@@ -1,5 +1,5 @@
-Size: 357 bytes (0.00 MiB)
-SHA-256: 0e3fecbaa8acac72b0cdae42f0636e40ec6695ba3215c822adfae713350005a0
+Size: 256 bytes (0.00 MiB)
+SHA-256: abd9d9b4a56bd0caf434688a6a7ec030ff3441eac7d04d6a835d00cffc20013e
 Provenance: asap7 commit abcde1234, generated locally
 Source files (1):
   - test.lib

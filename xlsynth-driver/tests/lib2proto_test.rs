@@ -120,7 +120,9 @@ library (test) {
     assert_eq!(full.lut_axes.len(), 1);
     assert_ne!(full.lu_table_templates[0].index_1_id, 0);
     let timing_table = &full.cells[0].pins[1].timing_arcs[0].tables[0];
-    assert_eq!(timing_table.index_1_id, 0);
+    assert_ne!(timing_table.shape_id, 0);
+    let timing_shape = &full.lut_shapes[(timing_table.shape_id - 1) as usize];
+    assert_eq!(timing_shape.index_1_id, 0);
     assert_eq!(timing_table.values, vec![0.4_f32]);
 
     let textproto_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
@@ -188,6 +190,119 @@ library (test) {
         "liberty-proto-info rejected generated textproto: {}",
         String::from_utf8_lossy(&textproto_info.stderr)
     );
+}
+
+#[test]
+fn lib2proto_validates_only_retained_payload_classes() {
+    let temp_dir = tempfile::tempdir().expect("create temp directory");
+    let invalid_timing_path = temp_dir.path().join("invalid_timing.lib");
+    let invalid_power_path = temp_dir.path().join("invalid_power.lib");
+    std::fs::write(
+        &invalid_timing_path,
+        r#"
+library (invalid_timing) {
+  cell (BUF) {
+    area : 1.0;
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A B";
+        timing_type : combinational;
+      }
+    }
+  }
+}
+"#,
+    )
+    .expect("write invalid timing Liberty input");
+    std::fs::write(
+        &invalid_power_path,
+        r#"
+library (invalid_power) {
+  cell (INV) {
+    area : 1.0;
+    pin (A) {
+      direction : input;
+      internal_power () {
+        related_pg_pin : VDD;
+      }
+    }
+    pin (Y) { direction : output; function : "!A"; }
+  }
+}
+"#,
+    )
+    .expect("write invalid power Liberty input");
+
+    let default_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("lib2proto")
+        .arg("--output")
+        .arg(temp_dir.path().join("default.proto"))
+        .arg(&invalid_timing_path)
+        .arg(&invalid_power_path)
+        .output()
+        .expect("run default lib2proto");
+    assert!(
+        default_output.status.success(),
+        "default lib2proto validated stripped payloads: {}",
+        String::from_utf8_lossy(&default_output.stderr)
+    );
+
+    let timing_only_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("lib2proto")
+        .arg("--output")
+        .arg(temp_dir.path().join("timing_only.proto"))
+        .arg("--include-timing")
+        .arg(&invalid_power_path)
+        .output()
+        .expect("run timing-only lib2proto");
+    assert!(
+        timing_only_output.status.success(),
+        "timing-only lib2proto validated stripped power: {}",
+        String::from_utf8_lossy(&timing_only_output.stderr)
+    );
+
+    let power_only_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("lib2proto")
+        .arg("--output")
+        .arg(temp_dir.path().join("power_only.proto"))
+        .arg("--include-power")
+        .arg(&invalid_timing_path)
+        .output()
+        .expect("run power-only lib2proto");
+    assert!(
+        power_only_output.status.success(),
+        "power-only lib2proto validated stripped timing: {}",
+        String::from_utf8_lossy(&power_only_output.stderr)
+    );
+
+    let invalid_timing_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("lib2proto")
+        .arg("--output")
+        .arg(temp_dir.path().join("invalid_timing.proto"))
+        .arg("--include-timing")
+        .arg(&invalid_timing_path)
+        .output()
+        .expect("run invalid timing lib2proto");
+    assert!(!invalid_timing_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_timing_output.stderr)
+            .contains("unsupported multi-pin related_pin selector")
+    );
+
+    let invalid_power_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("lib2proto")
+        .arg("--output")
+        .arg(temp_dir.path().join("invalid_power.proto"))
+        .arg("--include-power")
+        .arg(&invalid_power_path)
+        .output()
+        .expect("run invalid power lib2proto");
+    assert!(!invalid_power_output.status.success());
+    assert!(String::from_utf8_lossy(&invalid_power_output.stderr).contains("has no power tables"));
 }
 
 #[test]

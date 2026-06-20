@@ -99,10 +99,11 @@ The flags are independent, so timing-only and power-only payloads can also be
 generated when needed.
 
 `lib2proto` emits the `liberty.Library` format defined in
-`xlsynth-g8r/proto/liberty.proto`. The wire format uses float32 table values and
-library-wide interned axis vectors; loaders expand it to float64 values and
-inline axes for the in-memory evaluator API. This is a breaking wire-format
-change, and older Liberty proto files must be regenerated.
+`xlsynth-g8r/proto/liberty.proto`. The wire format uses float32 table values,
+typed enums for standard Liberty vocabularies, and library-wide interned
+strings, axis vectors, and table shapes. Loaders expand it to strings, float64
+values, and inline table geometry for the in-memory evaluator API. This is a
+breaking wire-format change, and older Liberty proto files must be regenerated.
 In Rust, `xlsynth_g8r::liberty_proto` contains the generated wire types, while
 `xlsynth_g8r::liberty_model` contains the normalized evaluator-facing types.
 

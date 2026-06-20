@@ -508,12 +508,14 @@ mod tests {
     }
 
     fn scalar_table(kind: &str, value: f64) -> TimingTable {
-        TimingTable {
-            kind: kind.to_string(),
-            values: vec![value],
-            dimensions: vec![],
-            ..Default::default()
-        }
+        let kind = match kind {
+            "cell_rise" => xlsynth_g8r::liberty_proto::TimingTableKind::CellRise,
+            "cell_fall" => xlsynth_g8r::liberty_proto::TimingTableKind::CellFall,
+            "rise_transition" => xlsynth_g8r::liberty_proto::TimingTableKind::RiseTransition,
+            "fall_transition" => xlsynth_g8r::liberty_proto::TimingTableKind::FallTransition,
+            other => panic!("unsupported test timing-table kind {other}"),
+        };
+        TimingTable::from_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
     }
 
     fn make_inv_cell(name: &str, threshold_voltage_group_id: u32) -> Cell {

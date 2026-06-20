@@ -47,17 +47,17 @@ impl std::error::Error for TimingTableArrayError {}
 #[derive(Clone, Copy, Debug)]
 pub struct TimingTableArrayView<'a> {
     dimensions: &'a [u32],
-    values: &'a [f64],
+    values: &'a [f32],
 }
 
 impl<'a> TimingTableArrayView<'a> {
     pub fn from_timing_table(table: &'a TimingTable) -> Result<Self, TimingTableArrayError> {
-        Self::from_parts(&table.dimensions, &table.values)
+        Self::from_parts(&table.shape.dimensions, &table.values)
     }
 
     pub fn from_parts(
         dimensions: &'a [u32],
-        values: &'a [f64],
+        values: &'a [f32],
     ) -> Result<Self, TimingTableArrayError> {
         let expected_values = expected_value_count(dimensions)?;
         if expected_values != values.len() {
@@ -78,7 +78,7 @@ impl<'a> TimingTableArrayView<'a> {
         self.dimensions
     }
 
-    pub fn values(&self) -> &'a [f64] {
+    pub fn values(&self) -> &'a [f32] {
         self.values
     }
 
@@ -108,7 +108,7 @@ impl<'a> TimingTableArrayView<'a> {
 
     pub fn get(&self, indices: &[usize]) -> Option<f64> {
         let linear = self.linear_index(indices)?;
-        self.values.get(linear).copied()
+        self.values.get(linear).copied().map(f64::from)
     }
 }
 
@@ -131,13 +131,22 @@ fn expected_value_count(dimensions: &[u32]) -> Result<usize, TimingTableArrayErr
 mod tests {
     use super::*;
 
+    fn table(dimensions: Vec<u32>, values: Vec<f64>) -> TimingTable {
+        TimingTable::from_f64(
+            crate::liberty_proto::TimingTableKind::Unknown,
+            0,
+            vec![],
+            vec![],
+            vec![],
+            values,
+            dimensions,
+            "",
+        )
+    }
+
     #[test]
     fn array_allows_dynamic_rank_indexing() {
-        let table = TimingTable {
-            dimensions: vec![2, 3, 2],
-            values: (0..12).map(f64::from).collect(),
-            ..Default::default()
-        };
+        let table = table(vec![2, 3, 2], (0..12).map(f64::from).collect());
         let array = TimingTableArrayView::from_timing_table(&table).unwrap();
         assert_eq!(array.rank(), 3);
         assert_eq!(array.dimensions(), &[2, 3, 2]);
@@ -147,25 +156,17 @@ mod tests {
 
     #[test]
     fn array_preserves_singleton_axes() {
-        let table = TimingTable {
-            dimensions: vec![1, 2],
-            values: vec![0.10, 0.20],
-            ..Default::default()
-        };
+        let table = table(vec![1, 2], vec![0.10, 0.20]);
         let array = TimingTableArrayView::from_timing_table(&table).unwrap();
         assert_eq!(array.rank(), 2);
-        assert_eq!(array.get(&[0, 0]), Some(0.10));
-        assert_eq!(array.get(&[0, 1]), Some(0.20));
+        assert_eq!(array.get(&[0, 0]), Some(f64::from(0.10_f32)));
+        assert_eq!(array.get(&[0, 1]), Some(f64::from(0.20_f32)));
         assert_eq!(array.get(&[1, 0]), None);
     }
 
     #[test]
     fn array_rejects_shape_mismatch() {
-        let table = TimingTable {
-            dimensions: vec![2, 2],
-            values: vec![0.10, 0.20, 0.30],
-            ..Default::default()
-        };
+        let table = table(vec![2, 2], vec![0.10, 0.20, 0.30]);
         let err = TimingTableArrayView::from_timing_table(&table).unwrap_err();
         assert_eq!(
             err,
@@ -179,11 +180,7 @@ mod tests {
 
     #[test]
     fn array_handles_scalar_tables() {
-        let table = TimingTable {
-            dimensions: vec![],
-            values: vec![42.0],
-            ..Default::default()
-        };
+        let table = table(vec![], vec![42.0]);
         let array = TimingTableArrayView::from_timing_table(&table).unwrap();
         assert_eq!(array.rank(), 0);
         assert_eq!(array.get(&[]), Some(42.0));

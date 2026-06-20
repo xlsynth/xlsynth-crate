@@ -144,11 +144,11 @@ mod tests {
                         internal_power: vec![InternalPower {
                             tables: vec![
                                 PowerTable {
-                                    transition: PowerTransition::Rise as i32,
+                                    transition: PowerTransition::Rise,
                                     ..Default::default()
                                 },
                                 PowerTable {
-                                    transition: PowerTransition::Fall as i32,
+                                    transition: PowerTransition::Fall,
                                     ..Default::default()
                                 },
                             ],

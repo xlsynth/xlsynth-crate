@@ -134,7 +134,7 @@ pub fn analyze_register_stages(
             for arc in output_pin
                 .timing_arcs
                 .iter()
-                .filter(|arc| is_combinational_timing_type(arc.timing_type.as_str()))
+                .filter(|arc| is_combinational_timing_type(arc.timing_type_str()))
             {
                 for related_pin in arc.related_pin.split_whitespace() {
                     let Some(input_bits) = connections.get(related_pin) else {

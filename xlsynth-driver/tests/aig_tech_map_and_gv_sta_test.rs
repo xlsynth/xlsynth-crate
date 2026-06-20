@@ -17,65 +17,70 @@ fn make_two_input_and_aig() -> String {
 
 fn make_timing_enabled_inv_nand2_liberty_textproto() -> &'static str {
     r#"
+format_magic: 5496997758177923663
 cells: {
   name: "INV"
-  pins: { name: "A" direction: INPUT capacitance: 0.01 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 0.01 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "!A"
+    function_string_id: 3
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 1.0 }
-      tables: { kind: "cell_fall" values: 1.1 }
-      tables: { kind: "rise_transition" values: 0.3 }
-      tables: { kind: "fall_transition" values: 0.4 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 1.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 1.1 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.3 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.4 }
     }
   }
   area: 1.0
 }
 cells: {
   name: "NAND2"
-  pins: { name: "A" direction: INPUT capacitance: 0.02 }
-  pins: { name: "B" direction: INPUT capacitance: 0.02 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 0.02 }
+  pins: { name_string_id: 4 direction: INPUT capacitance: 0.02 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "!(A*B)"
+    function_string_id: 5
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 2.0 }
-      tables: { kind: "cell_fall" values: 2.1 }
-      tables: { kind: "rise_transition" values: 0.5 }
-      tables: { kind: "fall_transition" values: 0.6 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 2.1 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.5 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.6 }
     }
     timing_arcs: {
-      related_pin: "B"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 2.0 }
-      tables: { kind: "cell_fall" values: 2.1 }
-      tables: { kind: "rise_transition" values: 0.5 }
-      tables: { kind: "fall_transition" values: 0.6 }
+      related_pin_string_id: 4
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 2.1 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.5 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.6 }
     }
   }
   area: 2.0
 }
 units: { time_unit: "1ps" capacitance_unit: "1pf" }
+interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
+lut_shapes: {}
 "#
 }
 
 fn make_no_timing_liberty_textproto() -> &'static str {
     r#"
+format_magic: 5496997758177923663
 cells: {
   name: "INV"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "!A" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 3 }
 }
+interned_strings: ["A", "Y", "!A"]
 "#
 }
 

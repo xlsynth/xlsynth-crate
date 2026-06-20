@@ -111,7 +111,7 @@ fn build_cell_formula_map(
             continue;
         }
         let collapse_for_cell = collapse_sequential && !override_cells.contains(&cell.name);
-        let pin_names: HashSet<String> = cell.pins.iter().map(|pin| pin.name.clone()).collect();
+        let pin_names: HashSet<String> = cell.pins.iter().map(|pin| pin.name.to_string()).collect();
         let state_vars: HashSet<String> = cell
             .sequential
             .iter()
@@ -205,7 +205,7 @@ fn build_cell_formula_map(
         }
         for pin in &cell.pins {
             if pin.direction == 1 && !pin.function.is_empty() {
-                let original_formula_string = pin.function.clone();
+                let original_formula_string = pin.function.to_string();
                 match crate::liberty::cell_formula::parse_formula(&pin.function) {
                     Ok(term) => {
                         let term = if collapse_for_cell {
@@ -231,7 +231,7 @@ fn build_cell_formula_map(
                             term
                         };
                         cell_formula_map.insert(
-                            (cell.name.clone(), pin.name.clone()),
+                            (cell.name.clone(), pin.name.to_string()),
                             (term, original_formula_string),
                         );
                     }
@@ -1147,8 +1147,8 @@ fn build_instance_aig_binding(
         };
         let direction = checked_pin_direction(type_name, &pin.name, pin.direction)?;
         let operand = match direction {
-            PinDirection::Input => input_operands.get(&pin.name),
-            PinDirection::Output => output_operands.get(&pin.name),
+            PinDirection::Input => input_operands.get(pin.name.as_str()),
+            PinDirection::Output => output_operands.get(pin.name.as_str()),
             PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
         }
         .copied()
@@ -1159,7 +1159,7 @@ fn build_instance_aig_binding(
             )
         })?;
         pins.push(InstancePinAigBinding {
-            pin_name: pin.name.clone(),
+            pin_name: pin.name.to_string(),
             direction,
             operand,
             connection: build_pin_connection(connection, normalized, nets, interner)?,

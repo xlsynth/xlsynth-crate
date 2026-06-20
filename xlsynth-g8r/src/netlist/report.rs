@@ -174,6 +174,7 @@ pub fn build_sta_report(
     let outputs = output_timing_rows(module, nets, interner, &report, true)?;
 
     let time_unit = library
+        .as_model()
         .units
         .as_ref()
         .map(|u| u.time_unit.as_str())
@@ -252,8 +253,9 @@ pub fn build_netlist_report(
     library: &LibraryWithTimingData,
     options: StaOptions,
 ) -> Result<NetlistReport> {
-    let area = build_area_report(module, interner, library.as_model())?;
-    let stages = analyze_register_stages(module, nets, interner, library.as_model())?;
+    let metadata = library.as_model();
+    let area = build_area_report(module, interner, metadata)?;
+    let stages = analyze_register_stages(module, nets, interner, metadata)?;
     if stages.register_indices.is_empty() {
         let sta = build_sta_report(module, nets, interner, library, options)?;
         return Ok(NetlistReport {
@@ -343,6 +345,7 @@ pub fn build_netlist_report(
     let register_launch_outputs =
         output_timing_rows(module, nets, interner, &register_launch, false)?;
     let time_unit = library
+        .as_model()
         .units
         .as_ref()
         .map(|u| u.time_unit.as_str())
@@ -397,86 +400,51 @@ mod tests {
         }
     }
 
+    fn scalar_table(kind: crate::liberty_proto::TimingTableKind, value: f64) -> TimingTable {
+        TimingTable::from_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
+    }
+
     fn timing_arc(related_pin: &str, rise: f64, fall: f64) -> TimingArc {
-        TimingArc {
-            related_pin: related_pin.to_string(),
-            timing_sense: "positive_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            tables: vec![
-                TimingTable {
-                    kind: "cell_rise".to_string(),
-                    values: vec![rise],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "cell_fall".to_string(),
-                    values: vec![fall],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "rise_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "fall_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
+        TimingArc::from_raw(
+            related_pin,
+            "positive_unate",
+            "combinational",
+            "",
+            vec![
+                scalar_table(crate::liberty_proto::TimingTableKind::CellRise, rise),
+                scalar_table(crate::liberty_proto::TimingTableKind::CellFall, fall),
+                scalar_table(crate::liberty_proto::TimingTableKind::RiseTransition, 0.1),
+                scalar_table(crate::liberty_proto::TimingTableKind::FallTransition, 0.1),
             ],
-            ..Default::default()
-        }
+        )
     }
 
     fn clock_to_output_arc() -> TimingArc {
-        TimingArc {
-            related_pin: "CLK".to_string(),
-            timing_sense: "non_unate".to_string(),
-            timing_type: "rising_edge".to_string(),
-            tables: vec![
-                TimingTable {
-                    kind: "cell_rise".to_string(),
-                    values: vec![0.5],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "cell_fall".to_string(),
-                    values: vec![0.5],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "rise_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "fall_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
+        TimingArc::from_raw(
+            "CLK",
+            "non_unate",
+            "rising_edge",
+            "",
+            vec![
+                scalar_table(crate::liberty_proto::TimingTableKind::CellRise, 0.5),
+                scalar_table(crate::liberty_proto::TimingTableKind::CellFall, 0.5),
+                scalar_table(crate::liberty_proto::TimingTableKind::RiseTransition, 0.1),
+                scalar_table(crate::liberty_proto::TimingTableKind::FallTransition, 0.1),
             ],
-            ..Default::default()
-        }
+        )
     }
 
     fn setup_arc() -> TimingArc {
-        TimingArc {
-            related_pin: "CLK".to_string(),
-            timing_type: "setup_rising".to_string(),
-            tables: vec![
-                TimingTable {
-                    kind: "rise_constraint".to_string(),
-                    values: vec![0.25],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "fall_constraint".to_string(),
-                    values: vec![0.25],
-                    ..Default::default()
-                },
+        TimingArc::from_raw(
+            "CLK",
+            "",
+            "setup_rising",
+            "",
+            vec![
+                scalar_table(crate::liberty_proto::TimingTableKind::RiseConstraint, 0.25),
+                scalar_table(crate::liberty_proto::TimingTableKind::FallConstraint, 0.25),
             ],
-            ..Default::default()
-        }
+        )
     }
 
     fn inv_nand_library() -> Library {

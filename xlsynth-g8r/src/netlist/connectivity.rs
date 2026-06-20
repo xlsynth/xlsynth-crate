@@ -330,7 +330,7 @@ fn build_dir_by_pin_for_instance(
             } else {
                 PinDirection::Invalid
             };
-            dir_by_pin.insert(pin.name.clone(), dir);
+            dir_by_pin.insert(pin.name.to_string(), dir);
         }
         Some(dir_by_pin)
     } else if let Some(module_maps) = module_port_dirs {

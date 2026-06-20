@@ -193,12 +193,12 @@ impl IndexedLibrary {
                 return false;
             }
             if let Some(v) = timing_type {
-                if arc.timing_type != v {
+                if arc.timing_type_str() != v {
                     return false;
                 }
             }
             if let Some(v) = timing_sense {
-                if arc.timing_sense != v {
+                if arc.timing_sense_str() != v {
                     return false;
                 }
             }
@@ -242,7 +242,7 @@ impl IndexedLibrary {
             .proto
             .lu_table_templates
             .iter()
-            .filter(|tmpl| tmpl.kind == template_kind && tmpl.name == template_name);
+            .filter(|tmpl| tmpl.kind_str() == template_kind && tmpl.name == template_name);
         let first = matches.next()?;
         if matches.next().is_some() {
             return None;
@@ -264,7 +264,7 @@ impl IndexedLibrary {
             .proto
             .lu_table_templates
             .get((template_id - 1) as usize)?;
-        if tmpl.kind == template_kind {
+        if tmpl.kind_str() == template_kind {
             Some(tmpl)
         } else {
             None
@@ -355,23 +355,22 @@ mod tests {
                         function: "!(A * B)".to_string(),
                         name: "Y".to_string(),
                         is_clocking_pin: false,
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "negative_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            when: String::new(),
-                            tables: vec![TimingTable {
-                                kind: "cell_rise".to_string(),
-                                template_id: 1,
-                                template_name: String::new(),
-                                index_1: vec![0.01, 0.02],
-                                index_2: vec![0.1, 0.2],
-                                index_3: vec![],
-                                values: vec![1.0, 2.0, 3.0, 4.0],
-                                dimensions: vec![2, 2],
-                                ..Default::default()
-                            }],
-                        }],
+                        timing_arcs: vec![TimingArc::from_raw(
+                            "A",
+                            "negative_unate",
+                            "combinational",
+                            "",
+                            vec![TimingTable::from_f64(
+                                crate::liberty_proto::TimingTableKind::CellRise,
+                                1,
+                                vec![0.01, 0.02],
+                                vec![0.1, 0.2],
+                                vec![],
+                                vec![1.0, 2.0, 3.0, 4.0],
+                                vec![2, 2],
+                                "",
+                            )],
+                        )],
                         ..Default::default()
                     },
                 ],
@@ -410,7 +409,7 @@ mod tests {
         let arc = indexed
             .timing_arc_for_pin("NAND2", "Y", "A")
             .expect("arc for related pin A should exist");
-        assert_eq!(arc.timing_sense, "negative_unate");
+        assert_eq!(arc.timing_sense_str(), "negative_unate");
         assert_eq!(arc.tables.len(), 1);
         assert_eq!(arc.tables[0].template_id, 1);
 
@@ -559,20 +558,8 @@ mod tests {
                         name: "Y".to_string(),
                         is_clocking_pin: false,
                         timing_arcs: vec![
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                when: String::new(),
-                                tables: vec![],
-                            },
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "setup_rising".to_string(),
-                                when: "B".to_string(),
-                                tables: vec![],
-                            },
+                            TimingArc::from_raw("A", "negative_unate", "combinational", "", vec![]),
+                            TimingArc::from_raw("A", "positive_unate", "setup_rising", "B", vec![]),
                         ],
                         ..Default::default()
                     },
@@ -606,8 +593,8 @@ mod tests {
                 Some(""),
             )
             .expect("combinational arc should resolve uniquely");
-        assert_eq!(comb.timing_type, "combinational");
-        assert_eq!(comb.timing_sense, "negative_unate");
+        assert_eq!(comb.timing_type_str(), "combinational");
+        assert_eq!(comb.timing_sense_str(), "negative_unate");
         assert_eq!(comb.when, "");
 
         let setup = indexed
@@ -620,8 +607,8 @@ mod tests {
                 Some("B"),
             )
             .expect("setup arc should resolve uniquely");
-        assert_eq!(setup.timing_type, "setup_rising");
-        assert_eq!(setup.timing_sense, "positive_unate");
+        assert_eq!(setup.timing_type_str(), "setup_rising");
+        assert_eq!(setup.timing_sense_str(), "positive_unate");
         assert_eq!(setup.when, "B");
     }
 
@@ -636,13 +623,13 @@ mod tests {
                         function: "".to_string(),
                         name: "A".to_string(),
                         is_clocking_pin: false,
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "CLK".to_string(),
-                            timing_sense: "non_unate".to_string(),
-                            timing_type: "setup_rising".to_string(),
-                            when: String::new(),
-                            tables: vec![],
-                        }],
+                        timing_arcs: vec![TimingArc::from_raw(
+                            "CLK",
+                            "non_unate",
+                            "setup_rising",
+                            "",
+                            vec![],
+                        )],
                         ..Default::default()
                     },
                     Pin {
@@ -650,13 +637,13 @@ mod tests {
                         function: "A".to_string(),
                         name: "Y".to_string(),
                         is_clocking_pin: false,
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            when: String::new(),
-                            tables: vec![],
-                        }],
+                        timing_arcs: vec![TimingArc::from_raw(
+                            "A",
+                            "positive_unate",
+                            "combinational",
+                            "",
+                            vec![],
+                        )],
                         ..Default::default()
                     },
                 ],
@@ -695,6 +682,6 @@ mod tests {
         let arc = indexed
             .timing_arc_for_pin("U1", "Y", "A")
             .expect("output combinational arc should still be found");
-        assert_eq!(arc.timing_type, "combinational");
+        assert_eq!(arc.timing_type_str(), "combinational");
     }
 }

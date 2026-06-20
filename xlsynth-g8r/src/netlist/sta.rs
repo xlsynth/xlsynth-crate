@@ -361,7 +361,7 @@ impl<'a> StaLibraryIndex<'a> {
             }
             let mut pin_map = HashMap::new();
             for (pin_idx, pin) in cell.pins.iter().enumerate() {
-                if pin_map.insert(pin.name.clone(), pin_idx).is_some() {
+                if pin_map.insert(pin.name.to_string(), pin_idx).is_some() {
                     return Err(anyhow!(
                         "library cell '{}' defines pin '{}' more than once; duplicate pin names are unsupported in basic STA",
                         cell.name,
@@ -484,7 +484,7 @@ pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> 
                 && pin
                     .timing_arcs
                     .iter()
-                    .any(|arc| matches!(arc.timing_type.as_str(), "rising_edge" | "falling_edge"))
+                    .any(|arc| matches!(arc.timing_type_str(), "rising_edge" | "falling_edge"))
         })
 }
 
@@ -617,9 +617,11 @@ fn analyze_max_arrival_proto_with_mode(
                 .iter()
                 .filter(|pin| pin.direction == PinDirection::Output as i32)
             {
-                for arc in output_pin.timing_arcs.iter().filter(|arc| {
-                    StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational()
-                }) {
+                for arc in output_pin
+                    .timing_arcs
+                    .iter()
+                    .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
+                {
                     for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
                         let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
                             anyhow!(
@@ -1005,20 +1007,20 @@ fn analyze_max_arrival_proto_with_mode(
             if let Some(unsupported_arc) = pin
                 .timing_arcs
                 .iter()
-                .find(|arc| !StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+                .find(|arc| !StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
             {
                 return Err(anyhow!(
                     "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
                     instance_name,
                     cell_name,
                     pin.name,
-                    unsupported_arc.timing_type
+                    unsupported_arc.timing_type_str()
                 ));
             }
             let combinational_arcs: Vec<&TimingArc> = pin
                 .timing_arcs
                 .iter()
-                .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+                .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
                 .collect();
             let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
                 Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
@@ -1201,8 +1203,8 @@ fn analyze_max_arrival_proto_with_mode(
                                 } else {
                                     arc.when.as_str()
                                 },
-                                arc.timing_sense,
-                                arc.timing_type,
+                                arc.timing_sense_str(),
+                                arc.timing_type_str(),
                                 format_edge_timing_set(&candidate.rise),
                                 format_edge_timing_set(&candidate.fall),
                                 format_optional_edge_timing(candidate.rise.max_arrival_edge()),
@@ -1332,7 +1334,7 @@ fn analyze_max_arrival_proto_with_mode(
                 let setup_arcs: Vec<&TimingArc> = pin
                     .timing_arcs
                     .iter()
-                    .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_setup())
+                    .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_setup())
                     .collect();
                 if setup_arcs.is_empty() {
                     continue;
@@ -1738,7 +1740,7 @@ fn visit_combinational_output_pin(
     for arc in pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
     {
         for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
             let related_pin_idx = lib.pin_index(cell_idx, related_pin_name).ok_or_else(|| {
@@ -1791,13 +1793,13 @@ pub fn validate_output_pin_for_basic_sta(
     if let Some(unsupported_arc) = pin
         .timing_arcs
         .iter()
-        .find(|arc| !StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+        .find(|arc| !StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
     {
         return Err(anyhow!(
             "cell '{}' output pin '{}' has unsupported timing type '{}'",
             cell_name,
             pin.name,
-            unsupported_arc.timing_type
+            unsupported_arc.timing_type_str()
         ));
     }
     let combinational_arcs: Vec<&TimingArc> = pin.timing_arcs.iter().collect();
@@ -1811,7 +1813,7 @@ pub fn validate_output_pin_for_basic_sta(
     )?;
 
     for arc in &combinational_arcs {
-        let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
+        let timing_type = StaTimingType::from_raw(arc.timing_type_str());
         let context = format!(
             "cell '{}' output pin '{}' related_pin '{}'",
             cell_name, pin.name, arc.related_pin
@@ -1835,7 +1837,7 @@ pub fn validate_output_pin_for_basic_sta(
             {
                 continue;
             }
-            let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
+            let timing_type = StaTimingType::from_raw(arc.timing_type_str());
             has_rise |= timing_type.produces_rise();
             has_fall |= timing_type.produces_fall();
         }
@@ -2102,8 +2104,8 @@ fn evaluate_arc_set(
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<SignalTimingSet> {
-    let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
-    let timing_sense = StaTimingSense::from_raw(arc.timing_sense.as_str());
+    let timing_type = StaTimingType::from_raw(arc.timing_type_str());
+    let timing_sense = StaTimingSense::from_raw(arc.timing_sense_str());
     let all_inputs = if timing_sense.may_use_either_input_edge() {
         let mut combined = input_timing.rise.clone();
         combined.extend_from(&input_timing.fall);
@@ -2122,7 +2124,7 @@ fn evaluate_arc_set(
                 .expect("non-unate input set should be built")),
             _ => Err(anyhow!(
                 "{context}: unsupported timing_sense '{}'",
-                arc.timing_sense
+                arc.timing_sense_str()
             )),
         }
     };
@@ -2240,7 +2242,7 @@ fn evaluate_register_launch_output_set(
     let launch_arcs: Vec<&TimingArc> = pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_clock_to_output())
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_clock_to_output())
         .collect();
     if launch_arcs.is_empty() {
         return Err(anyhow!(
@@ -2466,7 +2468,7 @@ fn find_optional_unique_table<'a>(
     let mut matches = arc
         .tables
         .iter()
-        .filter(|table| table.kind == kind.as_raw());
+        .filter(|table| table.kind_str() == kind.as_raw());
     let first = matches.next();
     if matches.next().is_some() {
         return Err(anyhow!(
@@ -2506,9 +2508,9 @@ fn find_optional_delay_slew_tables<'a>(
 }
 
 fn expected_template_kind_for_timing_table(table: &TimingTable) -> Result<LuTableTemplateKind> {
-    LibertyTableKind::from_raw(table.kind.as_str())
+    LibertyTableKind::from_raw(table.kind_str())
         .template_kind()
-        .ok_or_else(|| anyhow!("unsupported Liberty table kind '{}'", table.kind))
+        .ok_or_else(|| anyhow!("unsupported Liberty table kind '{}'", table.kind_str()))
 }
 
 struct TimingTableLayout<'a> {
@@ -2523,25 +2525,25 @@ fn timing_table_layout<'a>(
     table: &'a TimingTable,
     context: &str,
 ) -> Result<TimingTableLayout<'a>> {
-    let template: Option<&LuTableTemplate> = if table.template_id == 0 {
+    let template: Option<&LuTableTemplate> = if table.shape.template_id == 0 {
         None
     } else {
-        let idx = (table.template_id - 1) as usize;
+        let idx = (table.shape.template_id - 1) as usize;
         let tmpl = library.lu_table_templates.get(idx).ok_or_else(|| {
             anyhow!(
                 "{context}: template_id {} out of range ({} templates)",
-                table.template_id,
+                table.shape.template_id,
                 library.lu_table_templates.len()
             )
         })?;
         let expected_kind = expected_template_kind_for_timing_table(table)
             .map_err(|e| anyhow!("{context}: {e}"))?;
-        let actual_kind = LuTableTemplateKind::from_raw(tmpl.kind.as_str());
+        let actual_kind = LuTableTemplateKind::from_raw(tmpl.kind_str());
         if actual_kind != expected_kind {
             return Err(anyhow!(
                 "{context}: template_id {} kind mismatch; got '{}' expected '{}'",
-                table.template_id,
-                tmpl.kind,
+                table.shape.template_id,
+                tmpl.kind_str(),
                 expected_kind.as_raw()
             ));
         }
@@ -2550,14 +2552,14 @@ fn timing_table_layout<'a>(
 
     Ok(TimingTableLayout {
         axes: [
-            effective_axis(&table.index_1, template.map(|t| t.index_1.as_slice())),
-            effective_axis(&table.index_2, template.map(|t| t.index_2.as_slice())),
-            effective_axis(&table.index_3, template.map(|t| t.index_3.as_slice())),
+            effective_axis(&table.shape.index_1, template.map(|t| t.index_1.as_slice())),
+            effective_axis(&table.shape.index_2, template.map(|t| t.index_2.as_slice())),
+            effective_axis(&table.shape.index_3, template.map(|t| t.index_3.as_slice())),
         ],
         variables: [
-            template.map(|t| t.variable_1.as_str()).unwrap_or(""),
-            template.map(|t| t.variable_2.as_str()).unwrap_or(""),
-            template.map(|t| t.variable_3.as_str()).unwrap_or(""),
+            template.map(|t| t.variable_1_str()).unwrap_or(""),
+            template.map(|t| t.variable_2_str()).unwrap_or(""),
+            template.map(|t| t.variable_3_str()).unwrap_or(""),
         ],
     })
 }
@@ -2633,7 +2635,7 @@ fn validate_timing_tables_once(
     for arc in arcs {
         for table in &arc.tables {
             if !matches!(
-                LibertyTableKind::from_raw(table.kind.as_str()),
+                LibertyTableKind::from_raw(table.kind_str()),
                 LibertyTableKind::CellRise
                     | LibertyTableKind::CellFall
                     | LibertyTableKind::RiseTransition
@@ -2649,7 +2651,10 @@ fn validate_timing_tables_once(
                 table,
                 &format!(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
-                    cell_name, pin_name, arc.related_pin, table.kind
+                    cell_name,
+                    pin_name,
+                    arc.related_pin,
+                    table.kind_str()
                 ),
             )?;
         }
@@ -2672,7 +2677,7 @@ fn validate_constraint_tables_once(
     for arc in arcs {
         for table in &arc.tables {
             if !matches!(
-                LibertyTableKind::from_raw(table.kind.as_str()),
+                LibertyTableKind::from_raw(table.kind_str()),
                 LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
             ) {
                 continue;
@@ -2685,7 +2690,10 @@ fn validate_constraint_tables_once(
                 table,
                 &format!(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
-                    cell_name, pin_name, arc.related_pin, table.kind
+                    cell_name,
+                    pin_name,
+                    arc.related_pin,
+                    table.kind_str()
                 ),
             )?;
         }
@@ -2809,7 +2817,7 @@ fn evaluate_table_with_query_and_diagnostics(
     let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
     let mut axis_queries: Vec<f64> = Vec::with_capacity(rank);
     let is_setup = matches!(
-        LibertyTableKind::from_raw(table.kind.as_str()),
+        LibertyTableKind::from_raw(table.kind_str()),
         LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
     );
     let mut above_max_axis_count = 0usize;
@@ -2943,7 +2951,7 @@ fn evaluate_table_with_query_and_diagnostics(
 
 fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
     matches!(
-        LibertyTableKind::from_raw(table.kind.as_str()),
+        LibertyTableKind::from_raw(table.kind_str()),
         LibertyTableKind::CellRise
             | LibertyTableKind::CellFall
             | LibertyTableKind::RiseTransition
@@ -3036,15 +3044,15 @@ fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str
         ));
     }
     let expected_rank = axis_rank(axes[0], axes[1], axes[2]);
-    if table.dimensions.len() != expected_rank {
+    if table.shape.dimensions.len() != expected_rank {
         return Err(anyhow!(
             "{context}: timing table dimension rank {} does not match effective axis rank {}",
-            table.dimensions.len(),
+            table.shape.dimensions.len(),
             expected_rank
         ));
     }
     for (axis_idx, axis) in axes.iter().take(expected_rank).enumerate() {
-        let dimension = table.dimensions[axis_idx] as usize;
+        let dimension = table.shape.dimensions[axis_idx] as usize;
         if dimension != axis.len() {
             return Err(anyhow!(
                 "{context}: timing table axis {} dimension {} does not match effective axis length {}",
@@ -3207,13 +3215,37 @@ mod tests {
             .unwrap_or_else(|| panic!("missing net '{}'", name))
     }
 
+    fn test_table(
+        kind: &str,
+        template_id: u32,
+        index_1: Vec<f64>,
+        index_2: Vec<f64>,
+        values: Vec<f64>,
+        dimensions: Vec<u32>,
+    ) -> TimingTable {
+        let kind = match kind {
+            "cell_rise" => crate::liberty_proto::TimingTableKind::CellRise,
+            "cell_fall" => crate::liberty_proto::TimingTableKind::CellFall,
+            "rise_transition" => crate::liberty_proto::TimingTableKind::RiseTransition,
+            "fall_transition" => crate::liberty_proto::TimingTableKind::FallTransition,
+            "rise_constraint" => crate::liberty_proto::TimingTableKind::RiseConstraint,
+            "fall_constraint" => crate::liberty_proto::TimingTableKind::FallConstraint,
+            other => panic!("unsupported test timing-table kind {other}"),
+        };
+        TimingTable::from_f64(
+            kind,
+            template_id,
+            index_1,
+            index_2,
+            vec![],
+            values,
+            dimensions,
+            "",
+        )
+    }
+
     fn scalar_table(kind: &str, value: f64) -> TimingTable {
-        TimingTable {
-            kind: kind.to_string(),
-            values: vec![value],
-            dimensions: vec![],
-            ..Default::default()
-        }
+        test_table(kind, 0, vec![], vec![], vec![value], vec![])
     }
 
     #[test]
@@ -3267,20 +3299,15 @@ mod tests {
             ],
             ..Default::default()
         };
-        let c2q = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values: vec![7.0, 9.0],
-            ..Default::default()
-        };
-        let setup = TimingTable {
-            kind: "rise_constraint".to_string(),
-            template_id: 2,
-            dimensions: vec![2, 2],
-            values: vec![3.0, 1.0, 4.0, 2.0],
-            ..Default::default()
-        };
+        let c2q = test_table("cell_rise", 1, vec![], vec![], vec![7.0, 9.0], vec![2]);
+        let setup = test_table(
+            "rise_constraint",
+            2,
+            vec![],
+            vec![],
+            vec![3.0, 1.0, 4.0, 2.0],
+            vec![2, 2],
+        );
         let mut counts = TimingQueryDiagnosticCounts::default();
 
         assert_close(
@@ -3329,7 +3356,7 @@ mod tests {
 
     #[test]
     fn template_kind_lookup_rejects_unknown_power_named_table_kinds() {
-        let table = scalar_table("made_up_power", 1.0);
+        let table = TimingTable::default();
         assert!(
             expected_template_kind_for_timing_table(&table)
                 .unwrap_err()
@@ -3339,8 +3366,9 @@ mod tests {
     }
 
     fn assert_close(lhs: f64, rhs: f64) {
+        let tolerance = 1e-6_f64.max(rhs.abs() * 1e-7);
         assert!(
-            (lhs - rhs).abs() <= 1e-9,
+            (lhs - rhs).abs() <= tolerance,
             "expected {} ~= {} (|diff|={})",
             lhs,
             rhs,
@@ -4926,13 +4954,8 @@ module top (a, n, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let table = |kind: &str, values: Vec<f64>| TimingTable {
-            kind: kind.to_string(),
-            template_id: 1,
-            dimensions: vec![2, 2],
-            values,
-            ..Default::default()
-        };
+        let table =
+            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2, 2]);
         let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -5185,13 +5208,8 @@ endmodule
             ..Default::default()
         };
 
-        let table = |kind: &str, values: Vec<f64>| TimingTable {
-            kind: kind.to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values,
-            ..Default::default()
-        };
+        let table =
+            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
 
         let arc = TimingArc {
             related_pin: "A".to_string(),
@@ -5245,13 +5263,8 @@ endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
 
-        let table = |kind: &str, values: Vec<f64>| TimingTable {
-            kind: kind.to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values,
-            ..Default::default()
-        };
+        let table =
+            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
 
         let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
@@ -5377,13 +5390,8 @@ endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
 
-        let table = |kind: &str, values: Vec<f64>| TimingTable {
-            kind: kind.to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values,
-            ..Default::default()
-        };
+        let table =
+            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
 
         let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
@@ -5554,34 +5562,38 @@ endmodule
                             timing_sense: "positive_unate".to_string(),
                             timing_type: "combinational".to_string(),
                             tables: vec![
-                                TimingTable {
-                                    kind: "cell_rise".to_string(),
-                                    template_id: 1,
-                                    dimensions: vec![2, 2],
-                                    values: vec![10.0, 20.0, 30.0, 40.0],
-                                    ..Default::default()
-                                },
-                                TimingTable {
-                                    kind: "cell_fall".to_string(),
-                                    template_id: 1,
-                                    dimensions: vec![2, 2],
-                                    values: vec![5.0, 7.0, 9.0, 11.0],
-                                    ..Default::default()
-                                },
-                                TimingTable {
-                                    kind: "rise_transition".to_string(),
-                                    template_id: 1,
-                                    dimensions: vec![2, 2],
-                                    values: vec![1.0, 2.0, 3.0, 4.0],
-                                    ..Default::default()
-                                },
-                                TimingTable {
-                                    kind: "fall_transition".to_string(),
-                                    template_id: 1,
-                                    dimensions: vec![2, 2],
-                                    values: vec![2.0, 4.0, 6.0, 8.0],
-                                    ..Default::default()
-                                },
+                                test_table(
+                                    "cell_rise",
+                                    1,
+                                    vec![],
+                                    vec![],
+                                    vec![10.0, 20.0, 30.0, 40.0],
+                                    vec![2, 2],
+                                ),
+                                test_table(
+                                    "cell_fall",
+                                    1,
+                                    vec![],
+                                    vec![],
+                                    vec![5.0, 7.0, 9.0, 11.0],
+                                    vec![2, 2],
+                                ),
+                                test_table(
+                                    "rise_transition",
+                                    1,
+                                    vec![],
+                                    vec![],
+                                    vec![1.0, 2.0, 3.0, 4.0],
+                                    vec![2, 2],
+                                ),
+                                test_table(
+                                    "fall_transition",
+                                    1,
+                                    vec![],
+                                    vec![],
+                                    vec![2.0, 4.0, 6.0, 8.0],
+                                    vec![2, 2],
+                                ),
                             ],
                             ..Default::default()
                         }],
@@ -5770,13 +5782,8 @@ endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
 
-        let table = |kind: &str, values: Vec<f64>| TimingTable {
-            kind: kind.to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values,
-            ..Default::default()
-        };
+        let table =
+            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
 
         let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
@@ -5866,13 +5873,7 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![1, 2],
-            values: vec![1.0, 2.0],
-            ..Default::default()
-        };
+        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0], vec![1, 2]);
 
         let low = evaluate_table(&lib, &table, 7.0, 0.0, "singleton_axis_low").expect("table eval");
         assert_close(low, 1.0);
@@ -5895,13 +5896,14 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2, 2],
-            values: vec![6.90715, 9.84125, 8.69936, 11.6159],
-            ..Default::default()
-        };
+        let table = test_table(
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![6.90715, 9.84125, 8.69936, 11.6159],
+            vec![2, 2],
+        );
 
         let clamped = evaluate_table(&lib, &table, 0.0, 0.619_928, "clamped").expect("table eval");
         assert_close(clamped, 6.90715);
@@ -5932,20 +5934,22 @@ endmodule
             ],
             ..Default::default()
         };
-        let delay_table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2, 2],
-            values: vec![1.0, 2.0, 3.0, 4.0],
-            ..Default::default()
-        };
-        let setup_table = TimingTable {
-            kind: "rise_constraint".to_string(),
-            template_id: 2,
-            dimensions: vec![2, 2],
-            values: vec![1.0, 2.0, 3.0, 4.0],
-            ..Default::default()
-        };
+        let delay_table = test_table(
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![2, 2],
+        );
+        let setup_table = test_table(
+            "rise_constraint",
+            2,
+            vec![],
+            vec![],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![2, 2],
+        );
         let mut counts = TimingQueryDiagnosticCounts::default();
 
         assert_close(
@@ -6067,13 +6071,7 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![3],
-            values: vec![1.0, 2.0, 3.0],
-            ..Default::default()
-        };
+        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0, 3.0], vec![3]);
 
         let error = validate_timing_table_payload(&lib, &table, "bad_extent")
             .expect_err("axis extent mismatch should be rejected");
@@ -6094,13 +6092,7 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values: vec![1.0, 2.0],
-            ..Default::default()
-        };
+        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0], vec![2]);
 
         let error = validate_timing_table_payload(&lib, &table, "bad_rank")
             .expect_err("axis rank mismatch should be rejected");
@@ -6119,13 +6111,7 @@ endmodule
             }],
             ..Default::default()
         };
-        let axis_table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values: vec![1.0, 2.0],
-            ..Default::default()
-        };
+        let axis_table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0], vec![2]);
         let axis_error = validate_timing_table_payload(&lib, &axis_table, "bad_axis")
             .expect_err("non-finite axes should be rejected");
         assert!(
@@ -6134,11 +6120,7 @@ endmodule
                 .contains("axis 1 contains non-finite")
         );
 
-        let value_table = TimingTable {
-            kind: "cell_rise".to_string(),
-            values: vec![f64::NAN],
-            ..Default::default()
-        };
+        let value_table = test_table("cell_rise", 0, vec![], vec![], vec![f64::NAN], vec![]);
         let value_error = validate_timing_table_payload(
             &crate::liberty_model::Library::default(),
             &value_table,
@@ -6164,13 +6146,7 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![3],
-            values: vec![1.0, 2.0, 3.0],
-            ..Default::default()
-        };
+        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0, 3.0], vec![3]);
 
         let error = validate_timing_table_payload(&lib, &table, "duplicate_axis")
             .expect_err("duplicate axis points should be rejected");
@@ -6193,13 +6169,7 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values: vec![2.0, 1.0],
-            ..Default::default()
-        };
+        let table = test_table("cell_rise", 1, vec![], vec![], vec![2.0, 1.0], vec![2]);
 
         validate_timing_table_payload(&lib, &table, "non_monotone")
             .expect("non-monotone delay tables should be structurally valid");
@@ -6223,13 +6193,14 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2, 2],
-            values: vec![1.0, 4.0, 3.0, 2.0],
-            ..Default::default()
-        };
+        let table = test_table(
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![1.0, 4.0, 3.0, 2.0],
+            vec![2, 2],
+        );
 
         assert_close(
             evaluate_table(&lib, &table, 1.0, 1.0, "non_monotone_2d").expect("table eval"),
@@ -6249,13 +6220,14 @@ endmodule
             }],
             ..Default::default()
         };
-        let table = TimingTable {
-            kind: "cell_rise".to_string(),
-            template_id: 1,
-            dimensions: vec![2],
-            values: vec![28.4535, 28.2959],
-            ..Default::default()
-        };
+        let table = test_table(
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![28.4535, 28.2959],
+            vec![2],
+        );
 
         assert_close(
             evaluate_table(&lib, &table, 1.0, 0.0, "characterization_noise").expect("table eval"),
@@ -6297,10 +6269,10 @@ endmodule
     #[test]
     fn evaluate_output_edge_set_rejects_non_finite_arrival_results() {
         let input_timing = EdgeTimingSet::from_single(EdgeTiming {
-            arrival: f64::MAX,
+            arrival: f64::INFINITY,
             transition: 0.1,
         });
-        let delay_table = scalar_table("cell_rise", f64::MAX);
+        let delay_table = scalar_table("cell_rise", 0.0);
         let slew_table = scalar_table("rise_transition", 0.1);
         let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 

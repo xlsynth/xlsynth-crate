@@ -25,7 +25,7 @@ pub struct LibraryWithTimingData {
 }
 
 impl Library {
-    /// Wraps normalized Liberty data after dropping timing payloads.
+    /// Wraps Liberty model data after dropping timing payloads.
     pub fn from_model(mut model: liberty_model::Library) -> Self {
         strip_timing_data(&mut model);
         Self { proto: model }
@@ -41,7 +41,8 @@ impl Library {
 }
 
 impl LibraryWithTimingData {
-    /// Wraps normalized Liberty data while preserving timing payloads.
+    /// Wraps fully populated Liberty model data while preserving timing
+    /// payloads.
     pub fn from_model(model: liberty_model::Library) -> Self {
         Self { proto: model }
     }
@@ -67,7 +68,7 @@ impl Deref for LibraryWithTimingData {
     type Target = liberty_model::Library;
 
     fn deref(&self) -> &Self::Target {
-        &self.proto
+        self.as_model()
     }
 }
 
@@ -79,7 +80,7 @@ impl AsRef<liberty_model::Library> for Library {
 
 impl AsRef<liberty_model::Library> for LibraryWithTimingData {
     fn as_ref(&self) -> &liberty_model::Library {
-        &self.proto
+        self.as_model()
     }
 }
 
@@ -91,21 +92,14 @@ impl From<Library> for liberty_model::Library {
 
 impl From<LibraryWithTimingData> for liberty_model::Library {
     fn from(value: LibraryWithTimingData) -> Self {
-        value.proto
+        value.into_model()
     }
 }
 
 impl From<LibraryWithTimingData> for Library {
     fn from(value: LibraryWithTimingData) -> Self {
-        Library::from_model(value.proto)
+        Library::from_model(value.into_model())
     }
-}
-
-fn has_timing_data(proto: &liberty_model::Library) -> bool {
-    proto
-        .cells
-        .iter()
-        .any(|cell| cell.pins.iter().any(|pin| !pin.timing_arcs.is_empty()))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -236,14 +230,14 @@ fn decode_library_with_timing_data_from_bytes(
     bytes: &[u8],
     source_name: &str,
 ) -> Result<LibraryWithTimingData> {
-    let proto = decode_library_binary_or_text(bytes, source_name)?;
-    if !has_timing_data(&proto) {
+    let model = decode_library_binary_or_text(bytes, source_name)?;
+    if count_timing_tables(&model) == 0 {
         return Err(anyhow!(
             "liberty proto '{}' has no timing payloads; load a timing-enabled proto or use the non-timing loader",
             source_name
         ));
     }
-    Ok(LibraryWithTimingData::from_model(proto))
+    Ok(LibraryWithTimingData::from_model(model))
 }
 
 /// Reads a binary proto or textproto, transparently decompressing `.gz` inputs.
@@ -318,25 +312,33 @@ mod tests {
                 name: "INV".to_string(),
                 pins: vec![Pin {
                     name: "Y".to_string(),
-                    timing_arcs: vec![TimingArc {
-                        related_pin: "A".to_string(),
-                        tables: vec![TimingTable {
-                            kind: "cell_rise".to_string(),
-                            template_id: 1,
-                            values: vec![0.25],
-                            dimensions: vec![1],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    }],
+                    timing_arcs: vec![TimingArc::from_raw(
+                        "A",
+                        "",
+                        "",
+                        "",
+                        vec![TimingTable::from_f64(
+                            liberty_proto::TimingTableKind::CellRise,
+                            1,
+                            vec![],
+                            vec![],
+                            vec![],
+                            vec![0.25],
+                            vec![1],
+                            "",
+                        )],
+                    )],
                     internal_power: vec![InternalPower {
-                        tables: vec![PowerTable {
-                            transition: PowerTransition::Rise as i32,
-                            template_id: 2,
-                            values: vec![0.5],
-                            dimensions: vec![1],
-                            ..Default::default()
-                        }],
+                        tables: vec![PowerTable::from_f64(
+                            PowerTransition::Rise,
+                            2,
+                            vec![],
+                            vec![],
+                            vec![],
+                            vec![0.5],
+                            vec![1],
+                            "",
+                        )],
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -348,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_binary_roundtrips_to_normalized_data() {
+    fn compact_binary_roundtrips_to_runtime_data() {
         let wire = library_to_proto(make_payload()).unwrap();
         let loaded = decode_library_binary_or_text(&wire.encode_to_vec(), "unit-test").unwrap();
 
@@ -427,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_gzipped_compact_proto() {
+    fn loads_gzipped_proto_into_runtime_model() {
         let wire = library_to_proto(make_payload()).unwrap();
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&wire.encode_to_vec()).unwrap();
@@ -438,6 +440,7 @@ mod tests {
         let loaded = load_library_with_timing_data_from_path(&path).unwrap();
         assert_eq!(loaded.cells.len(), 1);
         assert_eq!(loaded.cells[0].pins[0].timing_arcs.len(), 1);
+        assert_eq!(loaded.cells[0].pins[0].timing_arcs[0].tables.len(), 1);
     }
 
     #[test]

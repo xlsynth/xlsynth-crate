@@ -315,7 +315,7 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
             .pins
             .iter()
             .filter(|p| p.is_clocking_pin)
-            .map(|p| p.name.clone())
+            .map(|p| p.name.to_string())
             .collect();
         match candidates.as_slice() {
             [pin] => pin.clone(),
@@ -341,7 +341,7 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
             .pins
             .iter()
             .filter(|p| p.direction == PinDirection::Output as i32)
-            .map(|p| p.name.clone())
+            .map(|p| p.name.to_string())
             .collect();
         match candidates.as_slice() {
             [pin] => pin.clone(),
@@ -363,7 +363,7 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
     let clock_pin_ok = cell
         .pins
         .iter()
-        .any(|p| p.name == clock_pin && p.direction == PinDirection::Input as i32);
+        .any(|p| p.name.as_str() == clock_pin && p.direction == PinDirection::Input as i32);
     if !clock_pin_ok {
         return Err(anyhow!(format!(
             "cell '{}' clock_gate clock pin '{}' is missing or not INPUT",
@@ -374,7 +374,7 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
     let output_pin_ok = cell
         .pins
         .iter()
-        .any(|p| p.name == output_pin && p.direction == PinDirection::Output as i32);
+        .any(|p| p.name.as_str() == output_pin && p.direction == PinDirection::Output as i32);
     if !output_pin_ok {
         return Err(anyhow!(format!(
             "cell '{}' clock_gate output pin '{}' is missing or not OUTPUT",
@@ -780,21 +780,24 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         .find(|p| p.is_clocking_pin)
         .map(|p| p.name.clone());
     if let (Some(a), Some(b)) = (&clock_pin_from_seq, &clock_pin_from_pin) {
-        if a != b {
+        if a.as_str() != b.as_str() {
             return Err(anyhow!(format!(
                 "cell '{}' clock pin mismatch: seq '{}' vs pin '{}'",
                 cell.name, a, b
             )));
         }
     }
-    let clock_pin = clock_pin_from_seq.or(clock_pin_from_pin);
+    let clock_pin = clock_pin_from_seq.or_else(|| clock_pin_from_pin.map(|name| name.to_string()));
 
     for pin in inputs.iter() {
-        if clock_pin.as_ref().is_some_and(|c| c == &pin.name) {
+        if clock_pin
+            .as_ref()
+            .is_some_and(|clock| clock == pin.name.as_str())
+        {
             continue;
         }
         let nr = b.add_param(&pin.name, Type::Bits(1));
-        input_map.insert(pin.name.clone(), nr);
+        input_map.insert(pin.name.to_string(), nr);
     }
 
     let mut registers: Vec<Register> = Vec::new();
@@ -909,7 +912,7 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
 
     let mut output_nodes: Vec<NodeRef> = Vec::new();
     for pin in outputs.iter() {
-        output_names.push(pin.name.clone());
+        output_names.push(pin.name.to_string());
         let term = if pin.function.is_empty() {
             None
         } else {
@@ -928,11 +931,11 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
                 },
             )?
         } else if let (Some(state_var), Some(state_ref)) = (&state_var_name, state_ref) {
-            if pin.name == *state_var {
+            if pin.name.as_str() == state_var {
                 state_ref
             } else if complementary_state_var_name
                 .as_ref()
-                .is_some_and(|name| pin.name == *name)
+                .is_some_and(|name| pin.name.as_str() == name)
             {
                 complementary_state_ref.expect("complementary state name has a node")
             } else {
@@ -1159,7 +1162,7 @@ fn build_top_block(
             if seq.kind == SequentialKind::Ff as i32 {
                 for pin in &cell.pins {
                     if pin.is_clocking_pin {
-                        dff_clock_pins.push(pin.name.clone());
+                        dff_clock_pins.push(pin.name.to_string());
                     }
                 }
                 if !seq.clock_expr.is_empty() {
@@ -1291,12 +1294,12 @@ fn build_top_block(
             let nr = b.add_node(
                 NodePayload::InstantiationOutput {
                     instantiation: inst_name.clone(),
-                    port_name: pin.name.clone(),
+                    port_name: pin.name.to_string(),
                 },
                 Type::Bits(1),
                 Some(&output_node_name),
             );
-            output_refs.push((pin.name.clone(), nr));
+            output_refs.push((pin.name.to_string(), nr));
         }
         instance_outputs.push((inst_name_raw, inst_name, output_refs));
     }
@@ -1363,12 +1366,13 @@ fn build_top_block(
         let inputs = lib_indexed
             .pins_for_dir(&cell_name, PinDirection::Input)
             .unwrap_or_default();
-        let input_pin_names: HashSet<String> = inputs.iter().map(|pin| pin.name.clone()).collect();
+        let input_pin_names: HashSet<String> =
+            inputs.iter().map(|pin| pin.name.to_string()).collect();
 
         let mut clock_pin_names: HashSet<String> = inputs
             .iter()
             .filter(|pin| pin.is_clocking_pin)
-            .map(|pin| pin.name.clone())
+            .map(|pin| pin.name.to_string())
             .collect();
         if let Some(seq) = cell.sequential.first() {
             if !seq.clock_expr.is_empty() {

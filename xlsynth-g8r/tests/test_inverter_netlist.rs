@@ -12,30 +12,33 @@ use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_l
 use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 const LIBERTY_INVERTER_AND_BUF_TEXTPROTO: &str = r#"
-format_magic: 5496997758161146447
+format_magic: 5496997758177923663
+interned_strings: "A"
+interned_strings: "Y"
+interned_strings: "(!A)"
 cells: {
   name: "INV"
   pins: {
-    name: "A"
+    name_string_id: 1
     direction: INPUT
   }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "(!A)"
+    function_string_id: 3
   }
   area: 1.0
 }
 cells: {
   name: "BUF"
   pins: {
-    name: "A"
+    name_string_id: 1
     direction: INPUT
   }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "A"
+    function_string_id: 1
   }
   area: 1.0
 }

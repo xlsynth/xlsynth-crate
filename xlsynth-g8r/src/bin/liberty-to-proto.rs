@@ -15,6 +15,7 @@ use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
 use xlsynth_g8r::liberty::model::{library_to_proto, strip_timing_data};
 use xlsynth_g8r::liberty::parser::{
     parse_liberty_files, parse_liberty_files_without_timing_validation,
+    validate_library_consistency,
 };
 
 #[derive(Parser, Debug)]
@@ -42,6 +43,7 @@ fn main() {
     };
     if args.no_timing_data {
         strip_timing_data(&mut proto_lib);
+        validate_library_consistency(&proto_lib).expect("validate retained Liberty data");
     }
     let proto_lib = library_to_proto(proto_lib).expect("encode Liberty LUT data");
     println!("Writing output to {}...", args.output.display());
@@ -69,14 +71,15 @@ mod tests {
     fn test_proto_structure() {
         let mut lib = Library {
             cells: vec![],
+            interned_strings: vec!["A".to_string()],
             ..Default::default()
         };
         lib.cells.push(Cell {
             area: 1.0,
             pins: vec![Pin {
-                name: "A".to_string(),
+                name_string_id: 1,
                 direction: PinDirection::Input as i32,
-                function: "A".to_string(),
+                function_string_id: 1,
                 is_clocking_pin: false,
                 ..Default::default()
             }],
