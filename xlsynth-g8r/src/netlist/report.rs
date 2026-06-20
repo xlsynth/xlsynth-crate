@@ -382,7 +382,8 @@ mod tests {
     use super::{build_area_report, build_netlist_report, select_module};
     use crate::liberty::LibraryWithTimingData;
     use crate::liberty_model::{
-        Cell, Library, Pin, PinDirection, Sequential, SequentialKind, TimingArc, TimingTable,
+        Cell, Library, LibraryBuilder, Pin, PinDirection, Sequential, SequentialKind, TimingArc,
+        TimingTable,
     };
     use crate::netlist::io::ParsedNetlist;
     use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
@@ -400,159 +401,215 @@ mod tests {
         }
     }
 
-    fn scalar_table(kind: crate::liberty_proto::TimingTableKind, value: f64) -> TimingTable {
-        TimingTable::from_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
+    fn scalar_table(
+        builder: &mut LibraryBuilder,
+        kind: crate::liberty_proto::TimingTableKind,
+        value: f64,
+    ) -> TimingTable {
+        builder
+            .add_timing_table_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
+            .unwrap()
     }
 
-    fn timing_arc(related_pin: &str, rise: f64, fall: f64) -> TimingArc {
-        TimingArc::from_raw(
-            related_pin,
-            "positive_unate",
-            "combinational",
-            "",
-            vec![
-                scalar_table(crate::liberty_proto::TimingTableKind::CellRise, rise),
-                scalar_table(crate::liberty_proto::TimingTableKind::CellFall, fall),
-                scalar_table(crate::liberty_proto::TimingTableKind::RiseTransition, 0.1),
-                scalar_table(crate::liberty_proto::TimingTableKind::FallTransition, 0.1),
-            ],
-        )
+    fn timing_arc(
+        builder: &mut LibraryBuilder,
+        related_pin: &str,
+        rise: f64,
+        fall: f64,
+    ) -> TimingArc {
+        let tables = vec![
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellRise,
+                rise,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellFall,
+                fall,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::RiseTransition,
+                0.1,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::FallTransition,
+                0.1,
+            ),
+        ];
+        builder
+            .add_timing_arc(related_pin, "positive_unate", "combinational", "", tables)
+            .unwrap()
     }
 
-    fn clock_to_output_arc() -> TimingArc {
-        TimingArc::from_raw(
-            "CLK",
-            "non_unate",
-            "rising_edge",
-            "",
-            vec![
-                scalar_table(crate::liberty_proto::TimingTableKind::CellRise, 0.5),
-                scalar_table(crate::liberty_proto::TimingTableKind::CellFall, 0.5),
-                scalar_table(crate::liberty_proto::TimingTableKind::RiseTransition, 0.1),
-                scalar_table(crate::liberty_proto::TimingTableKind::FallTransition, 0.1),
-            ],
-        )
+    fn clock_to_output_arc(builder: &mut LibraryBuilder) -> TimingArc {
+        let tables = vec![
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellRise,
+                0.5,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellFall,
+                0.5,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::RiseTransition,
+                0.1,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::FallTransition,
+                0.1,
+            ),
+        ];
+        builder
+            .add_timing_arc("CLK", "non_unate", "rising_edge", "", tables)
+            .unwrap()
     }
 
-    fn setup_arc() -> TimingArc {
-        TimingArc::from_raw(
-            "CLK",
-            "",
-            "setup_rising",
-            "",
-            vec![
-                scalar_table(crate::liberty_proto::TimingTableKind::RiseConstraint, 0.25),
-                scalar_table(crate::liberty_proto::TimingTableKind::FallConstraint, 0.25),
-            ],
-        )
+    fn setup_arc(builder: &mut LibraryBuilder) -> TimingArc {
+        let tables = vec![
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::RiseConstraint,
+                0.25,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::FallConstraint,
+                0.25,
+            ),
+        ];
+        builder
+            .add_timing_arc("CLK", "", "setup_rising", "", tables)
+            .unwrap()
     }
 
     fn inv_nand_library() -> Library {
-        Library {
-            cells: vec![
-                Cell {
-                    name: "INV".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "A".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Y".to_string(),
-                            direction: PinDirection::Output as i32,
-                            function: "!A".to_string(),
-                            timing_arcs: vec![timing_arc("A", 1.0, 1.0)],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "BUF".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "A".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Y".to_string(),
-                            direction: PinDirection::Output as i32,
-                            function: "A".to_string(),
-                            timing_arcs: vec![timing_arc("A", 1.0, 1.0)],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "NAND2".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "A".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "B".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Y".to_string(),
-                            direction: PinDirection::Output as i32,
-                            function: "!(A*B)".to_string(),
-                            timing_arcs: vec![timing_arc("A", 2.0, 2.0), timing_arc("B", 2.0, 2.0)],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 2.0,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "DFF".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "D".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            timing_arcs: vec![setup_arc()],
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "CLK".to_string(),
-                            direction: PinDirection::Input as i32,
-                            is_clocking_pin: true,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Q".to_string(),
-                            direction: PinDirection::Output as i32,
-                            timing_arcs: vec![clock_to_output_arc()],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 4.0,
-                    sequential: vec![Sequential {
-                        state_var: "IQ".to_string(),
-                        next_state: "D".to_string(),
-                        clock_expr: "CLK".to_string(),
-                        kind: SequentialKind::Ff as i32,
+        let mut builder = LibraryBuilder::new();
+        let a = builder.intern_string("A").unwrap();
+        let b = builder.intern_string("B").unwrap();
+        let d = builder.intern_string("D").unwrap();
+        let clk = builder.intern_string("CLK").unwrap();
+        let q = builder.intern_string("Q").unwrap();
+        let y = builder.intern_string("Y").unwrap();
+        let not_a = builder.intern_string("!A").unwrap();
+        let identity_a = builder.intern_string("A").unwrap();
+        let nand = builder.intern_string("!(A*B)").unwrap();
+        let inv_arc = timing_arc(&mut builder, "A", 1.0, 1.0);
+        let buf_arc = timing_arc(&mut builder, "A", 1.0, 1.0);
+        let nand_a_arc = timing_arc(&mut builder, "A", 2.0, 2.0);
+        let nand_b_arc = timing_arc(&mut builder, "B", 2.0, 2.0);
+        let setup = setup_arc(&mut builder);
+        let clock_to_output = clock_to_output_arc(&mut builder);
+        builder.cells = vec![
+            Cell {
+                name: "INV".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: a,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
                         ..Default::default()
-                    }],
+                    },
+                    Pin {
+                        name: y,
+                        direction: PinDirection::Output as i32,
+                        function: not_a,
+                        timing_arcs: vec![inv_arc],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "BUF".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: a,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: y,
+                        direction: PinDirection::Output as i32,
+                        function: identity_a,
+                        timing_arcs: vec![buf_arc],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "NAND2".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: a,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: b,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: y,
+                        direction: PinDirection::Output as i32,
+                        function: nand,
+                        timing_arcs: vec![nand_a_arc, nand_b_arc],
+                        ..Default::default()
+                    },
+                ],
+                area: 2.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "DFF".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: d,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        timing_arcs: vec![setup],
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: clk,
+                        direction: PinDirection::Input as i32,
+                        is_clocking_pin: true,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: q,
+                        direction: PinDirection::Output as i32,
+                        timing_arcs: vec![clock_to_output],
+                        ..Default::default()
+                    },
+                ],
+                area: 4.0,
+                sequential: vec![Sequential {
+                    state_var: "IQ".to_string().into(),
+                    next_state: "D".to_string().into(),
+                    clock_expr: "CLK".to_string().into(),
+                    kind: SequentialKind::Ff as i32,
                     ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+                }],
+                ..Default::default()
+            },
+        ];
+        builder.finish()
     }
 
     #[test]

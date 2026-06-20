@@ -118,8 +118,8 @@ pub fn liberty_proto_info_from_path(path: &Path) -> Result<LibertyProtoInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty::model::library_to_proto;
-    use crate::liberty_model::{Cell, InternalPower, Pin, PowerTable, Sequential, TimingArc};
+    use crate::liberty::model::{library_from_proto, library_to_proto};
+    use crate::liberty_model::{Cell, InternalPower, LibraryBuilder, Pin, Sequential, TimingArc};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use prost::Message;
@@ -127,47 +127,62 @@ mod tests {
 
     #[test]
     fn summarizes_combinational_sequential_timing_and_power_data() {
-        let proto = Library {
-            provenance: "test provenance".to_string(),
-            source_files: vec![
-                "combinational.lib".to_string(),
-                "sequential.lib".to_string(),
-            ],
-            nominal_voltage: Some(0.7),
-            lu_table_templates: vec![Default::default(), Default::default()],
-            cells: vec![
-                Cell {
-                    name: "INV".to_string(),
-                    dont_use: Some(true),
-                    pins: vec![Pin {
-                        timing_arcs: vec![TimingArc::default()],
-                        internal_power: vec![InternalPower {
-                            tables: vec![
-                                PowerTable {
-                                    transition: PowerTransition::Rise,
-                                    ..Default::default()
-                                },
-                                PowerTable {
-                                    transition: PowerTransition::Fall,
-                                    ..Default::default()
-                                },
-                            ],
-                            ..Default::default()
-                        }],
+        let mut builder = LibraryBuilder::new();
+        let rise = builder
+            .add_power_table_f64(
+                PowerTransition::Rise,
+                0,
+                vec![],
+                vec![],
+                vec![],
+                vec![0.0],
+                vec![],
+                "",
+            )
+            .unwrap();
+        let fall = builder
+            .add_power_table_f64(
+                PowerTransition::Fall,
+                0,
+                vec![],
+                vec![],
+                vec![],
+                vec![0.0],
+                vec![],
+                "",
+            )
+            .unwrap();
+        builder.provenance = "test provenance".to_string();
+        builder.source_files = vec![
+            "combinational.lib".to_string(),
+            "sequential.lib".to_string(),
+        ];
+        builder.nominal_voltage = Some(0.7);
+        builder.lu_table_templates = vec![Default::default(), Default::default()];
+        builder.cells = vec![
+            Cell {
+                name: "INV".to_string().into(),
+                dont_use: Some(true),
+                pins: vec![Pin {
+                    timing_arcs: vec![TimingArc::default()],
+                    internal_power: vec![InternalPower {
+                        tables: vec![rise, fall],
                         ..Default::default()
                     }],
                     ..Default::default()
-                },
-                Cell {
-                    name: "DFF".to_string(),
-                    sequential: vec![Sequential::default()],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        let bytes = library_to_proto(proto.clone()).unwrap().encode_to_vec();
+                }],
+                ..Default::default()
+            },
+            Cell {
+                name: "DFF".to_string().into(),
+                sequential: vec![Sequential::default()],
+                ..Default::default()
+            },
+        ];
+        let wire = library_to_proto(builder.finish()).unwrap();
+        let bytes = wire.encode_to_vec();
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let proto = library_from_proto(wire).unwrap();
         let info = summarize_liberty_proto(bytes.len() as u64, sha256, &proto);
 
         assert_eq!(info.size_bytes, bytes.len() as u64);
@@ -194,9 +209,9 @@ mod tests {
     #[test]
     fn reads_gzipped_proto_and_reports_stored_file_identity() {
         let proto = Library {
-            provenance: "compressed test".to_string(),
+            provenance: "compressed test".to_string().into(),
             cells: vec![Cell {
-                name: "INV".to_string(),
+                name: "INV".to_string().into(),
                 ..Default::default()
             }],
             ..Default::default()

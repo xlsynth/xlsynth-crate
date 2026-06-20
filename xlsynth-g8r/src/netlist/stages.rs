@@ -111,7 +111,7 @@ pub fn analyze_register_stages(
         let connections = connection_map(instance, interner)?;
         if infos[inst_idx].sequential {
             for pin in &cell.pins {
-                let Some(bits) = connections.get(pin.name.as_str()) else {
+                let Some(bits) = connections.get(library.resolve_string(&pin.name)) else {
                     continue;
                 };
                 if pin.direction == PinDirection::Output as i32 {
@@ -128,15 +128,16 @@ pub fn analyze_register_stages(
             .iter()
             .filter(|pin| pin.direction == PinDirection::Output as i32)
         {
-            let Some(output_bits) = connections.get(output_pin.name.as_str()) else {
+            let Some(output_bits) = connections.get(library.resolve_string(&output_pin.name))
+            else {
                 continue;
             };
             for arc in output_pin
                 .timing_arcs
                 .iter()
-                .filter(|arc| is_combinational_timing_type(arc.timing_type_str()))
+                .filter(|arc| is_combinational_timing_type(arc.timing_type_str(library)))
             {
-                for related_pin in arc.related_pin.split_whitespace() {
+                for related_pin in library.resolve_string(&arc.related_pin).split_whitespace() {
                     let Some(input_bits) = connections.get(related_pin) else {
                         continue;
                     };

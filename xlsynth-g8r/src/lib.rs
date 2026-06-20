@@ -27,7 +27,9 @@ pub mod liberty_proto {
 /// Normalized in-memory Liberty model used by evaluators and transforms.
 pub mod liberty_model {
     pub use crate::liberty::model::{
-        Cell, InternalPower, Library, LuTableTemplate, Pin, PowerTable, TimingArc, TimingTable,
+        AxisId, Cell, InternalPower, Library, LibraryBuilder, LuTableTemplate, LutShape,
+        LutTemplateKind, LutValueRange, LutVariable, Pin, PowerTable, StringId, TimingArc,
+        TimingSense, TimingTable, TimingType,
     };
     pub use crate::liberty_proto::{
         ClockGate, LibraryUnits, PinDirection, PowerTransition, Sequential, SequentialKind,

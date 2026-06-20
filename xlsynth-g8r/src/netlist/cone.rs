@@ -300,7 +300,7 @@ where
     }
     if matches.is_empty() {
         return Err(ConeError::MissingInstance {
-            name: start_instance.to_string(),
+            name: start_instance.to_string().into(),
         });
     }
     // `NetlistModule` parsing enforces that instance names are unique within a
@@ -730,28 +730,30 @@ mod tests {
         };
 
         // Liberty library with INV (from common test utils) and AND2 cell.
-        let mut lib: Library = make_test_library();
-        lib.cells.push(crate::liberty_model::Cell {
-            name: "AND2".to_string(),
+        let mut builder = crate::liberty_model::LibraryBuilder::from_library(make_test_library());
+        let input_a = builder.intern_string("A").unwrap();
+        let input_b = builder.intern_string("B").unwrap();
+        let output_y = builder.intern_string("Y").unwrap();
+        let and_function = builder.intern_string("(A*B)").unwrap();
+        builder.cells.push(crate::liberty_model::Cell {
+            name: "AND2".to_string().into(),
             pins: vec![
                 crate::liberty_model::Pin {
                     direction: crate::liberty_model::PinDirection::Input as i32,
-                    function: "".to_string(),
-                    name: "A".to_string(),
+                    name: input_a,
                     is_clocking_pin: false,
                     ..Default::default()
                 },
                 crate::liberty_model::Pin {
                     direction: crate::liberty_model::PinDirection::Input as i32,
-                    function: "".to_string(),
-                    name: "B".to_string(),
+                    name: input_b,
                     is_clocking_pin: false,
                     ..Default::default()
                 },
                 crate::liberty_model::Pin {
                     direction: crate::liberty_model::PinDirection::Output as i32,
-                    function: "(A*B)".to_string(),
-                    name: "Y".to_string(),
+                    function: and_function,
+                    name: output_y,
                     is_clocking_pin: false,
                     ..Default::default()
                 },
@@ -762,7 +764,7 @@ mod tests {
             ..Default::default()
         });
 
-        let indexed = IndexedLibrary::new(lib);
+        let indexed = IndexedLibrary::new(builder.finish());
         let mut visits: Vec<ConeVisit> = Vec::new();
         let dff_cells: HashSet<String> = HashSet::new();
         visit_module_cone(

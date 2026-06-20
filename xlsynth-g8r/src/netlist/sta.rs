@@ -361,11 +361,12 @@ impl<'a> StaLibraryIndex<'a> {
             }
             let mut pin_map = HashMap::new();
             for (pin_idx, pin) in cell.pins.iter().enumerate() {
-                if pin_map.insert(pin.name.to_string(), pin_idx).is_some() {
+                let pin_name = library.resolve_string(&pin.name);
+                if pin_map.insert(pin_name.to_string(), pin_idx).is_some() {
                     return Err(anyhow!(
                         "library cell '{}' defines pin '{}' more than once; duplicate pin names are unsupported in basic STA",
                         cell.name,
-                        pin.name
+                        pin_name
                     ));
                 }
             }
@@ -481,10 +482,13 @@ pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> 
     !cell.sequential.is_empty()
         || cell.pins.iter().any(|pin| {
             pin.direction == PinDirection::Output as i32
-                && pin
-                    .timing_arcs
-                    .iter()
-                    .any(|arc| matches!(arc.timing_type_str(), "rising_edge" | "falling_edge"))
+                && pin.timing_arcs.iter().any(|arc| {
+                    matches!(
+                        arc.timing_type.wire_value(),
+                        crate::liberty_proto::TimingType::RisingEdge
+                            | crate::liberty_proto::TimingType::FallingEdge
+                    )
+                })
         })
 }
 
@@ -617,17 +621,17 @@ fn analyze_max_arrival_proto_with_mode(
                 .iter()
                 .filter(|pin| pin.direction == PinDirection::Output as i32)
             {
-                for arc in output_pin
-                    .timing_arcs
-                    .iter()
-                    .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
-                {
-                    for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+                for arc in output_pin.timing_arcs.iter().filter(|arc| {
+                    StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
+                }) {
+                    for related_pin_name in
+                        split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
+                    {
                         let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
                             anyhow!(
                                 "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
                                 cell_name,
-                                output_pin.name,
+                                lib.library.resolve_string(&output_pin.name),
                                 related_pin_name
                             )
                         })?;
@@ -637,7 +641,7 @@ fn analyze_max_arrival_proto_with_mode(
                             return Err(anyhow!(
                                 "cell '{}' output pin '{}' has timing arc related pin '{}' with unsupported direction value {}",
                                 cell_name,
-                                output_pin.name,
+                                lib.library.resolve_string(&output_pin.name),
                                 related_pin_name,
                                 related_pin.direction
                             ));
@@ -710,8 +714,11 @@ fn analyze_max_arrival_proto_with_mode(
                                 pin_name: pin_name.clone(),
                             });
                             if pin.timing_arcs.is_empty() {
-                                bit_constant_values[*bit_idx] =
-                                    constant_output_function_value(cell_name.as_str(), pin)?;
+                                bit_constant_values[*bit_idx] = constant_output_function_value(
+                                    lib.library,
+                                    cell_name.as_str(),
+                                    pin,
+                                )?;
                             }
                         }
                         PinBitSource::Literal(_) | PinBitSource::Unknown => unreachable!(),
@@ -747,7 +754,7 @@ fn analyze_max_arrival_proto_with_mode(
                 .enumerate()
                 .filter(|(_, pin)| {
                     pin.direction == PinDirection::Output as i32
-                        && pin_sources.contains_key(pin.name.as_str())
+                        && pin_sources.contains_key(lib.library.resolve_string(&pin.name))
                 })
                 .map(|(pin_idx, _)| pin_idx)
                 .collect()
@@ -978,7 +985,8 @@ fn analyze_max_arrival_proto_with_mode(
         let mut local_output_timing_sets: HashMap<String, SignalTimingSet> = HashMap::new();
         for pin_idx in &instance_output_pin_orders[inst_idx] {
             let pin = &lib.library.cells[cell_idx].pins[*pin_idx];
-            let output_sources = inst_pin_map.get(pin.name.as_str());
+            let pin_name = lib.library.resolve_string(&pin.name);
+            let output_sources = inst_pin_map.get(pin_name);
             if analysis_mode.uses_register_boundaries() && instance_is_sequential[inst_idx] {
                 if analysis_mode.launches_register(inst_idx) {
                     let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
@@ -998,29 +1006,29 @@ fn analyze_max_arrival_proto_with_mode(
                         &mut timing_query_diagnostic_counts,
                         &format!(
                             "{}.{} (instance '{}') clock-to-output",
-                            cell_name, pin.name, instance_name
+                            cell_name, pin_name, instance_name
                         ),
                     )?);
                 }
                 continue;
             }
-            if let Some(unsupported_arc) = pin
-                .timing_arcs
-                .iter()
-                .find(|arc| !StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
-            {
+            if let Some(unsupported_arc) = pin.timing_arcs.iter().find(|arc| {
+                !StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
+            }) {
                 return Err(anyhow!(
                     "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
                     instance_name,
                     cell_name,
-                    pin.name,
-                    unsupported_arc.timing_type_str()
+                    pin_name,
+                    unsupported_arc.timing_type_str(lib.library)
                 ));
             }
             let combinational_arcs: Vec<&TimingArc> = pin
                 .timing_arcs
                 .iter()
-                .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
+                .filter(|arc| {
+                    StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
+                })
                 .collect();
             let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
                 Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
@@ -1031,19 +1039,21 @@ fn analyze_max_arrival_proto_with_mode(
             };
             let output_net_name = output_bit_idx
                 .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
-                .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin.name));
+                .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name));
             if combinational_arcs.is_empty() {
-                if let Some(constant_value) = constant_output_function_value(cell_name, pin)? {
+                if let Some(constant_value) =
+                    constant_output_function_value(lib.library, cell_name, pin)?
+                {
                     sta_trace(|| {
                         format!(
                             "inst={} cell={} out_pin={} out_net={} constant_source={}",
-                            instance_name, cell_name, pin.name, output_net_name, constant_value,
+                            instance_name, cell_name, pin_name, output_net_name, constant_value,
                         )
                     });
                     store_output_timing_set(
                         &mut local_output_timing_sets,
                         &mut bit_timing_sets,
-                        pin.name.as_str(),
+                        pin_name,
                         output_bit_idx,
                         literal_source_timing_set.clone(),
                     );
@@ -1053,13 +1063,13 @@ fn analyze_max_arrival_proto_with_mode(
                     "basic STA only supports combinational or constant-source output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs and no constant function",
                     instance_name,
                     cell_name,
-                    pin.name
+                    pin_name
                 ));
             }
             validate_timing_tables_once(
                 lib.library,
                 cell_name,
-                pin.name.as_str(),
+                pin_name,
                 combinational_arcs.as_slice(),
                 &mut validated_timing_tables,
             )?;
@@ -1071,23 +1081,30 @@ fn analyze_max_arrival_proto_with_mode(
             for arc in &combinational_arcs {
                 let arc_context = format!(
                     "cell '{}' output pin '{}' timing arc related_pin '{}'",
-                    cell_name, pin.name, arc.related_pin
+                    cell_name,
+                    pin_name,
+                    lib.library.resolve_string(&arc.related_pin)
                 );
-                if !arc_when_may_apply(arc, known_pin_values, arc_context.as_str())? {
+                if !arc_when_may_apply(lib.library, arc, known_pin_values, arc_context.as_str())? {
                     sta_trace(|| {
                         format!(
                             "inst={} cell={} out_pin={} when={} skipped=true",
-                            instance_name, cell_name, pin.name, arc.when,
+                            instance_name,
+                            cell_name,
+                            pin_name,
+                            lib.library.resolve_string(&arc.when),
                         )
                     });
                     continue;
                 }
-                for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+                for related_pin_name in
+                    split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
+                {
                     let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
                             anyhow!(
                                 "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
                                 cell_name,
-                                pin.name,
+                                pin_name,
                                 related_pin_name
                             )
                         })?;
@@ -1102,7 +1119,7 @@ fn analyze_max_arrival_proto_with_mode(
                                 cell_name,
                                 related_pin_name,
                                 cell_name,
-                                pin.name,
+                                pin_name,
                                 instance_name
                             ));
                         };
@@ -1126,7 +1143,7 @@ fn analyze_max_arrival_proto_with_mode(
                                         "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
                                         instance_name,
                                         cell_name,
-                                        pin.name,
+                                        pin_name,
                                         related_pin_name
                                     )
                                 })?;
@@ -1135,7 +1152,7 @@ fn analyze_max_arrival_proto_with_mode(
                                 "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
                                 instance_name,
                                 cell_name,
-                                pin.name,
+                                pin_name,
                                 related_pin_name
                             ));
                         }
@@ -1151,7 +1168,7 @@ fn analyze_max_arrival_proto_with_mode(
                                             "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
                                             normalized.render_bit(*related_bit_idx, nets, interner),
                                             cell_name,
-                                            pin.name,
+                                            pin_name,
                                             related_pin_name
                                         ));
                                     };
@@ -1179,7 +1196,7 @@ fn analyze_max_arrival_proto_with_mode(
                     for (input_timing_set, related_net_name) in related_timing_sets {
                         let context = format!(
                             "{}.{} (instance '{}') related_pin '{}'",
-                            cell_name, pin.name, instance_name, related_pin_name
+                            cell_name, pin_name, instance_name, related_pin_name
                         );
                         let candidate = evaluate_arc_set(
                             lib.library,
@@ -1194,17 +1211,17 @@ fn analyze_max_arrival_proto_with_mode(
                                 "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
                                 instance_name,
                                 cell_name,
-                                pin.name,
+                                pin_name,
                                 output_net_name,
                                 related_pin_name,
                                 related_net_name,
-                                if arc.when.is_empty() {
+                                if lib.library.resolve_string(&arc.when).is_empty() {
                                     "<empty>"
                                 } else {
-                                    arc.when.as_str()
+                                    lib.library.resolve_string(&arc.when)
                                 },
-                                arc.timing_sense_str(),
-                                arc.timing_type_str(),
+                                arc.timing_sense_str(lib.library),
+                                arc.timing_type_str(lib.library),
                                 format_edge_timing_set(&candidate.rise),
                                 format_edge_timing_set(&candidate.fall),
                                 format_optional_edge_timing(candidate.rise.max_arrival_edge()),
@@ -1227,7 +1244,7 @@ fn analyze_max_arrival_proto_with_mode(
                     "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
                     instance_name,
                     cell_name,
-                    pin.name
+                    pin_name
                 ));
             };
             // Use a conservative per-edge envelope: max arrival and max
@@ -1238,7 +1255,7 @@ fn analyze_max_arrival_proto_with_mode(
                     "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
                     instance_name,
                     cell_name,
-                    pin.name,
+                    pin_name,
                     output_net_name,
                     format_edge_timing_set(&out_timing_set.rise),
                     format_edge_timing_set(&out_timing_set.fall),
@@ -1250,7 +1267,7 @@ fn analyze_max_arrival_proto_with_mode(
             store_output_timing_set(
                 &mut local_output_timing_sets,
                 &mut bit_timing_sets,
-                pin.name.as_str(),
+                pin_name,
                 output_bit_idx,
                 out_timing_set,
             );
@@ -1331,10 +1348,13 @@ fn analyze_max_arrival_proto_with_mode(
                 .iter()
                 .filter(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
             {
+                let pin_name = lib.library.resolve_string(&pin.name);
                 let setup_arcs: Vec<&TimingArc> = pin
                     .timing_arcs
                     .iter()
-                    .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_setup())
+                    .filter(|arc| {
+                        StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_setup()
+                    })
                     .collect();
                 if setup_arcs.is_empty() {
                     continue;
@@ -1342,11 +1362,11 @@ fn analyze_max_arrival_proto_with_mode(
                 validate_constraint_tables_once(
                     lib.library,
                     &instance_cell_names[inst_idx],
-                    pin.name.as_str(),
+                    pin_name,
                     setup_arcs.as_slice(),
                     &mut validated_timing_tables,
                 )?;
-                let Some(sources) = pin_sources.get(pin.name.as_str()) else {
+                let Some(sources) = pin_sources.get(pin_name) else {
                     continue;
                 };
                 for source in sources {
@@ -1365,7 +1385,7 @@ fn analyze_max_arrival_proto_with_mode(
                         &format!(
                             "{}.{} (instance '{}') setup",
                             instance_cell_names[inst_idx],
-                            pin.name,
+                            pin_name,
                             resolve_symbol(
                                 interner,
                                 normalized.instances[inst_idx].instance_name,
@@ -1655,16 +1675,22 @@ fn split_related_pin_names(related_pin: &str) -> impl Iterator<Item = &str> {
 
 /// Returns the Boolean value of an output function when it is constant without
 /// any input bindings.
-fn constant_output_function_value(cell_name: &str, pin: &Pin) -> Result<Option<bool>> {
-    if pin.function.trim().is_empty() {
+fn constant_output_function_value(
+    library: &crate::liberty_model::Library,
+    cell_name: &str,
+    pin: &Pin,
+) -> Result<Option<bool>> {
+    let pin_name = library.resolve_string(&pin.name);
+    let function_text = library.resolve_string(&pin.function);
+    if function_text.trim().is_empty() {
         return Ok(None);
     }
-    let function = parse_formula(pin.function.as_str()).map_err(|e| {
+    let function = parse_formula(function_text).map_err(|e| {
         anyhow!(
             "cell '{}' output pin '{}' has invalid function='{}': {}",
             cell_name,
-            pin.name,
-            pin.function,
+            pin_name,
+            function_text,
             e
         )
     })?;
@@ -1707,7 +1733,7 @@ fn combinational_output_pin_evaluation_order(
     let mut order = Vec::new();
     for (pin_idx, pin) in cell.pins.iter().enumerate() {
         if pin.direction == PinDirection::Output as i32
-            && pin_sources.contains_key(pin.name.as_str())
+            && pin_sources.contains_key(lib.library.resolve_string(&pin.name))
         {
             visit_combinational_output_pin(lib, cell_idx, pin_idx, &mut visit_states, &mut order)?;
         }
@@ -1725,12 +1751,13 @@ fn visit_combinational_output_pin(
 ) -> Result<()> {
     let cell = &lib.library.cells[cell_idx];
     let pin = &cell.pins[pin_idx];
+    let pin_name = lib.library.resolve_string(&pin.name);
     match visit_states[pin_idx] {
         OutputPinVisitState::Visiting => {
             return Err(anyhow!(
                 "cell '{}' has a combinational output-pin dependency cycle involving '{}'; basic STA only supports acyclic output-related timing arcs",
                 cell.name,
-                pin.name
+                pin_name
             ));
         }
         OutputPinVisitState::Done => return Ok(()),
@@ -1740,14 +1767,16 @@ fn visit_combinational_output_pin(
     for arc in pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational())
     {
-        for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+        for related_pin_name in
+            split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
+        {
             let related_pin_idx = lib.pin_index(cell_idx, related_pin_name).ok_or_else(|| {
                 anyhow!(
                     "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
                     cell.name,
-                    pin.name,
+                    pin_name,
                     related_pin_name
                 )
             })?;
@@ -1776,30 +1805,33 @@ pub fn validate_output_pin_for_basic_sta(
     pin: &Pin,
     required_related_pins: &[String],
 ) -> Result<()> {
+    let pin_name = library.resolve_string(&pin.name);
     if pin.direction != PinDirection::Output as i32 {
         return Err(anyhow!(
             "cell '{}' pin '{}' is not an output pin",
             cell_name,
-            pin.name
+            pin_name
         ));
     }
-    if pin.timing_arcs.is_empty() && constant_output_function_value(cell_name, pin)?.is_none() {
+    if pin.timing_arcs.is_empty()
+        && constant_output_function_value(library, cell_name, pin)?.is_none()
+    {
         return Err(anyhow!(
             "cell '{}' output pin '{}' has no timing arcs and no constant function",
             cell_name,
-            pin.name
+            pin_name
         ));
     }
     if let Some(unsupported_arc) = pin
         .timing_arcs
         .iter()
-        .find(|arc| !StaTimingType::from_raw(arc.timing_type_str()).is_combinational())
+        .find(|arc| !StaTimingType::from_raw(arc.timing_type_str(library)).is_combinational())
     {
         return Err(anyhow!(
             "cell '{}' output pin '{}' has unsupported timing type '{}'",
             cell_name,
-            pin.name,
-            unsupported_arc.timing_type_str()
+            pin_name,
+            unsupported_arc.timing_type_str(library)
         ));
     }
     let combinational_arcs: Vec<&TimingArc> = pin.timing_arcs.iter().collect();
@@ -1807,16 +1839,18 @@ pub fn validate_output_pin_for_basic_sta(
     validate_timing_tables_once(
         library,
         cell_name,
-        pin.name.as_str(),
+        pin_name,
         combinational_arcs.as_slice(),
         &mut validated_tables,
     )?;
 
     for arc in &combinational_arcs {
-        let timing_type = StaTimingType::from_raw(arc.timing_type_str());
+        let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
         let context = format!(
             "cell '{}' output pin '{}' related_pin '{}'",
-            cell_name, pin.name, arc.related_pin
+            cell_name,
+            pin_name,
+            library.resolve_string(&arc.related_pin)
         );
         if timing_type.produces_rise() {
             find_unique_table(arc, StaTimingTableKind::CellRise, context.as_str())?;
@@ -1832,12 +1866,12 @@ pub fn validate_output_pin_for_basic_sta(
         let mut has_rise = false;
         let mut has_fall = false;
         for arc in &combinational_arcs {
-            if !split_related_pin_names(arc.related_pin.as_str())
+            if !split_related_pin_names(library.resolve_string(&arc.related_pin))
                 .any(|related_pin| related_pin == required_pin)
             {
                 continue;
             }
-            let timing_type = StaTimingType::from_raw(arc.timing_type_str());
+            let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
             has_rise |= timing_type.produces_rise();
             has_fall |= timing_type.produces_fall();
         }
@@ -1845,7 +1879,7 @@ pub fn validate_output_pin_for_basic_sta(
             return Err(anyhow!(
                 "cell '{}' output pin '{}' lacks complete rise/fall combinational timing coverage for functional input '{}'",
                 cell_name,
-                pin.name,
+                pin_name,
                 required_pin
             ));
         }
@@ -2059,15 +2093,17 @@ fn aggregate_bit_timing_by_net(
 }
 
 fn arc_when_may_apply(
+    library: &crate::liberty_model::Library,
     arc: &TimingArc,
     known_pin_values: &HashMap<String, bool>,
     context: &str,
 ) -> Result<bool> {
-    if arc.when.is_empty() {
+    let when_text = library.resolve_string(&arc.when);
+    if when_text.is_empty() {
         return Ok(true);
     }
-    let when = parse_formula(arc.when.as_str())
-        .map_err(|e| anyhow!("{context}: could not parse when='{}': {}", arc.when, e))?;
+    let when = parse_formula(when_text)
+        .map_err(|e| anyhow!("{context}: could not parse when='{}': {}", when_text, e))?;
     Ok(when.evaluate_partial(known_pin_values) != Some(false))
 }
 
@@ -2104,8 +2140,8 @@ fn evaluate_arc_set(
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<SignalTimingSet> {
-    let timing_type = StaTimingType::from_raw(arc.timing_type_str());
-    let timing_sense = StaTimingSense::from_raw(arc.timing_sense_str());
+    let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
+    let timing_sense = StaTimingSense::from_raw(arc.timing_sense_str(library));
     let all_inputs = if timing_sense.may_use_either_input_edge() {
         let mut combined = input_timing.rise.clone();
         combined.extend_from(&input_timing.fall);
@@ -2124,7 +2160,7 @@ fn evaluate_arc_set(
                 .expect("non-unate input set should be built")),
             _ => Err(anyhow!(
                 "{context}: unsupported timing_sense '{}'",
-                arc.timing_sense_str()
+                arc.timing_sense_str(library)
             )),
         }
     };
@@ -2242,7 +2278,7 @@ fn evaluate_register_launch_output_set(
     let launch_arcs: Vec<&TimingArc> = pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str()).is_clock_to_output())
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(library)).is_clock_to_output())
         .collect();
     if launch_arcs.is_empty() {
         return Err(anyhow!(
@@ -2252,14 +2288,14 @@ fn evaluate_register_launch_output_set(
     validate_timing_tables_once(
         library,
         cell_name,
-        pin.name.as_str(),
+        library.resolve_string(&pin.name),
         launch_arcs.as_slice(),
         validated_tables,
     )?;
 
     let mut output = SignalTimingSet::default();
     for arc in launch_arcs {
-        if !arc_when_may_apply(arc, known_pin_values, context)? {
+        if !arc_when_may_apply(library, arc, known_pin_values, context)? {
             continue;
         }
         if let Some((delay, transition)) = find_optional_delay_slew_tables(
@@ -2345,7 +2381,7 @@ fn evaluate_register_setup_capture_arrival(
 ) -> Result<Option<RegisterCaptureTimingCandidate>> {
     let mut worst_timing: Option<RegisterCaptureTimingCandidate> = None;
     for arc in setup_arcs {
-        if !arc_when_may_apply(arc, known_pin_values, context)? {
+        if !arc_when_may_apply(library, arc, known_pin_values, context)? {
             continue;
         }
         if let Some(table) =
@@ -2525,41 +2561,43 @@ fn timing_table_layout<'a>(
     table: &'a TimingTable,
     context: &str,
 ) -> Result<TimingTableLayout<'a>> {
-    let template: Option<&LuTableTemplate> = if table.shape.template_id == 0 {
+    let shape = library.timing_table_shape(table);
+    let template: Option<&LuTableTemplate> = if shape.template_id == 0 {
         None
     } else {
-        let idx = (table.shape.template_id - 1) as usize;
+        let idx = (shape.template_id - 1) as usize;
         let tmpl = library.lu_table_templates.get(idx).ok_or_else(|| {
             anyhow!(
                 "{context}: template_id {} out of range ({} templates)",
-                table.shape.template_id,
+                shape.template_id,
                 library.lu_table_templates.len()
             )
         })?;
         let expected_kind = expected_template_kind_for_timing_table(table)
             .map_err(|e| anyhow!("{context}: {e}"))?;
-        let actual_kind = LuTableTemplateKind::from_raw(tmpl.kind_str());
+        let actual_kind = LuTableTemplateKind::from_raw(tmpl.kind_str(library));
         if actual_kind != expected_kind {
             return Err(anyhow!(
                 "{context}: template_id {} kind mismatch; got '{}' expected '{}'",
-                table.shape.template_id,
-                tmpl.kind_str(),
+                shape.template_id,
+                tmpl.kind_str(library),
                 expected_kind.as_raw()
             ));
         }
         Some(tmpl)
     };
 
+    let table_axes = library.timing_table_axes(table);
     Ok(TimingTableLayout {
         axes: [
-            effective_axis(&table.shape.index_1, template.map(|t| t.index_1.as_slice())),
-            effective_axis(&table.shape.index_2, template.map(|t| t.index_2.as_slice())),
-            effective_axis(&table.shape.index_3, template.map(|t| t.index_3.as_slice())),
+            effective_axis(table_axes[0], template.map(|t| t.index_1.as_slice())),
+            effective_axis(table_axes[1], template.map(|t| t.index_2.as_slice())),
+            effective_axis(table_axes[2], template.map(|t| t.index_3.as_slice())),
         ],
         variables: [
-            template.map(|t| t.variable_1_str()).unwrap_or(""),
-            template.map(|t| t.variable_2_str()).unwrap_or(""),
-            template.map(|t| t.variable_3_str()).unwrap_or(""),
+            template.map(|t| t.variable_1_str(library)).unwrap_or(""),
+            template.map(|t| t.variable_2_str(library)).unwrap_or(""),
+            template.map(|t| t.variable_3_str(library)).unwrap_or(""),
         ],
     })
 }
@@ -2571,9 +2609,9 @@ fn validate_timing_table_structure(
     table: &TimingTable,
     context: &str,
 ) -> Result<()> {
-    let array = TimingTableArrayView::from_timing_table(table)
+    let array = TimingTableArrayView::from_timing_table(library, table)
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
-    for value in &table.values {
+    for value in library.timing_table_values(table) {
         if !value.is_finite() {
             return Err(anyhow!(
                 "{context}: timing table contains non-finite value {}",
@@ -2588,7 +2626,11 @@ fn validate_timing_table_structure(
         ));
     }
     let layout = timing_table_layout(library, table, context)?;
-    validate_effective_axes(table, layout.axes, context)?;
+    validate_effective_axes(
+        &library.timing_table_shape(table).dimensions,
+        layout.axes,
+        context,
+    )?;
     for (axis_idx, axis) in layout.axes.iter().take(array.rank()).enumerate() {
         if axis.is_empty() {
             return Err(anyhow!(
@@ -2653,7 +2695,7 @@ fn validate_timing_tables_once(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
                     cell_name,
                     pin_name,
-                    arc.related_pin,
+                    library.resolve_string(&arc.related_pin),
                     table.kind_str()
                 ),
             )?;
@@ -2692,7 +2734,7 @@ fn validate_constraint_tables_once(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
                     cell_name,
                     pin_name,
-                    arc.related_pin,
+                    library.resolve_string(&arc.related_pin),
                     table.kind_str()
                 ),
             )?;
@@ -2805,7 +2847,7 @@ fn evaluate_table_with_query_and_diagnostics(
         "related pin transition query",
         context,
     )?;
-    let array = TimingTableArrayView::from_timing_table(table)
+    let array = TimingTableArrayView::from_timing_table(library, table)
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
     let layout = timing_table_layout(library, table, context)?;
     let rank = array.rank();
@@ -3034,7 +3076,7 @@ fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> boo
     true
 }
 
-fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str) -> Result<()> {
+fn validate_effective_axes(dimensions: &[u32], axes: [&[f64]; 3], context: &str) -> Result<()> {
     if !axes_are_contiguous(axes[0], axes[1], axes[2]) {
         return Err(anyhow!(
             "{context}: timing table has non-contiguous effective axes (index_1={}, index_2={}, index_3={})",
@@ -3044,15 +3086,15 @@ fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str
         ));
     }
     let expected_rank = axis_rank(axes[0], axes[1], axes[2]);
-    if table.shape.dimensions.len() != expected_rank {
+    if dimensions.len() != expected_rank {
         return Err(anyhow!(
             "{context}: timing table dimension rank {} does not match effective axis rank {}",
-            table.shape.dimensions.len(),
+            dimensions.len(),
             expected_rank
         ));
     }
     for (axis_idx, axis) in axes.iter().take(expected_rank).enumerate() {
-        let dimension = table.shape.dimensions[axis_idx] as usize;
+        let dimension = dimensions[axis_idx] as usize;
         if dimension != axis.len() {
             return Err(anyhow!(
                 "{context}: timing table axis {} dimension {} does not match effective axis length {}",
@@ -3177,7 +3219,7 @@ fn resolve_symbol(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_model::{Cell, Pin, TimingArc, TimingTable};
+    use crate::liberty_model::{Cell, LibraryBuilder, Pin, TimingArc, TimingTable};
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
 
@@ -3216,6 +3258,7 @@ mod tests {
     }
 
     fn test_table(
+        builder: &mut LibraryBuilder,
         kind: &str,
         template_id: u32,
         index_1: Vec<f64>,
@@ -3232,20 +3275,90 @@ mod tests {
             "fall_constraint" => crate::liberty_proto::TimingTableKind::FallConstraint,
             other => panic!("unsupported test timing-table kind {other}"),
         };
-        TimingTable::from_f64(
-            kind,
-            template_id,
-            index_1,
-            index_2,
-            vec![],
-            values,
-            dimensions,
-            "",
+        builder
+            .add_timing_table_f64(
+                kind,
+                template_id,
+                index_1,
+                index_2,
+                vec![],
+                values,
+                dimensions,
+                "",
+            )
+            .unwrap()
+    }
+
+    fn scalar_table(builder: &mut LibraryBuilder, kind: &str, value: f64) -> TimingTable {
+        test_table(builder, kind, 0, vec![], vec![], vec![value], vec![])
+    }
+
+    fn test_pin(
+        builder: &mut LibraryBuilder,
+        name: &str,
+        direction: PinDirection,
+        function: &str,
+        timing_arcs: Vec<TimingArc>,
+    ) -> Pin {
+        Pin {
+            direction: direction as i32,
+            name: builder.intern_string(name).unwrap(),
+            function: builder.intern_string(function).unwrap(),
+            timing_arcs,
+            ..Default::default()
+        }
+    }
+
+    fn test_arc(
+        builder: &mut LibraryBuilder,
+        related_pin: &str,
+        timing_sense: &str,
+        timing_type: &str,
+        when: &str,
+        tables: Vec<TimingTable>,
+    ) -> TimingArc {
+        builder
+            .add_timing_arc(related_pin, timing_sense, timing_type, when, tables)
+            .unwrap()
+    }
+
+    fn scalar_arc(
+        builder: &mut LibraryBuilder,
+        related_pin: &str,
+        timing_sense: &str,
+        timing_type: &str,
+        when: &str,
+        cell_rise: f64,
+        cell_fall: f64,
+        rise_transition: f64,
+        fall_transition: f64,
+    ) -> TimingArc {
+        let tables = vec![
+            scalar_table(builder, "cell_rise", cell_rise),
+            scalar_table(builder, "cell_fall", cell_fall),
+            scalar_table(builder, "rise_transition", rise_transition),
+            scalar_table(builder, "fall_transition", fall_transition),
+        ];
+        test_arc(
+            builder,
+            related_pin,
+            timing_sense,
+            timing_type,
+            when,
+            tables,
         )
     }
 
-    fn scalar_table(kind: &str, value: f64) -> TimingTable {
-        test_table(kind, 0, vec![], vec![], vec![value], vec![])
+    fn library_and_table(
+        template: LuTableTemplate,
+        kind: &str,
+        values: Vec<f64>,
+        dimensions: Vec<u32>,
+    ) -> (crate::liberty_model::Library, TimingTable) {
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![template];
+        let table = test_table(&mut builder, kind, 1, vec![], vec![], values, dimensions);
+        (builder.finish(), table)
     }
 
     #[test]
@@ -3278,29 +3391,36 @@ mod tests {
 
     #[test]
     fn ideal_clock_queries_select_minimum_characterized_slew_without_diagnostic() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![
-                LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    name: "delay".to_string(),
-                    variable_1: "input_net_transition".to_string(),
-                    index_1: vec![5.0, 10.0],
-                    ..Default::default()
-                },
-                LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    name: "constraint".to_string(),
-                    variable_1: "constrained_pin_transition".to_string(),
-                    variable_2: "related_pin_transition".to_string(),
-                    index_1: vec![1.0, 2.0],
-                    index_2: vec![5.0, 10.0],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        let c2q = test_table("cell_rise", 1, vec![], vec![], vec![7.0, 9.0], vec![2]);
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "delay".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
+                index_1: vec![5.0, 10.0],
+                ..Default::default()
+            },
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "constraint".to_string(),
+                variable_1: "constrained_pin_transition".to_string().into(),
+                variable_2: "related_pin_transition".to_string().into(),
+                index_1: vec![1.0, 2.0],
+                index_2: vec![5.0, 10.0],
+                ..Default::default()
+            },
+        ];
+        let c2q = test_table(
+            &mut builder,
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![7.0, 9.0],
+            vec![2],
+        );
         let setup = test_table(
+            &mut builder,
             "rise_constraint",
             2,
             vec![],
@@ -3308,6 +3428,7 @@ mod tests {
             vec![3.0, 1.0, 4.0, 2.0],
             vec![2, 2],
         );
+        let lib = builder.finish();
         let mut counts = TimingQueryDiagnosticCounts::default();
 
         assert_close(
@@ -3376,38 +3497,34 @@ mod tests {
         );
     }
 
-    fn scalar_inv_library() -> crate::liberty_model::Library {
-        crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "negative_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", 2.0),
-                                scalar_table("cell_fall", 3.0),
-                                scalar_table("rise_transition", 0.2),
-                                scalar_table("fall_transition", 0.3),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+    fn scalar_inv_builder() -> LibraryBuilder {
+        let mut builder = LibraryBuilder::new();
+        let tables = vec![
+            scalar_table(&mut builder, "cell_rise", 2.0),
+            scalar_table(&mut builder, "cell_fall", 3.0),
+            scalar_table(&mut builder, "rise_transition", 0.2),
+            scalar_table(&mut builder, "fall_transition", 0.3),
+        ];
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational",
+            "",
+            tables,
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![input, output],
             ..Default::default()
-        }
+        }];
+        builder
+    }
+
+    fn scalar_inv_library() -> crate::liberty_model::Library {
+        scalar_inv_builder().finish()
     }
 
     #[test]
@@ -3448,29 +3565,22 @@ module top (y_hi, y_lo, z);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let mut lib = scalar_inv_library();
-        lib.cells.extend([
+        let mut builder = scalar_inv_builder();
+        let tie_hi = test_pin(&mut builder, "H", PinDirection::Output, "1", vec![]);
+        let tie_lo = test_pin(&mut builder, "L", PinDirection::Output, "0", vec![]);
+        builder.cells.extend([
             Cell {
-                name: "TIEHI".to_string(),
-                pins: vec![Pin {
-                    direction: PinDirection::Output as i32,
-                    function: "1".to_string(),
-                    name: "H".to_string(),
-                    ..Default::default()
-                }],
+                name: "TIEHI".to_string().into(),
+                pins: vec![tie_hi],
                 ..Default::default()
             },
             Cell {
-                name: "TIELO".to_string(),
-                pins: vec![Pin {
-                    direction: PinDirection::Output as i32,
-                    function: "0".to_string(),
-                    name: "L".to_string(),
-                    ..Default::default()
-                }],
+                name: "TIELO".to_string().into(),
+                pins: vec![tie_lo],
                 ..Default::default()
             },
         ]);
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -3507,26 +3617,15 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "BUF".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        function: "A".to_string(),
-                        name: "Y".to_string(),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "A", vec![]);
+        builder.cells = vec![Cell {
+            name: "BUF".to_string().into(),
+            pins: vec![input, output],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let error = analyze_combinational_max_arrival_proto(
             &module,
@@ -3961,56 +4060,44 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "NAND2".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "B".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 2.0),
-                                    scalar_table("cell_fall", 3.0),
-                                    scalar_table("rise_transition", 0.2),
-                                    scalar_table("fall_transition", 0.3),
-                                ],
-                                ..Default::default()
-                            },
-                            TimingArc {
-                                related_pin: "B".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 2.0),
-                                    scalar_table("cell_fall", 3.0),
-                                    scalar_table("rise_transition", 0.2),
-                                    scalar_table("fall_transition", 0.3),
-                                ],
-                                ..Default::default()
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let arc_a = scalar_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.2,
+            0.3,
+        );
+        let arc_b = scalar_arc(
+            &mut builder,
+            "B",
+            "negative_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.2,
+            0.3,
+        );
+        let input_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let input_b = test_pin(&mut builder, "B", PinDirection::Input, "", vec![]);
+        let output = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![arc_a, arc_b],
+        );
+        builder.cells = vec![Cell {
+            name: "NAND2".to_string().into(),
+            pins: vec![input_a, input_b, output],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let error = analyze_combinational_max_arrival_proto(
             &module,
@@ -4039,56 +4126,44 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "NAND2".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "B".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 2.0),
-                                    scalar_table("cell_fall", 3.0),
-                                    scalar_table("rise_transition", 0.2),
-                                    scalar_table("fall_transition", 0.3),
-                                ],
-                                ..Default::default()
-                            },
-                            TimingArc {
-                                related_pin: "B".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 4.0),
-                                    scalar_table("cell_fall", 5.0),
-                                    scalar_table("rise_transition", 0.4),
-                                    scalar_table("fall_transition", 0.5),
-                                ],
-                                ..Default::default()
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let arc_a = scalar_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.2,
+            0.3,
+        );
+        let arc_b = scalar_arc(
+            &mut builder,
+            "B",
+            "negative_unate",
+            "combinational",
+            "",
+            4.0,
+            5.0,
+            0.4,
+            0.5,
+        );
+        let input_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let input_b = test_pin(&mut builder, "B", PinDirection::Input, "", vec![]);
+        let output = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![arc_a, arc_b],
+        );
+        builder.cells = vec![Cell {
+            name: "NAND2".to_string().into(),
+            pins: vec![input_a, input_b, output],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4115,68 +4190,55 @@ module top (a, y0, y1);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "DUALOUT".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y1".to_string(),
-                        timing_arcs: vec![
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 3.0),
-                                    scalar_table("cell_fall", 3.0),
-                                    scalar_table("rise_transition", 0.1),
-                                    scalar_table("fall_transition", 0.1),
-                                ],
-                                ..Default::default()
-                            },
-                            TimingArc {
-                                related_pin: "Y0".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 1.0),
-                                    scalar_table("cell_fall", 1.0),
-                                    scalar_table("rise_transition", 0.1),
-                                    scalar_table("fall_transition", 0.1),
-                                ],
-                                ..Default::default()
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y0".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", 1.0),
-                                scalar_table("cell_fall", 1.0),
-                                scalar_table("rise_transition", 0.1),
-                                scalar_table("fall_transition", 0.1),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let a_to_y1 = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            3.0,
+            3.0,
+            0.1,
+            0.1,
+        );
+        let y0_to_y1 = scalar_arc(
+            &mut builder,
+            "Y0",
+            "positive_unate",
+            "combinational",
+            "",
+            1.0,
+            1.0,
+            0.1,
+            0.1,
+        );
+        let a_to_y0 = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            1.0,
+            1.0,
+            0.1,
+            0.1,
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let y1 = test_pin(
+            &mut builder,
+            "Y1",
+            PinDirection::Output,
+            "",
+            vec![a_to_y1, y0_to_y1],
+        );
+        let y0 = test_pin(&mut builder, "Y0", PinDirection::Output, "", vec![a_to_y0]);
+        builder.cells = vec![Cell {
+            name: "DUALOUT".to_string().into(),
+            pins: vec![input, y1, y0],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4219,54 +4281,38 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "DUALOUT".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y1".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "Y0".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", 1.0),
-                                scalar_table("cell_fall", 1.0),
-                                scalar_table("rise_transition", 0.1),
-                                scalar_table("fall_transition", 0.1),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y0".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", 1.0),
-                                scalar_table("cell_fall", 1.0),
-                                scalar_table("rise_transition", 0.1),
-                                scalar_table("fall_transition", 0.1),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let y0_to_y1 = scalar_arc(
+            &mut builder,
+            "Y0",
+            "positive_unate",
+            "combinational",
+            "",
+            1.0,
+            1.0,
+            0.1,
+            0.1,
+        );
+        let a_to_y0 = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            1.0,
+            1.0,
+            0.1,
+            0.1,
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let y1 = test_pin(&mut builder, "Y1", PinDirection::Output, "", vec![y0_to_y1]);
+        let y0 = test_pin(&mut builder, "Y0", PinDirection::Output, "", vec![a_to_y0]);
+        builder.cells = vec![Cell {
+            name: "DUALOUT".to_string().into(),
+            pins: vec![input, y1, y0],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4289,35 +4335,17 @@ module top (y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "DUALOUT".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y0".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "Y1".to_string(),
-                            timing_type: "combinational".to_string(),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y1".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "Y0".to_string(),
-                            timing_type: "combinational".to_string(),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let y1_to_y0 = test_arc(&mut builder, "Y1", "", "combinational", "", vec![]);
+        let y0_to_y1 = test_arc(&mut builder, "Y0", "", "combinational", "", vec![]);
+        let y0 = test_pin(&mut builder, "Y0", PinDirection::Output, "", vec![y1_to_y0]);
+        let y1 = test_pin(&mut builder, "Y1", PinDirection::Output, "", vec![y0_to_y1]);
+        builder.cells = vec![Cell {
+            name: "DUALOUT".to_string().into(),
+            pins: vec![y0, y1],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let error = analyze_combinational_max_arrival_proto(
             &module,
@@ -4444,47 +4472,45 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational_rise".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 2.0),
-                                    scalar_table("rise_transition", 0.2),
-                                ],
-                                ..Default::default()
-                            },
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational_fall".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_fall", 3.0),
-                                    scalar_table("fall_transition", 0.3),
-                                ],
-                                ..Default::default()
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let rise_tables = vec![
+            scalar_table(&mut builder, "cell_rise", 2.0),
+            scalar_table(&mut builder, "rise_transition", 0.2),
+        ];
+        let fall_tables = vec![
+            scalar_table(&mut builder, "cell_fall", 3.0),
+            scalar_table(&mut builder, "fall_transition", 0.3),
+        ];
+        let rise_arc = test_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational_rise",
+            "",
+            rise_tables,
+        );
+        let fall_arc = test_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational_fall",
+            "",
+            fall_tables,
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![rise_arc, fall_arc],
+        );
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![input, output],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4518,37 +4544,26 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", -2.0),
-                                scalar_table("cell_fall", -1.0),
-                                scalar_table("rise_transition", 0.2),
-                                scalar_table("fall_transition", 0.3),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let arc = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            -2.0,
+            -1.0,
+            0.2,
+            0.3,
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![input, output],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4579,49 +4594,27 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![
-                Cell {
-                    name: "PASS_WITH_EN".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "EN".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 2.0),
-                                    scalar_table("cell_fall", 3.0),
-                                    scalar_table("rise_transition", 0.2),
-                                    scalar_table("fall_transition", 0.3),
-                                ],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "INV".to_string(),
-                    pins: scalar_inv_library().cells[0].pins.clone(),
-                    ..Default::default()
-                },
-            ],
+        let mut builder = scalar_inv_builder();
+        let pass_arc = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.2,
+            0.3,
+        );
+        let input_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let input_en = test_pin(&mut builder, "EN", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![pass_arc]);
+        builder.cells.push(Cell {
+            name: "PASS_WITH_EN".to_string().into(),
+            pins: vec![input_a, input_en, output],
             ..Default::default()
-        };
+        });
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4648,42 +4641,27 @@ module top (a, b, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "NAND2".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "B".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A B".to_string(),
-                            timing_sense: "negative_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", 2.0),
-                                scalar_table("cell_fall", 3.0),
-                                scalar_table("rise_transition", 0.2),
-                                scalar_table("fall_transition", 0.3),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let arc = scalar_arc(
+            &mut builder,
+            "A B",
+            "negative_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.2,
+            0.3,
+        );
+        let input_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let input_b = test_pin(&mut builder, "B", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "NAND2".to_string().into(),
+            pins: vec![input_a, input_b, output],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4710,35 +4688,17 @@ module top (d, clk, q);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "DFF".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "D".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "CLK".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Q".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "CLK".to_string(),
-                            timing_type: "rising_edge".to_string(),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let arc = test_arc(&mut builder, "CLK", "", "rising_edge", "", vec![]);
+        let d = test_pin(&mut builder, "D", PinDirection::Input, "", vec![]);
+        let clk = test_pin(&mut builder, "CLK", PinDirection::Input, "", vec![]);
+        let q = test_pin(&mut builder, "Q", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "DFF".to_string().into(),
+            pins: vec![d, clk, q],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let error = analyze_combinational_max_arrival_proto(
             &module,
@@ -4769,43 +4729,27 @@ module top (a, en, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "BUF_EN".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "EN".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            when: "EN".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", 2.0),
-                                scalar_table("cell_fall", 3.0),
-                                scalar_table("rise_transition", 0.2),
-                                scalar_table("fall_transition", 0.3),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let arc = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "EN",
+            2.0,
+            3.0,
+            0.2,
+            0.3,
+        );
+        let a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let en = test_pin(&mut builder, "EN", PinDirection::Input, "", vec![]);
+        let y = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "BUF_EN".to_string().into(),
+            pins: vec![a, en, y],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -4832,56 +4776,44 @@ module top (a, clk, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "MIXED".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "CLK".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 2.0),
-                                    scalar_table("cell_fall", 3.0),
-                                    scalar_table("rise_transition", 0.2),
-                                    scalar_table("fall_transition", 0.3),
-                                ],
-                                ..Default::default()
-                            },
-                            TimingArc {
-                                related_pin: "CLK".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "rising_edge".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 4.0),
-                                    scalar_table("cell_fall", 5.0),
-                                    scalar_table("rise_transition", 0.4),
-                                    scalar_table("fall_transition", 0.5),
-                                ],
-                                ..Default::default()
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let combinational = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.2,
+            0.3,
+        );
+        let sequential = scalar_arc(
+            &mut builder,
+            "CLK",
+            "positive_unate",
+            "rising_edge",
+            "",
+            4.0,
+            5.0,
+            0.4,
+            0.5,
+        );
+        let a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let clk = test_pin(&mut builder, "CLK", PinDirection::Input, "", vec![]);
+        let y = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![combinational, sequential],
+        );
+        builder.cells = vec![Cell {
+            name: "MIXED".to_string().into(),
+            pins: vec![a, clk, y],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let error = analyze_combinational_max_arrival_proto(
             &module,
@@ -4954,50 +4886,43 @@ module top (a, n, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let table =
-            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2, 2]);
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_2d".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                variable_2: "total_output_net_capacitance".to_string(),
-                index_1: vec![0.0, 1.0],
-                index_2: vec![0.0, 10.0],
-                ..Default::default()
-            }],
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        capacitance: Some(1.0),
-                        max_capacitance: Some(1000.0),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                table("cell_rise", vec![0.0, 10.0, 0.0, 10.0]),
-                                table("cell_fall", vec![0.0, 10.0, 0.0, 10.0]),
-                                table("rise_transition", vec![0.0, 0.0, 0.0, 0.0]),
-                                table("fall_transition", vec![0.0, 0.0, 0.0, 0.0]),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_2d".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.0, 1.0],
+            index_2: vec![0.0, 10.0],
             ..Default::default()
+        }];
+        let mut make_table = |kind: &str, values: Vec<f64>| {
+            test_table(&mut builder, kind, 1, vec![], vec![], values, vec![2, 2])
         };
+        let tables = vec![
+            make_table("cell_rise", vec![0.0, 10.0, 0.0, 10.0]),
+            make_table("cell_fall", vec![0.0, 10.0, 0.0, 10.0]),
+            make_table("rise_transition", vec![0.0, 0.0, 0.0, 0.0]),
+            make_table("fall_transition", vec![0.0, 0.0, 0.0, 0.0]),
+        ];
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            tables,
+        );
+        let mut input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        input.capacitance = Some(1.0);
+        input.max_capacitance = Some(1000.0);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![input, output],
+            ..Default::default()
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5026,37 +4951,26 @@ endmodule
     fn sta_inv_chain_propagates_arrival_and_transition() {
         let src = bench_synth_netlist::make_chain_netlist(2);
         let (module, nets, interner) = parse_single_module(src.as_str());
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                scalar_table("cell_rise", 2.0),
-                                scalar_table("cell_fall", 3.0),
-                                scalar_table("rise_transition", 0.4),
-                                scalar_table("fall_transition", 0.5),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let arc = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.4,
+            0.5,
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![input, output],
             ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5095,86 +5009,64 @@ module top (a, b, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let inv_arc = TimingArc {
-            related_pin: "A".to_string(),
-            timing_sense: "positive_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            tables: vec![
-                scalar_table("cell_rise", 2.0),
-                scalar_table("cell_fall", 7.0),
-                scalar_table("rise_transition", 0.2),
-                scalar_table("fall_transition", 0.7),
-            ],
-            ..Default::default()
-        };
-        let nand_arc_a = TimingArc {
-            related_pin: "A".to_string(),
-            timing_sense: "negative_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            tables: vec![
-                scalar_table("cell_rise", 100.0),
-                scalar_table("cell_fall", 10.0),
-                scalar_table("rise_transition", 1.0),
-                scalar_table("fall_transition", 1.0),
-            ],
-            ..Default::default()
-        };
-        let nand_arc_b = TimingArc {
-            related_pin: "B".to_string(),
-            timing_sense: "negative_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            tables: vec![
-                scalar_table("cell_rise", 1.0),
-                scalar_table("cell_fall", 1.0),
-                scalar_table("rise_transition", 0.5),
-                scalar_table("fall_transition", 0.5),
-            ],
-            ..Default::default()
-        };
-        let lib = crate::liberty_model::Library {
-            cells: vec![
-                Cell {
-                    name: "INV".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![inv_arc],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "NAND2".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "B".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![nand_arc_a, nand_arc_b],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        let mut builder = LibraryBuilder::new();
+        let inv_arc = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            2.0,
+            7.0,
+            0.2,
+            0.7,
+        );
+        let nand_arc_a = scalar_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational",
+            "",
+            100.0,
+            10.0,
+            1.0,
+            1.0,
+        );
+        let nand_arc_b = scalar_arc(
+            &mut builder,
+            "B",
+            "negative_unate",
+            "combinational",
+            "",
+            1.0,
+            1.0,
+            0.5,
+            0.5,
+        );
+        let inv_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let inv_y = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![inv_arc]);
+        let nand_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let nand_b = test_pin(&mut builder, "B", PinDirection::Input, "", vec![]);
+        let nand_y = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![nand_arc_a, nand_arc_b],
+        );
+        builder.cells = vec![
+            Cell {
+                name: "INV".to_string().into(),
+                pins: vec![inv_a, inv_y],
+                ..Default::default()
+            },
+            Cell {
+                name: "NAND2".to_string().into(),
+                pins: vec![nand_a, nand_b, nand_y],
+                ..Default::default()
+            },
+        ];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5197,32 +5089,25 @@ endmodule
 
     #[test]
     fn sta_non_unate_keeps_arrival_and_transition_correlated_per_source_edge() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_1d_transition".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                index_1: vec![1.0, 5.0],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_1d_transition".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            index_1: vec![1.0, 5.0],
             ..Default::default()
+        }];
+        let mut make_table = |kind: &str, values: Vec<f64>| {
+            test_table(&mut builder, kind, 1, vec![], vec![], values, vec![2])
         };
-
-        let table =
-            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
-
-        let arc = TimingArc {
-            related_pin: "A".to_string(),
-            timing_sense: "non_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            tables: vec![
-                table("cell_rise", vec![10.0, 50.0]),
-                table("cell_fall", vec![4.0, 20.0]),
-                table("rise_transition", vec![2.0, 8.0]),
-                table("fall_transition", vec![3.0, 7.0]),
-            ],
-            ..Default::default()
-        };
+        let tables = vec![
+            make_table("cell_rise", vec![10.0, 50.0]),
+            make_table("cell_fall", vec![4.0, 20.0]),
+            make_table("rise_transition", vec![2.0, 8.0]),
+            make_table("fall_transition", vec![3.0, 7.0]),
+        ];
+        let arc = test_arc(&mut builder, "A", "non_unate", "combinational", "", tables);
+        let lib = builder.finish();
 
         let input = SignalTiming {
             rise: EdgeTiming {
@@ -5263,96 +5148,77 @@ endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
 
-        let table =
-            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
-
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_1d_transition".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                index_1: vec![1.0, 5.0],
-                ..Default::default()
-            }],
-            cells: vec![
-                Cell {
-                    name: "MERGE".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "B".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![
-                                TimingArc {
-                                    related_pin: "A".to_string(),
-                                    timing_sense: "positive_unate".to_string(),
-                                    timing_type: "combinational".to_string(),
-                                    tables: vec![
-                                        scalar_table("cell_rise", 10.0),
-                                        scalar_table("cell_fall", 10.0),
-                                        scalar_table("rise_transition", 1.0),
-                                        scalar_table("fall_transition", 1.0),
-                                    ],
-                                    ..Default::default()
-                                },
-                                TimingArc {
-                                    related_pin: "B".to_string(),
-                                    timing_sense: "positive_unate".to_string(),
-                                    timing_type: "combinational".to_string(),
-                                    tables: vec![
-                                        scalar_table("cell_rise", 8.0),
-                                        scalar_table("cell_fall", 8.0),
-                                        scalar_table("rise_transition", 5.0),
-                                        scalar_table("fall_transition", 5.0),
-                                    ],
-                                    ..Default::default()
-                                },
-                            ],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "LOADSENS".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    table("cell_rise", vec![10.0, 50.0]),
-                                    table("cell_fall", vec![10.0, 50.0]),
-                                    table("rise_transition", vec![1.0, 5.0]),
-                                    table("fall_transition", vec![1.0, 5.0]),
-                                ],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-            ],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_1d_transition".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            index_1: vec![1.0, 5.0],
             ..Default::default()
+        }];
+        let merge_a = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            10.0,
+            10.0,
+            1.0,
+            1.0,
+        );
+        let merge_b = scalar_arc(
+            &mut builder,
+            "B",
+            "positive_unate",
+            "combinational",
+            "",
+            8.0,
+            8.0,
+            5.0,
+            5.0,
+        );
+        let mut make_table = |kind: &str, values: Vec<f64>| {
+            test_table(&mut builder, kind, 1, vec![], vec![], values, vec![2])
         };
+        let load_tables = vec![
+            make_table("cell_rise", vec![10.0, 50.0]),
+            make_table("cell_fall", vec![10.0, 50.0]),
+            make_table("rise_transition", vec![1.0, 5.0]),
+            make_table("fall_transition", vec![1.0, 5.0]),
+        ];
+        let load_arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            load_tables,
+        );
+        let merge_in_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let merge_in_b = test_pin(&mut builder, "B", PinDirection::Input, "", vec![]);
+        let merge_out = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![merge_a, merge_b],
+        );
+        let load_in = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let load_out = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![load_arc]);
+        builder.cells = vec![
+            Cell {
+                name: "MERGE".to_string().into(),
+                pins: vec![merge_in_a, merge_in_b, merge_out],
+                ..Default::default()
+            },
+            Cell {
+                name: "LOADSENS".to_string().into(),
+                pins: vec![load_in, load_out],
+                ..Default::default()
+            },
+        ];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5390,119 +5256,94 @@ endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
 
-        let table =
-            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
-
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_1d_transition".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                index_1: vec![1.0, 5.0],
-                ..Default::default()
-            }],
-            cells: vec![
-                Cell {
-                    name: "SKEW".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    scalar_table("cell_rise", 40.0),
-                                    scalar_table("cell_fall", 0.0),
-                                    scalar_table("rise_transition", 1.0),
-                                    scalar_table("fall_transition", 5.0),
-                                ],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "DUAL".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![
-                                TimingArc {
-                                    related_pin: "A".to_string(),
-                                    timing_sense: "positive_unate".to_string(),
-                                    timing_type: "combinational".to_string(),
-                                    tables: vec![
-                                        scalar_table("cell_rise", 10.0),
-                                        scalar_table("cell_fall", 10.0),
-                                        scalar_table("rise_transition", 1.0),
-                                        scalar_table("fall_transition", 1.0),
-                                    ],
-                                    ..Default::default()
-                                },
-                                TimingArc {
-                                    related_pin: "A".to_string(),
-                                    timing_sense: "negative_unate".to_string(),
-                                    timing_type: "combinational".to_string(),
-                                    tables: vec![
-                                        scalar_table("cell_rise", 20.0),
-                                        scalar_table("cell_fall", 20.0),
-                                        scalar_table("rise_transition", 5.0),
-                                        scalar_table("fall_transition", 5.0),
-                                    ],
-                                    ..Default::default()
-                                },
-                            ],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "LOADSENS".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    table("cell_rise", vec![10.0, 50.0]),
-                                    table("cell_fall", vec![10.0, 50.0]),
-                                    table("rise_transition", vec![1.0, 5.0]),
-                                    table("fall_transition", vec![1.0, 5.0]),
-                                ],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-            ],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_1d_transition".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            index_1: vec![1.0, 5.0],
             ..Default::default()
+        }];
+        let skew_arc = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            40.0,
+            0.0,
+            1.0,
+            5.0,
+        );
+        let dual_positive = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            10.0,
+            10.0,
+            1.0,
+            1.0,
+        );
+        let dual_negative = scalar_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational",
+            "",
+            20.0,
+            20.0,
+            5.0,
+            5.0,
+        );
+        let mut make_table = |kind: &str, values: Vec<f64>| {
+            test_table(&mut builder, kind, 1, vec![], vec![], values, vec![2])
         };
+        let load_tables = vec![
+            make_table("cell_rise", vec![10.0, 50.0]),
+            make_table("cell_fall", vec![10.0, 50.0]),
+            make_table("rise_transition", vec![1.0, 5.0]),
+            make_table("fall_transition", vec![1.0, 5.0]),
+        ];
+        let load_arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            load_tables,
+        );
+        let skew_in = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let skew_out = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![skew_arc]);
+        let dual_in = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let dual_out = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![dual_positive, dual_negative],
+        );
+        let load_in = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let load_out = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![load_arc]);
+        builder.cells = vec![
+            Cell {
+                name: "SKEW".to_string().into(),
+                pins: vec![skew_in, skew_out],
+                ..Default::default()
+            },
+            Cell {
+                name: "DUAL".to_string().into(),
+                pins: vec![dual_in, dual_out],
+                ..Default::default()
+            },
+            Cell {
+                name: "LOADSENS".to_string().into(),
+                pins: vec![load_in, load_out],
+                ..Default::default()
+            },
+        ];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5536,74 +5377,68 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_2d".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                variable_2: "total_output_net_capacitance".to_string(),
-                index_1: vec![0.1, 0.3],
-                index_2: vec![1.0, 3.0],
-                ..Default::default()
-            }],
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            tables: vec![
-                                test_table(
-                                    "cell_rise",
-                                    1,
-                                    vec![],
-                                    vec![],
-                                    vec![10.0, 20.0, 30.0, 40.0],
-                                    vec![2, 2],
-                                ),
-                                test_table(
-                                    "cell_fall",
-                                    1,
-                                    vec![],
-                                    vec![],
-                                    vec![5.0, 7.0, 9.0, 11.0],
-                                    vec![2, 2],
-                                ),
-                                test_table(
-                                    "rise_transition",
-                                    1,
-                                    vec![],
-                                    vec![],
-                                    vec![1.0, 2.0, 3.0, 4.0],
-                                    vec![2, 2],
-                                ),
-                                test_table(
-                                    "fall_transition",
-                                    1,
-                                    vec![],
-                                    vec![],
-                                    vec![2.0, 4.0, 6.0, 8.0],
-                                    vec![2, 2],
-                                ),
-                            ],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_2d".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.1, 0.3],
+            index_2: vec![1.0, 3.0],
             ..Default::default()
-        };
+        }];
+        let rise = test_table(
+            &mut builder,
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![10.0, 20.0, 30.0, 40.0],
+            vec![2, 2],
+        );
+        let fall = test_table(
+            &mut builder,
+            "cell_fall",
+            1,
+            vec![],
+            vec![],
+            vec![5.0, 7.0, 9.0, 11.0],
+            vec![2, 2],
+        );
+        let rise_transition = test_table(
+            &mut builder,
+            "rise_transition",
+            1,
+            vec![],
+            vec![],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![2, 2],
+        );
+        let fall_transition = test_table(
+            &mut builder,
+            "fall_transition",
+            1,
+            vec![],
+            vec![],
+            vec![2.0, 4.0, 6.0, 8.0],
+            vec![2, 2],
+        );
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            vec![rise, fall, rise_transition, fall_transition],
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![input, output],
+            ..Default::default()
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5640,44 +5475,44 @@ module top (a, en, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let arc = |when: &str, cell_rise: f64, cell_fall: f64| TimingArc {
-            related_pin: "A".to_string(),
-            timing_sense: "positive_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            when: when.to_string(),
-            tables: vec![
-                scalar_table("cell_rise", cell_rise),
-                scalar_table("cell_fall", cell_fall),
-                scalar_table("rise_transition", 0.0),
-                scalar_table("fall_transition", 0.0),
-            ],
+        let mut builder = LibraryBuilder::new();
+        let enabled = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "EN",
+            10.0,
+            10.0,
+            0.0,
+            0.0,
+        );
+        let disabled = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "!EN",
+            2.0,
+            3.0,
+            0.0,
+            0.0,
+        );
+        let a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let en = test_pin(&mut builder, "EN", PinDirection::Input, "", vec![]);
+        let y = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![enabled, disabled],
+        );
+        builder.cells = vec![Cell {
+            name: "BUF_EN".to_string().into(),
+            pins: vec![a, en, y],
             ..Default::default()
-        };
-        let lib = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "BUF_EN".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "EN".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        name: "Y".to_string(),
-                        timing_arcs: vec![arc("EN", 10.0, 10.0), arc("!EN", 2.0, 3.0)],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        }];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5705,56 +5540,52 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let arc = |when: &str, cell_rise: f64, cell_fall: f64| TimingArc {
-            related_pin: "A".to_string(),
-            timing_sense: "positive_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            when: when.to_string(),
-            tables: vec![
-                scalar_table("cell_rise", cell_rise),
-                scalar_table("cell_fall", cell_fall),
-                scalar_table("rise_transition", 0.0),
-                scalar_table("fall_transition", 0.0),
-            ],
-            ..Default::default()
-        };
-        let lib = crate::liberty_model::Library {
-            cells: vec![
-                Cell {
-                    name: "BUF_EN".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "EN".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![arc("EN", 10.0, 10.0), arc("!EN", 2.0, 3.0)],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "TIELO".to_string(),
-                    pins: vec![Pin {
-                        direction: PinDirection::Output as i32,
-                        function: "0".to_string(),
-                        name: "Y".to_string(),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        let mut builder = LibraryBuilder::new();
+        let enabled = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "EN",
+            10.0,
+            10.0,
+            0.0,
+            0.0,
+        );
+        let disabled = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "!EN",
+            2.0,
+            3.0,
+            0.0,
+            0.0,
+        );
+        let a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let en = test_pin(&mut builder, "EN", PinDirection::Input, "", vec![]);
+        let y = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![enabled, disabled],
+        );
+        let tie_y = test_pin(&mut builder, "Y", PinDirection::Output, "0", vec![]);
+        builder.cells = vec![
+            Cell {
+                name: "BUF_EN".to_string().into(),
+                pins: vec![a, en, y],
+                ..Default::default()
+            },
+            Cell {
+                name: "TIELO".to_string().into(),
+                pins: vec![tie_y],
+                ..Default::default()
+            },
+        ];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5782,61 +5613,50 @@ endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
 
-        let table =
-            |kind: &str, values: Vec<f64>| test_table(kind, 1, vec![], vec![], values, vec![2]);
-
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_1d_load".to_string(),
-                variable_1: "total_output_net_capacitance".to_string(),
-                index_1: vec![1.0, 10.0],
-                ..Default::default()
-            }],
-            cells: vec![
-                Cell {
-                    name: "DRV".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            timing_arcs: vec![TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                tables: vec![
-                                    table("cell_rise", vec![10.0, 20.0]),
-                                    table("cell_fall", vec![30.0, 40.0]),
-                                    table("rise_transition", vec![0.0, 0.0]),
-                                    table("fall_transition", vec![0.0, 0.0]),
-                                ],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "SINK".to_string(),
-                    pins: vec![Pin {
-                        direction: PinDirection::Input as i32,
-                        name: "A".to_string(),
-                        capacitance: Some(9.0),
-                        rise_capacitance: Some(1.0),
-                        fall_capacitance: Some(10.0),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-            ],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_1d_load".to_string(),
+            variable_1: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![1.0, 10.0],
             ..Default::default()
+        }];
+        let mut make_table = |kind: &str, values: Vec<f64>| {
+            test_table(&mut builder, kind, 1, vec![], vec![], values, vec![2])
         };
+        let tables = vec![
+            make_table("cell_rise", vec![10.0, 20.0]),
+            make_table("cell_fall", vec![30.0, 40.0]),
+            make_table("rise_transition", vec![0.0, 0.0]),
+            make_table("fall_transition", vec![0.0, 0.0]),
+        ];
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            tables,
+        );
+        let drv_in = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let drv_out = test_pin(&mut builder, "Y", PinDirection::Output, "", vec![arc]);
+        let mut sink_in = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        sink_in.capacitance = Some(9.0);
+        sink_in.rise_capacitance = Some(1.0);
+        sink_in.fall_capacitance = Some(10.0);
+        builder.cells = vec![
+            Cell {
+                name: "DRV".to_string().into(),
+                pins: vec![drv_in, drv_out],
+                ..Default::default()
+            },
+            Cell {
+                name: "SINK".to_string().into(),
+                pins: vec![sink_in],
+                ..Default::default()
+            },
+        ];
+        let lib = builder.finish();
 
         let report = analyze_combinational_max_arrival_proto(
             &module,
@@ -5861,19 +5681,26 @@ endmodule
 
     #[test]
     fn evaluate_table_does_not_duplicate_weight_on_singleton_axes() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_singleton_x_axis".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                variable_2: "total_output_net_capacitance".to_string(),
-                index_1: vec![0.0],
-                index_2: vec![0.0, 1.0],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_singleton_x_axis".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.0],
+            index_2: vec![0.0, 1.0],
             ..Default::default()
-        };
-        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0], vec![1, 2]);
+        }];
+        let table = test_table(
+            &mut builder,
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![1.0, 2.0],
+            vec![1, 2],
+        );
+        let lib = builder.finish();
 
         let low = evaluate_table(&lib, &table, 7.0, 0.0, "singleton_axis_low").expect("table eval");
         assert_close(low, 1.0);
@@ -5884,19 +5711,18 @@ endmodule
 
     #[test]
     fn evaluate_table_clamps_below_axis_range() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_2d_extrap".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                variable_2: "total_output_net_capacitance".to_string(),
-                index_1: vec![5.0, 10.0],
-                index_2: vec![0.72, 1.44],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_2d_extrap".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![5.0, 10.0],
+            index_2: vec![0.72, 1.44],
             ..Default::default()
-        };
+        }];
         let table = test_table(
+            &mut builder,
             "cell_rise",
             1,
             vec![],
@@ -5904,6 +5730,7 @@ endmodule
             vec![6.90715, 9.84125, 8.69936, 11.6159],
             vec![2, 2],
         );
+        let lib = builder.finish();
 
         let clamped = evaluate_table(&lib, &table, 0.0, 0.619_928, "clamped").expect("table eval");
         assert_close(clamped, 6.90715);
@@ -5911,30 +5738,29 @@ endmodule
 
     #[test]
     fn evaluate_table_counts_clamp_categories() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![
-                LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    name: "tmpl_2d_delay_diagnostics".to_string(),
-                    variable_1: "input_net_transition".to_string(),
-                    variable_2: "total_output_net_capacitance".to_string(),
-                    index_1: vec![5.0, 10.0],
-                    index_2: vec![0.72, 1.44],
-                    ..Default::default()
-                },
-                LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    name: "tmpl_2d_setup_diagnostics".to_string(),
-                    variable_1: "constrained_pin_transition".to_string(),
-                    variable_2: "related_pin_transition".to_string(),
-                    index_1: vec![5.0, 10.0],
-                    index_2: vec![5.0, 10.0],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "tmpl_2d_delay_diagnostics".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
+                variable_2: "total_output_net_capacitance".to_string().into(),
+                index_1: vec![5.0, 10.0],
+                index_2: vec![0.72, 1.44],
+                ..Default::default()
+            },
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "tmpl_2d_setup_diagnostics".to_string(),
+                variable_1: "constrained_pin_transition".to_string().into(),
+                variable_2: "related_pin_transition".to_string().into(),
+                index_1: vec![5.0, 10.0],
+                index_2: vec![5.0, 10.0],
+                ..Default::default()
+            },
+        ];
         let delay_table = test_table(
+            &mut builder,
             "cell_rise",
             1,
             vec![],
@@ -5943,6 +5769,7 @@ endmodule
             vec![2, 2],
         );
         let setup_table = test_table(
+            &mut builder,
             "rise_constraint",
             2,
             vec![],
@@ -5950,6 +5777,7 @@ endmodule
             vec![1.0, 2.0, 3.0, 4.0],
             vec![2, 2],
         );
+        let lib = builder.finish();
         let mut counts = TimingQueryDiagnosticCounts::default();
 
         assert_close(
@@ -6061,17 +5889,18 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_axis_dimension_mismatch() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
+        let (lib, table) = library_and_table(
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
                 name: "tmpl_bad_extent".to_string(),
-                variable_1: "input_net_transition".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
                 index_1: vec![0.0, 1.0],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0, 3.0], vec![3]);
+            },
+            "cell_rise",
+            vec![1.0, 2.0, 3.0],
+            vec![3],
+        );
 
         let error = validate_timing_table_payload(&lib, &table, "bad_extent")
             .expect_err("axis extent mismatch should be rejected");
@@ -6080,19 +5909,20 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_axis_rank_mismatch() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
+        let (lib, table) = library_and_table(
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
                 name: "tmpl_bad_rank".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                variable_2: "total_output_net_capacitance".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
+                variable_2: "total_output_net_capacitance".to_string().into(),
                 index_1: vec![0.0, 1.0],
                 index_2: vec![0.0, 1.0],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0], vec![2]);
+            },
+            "cell_rise",
+            vec![1.0, 2.0],
+            vec![2],
+        );
 
         let error = validate_timing_table_payload(&lib, &table, "bad_rank")
             .expect_err("axis rank mismatch should be rejected");
@@ -6101,17 +5931,33 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_non_finite_axes_and_values() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_non_finite_axis".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                index_1: vec![0.0, f64::INFINITY],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_non_finite_axis".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            index_1: vec![0.0, f64::INFINITY],
             ..Default::default()
-        };
-        let axis_table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0], vec![2]);
+        }];
+        let axis_table = test_table(
+            &mut builder,
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![1.0, 2.0],
+            vec![2],
+        );
+        let value_table = test_table(
+            &mut builder,
+            "cell_rise",
+            0,
+            vec![],
+            vec![],
+            vec![f64::NAN],
+            vec![],
+        );
+        let lib = builder.finish();
         let axis_error = validate_timing_table_payload(&lib, &axis_table, "bad_axis")
             .expect_err("non-finite axes should be rejected");
         assert!(
@@ -6120,13 +5966,8 @@ endmodule
                 .contains("axis 1 contains non-finite")
         );
 
-        let value_table = test_table("cell_rise", 0, vec![], vec![], vec![f64::NAN], vec![]);
-        let value_error = validate_timing_table_payload(
-            &crate::liberty_model::Library::default(),
-            &value_table,
-            "bad_value",
-        )
-        .expect_err("non-finite table values should be rejected");
+        let value_error = validate_timing_table_payload(&lib, &value_table, "bad_value")
+            .expect_err("non-finite table values should be rejected");
         assert!(
             value_error
                 .to_string()
@@ -6136,17 +5977,18 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_duplicate_axis_points() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
+        let (lib, table) = library_and_table(
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
                 name: "tmpl_duplicate_axis".to_string(),
-                variable_1: "input_net_transition".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
                 index_1: vec![0.0, 0.0, 1.0],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let table = test_table("cell_rise", 1, vec![], vec![], vec![1.0, 2.0, 3.0], vec![3]);
+            },
+            "cell_rise",
+            vec![1.0, 2.0, 3.0],
+            vec![3],
+        );
 
         let error = validate_timing_table_payload(&lib, &table, "duplicate_axis")
             .expect_err("duplicate axis points should be rejected");
@@ -6159,17 +6001,18 @@ endmodule
 
     #[test]
     fn evaluate_table_repairs_non_monotone_delay_values_with_upper_envelope() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
+        let (lib, table) = library_and_table(
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
                 name: "tmpl_non_monotone".to_string(),
-                variable_1: "input_net_transition".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
                 index_1: vec![0.0, 1.0],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let table = test_table("cell_rise", 1, vec![], vec![], vec![2.0, 1.0], vec![2]);
+            },
+            "cell_rise",
+            vec![2.0, 1.0],
+            vec![2],
+        );
 
         validate_timing_table_payload(&lib, &table, "non_monotone")
             .expect("non-monotone delay tables should be structurally valid");
@@ -6181,23 +6024,17 @@ endmodule
 
     #[test]
     fn evaluate_table_repairs_two_dimensional_delay_values_coordinatewise() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
+        let (lib, table) = library_and_table(
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
                 name: "tmpl_non_monotone_2d".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                variable_2: "total_output_net_capacitance".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
+                variable_2: "total_output_net_capacitance".to_string().into(),
                 index_1: vec![0.0, 1.0],
                 index_2: vec![0.0, 1.0],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let table = test_table(
+            },
             "cell_rise",
-            1,
-            vec![],
-            vec![],
             vec![1.0, 4.0, 3.0, 2.0],
             vec![2, 2],
         );
@@ -6210,21 +6047,15 @@ endmodule
 
     #[test]
     fn evaluate_table_repairs_small_characterization_noise() {
-        let lib = crate::liberty_model::Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
+        let (lib, table) = library_and_table(
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
                 name: "tmpl_characterization_noise".to_string(),
-                variable_1: "input_net_transition".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
                 index_1: vec![0.0, 1.0],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let table = test_table(
+            },
             "cell_rise",
-            1,
-            vec![],
-            vec![],
             vec![28.4535, 28.2959],
             vec![2],
         );
@@ -6241,12 +6072,14 @@ endmodule
             arrival: 0.0,
             transition: 0.1,
         });
-        let delay_table = scalar_table("cell_rise", 1.0);
-        let slew_table = scalar_table("rise_transition", -0.1);
+        let mut builder = LibraryBuilder::new();
+        let delay_table = scalar_table(&mut builder, "cell_rise", 1.0);
+        let slew_table = scalar_table(&mut builder, "rise_transition", -0.1);
+        let lib = builder.finish();
         let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let output = evaluate_output_edge_set(
-            &crate::liberty_model::Library::default(),
+            &lib,
             &delay_table,
             &slew_table,
             &input_timing,
@@ -6272,12 +6105,14 @@ endmodule
             arrival: f64::INFINITY,
             transition: 0.1,
         });
-        let delay_table = scalar_table("cell_rise", 0.0);
-        let slew_table = scalar_table("rise_transition", 0.1);
+        let mut builder = LibraryBuilder::new();
+        let delay_table = scalar_table(&mut builder, "cell_rise", 0.0);
+        let slew_table = scalar_table(&mut builder, "rise_transition", 0.1);
+        let lib = builder.finish();
         let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let error = evaluate_output_edge_set(
-            &crate::liberty_model::Library::default(),
+            &lib,
             &delay_table,
             &slew_table,
             &input_timing,
@@ -6300,11 +6135,11 @@ endmodule
         let duplicate_cells = crate::liberty_model::Library {
             cells: vec![
                 Cell {
-                    name: "INV".to_string(),
+                    name: "INV".to_string().into(),
                     ..Default::default()
                 },
                 Cell {
-                    name: "INV".to_string(),
+                    name: "INV".to_string().into(),
                     ..Default::default()
                 },
             ],
@@ -6320,23 +6155,15 @@ endmodule
                 .contains("defines cell 'INV' more than once")
         );
 
-        let duplicate_pins = crate::liberty_model::Library {
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                    Pin {
-                        name: "A".to_string(),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
+        let mut builder = LibraryBuilder::new();
+        let pin_a_1 = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let pin_a_2 = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![pin_a_1, pin_a_2],
             ..Default::default()
-        };
+        }];
+        let duplicate_pins = builder.finish();
         let pin_error = match StaLibraryIndex::new(&duplicate_pins) {
             Ok(_) => panic!("duplicate pins should fail"),
             Err(error) => error,
@@ -6360,23 +6187,29 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let mut lib = scalar_inv_library();
-        lib.cells.push(Cell {
-            name: "UNUSED".to_string(),
-            pins: vec![Pin {
-                direction: PinDirection::Output as i32,
-                name: "Y".to_string(),
-                timing_arcs: vec![TimingArc {
-                    related_pin: "A".to_string(),
-                    timing_sense: "positive_unate".to_string(),
-                    timing_type: "combinational".to_string(),
-                    tables: vec![scalar_table("cell_rise", f64::NAN)],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
+        let mut builder = scalar_inv_builder();
+        let malformed_table = scalar_table(&mut builder, "cell_rise", f64::NAN);
+        let malformed_arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            vec![malformed_table],
+        );
+        let output = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "",
+            vec![malformed_arc],
+        );
+        builder.cells.push(Cell {
+            name: "UNUSED".to_string().into(),
+            pins: vec![output],
             ..Default::default()
         });
+        let lib = builder.finish();
 
         analyze_combinational_max_arrival_proto(
             &module,

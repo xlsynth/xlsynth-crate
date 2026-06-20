@@ -29,19 +29,19 @@ fn load_cell_formula_map(liberty_lib: &liberty_model::Library) -> HashMap<String
     let mut map = HashMap::new();
     for cell in &liberty_lib.cells {
         // Find the output pin with a function
-        if let Some(pin) = cell
-            .pins
-            .iter()
-            .find(|p| p.direction == PinDirection::Output as i32 && !p.function.is_empty())
-        {
-            match cell_formula::parse_formula(&pin.function) {
+        if let Some(pin) = cell.pins.iter().find(|p| {
+            p.direction == PinDirection::Output as i32
+                && !liberty_lib.resolve_string(&p.function).is_empty()
+        }) {
+            let function = liberty_lib.resolve_string(&pin.function);
+            match cell_formula::parse_formula(function) {
                 Ok(term) => {
                     map.insert(cell.name.clone(), term);
                 }
                 Err(e) => {
                     eprintln!(
                         "Failed to parse formula for cell '{}': {}\n  formula: {}",
-                        cell.name, e, pin.function
+                        cell.name, e, function
                     );
                 }
             }

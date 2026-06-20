@@ -23,93 +23,67 @@ pub use timing_table::{TimingTableArrayError, TimingTableArrayView};
 
 #[cfg(test)]
 pub mod test_utils {
-    use crate::liberty_model::{Cell, Library, Pin, PinDirection};
+    use crate::liberty_model::{Cell, Library, LibraryBuilder, Pin, PinDirection};
+
+    fn pin(
+        builder: &mut LibraryBuilder,
+        direction: PinDirection,
+        name: &str,
+        function: &str,
+        is_clocking_pin: bool,
+    ) -> Pin {
+        Pin {
+            direction: direction as i32,
+            function: builder.intern_string(function).unwrap(),
+            name: builder.intern_string(name).unwrap(),
+            is_clocking_pin,
+            ..Default::default()
+        }
+    }
 
     /// Small test Liberty library used across unit tests. Contains:
     /// - `INV` with pins `A` (input) and `Y` (output).
     /// - `BUF` with pins `I` (input) and `O` (output).
     /// - `DFF` with pins `D` (input), `CLK` (clocking input), and `Q` (output).
     pub fn make_test_library() -> Library {
-        Library {
-            cells: vec![
-                Cell {
-                    name: "INV".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "A".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            function: "(!A)".to_string(),
-                            name: "Y".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "BUF".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "I".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            function: "I".to_string(),
-                            name: "O".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "DFF".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "D".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "CLK".to_string(),
-                            is_clocking_pin: true,
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            function: "D".to_string(),
-                            name: "Q".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+        let mut builder = LibraryBuilder::new();
+        let cells = vec![
+            Cell {
+                name: "INV".to_string().into(),
+                pins: vec![
+                    pin(&mut builder, PinDirection::Input, "A", "", false),
+                    pin(&mut builder, PinDirection::Output, "Y", "(!A)", false),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+            Cell {
+                name: "BUF".to_string().into(),
+                pins: vec![
+                    pin(&mut builder, PinDirection::Input, "I", "", false),
+                    pin(&mut builder, PinDirection::Output, "O", "I", false),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+            Cell {
+                name: "DFF".to_string().into(),
+                pins: vec![
+                    pin(&mut builder, PinDirection::Input, "D", "", false),
+                    pin(&mut builder, PinDirection::Input, "CLK", "", true),
+                    pin(&mut builder, PinDirection::Output, "Q", "D", false),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+        ];
+        builder.cells = cells;
+        builder.finish()
     }
 }

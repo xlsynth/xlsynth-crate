@@ -14,12 +14,12 @@ use std::io::{BufReader, Read};
 use std::ops::Deref;
 use std::path::Path;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Library {
     proto: liberty_model::Library,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct LibraryWithTimingData {
     proto: liberty_model::Library,
 }
@@ -125,7 +125,7 @@ pub fn count_timing_values(proto: &liberty_model::Library) -> usize {
         .flat_map(|cell| &cell.pins)
         .flat_map(|pin| &pin.timing_arcs)
         .flat_map(|arc| &arc.tables)
-        .map(|table| table.values.len())
+        .map(|table| table.value_range().len())
         .sum()
 }
 
@@ -272,8 +272,8 @@ mod tests {
     use super::*;
     use crate::liberty::model::library_to_proto;
     use crate::liberty_model::{
-        Cell, InternalPower, LuTableTemplate, Pin, PowerTable, PowerTransition, Sequential,
-        SequentialKind, TimingArc, TimingTable,
+        Cell, InternalPower, LibraryBuilder, LuTableTemplate, Pin, PowerTransition, Sequential,
+        SequentialKind,
     };
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -292,61 +292,64 @@ mod tests {
     }
 
     fn make_payload() -> liberty_model::Library {
-        liberty_model::Library {
-            nominal_voltage: Some(0.7),
-            provenance: "test provenance".to_string(),
-            source_files: vec!["cells.lib".to_string()],
-            lu_table_templates: vec![
-                LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    index_1: vec![0.1],
-                    ..Default::default()
-                },
-                LuTableTemplate {
-                    kind: "power_lut_template".to_string(),
-                    index_1: vec![0.1],
-                    ..Default::default()
-                },
-            ],
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![Pin {
-                    name: "Y".to_string(),
-                    timing_arcs: vec![TimingArc::from_raw(
-                        "A",
-                        "",
-                        "",
-                        "",
-                        vec![TimingTable::from_f64(
-                            liberty_proto::TimingTableKind::CellRise,
-                            1,
-                            vec![],
-                            vec![],
-                            vec![],
-                            vec![0.25],
-                            vec![1],
-                            "",
-                        )],
-                    )],
-                    internal_power: vec![InternalPower {
-                        tables: vec![PowerTable::from_f64(
-                            PowerTransition::Rise,
-                            2,
-                            vec![],
-                            vec![],
-                            vec![],
-                            vec![0.5],
-                            vec![1],
-                            "",
-                        )],
-                        ..Default::default()
-                    }],
+        let mut builder = LibraryBuilder::new();
+        let timing_table = builder
+            .add_timing_table_f64(
+                liberty_proto::TimingTableKind::CellRise,
+                1,
+                vec![],
+                vec![],
+                vec![],
+                vec![0.25],
+                vec![1],
+                "",
+            )
+            .unwrap();
+        let power_table = builder
+            .add_power_table_f64(
+                PowerTransition::Rise,
+                2,
+                vec![],
+                vec![],
+                vec![],
+                vec![0.5],
+                vec![1],
+                "",
+            )
+            .unwrap();
+        builder.nominal_voltage = Some(0.7);
+        builder.provenance = "test provenance".to_string();
+        builder.source_files = vec!["cells.lib".to_string()];
+        builder.lu_table_templates = vec![
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                index_1: vec![0.1],
+                ..Default::default()
+            },
+            LuTableTemplate {
+                kind: "power_lut_template".to_string().into(),
+                index_1: vec![0.1],
+                ..Default::default()
+            },
+        ];
+        let name = builder.intern_string("Y").unwrap();
+        let arc = builder
+            .add_timing_arc("A", "", "", "", vec![timing_table])
+            .unwrap();
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![Pin {
+                name,
+                timing_arcs: vec![arc],
+                internal_power: vec![InternalPower {
+                    tables: vec![power_table],
                     ..Default::default()
                 }],
                 ..Default::default()
             }],
             ..Default::default()
-        }
+        }];
+        builder.finish()
     }
 
     #[test]
@@ -356,28 +359,25 @@ mod tests {
 
         assert_eq!(loaded.provenance, "test provenance");
         assert_eq!(loaded.lu_table_templates[0].index_1, vec![0.1]);
-        assert_eq!(
-            loaded.cells[0].pins[0].timing_arcs[0].tables[0].values,
-            vec![f64::from(0.25_f32)]
-        );
-        assert_eq!(
-            loaded.cells[0].pins[0].internal_power[0].tables[0].values,
-            vec![f64::from(0.5_f32)]
-        );
+        let timing_table = &loaded.cells[0].pins[0].timing_arcs[0].tables[0];
+        assert_eq!(loaded.timing_table_values(timing_table), &[0.25_f32]);
+        let power_table = &loaded.cells[0].pins[0].internal_power[0].tables[0];
+        assert_eq!(loaded.power_table_values(power_table), &[0.5_f32]);
     }
 
     #[test]
     fn sequential_complement_is_optional_in_binary_payloads() {
-        let mut payload = make_payload();
-        payload.cells[0].sequential = vec![Sequential {
-            state_var: "IQ".to_string(),
-            next_state: "D".to_string(),
-            clock_expr: "CLK".to_string(),
+        let sequential = Sequential {
+            state_var: "IQ".to_string().into(),
+            next_state: "D".to_string().into(),
+            clock_expr: "CLK".to_string().into(),
             kind: SequentialKind::Ff as i32,
             complementary_state_var: None,
             ..Default::default()
-        }];
-        let wire_without_complement = library_to_proto(payload.clone()).unwrap();
+        };
+        let mut payload_without_complement = make_payload();
+        payload_without_complement.cells[0].sequential = vec![sequential.clone()];
+        let wire_without_complement = library_to_proto(payload_without_complement).unwrap();
         let loaded_without_complement = decode_library_binary_or_text(
             &wire_without_complement.encode_to_vec(),
             "without-complement.proto",
@@ -388,8 +388,12 @@ mod tests {
             None
         );
 
-        payload.cells[0].sequential[0].complementary_state_var = Some("IQN".to_string());
-        let wire_with_complement = library_to_proto(payload).unwrap();
+        let mut payload_with_complement = make_payload();
+        payload_with_complement.cells[0].sequential = vec![Sequential {
+            complementary_state_var: Some("IQN".to_string()),
+            ..sequential
+        }];
+        let wire_with_complement = library_to_proto(payload_with_complement).unwrap();
         let loaded_with_complement = decode_library_binary_or_text(
             &wire_with_complement.encode_to_vec(),
             "with-complement.proto",
@@ -419,7 +423,7 @@ mod tests {
     fn rejects_the_pre_breaking_change_wire_format() {
         let old = OldLibraryPayload {
             cells: vec![OldCellPayload {
-                name: "INV".to_string(),
+                name: "INV".to_string().into(),
             }],
         };
 
@@ -450,9 +454,16 @@ mod tests {
 
         assert!(loaded.cells[0].pins[0].timing_arcs.is_empty());
         assert_eq!(loaded.lu_table_templates.len(), 1);
-        assert_eq!(loaded.lu_table_templates[0].kind, "power_lut_template");
         assert_eq!(
-            loaded.cells[0].pins[0].internal_power[0].tables[0].template_id,
+            loaded.lu_table_templates[0].kind_str(&loaded),
+            "power_lut_template"
+        );
+        assert_eq!(loaded.lut_shapes.len(), 1);
+        assert_eq!(loaded.lut_values, vec![0.5_f32]);
+        assert_eq!(
+            loaded
+                .power_table_shape(&loaded.cells[0].pins[0].internal_power[0].tables[0])
+                .template_id,
             1
         );
     }

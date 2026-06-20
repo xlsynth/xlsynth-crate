@@ -596,50 +596,54 @@ mod tests {
     }
 
     fn make_inv_nand2_liberty() -> LibertyLibrary {
-        LibertyLibrary {
-            cells: vec![
-                Cell {
-                    name: "INV".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            function: "!A".to_string(),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "NAND2".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "A".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            name: "B".to_string(),
-                            ..Default::default()
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            name: "Y".to_string(),
-                            function: "!(A*B)".to_string(),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+        let mut builder = crate::liberty_model::LibraryBuilder::new();
+        let a = builder.intern_string("A").unwrap();
+        let b = builder.intern_string("B").unwrap();
+        let y = builder.intern_string("Y").unwrap();
+        let inv_function = builder.intern_string("!A").unwrap();
+        let nand_function = builder.intern_string("!(A*B)").unwrap();
+        builder.cells = vec![
+            Cell {
+                name: "INV".to_string().into(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: a,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: y,
+                        function: inv_function,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            Cell {
+                name: "NAND2".to_string().into(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: a,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: b,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: y,
+                        function: nand_function,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+        builder.finish()
     }
 
     fn assert_projected_equivalent_for_all_inputs(lhs: &GateFn, rhs: &GateFn) {

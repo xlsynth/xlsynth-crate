@@ -111,7 +111,11 @@ fn build_cell_formula_map(
             continue;
         }
         let collapse_for_cell = collapse_sequential && !override_cells.contains(&cell.name);
-        let pin_names: HashSet<String> = cell.pins.iter().map(|pin| pin.name.to_string()).collect();
+        let pin_names: HashSet<String> = cell
+            .pins
+            .iter()
+            .map(|pin| liberty_lib.resolve_string(&pin.name).to_string())
+            .collect();
         let state_vars: HashSet<String> = cell
             .sequential
             .iter()
@@ -204,9 +208,11 @@ fn build_cell_formula_map(
             }
         }
         for pin in &cell.pins {
-            if pin.direction == 1 && !pin.function.is_empty() {
-                let original_formula_string = pin.function.to_string();
-                match crate::liberty::cell_formula::parse_formula(&pin.function) {
+            let pin_name = liberty_lib.resolve_string(&pin.name);
+            let function = liberty_lib.resolve_string(&pin.function);
+            if pin.direction == 1 && !function.is_empty() {
+                let original_formula_string = function.to_string();
+                match crate::liberty::cell_formula::parse_formula(function) {
                     Ok(term) => {
                         let term = if collapse_for_cell {
                             let replaced = substitute_state_vars_in_term(&term, &sequential_terms);
@@ -222,8 +228,8 @@ fn build_cell_formula_map(
                                     "collapse_sequential could not safely collapse state variables [{}] for cell '{}' output pin '{}' (function \"{}\")",
                                     remaining_state_refs.join(", "),
                                     cell.name,
-                                    pin.name,
-                                    pin.function
+                                    pin_name,
+                                    function
                                 ));
                             }
                             replaced
@@ -231,7 +237,7 @@ fn build_cell_formula_map(
                             term
                         };
                         cell_formula_map.insert(
-                            (cell.name.clone(), pin.name.to_string()),
+                            (cell.name.clone(), pin_name.to_string()),
                             (term, original_formula_string),
                         );
                     }
@@ -239,7 +245,7 @@ fn build_cell_formula_map(
                         log::warn!(
                             "Failed to parse formula for cell '{}', pin '{}' (formula: \"{}\"): {}",
                             cell.name,
-                            pin.name,
+                            pin_name,
                             original_formula_string,
                             e
                         );
@@ -685,7 +691,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
             .ok_or_else(|| format!("Cell '{}' not found in liberty data", type_name))?;
         let mut pin_directions = std::collections::HashMap::new();
         for pin in &cell.pins {
-            pin_directions.insert(pin.name.as_str(), pin.direction);
+            pin_directions.insert(liberty_lib.resolve_string(&pin.name), pin.direction);
         }
         for connection in &inst.connections {
             let port_name = interner.resolve(connection.port).unwrap();
@@ -727,7 +733,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                 .ok_or_else(|| format!("Cell '{}' not found in Liberty", type_name))?;
             let mut pin_directions = HashMap::new();
             for pin in &cell.pins {
-                pin_directions.insert(pin.name.as_str(), pin.direction);
+                pin_directions.insert(liberty_lib.resolve_string(&pin.name), pin.direction);
             }
             let (input_map, missing_inputs, port_map) = build_instance_input_map(
                 inst,
@@ -769,6 +775,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                     let binding = build_instance_aig_binding(
                         inst,
                         cell,
+                        liberty_lib,
                         type_name,
                         inst_name,
                         interner,
@@ -806,7 +813,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                 let mut pin_directions = HashMap::new();
                 if let Some(cell) = liberty_lib.cells.iter().find(|c| c.name == type_name) {
                     for pin in &cell.pins {
-                        pin_directions.insert(pin.name.as_str(), pin.direction);
+                        pin_directions.insert(liberty_lib.resolve_string(&pin.name), pin.direction);
                     }
                 }
                 // Recompute missing inputs for this instance w.r.t. current resolved nets.
@@ -995,7 +1002,7 @@ fn validate_labeled_eval_module(
             let pin = cell
                 .pins
                 .iter()
-                .find(|pin| pin.name == pin_name)
+                .find(|pin| liberty_lib.resolve_string(&pin.name) == pin_name)
                 .ok_or_else(|| {
                     format!(
                         "cell '{}' instance '{}' connects unknown Liberty pin '{}'",
@@ -1043,16 +1050,17 @@ fn validate_labeled_eval_module(
                             type_name, instance_name, pin_name
                         ));
                     }
-                    if pin.function.is_empty() {
+                    let function = liberty_lib.resolve_string(&pin.function);
+                    if function.is_empty() {
                         return Err(format!(
                             "cell '{}' instance '{}' output pin '{}' has no Liberty function",
                             type_name, instance_name, pin_name
                         ));
                     }
-                    crate::liberty::cell_formula::parse_formula(&pin.function).map_err(|e| {
+                    crate::liberty::cell_formula::parse_formula(function).map_err(|e| {
                         format!(
                             "failed to parse Liberty function for cell '{}' instance '{}' output pin '{}' (function \"{}\"): {}",
-                            type_name, instance_name, pin_name, pin.function, e
+                            type_name, instance_name, pin_name, function, e
                         )
                     })?;
                 }
@@ -1128,6 +1136,7 @@ fn build_module_port_aig_bindings(
 fn build_instance_aig_binding(
     inst: &NormalizedInstance,
     cell: &Cell,
+    liberty_lib: &Library,
     type_name: &str,
     instance_name: &str,
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -1138,28 +1147,29 @@ fn build_instance_aig_binding(
 ) -> Result<InstanceAigBinding, String> {
     let mut pins = Vec::new();
     for pin in &cell.pins {
+        let pin_name = liberty_lib.resolve_string(&pin.name);
         let Some(connection) = inst
             .connections
             .iter()
-            .find(|connection| interner.resolve(connection.port) == Some(pin.name.as_str()))
+            .find(|connection| interner.resolve(connection.port) == Some(pin_name))
         else {
             continue;
         };
-        let direction = checked_pin_direction(type_name, &pin.name, pin.direction)?;
+        let direction = checked_pin_direction(type_name, pin_name, pin.direction)?;
         let operand = match direction {
-            PinDirection::Input => input_operands.get(pin.name.as_str()),
-            PinDirection::Output => output_operands.get(pin.name.as_str()),
+            PinDirection::Input => input_operands.get(pin_name),
+            PinDirection::Output => output_operands.get(pin_name),
             PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
         }
         .copied()
         .ok_or_else(|| {
             format!(
                 "internal error: no AIG operand was produced for cell '{}' instance '{}' pin '{}'",
-                type_name, instance_name, pin.name
+                type_name, instance_name, pin_name
             )
         })?;
         pins.push(InstancePinAigBinding {
-            pin_name: pin.name.to_string(),
+            pin_name: pin_name.to_string(),
             direction,
             operand,
             connection: build_pin_connection(connection, normalized, nets, interner)?,
@@ -1430,7 +1440,7 @@ This indicates missing drivers or a DFF classification mismatch; re-run with RUS
 mod tests {
     use super::*;
     use crate::aig_sim::gate_sim::{self, Collect};
-    use crate::liberty_model::{Cell, Library, Pin, PinDirection};
+    use crate::liberty_model::{Cell, Library, LibraryBuilder, Pin, PinDirection};
     use crate::netlist::parse::{
         Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, Parser, PortDirection,
         TokenScanner,
@@ -1438,81 +1448,130 @@ mod tests {
     use string_interner::{StringInterner, backend::StringBackend};
     use xlsynth::IrBits;
 
-    fn input_pin(name: &str) -> Pin {
+    fn input_pin(builder: &mut LibraryBuilder, name: &str) -> Pin {
         Pin {
-            name: name.to_string(),
+            name: builder.intern_string(name).unwrap(),
             direction: PinDirection::Input as i32,
-            function: String::new(),
             is_clocking_pin: false,
             ..Default::default()
         }
     }
 
-    fn output_pin(name: &str, function: &str) -> Pin {
+    fn output_pin(builder: &mut LibraryBuilder, name: &str, function: &str) -> Pin {
         Pin {
-            name: name.to_string(),
+            name: builder.intern_string(name).unwrap(),
             direction: PinDirection::Output as i32,
-            function: function.to_string(),
+            function: builder.intern_string(function).unwrap(),
             is_clocking_pin: false,
             ..Default::default()
         }
+    }
+
+    fn test_cell(
+        builder: &mut LibraryBuilder,
+        cell_name: &str,
+        pin_specs: &[(&str, i32, &str, bool)],
+        sequential: Vec<crate::liberty_model::Sequential>,
+    ) -> Cell {
+        let pins = pin_specs
+            .iter()
+            .map(|(name, direction, function, is_clocking_pin)| Pin {
+                name: builder.intern_string(name).unwrap(),
+                direction: *direction,
+                function: builder.intern_string(function).unwrap(),
+                is_clocking_pin: *is_clocking_pin,
+                ..Default::default()
+            })
+            .collect();
+        Cell {
+            name: cell_name.to_string(),
+            pins,
+            area: 1.0,
+            sequential,
+            ..Default::default()
+        }
+    }
+
+    fn test_library(
+        cell_name: &str,
+        pin_specs: &[(&str, i32, &str, bool)],
+        sequential: Vec<crate::liberty_model::Sequential>,
+    ) -> Library {
+        let mut builder = LibraryBuilder::new();
+        let cell = test_cell(&mut builder, cell_name, pin_specs, sequential);
+        builder.cells = vec![cell];
+        builder.finish()
     }
 
     fn projection_order_test_liberty() -> Library {
-        Library {
-            cells: vec![
-                Cell {
-                    name: "BUF".to_string(),
-                    pins: vec![input_pin("A"), output_pin("Y", "A")],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "INV".to_string(),
-                    pins: vec![input_pin("A"), output_pin("Y", "(!A)")],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "AO21".to_string(),
-                    pins: vec![
-                        input_pin("A1"),
-                        input_pin("A2"),
-                        input_pin("B"),
-                        output_pin("Y", "((A1 & A2) | B)"),
-                    ],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-                // Similar to ASAP7 `DFFHQx1_ASAP7_75t_R`: a D flip-flop
-                // whose Q output is modeled by the override path as Q = D.
-                Cell {
-                    name: "DFFHQ".to_string(),
-                    pins: vec![input_pin("D"), input_pin("CLK"), output_pin("Q", "IQ")],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-                // Similar to ASAP7 `DFFHQNx1_ASAP7_75t_R`: a D flip-flop
-                // whose QN output is modeled by the override path as QN = !D.
-                Cell {
-                    name: "DFFHQN".to_string(),
-                    pins: vec![input_pin("D"), input_pin("CLK"), output_pin("QN", "IQN")],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+        let mut builder = LibraryBuilder::new();
+        let cells = vec![
+            Cell {
+                name: "BUF".to_string().into(),
+                pins: vec![
+                    input_pin(&mut builder, "A"),
+                    output_pin(&mut builder, "Y", "A"),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+            Cell {
+                name: "INV".to_string().into(),
+                pins: vec![
+                    input_pin(&mut builder, "A"),
+                    output_pin(&mut builder, "Y", "(!A)"),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+            Cell {
+                name: "AO21".to_string().into(),
+                pins: vec![
+                    input_pin(&mut builder, "A1"),
+                    input_pin(&mut builder, "A2"),
+                    input_pin(&mut builder, "B"),
+                    output_pin(&mut builder, "Y", "((A1 & A2) | B)"),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+            // Similar to ASAP7 `DFFHQx1_ASAP7_75t_R`: a D flip-flop
+            // whose Q output is modeled by the override path as Q = D.
+            Cell {
+                name: "DFFHQ".to_string().into(),
+                pins: vec![
+                    input_pin(&mut builder, "D"),
+                    input_pin(&mut builder, "CLK"),
+                    output_pin(&mut builder, "Q", "IQ"),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+            // Similar to ASAP7 `DFFHQNx1_ASAP7_75t_R`: a D flip-flop
+            // whose QN output is modeled by the override path as QN = !D.
+            Cell {
+                name: "DFFHQN".to_string().into(),
+                pins: vec![
+                    input_pin(&mut builder, "D"),
+                    input_pin(&mut builder, "CLK"),
+                    output_pin(&mut builder, "QN", "IQN"),
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+                ..Default::default()
+            },
+        ];
+        builder.cells = cells;
+        builder.finish()
     }
 
     fn eval_single_output_bit(gate_fn: &GateFn, inputs: &[bool]) -> bool {
@@ -1781,32 +1840,11 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "A".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Y".to_string(),
-                        direction: 1,
-                        function: "(!A)".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library(
+            "INV",
+            &[("A", 2, "", false), ("Y", 1, "(!A)", false)],
+            vec![],
+        );
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,
@@ -1868,32 +1906,11 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "A".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Y".to_string(),
-                        direction: 1,
-                        function: "(!A)".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library(
+            "INV",
+            &[("A", 2, "", false), ("Y", 1, "(!A)", false)],
+            vec![],
+        );
         let res = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,
@@ -1944,39 +1961,15 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "AND2".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "A".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "B".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Y".to_string(),
-                        direction: 1,
-                        function: "(A & B)".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library(
+            "AND2",
+            &[
+                ("A", 2, "", false),
+                ("B", 2, "", false),
+                ("Y", 1, "(A & B)", false),
+            ],
+            vec![],
+        );
         let err = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,
@@ -2045,32 +2038,7 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "BUF".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "A".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Y".to_string(),
-                        direction: 1,
-                        function: "A".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library("BUF", &[("A", 2, "", false), ("Y", 1, "A", false)], vec![]);
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,
@@ -2515,32 +2483,7 @@ endmodule
             instances,
         };
         // Liberty with a DFF cell having pins D (input) and Q (output)
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFF".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "Q".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library("DFF", &[("D", 2, "", false), ("Q", 1, "Q", false)], vec![]);
         let mut dff_cells = std::collections::HashSet::new();
         dff_cells.insert("DFF".to_string());
 
@@ -2619,32 +2562,7 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFF".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "Q".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library("DFF", &[("D", 2, "", false), ("Q", 1, "Q", false)], vec![]);
         let mut dff_cells = std::collections::HashSet::new();
         dff_cells.insert("DFF".to_string());
 
@@ -2714,32 +2632,7 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFF".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "d".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "q".to_string(),
-                        direction: 1,
-                        function: "d".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library("DFF", &[("d", 2, "", false), ("q", 1, "d", false)], vec![]);
         let mut dff_cells = std::collections::HashSet::new();
         dff_cells.insert("DFF".to_string());
         // Set up the input value for D
@@ -2814,32 +2707,11 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFFN".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "QN".to_string(),
-                        direction: 1,
-                        function: "IQN".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library(
+            "DFFN",
+            &[("D", 2, "", false), ("QN", 1, "IQN", false)],
+            vec![],
+        );
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
         dff_cells_inverted.insert("DFFN".to_string());
@@ -2907,32 +2779,11 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFFN".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "QN".to_string(),
-                        direction: 1,
-                        function: "IQN".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library(
+            "DFFN",
+            &[("D", 2, "", false), ("QN", 1, "IQN", false)],
+            vec![],
+        );
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
         dff_cells_inverted.insert("DFFN".to_string());
@@ -3003,32 +2854,11 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFFN".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "QN".to_string(),
-                        direction: 1,
-                        function: "IQN".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library(
+            "DFFN",
+            &[("D", 2, "", false), ("QN", 1, "IQN", false)],
+            vec![],
+        );
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
         dff_cells_inverted.insert("DFFN".to_string());
@@ -3107,47 +2937,23 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFFX".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "IQ".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "QN".to_string(),
-                        direction: 1,
-                        function: "IQN".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![crate::liberty_model::Sequential {
-                    state_var: "IQ".to_string(),
-                    next_state: "D".to_string(),
-                    clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_model::SequentialKind::Ff as i32,
-                    clear_expr: String::new(),
-                    preset_expr: String::new(),
-                    complementary_state_var: Some("IQN".to_string()),
-                }],
-                clock_gate: None,
-                ..Default::default()
+        let liberty_lib = test_library(
+            "DFFX",
+            &[
+                ("D", 2, "", false),
+                ("Q", 1, "IQ", false),
+                ("QN", 1, "IQN", false),
+            ],
+            vec![crate::liberty_model::Sequential {
+                state_var: "IQ".to_string(),
+                next_state: "D".to_string(),
+                clock_expr: "CLK".to_string(),
+                kind: crate::liberty_model::SequentialKind::Ff as i32,
+                clear_expr: String::new(),
+                preset_expr: String::new(),
+                complementary_state_var: Some("IQN".to_string()),
             }],
-            ..Default::default()
-        };
+        );
         let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
             &nets,
@@ -3231,79 +3037,34 @@ endmodule
         };
         // Include an unsupported sequential cell in the library, but do not instantiate
         // it.
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![
-                crate::liberty_model::Cell {
-                    name: "INV".to_string(),
-                    pins: vec![
-                        crate::liberty_model::Pin {
-                            name: "A".to_string(),
-                            direction: 2,
-                            function: String::new(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                        crate::liberty_model::Pin {
-                            name: "Y".to_string(),
-                            direction: 1,
-                            function: "!A".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    sequential: vec![],
-                    clock_gate: None,
-                    ..Default::default()
-                },
-                crate::liberty_model::Cell {
-                    name: "DFFEN".to_string(),
-                    pins: vec![
-                        crate::liberty_model::Pin {
-                            name: "D".to_string(),
-                            direction: 2,
-                            function: String::new(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                        crate::liberty_model::Pin {
-                            name: "EN".to_string(),
-                            direction: 2,
-                            function: String::new(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                        crate::liberty_model::Pin {
-                            name: "CLK".to_string(),
-                            direction: 2,
-                            function: String::new(),
-                            is_clocking_pin: true,
-                            ..Default::default()
-                        },
-                        crate::liberty_model::Pin {
-                            name: "Q".to_string(),
-                            direction: 1,
-                            function: "IQ".to_string(),
-                            is_clocking_pin: false,
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    sequential: vec![crate::liberty_model::Sequential {
-                        state_var: "IQ".to_string(),
-                        next_state: "(!EN * IQ) + (EN * D)".to_string(),
-                        clock_expr: "CLK".to_string(),
-                        kind: crate::liberty_model::SequentialKind::Ff as i32,
-                        clear_expr: String::new(),
-                        preset_expr: String::new(),
-                        complementary_state_var: None,
-                    }],
-                    clock_gate: None,
-                    ..Default::default()
-                },
+        let mut builder = LibraryBuilder::new();
+        let inv = test_cell(
+            &mut builder,
+            "INV",
+            &[("A", 2, "", false), ("Y", 1, "!A", false)],
+            vec![],
+        );
+        let dffen = test_cell(
+            &mut builder,
+            "DFFEN",
+            &[
+                ("D", 2, "", false),
+                ("EN", 2, "", false),
+                ("CLK", 2, "", true),
+                ("Q", 1, "IQ", false),
             ],
-            ..Default::default()
-        };
+            vec![crate::liberty_model::Sequential {
+                state_var: "IQ".to_string(),
+                next_state: "(!EN * IQ) + (EN * D)".to_string(),
+                clock_expr: "CLK".to_string(),
+                kind: crate::liberty_model::SequentialKind::Ff as i32,
+                clear_expr: String::new(),
+                preset_expr: String::new(),
+                complementary_state_var: None,
+            }],
+        );
+        builder.cells = vec![inv, dffen];
+        let liberty_lib = builder.finish();
         let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
             &nets,
@@ -3379,54 +3140,24 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFFAR".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "RN".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "CLK".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: true,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "IQ".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![crate::liberty_model::Sequential {
-                    state_var: "IQ".to_string(),
-                    next_state: "D".to_string(),
-                    clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_model::SequentialKind::Ff as i32,
-                    clear_expr: "!RN".to_string(),
-                    preset_expr: String::new(),
-                    complementary_state_var: None,
-                }],
-                clock_gate: None,
-                ..Default::default()
+        let liberty_lib = test_library(
+            "DFFAR",
+            &[
+                ("D", 2, "", false),
+                ("RN", 2, "", false),
+                ("CLK", 2, "", true),
+                ("Q", 1, "IQ", false),
+            ],
+            vec![crate::liberty_model::Sequential {
+                state_var: "IQ".to_string(),
+                next_state: "D".to_string(),
+                clock_expr: "CLK".to_string(),
+                kind: crate::liberty_model::SequentialKind::Ff as i32,
+                clear_expr: "!RN".to_string(),
+                preset_expr: String::new(),
+                complementary_state_var: None,
             }],
-            ..Default::default()
-        };
+        );
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
             &nets,
@@ -3503,47 +3234,23 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "LATCH".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "CLK".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: true,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "IQ".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![crate::liberty_model::Sequential {
-                    state_var: "IQ".to_string(),
-                    next_state: "D".to_string(),
-                    clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_model::SequentialKind::Latch as i32,
-                    clear_expr: String::new(),
-                    preset_expr: String::new(),
-                    complementary_state_var: None,
-                }],
-                clock_gate: None,
-                ..Default::default()
+        let liberty_lib = test_library(
+            "LATCH",
+            &[
+                ("D", 2, "", false),
+                ("CLK", 2, "", true),
+                ("Q", 1, "IQ", false),
+            ],
+            vec![crate::liberty_model::Sequential {
+                state_var: "IQ".to_string(),
+                next_state: "D".to_string(),
+                clock_expr: "CLK".to_string(),
+                kind: crate::liberty_model::SequentialKind::Latch as i32,
+                clear_expr: String::new(),
+                preset_expr: String::new(),
+                complementary_state_var: None,
             }],
-            ..Default::default()
-        };
+        );
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
             &nets,
@@ -3620,54 +3327,24 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFFEN".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "EN".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "CLK".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: true,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "IQ".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![crate::liberty_model::Sequential {
-                    state_var: "IQ".to_string(),
-                    next_state: "(!EN * IQ) + (EN * D)".to_string(),
-                    clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_model::SequentialKind::Ff as i32,
-                    clear_expr: String::new(),
-                    preset_expr: String::new(),
-                    complementary_state_var: None,
-                }],
-                clock_gate: None,
-                ..Default::default()
+        let liberty_lib = test_library(
+            "DFFEN",
+            &[
+                ("D", 2, "", false),
+                ("EN", 2, "", false),
+                ("CLK", 2, "", true),
+                ("Q", 1, "IQ", false),
+            ],
+            vec![crate::liberty_model::Sequential {
+                state_var: "IQ".to_string(),
+                next_state: "(!EN * IQ) + (EN * D)".to_string(),
+                clock_expr: "CLK".to_string(),
+                kind: crate::liberty_model::SequentialKind::Ff as i32,
+                clear_expr: String::new(),
+                preset_expr: String::new(),
+                complementary_state_var: None,
             }],
-            ..Default::default()
-        };
+        );
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
             &nets,
@@ -3734,47 +3411,23 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFFNP".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "CLK".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: true,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "IQ".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![crate::liberty_model::Sequential {
-                    state_var: "IQ".to_string(),
-                    next_state: "D & FOO".to_string(),
-                    clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_model::SequentialKind::Ff as i32,
-                    clear_expr: String::new(),
-                    preset_expr: String::new(),
-                    complementary_state_var: None,
-                }],
-                clock_gate: None,
-                ..Default::default()
+        let liberty_lib = test_library(
+            "DFFNP",
+            &[
+                ("D", 2, "", false),
+                ("CLK", 2, "", true),
+                ("Q", 1, "IQ", false),
+            ],
+            vec![crate::liberty_model::Sequential {
+                state_var: "IQ".to_string(),
+                next_state: "D & FOO".to_string(),
+                clock_expr: "CLK".to_string(),
+                kind: crate::liberty_model::SequentialKind::Ff as i32,
+                clear_expr: String::new(),
+                preset_expr: String::new(),
+                complementary_state_var: None,
             }],
-            ..Default::default()
-        };
+        );
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
             &nets,
@@ -3826,32 +3479,8 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "DFF".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "D".to_string(),
-                        direction: 2,
-                        function: String::new(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Q".to_string(),
-                        direction: 1,
-                        function: "IQ".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib =
+            test_library("DFF", &[("D", 2, "", false), ("Q", 1, "IQ", false)], vec![]);
         let mut dff_cells_identity = HashSet::new();
         dff_cells_identity.insert("DFF".to_string());
         let gate_fn = project_gatefn_from_netlist_and_liberty(
@@ -3924,39 +3553,15 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_model::Library {
-            cells: vec![crate::liberty_model::Cell {
-                name: "AND2".to_string(),
-                pins: vec![
-                    crate::liberty_model::Pin {
-                        name: "A".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "B".to_string(),
-                        direction: 2,
-                        function: "".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    crate::liberty_model::Pin {
-                        name: "Y".to_string(),
-                        direction: 1,
-                        function: "(A & B)".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let liberty_lib = test_library(
+            "AND2",
+            &[
+                ("A", 2, "", false),
+                ("B", 2, "", false),
+                ("Y", 1, "(A & B)", false),
+            ],
+            vec![],
+        );
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,

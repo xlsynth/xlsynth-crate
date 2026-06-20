@@ -330,7 +330,7 @@ fn build_dir_by_pin_for_instance(
             } else {
                 PinDirection::Invalid
             };
-            dir_by_pin.insert(pin.name.to_string(), dir);
+            dir_by_pin.insert(lib.library().resolve_string(&pin.name).to_string(), dir);
         }
         Some(dir_by_pin)
     } else if let Some(module_maps) = module_port_dirs {
@@ -389,7 +389,7 @@ fn resolve_to_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_model::{Cell, Library, Pin};
+    use crate::liberty_model::{Cell, Pin};
     use crate::netlist::parse::{
         Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
@@ -468,33 +468,33 @@ mod tests {
             instances,
         };
 
-        let lib_proto = Library {
-            cells: vec![Cell {
-                name: "INV".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        function: "".to_string(),
-                        name: "A".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        function: "(!A)".to_string(),
-                        name: "Y".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                ..Default::default()
-            }],
+        let mut builder = crate::liberty_model::LibraryBuilder::new();
+        let a = builder.intern_string("A").unwrap();
+        let y = builder.intern_string("Y").unwrap();
+        let inv_function = builder.intern_string("(!A)").unwrap();
+        builder.cells = vec![Cell {
+            name: "INV".to_string().into(),
+            pins: vec![
+                Pin {
+                    direction: PinDirection::Input as i32,
+                    name: a,
+                    is_clocking_pin: false,
+                    ..Default::default()
+                },
+                Pin {
+                    direction: PinDirection::Output as i32,
+                    function: inv_function,
+                    name: y,
+                    is_clocking_pin: false,
+                    ..Default::default()
+                },
+            ],
+            area: 1.0,
+            sequential: vec![],
+            clock_gate: None,
             ..Default::default()
-        };
-        let indexed = IndexedLibrary::new(lib_proto);
+        }];
+        let indexed = IndexedLibrary::new(builder.finish());
 
         (module, nets, interner, indexed)
     }

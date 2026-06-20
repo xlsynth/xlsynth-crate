@@ -2,122 +2,53 @@
 
 use crate::liberty_proto as wire;
 use anyhow::{Result, bail};
-use std::collections::{HashMap, VecDeque};
-use std::ops::Deref;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
-pub type SharedString = String;
-
-pub type SharedAxis = Arc<Vec<f64>>;
-
-fn empty_string() -> SharedString {
-    SharedString::default()
+/// One-based reference into `Library`'s interned-string pool; zero is empty.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct StringId {
+    id: u32,
 }
 
-fn empty_axis() -> SharedAxis {
-    Arc::new(Vec::new())
+impl StringId {
+    /// Returns whether this ID is the zero sentinel rather than a pool entry.
+    pub fn is_unset(self) -> bool {
+        self.id == 0
+    }
+
+    fn from_pool_id(id: u32) -> Self {
+        Self { id }
+    }
 }
 
-pub fn shared_string(value: impl Into<String>) -> SharedString {
-    value.into()
+/// One-based reference into `Library`'s LUT-axis pool; zero is an empty axis.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AxisId(u32);
+
+impl AxisId {
+    /// Returns whether this ID is the zero sentinel rather than a pool entry.
+    pub fn is_unset(self) -> bool {
+        self.0 == 0
+    }
 }
 
-pub fn shared_axis(values: Vec<f64>) -> SharedAxis {
-    Arc::new(values)
-}
-
-/// A range in a shared float32 LUT-value allocation.
+/// A range in a library-owned float32 LUT-value allocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LutValueRange {
-    pub start: u32,
-    pub len: u32,
+    start: u32,
+    len: u32,
 }
 
-/// A slice-like reference into a shared float32 LUT-value allocation.
-#[derive(Clone, Debug)]
-pub struct LutValues {
-    storage: Arc<Vec<f32>>,
-    range: LutValueRange,
-}
-
-impl Default for LutValues {
-    fn default() -> Self {
-        Self {
-            storage: Arc::new(Vec::new()),
-            range: LutValueRange::default(),
-        }
-    }
-}
-
-impl LutValues {
-    pub fn from_f32(values: Vec<f32>) -> Self {
-        let len = u32::try_from(values.len()).expect("LUT value count exceeds u32");
-        Self {
-            storage: Arc::new(values),
-            range: LutValueRange { start: 0, len },
-        }
+impl LutValueRange {
+    /// Returns the number of values in this range.
+    pub fn len(self) -> usize {
+        self.len as usize
     }
 
-    pub fn from_f64(values: Vec<f64>) -> Result<Self> {
-        Ok(Self::from_f32(values_to_f32(values)?))
-    }
-
-    fn from_shared(storage: Arc<Vec<f32>>, range: LutValueRange) -> Self {
-        Self { storage, range }
-    }
-
-    pub fn range(&self) -> LutValueRange {
-        self.range
-    }
-
-    pub fn shares_storage_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.storage, &other.storage)
-    }
-}
-
-impl Deref for LutValues {
-    type Target = [f32];
-
-    fn deref(&self) -> &Self::Target {
-        let start = self.range.start as usize;
-        let end = start + self.range.len as usize;
-        &self.storage[start..end]
-    }
-}
-
-impl<'a> IntoIterator for &'a LutValues {
-    type Item = &'a f32;
-    type IntoIter = std::slice::Iter<'a, f32>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-impl PartialEq for LutValues {
-    fn eq(&self, other: &Self) -> bool {
-        self.deref() == other.deref()
-    }
-}
-
-impl PartialEq<Vec<f32>> for LutValues {
-    fn eq(&self, other: &Vec<f32>) -> bool {
-        self.deref() == other.as_slice()
-    }
-}
-
-impl PartialEq<Vec<f64>> for LutValues {
-    fn eq(&self, other: &Vec<f64>) -> bool {
-        self.iter()
-            .copied()
-            .map(f64::from)
-            .eq(other.iter().copied())
-    }
-}
-
-impl From<Vec<f64>> for LutValues {
-    fn from(values: Vec<f64>) -> Self {
-        Self::from_f64(values).expect("test LUT values fit in float32")
+    /// Returns whether this range contains no values.
+    pub fn is_empty(self) -> bool {
+        self.len == 0
     }
 }
 
@@ -125,28 +56,28 @@ impl From<Vec<f64>> for LutValues {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LutShape {
     pub template_id: u32,
-    pub index_1: SharedAxis,
-    pub index_2: SharedAxis,
-    pub index_3: SharedAxis,
-    pub dimensions: Arc<Vec<u32>>,
-    pub template_name: SharedString,
+    pub index_1: AxisId,
+    pub index_2: AxisId,
+    pub index_3: AxisId,
+    pub dimensions: Box<[u32]>,
+    pub template_name: StringId,
 }
 
 impl Default for LutShape {
     fn default() -> Self {
         Self {
             template_id: 0,
-            index_1: empty_axis(),
-            index_2: empty_axis(),
-            index_3: empty_axis(),
-            dimensions: Arc::new(Vec::new()),
-            template_name: empty_string(),
+            index_1: AxisId::default(),
+            index_2: AxisId::default(),
+            index_3: AxisId::default(),
+            dimensions: Box::default(),
+            template_name: StringId::default(),
         }
     }
 }
 
 /// Fully populated in-memory Liberty library used by parsers and evaluators.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Library {
     pub cells: Vec<Cell>,
     pub units: Option<wire::LibraryUnits>,
@@ -157,6 +88,591 @@ pub struct Library {
     pub nominal_voltage: Option<f64>,
     pub provenance: String,
     pub source_files: Vec<String>,
+    pub(crate) strings: Vec<Box<str>>,
+    pub(crate) lut_axes: Vec<Box<[f64]>>,
+    pub(crate) lut_shapes: Vec<LutShape>,
+    pub(crate) lut_values: Vec<f32>,
+}
+
+/// Mutable construction state for a pooled Liberty runtime model.
+#[derive(Debug, Default)]
+pub struct LibraryBuilder {
+    library: Library,
+    string_id_by_value: HashMap<String, StringId>,
+    axis_id_by_value: HashMap<Vec<u64>, AxisId>,
+}
+
+impl Library {
+    /// Resolves an interned string ID.
+    pub fn resolve_string(&self, id: &StringId) -> &str {
+        if id.id == 0 {
+            return "";
+        }
+        self.strings
+            .get((id.id - 1) as usize)
+            .expect("validated interned string ID")
+    }
+
+    /// Resolves an interned LUT-axis ID.
+    pub fn resolve_axis(&self, id: AxisId) -> &[f64] {
+        if id.0 == 0 {
+            return &[];
+        }
+        self.lut_axes
+            .get((id.0 - 1) as usize)
+            .expect("validated LUT axis ID")
+    }
+
+    /// Removes unreferenced pool entries, coalesces duplicates, and remaps IDs.
+    pub(crate) fn compact_reference_pools(&mut self) {
+        fn mark_string(id: StringId, used: &mut [bool]) {
+            if !id.is_unset() {
+                used[(id.id - 1) as usize] = true;
+            }
+        }
+
+        fn remap_string(id: &mut StringId, remap: &[StringId]) {
+            if !id.is_unset() {
+                *id = remap[(id.id - 1) as usize];
+            }
+        }
+
+        let mut used_strings = vec![false; self.strings.len()];
+        for template in &self.lu_table_templates {
+            mark_string(template.kind.other, &mut used_strings);
+            mark_string(template.variable_1.other, &mut used_strings);
+            mark_string(template.variable_2.other, &mut used_strings);
+            mark_string(template.variable_3.other, &mut used_strings);
+        }
+        for shape in &self.lut_shapes {
+            mark_string(shape.template_name, &mut used_strings);
+        }
+        for cell in &self.cells {
+            for pin in &cell.pins {
+                mark_string(pin.function, &mut used_strings);
+                mark_string(pin.name, &mut used_strings);
+                for arc in &pin.timing_arcs {
+                    mark_string(arc.related_pin, &mut used_strings);
+                    mark_string(arc.timing_sense.other, &mut used_strings);
+                    mark_string(arc.timing_type.other, &mut used_strings);
+                    mark_string(arc.when, &mut used_strings);
+                }
+                for group in &pin.internal_power {
+                    for related_pin in &group.related_pins {
+                        mark_string(*related_pin, &mut used_strings);
+                    }
+                    mark_string(group.when, &mut used_strings);
+                    mark_string(group.related_pg_pin, &mut used_strings);
+                }
+            }
+        }
+
+        let old_strings = std::mem::take(&mut self.strings);
+        let mut string_remap = vec![StringId::default(); old_strings.len()];
+        let mut string_id_by_value = HashMap::new();
+        for (old_index, value) in old_strings.into_iter().enumerate() {
+            if !used_strings[old_index] {
+                continue;
+            }
+            let id = if let Some(id) = string_id_by_value.get(value.as_ref()) {
+                *id
+            } else {
+                let id = StringId::from_pool_id(self.strings.len() as u32 + 1);
+                string_id_by_value.insert(value.to_string(), id);
+                self.strings.push(value);
+                id
+            };
+            string_remap[old_index] = id;
+        }
+        for template in &mut self.lu_table_templates {
+            remap_string(&mut template.kind.other, &string_remap);
+            remap_string(&mut template.variable_1.other, &string_remap);
+            remap_string(&mut template.variable_2.other, &string_remap);
+            remap_string(&mut template.variable_3.other, &string_remap);
+        }
+        for shape in &mut self.lut_shapes {
+            remap_string(&mut shape.template_name, &string_remap);
+        }
+        for cell in &mut self.cells {
+            for pin in &mut cell.pins {
+                remap_string(&mut pin.function, &string_remap);
+                remap_string(&mut pin.name, &string_remap);
+                for arc in &mut pin.timing_arcs {
+                    remap_string(&mut arc.related_pin, &string_remap);
+                    remap_string(&mut arc.timing_sense.other, &string_remap);
+                    remap_string(&mut arc.timing_type.other, &string_remap);
+                    remap_string(&mut arc.when, &string_remap);
+                }
+                for group in &mut pin.internal_power {
+                    for related_pin in &mut group.related_pins {
+                        remap_string(related_pin, &string_remap);
+                    }
+                    remap_string(&mut group.when, &string_remap);
+                    remap_string(&mut group.related_pg_pin, &string_remap);
+                }
+            }
+        }
+
+        let mut used_axes = vec![false; self.lut_axes.len()];
+        for shape in &self.lut_shapes {
+            for id in [shape.index_1, shape.index_2, shape.index_3] {
+                if !id.is_unset() {
+                    used_axes[(id.0 - 1) as usize] = true;
+                }
+            }
+        }
+        let old_axes = std::mem::take(&mut self.lut_axes);
+        let mut axis_remap = vec![AxisId::default(); old_axes.len()];
+        let mut axis_id_by_value = HashMap::new();
+        for (old_index, axis) in old_axes.into_iter().enumerate() {
+            if !used_axes[old_index] {
+                continue;
+            }
+            let key = axis_key(&axis);
+            let id = if let Some(id) = axis_id_by_value.get(&key) {
+                *id
+            } else {
+                let id = AxisId(self.lut_axes.len() as u32 + 1);
+                axis_id_by_value.insert(key, id);
+                self.lut_axes.push(axis);
+                id
+            };
+            axis_remap[old_index] = id;
+        }
+        for shape in &mut self.lut_shapes {
+            for id in [&mut shape.index_1, &mut shape.index_2, &mut shape.index_3] {
+                if !id.is_unset() {
+                    *id = axis_remap[(id.0 - 1) as usize];
+                }
+            }
+        }
+    }
+
+    fn lut_shape(&self, shape_id: u32) -> &LutShape {
+        self.lut_shapes
+            .get((shape_id - 1) as usize)
+            .expect("validated LUT shape ID")
+    }
+
+    /// Resolves the library-owned shape referenced by a timing table.
+    pub fn timing_table_shape<'a>(&'a self, table: &'a TimingTable) -> &'a LutShape {
+        self.lut_shape(table.shape_id)
+    }
+
+    /// Resolves all explicit axes referenced by a timing table.
+    pub fn timing_table_axes<'a>(&'a self, table: &'a TimingTable) -> [&'a [f64]; 3] {
+        let shape = self.lut_shape(table.shape_id);
+        [
+            self.resolve_axis(shape.index_1),
+            self.resolve_axis(shape.index_2),
+            self.resolve_axis(shape.index_3),
+        ]
+    }
+
+    /// Resolves the legacy template name referenced by a timing table.
+    pub fn timing_table_template_name<'a>(&'a self, table: &'a TimingTable) -> &'a str {
+        self.resolve_string(&self.lut_shape(table.shape_id).template_name)
+    }
+
+    /// Resolves the library-owned shape referenced by a power table.
+    pub fn power_table_shape<'a>(&'a self, table: &'a PowerTable) -> &'a LutShape {
+        self.lut_shape(table.shape_id)
+    }
+
+    /// Resolves all explicit axes referenced by a power table.
+    pub fn power_table_axes<'a>(&'a self, table: &'a PowerTable) -> [&'a [f64]; 3] {
+        let shape = self.lut_shape(table.shape_id);
+        [
+            self.resolve_axis(shape.index_1),
+            self.resolve_axis(shape.index_2),
+            self.resolve_axis(shape.index_3),
+        ]
+    }
+
+    /// Resolves the legacy template name referenced by a power table.
+    pub fn power_table_template_name<'a>(&'a self, table: &'a PowerTable) -> &'a str {
+        self.resolve_string(&self.lut_shape(table.shape_id).template_name)
+    }
+
+    fn lut_values(&self, range: LutValueRange) -> &[f32] {
+        let start = range.start as usize;
+        let end = start + range.len as usize;
+        self.lut_values
+            .get(start..end)
+            .expect("validated LUT value range")
+    }
+
+    /// Resolves the library-owned values referenced by a timing table.
+    pub fn timing_table_values<'a>(&'a self, table: &'a TimingTable) -> &'a [f32] {
+        self.lut_values(table.values)
+    }
+
+    /// Resolves the library-owned values referenced by a power table.
+    pub fn power_table_values<'a>(&'a self, table: &'a PowerTable) -> &'a [f32] {
+        self.lut_values(table.values)
+    }
+}
+
+impl LibraryBuilder {
+    /// Creates an empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resumes construction from an existing pooled model.
+    pub fn from_library(mut library: Library) -> Self {
+        library.compact_reference_pools();
+        let string_id_by_value = library
+            .strings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.to_string(), StringId::from_pool_id(index as u32 + 1)))
+            .collect();
+        let axis_id_by_value = library
+            .lut_axes
+            .iter()
+            .enumerate()
+            .map(|(index, axis)| (axis_key(axis), AxisId(index as u32 + 1)))
+            .collect();
+        Self {
+            library,
+            string_id_by_value,
+            axis_id_by_value,
+        }
+    }
+
+    /// Returns the model under construction.
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// Returns mutable non-pool model data under construction.
+    pub fn library_mut(&mut self) -> &mut Library {
+        &mut self.library
+    }
+
+    /// Finishes construction and discards interning state.
+    pub fn finish(mut self) -> Library {
+        self.library.compact_reference_pools();
+        self.library
+    }
+
+    /// Interns a string for use by a model record.
+    pub fn intern_string(&mut self, value: impl AsRef<str>) -> Result<StringId> {
+        let value = value.as_ref();
+        if value.is_empty() {
+            return Ok(StringId::default());
+        }
+        if let Some(id) = self.string_id_by_value.get(value) {
+            return Ok(*id);
+        }
+        let id = StringId::from_pool_id(
+            u32::try_from(self.library.strings.len() + 1)
+                .map_err(|_| anyhow::anyhow!("too many interned strings"))?,
+        );
+        self.library.strings.push(value.into());
+        self.string_id_by_value.insert(value.to_string(), id);
+        Ok(id)
+    }
+
+    fn intern_axis(&mut self, values: Vec<f64>) -> Result<AxisId> {
+        if values.is_empty() {
+            return Ok(AxisId::default());
+        }
+        let key = axis_key(&values);
+        if let Some(id) = self.axis_id_by_value.get(&key) {
+            return Ok(*id);
+        }
+        let id = AxisId(
+            u32::try_from(self.library.lut_axes.len() + 1)
+                .map_err(|_| anyhow::anyhow!("too many LUT axes"))?,
+        );
+        self.library.lut_axes.push(values.into_boxed_slice());
+        self.axis_id_by_value.insert(key, id);
+        Ok(id)
+    }
+
+    fn append_lut_values(&mut self, mut values: Vec<f32>) -> Result<LutValueRange> {
+        let start = u32::try_from(self.library.lut_values.len())
+            .map_err(|_| anyhow::anyhow!("LUT value storage exceeds u32"))?;
+        let len = u32::try_from(values.len())
+            .map_err(|_| anyhow::anyhow!("LUT table value count exceeds u32"))?;
+        self.library.lut_values.append(&mut values);
+        Ok(LutValueRange { start, len })
+    }
+
+    fn append_lut_shape(&mut self, shape: LutShape) -> Result<u32> {
+        self.library.lut_shapes.push(shape);
+        u32::try_from(self.library.lut_shapes.len())
+            .map_err(|_| anyhow::anyhow!("too many LUT shapes"))
+    }
+
+    /// Builds a timing arc whose selector strings are interned in this library.
+    pub fn add_timing_arc(
+        &mut self,
+        related_pin: impl AsRef<str>,
+        timing_sense: impl AsRef<str>,
+        timing_type: impl AsRef<str>,
+        when: impl AsRef<str>,
+        tables: Vec<TimingTable>,
+    ) -> Result<TimingArc> {
+        let related_pin = self.intern_string(related_pin)?;
+        let timing_sense = TimingSense::from_raw_in(self, timing_sense.as_ref())?;
+        let timing_type = TimingType::from_raw_in(self, timing_type.as_ref())?;
+        let when = self.intern_string(when)?;
+        Ok(TimingArc {
+            related_pin,
+            timing_sense,
+            timing_type,
+            when,
+            tables,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Adds a timing table and returns its pooled table record.
+    pub fn add_timing_table_f64(
+        &mut self,
+        kind: wire::TimingTableKind,
+        template_id: u32,
+        index_1: Vec<f64>,
+        index_2: Vec<f64>,
+        index_3: Vec<f64>,
+        values: Vec<f64>,
+        dimensions: Vec<u32>,
+        template_name: impl Into<String>,
+    ) -> Result<TimingTable> {
+        let axes = [
+            self.intern_axis(index_1)?,
+            self.intern_axis(index_2)?,
+            self.intern_axis(index_3)?,
+        ];
+        let template_name: String = template_name.into();
+        let template_name = self.intern_string(template_name)?;
+        let shape_id = self.append_lut_shape(LutShape {
+            template_id,
+            index_1: axes[0],
+            index_2: axes[1],
+            index_3: axes[2],
+            dimensions: dimensions.into_boxed_slice(),
+            template_name,
+        })?;
+        let values = self.append_lut_values(values_to_f32(values)?)?;
+        Ok(TimingTable {
+            kind,
+            shape_id,
+            values,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Adds a power table and returns its pooled table record.
+    pub fn add_power_table_f64(
+        &mut self,
+        transition: wire::PowerTransition,
+        template_id: u32,
+        index_1: Vec<f64>,
+        index_2: Vec<f64>,
+        index_3: Vec<f64>,
+        values: Vec<f64>,
+        dimensions: Vec<u32>,
+        template_name: impl Into<String>,
+    ) -> Result<PowerTable> {
+        let axes = [
+            self.intern_axis(index_1)?,
+            self.intern_axis(index_2)?,
+            self.intern_axis(index_3)?,
+        ];
+        let template_name: String = template_name.into();
+        let template_name = self.intern_string(template_name)?;
+        let shape_id = self.append_lut_shape(LutShape {
+            template_id,
+            index_1: axes[0],
+            index_2: axes[1],
+            index_3: axes[2],
+            dimensions: dimensions.into_boxed_slice(),
+            template_name,
+        })?;
+        let values = self.append_lut_values(values_to_f32(values)?)?;
+        Ok(PowerTable {
+            transition,
+            shape_id,
+            values,
+        })
+    }
+}
+
+impl Deref for LibraryBuilder {
+    type Target = Library;
+
+    fn deref(&self) -> &Self::Target {
+        &self.library
+    }
+}
+
+impl DerefMut for LibraryBuilder {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.library
+    }
+}
+
+impl From<LibraryBuilder> for Library {
+    fn from(builder: LibraryBuilder) -> Self {
+        builder.finish()
+    }
+}
+
+impl Library {
+    pub(crate) fn append_cells_and_luts(&mut self, mut other: Library) -> Result<()> {
+        fn offset_string(id: &mut StringId, offset: u32) -> Result<()> {
+            if id.id != 0 {
+                id.id = id
+                    .id
+                    .checked_add(offset)
+                    .ok_or_else(|| anyhow::anyhow!("interned string ID overflow"))?;
+            }
+            Ok(())
+        }
+
+        fn offset_axis(id: &mut AxisId, offset: u32) -> Result<()> {
+            if id.0 != 0 {
+                id.0 =
+                    id.0.checked_add(offset)
+                        .ok_or_else(|| anyhow::anyhow!("LUT axis ID overflow"))?;
+            }
+            Ok(())
+        }
+
+        let string_offset = u32::try_from(self.strings.len())
+            .map_err(|_| anyhow::anyhow!("too many interned strings"))?;
+        let axis_offset =
+            u32::try_from(self.lut_axes.len()).map_err(|_| anyhow::anyhow!("too many LUT axes"))?;
+        let shape_offset = u32::try_from(self.lut_shapes.len())
+            .map_err(|_| anyhow::anyhow!("too many LUT shapes"))?;
+        let value_offset = u32::try_from(self.lut_values.len())
+            .map_err(|_| anyhow::anyhow!("LUT value storage exceeds u32"))?;
+        for cell in &mut other.cells {
+            for pin in &mut cell.pins {
+                offset_string(&mut pin.function, string_offset)?;
+                offset_string(&mut pin.name, string_offset)?;
+                for arc in &mut pin.timing_arcs {
+                    offset_string(&mut arc.related_pin, string_offset)?;
+                    offset_string(&mut arc.timing_sense.other, string_offset)?;
+                    offset_string(&mut arc.timing_type.other, string_offset)?;
+                    offset_string(&mut arc.when, string_offset)?;
+                    for table in &mut arc.tables {
+                        table.shape_id = table
+                            .shape_id
+                            .checked_add(shape_offset)
+                            .ok_or_else(|| anyhow::anyhow!("LUT shape ID overflow"))?;
+                        table.values.start = table
+                            .values
+                            .start
+                            .checked_add(value_offset)
+                            .ok_or_else(|| anyhow::anyhow!("LUT value offset overflow"))?;
+                    }
+                }
+                for group in &mut pin.internal_power {
+                    for related_pin in &mut group.related_pins {
+                        offset_string(related_pin, string_offset)?;
+                    }
+                    offset_string(&mut group.when, string_offset)?;
+                    offset_string(&mut group.related_pg_pin, string_offset)?;
+                    for table in &mut group.tables {
+                        table.shape_id = table
+                            .shape_id
+                            .checked_add(shape_offset)
+                            .ok_or_else(|| anyhow::anyhow!("LUT shape ID overflow"))?;
+                        table.values.start = table
+                            .values
+                            .start
+                            .checked_add(value_offset)
+                            .ok_or_else(|| anyhow::anyhow!("LUT value offset overflow"))?;
+                    }
+                }
+            }
+        }
+        for template in &mut other.lu_table_templates {
+            offset_string(&mut template.kind.other, string_offset)?;
+            offset_string(&mut template.variable_1.other, string_offset)?;
+            offset_string(&mut template.variable_2.other, string_offset)?;
+            offset_string(&mut template.variable_3.other, string_offset)?;
+        }
+        for shape in &mut other.lut_shapes {
+            offset_axis(&mut shape.index_1, axis_offset)?;
+            offset_axis(&mut shape.index_2, axis_offset)?;
+            offset_axis(&mut shape.index_3, axis_offset)?;
+            offset_string(&mut shape.template_name, string_offset)?;
+        }
+        self.cells.append(&mut other.cells);
+        self.lu_table_templates
+            .append(&mut other.lu_table_templates);
+        self.strings.append(&mut other.strings);
+        self.lut_axes.append(&mut other.lut_axes);
+        self.lut_shapes.append(&mut other.lut_shapes);
+        self.lut_values.append(&mut other.lut_values);
+        Ok(())
+    }
+
+    fn compact_lut_pools(&mut self) {
+        fn compact_table(
+            shape_id: &mut u32,
+            values: &mut LutValueRange,
+            old_shapes: &[LutShape],
+            old_values: &[f32],
+            new_shapes: &mut Vec<LutShape>,
+            new_shape_id_by_old: &mut HashMap<u32, u32>,
+            new_values: &mut Vec<f32>,
+        ) {
+            let new_shape_id = *new_shape_id_by_old.entry(*shape_id).or_insert_with(|| {
+                new_shapes.push(old_shapes[(*shape_id - 1) as usize].clone());
+                new_shapes.len() as u32
+            });
+            *shape_id = new_shape_id;
+            let old_start = values.start as usize;
+            let old_end = old_start + values.len as usize;
+            values.start = new_values.len() as u32;
+            new_values.extend_from_slice(&old_values[old_start..old_end]);
+        }
+
+        let old_shapes = std::mem::take(&mut self.lut_shapes);
+        let old_values = std::mem::take(&mut self.lut_values);
+        let mut new_shapes = Vec::new();
+        let mut new_shape_id_by_old = HashMap::new();
+        let mut new_values = Vec::new();
+        for cell in &mut self.cells {
+            for pin in &mut cell.pins {
+                for arc in &mut pin.timing_arcs {
+                    for table in &mut arc.tables {
+                        compact_table(
+                            &mut table.shape_id,
+                            &mut table.values,
+                            &old_shapes,
+                            &old_values,
+                            &mut new_shapes,
+                            &mut new_shape_id_by_old,
+                            &mut new_values,
+                        );
+                    }
+                }
+                for group in &mut pin.internal_power {
+                    for table in &mut group.tables {
+                        compact_table(
+                            &mut table.shape_id,
+                            &mut table.values,
+                            &old_shapes,
+                            &old_values,
+                            &mut new_shapes,
+                            &mut new_shape_id_by_old,
+                            &mut new_values,
+                        );
+                    }
+                }
+            }
+        }
+        self.lut_shapes = new_shapes;
+        self.lut_values = new_values;
+    }
 }
 
 /// Normalized cell data.
@@ -175,8 +691,8 @@ pub struct Cell {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pin {
     pub direction: i32,
-    pub function: SharedString,
-    pub name: SharedString,
+    pub function: StringId,
+    pub name: StringId,
     pub is_clocking_pin: bool,
     pub capacitance: Option<f64>,
     pub rise_capacitance: Option<f64>,
@@ -186,70 +702,149 @@ pub struct Pin {
     pub internal_power: Vec<InternalPower>,
 }
 
+macro_rules! liberty_enum_value {
+    ($name:ident, $wire:ty, $default:path, $parse:path, $format:path) => {
+        #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        pub struct $name {
+            value: $wire,
+            other: StringId,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    value: $default,
+                    other: StringId::default(),
+                }
+            }
+        }
+
+        impl $name {
+            fn from_wire(value: $wire, other: StringId) -> Self {
+                Self { value, other }
+            }
+
+            pub(crate) fn from_raw_in(builder: &mut LibraryBuilder, raw: &str) -> Result<Self> {
+                let value = $parse(raw);
+                let other = if value == <$wire>::Other {
+                    builder.intern_string(raw)?
+                } else {
+                    StringId::default()
+                };
+                Ok(Self { value, other })
+            }
+
+            pub fn as_str<'a>(&'a self, library: &'a Library) -> &'a str {
+                $format(self.value, library.resolve_string(&self.other))
+            }
+
+            pub fn wire_value(&self) -> $wire {
+                self.value
+            }
+
+            fn fallback<'a>(&'a self, library: &'a Library) -> &'a str {
+                library.resolve_string(&self.other)
+            }
+        }
+
+        #[cfg(test)]
+        impl From<String> for $name {
+            fn from(raw: String) -> Self {
+                let value = $parse(&raw);
+                assert_ne!(value, <$wire>::Other, "unknown test enum value '{raw}'");
+                Self {
+                    value,
+                    other: StringId::default(),
+                }
+            }
+        }
+
+        #[cfg(test)]
+        impl From<&str> for $name {
+            fn from(raw: &str) -> Self {
+                raw.to_string().into()
+            }
+        }
+    };
+}
+
+liberty_enum_value!(
+    LutTemplateKind,
+    wire::LutTemplateKind,
+    wire::LutTemplateKind::Unknown,
+    lut_template_kind_to_wire,
+    lut_template_kind_str
+);
+liberty_enum_value!(
+    LutVariable,
+    wire::LutVariable,
+    wire::LutVariable::Unspecified,
+    lut_variable_to_wire,
+    lut_variable_str
+);
+liberty_enum_value!(
+    TimingSense,
+    wire::TimingSense,
+    wire::TimingSense::Unspecified,
+    timing_sense_to_wire,
+    timing_sense_str
+);
+liberty_enum_value!(
+    TimingType,
+    wire::TimingType,
+    wire::TimingType::Unspecified,
+    timing_type_to_wire,
+    timing_type_str
+);
+
 /// LUT template metadata; table payloads share canonicalized shapes separately.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LuTableTemplate {
-    pub kind: String,
+    pub kind: LutTemplateKind,
     pub name: String,
-    pub variable_1: String,
-    pub variable_2: String,
-    pub variable_3: String,
+    pub variable_1: LutVariable,
+    pub variable_2: LutVariable,
+    pub variable_3: LutVariable,
     pub index_1: Vec<f64>,
     pub index_2: Vec<f64>,
     pub index_3: Vec<f64>,
 }
 
 impl LuTableTemplate {
-    pub fn kind_str(&self) -> &str {
-        self.kind.as_str()
+    pub fn kind_str<'a>(&'a self, library: &'a Library) -> &'a str {
+        self.kind.as_str(library)
     }
 
-    pub fn variable_1_str(&self) -> &str {
-        self.variable_1.as_str()
+    pub fn variable_1_str<'a>(&'a self, library: &'a Library) -> &'a str {
+        self.variable_1.as_str(library)
     }
 
-    pub fn variable_2_str(&self) -> &str {
-        self.variable_2.as_str()
+    pub fn variable_2_str<'a>(&'a self, library: &'a Library) -> &'a str {
+        self.variable_2.as_str(library)
     }
 
-    pub fn variable_3_str(&self) -> &str {
-        self.variable_3.as_str()
+    pub fn variable_3_str<'a>(&'a self, library: &'a Library) -> &'a str {
+        self.variable_3.as_str(library)
     }
 }
 
 /// Normalized timing arc.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TimingArc {
-    pub related_pin: SharedString,
-    pub timing_sense: String,
-    pub timing_type: String,
-    pub when: SharedString,
+    pub related_pin: StringId,
+    pub timing_sense: TimingSense,
+    pub timing_type: TimingType,
+    pub when: StringId,
     pub tables: Vec<TimingTable>,
 }
 
 impl TimingArc {
-    pub fn from_raw(
-        related_pin: impl Into<String>,
-        timing_sense: impl AsRef<str>,
-        timing_type: impl AsRef<str>,
-        when: impl Into<String>,
-        tables: Vec<TimingTable>,
-    ) -> Self {
-        Self {
-            related_pin: related_pin.into(),
-            timing_sense: timing_sense.as_ref().to_string(),
-            timing_type: timing_type.as_ref().to_string(),
-            when: when.into(),
-            tables,
-        }
+    pub fn timing_sense_str<'a>(&'a self, library: &'a Library) -> &'a str {
+        self.timing_sense.as_str(library)
     }
 
-    pub fn timing_sense_str(&self) -> &str {
-        self.timing_sense.as_str()
-    }
-
-    pub fn timing_type_str(&self) -> &str {
-        self.timing_type.as_str()
+    pub fn timing_type_str<'a>(&'a self, library: &'a Library) -> &'a str {
+        self.timing_type.as_str(library)
     }
 }
 
@@ -257,44 +852,29 @@ impl TimingArc {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimingTable {
     pub kind: wire::TimingTableKind,
-    pub shape: Arc<LutShape>,
-    pub values: LutValues,
+    shape_id: u32,
+    values: LutValueRange,
 }
 
 impl Default for TimingTable {
     fn default() -> Self {
         Self {
             kind: wire::TimingTableKind::Unknown,
-            shape: Arc::new(LutShape::default()),
-            values: LutValues::default(),
+            shape_id: 0,
+            values: LutValueRange::default(),
         }
     }
 }
 
 impl TimingTable {
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_f64(
-        kind: wire::TimingTableKind,
-        template_id: u32,
-        index_1: Vec<f64>,
-        index_2: Vec<f64>,
-        index_3: Vec<f64>,
-        values: Vec<f64>,
-        dimensions: Vec<u32>,
-        template_name: impl Into<String>,
-    ) -> Self {
-        Self {
-            kind,
-            shape: Arc::new(LutShape {
-                template_id,
-                index_1: shared_axis(index_1),
-                index_2: shared_axis(index_2),
-                index_3: shared_axis(index_3),
-                dimensions: Arc::new(dimensions),
-                template_name: template_name.into(),
-            }),
-            values: values.into(),
-        }
+    /// Returns the one-based ID of this table's library-owned shape.
+    pub fn shape_id(&self) -> u32 {
+        self.shape_id
+    }
+
+    /// Returns this table's range in the library-owned value allocation.
+    pub fn value_range(&self) -> LutValueRange {
+        self.values
     }
 
     pub fn kind_str(&self) -> &'static str {
@@ -302,26 +882,12 @@ impl TimingTable {
     }
 }
 
-impl Deref for TimingTable {
-    type Target = LutShape;
-
-    fn deref(&self) -> &Self::Target {
-        &self.shape
-    }
-}
-
-impl std::ops::DerefMut for TimingTable {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        Arc::make_mut(&mut self.shape)
-    }
-}
-
 /// Normalized internal-power selector and table data.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InternalPower {
-    pub related_pins: Vec<SharedString>,
-    pub when: SharedString,
-    pub related_pg_pin: SharedString,
+    pub related_pins: Vec<StringId>,
+    pub when: StringId,
+    pub related_pg_pin: StringId,
     pub tables: Vec<PowerTable>,
 }
 
@@ -329,8 +895,8 @@ impl Default for InternalPower {
     fn default() -> Self {
         Self {
             related_pins: Vec::new(),
-            when: empty_string(),
-            related_pg_pin: empty_string(),
+            when: StringId::default(),
+            related_pg_pin: StringId::default(),
             tables: Vec::new(),
         }
     }
@@ -340,58 +906,29 @@ impl Default for InternalPower {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PowerTable {
     pub transition: wire::PowerTransition,
-    pub shape: Arc<LutShape>,
-    pub values: LutValues,
+    shape_id: u32,
+    values: LutValueRange,
 }
 
 impl Default for PowerTable {
     fn default() -> Self {
         Self {
             transition: wire::PowerTransition::Unknown,
-            shape: Arc::new(LutShape::default()),
-            values: LutValues::default(),
+            shape_id: 0,
+            values: LutValueRange::default(),
         }
     }
 }
 
 impl PowerTable {
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_f64(
-        transition: wire::PowerTransition,
-        template_id: u32,
-        index_1: Vec<f64>,
-        index_2: Vec<f64>,
-        index_3: Vec<f64>,
-        values: Vec<f64>,
-        dimensions: Vec<u32>,
-        template_name: impl Into<String>,
-    ) -> Self {
-        Self {
-            transition,
-            shape: Arc::new(LutShape {
-                template_id,
-                index_1: shared_axis(index_1),
-                index_2: shared_axis(index_2),
-                index_3: shared_axis(index_3),
-                dimensions: Arc::new(dimensions),
-                template_name: template_name.into(),
-            }),
-            values: values.into(),
-        }
+    /// Returns the one-based ID of this table's library-owned shape.
+    pub fn shape_id(&self) -> u32 {
+        self.shape_id
     }
-}
 
-impl Deref for PowerTable {
-    type Target = LutShape;
-
-    fn deref(&self) -> &Self::Target {
-        &self.shape
-    }
-}
-
-impl std::ops::DerefMut for PowerTable {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        Arc::make_mut(&mut self.shape)
+    /// Returns this table's range in the library-owned value allocation.
+    pub fn value_range(&self) -> LutValueRange {
+        self.values
     }
 }
 
@@ -404,6 +941,18 @@ fn enum_string<'a, E: Copy + PartialEq>(
         .iter()
         .find_map(|(candidate, text)| (*candidate == value).then_some(*text))
         .unwrap_or(other)
+}
+
+fn lut_template_kind_str(value: wire::LutTemplateKind, other: &str) -> &str {
+    enum_string(
+        value,
+        other,
+        &[
+            (wire::LutTemplateKind::Unknown, ""),
+            (wire::LutTemplateKind::Timing, "lu_table_template"),
+            (wire::LutTemplateKind::Power, "power_lut_template"),
+        ],
+    )
 }
 
 fn lut_variable_str(value: wire::LutVariable, other: &str) -> &str {
@@ -503,6 +1052,19 @@ fn timing_type_str(value: wire::TimingType, other: &str) -> &str {
     }
 }
 
+fn timing_sense_str(value: wire::TimingSense, other: &str) -> &str {
+    enum_string(
+        value,
+        other,
+        &[
+            (wire::TimingSense::Unspecified, ""),
+            (wire::TimingSense::PositiveUnate, "positive_unate"),
+            (wire::TimingSense::NegativeUnate, "negative_unate"),
+            (wire::TimingSense::NonUnate, "non_unate"),
+        ],
+    )
+}
+
 pub fn timing_table_kind_str(value: wire::TimingTableKind) -> &'static str {
     match value {
         wire::TimingTableKind::Unknown => "",
@@ -533,19 +1095,8 @@ fn retain_templates_and_remap_ids(
             *id = id_remap.get(*id as usize).copied().unwrap_or(0);
         }
     };
-    for cell in &mut library.cells {
-        for pin in &mut cell.pins {
-            for arc in &mut pin.timing_arcs {
-                for table in &mut arc.tables {
-                    remap(&mut Arc::make_mut(&mut table.shape).template_id);
-                }
-            }
-            for group in &mut pin.internal_power {
-                for table in &mut group.tables {
-                    remap(&mut Arc::make_mut(&mut table.shape).template_id);
-                }
-            }
-        }
+    for shape in &mut library.lut_shapes {
+        remap(&mut shape.template_id);
     }
 }
 
@@ -556,7 +1107,11 @@ pub fn strip_timing_data(library: &mut Library) {
             pin.timing_arcs.clear();
         }
     }
-    retain_templates_and_remap_ids(library, |template| template.kind != "lu_table_template");
+    library.compact_lut_pools();
+    retain_templates_and_remap_ids(library, |template| {
+        template.kind.wire_value() != wire::LutTemplateKind::Timing
+    });
+    library.compact_reference_pools();
 }
 
 /// Removes dynamic-power payloads and templates from normalized library data.
@@ -567,7 +1122,11 @@ pub fn strip_power_data(library: &mut Library) {
             pin.internal_power.clear();
         }
     }
-    retain_templates_and_remap_ids(library, |template| template.kind != "power_lut_template");
+    library.compact_lut_pools();
+    retain_templates_and_remap_ids(library, |template| {
+        template.kind.wire_value() != wire::LutTemplateKind::Power
+    });
+    library.compact_reference_pools();
 }
 
 /// Wire-format discriminator stored in every serialized Liberty library.
@@ -747,8 +1306,8 @@ fn collect_string_frequencies(library: &Library) -> HashMap<String, u64> {
     let mut frequencies = HashMap::new();
     for template in &library.lu_table_templates {
         record_enum_fallback(
-            &template.kind,
-            lut_template_kind_to_wire(&template.kind) == wire::LutTemplateKind::Other,
+            template.kind.fallback(library),
+            template.kind.wire_value() == wire::LutTemplateKind::Other,
             &mut frequencies,
         );
         for variable in [
@@ -757,43 +1316,46 @@ fn collect_string_frequencies(library: &Library) -> HashMap<String, u64> {
             &template.variable_3,
         ] {
             record_enum_fallback(
-                variable,
-                lut_variable_to_wire(variable) == wire::LutVariable::Other,
+                variable.fallback(library),
+                variable.wire_value() == wire::LutVariable::Other,
                 &mut frequencies,
             );
         }
     }
     for cell in &library.cells {
         for pin in &cell.pins {
-            record_string(&pin.function, &mut frequencies);
-            record_string(&pin.name, &mut frequencies);
+            record_string(library.resolve_string(&pin.function), &mut frequencies);
+            record_string(library.resolve_string(&pin.name), &mut frequencies);
             for arc in &pin.timing_arcs {
-                record_string(&arc.related_pin, &mut frequencies);
-                record_string(&arc.when, &mut frequencies);
+                record_string(library.resolve_string(&arc.related_pin), &mut frequencies);
+                record_string(library.resolve_string(&arc.when), &mut frequencies);
                 record_enum_fallback(
-                    &arc.timing_sense,
-                    timing_sense_to_wire(&arc.timing_sense) == wire::TimingSense::Other,
+                    arc.timing_sense.fallback(library),
+                    arc.timing_sense.wire_value() == wire::TimingSense::Other,
                     &mut frequencies,
                 );
                 record_enum_fallback(
-                    &arc.timing_type,
-                    timing_type_to_wire(&arc.timing_type) == wire::TimingType::Other,
+                    arc.timing_type.fallback(library),
+                    arc.timing_type.wire_value() == wire::TimingType::Other,
                     &mut frequencies,
                 );
                 for table in &arc.tables {
                     if table.kind != wire::TimingTableKind::Unknown {
-                        record_string(&table.shape.template_name, &mut frequencies);
+                        record_string(library.timing_table_template_name(table), &mut frequencies);
                     }
                 }
             }
             for group in &pin.internal_power {
                 for related_pin in &group.related_pins {
-                    record_string(related_pin, &mut frequencies);
+                    record_string(library.resolve_string(related_pin), &mut frequencies);
                 }
-                record_string(&group.when, &mut frequencies);
-                record_string(&group.related_pg_pin, &mut frequencies);
+                record_string(library.resolve_string(&group.when), &mut frequencies);
+                record_string(
+                    library.resolve_string(&group.related_pg_pin),
+                    &mut frequencies,
+                );
                 for table in &group.tables {
-                    record_string(&table.shape.template_name, &mut frequencies);
+                    record_string(library.power_table_template_name(table), &mut frequencies);
                 }
             }
         }
@@ -852,7 +1414,7 @@ fn values_to_f32(values: Vec<f64>) -> Result<Vec<f32>> {
 /// Converts normalized data into the compact protobuf representation.
 ///
 /// Timing-table kinds not consumed by the deterministic evaluator are omitted.
-pub fn library_to_proto(library: Library) -> Result<wire::Library> {
+pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
     let mut axis_frequencies = HashMap::new();
     for template in &library.lu_table_templates {
         record_axis(&template.index_1, &mut axis_frequencies);
@@ -866,16 +1428,16 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
                     if table.kind == wire::TimingTableKind::Unknown {
                         continue;
                     }
-                    record_axis(&table.shape.index_1, &mut axis_frequencies);
-                    record_axis(&table.shape.index_2, &mut axis_frequencies);
-                    record_axis(&table.shape.index_3, &mut axis_frequencies);
+                    for axis in library.timing_table_axes(table) {
+                        record_axis(axis, &mut axis_frequencies);
+                    }
                 }
             }
             for group in &pin.internal_power {
                 for table in &group.tables {
-                    record_axis(&table.shape.index_1, &mut axis_frequencies);
-                    record_axis(&table.shape.index_2, &mut axis_frequencies);
-                    record_axis(&table.shape.index_3, &mut axis_frequencies);
+                    for axis in library.power_table_axes(table) {
+                        record_axis(axis, &mut axis_frequencies);
+                    }
                 }
             }
         }
@@ -909,14 +1471,16 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
                     if table.kind == wire::TimingTableKind::Unknown {
                         continue;
                     }
+                    let shape = library.timing_table_shape(table);
+                    let axes = library.timing_table_axes(table);
                     *shape_frequencies
                         .entry(shape_key(
-                            table.shape.template_id,
-                            &table.shape.index_1,
-                            &table.shape.index_2,
-                            &table.shape.index_3,
-                            &table.shape.dimensions,
-                            &table.shape.template_name,
+                            shape.template_id,
+                            axes[0],
+                            axes[1],
+                            axes[2],
+                            &shape.dimensions,
+                            library.timing_table_template_name(table),
                             &id_by_axis,
                             &id_by_string,
                         ))
@@ -925,14 +1489,16 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
             }
             for group in &pin.internal_power {
                 for table in &group.tables {
+                    let shape = library.power_table_shape(table);
+                    let axes = library.power_table_axes(table);
                     *shape_frequencies
                         .entry(shape_key(
-                            table.shape.template_id,
-                            &table.shape.index_1,
-                            &table.shape.index_2,
-                            &table.shape.index_3,
-                            &table.shape.dimensions,
-                            &table.shape.template_name,
+                            shape.template_id,
+                            axes[0],
+                            axes[1],
+                            axes[2],
+                            &shape.dimensions,
+                            library.power_table_template_name(table),
                             &id_by_axis,
                             &id_by_string,
                         ))
@@ -957,14 +1523,14 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
         });
     }
 
-    let lu_table_templates = library
-        .lu_table_templates
+    let model_templates = std::mem::take(&mut library.lu_table_templates);
+    let lu_table_templates = model_templates
         .into_iter()
         .map(|template| {
-            let kind = lut_template_kind_to_wire(&template.kind);
-            let variable_1 = lut_variable_to_wire(&template.variable_1);
-            let variable_2 = lut_variable_to_wire(&template.variable_2);
-            let variable_3 = lut_variable_to_wire(&template.variable_3);
+            let kind = template.kind.wire_value();
+            let variable_1 = template.variable_1.wire_value();
+            let variable_2 = template.variable_2.wire_value();
+            let variable_3 = template.variable_3.wire_value();
             wire::LuTableTemplate {
                 kind: kind as i32,
                 name: template.name,
@@ -975,30 +1541,30 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
                 index_2_id: axis_id(&template.index_2, &id_by_axis),
                 index_3_id: axis_id(&template.index_3, &id_by_axis),
                 kind_string_id: if kind == wire::LutTemplateKind::Other {
-                    string_id(&template.kind, &id_by_string)
+                    string_id(template.kind.fallback(&library), &id_by_string)
                 } else {
                     0
                 },
                 variable_1_string_id: if variable_1 == wire::LutVariable::Other {
-                    string_id(&template.variable_1, &id_by_string)
+                    string_id(template.variable_1.fallback(&library), &id_by_string)
                 } else {
                     0
                 },
                 variable_2_string_id: if variable_2 == wire::LutVariable::Other {
-                    string_id(&template.variable_2, &id_by_string)
+                    string_id(template.variable_2.fallback(&library), &id_by_string)
                 } else {
                     0
                 },
                 variable_3_string_id: if variable_3 == wire::LutVariable::Other {
-                    string_id(&template.variable_3, &id_by_string)
+                    string_id(template.variable_3.fallback(&library), &id_by_string)
                 } else {
                     0
                 },
             }
         })
         .collect();
-    let cells = library
-        .cells
+    let model_cells = std::mem::take(&mut library.cells);
+    let cells = model_cells
         .into_iter()
         .map(|cell| {
             let pins = cell
@@ -1014,39 +1580,47 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
                                 .into_iter()
                                 .filter(|table| table.kind != wire::TimingTableKind::Unknown)
                                 .map(|table| {
+                                    let shape = library.timing_table_shape(&table);
+                                    let axes = library.timing_table_axes(&table);
                                     let key = shape_key(
-                                        table.shape.template_id,
-                                        &table.shape.index_1,
-                                        &table.shape.index_2,
-                                        &table.shape.index_3,
-                                        &table.shape.dimensions,
-                                        &table.shape.template_name,
+                                        shape.template_id,
+                                        axes[0],
+                                        axes[1],
+                                        axes[2],
+                                        &shape.dimensions,
+                                        library.timing_table_template_name(&table),
                                         &id_by_axis,
                                         &id_by_string,
                                     );
                                     Ok(wire::TimingTable {
                                         kind: table.kind as i32,
                                         shape_id: shape_id(&key, &id_by_shape),
-                                        values: table.values.to_vec(),
+                                        values: library.timing_table_values(&table).to_vec(),
                                     })
                                 })
                                 .collect::<Result<Vec<_>>>()?;
-                            let timing_sense = timing_sense_to_wire(&arc.timing_sense);
-                            let timing_type = timing_type_to_wire(&arc.timing_type);
+                            let timing_sense = arc.timing_sense.wire_value();
+                            let timing_type = arc.timing_type.wire_value();
                             Ok(wire::TimingArc {
-                                related_pin_string_id: string_id(&arc.related_pin, &id_by_string),
+                                related_pin_string_id: string_id(
+                                    library.resolve_string(&arc.related_pin),
+                                    &id_by_string,
+                                ),
                                 timing_sense: timing_sense as i32,
                                 timing_type: timing_type as i32,
-                                when_string_id: string_id(&arc.when, &id_by_string),
+                                when_string_id: string_id(
+                                    library.resolve_string(&arc.when),
+                                    &id_by_string,
+                                ),
                                 tables,
                                 timing_sense_string_id: if timing_sense == wire::TimingSense::Other
                                 {
-                                    string_id(&arc.timing_sense, &id_by_string)
+                                    string_id(arc.timing_sense.fallback(&library), &id_by_string)
                                 } else {
                                     0
                                 },
                                 timing_type_string_id: if timing_type == wire::TimingType::Other {
-                                    string_id(&arc.timing_type, &id_by_string)
+                                    string_id(arc.timing_type.fallback(&library), &id_by_string)
                                 } else {
                                     0
                                 },
@@ -1061,20 +1635,22 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
                                 .tables
                                 .into_iter()
                                 .map(|table| {
+                                    let shape = library.power_table_shape(&table);
+                                    let axes = library.power_table_axes(&table);
                                     let key = shape_key(
-                                        table.shape.template_id,
-                                        &table.shape.index_1,
-                                        &table.shape.index_2,
-                                        &table.shape.index_3,
-                                        &table.shape.dimensions,
-                                        &table.shape.template_name,
+                                        shape.template_id,
+                                        axes[0],
+                                        axes[1],
+                                        axes[2],
+                                        &shape.dimensions,
+                                        library.power_table_template_name(&table),
                                         &id_by_axis,
                                         &id_by_string,
                                     );
                                     Ok(wire::PowerTable {
                                         transition: table.transition as i32,
                                         shape_id: shape_id(&key, &id_by_shape),
-                                        values: table.values.to_vec(),
+                                        values: library.power_table_values(&table).to_vec(),
                                     })
                                 })
                                 .collect::<Result<Vec<_>>>()?;
@@ -1082,11 +1658,16 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
                                 related_pin_string_ids: group
                                     .related_pins
                                     .iter()
-                                    .map(|value| string_id(value, &id_by_string))
+                                    .map(|value| {
+                                        string_id(library.resolve_string(value), &id_by_string)
+                                    })
                                     .collect(),
-                                when_string_id: string_id(&group.when, &id_by_string),
+                                when_string_id: string_id(
+                                    library.resolve_string(&group.when),
+                                    &id_by_string,
+                                ),
                                 related_pg_pin_string_id: string_id(
-                                    &group.related_pg_pin,
+                                    library.resolve_string(&group.related_pg_pin),
                                     &id_by_string,
                                 ),
                                 tables,
@@ -1095,8 +1676,11 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
                         .collect::<Result<Vec<_>>>()?;
                     Ok(wire::Pin {
                         direction: pin.direction,
-                        function_string_id: string_id(&pin.function, &id_by_string),
-                        name_string_id: string_id(&pin.name, &id_by_string),
+                        function_string_id: string_id(
+                            library.resolve_string(&pin.function),
+                            &id_by_string,
+                        ),
+                        name_string_id: string_id(library.resolve_string(&pin.name), &id_by_string),
                         is_clocking_pin: pin.is_clocking_pin,
                         capacitance: pin.capacitance,
                         rise_capacitance: pin.rise_capacitance,
@@ -1136,86 +1720,90 @@ pub fn library_to_proto(library: Library) -> Result<wire::Library> {
     })
 }
 
-fn resolve_shared_axis(axis_id: u32, axes: &[SharedAxis]) -> Result<SharedAxis> {
-    if axis_id == 0 {
-        return Ok(empty_axis());
+fn axis_id_from_wire(id: u32, axis_count: usize) -> Result<AxisId> {
+    if id as usize > axis_count {
+        bail!("LUT axis ID {id} is out of range");
     }
-    axes.get((axis_id - 1) as usize)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("LUT axis ID {axis_id} is out of range"))
+    Ok(AxisId(id))
 }
 
-fn resolve_shared_string(string_id: u32, strings: &[SharedString]) -> Result<SharedString> {
-    if string_id == 0 {
-        return Ok(empty_string());
+fn string_id_from_wire(id: u32, string_count: usize) -> Result<StringId> {
+    if id as usize > string_count {
+        bail!("interned string ID {id} is out of range");
     }
-    strings
-        .get((string_id - 1) as usize)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("interned string ID {string_id} is out of range"))
+    Ok(StringId::from_pool_id(id))
 }
 
-fn resolve_shape(shape_id: u32, shapes: &[Arc<LutShape>]) -> Result<&Arc<LutShape>> {
+fn axis_values(id: AxisId, axes: &[Box<[f64]>]) -> &[f64] {
+    if id.is_unset() {
+        &[]
+    } else {
+        &axes[(id.0 - 1) as usize]
+    }
+}
+
+fn validate_shape_id(shape_id: u32, shape_count: usize) -> Result<()> {
     if shape_id == 0 {
         bail!("LUT table has no shape ID");
     }
-    shapes
-        .get((shape_id - 1) as usize)
-        .ok_or_else(|| anyhow::anyhow!("LUT shape ID {shape_id} is out of range"))
+    if shape_id as usize > shape_count {
+        bail!("LUT shape ID {shape_id} is out of range");
+    }
+    Ok(())
 }
 
 fn timing_table_from_wire(
-    table: wire::TimingTable,
-    shapes: &[Arc<LutShape>],
-    values: Arc<Vec<f32>>,
-    range: LutValueRange,
+    mut table: wire::TimingTable,
+    shape_count: usize,
+    value_storage: &mut Vec<f32>,
 ) -> Result<TimingTable> {
-    let shape = resolve_shape(table.shape_id, shapes)?;
+    validate_shape_id(table.shape_id, shape_count)?;
+    let values = append_lut_values(value_storage, std::mem::take(&mut table.values))?;
     Ok(TimingTable {
         kind: wire::TimingTableKind::try_from(table.kind)
             .map_err(|_| anyhow::anyhow!("invalid timing-table kind {}", table.kind))?,
-        shape: shape.clone(),
-        values: LutValues::from_shared(values, range),
+        shape_id: table.shape_id,
+        values,
     })
 }
 
 fn power_table_from_wire(
-    table: wire::PowerTable,
-    shapes: &[Arc<LutShape>],
-    values: Arc<Vec<f32>>,
-    range: LutValueRange,
+    mut table: wire::PowerTable,
+    shape_count: usize,
+    value_storage: &mut Vec<f32>,
 ) -> Result<PowerTable> {
-    let shape = resolve_shape(table.shape_id, shapes)?;
+    validate_shape_id(table.shape_id, shape_count)?;
+    let values = append_lut_values(value_storage, std::mem::take(&mut table.values))?;
     Ok(PowerTable {
         transition: wire::PowerTransition::try_from(table.transition)
             .map_err(|_| anyhow::anyhow!("invalid power transition {}", table.transition))?,
-        shape: shape.clone(),
-        values: LutValues::from_shared(values, range),
+        shape_id: table.shape_id,
+        values,
     })
 }
 
-fn append_lut_values(storage: &mut Vec<f32>, values: &mut Vec<f32>) -> Result<LutValueRange> {
+fn append_lut_values(storage: &mut Vec<f32>, mut values: Vec<f32>) -> Result<LutValueRange> {
     let start = u32::try_from(storage.len())
         .map_err(|_| anyhow::anyhow!("LUT value storage exceeds u32"))?;
     let len = u32::try_from(values.len())
         .map_err(|_| anyhow::anyhow!("LUT table value count exceeds u32"))?;
-    storage.append(values);
+    storage.append(&mut values);
     Ok(LutValueRange { start, len })
 }
 
-fn shared_other_string(
+fn other_string_id(
     is_other: bool,
     string_id: u32,
-    strings: &[SharedString],
+    string_count: usize,
     field: &str,
-) -> Result<SharedString> {
+) -> Result<StringId> {
     if !is_other {
-        return Ok(empty_string());
+        return Ok(StringId::default());
     }
     if string_id == 0 {
         bail!("{field} uses OTHER without a fallback string ID");
     }
-    resolve_shared_string(string_id, strings)
+    string_id_from_wire(string_id, string_count)
 }
 
 /// Converts a protobuf payload into the fully populated pooled runtime model.
@@ -1226,44 +1814,40 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
             library.format_magic
         );
     }
-    let strings: Vec<SharedString> = std::mem::take(&mut library.interned_strings)
+    if let Some(index) = library.interned_strings.iter().position(String::is_empty) {
+        bail!("interned string pool entry {} is empty", index + 1);
+    }
+    if let Some(index) = library
+        .lut_axes
+        .iter()
+        .position(|axis| axis.values.is_empty())
+    {
+        bail!("LUT axis pool entry {} is empty", index + 1);
+    }
+    let strings: Vec<Box<str>> = std::mem::take(&mut library.interned_strings)
         .into_iter()
-        .map(SharedString::from)
+        .map(String::into_boxed_str)
         .collect();
-    let axes: Vec<SharedAxis> = std::mem::take(&mut library.lut_axes)
+    let axes: Vec<Box<[f64]>> = std::mem::take(&mut library.lut_axes)
         .into_iter()
-        .map(|axis| Arc::new(axis.values))
+        .map(|axis| axis.values.into_boxed_slice())
         .collect();
-    let shapes: Vec<Arc<LutShape>> = std::mem::take(&mut library.lut_shapes)
+    let string_count = strings.len();
+    let axis_count = axes.len();
+    let shapes: Vec<LutShape> = std::mem::take(&mut library.lut_shapes)
         .into_iter()
         .map(|shape| {
-            Ok(Arc::new(LutShape {
+            Ok(LutShape {
                 template_id: shape.template_id,
-                index_1: resolve_shared_axis(shape.index_1_id, &axes)?,
-                index_2: resolve_shared_axis(shape.index_2_id, &axes)?,
-                index_3: resolve_shared_axis(shape.index_3_id, &axes)?,
-                dimensions: Arc::new(shape.dimensions),
-                template_name: resolve_shared_string(shape.template_name_string_id, &strings)?,
-            }))
+                index_1: axis_id_from_wire(shape.index_1_id, axis_count)?,
+                index_2: axis_id_from_wire(shape.index_2_id, axis_count)?,
+                index_3: axis_id_from_wire(shape.index_3_id, axis_count)?,
+                dimensions: shape.dimensions.into_boxed_slice(),
+                template_name: string_id_from_wire(shape.template_name_string_id, string_count)?,
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let table_count: usize = library
-        .cells
-        .iter()
-        .flat_map(|cell| &cell.pins)
-        .map(|pin| {
-            pin.timing_arcs
-                .iter()
-                .map(|arc| arc.tables.len())
-                .sum::<usize>()
-                + pin
-                    .internal_power
-                    .iter()
-                    .map(|group| group.tables.len())
-                    .sum::<usize>()
-        })
-        .sum();
     let value_count: usize = library
         .cells
         .iter()
@@ -1283,24 +1867,7 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
         })
         .sum();
     let mut value_storage = Vec::with_capacity(value_count);
-    let mut value_ranges = VecDeque::with_capacity(table_count);
-    for cell in &mut library.cells {
-        for pin in &mut cell.pins {
-            for arc in &mut pin.timing_arcs {
-                for table in &mut arc.tables {
-                    value_ranges
-                        .push_back(append_lut_values(&mut value_storage, &mut table.values)?);
-                }
-            }
-            for group in &mut pin.internal_power {
-                for table in &mut group.tables {
-                    value_ranges
-                        .push_back(append_lut_values(&mut value_storage, &mut table.values)?);
-                }
-            }
-        }
-    }
-    let value_storage = Arc::new(value_storage);
+    let shape_count = shapes.len();
 
     let lu_table_templates = std::mem::take(&mut library.lu_table_templates)
         .into_iter()
@@ -1313,54 +1880,42 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                 .map_err(|_| anyhow::anyhow!("invalid LUT variable {}", template.variable_2))?;
             let variable_3 = wire::LutVariable::try_from(template.variable_3)
                 .map_err(|_| anyhow::anyhow!("invalid LUT variable {}", template.variable_3))?;
-            let kind_other = shared_other_string(
+            let kind_other = other_string_id(
                 kind == wire::LutTemplateKind::Other,
                 template.kind_string_id,
-                &strings,
+                string_count,
                 "LUT template kind",
             )?;
-            let variable_1_other = shared_other_string(
+            let variable_1_other = other_string_id(
                 variable_1 == wire::LutVariable::Other,
                 template.variable_1_string_id,
-                &strings,
+                string_count,
                 "LUT variable_1",
             )?;
-            let variable_2_other = shared_other_string(
+            let variable_2_other = other_string_id(
                 variable_2 == wire::LutVariable::Other,
                 template.variable_2_string_id,
-                &strings,
+                string_count,
                 "LUT variable_2",
             )?;
-            let variable_3_other = shared_other_string(
+            let variable_3_other = other_string_id(
                 variable_3 == wire::LutVariable::Other,
                 template.variable_3_string_id,
-                &strings,
+                string_count,
                 "LUT variable_3",
             )?;
             Ok(LuTableTemplate {
-                kind: enum_string(
-                    kind,
-                    kind_other.as_str(),
-                    &[
-                        (wire::LutTemplateKind::Unknown, ""),
-                        (wire::LutTemplateKind::Timing, "lu_table_template"),
-                        (wire::LutTemplateKind::Power, "power_lut_template"),
-                    ],
-                )
-                .to_string(),
+                kind: LutTemplateKind::from_wire(kind, kind_other),
                 name: template.name,
-                variable_1: lut_variable_str(variable_1, variable_1_other.as_str()).to_string(),
-                variable_2: lut_variable_str(variable_2, variable_2_other.as_str()).to_string(),
-                variable_3: lut_variable_str(variable_3, variable_3_other.as_str()).to_string(),
-                index_1: resolve_shared_axis(template.index_1_id, &axes)?
-                    .as_ref()
-                    .clone(),
-                index_2: resolve_shared_axis(template.index_2_id, &axes)?
-                    .as_ref()
-                    .clone(),
-                index_3: resolve_shared_axis(template.index_3_id, &axes)?
-                    .as_ref()
-                    .clone(),
+                variable_1: LutVariable::from_wire(variable_1, variable_1_other),
+                variable_2: LutVariable::from_wire(variable_2, variable_2_other),
+                variable_3: LutVariable::from_wire(variable_3, variable_3_other),
+                index_1: axis_values(axis_id_from_wire(template.index_1_id, axis_count)?, &axes)
+                    .to_vec(),
+                index_2: axis_values(axis_id_from_wire(template.index_2_id, axis_count)?, &axes)
+                    .to_vec(),
+                index_3: axis_values(axis_id_from_wire(template.index_3_id, axis_count)?, &axes)
+                    .to_vec(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1379,15 +1934,7 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                                 .tables
                                 .into_iter()
                                 .map(|table| {
-                                    let range = value_ranges.pop_front().ok_or_else(|| {
-                                        anyhow::anyhow!("missing pooled timing-table value range")
-                                    })?;
-                                    timing_table_from_wire(
-                                        table,
-                                        &shapes,
-                                        value_storage.clone(),
-                                        range,
-                                    )
+                                    timing_table_from_wire(table, shape_count, &mut value_storage)
                                 })
                                 .collect::<Result<Vec<_>>>()?;
                             let timing_sense = wire::TimingSense::try_from(arc.timing_sense)
@@ -1398,40 +1945,29 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                                 wire::TimingType::try_from(arc.timing_type).map_err(|_| {
                                     anyhow::anyhow!("invalid timing type {}", arc.timing_type)
                                 })?;
-                            let timing_sense_other = shared_other_string(
+                            let timing_sense_other = other_string_id(
                                 timing_sense == wire::TimingSense::Other,
                                 arc.timing_sense_string_id,
-                                &strings,
+                                string_count,
                                 "timing sense",
                             )?;
-                            let timing_type_other = shared_other_string(
+                            let timing_type_other = other_string_id(
                                 timing_type == wire::TimingType::Other,
                                 arc.timing_type_string_id,
-                                &strings,
+                                string_count,
                                 "timing type",
                             )?;
                             Ok(TimingArc {
-                                related_pin: resolve_shared_string(
+                                related_pin: string_id_from_wire(
                                     arc.related_pin_string_id,
-                                    &strings,
+                                    string_count,
                                 )?,
-                                timing_sense: enum_string(
+                                timing_sense: TimingSense::from_wire(
                                     timing_sense,
-                                    timing_sense_other.as_str(),
-                                    &[
-                                        (wire::TimingSense::Unspecified, ""),
-                                        (wire::TimingSense::PositiveUnate, "positive_unate"),
-                                        (wire::TimingSense::NegativeUnate, "negative_unate"),
-                                        (wire::TimingSense::NonUnate, "non_unate"),
-                                    ],
-                                )
-                                .to_string(),
-                                timing_type: timing_type_str(
-                                    timing_type,
-                                    timing_type_other.as_str(),
-                                )
-                                .to_string(),
-                                when: resolve_shared_string(arc.when_string_id, &strings)?,
+                                    timing_sense_other,
+                                ),
+                                timing_type: TimingType::from_wire(timing_type, timing_type_other),
+                                when: string_id_from_wire(arc.when_string_id, string_count)?,
                                 tables,
                             })
                         })
@@ -1444,27 +1980,19 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                                 .tables
                                 .into_iter()
                                 .map(|table| {
-                                    let range = value_ranges.pop_front().ok_or_else(|| {
-                                        anyhow::anyhow!("missing pooled power-table value range")
-                                    })?;
-                                    power_table_from_wire(
-                                        table,
-                                        &shapes,
-                                        value_storage.clone(),
-                                        range,
-                                    )
+                                    power_table_from_wire(table, shape_count, &mut value_storage)
                                 })
                                 .collect::<Result<Vec<_>>>()?;
                             Ok(InternalPower {
                                 related_pins: group
                                     .related_pin_string_ids
                                     .into_iter()
-                                    .map(|id| resolve_shared_string(id, &strings))
+                                    .map(|id| string_id_from_wire(id, string_count))
                                     .collect::<Result<Vec<_>>>()?,
-                                when: resolve_shared_string(group.when_string_id, &strings)?,
-                                related_pg_pin: resolve_shared_string(
+                                when: string_id_from_wire(group.when_string_id, string_count)?,
+                                related_pg_pin: string_id_from_wire(
                                     group.related_pg_pin_string_id,
-                                    &strings,
+                                    string_count,
                                 )?,
                                 tables,
                             })
@@ -1472,8 +2000,8 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                         .collect::<Result<Vec<_>>>()?;
                     Ok(Pin {
                         direction: pin.direction,
-                        function: resolve_shared_string(pin.function_string_id, &strings)?,
-                        name: resolve_shared_string(pin.name_string_id, &strings)?,
+                        function: string_id_from_wire(pin.function_string_id, string_count)?,
+                        name: string_id_from_wire(pin.name_string_id, string_count)?,
                         is_clocking_pin: pin.is_clocking_pin,
                         capacitance: pin.capacitance,
                         rise_capacitance: pin.rise_capacitance,
@@ -1496,10 +2024,6 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    if !value_ranges.is_empty() {
-        bail!("unused pooled LUT-value ranges remain after model conversion");
-    }
-
     Ok(Library {
         cells,
         units: library.units,
@@ -1510,6 +2034,10 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
         nominal_voltage: library.nominal_voltage,
         provenance: library.provenance,
         source_files: library.source_files,
+        strings,
+        lut_axes: axes,
+        lut_shapes: shapes,
+        lut_values: value_storage,
     })
 }
 
@@ -1519,72 +2047,192 @@ mod tests {
     use prost::Message;
 
     #[test]
-    fn proto_conversion_roundtrips_with_float32_precision() {
-        let shared_axis = vec![0.01, 0.02];
-        let library = Library {
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "custom_template".to_string(),
-                variable_1: "custom_variable".to_string(),
-                index_1: shared_axis.clone(),
+    fn string_id_is_a_four_byte_copy_handle() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<StringId>();
+        assert_eq!(std::mem::size_of::<StringId>(), 4);
+    }
+
+    #[test]
+    fn stripping_payloads_compacts_string_and_axis_pools() {
+        let mut builder = LibraryBuilder::new();
+        let timing = builder
+            .add_timing_table_f64(
+                wire::TimingTableKind::CellRise,
+                1,
+                vec![1.0, 2.0],
+                vec![],
+                vec![],
+                vec![3.0, 4.0],
+                vec![2],
+                "timing_template",
+            )
+            .unwrap();
+        let power = builder
+            .add_power_table_f64(
+                wire::PowerTransition::Rise,
+                2,
+                vec![5.0, 6.0],
+                vec![],
+                vec![],
+                vec![7.0, 8.0],
+                vec![2],
+                "power_template",
+            )
+            .unwrap();
+        let arc = builder
+            .add_timing_arc(
+                "TIMING_SOURCE",
+                "positive_unate",
+                "combinational",
+                "",
+                vec![timing],
+            )
+            .unwrap();
+        let power_source = builder.intern_string("POWER_SOURCE").unwrap();
+        let pin_name = builder.intern_string("Y").unwrap();
+        let timing_kind = LutTemplateKind::from_raw_in(&mut builder, "lu_table_template").unwrap();
+        let power_kind = LutTemplateKind::from_raw_in(&mut builder, "power_lut_template").unwrap();
+        builder.lu_table_templates = vec![
+            LuTableTemplate {
+                kind: timing_kind,
                 ..Default::default()
-            }],
-            cells: vec![Cell {
-                pins: vec![Pin {
-                    function: "A".to_string(),
-                    name: "Y".to_string(),
-                    timing_arcs: vec![TimingArc::from_raw(
-                        "A",
-                        "positive_unate",
-                        "custom_timing_type",
-                        "ENABLE",
-                        vec![
-                            TimingTable::from_f64(
-                                wire::TimingTableKind::CellRise,
-                                0,
-                                shared_axis.clone(),
-                                vec![],
-                                vec![],
-                                vec![0.1, 0.2],
-                                vec![2],
-                                "",
-                            ),
-                            TimingTable::from_f64(
-                                wire::TimingTableKind::CellFall,
-                                0,
-                                shared_axis.clone(),
-                                vec![],
-                                vec![],
-                                vec![0.5, 0.6],
-                                vec![2],
-                                "",
-                            ),
-                        ],
-                    )],
-                    internal_power: vec![InternalPower {
-                        related_pins: vec!["A".to_string()],
-                        when: "ENABLE".to_string(),
-                        related_pg_pin: "VDD".to_string(),
-                        tables: vec![PowerTable::from_f64(
-                            wire::PowerTransition::Rise,
-                            0,
-                            shared_axis,
-                            vec![],
-                            vec![],
-                            vec![0.3, 0.4],
-                            vec![2],
-                            "",
-                        )],
-                        ..Default::default()
-                    }],
+            },
+            LuTableTemplate {
+                kind: power_kind,
+                ..Default::default()
+            },
+        ];
+        builder.cells = vec![Cell {
+            pins: vec![Pin {
+                name: pin_name,
+                timing_arcs: vec![arc],
+                internal_power: vec![InternalPower {
+                    related_pins: vec![power_source],
+                    tables: vec![power],
                     ..Default::default()
                 }],
                 ..Default::default()
             }],
             ..Default::default()
-        };
+        }];
+        let mut library = builder.finish();
 
-        let proto = library_to_proto(library.clone()).unwrap();
-        let second_proto = library_to_proto(library).unwrap();
+        assert_eq!(library.lut_axes.len(), 2);
+        assert!(
+            library
+                .strings
+                .iter()
+                .any(|value| value.as_ref() == "TIMING_SOURCE")
+        );
+        strip_timing_data(&mut library);
+        assert_eq!(library.lut_axes.len(), 1);
+        assert_eq!(
+            library.resolve_axis(library.lut_shapes[0].index_1),
+            &[5.0, 6.0]
+        );
+        assert!(
+            !library
+                .strings
+                .iter()
+                .any(|value| value.as_ref() == "TIMING_SOURCE")
+        );
+        assert!(
+            library
+                .strings
+                .iter()
+                .any(|value| value.as_ref() == "POWER_SOURCE")
+        );
+
+        strip_power_data(&mut library);
+        assert!(library.lut_axes.is_empty());
+        assert!(library.lut_shapes.is_empty());
+        assert!(library.lut_values.is_empty());
+        assert_eq!(library.strings.len(), 1);
+        assert_eq!(library.resolve_string(&library.cells[0].pins[0].name), "Y");
+    }
+
+    #[test]
+    fn proto_conversion_roundtrips_with_float32_precision() {
+        let shared_axis = vec![0.01, 0.02];
+        let mut builder = LibraryBuilder::new();
+        let rise = builder
+            .add_timing_table_f64(
+                wire::TimingTableKind::CellRise,
+                0,
+                shared_axis.clone(),
+                vec![],
+                vec![],
+                vec![0.1, 0.2],
+                vec![2],
+                "",
+            )
+            .unwrap();
+        let fall = builder
+            .add_timing_table_f64(
+                wire::TimingTableKind::CellFall,
+                0,
+                shared_axis.clone(),
+                vec![],
+                vec![],
+                vec![0.5, 0.6],
+                vec![2],
+                "",
+            )
+            .unwrap();
+        let power = builder
+            .add_power_table_f64(
+                wire::PowerTransition::Rise,
+                0,
+                shared_axis.clone(),
+                vec![],
+                vec![],
+                vec![0.3, 0.4],
+                vec![2],
+                "",
+            )
+            .unwrap();
+        let kind = LutTemplateKind::from_raw_in(&mut builder, "custom_template").unwrap();
+        let variable_1 = LutVariable::from_raw_in(&mut builder, "custom_variable").unwrap();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind,
+            variable_1,
+            index_1: shared_axis.clone(),
+            ..Default::default()
+        }];
+        let function = builder.intern_string("A").unwrap();
+        let name = builder.intern_string("Y").unwrap();
+        let arc = builder
+            .add_timing_arc(
+                "A",
+                "positive_unate",
+                "custom_timing_type",
+                "ENABLE",
+                vec![rise, fall],
+            )
+            .unwrap();
+        let related_pin = builder.intern_string("A").unwrap();
+        let when = builder.intern_string("ENABLE").unwrap();
+        let related_pg_pin = builder.intern_string("VDD").unwrap();
+        builder.cells = vec![Cell {
+            pins: vec![Pin {
+                function,
+                name,
+                timing_arcs: vec![arc],
+                internal_power: vec![InternalPower {
+                    related_pins: vec![related_pin],
+                    when,
+                    related_pg_pin,
+                    tables: vec![power],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+
+        let proto = library_to_proto(builder.finish()).unwrap();
+        let second_proto = library_to_proto(library_from_proto(proto.clone()).unwrap()).unwrap();
 
         assert!(has_valid_header(&proto));
         assert_eq!(proto.encode_to_vec(), second_proto.encode_to_vec());
@@ -1619,32 +2267,69 @@ mod tests {
             vec![0.1_f32, 0.2_f32]
         );
         let roundtrip = library_from_proto(proto).unwrap();
-        assert_eq!(roundtrip.lu_table_templates[0].kind, "custom_template");
         assert_eq!(
-            roundtrip.lu_table_templates[0].variable_1,
+            roundtrip.lu_table_templates[0].kind_str(&roundtrip),
+            "custom_template"
+        );
+        assert_eq!(
+            roundtrip.lu_table_templates[0].variable_1_str(&roundtrip),
             "custom_variable"
         );
-        assert_eq!(roundtrip.cells[0].pins[0].function, "A");
-        assert_eq!(roundtrip.cells[0].pins[0].name, "Y");
         assert_eq!(
-            roundtrip.cells[0].pins[0].timing_arcs[0].timing_type_str(),
+            roundtrip.resolve_string(&roundtrip.cells[0].pins[0].function),
+            "A"
+        );
+        assert_eq!(
+            roundtrip.resolve_string(&roundtrip.cells[0].pins[0].name),
+            "Y"
+        );
+        assert_eq!(
+            roundtrip.cells[0].pins[0].function,
+            roundtrip.cells[0].pins[0].timing_arcs[0].related_pin
+        );
+        assert_eq!(
+            roundtrip.cells[0].pins[0].timing_arcs[0].timing_type_str(&roundtrip),
             "custom_timing_type"
         );
-        assert_eq!(roundtrip.cells[0].pins[0].timing_arcs[0].when, "ENABLE");
+        assert_eq!(
+            roundtrip.resolve_string(&roundtrip.cells[0].pins[0].timing_arcs[0].when),
+            "ENABLE"
+        );
+        assert_eq!(
+            roundtrip.cells[0].pins[0].timing_arcs[0].when,
+            roundtrip.cells[0].pins[0].internal_power[0].when
+        );
         let rise = &roundtrip.cells[0].pins[0].timing_arcs[0].tables[0];
         let fall = &roundtrip.cells[0].pins[0].timing_arcs[0].tables[1];
         let power = &roundtrip.cells[0].pins[0].internal_power[0].tables[0];
-        assert!(rise.values.shares_storage_with(&fall.values));
-        assert!(rise.values.shares_storage_with(&power.values));
-        assert!(Arc::ptr_eq(&rise.shape, &fall.shape));
-        assert!(Arc::ptr_eq(&rise.shape, &power.shape));
-        assert_eq!(rise.values, vec![f64::from(0.1_f32), f64::from(0.2_f32)]);
-        assert_eq!(power.values, vec![f64::from(0.3_f32), f64::from(0.4_f32)]);
+        assert_eq!(rise.shape_id(), fall.shape_id());
+        assert_eq!(rise.shape_id(), power.shape_id());
+        assert_eq!(roundtrip.timing_table_values(rise), &[0.1_f32, 0.2_f32]);
+        assert_eq!(roundtrip.power_table_values(power), &[0.3_f32, 0.4_f32]);
     }
 
     #[test]
     fn proto_conversion_rejects_invalid_header() {
         let error = library_from_proto(wire::Library::default()).unwrap_err();
         assert!(format!("{error:#}").contains("invalid Liberty proto header"));
+    }
+
+    #[test]
+    fn proto_conversion_rejects_empty_reference_pool_entries() {
+        let empty_string = wire::Library {
+            format_magic: LIBERTY_FORMAT_MAGIC,
+            interned_strings: vec![String::new()],
+            ..Default::default()
+        };
+        let error = library_from_proto(empty_string).unwrap_err();
+        assert!(format!("{error:#}").contains("interned string pool entry 1 is empty"));
+
+        let empty_axis = wire::Library {
+            format_magic: LIBERTY_FORMAT_MAGIC,
+            lut_axes: vec![wire::LutAxis::default()],
+            ..Default::default()
+        };
+        let error = library_from_proto(empty_axis).unwrap_err();
+        assert!(format!("{error:#}").contains("LUT axis pool entry 1 is empty"));
     }
 }

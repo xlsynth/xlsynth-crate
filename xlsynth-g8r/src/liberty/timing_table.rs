@@ -6,7 +6,7 @@
 //! dimensions vector. This wrapper validates shape consistency and offers safe
 //! N-D indexing.
 
-use crate::liberty_model::TimingTable;
+use crate::liberty_model::{Library, TimingTable};
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,8 +51,14 @@ pub struct TimingTableArrayView<'a> {
 }
 
 impl<'a> TimingTableArrayView<'a> {
-    pub fn from_timing_table(table: &'a TimingTable) -> Result<Self, TimingTableArrayError> {
-        Self::from_parts(&table.shape.dimensions, &table.values)
+    pub fn from_timing_table(
+        library: &'a Library,
+        table: &'a TimingTable,
+    ) -> Result<Self, TimingTableArrayError> {
+        Self::from_parts(
+            &library.timing_table_shape(table).dimensions,
+            library.timing_table_values(table),
+        )
     }
 
     pub fn from_parts(
@@ -130,24 +136,29 @@ fn expected_value_count(dimensions: &[u32]) -> Result<usize, TimingTableArrayErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::liberty_model::LibraryBuilder;
 
-    fn table(dimensions: Vec<u32>, values: Vec<f64>) -> TimingTable {
-        TimingTable::from_f64(
-            crate::liberty_proto::TimingTableKind::Unknown,
-            0,
-            vec![],
-            vec![],
-            vec![],
-            values,
-            dimensions,
-            "",
-        )
+    fn table(dimensions: Vec<u32>, values: Vec<f64>) -> (Library, TimingTable) {
+        let mut builder = LibraryBuilder::new();
+        let table = builder
+            .add_timing_table_f64(
+                crate::liberty_proto::TimingTableKind::Unknown,
+                0,
+                vec![],
+                vec![],
+                vec![],
+                values,
+                dimensions,
+                "",
+            )
+            .unwrap();
+        (builder.finish(), table)
     }
 
     #[test]
     fn array_allows_dynamic_rank_indexing() {
-        let table = table(vec![2, 3, 2], (0..12).map(f64::from).collect());
-        let array = TimingTableArrayView::from_timing_table(&table).unwrap();
+        let (library, table) = table(vec![2, 3, 2], (0..12).map(f64::from).collect());
+        let array = TimingTableArrayView::from_timing_table(&library, &table).unwrap();
         assert_eq!(array.rank(), 3);
         assert_eq!(array.dimensions(), &[2, 3, 2]);
         assert_eq!(array.linear_index(&[1, 0, 1]), Some(7));
@@ -156,8 +167,8 @@ mod tests {
 
     #[test]
     fn array_preserves_singleton_axes() {
-        let table = table(vec![1, 2], vec![0.10, 0.20]);
-        let array = TimingTableArrayView::from_timing_table(&table).unwrap();
+        let (library, table) = table(vec![1, 2], vec![0.10, 0.20]);
+        let array = TimingTableArrayView::from_timing_table(&library, &table).unwrap();
         assert_eq!(array.rank(), 2);
         assert_eq!(array.get(&[0, 0]), Some(f64::from(0.10_f32)));
         assert_eq!(array.get(&[0, 1]), Some(f64::from(0.20_f32)));
@@ -166,8 +177,8 @@ mod tests {
 
     #[test]
     fn array_rejects_shape_mismatch() {
-        let table = table(vec![2, 2], vec![0.10, 0.20, 0.30]);
-        let err = TimingTableArrayView::from_timing_table(&table).unwrap_err();
+        let (library, table) = table(vec![2, 2], vec![0.10, 0.20, 0.30]);
+        let err = TimingTableArrayView::from_timing_table(&library, &table).unwrap_err();
         assert_eq!(
             err,
             TimingTableArrayError::InvalidValueCount {
@@ -180,8 +191,8 @@ mod tests {
 
     #[test]
     fn array_handles_scalar_tables() {
-        let table = table(vec![], vec![42.0]);
-        let array = TimingTableArrayView::from_timing_table(&table).unwrap();
+        let (library, table) = table(vec![], vec![42.0]);
+        let array = TimingTableArrayView::from_timing_table(&library, &table).unwrap();
         assert_eq!(array.rank(), 0);
         assert_eq!(array.get(&[]), Some(42.0));
         assert_eq!(array.get(&[0]), None);

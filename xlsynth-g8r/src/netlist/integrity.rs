@@ -1054,7 +1054,7 @@ pub fn check_module(
     for cell in &lib.cells {
         let mut pins = HashMap::new();
         for pin in &cell.pins {
-            pins.insert(pin.name.as_str(), pin.direction);
+            pins.insert(lib.resolve_string(&pin.name), pin.direction);
         }
         dir_map.insert(cell.name.as_str(), pins);
     }
