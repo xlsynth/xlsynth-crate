@@ -1333,6 +1333,16 @@ impl TypeAlias {
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_type_alias_to_string(self.ptr)) }
     }
+
+    /// Returns whether two wrappers point at the same DSLX type alias
+    /// definition.
+    ///
+    /// This is an identity check, not a semantic equality comparison between
+    /// independently parsed definitions.
+    pub fn is_same_definition(&self, other: &TypeAlias) -> bool {
+        self.ptr == other.ptr
+    }
+
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_type_alias_get_identifier(self.ptr);

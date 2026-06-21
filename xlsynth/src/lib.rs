@@ -338,57 +338,6 @@ pub fn mangle_dslx_name_with_env(
     xls_mangle_dslx_name_full(module, name, convention, free_keys, env, scope)
 }
 
-fn x_path_to_rs_filename(path: &std::path::Path) -> String {
-    let mut out = path.file_stem().unwrap().to_str().unwrap().to_string();
-    out.push_str(".rs");
-    out
-}
-
-/// Converts a DSLX module (i.e. `.x` file) into its corresponding Rust bridge
-/// code, and emits that Rust code to a corresponding filename in the `out_dir`.
-///
-/// The generated source uses `xlsynth-aot-runtime` value types such as
-/// `UBits` and `SBits`, so crates that `include!` the bridge source must depend
-/// on `xlsynth-aot-runtime` at normal compile time.
-pub fn x_path_to_rs_bridge(
-    relpath: &str,
-    out_dir: &std::path::Path,
-    root_dir: &std::path::Path,
-) -> std::path::PathBuf {
-    let mut import_data = dslx::ImportData::new(None, &[root_dir]);
-    let path = std::path::PathBuf::from(relpath);
-    let dslx = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("DSLX file should be readable: {:?}", path));
-
-    // Generate the bridge code.
-    let mut builder = rust_bridge_builder::RustBridgeBuilder::new();
-    dslx_bridge::convert_leaf_module(&mut import_data, &dslx, &path, &mut builder)
-        .expect("expect bridge building success");
-    let rs = builder.build();
-
-    // Write this out to the corresponding Rust filename in the `out_dir`.
-    let out_path = out_dir.join(x_path_to_rs_filename(&path));
-    std::fs::write(&out_path, rs).unwrap();
-    out_path
-}
-
-// Wrapper around `x_path_to_rs_bridge` where:
-//
-// - the `out_dir` comes from the environment variable `OUT_DIR` which is
-//   populated e.g. by `cargo` in `build.rs` execution.
-// - the working directory comes from the repository root
-//
-// The returned source has the same normal compile-time dependency on
-// `xlsynth-aot-runtime` as `x_path_to_rs_bridge`.
-pub fn x_path_to_rs_bridge_via_env(relpath: &str) -> std::path::PathBuf {
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR should be set");
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .exec()
-        .expect("cargo metadata should be available");
-    let root_dir = metadata.workspace_root.as_path().as_std_path();
-    x_path_to_rs_bridge(relpath, std::path::Path::new(&out_dir), root_dir)
-}
-
 #[cfg(test)]
 mod tests {
     use lib_support::xls_format_preference_from_string;

@@ -8,13 +8,13 @@ use xlsynth_pir_compiler_aot_ir_test_crate::native_aot_tests_aot::native_aot_tes
 use xlsynth_pir_compiler_runtime::ExecutionOptions;
 
 fn bench_generated_scalar_runner(c: &mut Criterion) {
-    let lhs = native_aot_tests_aot::U8::new(10).expect("benchmark input should fit");
-    let rhs = native_aot_tests_aot::U8::new(20).expect("benchmark input should fit");
+    let lhs = native_aot_tests_aot::U8::new(10);
+    let rhs = native_aot_tests_aot::U8::new(20);
 
     c.bench_function("pir_aot_generated_runner_run", |b| {
         let mut runner =
             native_aot_tests::aot_add_inputs::new_runner().expect("runner should initialize");
-        let mut output = native_aot_tests_aot::U8::default();
+        let mut output = native_aot_tests_aot::U8::all_zeros();
         b.iter(|| {
             runner
                 .run(black_box(&lhs), black_box(&rhs), black_box(&mut output))
@@ -25,15 +25,15 @@ fn bench_generated_scalar_runner(c: &mut Criterion) {
 }
 
 fn bench_generated_event_runner(c: &mut Criterion) {
-    let x = native_aot_tests_aot::U8::new(0xa5).expect("benchmark input should fit");
-    let y = native_aot_tests_aot::U8::new(0x3c).expect("benchmark input should fit");
-    let passed = native_aot_tests_aot::U1::new(1).expect("benchmark input should fit");
-    let emit = native_aot_tests_aot::U1::new(1).expect("benchmark input should fit");
+    let x = native_aot_tests_aot::U8::new(0xa5);
+    let y = native_aot_tests_aot::U8::new(0x3c);
+    let passed = native_aot_tests_aot::U1::new(1);
+    let emit = native_aot_tests_aot::U1::new(1);
 
     c.bench_function("pir_aot_generated_runner_event_sites_run", |b| {
         let mut runner =
             native_aot_tests::aot_events::new_runner().expect("runner should initialize");
-        let mut output = native_aot_tests_aot::U8::default();
+        let mut output = native_aot_tests_aot::U8::all_zeros();
         b.iter(|| {
             runner
                 .run(
@@ -51,7 +51,7 @@ fn bench_generated_event_runner(c: &mut Criterion) {
     c.bench_function("pir_aot_generated_runner_event_sites_collect_all", |b| {
         let mut runner =
             native_aot_tests::aot_events::new_runner().expect("runner should initialize");
-        let mut output = native_aot_tests_aot::U8::default();
+        let mut output = native_aot_tests_aot::U8::all_zeros();
         b.iter(|| {
             let events = runner
                 .run_with_events(

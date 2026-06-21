@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Example of multi-threaded invocation of XLS functions.
+
 use lazy_static::lazy_static;
-///! Example of multi-threaded invocation of XLS functions.
 use rayon::prelude::*;
 use xlsynth::DslxConvertOptions;
 use xlsynth::IrPackage;
@@ -41,7 +42,7 @@ pub fn validate_all_threads_compute_add1() {
     // Use rayon to compute the "add1" function in parallel on every available core.
     let results: Vec<u32> = (0..num_cpus::get() as u32)
         .into_par_iter()
-        .map(|i| run_dslx_add1(i))
+        .map(run_dslx_add1)
         .collect();
 
     // Check that all the results are index+1.

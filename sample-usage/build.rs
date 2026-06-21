@@ -10,7 +10,7 @@ fn extract_rust_fence(content: &str) -> Option<String> {
     let after_start = &content[start_idx + fence_start.len()..];
 
     // skip any newline after "```rust"
-    let after_newline = after_start.trim_start_matches(|c| c == '\r' || c == '\n');
+    let after_newline = after_start.trim_start_matches(['\r', '\n']);
 
     let end_idx = after_newline.find(fence_end)?;
     Some(after_newline[..end_idx].to_string())
@@ -56,24 +56,6 @@ mod readme_snippet {{
 
 fn main() {
     make_readme_snippet_file();
-
-    let sample_with_enum_def_rs_path =
-        xlsynth::x_path_to_rs_bridge_via_env("src/sample_with_enum_def.x");
-    println!(
-        "cargo:rustc-env=DSLX_SAMPLE_WITH_ENUM_DEF_PATH={}",
-        sample_with_enum_def_rs_path.display()
-    );
-
-    // TODO(cdleary): 2024-12-02: Broken for the moment due to the type that has an
-    // extern-type member. let rs_path =
-    // xlsynth::x_path_to_rs_bridge_via_env("../xlsynth/tests/structure_zoo.x");
-    // println!("cargo:rustc-env=DSLX_STRUCTURE_ZOO={}", rs_path.display());
-
-    let rs_path = xlsynth::x_path_to_rs_bridge_via_env("src/sample_with_struct_def.x");
-    println!(
-        "cargo:rustc-env=DSLX_SAMPLE_WITH_STRUCT_DEF={}",
-        rs_path.display()
-    );
 
     println!("cargo:rerun-if-changed=build.rs");
 }

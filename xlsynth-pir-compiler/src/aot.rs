@@ -17,15 +17,14 @@ pub use xlsynth::DslxConvertOptions;
 use xlsynth::aot_builder as xlsynth_aot_builder;
 pub use xlsynth::aot_builder::TypedDslxAotBuildSpec;
 use xlsynth::aot_builder::{
-    NativeTypedDslxFunctionSignature, NativeTypedDslxType,
     build_native_typed_dslx_aot_package_metadata, collect_typed_dslx_aot_dependencies,
-    render_native_typed_dslx_generated_module, typed_dslx_implicit_token_entrypoint_wrapper_top,
+    typed_dslx_implicit_token_entrypoint_wrapper_top,
 };
 use xlsynth::{
-    DslxCallingConvention, convert_dslx_to_ir_text, dslx_path_to_module_name,
-    mangle_dslx_name_with_calling_convention,
+    DslxCallingConvention, IrPackage, convert_dslx_to_ir_text, dslx_path_to_module_name,
+    mangle_dslx_name_with_calling_convention, optimize_ir,
 };
-use xlsynth_pir::ir::{PackageMember, Type};
+use xlsynth_pir::ir::{NodePayload, PackageMember, Type};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler_runtime::{
     AssumptionFailureKind, EventKind, EventSiteMetadata, TraceTupleFieldLayout, TraceValueLayout,
@@ -470,6 +469,9 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
 }
 
 /// Collects DSLX entrypoints into one shared wrapper and package object.
+///
+/// Each entrypoint is lowered to XLS IR and optimized by XLS before Cranelift
+/// compiles the shared native object.
 pub struct TypedDslxAotPackageBuilder<'a> {
     name: &'a str,
     specs: Vec<TypedDslxAotBuildSpec<'a>>,
@@ -483,7 +485,6 @@ pub struct GeneratedTypedDslxAotPackage {
 }
 
 struct PreparedDslxAotEntrypoint {
-    dslx_text: String,
     package: xlsynth_pir::ir::Package,
     top: String,
 }
@@ -683,66 +684,6 @@ pub fn emit_aot_module_from_pir_text_with_out_dir(
     })
 }
 
-/// Emits a typed native AOT wrapper for one DSLX top-level function.
-pub fn emit_aot_module_from_dslx_file(
-    spec: &TypedDslxAotBuildSpec<'_>,
-) -> Result<GeneratedAotModule, CompilerError> {
-    let out_dir = std::env::var_os("OUT_DIR").ok_or_else(|| {
-        CompilerError::Backend("OUT_DIR is required while emitting an AOT module".into())
-    })?;
-    emit_aot_module_from_dslx_file_with_out_dir(spec, Path::new(&out_dir))
-}
-
-/// Emits a typed native AOT wrapper for one DSLX top-level function into
-/// `out_dir`.
-pub fn emit_aot_module_from_dslx_file_with_out_dir(
-    spec: &TypedDslxAotBuildSpec<'_>,
-    out_dir: &Path,
-) -> Result<GeneratedAotModule, CompilerError> {
-    let base_name = sanitize_identifier(spec.name);
-    if base_name.is_empty() {
-        return Err(CompilerError::InvalidArgument(
-            "AOT build spec name must contain an identifier character".into(),
-        ));
-    }
-    let (dslx_text, artifact) = compile_dslx_artifact(spec, &base_name)?;
-    let generated_source =
-        render_native_typed_dslx_generated_module(spec, &dslx_text, |signature| {
-            validate_native_typed_dslx_signature(signature, &artifact)
-                .map_err(|error| xlsynth::XlsynthError(error.to_string()))?;
-            Ok(render_typed_dslx_runner_items(signature, &artifact))
-        })
-        .map_err(|error| CompilerError::Backend(error.to_string()))?;
-
-    fs::create_dir_all(out_dir).map_err(|error| CompilerError::Backend(error.to_string()))?;
-    let object_file = out_dir.join(format!("{base_name}.pir_aot.o"));
-    let rust_file = out_dir.join(format!("{base_name}_typed_dslx_pir_aot_wrapper.rs"));
-    fs::write(&object_file, &artifact.object_code)
-        .map_err(|error| CompilerError::Backend(error.to_string()))?;
-    fs::write(&rust_file, generated_source)
-        .map_err(|error| CompilerError::Backend(error.to_string()))?;
-    cc::Build::new()
-        .cargo_metadata(true)
-        .object(&object_file)
-        .compile(&format!("xlsynth_pir_aot_{base_name}"));
-
-    Ok(GeneratedAotModule {
-        rust_file,
-        object_file,
-        artifact,
-    })
-}
-
-fn compile_dslx_artifact(
-    spec: &TypedDslxAotBuildSpec<'_>,
-    base_name: &str,
-) -> Result<(String, AotArtifact), CompilerError> {
-    let prepared = prepare_dslx_aot_entrypoint(spec, base_name)?;
-    let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
-    let artifact = compile_package_aot(&prepared.package, &prepared.top, &entrypoint_symbol)?;
-    Ok((prepared.dslx_text, artifact))
-}
-
 fn prepare_dslx_aot_entrypoint(
     spec: &TypedDslxAotBuildSpec<'_>,
     base_name: &str,
@@ -769,23 +710,83 @@ fn prepare_dslx_aot_entrypoint(
         calling_convention,
     )
     .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let optimized_pir_text = optimize_dslx_aot_pir_text(
+        &pir_text,
+        &dslx_top,
+        spec.dslx_path.file_name().and_then(|name| name.to_str()),
+    )?;
     let (pir_text, top) = if spec.dslx_options.force_implicit_token_calling_convention {
         let wrapper_top = typed_dslx_implicit_token_entrypoint_wrapper_top(base_name);
         (
-            append_implicit_token_entrypoint_wrapper(&pir_text, &dslx_top, &wrapper_top)?,
+            append_implicit_token_entrypoint_wrapper(&optimized_pir_text, &dslx_top, &wrapper_top)?,
             wrapper_top,
         )
     } else {
-        (pir_text, dslx_top)
+        (optimized_pir_text, dslx_top)
     };
     let package = Parser::new(&pir_text)
         .parse_and_validate_package()
         .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
-    Ok(PreparedDslxAotEntrypoint {
-        dslx_text,
-        package,
-        top,
-    })
+    Ok(PreparedDslxAotEntrypoint { package, top })
+}
+
+/// Runs the XLS IR optimizer before a DSLX-derived package is lowered by
+/// Cranelift.
+fn optimize_dslx_aot_pir_text(
+    pir_text: &str,
+    top: &str,
+    filename: Option<&str>,
+) -> Result<String, CompilerError> {
+    let original_package = Parser::new(pir_text)
+        .parse_and_validate_package()
+        .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
+    let original_event_labels = original_package
+        .members
+        .iter()
+        .flat_map(|member| match member {
+            PackageMember::Function(function) => function.nodes.iter(),
+            PackageMember::Block { func, .. } => func.nodes.iter(),
+        })
+        .filter_map(|node| match &node.payload {
+            NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => {
+                Some(label.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let ir_package = IrPackage::parse_ir(pir_text, filename)
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let optimized_pir_text = optimize_ir(&ir_package, top)
+        .map(|package| package.to_string())
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let mut optimized_package = Parser::new(&optimized_pir_text)
+        .parse_and_validate_package()
+        .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
+    for member in &mut optimized_package.members {
+        let function = match member {
+            PackageMember::Function(function) => function,
+            PackageMember::Block { func, .. } => func,
+        };
+        for node in &mut function.nodes {
+            let label = match &mut node.payload {
+                NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => label,
+                _ => continue,
+            };
+            if let Some(original) = original_event_labels
+                .iter()
+                .filter(|original| {
+                    label.as_str() == original.as_str()
+                        || label
+                            .strip_suffix(original.as_str())
+                            .is_some_and(|prefix| prefix.ends_with('_'))
+                })
+                .max_by_key(|original| original.len())
+            {
+                label.clone_from(original);
+            }
+        }
+    }
+    Ok(optimized_package.to_string())
 }
 
 /// Appends a user-signature wrapper around a DSLX implicit-token entrypoint.
@@ -894,126 +895,6 @@ fn package_max_text_id(package: &xlsynth_pir::ir::Package) -> usize {
         .map(|node| node.text_id)
         .max()
         .unwrap_or(0)
-}
-
-fn render_typed_dslx_runner_items(
-    signature: &NativeTypedDslxFunctionSignature,
-    artifact: &AotArtifact,
-) -> String {
-    let entrypoint_artifact = AotEntrypointArtifact::from(artifact);
-    let param_names = signature
-        .params
-        .iter()
-        .map(|param| param.name.clone())
-        .collect::<Vec<_>>();
-    let param_types = signature
-        .params
-        .iter()
-        .map(|param| param.rust_type.clone())
-        .collect::<Vec<_>>();
-    render_runner_items(
-        &entrypoint_artifact,
-        &param_names,
-        &param_types,
-        &signature.return_rust_type,
-        "",
-        false,
-    )
-}
-
-fn validate_native_typed_dslx_signature(
-    signature: &NativeTypedDslxFunctionSignature,
-    artifact: &AotArtifact,
-) -> Result<(), CompilerError> {
-    if signature.params.len() != artifact.param_layouts.len() {
-        return Err(CompilerError::InvalidFunction(format!(
-            "typed DSLX parameter count {} does not match compiled PIR parameter count {}",
-            signature.params.len(),
-            artifact.param_layouts.len()
-        )));
-    }
-    for (index, (param, layout)) in signature
-        .params
-        .iter()
-        .zip(artifact.param_layouts.iter())
-        .enumerate()
-    {
-        validate_native_typed_dslx_type(
-            &format!("parameter {index} `{}`", param.name),
-            &param.ty,
-            layout,
-        )?;
-    }
-    validate_native_typed_dslx_type(
-        "return value",
-        &signature.return_type,
-        &artifact.result_layout,
-    )
-}
-
-fn validate_native_typed_dslx_type(
-    label: &str,
-    dslx_type: &NativeTypedDslxType,
-    layout: &NativeValueLayout,
-) -> Result<(), CompilerError> {
-    match (dslx_type, layout) {
-        (
-            NativeTypedDslxType::Bits { bit_count } | NativeTypedDslxType::Enum { bit_count },
-            NativeValueLayout::Scalar(scalar),
-        ) if *bit_count == scalar.bit_count => Ok(()),
-        (
-            NativeTypedDslxType::Bits { bit_count } | NativeTypedDslxType::Enum { bit_count },
-            NativeValueLayout::WideBits(wide),
-        ) if *bit_count == wide.bit_count => Ok(()),
-        (
-            NativeTypedDslxType::Array { size, element },
-            NativeValueLayout::Array {
-                element: native_element,
-                element_count,
-            },
-        ) if size == element_count => validate_native_typed_dslx_type(
-            &format!("{label} array element"),
-            element,
-            native_element,
-        ),
-        (
-            NativeTypedDslxType::Struct { fields },
-            NativeValueLayout::Tuple {
-                fields: native_fields,
-                ..
-            },
-        ) if fields.len() == native_fields.len() => {
-            for (field, native_field) in fields.iter().zip(native_fields.iter()) {
-                validate_native_typed_dslx_type(
-                    &format!("{label}.{}", field.name),
-                    &field.ty,
-                    &native_field.layout,
-                )?;
-            }
-            Ok(())
-        }
-        (
-            NativeTypedDslxType::Tuple { elements },
-            NativeValueLayout::Tuple {
-                fields: native_fields,
-                ..
-            },
-        ) if elements.len() == native_fields.len() => {
-            for (index, (element, native_field)) in
-                elements.iter().zip(native_fields.iter()).enumerate()
-            {
-                validate_native_typed_dslx_type(
-                    &format!("{label}.{index}"),
-                    element,
-                    &native_field.layout,
-                )?;
-            }
-            Ok(())
-        }
-        _ => Err(CompilerError::InvalidFunction(format!(
-            "typed DSLX native layout mismatch for {label}: DSLX has {dslx_type:?}, compiled PIR has {layout:?}"
-        ))),
-    }
 }
 
 struct ValidatedPirAotPackage<'a> {
@@ -1490,7 +1371,7 @@ fn render_pir_aot_runtime_items(
     tuple_types: &GeneratedTupleTypes,
 ) -> Result<String, CompilerError> {
     let mut output =
-        "pub use xlsynth_pir_compiler_runtime::{ExecutionOptions, Token};\n".to_string();
+        "pub use xlsynth_pir_compiler_runtime::{AllZeros, ExecutionOptions, Token};\n".to_string();
     for (signedness, bit_count) in collect_scalar_aliases(package) {
         output.push_str(&format!(
             "pub type {} = {};\n",
@@ -1530,20 +1411,20 @@ fn render_generated_tuple_type(
         })
         .collect::<Result<Vec<_>, CompilerError>>()?
         .concat();
-    let defaults = tuple_type
+    let all_zeros = tuple_type
         .elements
         .iter()
         .enumerate()
         .map(|(index, element)| {
             Ok(format!(
                 "            field{index}: {},\n",
-                render_pir_aot_default_expr(package, tuple_types, element, &[])?
+                render_pir_aot_all_zeros_expr(package, tuple_types, element, &[])?
             ))
         })
         .collect::<Result<Vec<_>, CompilerError>>()?
         .concat();
     Ok(format!(
-        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\nimpl {name} {{\n    /// Constructs a value whose DSLX/PIR data bits are all zero.\n    pub fn all_zeros() -> Self {{\n        Self {{\n{all_zeros}        }}\n    }}\n}}\nimpl AllZeros for {name} {{\n    fn all_zeros() -> Self {{\n        {name}::all_zeros()\n    }}\n}}\n",
         name = tuple_type.name,
     ))
 }
@@ -1735,6 +1616,7 @@ fn render_pir_aot_decl(
 ) -> Result<String, CompilerError> {
     match decl {
         PirAotDecl::Struct { name, fields } => {
+            let all_zeros_trait = render_root_item_path(module_path, "AllZeros");
             let rendered_fields = fields
                 .iter()
                 .map(|field| {
@@ -1746,19 +1628,24 @@ fn render_pir_aot_decl(
                 })
                 .collect::<Result<Vec<_>, CompilerError>>()?
                 .concat();
-            let defaults = fields
+            let all_zeros = fields
                 .iter()
                 .map(|field| {
                     Ok(format!(
                         "            {}: {},\n",
                         sanitize_identifier(&field.name),
-                        render_pir_aot_default_expr(package, tuple_types, &field.ty, module_path)?
+                        render_pir_aot_all_zeros_expr(
+                            package,
+                            tuple_types,
+                            &field.ty,
+                            module_path,
+                        )?
                     ))
                 })
                 .collect::<Result<Vec<_>, CompilerError>>()?
                 .concat();
             Ok(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n"
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\nimpl {name} {{\n    /// Constructs a value whose DSLX/PIR data bits are all zero.\n    pub fn all_zeros() -> Self {{\n        Self {{\n{all_zeros}        }}\n    }}\n}}\nimpl {all_zeros_trait} for {name} {{\n    fn all_zeros() -> Self {{\n        {name}::all_zeros()\n    }}\n}}\n"
             ))
         }
         PirAotDecl::Enum {
@@ -1768,6 +1655,7 @@ fn render_pir_aot_decl(
             variants,
         } => {
             let bits_type = render_scalar_alias_type(module_path, *signedness, *bit_count);
+            let all_zeros_trait = render_root_item_path(module_path, "AllZeros");
             let constants = variants
                 .iter()
                 .map(|variant| {
@@ -1780,7 +1668,7 @@ fn render_pir_aot_decl(
                 .collect::<Vec<_>>()
                 .concat();
             Ok(format!(
-                "#[repr(transparent)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {name}(pub {bits_type});\nimpl {name} {{\n{constants}}}\n"
+                "#[repr(transparent)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name}(pub {bits_type});\nimpl {name} {{\n    /// Constructs a value whose DSLX/PIR data bits are all zero.\n    pub fn all_zeros() -> Self {{\n        Self(<{bits_type} as {all_zeros_trait}>::all_zeros())\n    }}\n{constants}}}\nimpl {all_zeros_trait} for {name} {{\n    fn all_zeros() -> Self {{\n        {name}::all_zeros()\n    }}\n}}\n"
             ))
         }
         PirAotDecl::Alias { name, target } => Ok(format!(
@@ -1834,19 +1722,17 @@ fn render_pir_aot_type(
     }
 }
 
-fn render_pir_aot_default_expr(
+fn render_pir_aot_all_zeros_expr(
     package: &ValidatedPirAotPackage<'_>,
     tuple_types: &GeneratedTupleTypes,
     ty: &PirAotType,
     current_module_path: &[String],
 ) -> Result<String, CompilerError> {
-    match ty {
-        PirAotType::Array { element, .. } => Ok(format!(
-            "std::array::from_fn(|_| {})",
-            render_pir_aot_default_expr(package, tuple_types, element, current_module_path)?
-        )),
-        _ => Ok("Default::default()".to_string()),
-    }
+    Ok(format!(
+        "<{} as {}>::all_zeros()",
+        render_pir_aot_type(package, tuple_types, ty, current_module_path)?,
+        render_root_item_path(current_module_path, "AllZeros"),
+    ))
 }
 
 fn render_relative_type_path(current: &[String], target_module: &[String], name: &str) -> String {
@@ -2083,8 +1969,8 @@ fn render_runner_items(
     };
     let public_runtime_imports = if emit_native_value_types {
         r#"pub use xlsynth_pir_compiler_runtime::{
-    Bits0, BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionOptions, ExecutionResult,
-    RunError, Token, WideBits,
+    AllZeros, Bits0, BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionOptions,
+    ExecutionResult, RunError, Token, WideBits,
 };
 "#
     } else {
@@ -2272,33 +2158,22 @@ fn render_value_type(
         }
         Type::Tuple(fields) => {
             let mut rendered_fields = Vec::new();
-            let mut defaults = Vec::new();
+            let mut all_zeros = Vec::new();
             for (index, field) in fields.iter().enumerate() {
                 let field_name = format!("{name}Field{index}");
                 let rendered = render_value_type(field, &field_name, declarations)?;
                 rendered_fields.push(format!("    pub field{index}: {rendered},\n"));
-                defaults.push(format!(
-                    "            field{index}: {},\n",
-                    render_value_default_expr(field)?
+                all_zeros.push(format!(
+                    "            field{index}: <{rendered} as AllZeros>::all_zeros(),\n"
                 ));
             }
             declarations.push(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\nimpl {name} {{\n    /// Constructs a value whose DSLX/PIR data bits are all zero.\n    pub fn all_zeros() -> Self {{\n        Self {{\n{all_zeros}        }}\n    }}\n}}\nimpl AllZeros for {name} {{\n    fn all_zeros() -> Self {{\n        {name}::all_zeros()\n    }}\n}}\n",
                 fields = rendered_fields.concat(),
-                defaults = defaults.concat()
+                all_zeros = all_zeros.concat()
             ));
             Ok(name.to_string())
         }
-    }
-}
-
-fn render_value_default_expr(ty: &Type) -> Result<String, CompilerError> {
-    match ty {
-        Type::Array(array) => Ok(format!(
-            "std::array::from_fn(|_| {})",
-            render_value_default_expr(array.element_type.as_ref())?
-        )),
-        _ => Ok("Default::default()".to_string()),
     }
 }
 
@@ -2516,14 +2391,16 @@ mod tests {
         ));
         assert!(rendered.contains("pub field0: U8,"));
         assert!(rendered.contains("pub field1: U16,"));
-        assert!(rendered.contains("impl Default for XlsynthPirAotTuple0"));
-        assert!(rendered.contains("field0: Default::default(),"));
-        assert!(rendered.contains("field1: Default::default(),"));
+        assert!(rendered.contains("impl XlsynthPirAotTuple0"));
+        assert!(rendered.contains("impl AllZeros for XlsynthPirAotTuple0"));
+        assert!(rendered.contains("field0: <U8 as AllZeros>::all_zeros(),"));
+        assert!(rendered.contains("field1: <U16 as AllZeros>::all_zeros(),"));
         assert!(rendered.contains(
             "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
         ));
         assert!(rendered.contains("pub field0: XlsynthPirAotTuple0,"));
-        assert!(rendered.contains("impl Default for XlsynthPirAotTuple1"));
+        assert!(rendered.contains("impl AllZeros for XlsynthPirAotTuple1"));
+        assert!(!rendered.contains("impl Default for XlsynthPirAotTuple"));
         assert!(rendered.contains("pub type PairAlias = super::XlsynthPirAotTuple0;"));
         assert!(rendered.contains("pub pair: super::XlsynthPirAotTuple0,"));
         assert!(rendered.contains("pair: &super::super::XlsynthPirAotTuple0"));
@@ -2549,5 +2426,22 @@ mod tests {
             "Bits0"
         );
         assert!(declarations.is_empty());
+    }
+
+    #[test]
+    fn dslx_aot_pir_is_optimized_before_cranelift_lowering() {
+        let pir_text = r#"package optimizer_test
+
+top fn main(x: bits[32]) -> bits[32] {
+  zero: bits[32] = literal(value=0, id=2)
+  ret sum: bits[32] = add(x, zero, id=3)
+}
+"#;
+        assert!(pir_text.contains("add(x, zero,"));
+
+        let optimized = optimize_dslx_aot_pir_text(pir_text, "main", Some("optimizer_test.ir"))
+            .expect("IR optimization should succeed");
+
+        assert!(!optimized.contains("add(x, zero,"));
     }
 }

@@ -35,8 +35,6 @@ pub struct RustBridgeBuilder {
 pub(crate) enum RustBridgeTarget {
     /// Packing-oriented bridge values used by the LLVM standalone AOT path.
     StandaloneAot,
-    /// Native bridge values passed directly to PIR compiler entrypoints.
-    PirCompilerNative,
 }
 
 /// Rust items generated for one DSLX module, before parent modules are
@@ -123,13 +121,6 @@ impl RustBridgeBuilder {
             defer_parametric_struct_emission: false,
             target: RustBridgeTarget::StandaloneAot,
         }
-    }
-
-    /// Selects native PIR compiler storage for emitted bridge values.
-    #[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
-    pub(crate) fn with_pir_compiler_native_target(mut self) -> Self {
-        self.target = RustBridgeTarget::PirCompilerNative;
-        self
     }
 
     /// Appends raw Rust items immediately before the generated module closes.
@@ -499,14 +490,8 @@ impl RustBridgeBuilder {
 impl RustBridgeBuilder {
     /// Adds representation attributes suitable for this bridge target.
     fn push_struct_representation(&mut self) {
-        if self.target == RustBridgeTarget::PirCompilerNative {
-            self.lines.push("#[repr(C)]".to_string());
-            self.lines
-                .push("#[derive(Debug, Clone, Copy, PartialEq, Eq)]".to_string());
-        } else {
-            self.lines
-                .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
-        }
+        self.lines
+            .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
     }
 }
 
@@ -522,18 +507,9 @@ use xlsynth_aot_runtime::{
 "#
 }
 
-/// Renders the runtime imports shared by generated native compiler bridges.
-pub(crate) fn render_pir_compiler_native_runtime_imports() -> &'static str {
-    r#"pub use xlsynth_pir_compiler_runtime::{
-    BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits,
-};
-"#
-}
-
 fn render_runtime_imports(target: RustBridgeTarget) -> &'static str {
     match target {
         RustBridgeTarget::StandaloneAot => render_standalone_runtime_imports(),
-        RustBridgeTarget::PirCompilerNative => render_pir_compiler_native_runtime_imports(),
     }
 }
 
@@ -548,18 +524,6 @@ fn bits_rust_type(target: RustBridgeTarget, is_signed: bool, bit_count: usize) -
                 format!("UBits<{bit_count}>")
             }
         }
-        RustBridgeTarget::PirCompilerNative => native_bits_rust_type(bit_count),
-    }
-}
-
-/// Returns the native compiler runtime carrier for one DSLX bits value.
-pub(crate) fn native_bits_rust_type(bit_count: usize) -> String {
-    match bit_count {
-        1..=8 => format!("BitsInU8<{bit_count}>"),
-        9..=16 => format!("BitsInU16<{bit_count}>"),
-        17..=32 => format!("BitsInU32<{bit_count}>"),
-        33..=64 => format!("BitsInU64<{bit_count}>"),
-        _ => format!("WideBits<{bit_count}, {}>", bit_count.div_ceil(64)),
     }
 }
 
@@ -816,8 +780,6 @@ impl BridgeBuilder for RustBridgeBuilder {
             .join("::");
         let imports = if root.is_empty() {
             String::new()
-        } else if self.target == RustBridgeTarget::PirCompilerNative {
-            format!("use {root}::{{BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits}};\n")
         } else {
             format!(
                 "use {root}::{{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits}};\n"
@@ -845,34 +807,9 @@ impl BridgeBuilder for RustBridgeBuilder {
         &mut self,
         dslx_name: &str,
         is_signed: bool,
-        underlying_bit_count: usize,
+        _underlying_bit_count: usize,
         members: &[(String, IrValue)],
     ) -> Result<(), XlsynthError> {
-        if self.target == RustBridgeTarget::PirCompilerNative {
-            if !(1..=64).contains(&underlying_bit_count) {
-                return Err(XlsynthError(format!(
-                    "DSLX Rust bridge does not yet support native enum `{dslx_name}` with bits[{underlying_bit_count}] storage"
-                )));
-            }
-            let carrier = native_bits_rust_type(underlying_bit_count);
-            let carrier_expr = carrier.replacen('<', "::<", 1);
-            self.lines.push("#[repr(transparent)]".to_string());
-            self.lines
-                .push("#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]".to_string());
-            self.lines
-                .push(format!("pub struct {dslx_name}(pub {carrier});"));
-            self.lines.push(format!("impl {dslx_name} {{"));
-            for (name, value) in members {
-                let value = value.to_bits()?.to_u64()?;
-                self.lines
-                    .push("    #[allow(non_upper_case_globals)]".to_string());
-                self.lines.push(format!(
-                    "    pub const {name}: Self = Self({carrier_expr}::wrapping({value}));"
-                ));
-            }
-            self.lines.push("}\n".to_string());
-            return Ok(());
-        }
         let value_to_string = |value: &IrValue| -> Result<String, XlsynthError> {
             if is_signed {
                 value.to_i64().map(|v| v.to_string())
@@ -1158,10 +1095,6 @@ mod tests {
         assert_eq!(
             shape.rust_type(RustBridgeTarget::StandaloneAot),
             "(UBits<8>, [(SBits<4>, UBits<1>); 2])"
-        );
-        assert_eq!(
-            shape.rust_type(RustBridgeTarget::PirCompilerNative),
-            "(BitsInU8<8>, [(BitsInU8<4>, BitsInU8<1>); 2])"
         );
     }
 
