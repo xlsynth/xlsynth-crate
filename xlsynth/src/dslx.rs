@@ -2302,10 +2302,10 @@ impl TypeInfo {
     /// Returns whether two wrappers refer to the same DSLX typechecking
     /// context.
     ///
-    /// This is an identity check for resolving owner modules during bridge
+    /// This is an identity check for resolving owner modules during metadata
     /// generation; it is not a semantic comparison between two independent
     /// type environments.
-    pub(crate) fn is_same_type_context(&self, other: &Self) -> bool {
+    pub fn is_same_type_context(&self, other: &Self) -> bool {
         self.ptr == other.ptr
     }
 
@@ -2395,12 +2395,16 @@ impl TypeInfo {
         }
     }
 
-    pub fn build_function_call_graph(&self) -> Result<FunctionCallGraph, XlsynthError> {
+    pub fn build_function_call_graph(
+        &self,
+        module: &Module,
+    ) -> Result<FunctionCallGraph, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
         let success = unsafe {
-            sys::xls_dslx_type_info_build_function_call_graph(
+            sys::xls_dslx_type_info_build_function_call_graph_for_module(
                 self.ptr,
+                module.ptr,
                 &mut error_out,
                 &mut result_out,
             )

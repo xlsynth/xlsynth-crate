@@ -252,35 +252,6 @@ def ensure_versioned_dso_alias(output_dir: str, version: str, platform: str) -> 
     )
 
 
-def build_static_aot_runtime_release_filename(platform: str) -> str:
-    return f"libxls_aot_runtime-{platform}.a"
-
-
-def build_static_aot_runtime_link_config_release_filename(platform: str) -> str:
-    return f"libxls_aot_runtime_link-{platform}.toml"
-
-
-def download_static_aot_runtime_assets(
-    base_url: str, output_dir: str, platform: str, max_attempts: int
-) -> None:
-    high_integrity_download(
-        base_url,
-        build_static_aot_runtime_release_filename(platform),
-        output_dir,
-        max_attempts,
-        is_binary=False,
-        output_filename="libxls_aot_runtime.a",
-    )
-    high_integrity_download(
-        base_url,
-        build_static_aot_runtime_link_config_release_filename(platform),
-        output_dir,
-        max_attempts,
-        is_binary=False,
-        output_filename="libxls_aot_runtime_link.toml",
-    )
-
-
 def main():
     parser = OptionParser()
     parser.add_option(
@@ -307,24 +278,6 @@ def main():
         "--no-dso",
         dest="dso",
         help="Do not download the DSO library",
-        action="store_false",
-    )
-    parser.add_option(
-        "--standalone-aot-runtime",
-        dest="standalone_aot_runtime",
-        help=(
-            "Download the same-version standalone AOT runtime archive and "
-            "producer-authored link config (default)"
-        ),
-        action="store_true",
-        default=True,
-    )
-    parser.add_option(
-        "--no-standalone-aot-runtime",
-        dest="standalone_aot_runtime",
-        help=(
-            "Do not download the standalone AOT runtime archive or its " "link config"
-        ),
         action="store_false",
     )
     default_binaries_csv = ",".join(DEFAULT_BINARIES)
@@ -402,14 +355,6 @@ def main():
 
     if options.dso:
         ensure_versioned_dso_alias(output_dir, version, options.platform)
-
-    if options.standalone_aot_runtime:
-        download_static_aot_runtime_assets(
-            base_url,
-            output_dir,
-            options.platform,
-            options.max_attempts,
-        )
 
     # Download and extract dslx_stdlib.tar.gz
     stdlib_filename = "dslx_stdlib.tar.gz"

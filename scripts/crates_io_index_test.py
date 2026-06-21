@@ -28,7 +28,7 @@ def test_sparse_index_path_uses_cargo_index_layout():
     assert sparse_index_path("ab") == "2/ab"
     assert sparse_index_path("abc") == "3/a/abc"
     assert sparse_index_path("xlsynth-sys") == "xl/sy/xlsynth-sys"
-    assert sparse_index_path("XLSynth_Aot") == "xl/sy/xlsynth_aot"
+    assert sparse_index_path("XLSynth_Tools") == "xl/sy/xlsynth_tools"
 
 
 def test_published_version_is_found_through_sparse_index():

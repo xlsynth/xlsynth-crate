@@ -2,7 +2,6 @@
 
 crates = [
     "xlsynth-sys",
-    "xlsynth-aot-runtime",
     "xlsynth",
     "xlsynth-vastly",
     "xlsynth-pir",

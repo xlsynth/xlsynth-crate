@@ -39,6 +39,10 @@ pub struct CIrFunctionJit {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+/// Opaque context for the libxls AOT C API.
+///
+/// The bindings are retained so `xlsynth-sys` covers every exported libxls
+/// symbol. The high-level xlsynth AOT API uses the PIR/Cranelift compiler.
 #[repr(C)]
 pub struct CXlsAotExecContext {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
@@ -1544,6 +1548,13 @@ unsafe extern "C" {
     // -- call_graph
     pub fn xls_dslx_type_info_build_function_call_graph(
         type_info: *mut CDslxTypeInfo,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxCallGraph,
+    ) -> bool;
+
+    pub fn xls_dslx_type_info_build_function_call_graph_for_module(
+        type_info: *mut CDslxTypeInfo,
+        module: *mut CDslxModule,
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CDslxCallGraph,
     ) -> bool;
