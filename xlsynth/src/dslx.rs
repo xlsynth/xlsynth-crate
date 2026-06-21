@@ -2302,10 +2302,10 @@ impl TypeInfo {
     /// Returns whether two wrappers refer to the same DSLX typechecking
     /// context.
     ///
-    /// This is an identity check for resolving owner modules during bridge
+    /// This is an identity check for resolving owner modules during metadata
     /// generation; it is not a semantic comparison between two independent
     /// type environments.
-    pub(crate) fn is_same_type_context(&self, other: &Self) -> bool {
+    pub fn is_same_type_context(&self, other: &Self) -> bool {
         self.ptr == other.ptr
     }
 

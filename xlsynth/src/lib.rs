@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
-pub mod aot_builder;
-pub mod aot_entrypoint_metadata;
-pub mod aot_lib;
-pub mod aot_runner;
 pub mod dslx;
 pub mod dslx_bridge;
 pub mod ir_analysis;
@@ -12,7 +7,6 @@ pub mod ir_builder;
 pub mod ir_package;
 pub mod ir_value;
 mod lib_support;
-pub mod rust_bridge_builder;
 pub mod sv_bridge_builder;
 pub mod vast;
 pub mod vast_helpers;
@@ -30,8 +24,6 @@ use lib_support::{
     xls_optimize_ir,
 };
 
-pub use aot_lib::{AotCompiled, AotEntrypointMetadata, AotResult};
-pub use aot_runner::{AotEntrypointDescriptor, AotRunResult, AotRunner};
 pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownBits};
 pub use ir_builder::BValue;
 pub use ir_builder::FnBuilder;

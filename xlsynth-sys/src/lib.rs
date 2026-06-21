@@ -39,6 +39,10 @@ pub struct CIrFunctionJit {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+/// Opaque context for the libxls AOT C API.
+///
+/// The bindings are retained so `xlsynth-sys` covers every exported libxls
+/// symbol. The high-level xlsynth AOT API uses the PIR/Cranelift compiler.
 #[repr(C)]
 pub struct CXlsAotExecContext {
     _private: [u8; 0], // Ensures the struct cannot be instantiated

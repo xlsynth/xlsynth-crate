@@ -55,11 +55,7 @@ jobs:
       - name: Configure xlsynth artifact environment
         run: |
           XLSYNTH_TOOLS="$(realpath xlsynth_tools)"
-          test -f "${XLSYNTH_TOOLS}/libxls_aot_runtime.a"
-          test -f "${XLSYNTH_TOOLS}/libxls_aot_runtime_link.toml"
           echo "XLSYNTH_TOOLS=${XLSYNTH_TOOLS}" >> "$GITHUB_ENV"
-          echo "XLS_AOT_RUNTIME_PATH=${XLSYNTH_TOOLS}/libxls_aot_runtime.a" >> "$GITHUB_ENV"
-          echo "XLS_AOT_RUNTIME_LINK_CONFIG_PATH=${XLSYNTH_TOOLS}/libxls_aot_runtime_link.toml" >> "$GITHUB_ENV"
 
       - name: Download Bitwuzla shared library (macOS arm64)
         run: |

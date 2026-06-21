@@ -335,7 +335,7 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage
+          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace --exclude sample-usage
 
 
   # -----------------------------------------------------------
@@ -518,7 +518,7 @@ jobs:
         run: bash scripts/check_build_script_dso_runtime.sh
 
       - name: Build crate
-        run: cargo build --features with-z3-system,with-bitwuzla-system --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage -vv
+        run: cargo build --features with-z3-system,with-bitwuzla-system --workspace --exclude sample-usage -vv
 
       - name: Test crate
         env:
@@ -529,7 +529,7 @@ jobs:
           CARGO_BUILD_JOBS: 1
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-z3-system,with-bitwuzla-system --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage
+          cargo test --features with-z3-system,with-bitwuzla-system --workspace --exclude sample-usage
   # -----------------------------------------------------------
   # 4) macOS job
   # -----------------------------------------------------------
@@ -680,7 +680,7 @@ jobs:
           DYLD_LIBRARY_PATH: /usr/local/lib
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage
+          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace --exclude sample-usage
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
@@ -787,7 +787,7 @@ jobs:
       - name: Build crate
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --features with-bitwuzla-system --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage -vv
+          cargo build --features with-bitwuzla-system --workspace --exclude sample-usage -vv
 
       - name: Report disk usage after cargo build (rocky8)
         if: ${{ always() }}
@@ -804,7 +804,7 @@ jobs:
           iverilog -V || true
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-bitwuzla-system --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage
+          cargo test --features with-bitwuzla-system --workspace --exclude sample-usage
 
       - name: Report disk usage after cargo test (rocky8)
         if: ${{ always() }}
@@ -1000,7 +1000,7 @@ jobs:
           echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Build crate
-        run: cargo build --features with-z3-system,with-bitwuzla-system,with-boolector-system,with-z3-binary-test --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage -vv
+        run: cargo build --features with-z3-system,with-bitwuzla-system,with-boolector-system,with-z3-binary-test --workspace --exclude sample-usage -vv
 
       - name: Run Valgrind Tests
         run: |
@@ -1055,7 +1055,7 @@ jobs:
           # requirements.
           TAG='${{ steps.resolve-xls-tag-predownload.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 scripts/download_release.py -p rocky8 -o pre_download -d --standalone-aot-runtime -v ${TAG}
+          python3 scripts/download_release.py -p rocky8 -o pre_download -d -v ${TAG}
 
       - name: Install libc++ from llvm-18
         run: |
@@ -1072,21 +1072,16 @@ jobs:
           echo "Using DSLX_STDLIB_PATH=${DSLX_STDLIB_PATH}"
           cargo test -p xlsynth --verbose
 
-      - name: Run standalone runtime tests using pre-downloaded artifacts
+      - name: Run sample usage tests using pre-downloaded artifacts
         run: |
           cat > pre_download/xlsynth_artifacts.toml <<'EOF'
           dso_path = "libxls-rocky8.so"
           dslx_stdlib_path = "xls/dslx/stdlib"
-          aot_runtime_path = "libxls_aot_runtime.a"
-          aot_runtime_link_config_path = "libxls_aot_runtime_link.toml"
           EOF
           export XLSYNTH_ARTIFACT_CONFIG="$(realpath pre_download/xlsynth_artifacts.toml)"
           export LD_LIBRARY_PATH="$(realpath pre_download)${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           echo "Using XLSYNTH_ARTIFACT_CONFIG=${XLSYNTH_ARTIFACT_CONFIG}"
           cargo test \
-            -p xlsynth-aot-runtime \
-            -p xlsynth-aot-standalone-test-crate \
-            -p xlsynth-aot-test-crate \
             -p sample-usage \
             --verbose
 
@@ -1254,4 +1249,4 @@ jobs:
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Ensure benches compile
-        run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --exclude xlsynth-aot-runtime --exclude xlsynth-aot-standalone-test-crate --exclude xlsynth-aot-test-crate --exclude sample-usage --no-run
+        run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --exclude sample-usage --no-run

@@ -2,24 +2,25 @@
 
 //! Build-script helpers for emitting standalone native PIR AOT wrappers.
 
+mod dslx_metadata;
+mod dslx_type_metadata;
 pub mod metadata;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub use dslx_metadata::TypedDslxAotBuildSpec;
+use dslx_metadata::{
+    build_pir_aot_package_metadata, collect_typed_dslx_aot_dependencies,
+    typed_dslx_implicit_token_entrypoint_wrapper_top,
+};
 pub use metadata::{
     PIR_AOT_METADATA_FORMAT_VERSION, PirAotDecl, PirAotEntrypoint, PirAotEntrypointSource,
     PirAotEnumVariant, PirAotField, PirAotModule, PirAotPackageMetadata, PirAotParam,
     PirAotSignedness, PirAotType,
 };
 pub use xlsynth::DslxConvertOptions;
-use xlsynth::aot_builder as xlsynth_aot_builder;
-pub use xlsynth::aot_builder::TypedDslxAotBuildSpec;
-use xlsynth::aot_builder::{
-    build_native_typed_dslx_aot_package_metadata, collect_typed_dslx_aot_dependencies,
-    typed_dslx_implicit_token_entrypoint_wrapper_top,
-};
 use xlsynth::{
     DslxCallingConvention, IrPackage, convert_dslx_to_ir_text, dslx_path_to_module_name,
     mangle_dslx_name_with_calling_convention, optimize_ir,
@@ -137,165 +138,7 @@ fn export_generated_rust_file(env_var: &str, rust_file: &Path) -> Result<(), Com
 pub fn build_pir_aot_package_metadata_from_dslx_specs(
     specs: &[TypedDslxAotBuildSpec<'_>],
 ) -> Result<PirAotPackageMetadata, CompilerError> {
-    build_native_typed_dslx_aot_package_metadata(specs)
-        .map_err(|error| CompilerError::Backend(error.to_string()))
-        .and_then(pir_aot_package_metadata_from_dslx_bridge_metadata)
-}
-
-fn pir_aot_package_metadata_from_dslx_bridge_metadata(
-    metadata: xlsynth_aot_builder::TypedAotPackageMetadata,
-) -> Result<PirAotPackageMetadata, CompilerError> {
-    Ok(PirAotPackageMetadata {
-        format_version: PIR_AOT_METADATA_FORMAT_VERSION,
-        modules: metadata
-            .modules
-            .into_iter()
-            .map(pir_aot_module_from_dslx_bridge_metadata)
-            .collect::<Result<Vec<_>, _>>()?,
-        entrypoints: metadata
-            .entrypoints
-            .into_iter()
-            .map(pir_aot_entrypoint_from_dslx_bridge_metadata)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
-}
-
-fn pir_aot_module_from_dslx_bridge_metadata(
-    module: xlsynth_aot_builder::TypedAotModule,
-) -> Result<PirAotModule, CompilerError> {
-    Ok(PirAotModule {
-        path: module.path,
-        declarations: module
-            .declarations
-            .into_iter()
-            .map(pir_aot_decl_from_dslx_bridge_metadata)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
-}
-
-fn pir_aot_decl_from_dslx_bridge_metadata(
-    decl: xlsynth_aot_builder::TypedAotDecl,
-) -> Result<PirAotDecl, CompilerError> {
-    Ok(match decl {
-        xlsynth_aot_builder::TypedAotDecl::Struct { name, fields } => PirAotDecl::Struct {
-            name,
-            fields: fields
-                .into_iter()
-                .map(pir_aot_field_from_dslx_bridge_metadata)
-                .collect(),
-        },
-        xlsynth_aot_builder::TypedAotDecl::Enum {
-            name,
-            signedness,
-            bit_count,
-            variants,
-        } => PirAotDecl::Enum {
-            name,
-            signedness: pir_aot_signedness_from_dslx_bridge_metadata(signedness),
-            bit_count,
-            variants: variants
-                .into_iter()
-                .map(pir_aot_enum_variant_from_dslx_bridge_metadata)
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        xlsynth_aot_builder::TypedAotDecl::Alias { name, target } => PirAotDecl::Alias {
-            name,
-            target: pir_aot_type_from_dslx_bridge_metadata(target),
-        },
-    })
-}
-
-fn pir_aot_field_from_dslx_bridge_metadata(
-    field: xlsynth_aot_builder::TypedAotField,
-) -> PirAotField {
-    PirAotField {
-        name: field.name,
-        ty: pir_aot_type_from_dslx_bridge_metadata(field.ty),
-    }
-}
-
-fn pir_aot_enum_variant_from_dslx_bridge_metadata(
-    variant: xlsynth_aot_builder::TypedAotEnumVariant,
-) -> Result<PirAotEnumVariant, CompilerError> {
-    let value = u64::try_from(variant.value).map_err(|_| {
-        CompilerError::InvalidArgument(format!(
-            "PIR AOT enum variant `{}` value {} exceeds the current 64-bit metadata limit",
-            variant.name, variant.value
-        ))
-    })?;
-    Ok(PirAotEnumVariant {
-        name: variant.name,
-        value,
-    })
-}
-
-fn pir_aot_signedness_from_dslx_bridge_metadata(
-    signedness: xlsynth_aot_builder::TypedAotSignedness,
-) -> PirAotSignedness {
-    match signedness {
-        xlsynth_aot_builder::TypedAotSignedness::Unsigned => PirAotSignedness::Unsigned,
-        xlsynth_aot_builder::TypedAotSignedness::Signed => PirAotSignedness::Signed,
-    }
-}
-
-fn pir_aot_type_from_dslx_bridge_metadata(ty: xlsynth_aot_builder::TypedAotType) -> PirAotType {
-    match ty {
-        xlsynth_aot_builder::TypedAotType::Bits {
-            signedness,
-            bit_count,
-        } => PirAotType::Bits {
-            signedness: pir_aot_signedness_from_dslx_bridge_metadata(signedness),
-            bit_count,
-        },
-        xlsynth_aot_builder::TypedAotType::Token => PirAotType::Token,
-        xlsynth_aot_builder::TypedAotType::Array { size, element } => PirAotType::Array {
-            size,
-            element: Box::new(pir_aot_type_from_dslx_bridge_metadata(*element)),
-        },
-        xlsynth_aot_builder::TypedAotType::Tuple { elements } => PirAotType::Tuple {
-            elements: elements
-                .into_iter()
-                .map(pir_aot_type_from_dslx_bridge_metadata)
-                .collect(),
-        },
-        xlsynth_aot_builder::TypedAotType::TypeRef { module, name } => {
-            PirAotType::TypeRef { module, name }
-        }
-    }
-}
-
-fn pir_aot_entrypoint_from_dslx_bridge_metadata(
-    entrypoint: xlsynth_aot_builder::TypedAotEntrypoint,
-) -> Result<PirAotEntrypoint, CompilerError> {
-    let source = match entrypoint.ir_file {
-        Some(ir_file) => PirAotEntrypointSource::IrFile {
-            ir_file,
-            ir_top: entrypoint.ir_top,
-        },
-        None => PirAotEntrypointSource::GeneratedIr {
-            ir_top: entrypoint.ir_top,
-        },
-    };
-    Ok(PirAotEntrypoint {
-        name: entrypoint.name,
-        source,
-        owning_module: entrypoint.owning_module,
-        params: entrypoint
-            .params
-            .into_iter()
-            .map(pir_aot_param_from_dslx_bridge_metadata)
-            .collect(),
-        return_type: pir_aot_type_from_dslx_bridge_metadata(entrypoint.return_type),
-    })
-}
-
-fn pir_aot_param_from_dslx_bridge_metadata(
-    param: xlsynth_aot_builder::TypedAotParam,
-) -> PirAotParam {
-    PirAotParam {
-        name: param.name,
-        ty: pir_aot_type_from_dslx_bridge_metadata(param.ty),
-    }
+    build_pir_aot_package_metadata(specs).map_err(|error| CompilerError::Backend(error.to_string()))
 }
 
 /// Builds one metadata-backed shared wrapper from checked-in IR files.
