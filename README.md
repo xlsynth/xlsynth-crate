@@ -17,7 +17,7 @@ fn sample() -> Result<IrValue, XlsynthError> {
     let mol: IrValue = IrValue::u32(42);
 
     // Use the IR interpreter.
-    let interp_result: IrValue = f.interpret(&[mol.clone()])?;
+    let interp_result: IrValue = f.interpret(std::slice::from_ref(&mol))?;
 
     // Use the IR JIT.
     let jit = xlsynth::IrFunctionJit::new(&f)?;

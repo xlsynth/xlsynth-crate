@@ -5,6 +5,7 @@
 use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::ptr;
 
 use num_bigint::{BigInt, BigUint, Sign};
@@ -35,6 +36,21 @@ impl fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
+/// Constructs a value whose DSLX/PIR data bits are all zero.
+///
+/// Unlike [`Default`], this trait describes the representation being produced
+/// rather than implying a domain-specific default value.
+pub trait AllZeros {
+    /// Returns a value whose DSLX/PIR data bits are all zero.
+    fn all_zeros() -> Self;
+}
+
+impl<T: AllZeros, const N: usize> AllZeros for [T; N] {
+    fn all_zeros() -> Self {
+        std::array::from_fn(|_| T::all_zeros())
+    }
+}
+
 macro_rules! define_native_bits {
     ($name:ident, $carrier:ty, $carrier_bits:expr) => {
         #[repr(transparent)]
@@ -42,6 +58,11 @@ macro_rules! define_native_bits {
         pub struct $name<const BIT_COUNT: usize>($carrier);
 
         impl<const BIT_COUNT: usize> $name<BIT_COUNT> {
+            /// Constructs the canonical all-zero bitvector value.
+            pub const fn all_zeros() -> Self {
+                Self::from_raw_bits(0)
+            }
+
             fn validate_width() -> Result<(), RunError> {
                 if BIT_COUNT == 0 || BIT_COUNT > $carrier_bits {
                     Err(RunError(format!(
@@ -61,25 +82,42 @@ macro_rules! define_native_bits {
                 }
             }
 
-            /// Constructs a canonical bitvector value, rejecting excess high bits.
-            pub fn new(value: $carrier) -> Result<Self, RunError> {
+            fn try_from_u64(value: u64) -> Result<Self, RunError> {
                 Self::validate_width()?;
-                if value & !Self::mask() != 0 {
+                let carrier = <$carrier>::try_from(value).map_err(|_| {
+                    RunError(format!("value {value} does not fit in bits[{BIT_COUNT}]"))
+                })?;
+                if carrier & !Self::mask() != 0 {
                     Err(RunError(format!(
                         "value {value} does not fit in bits[{BIT_COUNT}]"
                     )))
                 } else {
-                    Ok(Self(value))
+                    Ok(Self(carrier))
                 }
             }
 
-            /// Constructs a canonical bitvector by truncating high bits.
-            pub const fn wrapping(value: $carrier) -> Self {
+            /// Constructs a canonical bitvector, panicking if the value does
+            /// not fit the requested width.
+            pub fn new(value: u64) -> Self {
+                Self::try_from_u64(value).unwrap_or_else(|error| panic!("{error}"))
+            }
+
+            /// Constructs a canonical bitvector from raw ABI bits.
+            pub const fn from_raw_bits(value: u64) -> Self {
                 assert!(
                     BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
                     "invalid native bits carrier width"
                 );
-                Self(value & Self::mask())
+                assert!(
+                    value <= <$carrier>::MAX as u64,
+                    "raw bits do not fit native carrier"
+                );
+                let carrier = value as $carrier;
+                assert!(
+                    carrier & !Self::mask() == 0,
+                    "raw bits do not fit target width"
+                );
+                Self(carrier)
             }
 
             /// Returns the native carrier value.
@@ -90,6 +128,20 @@ macro_rules! define_native_bits {
             /// Returns the value widened to `u64`.
             pub const fn to_u64(self) -> u64 {
                 self.0 as u64
+            }
+        }
+
+        impl<const BIT_COUNT: usize> AllZeros for $name<BIT_COUNT> {
+            fn all_zeros() -> Self {
+                Self::all_zeros()
+            }
+        }
+
+        impl<const BIT_COUNT: usize> TryFrom<u64> for $name<BIT_COUNT> {
+            type Error = RunError;
+
+            fn try_from(value: u64) -> Result<Self, Self::Error> {
+                Self::try_from_u64(value)
             }
         }
     };
@@ -105,12 +157,36 @@ define_native_bits!(BitsInU64, u64, 64);
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Bits0;
 
+impl Bits0 {
+    /// Constructs the sole `bits[0]` representation.
+    pub const fn all_zeros() -> Self {
+        Self
+    }
+}
+
+impl AllZeros for Bits0 {
+    fn all_zeros() -> Self {
+        Self::all_zeros()
+    }
+}
+
 /// Public unsigned DSLX-style wrapper for a `bits[0]` value.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnsignedBits0;
 
 impl UnsignedBits0 {
+    /// Constructs the sole `bits[0]` representation.
+    pub const fn all_zeros() -> Self {
+        Self
+    }
+
+    /// Constructs the sole unsigned `bits[0]` value, panicking unless the
+    /// supplied value is zero.
+    pub fn new(value: u64) -> Self {
+        Self::try_from(value).unwrap_or_else(|error| panic!("{error}"))
+    }
+
     /// Constructs the sole canonical raw `bits[0]` representation.
     pub const fn from_raw_bits(value: u64) -> Self {
         assert!(value == 0, "raw bits do not fit target width");
@@ -125,6 +201,12 @@ impl UnsignedBits0 {
     /// Returns the raw ABI bits widened to `u64`.
     pub const fn raw_bits(self) -> u64 {
         0
+    }
+}
+
+impl AllZeros for UnsignedBits0 {
+    fn all_zeros() -> Self {
+        Self::all_zeros()
     }
 }
 
@@ -146,6 +228,17 @@ impl TryFrom<u64> for UnsignedBits0 {
 pub struct SignedBits0;
 
 impl SignedBits0 {
+    /// Constructs the sole `sbits[0]` representation.
+    pub const fn all_zeros() -> Self {
+        Self
+    }
+
+    /// Constructs the sole signed `bits[0]` value, panicking unless the
+    /// supplied value is zero.
+    pub fn new(value: i64) -> Self {
+        Self::try_from(value).unwrap_or_else(|error| panic!("{error}"))
+    }
+
     /// Constructs the sole canonical raw `sbits[0]` representation.
     pub const fn from_raw_bits(value: u64) -> Self {
         assert!(value == 0, "raw bits do not fit target width");
@@ -160,6 +253,12 @@ impl SignedBits0 {
     /// Returns the raw ABI bits widened to `u64`.
     pub const fn raw_bits(self) -> u64 {
         0
+    }
+}
+
+impl AllZeros for SignedBits0 {
+    fn all_zeros() -> Self {
+        Self::all_zeros()
     }
 }
 
@@ -189,6 +288,11 @@ macro_rules! define_public_bits_wrappers {
         pub struct $unsigned_name<const BIT_COUNT: usize>($raw_name<BIT_COUNT>);
 
         impl<const BIT_COUNT: usize> $unsigned_name<BIT_COUNT> {
+            /// Constructs the canonical all-zero bitvector value.
+            pub const fn all_zeros() -> Self {
+                Self($raw_name::<BIT_COUNT>::all_zeros())
+            }
+
             const fn mask() -> $unsigned_carrier {
                 if BIT_COUNT == $carrier_bits {
                     <$unsigned_carrier>::MAX
@@ -197,27 +301,27 @@ macro_rules! define_public_bits_wrappers {
                 }
             }
 
-            /// Constructs an unsigned DSLX-style bit value, rejecting excess high bits.
-            pub fn new(value: $unsigned_carrier) -> Result<Self, RunError> {
-                Ok(Self($raw_name::<BIT_COUNT>::new(value)?))
-            }
-
-            /// Constructs an unsigned DSLX-style bit value by truncating high bits.
-            pub const fn wrapping(value: $unsigned_carrier) -> Self {
-                Self($raw_name::<BIT_COUNT>::wrapping(value))
+            /// Constructs an unsigned DSLX-style bit value, panicking if the
+            /// value does not fit the requested width.
+            pub fn new(value: u64) -> Self {
+                Self::try_from(value).unwrap_or_else(|error| panic!("{error}"))
             }
 
             /// Constructs an unsigned DSLX-style bit value from raw ABI bits.
-            pub const fn from_raw_bits(value: $unsigned_carrier) -> Self {
+            pub const fn from_raw_bits(value: u64) -> Self {
                 assert!(
                     BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
                     "invalid raw bit carrier width"
                 );
                 assert!(
-                    value & !Self::mask() == 0,
+                    value <= <$unsigned_carrier>::MAX as u64,
+                    "raw bits do not fit native carrier"
+                );
+                assert!(
+                    (value as $unsigned_carrier) & !Self::mask() == 0,
                     "raw bits do not fit target width"
                 );
-                Self($raw_name::<BIT_COUNT>::wrapping(value))
+                Self($raw_name::<BIT_COUNT>::from_raw_bits(value))
             }
 
             /// Returns the unsigned native carrier value.
@@ -227,8 +331,14 @@ macro_rules! define_public_bits_wrappers {
             }
 
             /// Returns the raw ABI bits in the native carrier.
-            pub const fn raw_bits(self) -> $unsigned_carrier {
-                self.0.get()
+            pub const fn raw_bits(self) -> u64 {
+                self.0.to_u64()
+            }
+        }
+
+        impl<const BIT_COUNT: usize> AllZeros for $unsigned_name<BIT_COUNT> {
+            fn all_zeros() -> Self {
+                Self::all_zeros()
             }
         }
 
@@ -236,12 +346,7 @@ macro_rules! define_public_bits_wrappers {
             type Error = RunError;
 
             fn try_from(value: u64) -> Result<Self, Self::Error> {
-                let carrier = <$unsigned_carrier>::try_from(value).map_err(|_| {
-                    RunError(format!(
-                        "value {value} does not fit in bits[{BIT_COUNT}]"
-                    ))
-                })?;
-                Self::new(carrier)
+                Ok(Self($raw_name::<BIT_COUNT>::try_from(value)?))
             }
         }
 
@@ -250,7 +355,12 @@ macro_rules! define_public_bits_wrappers {
         pub struct $signed_name<const BIT_COUNT: usize>($raw_name<BIT_COUNT>);
 
         impl<const BIT_COUNT: usize> $signed_name<BIT_COUNT> {
-            fn validate_signed_value(value: $signed_carrier) -> Result<(), RunError> {
+            /// Constructs the canonical all-zero bitvector value.
+            pub const fn all_zeros() -> Self {
+                Self($raw_name::<BIT_COUNT>::all_zeros())
+            }
+
+            fn validate_signed_value(value: i64) -> Result<(), RunError> {
                 if BIT_COUNT == 0 || BIT_COUNT > $carrier_bits {
                     return Err(RunError(format!(
                         "s{BIT_COUNT} cannot use a {}-bit native carrier",
@@ -277,32 +387,27 @@ macro_rules! define_public_bits_wrappers {
                 }
             }
 
-            /// Constructs a signed DSLX-style bit value, rejecting out-of-range values.
-            pub fn new(value: $signed_carrier) -> Result<Self, RunError> {
-                Self::validate_signed_value(value)?;
-                Ok(Self($raw_name::<BIT_COUNT>::wrapping(
-                    value as $unsigned_carrier,
-                )))
-            }
-
-            /// Constructs a signed DSLX-style bit value by truncating to the target width.
-            pub const fn wrapping(value: $signed_carrier) -> Self {
-                Self($raw_name::<BIT_COUNT>::wrapping(
-                    value as $unsigned_carrier,
-                ))
+            /// Constructs a signed DSLX-style bit value, panicking if the
+            /// value does not fit the requested width.
+            pub fn new(value: i64) -> Self {
+                Self::try_from(value).unwrap_or_else(|error| panic!("{error}"))
             }
 
             /// Constructs a signed DSLX-style bit value from raw ABI bits.
-            pub const fn from_raw_bits(value: $unsigned_carrier) -> Self {
+            pub const fn from_raw_bits(value: u64) -> Self {
                 assert!(
                     BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
                     "invalid raw bit carrier width"
                 );
                 assert!(
-                    value & !Self::mask() == 0,
+                    value <= <$unsigned_carrier>::MAX as u64,
+                    "raw bits do not fit native carrier"
+                );
+                assert!(
+                    (value as $unsigned_carrier) & !Self::mask() == 0,
                     "raw bits do not fit target width"
                 );
-                Self($raw_name::<BIT_COUNT>::wrapping(value))
+                Self($raw_name::<BIT_COUNT>::from_raw_bits(value))
             }
 
             /// Returns the sign-extended native signed carrier value.
@@ -322,8 +427,14 @@ macro_rules! define_public_bits_wrappers {
             }
 
             /// Returns the raw ABI bits in the native carrier.
-            pub const fn raw_bits(self) -> $unsigned_carrier {
-                self.0.get()
+            pub const fn raw_bits(self) -> u64 {
+                self.0.to_u64()
+            }
+        }
+
+        impl<const BIT_COUNT: usize> AllZeros for $signed_name<BIT_COUNT> {
+            fn all_zeros() -> Self {
+                Self::all_zeros()
             }
         }
 
@@ -331,10 +442,9 @@ macro_rules! define_public_bits_wrappers {
             type Error = RunError;
 
             fn try_from(value: i64) -> Result<Self, Self::Error> {
-                let carrier = <$signed_carrier>::try_from(value).map_err(|_| {
-                    RunError(format!("value {value} does not fit in s{BIT_COUNT}"))
-                })?;
-                Self::new(carrier)
+                Self::validate_signed_value(value)?;
+                let raw_bits = (value as u64) & (Self::mask() as u64);
+                Ok(Self($raw_name::<BIT_COUNT>::from_raw_bits(raw_bits)))
             }
         }
     };
@@ -352,6 +462,12 @@ define_public_bits_wrappers!(UnsignedBitsInU64, SignedBitsInU64, BitsInU64, u64,
 pub struct WideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>([u64; LIMB_COUNT]);
 
 impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> WideBits<BIT_COUNT, LIMB_COUNT> {
+    /// Constructs the canonical all-zero bitvector value.
+    pub fn all_zeros() -> Self {
+        Self::from_limbs([0; LIMB_COUNT])
+            .unwrap_or_else(|error| panic!("invalid wide bits type: {error}"))
+    }
+
     fn validate_layout() -> Result<(), RunError> {
         if BIT_COUNT <= 64 || LIMB_COUNT != BIT_COUNT.div_ceil(64) {
             Err(RunError(format!(
@@ -371,6 +487,10 @@ impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> WideBits<BIT_COUNT, LIMB_C
         }
     }
 
+    fn logical_byte_count() -> usize {
+        BIT_COUNT.div_ceil(8)
+    }
+
     /// Constructs a canonical wide bitvector, rejecting excess high bits.
     pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
         Self::validate_layout()?;
@@ -383,19 +503,58 @@ impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> WideBits<BIT_COUNT, LIMB_C
         }
     }
 
-    /// Constructs a canonical wide bitvector by truncating excess high bits.
-    pub fn wrapping_limbs(mut limbs: [u64; LIMB_COUNT]) -> Self {
-        assert!(
-            BIT_COUNT > 64 && LIMB_COUNT == BIT_COUNT.div_ceil(64),
-            "invalid native wide bits layout"
-        );
-        limbs[LIMB_COUNT - 1] &= Self::high_mask();
-        Self(limbs)
+    /// Constructs a canonical wide bitvector from its logical
+    /// least-significant-byte-first representation.
+    pub fn from_little_endian_bytes(bytes: &[u8]) -> Result<Self, RunError> {
+        Self::validate_layout()?;
+        let expected_byte_count = Self::logical_byte_count();
+        if bytes.len() != expected_byte_count {
+            return Err(RunError(format!(
+                "bits[{BIT_COUNT}] requires {expected_byte_count} little-endian bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut limbs = [0; LIMB_COUNT];
+        for (limb, chunk) in limbs.iter_mut().zip(bytes.chunks(size_of::<u64>())) {
+            let mut limb_bytes = [0; size_of::<u64>()];
+            limb_bytes[..chunk.len()].copy_from_slice(chunk);
+            *limb = u64::from_le_bytes(limb_bytes);
+        }
+        Self::from_limbs(limbs)
+    }
+
+    /// Returns the logical least-significant-byte-first representation.
+    pub fn to_little_endian_bytes<const BYTE_COUNT: usize>(
+        &self,
+    ) -> Result<[u8; BYTE_COUNT], RunError> {
+        Self::validate_layout()?;
+        let expected_byte_count = Self::logical_byte_count();
+        if BYTE_COUNT != expected_byte_count {
+            return Err(RunError(format!(
+                "bits[{BIT_COUNT}] requires {expected_byte_count} little-endian bytes, got {BYTE_COUNT}"
+            )));
+        }
+        let mut bytes = [0; BYTE_COUNT];
+        for (index, limb) in self.0.iter().enumerate() {
+            let start = index * size_of::<u64>();
+            if start == BYTE_COUNT {
+                break;
+            }
+            let copy_count = size_of::<u64>().min(BYTE_COUNT - start);
+            bytes[start..start + copy_count].copy_from_slice(&limb.to_le_bytes()[..copy_count]);
+        }
+        Ok(bytes)
     }
 
     /// Returns the least-significant-first limb representation.
     pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
         &self.0
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> AllZeros for WideBits<BIT_COUNT, LIMB_COUNT> {
+    fn all_zeros() -> Self {
+        Self::all_zeros()
     }
 }
 
@@ -413,16 +572,30 @@ pub struct UnsignedWideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>(
 );
 
 impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> UnsignedWideBits<BIT_COUNT, LIMB_COUNT> {
+    /// Constructs the canonical all-zero bitvector value.
+    pub fn all_zeros() -> Self {
+        Self(WideBits::all_zeros())
+    }
+
     /// Constructs a canonical wide unsigned bitvector, rejecting excess high
     /// bits.
     pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
         Ok(Self(WideBits::<BIT_COUNT, LIMB_COUNT>::from_limbs(limbs)?))
     }
 
-    /// Constructs a canonical wide unsigned bitvector by truncating excess high
-    /// bits.
-    pub fn wrapping_limbs(limbs: [u64; LIMB_COUNT]) -> Self {
-        Self(WideBits::<BIT_COUNT, LIMB_COUNT>::wrapping_limbs(limbs))
+    /// Constructs a canonical wide unsigned bitvector from its logical
+    /// least-significant-byte-first representation.
+    pub fn from_little_endian_bytes(bytes: &[u8]) -> Result<Self, RunError> {
+        Ok(Self(
+            WideBits::<BIT_COUNT, LIMB_COUNT>::from_little_endian_bytes(bytes)?,
+        ))
+    }
+
+    /// Returns the logical least-significant-byte-first representation.
+    pub fn to_little_endian_bytes<const BYTE_COUNT: usize>(
+        &self,
+    ) -> Result<[u8; BYTE_COUNT], RunError> {
+        self.0.to_little_endian_bytes()
     }
 
     /// Returns the least-significant-first raw ABI limb representation.
@@ -437,6 +610,14 @@ impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> UnsignedWideBits<BIT_COUNT
             bytes.extend_from_slice(&limb.to_le_bytes());
         }
         BigUint::from_bytes_le(&bytes)
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> AllZeros
+    for UnsignedWideBits<BIT_COUNT, LIMB_COUNT>
+{
+    fn all_zeros() -> Self {
+        Self::all_zeros()
     }
 }
 
@@ -456,15 +637,30 @@ pub struct SignedWideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>(
 );
 
 impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> SignedWideBits<BIT_COUNT, LIMB_COUNT> {
+    /// Constructs the canonical all-zero bitvector value.
+    pub fn all_zeros() -> Self {
+        Self(WideBits::all_zeros())
+    }
+
     /// Constructs a canonical wide signed bitvector from raw ABI limbs.
     pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
         Ok(Self(WideBits::<BIT_COUNT, LIMB_COUNT>::from_limbs(limbs)?))
     }
 
-    /// Constructs a canonical wide signed bitvector by truncating excess high
-    /// bits.
-    pub fn wrapping_limbs(limbs: [u64; LIMB_COUNT]) -> Self {
-        Self(WideBits::<BIT_COUNT, LIMB_COUNT>::wrapping_limbs(limbs))
+    /// Constructs a canonical wide signed bitvector from its logical raw-bit
+    /// least-significant-byte-first representation.
+    pub fn from_little_endian_bytes(bytes: &[u8]) -> Result<Self, RunError> {
+        Ok(Self(
+            WideBits::<BIT_COUNT, LIMB_COUNT>::from_little_endian_bytes(bytes)?,
+        ))
+    }
+
+    /// Returns the logical raw-bit least-significant-byte-first
+    /// representation.
+    pub fn to_little_endian_bytes<const BYTE_COUNT: usize>(
+        &self,
+    ) -> Result<[u8; BYTE_COUNT], RunError> {
+        self.0.to_little_endian_bytes()
     }
 
     /// Returns the least-significant-first raw ABI limb representation.
@@ -483,6 +679,14 @@ impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> SignedWideBits<BIT_COUNT, 
     }
 }
 
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> AllZeros
+    for SignedWideBits<BIT_COUNT, LIMB_COUNT>
+{
+    fn all_zeros() -> Self {
+        Self::all_zeros()
+    }
+}
+
 impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default
     for SignedWideBits<BIT_COUNT, LIMB_COUNT>
 {
@@ -495,6 +699,19 @@ impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Token;
+
+impl Token {
+    /// Constructs the sole token representation.
+    pub const fn all_zeros() -> Self {
+        Self
+    }
+}
+
+impl AllZeros for Token {
+    fn all_zeros() -> Self {
+        Self::all_zeros()
+    }
+}
 
 /// Kind of observable PIR event described by an event site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1028,6 +1245,190 @@ fn bounded_shift_amount(value: &BigUint, bit_count: usize) -> Option<usize> {
         .filter(|amount| *amount < bit_count)
 }
 
+fn top_limb_mask(bit_count: usize) -> u64 {
+    let used_bits = bit_count % u64::BITS as usize;
+    if used_bits == 0 {
+        u64::MAX
+    } else {
+        (1u64 << used_bits) - 1
+    }
+}
+
+/// Reads one logical limb, returning zero outside the source value.
+///
+/// # Safety
+///
+/// `limbs` must be readable for `bit_count.div_ceil(64)` native `u64` values.
+unsafe fn read_unsigned_limb(limbs: *const u64, bit_count: usize, index: usize) -> u64 {
+    let limb_count = bit_count.div_ceil(u64::BITS as usize);
+    if index >= limb_count {
+        return 0;
+    }
+    // SAFETY: the bounds check above enforces the pointer contract.
+    let value = unsafe { limbs.add(index).read() };
+    if index + 1 == limb_count {
+        value & top_limb_mask(bit_count)
+    } else {
+        value
+    }
+}
+
+/// Returns the signed extension limb for one logical source limb.
+///
+/// # Safety
+///
+/// `limbs` must be readable for `bit_count.div_ceil(64)` native `u64` values.
+unsafe fn read_signed_limb(
+    limbs: *const u64,
+    bit_count: usize,
+    index: usize,
+    negative: bool,
+) -> u64 {
+    let limb_count = bit_count.div_ceil(u64::BITS as usize);
+    if index >= limb_count {
+        return if negative { u64::MAX } else { 0 };
+    }
+    // SAFETY: the bounds check above enforces the pointer contract.
+    let value = unsafe { limbs.add(index).read() };
+    if index + 1 != limb_count {
+        return value;
+    }
+    let mask = top_limb_mask(bit_count);
+    if negative {
+        value | !mask
+    } else {
+        value & mask
+    }
+}
+
+/// Reads an unsigned shift amount if it is representable and in range.
+///
+/// # Safety
+///
+/// `limbs` must be readable for `bit_count.div_ceil(64)` native `u64` values.
+unsafe fn read_bounded_shift_amount(
+    limbs: *const u64,
+    bit_count: usize,
+    shifted_bit_count: usize,
+) -> Option<usize> {
+    let limb_count = bit_count.div_ceil(u64::BITS as usize);
+    let low = if limb_count == 0 {
+        0
+    } else {
+        // SAFETY: a nonzero limb count guarantees logical limb zero exists.
+        unsafe { read_unsigned_limb(limbs, bit_count, 0) }
+    };
+    for index in 1..limb_count {
+        // SAFETY: `index` is within the logical limb count.
+        if unsafe { read_unsigned_limb(limbs, bit_count, index) } != 0 {
+            return None;
+        }
+    }
+    usize::try_from(low)
+        .ok()
+        .filter(|amount| *amount < shifted_bit_count)
+}
+
+/// Executes a logical or arithmetic shift directly over fixed native limbs.
+///
+/// # Safety
+///
+/// Pointer requirements match [`xlsynth_pir_runtime_wide_binop`].
+unsafe fn shift_wide_limbs(
+    dst: *mut u64,
+    dst_bit_count: usize,
+    lhs: *const u64,
+    lhs_bit_count: usize,
+    rhs: *const u64,
+    rhs_bit_count: usize,
+    operation: WideBinaryOp,
+) {
+    debug_assert!(matches!(
+        operation,
+        WideBinaryOp::Shll | WideBinaryOp::Shrl | WideBinaryOp::Shra
+    ));
+    let negative = if operation == WideBinaryOp::Shra && lhs_bit_count != 0 {
+        let sign_index = lhs_bit_count - 1;
+        // SAFETY: a nonzero width guarantees the sign-bit limb exists.
+        (unsafe { lhs.add(sign_index / u64::BITS as usize).read() }
+            & (1u64 << (sign_index % u64::BITS as usize)))
+            != 0
+    } else {
+        false
+    };
+    // SAFETY: forwarded from this helper's pointer contract.
+    let amount = unsafe { read_bounded_shift_amount(rhs, rhs_bit_count, lhs_bit_count) };
+    let dst_limb_count = dst_bit_count.div_ceil(u64::BITS as usize);
+    let Some(amount) = amount else {
+        let fill = if operation == WideBinaryOp::Shra && negative {
+            u64::MAX
+        } else {
+            0
+        };
+        for index in 0..dst_limb_count {
+            let value = if index + 1 == dst_limb_count {
+                fill & top_limb_mask(dst_bit_count)
+            } else {
+                fill
+            };
+            // SAFETY: `index` is within the destination's logical limb count.
+            unsafe { dst.add(index).write(value) };
+        }
+        return;
+    };
+
+    let limb_shift = amount / u64::BITS as usize;
+    let bit_shift = amount % u64::BITS as usize;
+    for dst_index in 0..dst_limb_count {
+        let value = if operation == WideBinaryOp::Shll {
+            let Some(source_index) = dst_index.checked_sub(limb_shift) else {
+                // This destination limb is below the shifted source value.
+                unsafe { dst.add(dst_index).write(0) };
+                continue;
+            };
+            // SAFETY: out-of-range source indices are converted to zero.
+            let low = unsafe { read_unsigned_limb(lhs, lhs_bit_count, source_index) };
+            if bit_shift == 0 {
+                low
+            } else {
+                let high = source_index
+                    .checked_sub(1)
+                    .map(|index| {
+                        // SAFETY: out-of-range source indices are converted to zero.
+                        unsafe { read_unsigned_limb(lhs, lhs_bit_count, index) }
+                    })
+                    .unwrap_or(0);
+                (low << bit_shift) | (high >> (u64::BITS as usize - bit_shift))
+            }
+        } else {
+            let source_index = dst_index + limb_shift;
+            let read_limb = |index| {
+                if operation == WideBinaryOp::Shra {
+                    // SAFETY: out-of-range source indices are sign-extended.
+                    unsafe { read_signed_limb(lhs, lhs_bit_count, index, negative) }
+                } else {
+                    // SAFETY: out-of-range source indices are converted to zero.
+                    unsafe { read_unsigned_limb(lhs, lhs_bit_count, index) }
+                }
+            };
+            let low = read_limb(source_index);
+            if bit_shift == 0 {
+                low
+            } else {
+                let high = read_limb(source_index + 1);
+                (low >> bit_shift) | (high << (u64::BITS as usize - bit_shift))
+            }
+        };
+        let value = if dst_index + 1 == dst_limb_count {
+            value & top_limb_mask(dst_bit_count)
+        } else {
+            value
+        };
+        // SAFETY: `dst_index` is within the destination's logical limb count.
+        unsafe { dst.add(dst_index).write(value) };
+    }
+}
+
 /// Reads a fixed-width value from least-significant-first native `u64` limbs.
 ///
 /// # Safety
@@ -1125,6 +1526,24 @@ pub unsafe extern "C" fn xlsynth_pir_runtime_wide_binop(
     let Some(operation) = WideBinaryOp::from_abi(operation) else {
         return;
     };
+    if matches!(
+        operation,
+        WideBinaryOp::Shll | WideBinaryOp::Shrl | WideBinaryOp::Shra
+    ) {
+        // SAFETY: forwarded from this callback's pointer contract.
+        unsafe {
+            shift_wide_limbs(
+                dst,
+                dst_bit_count,
+                lhs,
+                lhs_bit_count,
+                rhs,
+                rhs_bit_count,
+                operation,
+            )
+        };
+        return;
+    }
     // SAFETY: forwarded from this callback's pointer contract.
     let lhs_unsigned = unsafe { read_wide_bits(lhs, lhs_bit_count) };
     // SAFETY: forwarded from this callback's pointer contract.
@@ -1169,26 +1588,7 @@ pub unsafe extern "C" fn xlsynth_pir_runtime_wide_binop(
             }
         }
         WideBinaryOp::Shll | WideBinaryOp::Shrl | WideBinaryOp::Shra => {
-            match bounded_shift_amount(&rhs_unsigned, lhs_bit_count) {
-                None if operation == WideBinaryOp::Shra => {
-                    if as_signed(lhs_unsigned, lhs_bit_count).sign() == Sign::Minus {
-                        bit_mask(dst_bit_count)
-                    } else {
-                        BigUint::from(0u8)
-                    }
-                }
-                None => BigUint::from(0u8),
-                Some(amount) if operation == WideBinaryOp::Shll => {
-                    truncate_unsigned(lhs_unsigned << amount, dst_bit_count)
-                }
-                Some(amount) if operation == WideBinaryOp::Shrl => {
-                    truncate_unsigned(lhs_unsigned >> amount, dst_bit_count)
-                }
-                Some(amount) => truncate_signed(
-                    as_signed(lhs_unsigned, lhs_bit_count) >> amount,
-                    dst_bit_count,
-                ),
-            }
+            unreachable!("wide shifts return through the allocation-free limb path")
         }
     };
     // SAFETY: forwarded from this callback's pointer contract.
@@ -1567,33 +1967,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn all_zeros_recursively_initializes_native_values() {
+        let scalar = UnsignedBitsInU16::<12>::all_zeros();
+        assert_eq!(scalar.to_u64(), 0);
+
+        let wide = SignedWideBits::<129, 3>::all_zeros();
+        assert_eq!(wide.limbs(), &[0, 0, 0]);
+
+        let nested: [[UnsignedBitsInU8<4>; 2]; 3] = AllZeros::all_zeros();
+        assert!(nested.iter().flatten().all(|value| value.to_u64() == 0));
+    }
+
+    #[test]
     fn native_bits_wrappers_enforce_semantic_widths() {
-        let value = BitsInU64::<42>::new((1u64 << 41) | 7).expect("value fits in bits[42]");
+        let value = BitsInU64::<42>::new((1u64 << 41) | 7);
         assert_eq!(value.to_u64(), (1u64 << 41) | 7);
-        assert!(BitsInU64::<42>::new(1u64 << 42).is_err());
-        assert_eq!(BitsInU16::<9>::wrapping(0xffff).get(), 0x1ff);
-        assert!(BitsInU8::<9>::new(0).is_err());
+        assert!(BitsInU64::<42>::try_from(1u64 << 42).is_err());
+        assert!(std::panic::catch_unwind(|| BitsInU64::<42>::new(1u64 << 42)).is_err());
+        assert_eq!(BitsInU16::<9>::new(0x1ff).get(), 0x1ff);
+        assert!(BitsInU8::<9>::try_from(0).is_err());
     }
 
     #[test]
     fn public_signed_and_unsigned_bits_wrappers_preserve_raw_abi_bits() {
-        let unsigned = UnsignedBitsInU8::<4>::new(15).expect("u4 max");
+        let unsigned = UnsignedBitsInU8::<4>::new(15);
         assert_eq!(unsigned.to_u64(), 15);
         assert_eq!(unsigned.raw_bits(), 15);
-        assert!(UnsignedBitsInU8::<4>::new(16).is_err());
+        assert!(UnsignedBitsInU8::<4>::try_from(16).is_err());
+        assert!(std::panic::catch_unwind(|| UnsignedBitsInU8::<4>::new(16)).is_err());
         assert!(std::panic::catch_unwind(|| UnsignedBitsInU8::<4>::from_raw_bits(16)).is_err());
 
-        let signed = SignedBitsInU8::<4>::new(-1).expect("s4 -1");
+        let signed = SignedBitsInU8::<4>::new(-1);
         assert_eq!(signed.to_i64(), -1);
         assert_eq!(signed.raw_bits(), 15);
-        assert!(SignedBitsInU8::<4>::new(8).is_err());
-        assert!(SignedBitsInU8::<4>::new(-9).is_err());
+        assert!(SignedBitsInU8::<4>::try_from(8).is_err());
+        assert!(SignedBitsInU8::<4>::try_from(-9).is_err());
+        assert!(std::panic::catch_unwind(|| SignedBitsInU8::<4>::new(8)).is_err());
         assert!(std::panic::catch_unwind(|| SignedBitsInU8::<4>::from_raw_bits(16)).is_err());
         assert_eq!(SignedBitsInU16::<9>::from_raw_bits(0x101).to_i64(), -255);
 
         let wide = SignedWideBits::<65, 2>::from_limbs([u64::MAX, 1]).expect("s65 -1");
         assert_eq!(wide.to_bigint(), BigInt::from(-1));
         assert_eq!(wide.limbs(), &[u64::MAX, 1]);
+    }
+
+    #[test]
+    fn wide_bits_convert_logical_little_endian_bytes() {
+        let bytes = [0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01, 0x01];
+        let value = WideBits::<65, 2>::from_little_endian_bytes(&bytes)
+            .expect("nine bytes encode bits[65]");
+        assert_eq!(value.limbs(), &[0x0123_4567_89ab_cdef, 1]);
+        let round_trip: [u8; 9] = value
+            .to_little_endian_bytes()
+            .expect("bits[65] uses nine logical bytes");
+        assert_eq!(round_trip, bytes);
+        assert!(value.to_little_endian_bytes::<8>().is_err());
+        assert!(WideBits::<65, 2>::from_little_endian_bytes(&bytes[..8]).is_err());
+
+        let mut excess_high_bits = bytes;
+        excess_high_bits[8] = 2;
+        assert!(WideBits::<65, 2>::from_little_endian_bytes(&excess_high_bits).is_err());
+
+        let unsigned = UnsignedWideBits::<65, 2>::from_little_endian_bytes(&bytes)
+            .expect("unsigned wrapper accepts logical bytes");
+        assert_eq!(
+            unsigned
+                .to_little_endian_bytes::<9>()
+                .expect("unsigned wrapper returns logical bytes"),
+            bytes
+        );
+        let signed = SignedWideBits::<65, 2>::from_little_endian_bytes(&bytes)
+            .expect("signed wrapper accepts raw logical bytes");
+        assert_eq!(
+            signed
+                .to_little_endian_bytes::<9>()
+                .expect("signed wrapper returns raw logical bytes"),
+            bytes
+        );
     }
 
     #[test]
@@ -1671,12 +2121,11 @@ mod tests {
     }
 
     #[test]
-    fn wide_bits_wrappers_use_lsb_first_limbs_and_mask_high_bits() {
+    fn wide_bits_wrappers_use_lsb_first_limbs_and_reject_high_bits() {
         let value =
             WideBits::<65, 2>::from_limbs([0x0123_4567_89ab_cdef, 1]).expect("canonical value");
         assert_eq!(value.limbs(), &[0x0123_4567_89ab_cdef, 1]);
         assert!(WideBits::<65, 2>::from_limbs([0, 2]).is_err());
-        assert_eq!(WideBits::<65, 2>::wrapping_limbs([7, 3]).limbs(), &[7, 1]);
         assert!(WideBits::<65, 3>::from_limbs([0, 0, 0]).is_err());
         assert_eq!(std::mem::size_of::<Token>(), 0);
     }
@@ -1998,6 +2447,123 @@ mod tests {
             );
         }
         assert_eq!(output, [1u64 << 63, 1]);
+    }
+
+    #[test]
+    fn allocation_free_wide_shifts_match_bigint_reference() {
+        fn reference_shift(
+            lhs: &[u64],
+            lhs_bit_count: usize,
+            rhs: &[u64],
+            rhs_bit_count: usize,
+            dst_bit_count: usize,
+            operation: WideBinaryOp,
+        ) -> Vec<u64> {
+            // SAFETY: the slices contain the limbs prescribed by their widths.
+            let lhs_unsigned = unsafe { read_wide_bits(lhs.as_ptr(), lhs_bit_count) };
+            // SAFETY: the slices contain the limbs prescribed by their widths.
+            let rhs_unsigned = unsafe { read_wide_bits(rhs.as_ptr(), rhs_bit_count) };
+            let result = match bounded_shift_amount(&rhs_unsigned, lhs_bit_count) {
+                None if operation == WideBinaryOp::Shra => {
+                    if as_signed(lhs_unsigned, lhs_bit_count).sign() == Sign::Minus {
+                        bit_mask(dst_bit_count)
+                    } else {
+                        BigUint::from(0u8)
+                    }
+                }
+                None => BigUint::from(0u8),
+                Some(amount) if operation == WideBinaryOp::Shll => {
+                    truncate_unsigned(lhs_unsigned << amount, dst_bit_count)
+                }
+                Some(amount) if operation == WideBinaryOp::Shrl => {
+                    truncate_unsigned(lhs_unsigned >> amount, dst_bit_count)
+                }
+                Some(amount) => truncate_signed(
+                    as_signed(lhs_unsigned, lhs_bit_count) >> amount,
+                    dst_bit_count,
+                ),
+            };
+            let mut output = vec![0; dst_bit_count.div_ceil(u64::BITS as usize)];
+            // SAFETY: `output` contains the limbs prescribed by `dst_bit_count`.
+            unsafe { write_wide_bits(output.as_mut_ptr(), dst_bit_count, result) };
+            output
+        }
+
+        for lhs_bit_count in [1usize, 63, 64, 65, 127, 128, 255, 256, 511, 512] {
+            let lhs_limb_count = lhs_bit_count.div_ceil(u64::BITS as usize);
+            for negative in [false, true] {
+                let mut lhs = (0..lhs_limb_count)
+                    .map(|index| {
+                        0x0123_4567_89ab_cdefu64.rotate_left((index * 13).try_into().unwrap())
+                    })
+                    .collect::<Vec<_>>();
+                let sign_limb = (lhs_bit_count - 1) / u64::BITS as usize;
+                let sign_mask = 1u64 << ((lhs_bit_count - 1) % u64::BITS as usize);
+                if negative {
+                    lhs[sign_limb] |= sign_mask;
+                } else {
+                    lhs[sign_limb] &= !sign_mask;
+                }
+                lhs[lhs_limb_count - 1] &= top_limb_mask(lhs_bit_count);
+
+                let mut amounts = vec![
+                    0,
+                    1,
+                    63,
+                    64,
+                    65,
+                    lhs_bit_count.saturating_sub(1) as u64,
+                    lhs_bit_count as u64,
+                    lhs_bit_count as u64 + 1,
+                ];
+                amounts.sort_unstable();
+                amounts.dedup();
+
+                let mut destination_widths = vec![
+                    lhs_bit_count.saturating_sub(1).max(1),
+                    lhs_bit_count,
+                    lhs_bit_count + 13,
+                ];
+                destination_widths.sort_unstable();
+                destination_widths.dedup();
+
+                for operation in [WideBinaryOp::Shll, WideBinaryOp::Shrl, WideBinaryOp::Shra] {
+                    for rhs in amounts
+                        .iter()
+                        .map(|amount| [*amount, 0])
+                        .chain(std::iter::once([0, 1]))
+                    {
+                        for dst_bit_count in destination_widths.iter().copied() {
+                            let expected = reference_shift(
+                                &lhs,
+                                lhs_bit_count,
+                                &rhs,
+                                128,
+                                dst_bit_count,
+                                operation,
+                            );
+                            let mut actual = vec![0; dst_bit_count.div_ceil(u64::BITS as usize)];
+                            // SAFETY: all slices contain the limbs prescribed by their widths.
+                            unsafe {
+                                xlsynth_pir_runtime_wide_binop(
+                                    actual.as_mut_ptr(),
+                                    dst_bit_count,
+                                    lhs.as_ptr(),
+                                    lhs_bit_count,
+                                    rhs.as_ptr(),
+                                    128,
+                                    operation as u32,
+                                );
+                            }
+                            assert_eq!(
+                                actual, expected,
+                                "operation={operation:?} lhs_width={lhs_bit_count} dst_width={dst_bit_count} rhs={rhs:?} negative={negative}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

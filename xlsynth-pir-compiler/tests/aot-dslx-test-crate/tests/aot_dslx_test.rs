@@ -38,7 +38,12 @@ fn cover_count(events: &ExecutionResult, label: &str) -> u64 {
         .cover_counts
         .iter()
         .find(|cover| cover.label == label)
-        .unwrap_or_else(|| panic!("missing cover count for label {label}"))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing cover count for label {label}; observed {:?}",
+                events.cover_counts
+            )
+        })
         .count
 }
 
@@ -92,28 +97,28 @@ fn typed_dslx_gizmo_runner_executes_without_marshalling() -> Result<(), Box<dyn 
     use dslx_aot::gizmo_types::{Gizmo, GizmoMode, GizmoTuning, SignedGizmoMode};
 
     let gizmo = Gizmo {
-        gizmo_id: dslx_aot::U8::new(9)?,
+        gizmo_id: dslx_aot::U8::new(9),
         mode: GizmoMode::Frob,
         frobs: [
-            dslx_aot::U4::new(1)?,
-            dslx_aot::U4::new(2)?,
-            dslx_aot::U4::new(3)?,
+            dslx_aot::U4::new(1),
+            dslx_aot::U4::new(2),
+            dslx_aot::U4::new(3),
         ],
         tuning: GizmoTuning {
-            frob_bias: dslx_aot::U4::new(4)?,
-            wobble_trim: dslx_aot::S4::new(-1)?,
+            frob_bias: dslx_aot::U4::new(4),
+            wobble_trim: dslx_aot::S4::new(-1),
         },
-        wobble: dslx_aot::S4::new(3)?,
+        wobble: dslx_aot::S4::new(3),
         signed_mode: SignedGizmoMode::Negative,
     };
     let garnish = [
-        dslx_aot::U4::new(5)?,
-        dslx_aot::U4::new(6)?,
-        dslx_aot::U4::new(7)?,
+        dslx_aot::U4::new(5),
+        dslx_aot::U4::new(6),
+        dslx_aot::U4::new(7),
     ];
 
     let mut runner = dslx_aot::gizmo_types::aot_gizmo_frob::new_runner()?;
-    let mut output = dslx_aot::gizmo_types::GizmoOutcome::default();
+    let mut output = dslx_aot::gizmo_types::GizmoOutcome::all_zeros();
     runner.run(&gizmo, &garnish, &mut output)?;
     assert_eq!(output.next_gizmo_id.to_u64(), 10);
     assert_eq!(output.selected_frob.to_u64(), 13);
@@ -134,48 +139,44 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
     };
 
     let box8 = Box8 {
-        value: dslx_aot::U8::new(8)?,
+        value: dslx_aot::U8::new(8),
     };
     let box16 = Box16 {
-        value: dslx_aot::U16::new(16)?,
+        value: dslx_aot::U16::new(16),
     };
     let matrix = Matrix2x3 {
         rows: [
             [
-                dslx_aot::U8::new(1)?,
-                dslx_aot::U8::new(2)?,
-                dslx_aot::U8::new(3)?,
+                dslx_aot::U8::new(1),
+                dslx_aot::U8::new(2),
+                dslx_aot::U8::new(3),
             ],
             [
-                dslx_aot::U8::new(4)?,
-                dslx_aot::U8::new(5)?,
-                dslx_aot::U8::new(6)?,
+                dslx_aot::U8::new(4),
+                dslx_aot::U8::new(5),
+                dslx_aot::U8::new(6),
             ],
         ],
     };
     let bits8 = dslx_aot::U8::new;
     let array_box = ArrayBox4 {
-        items: [bits8(10)?, bits8(11)?, bits8(12)?, bits8(13)?],
+        items: [bits8(10), bits8(11), bits8(12), bits8(13)],
     };
     let box_array: Box8Array4 = [
-        Box__N_8 { value: bits8(20)? },
-        Box__N_8 { value: bits8(21)? },
-        Box__N_8 { value: bits8(22)? },
-        Box__N_8 { value: bits8(23)? },
+        Box__N_8 { value: bits8(20) },
+        Box__N_8 { value: bits8(21) },
+        Box__N_8 { value: bits8(22) },
+        Box__N_8 { value: bits8(23) },
     ];
-    let expr_box = ExprBox8 { value: bits8(77)? };
-    let negative = NegativeTag {
-        payload: bits8(88)?,
-    };
-    let huge = HugeTag {
-        payload: bits8(99)?,
-    };
+    let expr_box = ExprBox8 { value: bits8(77) };
+    let negative = NegativeTag { payload: bits8(88) };
+    let huge = HugeTag { payload: bits8(99) };
     let wide_pair = WidePair {
         unsigned_value: dslx_aot::U65::from_limbs([0x0123_4567_89ab_cdef, 1])?,
         signed_value: dslx_aot::S65::from_limbs([u64::MAX, 1])?,
     };
     let mut runner = dslx_aot::parametric_forms::aot_parametric_forms::new_runner()?;
-    let mut result = dslx_aot::parametric_forms::ParametricFormsResult::default();
+    let mut result = dslx_aot::parametric_forms::ParametricFormsResult::all_zeros();
     runner.run(
         &box8,
         &box16,
@@ -206,12 +207,12 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
 #[test]
 fn typed_dslx_tuple_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
     let pair = dslx_aot::XlsynthPirAotTuple0 {
-        field0: dslx_aot::U8::new(10)?,
-        field1: dslx_aot::U16::new(1000)?,
+        field0: dslx_aot::U8::new(10),
+        field1: dslx_aot::U16::new(1000),
     };
-    let increment = dslx_aot::U8::new(7)?;
+    let increment = dslx_aot::U8::new(7);
     let mut runner = dslx_aot::tuple_shapes::aot_tuple_shapes::new_runner()?;
-    let mut output = dslx_aot::XlsynthPirAotTuple0::default();
+    let mut output = dslx_aot::XlsynthPirAotTuple0::all_zeros();
     runner.run(&pair, &increment, &mut output)?;
 
     assert_eq!(output.field0.to_u64(), 17);
@@ -228,10 +229,10 @@ fn typed_dslx_tuple_runner_executes() -> Result<(), Box<dyn std::error::Error>> 
 // package-level invokes when emitting the native object.
 #[test]
 fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
-    let init = dslx_aot::U8::new(10)?;
-    let increment = dslx_aot::U8::new(1)?;
+    let init = dslx_aot::U8::new(10);
+    let increment = dslx_aot::U8::new(1);
     let mut runner = dslx_aot::invokes_and_loop::aot_invokes_and_loop::new_runner()?;
-    let mut output = dslx_aot::U8::default();
+    let mut output = dslx_aot::U8::all_zeros();
     runner.run(&init, &increment, &mut output)?;
     assert_eq!(output.to_u64(), 18);
     Ok(())
@@ -242,15 +243,15 @@ fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::
 #[test]
 fn typed_dslx_event_runner_collects_trace_assert_and_cover()
 -> Result<(), Box<dyn std::error::Error>> {
-    let x = dslx_aot::U8::new(0xa5)?;
-    let y = dslx_aot::U8::new(0x3c)?;
-    let emit = dslx_aot::U1::new(1)?;
-    let suppress = dslx_aot::U1::new(0)?;
-    let passed = dslx_aot::U1::new(1)?;
-    let failed = dslx_aot::U1::new(0)?;
+    let x = dslx_aot::U8::new(0xa5);
+    let y = dslx_aot::U8::new(0x3c);
+    let emit = dslx_aot::U1::new(1);
+    let suppress = dslx_aot::U1::new(0);
+    let passed = dslx_aot::U1::new(1);
+    let failed = dslx_aot::U1::new(0);
     let mut runner = dslx_aot::events::aot_events::new_runner()?;
 
-    let mut successful_output = dslx_aot::U8::default();
+    let mut successful_output = dslx_aot::U8::all_zeros();
     let successful = runner.run_with_events(
         &x,
         &y,
@@ -272,7 +273,7 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
         vec!["accepted x=165", "x=165 y=3c"]
     );
 
-    let mut suppressed_output = dslx_aot::U8::default();
+    let mut suppressed_output = dslx_aot::U8::all_zeros();
     let suppressed = runner.run_with_events(
         &x,
         &y,
@@ -292,7 +293,7 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
         vec!["accepted x=165"]
     );
 
-    let mut failure_output = dslx_aot::U8::default();
+    let mut failure_output = dslx_aot::U8::all_zeros();
     let with_failure = runner.run_with_events(
         &x,
         &y,
@@ -318,7 +319,7 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
             .collect::<Vec<_>>(),
         vec!["x=165 y=3c"]
     );
-    let mut rejected_output = dslx_aot::U8::default();
+    let mut rejected_output = dslx_aot::U8::all_zeros();
     assert!(
         runner
             .run(&x, &y, &failed, &emit, &mut rejected_output)
@@ -337,15 +338,15 @@ fn typed_dslx_imported_parametric_structs_execute_without_marshalling()
     use dslx_aot::{parametric_imports, parametric_lib};
 
     let bits8 = dslx_aot::U8::new;
-    let remote = parametric_lib::RemotePlain { id: bits8(40)? };
-    let imported_direct = parametric_lib::RemoteBox__N_8 { value: bits8(60)? };
+    let remote = parametric_lib::RemotePlain { id: bits8(40) };
+    let imported_direct = parametric_lib::RemoteBox__N_8 { value: bits8(60) };
     let imported_pair = parametric_lib::RemotePair__A_8__B_23 {
-        left: bits8(61)?,
-        right: dslx_aot::U23::new(62)?,
+        left: bits8(61),
+        right: dslx_aot::U23::new(62),
     };
 
     let mut runner = parametric_imports::aot_parametric_imports::new_runner()?;
-    let mut result = parametric_imports::ParametricImportsResult::default();
+    let mut result = parametric_imports::ParametricImportsResult::all_zeros();
     runner.run(&remote, &imported_direct, &imported_pair, &mut result)?;
 
     assert_eq!(result.remote.id.to_u64(), 40);
@@ -361,10 +362,10 @@ fn typed_dslx_imported_parametric_structs_execute_without_marshalling()
 fn typed_dslx_duplicate_imported_names_use_canonical_paths()
 -> Result<(), Box<dyn std::error::Error>> {
     let widget = dslx_aot::foo::widget::Widget {
-        widget_id: dslx_aot::U8::new(41)?,
+        widget_id: dslx_aot::U8::new(41),
     };
     let mut runner = dslx_aot::frobber::aot_duplicate_widget::new_runner()?;
-    let mut output = dslx_aot::bar::widget::Widget::default();
+    let mut output = dslx_aot::bar::widget::Widget::all_zeros();
     runner.run(&widget, &mut output)?;
     assert_eq!(output.widget_id.to_u64(), 42);
     Ok(())
@@ -376,13 +377,13 @@ fn typed_dslx_duplicate_imported_names_use_canonical_paths()
 fn typed_dslx_namespaced_package_runners_preserve_module_paths()
 -> Result<(), Box<dyn std::error::Error>> {
     let doodle = dslx_aot::types::shared_types::Doodle {
-        doodle_id: dslx_aot::U8::new(51)?,
+        doodle_id: dslx_aot::U8::new(51),
     };
     let mut echo = dslx_aot::foo::my_file::aot_namespaced_package_echo::new_runner()?;
     let mut bump = dslx_aot::bar::your_file::aot_namespaced_package_bump::new_runner()?;
-    let mut echoed = dslx_aot::types::shared_types::Doodle::default();
+    let mut echoed = dslx_aot::types::shared_types::Doodle::all_zeros();
     echo.run(&doodle, &mut echoed)?;
-    let mut bumped = dslx_aot::types::shared_types::Doodle::default();
+    let mut bumped = dslx_aot::types::shared_types::Doodle::all_zeros();
     bump.run(&echoed, &mut bumped)?;
     assert_eq!(bumped.doodle_id.to_u64(), 52);
     Ok(())
