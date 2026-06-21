@@ -2,7 +2,7 @@
 
 [package]
 name = "xlsynth-pir-compiler-aot-ir-test-crate"
-version = "0.57.0"
+version = "0.58.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>", "Mark Heffernan <meheff@gmail.com>"]
 description = "IR integration tests for xlsynth-pir-compiler native AOT output"
