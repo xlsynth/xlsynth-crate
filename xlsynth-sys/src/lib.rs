@@ -1552,6 +1552,13 @@ unsafe extern "C" {
         result_out: *mut *mut CDslxCallGraph,
     ) -> bool;
 
+    pub fn xls_dslx_type_info_build_function_call_graph_for_module(
+        type_info: *mut CDslxTypeInfo,
+        module: *mut CDslxModule,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxCallGraph,
+    ) -> bool;
+
     pub fn xls_dslx_call_graph_free(call_graph: *mut CDslxCallGraph);
 
     pub fn xls_dslx_call_graph_get_function_count(call_graph: *mut CDslxCallGraph) -> i64;

@@ -168,7 +168,7 @@ fn accumulate_specializations(
         }
 
         let type_info = tm_current.get_type_info();
-        let call_graph = type_info.build_function_call_graph()?;
+        let call_graph = type_info.build_function_call_graph(&module)?;
         let reachable = reachable_functions(&current_top_name, &call_graph)?;
         debug!(
             "Iteration {} reachable functions: {:?}",
@@ -604,7 +604,7 @@ fn prune_unreachable_functions(
     let module = tm.get_module();
     let functions = collect_functions(&module);
     let type_info = tm.get_type_info();
-    let call_graph = type_info.build_function_call_graph()?;
+    let call_graph = type_info.build_function_call_graph(&module)?;
 
     let mut reachable = reachable_functions(top_function, &call_graph)?;
 
