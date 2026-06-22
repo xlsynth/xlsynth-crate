@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "irvals")]
-
 use std::io::Write;
 
 use xlsynth_vastly::compile_pipeline_module;
@@ -82,6 +80,45 @@ endmodule
         cycles[1].inputs.get("b").unwrap().to_bit_string_msb_first(),
         "001"
     );
+}
+
+#[test]
+fn parses_named_irvals_by_exact_input_name() {
+    let dut = r#"
+module m(
+  input logic clk,
+  input logic [3:0] a,
+  input logic [2:0] b,
+  output wire [3:0] out
+);
+  assign out = a;
+endmodule
+"#;
+    let m = compile_pipeline_module(dut).unwrap();
+    let td = mk_temp_dir();
+    let p = td.join("named.irvals");
+    std::fs::write(
+        &p,
+        "{b: bits[3]:7, a: bits[4]:0}\n{a: bits[4]:15, b: bits[3]:0}\n",
+    )
+    .unwrap();
+
+    let cycles = cycles_from_irvals_file(&m, &p, None).unwrap();
+    assert_eq!(cycles.len(), 2);
+    assert_eq!(
+        cycles[0].inputs.get("a").unwrap().to_bit_string_msb_first(),
+        "0000"
+    );
+    assert_eq!(
+        cycles[0].inputs.get("b").unwrap().to_bit_string_msb_first(),
+        "111"
+    );
+
+    std::fs::write(&p, "{a: bits[4]:0, wrong: bits[3]:0}\n").unwrap();
+    let error = cycles_from_irvals_file(&m, &p, None).unwrap_err();
+    let message = format!("{error:?}");
+    assert!(message.contains("missing [\\\"b\\\"]"), "{message}");
+    assert!(message.contains("unknown [\\\"wrong\\\"]"), "{message}");
 }
 
 fn mk_temp_dir() -> std::path::PathBuf {

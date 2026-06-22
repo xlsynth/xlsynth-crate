@@ -9,7 +9,7 @@ use std::time::Instant;
 use signal_hook::SigId;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::low_level as siglow;
-use xlsynth::IrValue;
+use xlsynth::{IrValue, IrValuesFileKind, NamedIrValue, NamedIrValueSet, parse_ir_values};
 use xlsynth_pir::ir_parser::Parser;
 
 use crate::{
@@ -99,14 +99,23 @@ fn install_signal_handlers<W: Write>(
 struct FileSink<'a, W: Write> {
     writer: &'a mut W,
     stop: Arc<AtomicBool>,
+    argument_names: Vec<String>,
+    file_kind: IrValuesFileKind,
     write_error: Option<String>,
 }
 
 impl<W: Write> FileSink<'_, W> {
-    fn new(writer: &mut W, stop: Arc<AtomicBool>) -> FileSink<'_, W> {
+    fn new(
+        writer: &mut W,
+        stop: Arc<AtomicBool>,
+        argument_names: Vec<String>,
+        file_kind: IrValuesFileKind,
+    ) -> FileSink<'_, W> {
         FileSink {
             writer,
             stop,
+            argument_names,
+            file_kind,
             write_error: None,
         }
     }
@@ -121,7 +130,48 @@ impl<W: Write> CorpusSink for FileSink<'_, W> {
         if self.write_error.is_some() {
             return;
         }
-        if let Err(e) = writeln!(self.writer, "{}", tuple_value) {
+        let formatted = match self.file_kind {
+            IrValuesFileKind::Positional => tuple_value.to_string(),
+            IrValuesFileKind::Named => {
+                let elements = match tuple_value.get_elements() {
+                    Ok(elements) => elements,
+                    Err(e) => {
+                        self.write_error = Some(format!(
+                            "Failed to append named corpus sample: value is not a tuple: {}",
+                            e
+                        ));
+                        self.stop.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                if elements.len() != self.argument_names.len() {
+                    self.write_error = Some(format!(
+                        "Failed to append named corpus sample: tuple has {} elements but function has {} parameters",
+                        elements.len(),
+                        self.argument_names.len()
+                    ));
+                    self.stop.store(true, Ordering::Relaxed);
+                    return;
+                }
+                let entries = self
+                    .argument_names
+                    .iter()
+                    .cloned()
+                    .zip(elements)
+                    .map(|(name, value)| NamedIrValue { name, value })
+                    .collect();
+                match NamedIrValueSet::new(entries) {
+                    Ok(set) => set.to_string(),
+                    Err(e) => {
+                        self.write_error =
+                            Some(format!("Failed to append named corpus sample: {}", e));
+                        self.stop.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+        };
+        if let Err(e) = writeln!(self.writer, "{}", formatted) {
             self.write_error = Some(format!("Failed to append corpus sample: {}", e));
             self.stop.store(true, Ordering::Relaxed);
         }
@@ -228,6 +278,7 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
     };
     let mut engine = AutocovEngine::from_ir_path(&config.ir_input_file, &config.entry_fn, cfg)
         .map_err(|e| format!("Failed to initialize autocov engine: {}", e))?;
+    let argument_names = engine.argument_names();
 
     let stop = Arc::new(AtomicBool::new(false));
     engine.set_stop_flag(Arc::clone(&stop));
@@ -262,6 +313,7 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
         }
     }
 
+    let mut corpus_file_kind = None;
     if let Ok(file) = std::fs::File::open(&config.corpus_file) {
         writeln!(
             stderr,
@@ -284,13 +336,30 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
             if line.is_empty() {
                 continue;
             }
-            let value = IrValue::parse_typed(line).map_err(|e| {
-                format!(
-                    "Invalid typed value on corpus line {}: {}",
-                    line_index + 1,
-                    e
-                )
+            let parsed = parse_ir_values(line).map_err(|e| {
+                format!("Invalid IR value on corpus line {}: {}", line_index + 1, e)
             })?;
+            let line_kind = parsed.kind();
+            if let Some(file_kind) = corpus_file_kind {
+                if line_kind != file_kind {
+                    return Err(format!(
+                        "IR values corpus mixes {:?} and {:?} records at line {}",
+                        file_kind,
+                        line_kind,
+                        line_index + 1
+                    ));
+                }
+            } else {
+                corpus_file_kind = Some(line_kind);
+            }
+            let mut values = parsed
+                .into_positional_values(&argument_names)
+                .map_err(|e| {
+                    format!("Invalid IR value on corpus line {}: {}", line_index + 1, e)
+                })?;
+            let value = values
+                .pop()
+                .expect("parsing one non-empty line produces one IR value");
             engine
                 .add_corpus_sample_from_arg_tuple(&value)
                 .map_err(|e| {
@@ -353,7 +422,12 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
             )
         })?;
     let mut writer = BufWriter::new(file);
-    let mut sink = FileSink::new(&mut writer, Arc::clone(&stop));
+    let mut sink = FileSink::new(
+        &mut writer,
+        Arc::clone(&stop),
+        argument_names,
+        corpus_file_kind.unwrap_or(IrValuesFileKind::Positional),
+    );
 
     if config.seed_structured && !stop.load(Ordering::Relaxed) && !engine.max_corpus_len_reached() {
         let added = engine.seed_structured_corpus(config.seed_two_hot_max_bits, Some(&mut sink));
@@ -485,7 +559,12 @@ mod tests {
     fn file_sink_sets_stop_flag_on_write_error() {
         let stop = Arc::new(AtomicBool::new(false));
         let mut writer = AlwaysFailWriter;
-        let mut sink = FileSink::new(&mut writer, Arc::clone(&stop));
+        let mut sink = FileSink::new(
+            &mut writer,
+            Arc::clone(&stop),
+            vec!["x".to_string(), "y".to_string()],
+            IrValuesFileKind::Positional,
+        );
         let tuple_value = IrValue::make_tuple(&[
             IrValue::parse_typed("bits[1]:0").expect("literal should parse"),
             IrValue::parse_typed("bits[1]:1").expect("literal should parse"),
@@ -502,5 +581,29 @@ mod tests {
             err.contains("Failed to append corpus sample"),
             "unexpected error message: {err}"
         );
+    }
+
+    #[test]
+    fn file_sink_formats_named_samples_in_argument_order() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut writer = Vec::new();
+        let mut sink = FileSink::new(
+            &mut writer,
+            Arc::clone(&stop),
+            vec!["x".to_string(), "y".to_string()],
+            IrValuesFileKind::Named,
+        );
+        let tuple_value = IrValue::make_tuple(&[
+            IrValue::parse_typed("bits[1]:0").expect("literal should parse"),
+            IrValue::parse_typed("bits[1]:1").expect("literal should parse"),
+        ]);
+
+        sink.on_new_sample(&tuple_value);
+
+        assert_eq!(
+            String::from_utf8(writer).unwrap(),
+            "{x: bits[1]:0, y: bits[1]:1}\n"
+        );
+        assert!(!stop.load(Ordering::Relaxed));
     }
 }

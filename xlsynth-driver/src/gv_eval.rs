@@ -3,9 +3,8 @@
 use std::{io::Write, path::Path};
 
 use clap::ArgMatches;
-use xlsynth::IrValue;
+use xlsynth::{IrValue, parse_ir_values_file};
 use xlsynth_g8r::netlist::gv_eval::{GvEvalOptions, load_labeled_netlist_aig};
-use xlsynth_pir::irvals::parse_irvals_tuple_file;
 
 fn write_toggle_activity_json(
     path: &str,
@@ -45,7 +44,15 @@ pub fn handle_gv_eval(matches: &ArgMatches) -> Result<(), String> {
         let input_irvals = matches
             .get_one::<String>("input_irvals")
             .expect("clap requires either arg_tuple or input_irvals");
-        parse_irvals_tuple_file(Path::new(input_irvals)).map_err(|e| e.to_string())?
+        let argument_names = model
+            .gate_fn
+            .inputs
+            .iter()
+            .map(|input| input.name.clone())
+            .collect::<Vec<_>>();
+        parse_ir_values_file(Path::new(input_irvals))
+            .and_then(|file| file.into_positional_values(&argument_names))
+            .map_err(|e| e.to_string())?
     };
     if matches.get_one::<String>("toggle_output_json").is_some() && samples.len() < 2 {
         return Err(

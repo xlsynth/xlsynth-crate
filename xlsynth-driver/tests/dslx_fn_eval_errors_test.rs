@@ -18,7 +18,7 @@ fn test_dslx_fn_eval_with_assert_itok_pir_interp() {
 
     // Two inputs: one ok (9), one failing (11).
     let irvals_path = dir.join("inputs.irvals");
-    let irvals = "(bits[32]:9)\n(bits[32]:11)\n";
+    let irvals = "{x: bits[32]:9}\n{x: bits[32]:11}\n";
     std::fs::write(&irvals_path, irvals).expect("write irvals");
 
     // Run with PIR interpreter to observe assertion failure on second line.

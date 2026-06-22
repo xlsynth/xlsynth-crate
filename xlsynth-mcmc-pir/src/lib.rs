@@ -77,12 +77,16 @@ use crate::transforms::{
 
 const DEFAULT_ORACLE_RANDOM_SAMPLES: usize = 32;
 
-pub fn parse_irvals_tuple_lines(irvals_text: &str) -> Result<Vec<IrValue>> {
-    xlsynth_pir::irvals::parse_irvals_tuple_lines(irvals_text).map_err(anyhow::Error::msg)
-}
-
-pub fn parse_irvals_tuple_file(path: &Path) -> Result<Vec<IrValue>> {
-    xlsynth_pir::irvals::parse_irvals_tuple_file(path).map_err(anyhow::Error::msg)
+/// Parses positional or named `.irvals` records for a specific IR function.
+pub fn parse_irvals_file_for_fn(path: &Path, f: &IrFn) -> Result<Vec<IrValue>> {
+    let argument_names = f
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<Vec<_>>();
+    xlsynth::parse_ir_values_file(path)?
+        .into_positional_values(&argument_names)
+        .map_err(anyhow::Error::new)
 }
 
 // We want invalid-IR candidates (esp. bit_slice bounds) to be visible, since
@@ -1531,8 +1535,8 @@ pub struct RunOptions {
     ///   `trajectory.c{chain_no:03}.jsonl`
     pub trajectory_dir: Option<PathBuf>,
 
-    /// Optional toggle stimulus samples in `.irvals` tuple form (one tuple per
-    /// sample) used by toggle-based objectives.
+    /// Optional toggle stimulus samples parsed from positional tuples or named
+    /// argument records in an `.irvals` file.
     pub toggle_stimulus: Option<Vec<IrValue>>,
 }
 
@@ -5736,25 +5740,27 @@ top fn f(x: bits[8] id=1) -> bits[8] {
     }
 
     #[test]
-    fn parse_irvals_tuple_lines_accepts_valid_tuples() {
-        let text = "(bits[1]:0, bits[1]:1)\n(bits[1]:1, bits[1]:1)\n";
-        let got = parse_irvals_tuple_lines(text).unwrap();
-        assert_eq!(got.len(), 2);
-    }
-
-    #[test]
-    fn parse_irvals_tuple_lines_rejects_invalid_or_non_tuple_lines() {
-        let bad_parse = parse_irvals_tuple_lines("not_a_value\n").unwrap_err();
-        assert!(
-            bad_parse.to_string().contains("line 1"),
-            "expected line number in parse error"
+    fn parse_irvals_file_for_fn_binds_and_validates_named_arguments() {
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[2] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(a, id=3)
+}"#,
         );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("named.irvals");
+        std::fs::write(
+            &path,
+            "{b: bits[2]:3, a: bits[1]:0}\n{a: bits[1]:1, b: bits[2]:1}\n",
+        )
+        .unwrap();
+        let values = parse_irvals_file_for_fn(&path, &f).unwrap();
+        assert_eq!(values[0].to_string(), "(bits[1]:0, bits[2]:3)");
+        assert_eq!(values[1].to_string(), "(bits[1]:1, bits[2]:1)");
 
-        let non_tuple = parse_irvals_tuple_lines("bits[1]:1\n").unwrap_err();
-        assert!(
-            non_tuple.to_string().contains("not a tuple"),
-            "expected tuple-specific error"
-        );
+        std::fs::write(&path, "{a: bits[1]:0, wrong: bits[2]:3}\n").unwrap();
+        let error = parse_irvals_file_for_fn(&path, &f).unwrap_err().to_string();
+        assert!(error.contains("missing [\"b\"]"), "{error}");
+        assert!(error.contains("unknown [\"wrong\"]"), "{error}");
     }
 
     #[test]

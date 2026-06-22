@@ -95,6 +95,51 @@ endmodule
 }
 
 #[test]
+fn gv_eval_accepts_named_irvals_and_rejects_wrong_names() {
+    let netlist = r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  AND2 u_and (.A(a), .B(b), .Y(y));
+endmodule
+"#;
+    let temp_dir = write_fixture(netlist, COMBINATIONAL_LIBERTY);
+    let irvals_path = temp_dir.path().join("named.irvals");
+    std::fs::write(
+        &irvals_path,
+        "{b: bits[1]:0, a: bits[1]:1}\n{a: bits[1]:1, b: bits[1]:1}\n",
+    )
+    .expect("write named samples");
+    let output = run_gv_eval(
+        &temp_dir,
+        &["--input-irvals", irvals_path.to_str().unwrap()],
+    );
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\n"
+    );
+
+    std::fs::write(&irvals_path, "{a: bits[1]:1, wrong: bits[1]:1}\n")
+        .expect("write bad named sample");
+    let output = run_gv_eval(
+        &temp_dir,
+        &["--input-irvals", irvals_path.to_str().unwrap()],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing [\"b\"]"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("unknown [\"wrong\"]"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 fn gv_eval_toggle_output_requires_two_samples() {
     let netlist = r#"
 module top (a, b, y);

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use xlsynth::IrBits;
 use xlsynth::IrValue;
 use xlsynth::XlsynthError;
+use xlsynth::parse_ir_values;
 
 use crate::Error;
 use crate::LogicBit;
@@ -23,21 +24,23 @@ pub fn cycles_from_irvals_file(
 ) -> Result<Vec<PipelineCycle>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| Error::Parse(format!("io error reading irvals `{}`: {e}", path.display())))?;
-    let mut parsed: Vec<IrValue> = Vec::new();
-    for (idx, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let v = IrValue::parse_typed(line).map_err(|e| {
-            Error::Parse(format!(
-                "failed to parse irvals line {} `{}`: {e}",
-                idx + 1,
-                line
-            ))
-        })?;
-        parsed.push(v);
-    }
+    let filtered_text = text
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with('#')
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let argument_names = m
+        .combo
+        .input_ports
+        .iter()
+        .map(|port| port.name.clone())
+        .collect::<Vec<_>>();
+    let mut parsed = parse_ir_values(&filtered_text)
+        .and_then(|file| file.into_positional_values(&argument_names))
+        .map_err(|e| Error::Parse(e.to_string()))?;
     if parsed.is_empty() {
         return Err(Error::Parse(format!(
             "no irvals parsed from `{}`",

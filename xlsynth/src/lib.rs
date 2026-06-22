@@ -6,6 +6,7 @@ pub mod ir_analysis;
 pub mod ir_builder;
 pub mod ir_package;
 pub mod ir_value;
+pub mod ir_values;
 mod lib_support;
 pub mod sv_bridge_builder;
 pub mod vast;
@@ -34,6 +35,10 @@ pub use ir_package::IrType;
 pub use ir_package::RunResult;
 pub use ir_package::TraceMessage;
 pub use ir_value::IrValue;
+pub use ir_values::{
+    IrValuesFile, IrValuesFileKind, NamedIrValue, NamedIrValueSet, parse_ir_values,
+    parse_ir_values_file,
+};
 pub use xlsynth_error::XlsynthError;
 use xlsynth_sys::CIrValue;
 

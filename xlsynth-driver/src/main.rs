@@ -780,7 +780,7 @@ fn main() {
                     clap::Arg::new("input_ir_path")
                         .long("input_ir_path")
                         .value_name("PATH")
-                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .help("Path to an .irvals file with one positional tuple or named argument set per line")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2042,7 +2042,7 @@ fn main() {
                     Arg::new("input_irvals")
                         .long("input-irvals")
                         .value_name("IRVALS_PATH")
-                        .help("Path to an .irvals file with one typed IR tuple per line")
+                        .help("Path to an .irvals file with one positional tuple or named argument set per line")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2623,7 +2623,7 @@ fn main() {
                     clap::Arg::new("input_irvals")
                         .long("input-irvals")
                         .value_name("IRVALS_PATH")
-                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .help("Path to an .irvals file with one positional tuple or named argument set per line")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2882,7 +2882,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                     clap::Arg::new("corpus_file")
                         .long("corpus-file")
                         .value_name("CORPUS_FILE")
-                        .help("Newline-delimited .irvals corpus file to append to")
+                        .help("Newline-delimited positional or named .irvals corpus file to append to")
                         .required(true)
                         .action(clap::ArgAction::Set),
                 )

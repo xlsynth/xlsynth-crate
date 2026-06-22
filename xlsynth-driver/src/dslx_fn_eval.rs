@@ -25,7 +25,13 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
             std::process::exit(1);
         }
     };
-    let lines: Vec<String> = irvals_text.lines().map(|s| s.to_string()).collect();
+    let ir_values = match xlsynth::parse_ir_values(&irvals_text) {
+        Ok(values) => values,
+        Err(e) => {
+            eprintln!("Failed to parse --input_ir_path: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let mode = match eval_mode {
         Some("jit") => crate::fn_eval::EvalMode::Jit,
@@ -51,7 +57,7 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
     match crate::fn_eval::evaluate_dslx_function_over_ir_values(
         dslx_file,
         top_fn,
-        &lines,
+        ir_values,
         mode,
         &opts,
         pir_dump_node_values,

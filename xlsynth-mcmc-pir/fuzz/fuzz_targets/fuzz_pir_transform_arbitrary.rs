@@ -15,7 +15,7 @@ use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
 };
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult, ProverFn};
 use xlsynth_prover::prover::{Prover, SolverChoice, SolverLimits, prover_for_choice_with_limits};
 
@@ -46,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
     let generated = generate_fn(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
         .expect("fixed random PIR options should always construct a valid function");
     let mut cur_pkg = generated.into_top_package("fuzz_pir_transform_arbitrary");
-    ir_validate::validate_package(&cur_pkg)
+    ir_verify::verify_package(&cur_pkg)
         .expect("directly generated PIR package should start valid");
     let initial_ir_text = cur_pkg.to_string();
 
@@ -102,7 +102,7 @@ fuzz_target!(|data: &[u8]| {
             );
             continue;
         }
-        if let Err(e) = ir_validate::validate_package(&next_pkg) {
+        if let Err(e) = ir_verify::verify_package(&next_pkg) {
             panic!(
                 "transform {:?} produced invalid PIR at {:?}: {e:?}\n\nbefore:\n{}\n\nafter:\n{}",
                 transform.kind(),

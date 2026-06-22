@@ -38,12 +38,12 @@ use xlsynth_mcmc_pir::AcceptedSampleMsg;
 use xlsynth_mcmc_pir::ExtensionCostingMode;
 use xlsynth_mcmc_pir::Objective;
 use xlsynth_mcmc_pir::RunOptions;
-use xlsynth_mcmc_pir::parse_irvals_tuple_file;
+use xlsynth_mcmc_pir::parse_irvals_file_for_fn;
 use xlsynth_mcmc_pir::run_pir_mcmc_with_shared_best;
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser::ParseOptions;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
 enum CliChainStrategy {
@@ -92,8 +92,8 @@ struct CliArgs {
     #[clap(long, value_parser)]
     max_area: Option<usize>,
 
-    /// Path to .irvals stimulus (one typed tuple per line) required for the
-    /// toggle-based metric.
+    /// Path to .irvals stimulus (one positional tuple or named argument set per
+    /// line) required for the toggle-based metric.
     #[clap(long, value_parser)]
     toggle_stimulus: Option<String>,
 
@@ -404,8 +404,8 @@ fn main() -> Result<()> {
         let mut pkg = parser
             .parse_package()
             .map_err(|e| anyhow::anyhow!("PIR parse_package failed: {:?}", e))?;
-        ir_validate::validate_package(&pkg)
-            .map_err(|e| anyhow::anyhow!("PIR validate_package failed: {:?}", e))?;
+        ir_verify::verify_package(&pkg)
+            .map_err(|e| anyhow::anyhow!("PIR verify_package failed: {:?}", e))?;
         // Drop the file table so `to_string()` does not emit `file_number` lines.
         pkg.file_table.id_to_path.clear();
         pkg
@@ -483,7 +483,7 @@ fn main() -> Result<()> {
         toggle_stimulus: cli
             .toggle_stimulus
             .as_ref()
-            .map(|p| parse_irvals_tuple_file(Path::new(p)))
+            .map(|p| parse_irvals_file_for_fn(Path::new(p), &top_fn))
             .transpose()?,
     };
 

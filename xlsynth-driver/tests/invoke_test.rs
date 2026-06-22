@@ -2993,6 +2993,66 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
 }
 
 #[test]
+fn test_ir_fn_autocov_preserves_named_irvals_corpus() {
+    let ir_text = r#"package sample
+
+top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
+  ret out: bits[1] = sel(sel, cases=[a, b], id=4)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    let corpus_path = temp_dir.path().join("interesting.irvals");
+    std::fs::write(&ir_path, ir_text).unwrap();
+    std::fs::write(
+        &corpus_path,
+        "{b: bits[1]:0, sel: bits[1]:0, a: bits[1]:0}\n",
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-autocov")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--corpus-file")
+        .arg(corpus_path.to_str().unwrap())
+        .arg("--max-corpus-len")
+        .arg("4")
+        .arg("--max-iters")
+        .arg("128")
+        .arg("--progress-every")
+        .arg("0")
+        .arg("--seed-two-hot-max-bits")
+        .arg("64")
+        .arg("--seed-structured=true")
+        .arg("--no-mux-space=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let corpus_text = std::fs::read_to_string(&corpus_path).unwrap();
+    let lines = corpus_text.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 4, "unexpected corpus:\n{}", corpus_text);
+    assert!(
+        lines.iter().all(|line| line.starts_with('{')),
+        "corpus form changed while appending:\n{}",
+        corpus_text
+    );
+    let values = xlsynth::parse_ir_values(&corpus_text)
+        .unwrap()
+        .into_positional_values(&["sel".to_string(), "a".to_string(), "b".to_string()])
+        .unwrap();
+    assert_eq!(values.len(), 4);
+}
+
+#[test]
 fn test_ir_fn_to_json() {
     let ir_text = r#"package sample
 
@@ -6878,6 +6938,83 @@ fn test_aig_eval_input_irvals_writes_toggle_activity_json() {
   ]
 }
 "#
+    );
+}
+
+#[test]
+fn test_aig_eval_accepts_named_irvals_in_aig_input_order() {
+    let gate_fn = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "and.aag", &gate_fn);
+    let irvals_path = dir.path().join("and.named.irvals");
+    std::fs::write(
+        &irvals_path,
+        "{b: bits[1]:0, a: bits[1]:0}\n{a: bits[1]:1, b: bits[1]:1}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig-eval")
+        .arg(aag_path)
+        .arg("--input-irvals")
+        .arg(irvals_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\n"
+    );
+
+    let fn_type_irvals_path = dir.path().join("and.fn-type.named.irvals");
+    std::fs::write(&fn_type_irvals_path, "{arg1: bits[1]:0, arg0: bits[1]:1}\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig-eval")
+        .arg(dir.path().join("and.aag"))
+        .arg("--input-irvals")
+        .arg(fn_type_irvals_path)
+        .arg("--fn-type")
+        .arg("(bits[1], bits[1]) -> bits[1]")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "aig-eval --fn-type failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[1]:0\n");
+}
+
+#[test]
+fn test_aig_eval_rejects_named_irvals_with_wrong_argument_name() {
+    let gate_fn = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "and.aag", &gate_fn);
+    let irvals_path = dir.path().join("and.bad-name.irvals");
+    std::fs::write(&irvals_path, "{a: bits[1]:1, wrong: bits[1]:1}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig-eval")
+        .arg(aag_path)
+        .arg("--input-irvals")
+        .arg(irvals_path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing [\"b\"]"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("unknown [\"wrong\"]"),
+        "unexpected stderr: {stderr}"
     );
 }
 

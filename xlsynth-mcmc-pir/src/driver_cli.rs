@@ -26,7 +26,7 @@ use crate::{
     Objective, PirMcmcBudgetFrontierOptions, PirMcmcBudgetWitness, PirMcmcPrefixMinimizeOptions,
     RunOptions, cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options,
     effective_constraint_limits, format_search_score, lower_toggle_stimulus_for_fn,
-    minimize_winning_prefix, parse_irvals_tuple_file, postprocess_gate_fn_for_artifact,
+    minimize_winning_prefix, parse_irvals_file_for_fn, postprocess_gate_fn_for_artifact,
     read_pir_mcmc_artifact_dir, run_pir_mcmc_with_artifact_and_observers,
     run_pir_mcmc_with_shared_best, search_score, search_winning_budget_frontier,
     validate_constraint_configuration, validate_pir_mcmc_artifact_run_options,
@@ -345,7 +345,7 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .long("toggle-stimulus")
                 .value_name("IRVALS_PATH")
                 .help(
-                    "Path to .irvals stimulus (one typed tuple per line) for toggle-based objective.",
+                    "Path to .irvals stimulus (one positional tuple or named argument set per line) for toggle-based objective.",
                 )
                 .action(ArgAction::Set),
         )
@@ -927,7 +927,10 @@ where
         .ok_or_else(|| anyhow::anyhow!("No top function found in PIR package"))?;
 
     let toggle_stimulus_values = match &cli.toggle_stimulus {
-        Some(path) => Some(parse_irvals_tuple_file(PathBuf::from(path).as_path())?),
+        Some(path) => Some(parse_irvals_file_for_fn(
+            PathBuf::from(path).as_path(),
+            &top_fn,
+        )?),
         None => None,
     };
     if cli.metric.needs_toggle_stimulus() && toggle_stimulus_values.is_none() {

@@ -9,7 +9,7 @@ use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_mcmc_pir::{
     Cost, G8rEvaluationMode, Objective, canonical_g8r_scoring_input_for_pir_fn,
     cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options,
-    lower_toggle_stimulus_for_fn, parse_irvals_tuple_file,
+    lower_toggle_stimulus_for_fn, parse_irvals_file_for_fn,
 };
 use xlsynth_pir::ir_parser;
 
@@ -193,7 +193,7 @@ fn verify_origin_alignment(
     let toggle_stimulus_values = cli
         .toggle_stimulus
         .as_ref()
-        .map(|path| parse_irvals_tuple_file(Path::new(path)))
+        .map(|path| parse_irvals_file_for_fn(Path::new(path), &top_fn))
         .transpose()
         .map_err(|e| e.to_string())?;
     let prepared_toggle_stimulus = toggle_stimulus_values
