@@ -9,7 +9,7 @@ use std::time::Instant;
 use signal_hook::SigId;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::low_level as siglow;
-use xlsynth::{IrValue, IrValuesFileKind, NamedIrValue, NamedIrValueSet, parse_ir_values};
+use xlsynth::{IrValue, IrValuesFileKind, NamedIrValueSet, parse_ir_values};
 use xlsynth_pir::ir_parser::Parser;
 
 use crate::{
@@ -133,34 +133,7 @@ impl<W: Write> CorpusSink for FileSink<'_, W> {
         let formatted = match self.file_kind {
             IrValuesFileKind::Positional => tuple_value.to_string(),
             IrValuesFileKind::Named => {
-                let elements = match tuple_value.get_elements() {
-                    Ok(elements) => elements,
-                    Err(e) => {
-                        self.write_error = Some(format!(
-                            "Failed to append named corpus sample: value is not a tuple: {}",
-                            e
-                        ));
-                        self.stop.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                };
-                if elements.len() != self.argument_names.len() {
-                    self.write_error = Some(format!(
-                        "Failed to append named corpus sample: tuple has {} elements but function has {} parameters",
-                        elements.len(),
-                        self.argument_names.len()
-                    ));
-                    self.stop.store(true, Ordering::Relaxed);
-                    return;
-                }
-                let entries = self
-                    .argument_names
-                    .iter()
-                    .cloned()
-                    .zip(elements)
-                    .map(|(name, value)| NamedIrValue { name, value })
-                    .collect();
-                match NamedIrValueSet::new(entries) {
+                match NamedIrValueSet::from_positional_tuple(&self.argument_names, tuple_value) {
                     Ok(set) => set.to_string(),
                     Err(e) => {
                         self.write_error =

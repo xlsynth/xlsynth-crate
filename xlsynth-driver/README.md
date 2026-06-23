@@ -1962,6 +1962,49 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `g8r-eval`
+
+Evaluates a native combinational or sequential G8R design (`.g8r` or
+`.g8rbin`) for one or more cycles. One typed IR result is printed per cycle.
+Each input record supplies only the externally visible inputs; register Q
+values are supplied by the selected initial state and prior cycles. The G8R
+clock is metadata and is not an input record field.
+
+- Required:
+  - `<G8R_FILE>`
+  - Exactly one input source:
+    - `<ARG_TUPLE>` – positional external inputs for one cycle.
+    - `--input-irvals <IRVALS_PATH>` – one positional tuple or named external
+      input set per cycle. Named entries must exactly match the external G8R
+      input names.
+  - For a design containing registers, exactly one initial-state option:
+    - `--initial-state-all-zeros`
+    - `--initial-state-from-g8r-initial-values` – errors and lists the
+      registers if any lack an `initial_value`.
+    - `--initial-state-file <IRVALS_PATH>` – exactly one positional tuple in
+      G8R register order or named record matching the G8R register names.
+- Optional:
+  - `--final-state-irvals <PATH>` – write the final register state as one named
+    record that can subsequently be passed to `--initial-state-file`.
+  - `--toggle-output-json <PATH>` – with at least two `--input-irvals` cycles,
+    write separate combinational-logic, external-interface, register-D, and
+    clocked register-Q toggle counts, plus output-reachable per-node activity.
+
+One input record represents one active clock cycle. External outputs are
+observed from the current state, then register D values are committed for the
+next cycle. Register-input toggles compare D between consecutive evaluations
+(`N - 1` intervals). Register-output toggles count actual Q changes across all
+simulated clock edges (`N` possible changes). Initialization itself is not a
+toggle from an unknown prior state.
+
+```shell
+xlsynth-driver g8r-eval pipeline.g8r \
+  --input-irvals inputs.irvals \
+  --initial-state-from-g8r-initial-values \
+  --final-state-irvals final-state.irvals \
+  --toggle-output-json toggles.json
+```
+
 ### `aig-eval`
 
 Evaluates an AIGER file (`.aag` or `.aig`) with one typed IR argument tuple or

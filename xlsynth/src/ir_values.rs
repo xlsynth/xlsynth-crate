@@ -43,6 +43,33 @@ impl NamedIrValueSet {
         Ok(Self { entries })
     }
 
+    /// Creates a named value set from a positional tuple and argument names.
+    pub fn from_positional_tuple(
+        argument_names: &[String],
+        tuple_value: &IrValue,
+    ) -> Result<Self, XlsynthError> {
+        let elements = tuple_value.get_elements().map_err(|e| {
+            XlsynthError(format!(
+                "cannot create named IR value set from a non-tuple value: {}",
+                e
+            ))
+        })?;
+        if elements.len() != argument_names.len() {
+            return Err(XlsynthError(format!(
+                "positional tuple arity mismatch: expected {}, got {}",
+                argument_names.len(),
+                elements.len()
+            )));
+        }
+        let entries = argument_names
+            .iter()
+            .cloned()
+            .zip(elements)
+            .map(|(name, value)| NamedIrValue { name, value })
+            .collect();
+        Self::new(entries)
+    }
+
     /// Returns entries in source order.
     pub fn entries(&self) -> &[NamedIrValue] {
         &self.entries
@@ -493,6 +520,23 @@ mod tests {
         .unwrap();
         assert_eq!(set.entries()[0].name, "y");
         assert_eq!(set.entries()[1].name, "x");
+    }
+
+    #[test]
+    fn named_value_set_from_positional_tuple() {
+        let tuple = IrValue::parse_typed("(bits[8]:1, bits[1]:0)").unwrap();
+        let set =
+            NamedIrValueSet::from_positional_tuple(&["x".to_string(), "y".to_string()], &tuple)
+                .unwrap();
+        assert_eq!(set.to_string(), "{x: bits[8]:1, y: bits[1]:0}");
+
+        let scalar = IrValue::parse_typed("bits[1]:0").unwrap();
+        let error =
+            NamedIrValueSet::from_positional_tuple(&["x".to_string()], &scalar).unwrap_err();
+        assert!(error.0.contains("non-tuple"));
+
+        let error = NamedIrValueSet::from_positional_tuple(&["x".to_string()], &tuple).unwrap_err();
+        assert!(error.0.contains("expected 1, got 2"));
     }
 
     #[test]

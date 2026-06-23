@@ -114,9 +114,14 @@ endmodule
         "111"
     );
 
-    std::fs::write(&p, "{a: bits[4]:0, wrong: bits[3]:0}\n").unwrap();
+    std::fs::write(
+        &p,
+        "# Keep original line numbers across comments and blank lines.\n\n{a: bits[4]:0, wrong: bits[3]:0}\n",
+    )
+    .unwrap();
     let error = cycles_from_irvals_file(&m, &p, None).unwrap_err();
     let message = format!("{error:?}");
+    assert!(message.contains("line 3"), "{message}");
     assert!(message.contains("missing [\\\"b\\\"]"), "{message}");
     assert!(message.contains("unknown [\\\"wrong\\\"]"), "{message}");
 }

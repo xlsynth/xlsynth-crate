@@ -6163,6 +6163,162 @@ fn test_g8r2v_add_clk_port_behavior() {
 }
 
 #[test]
+fn test_g8r_eval_sequential_named_inputs_final_state_and_toggles() {
+    let mut design = make_pipeline_sequential_design();
+    design.registers[0].initial_value = Some(IrBits::make_ubits(1, 1).unwrap());
+    design.validate().unwrap();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("pipeline.g8r");
+    let inputs_path = temp_dir.path().join("inputs.irvals");
+    let final_state_path = temp_dir.path().join("final-state.irvals");
+    let toggles_path = temp_dir.path().join("toggles.json");
+    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+    std::fs::write(&inputs_path, "{data: bits[1]:0}\n{data: bits[1]:1}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("--input-irvals")
+        .arg(&inputs_path)
+        .arg("--initial-state-from-g8r-initial-values")
+        .arg("--final-state-irvals")
+        .arg(&final_state_path)
+        .arg("--toggle-output-json")
+        .arg(&toggles_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:1\nbits[1]:0\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&final_state_path).unwrap(),
+        "{state: bits[1]:1}\n"
+    );
+    compare_golden_text(
+        &std::fs::read_to_string(&toggles_path).unwrap(),
+        "tests/test_g8r_eval_toggles.golden.json",
+    );
+}
+
+#[test]
+fn test_g8r_eval_accepts_zero_and_file_initial_state() {
+    let design = make_pipeline_sequential_design();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8rbin_path = temp_dir.path().join("pipeline.g8rbin");
+    let state_path = temp_dir.path().join("state.irvals");
+    std::fs::write(&g8rbin_path, encode_g8r_binary(&design).unwrap()).unwrap();
+    std::fs::write(&state_path, "{state: bits[1]:1}\n").unwrap();
+
+    let zero_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8rbin_path)
+        .arg("(bits[1]:0)")
+        .arg("--initial-state-all-zeros")
+        .output()
+        .unwrap();
+    assert!(zero_output.status.success());
+    assert_eq!(String::from_utf8_lossy(&zero_output.stdout), "bits[1]:0\n");
+
+    let file_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8rbin_path)
+        .arg("(bits[1]:0)")
+        .arg("--initial-state-file")
+        .arg(&state_path)
+        .output()
+        .unwrap();
+    assert!(
+        file_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&file_output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&file_output.stdout), "bits[1]:1\n");
+}
+
+#[test]
+fn test_g8r_eval_accepts_combinational_design_without_initial_state() {
+    let gate_fn = two_input_gate_fn("and", |a, b, builder| builder.add_and_binary(a, b));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("and.g8r");
+    let inputs_path = temp_dir.path().join("inputs.irvals");
+    write_g8r_file(&g8r_path, &gate_fn);
+    std::fs::write(
+        &inputs_path,
+        "{b: bits[1]:0, a: bits[1]:1}\n{a: bits[1]:1, b: bits[1]:1}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("--input-irvals")
+        .arg(&inputs_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\n"
+    );
+
+    let invalid_state = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("(bits[1]:1, bits[1]:1)")
+        .arg("--initial-state-all-zeros")
+        .output()
+        .unwrap();
+    assert!(!invalid_state.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_state.stderr)
+            .contains("invalid for a G8R design without registers")
+    );
+}
+
+#[test]
+fn test_g8r_eval_requires_complete_initial_state_policy() {
+    let design = make_pipeline_sequential_design();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("pipeline.g8r");
+    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+
+    let missing_policy = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("(bits[1]:0)")
+        .output()
+        .unwrap();
+    assert!(!missing_policy.status.success());
+    assert!(String::from_utf8_lossy(&missing_policy.stderr).contains("requires exactly one of"));
+
+    let missing_value = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("(bits[1]:0)")
+        .arg("--initial-state-from-g8r-initial-values")
+        .output()
+        .unwrap();
+    assert!(!missing_value.status.success());
+    let stderr = String::from_utf8_lossy(&missing_value.stderr);
+    assert!(
+        stderr.contains("registers without initial values"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("state"), "{stderr}");
+}
+
+#[test]
 fn test_g8r2v_emits_stored_sequential_gate_fn_registers() {
     let design = make_pipeline_sequential_design();
     let temp_dir = tempfile::tempdir().unwrap();
