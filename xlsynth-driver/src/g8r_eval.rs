@@ -216,6 +216,12 @@ pub fn handle_g8r_eval(matches: &ArgMatches) -> Result<(), String> {
         .expect("g8r_file is required by clap");
     let design = load_sequential_gate_fn_from_path(Path::new(g8r_file))?;
     let inputs = read_external_inputs(matches, &design)?;
+    if matches.get_one::<String>("toggle_output_json").is_some() && inputs.len() < 2 {
+        return Err(format!(
+            "--toggle-output-json requires at least two --input-irvals cycles; got {}",
+            inputs.len()
+        ));
+    }
     let initial_state = resolve_initial_state(matches, &design)?;
     let trace = simulate(&design, &inputs, initial_state)?;
 

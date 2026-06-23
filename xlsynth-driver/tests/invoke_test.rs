@@ -6319,6 +6319,41 @@ fn test_g8r_eval_requires_complete_initial_state_policy() {
 }
 
 #[test]
+fn test_g8r_eval_rejects_short_toggle_trace_before_emitting_output() {
+    let design = make_pipeline_sequential_design();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("pipeline.g8r");
+    let inputs_path = temp_dir.path().join("inputs.irvals");
+    let toggles_path = temp_dir.path().join("toggles.json");
+    let final_state_path = temp_dir.path().join("final-state.irvals");
+    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+    std::fs::write(&inputs_path, "{data: bits[1]:0}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("--input-irvals")
+        .arg(&inputs_path)
+        .arg("--initial-state-all-zeros")
+        .arg("--final-state-irvals")
+        .arg(&final_state_path)
+        .arg("--toggle-output-json")
+        .arg(&toggles_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "unexpected stdout: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires at least two --input-irvals cycles; got 1"),
+        "{stderr}"
+    );
+    assert!(!toggles_path.exists());
+    assert!(!final_state_path.exists());
+}
+
+#[test]
 fn test_g8r2v_emits_stored_sequential_gate_fn_registers() {
     let design = make_pipeline_sequential_design();
     let temp_dir = tempfile::tempdir().unwrap();
