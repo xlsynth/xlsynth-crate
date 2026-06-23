@@ -276,10 +276,7 @@ fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueS
 }
 
 /// Splits entries at commas outside strings, tuples, and arrays.
-fn split_named_entries<'a>(
-    inner: &'a str,
-    line_number: usize,
-) -> Result<Vec<&'a str>, XlsynthError> {
+fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, XlsynthError> {
     if inner.trim().is_empty() {
         return Ok(Vec::new());
     }

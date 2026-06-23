@@ -6203,7 +6203,7 @@ fn test_g8r_eval_sequential_named_inputs_final_state_and_toggles() {
     );
     compare_golden_text(
         &std::fs::read_to_string(&toggles_path).unwrap(),
-        "tests/test_g8r_eval_toggles.golden.json",
+        "tests/test_g8r_eval_toggles.golden.txt",
     );
 }
 
