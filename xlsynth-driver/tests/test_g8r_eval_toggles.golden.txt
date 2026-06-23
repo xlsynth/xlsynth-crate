@@ -1,0 +1,38 @@
+{
+  "cycle_count": 2,
+  "logic_transition_count": 1,
+  "logic": {
+    "gate_input_toggles": 0,
+    "gate_output_toggles": 0
+  },
+  "interface": {
+    "external_input_toggles": 1,
+    "external_output_toggles": 1
+  },
+  "registers": {
+    "aggregate_input_toggles": 1,
+    "aggregate_output_toggles": 2,
+    "entries": [
+      {
+        "name": "state",
+        "width": 1,
+        "input_toggles": 1,
+        "output_toggles": 2
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "node_id": 1,
+      "node_kind": "input",
+      "toggle_count": 1,
+      "toggle_rate": 1.0
+    },
+    {
+      "node_id": 2,
+      "node_kind": "input",
+      "toggle_count": 1,
+      "toggle_rate": 1.0
+    }
+  ]
+}

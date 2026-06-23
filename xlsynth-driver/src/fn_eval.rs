@@ -287,7 +287,7 @@ fn build_args_for_call(
 pub fn evaluate_dslx_function_over_ir_values(
     dslx_file: &Path,
     top_function: &str,
-    input_values_ir_text: &[String],
+    input_values: xlsynth::IrValuesFile,
     mode: EvalMode,
     opts: &DslxFnEvalOptions,
     pir_dump_node_values: bool,
@@ -332,23 +332,29 @@ pub fn evaluate_dslx_function_over_ir_values(
     // Build an evaluator instance that encapsulates backend state.
     let evaluator = DslxFnEvaluator::new(mode, &pkg, &func)?;
 
+    let logical_param_start = if requires_itok { 2 } else { 0 };
+    let function_type = func
+        .get_type()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let argument_names = (logical_param_start..function_type.param_count())
+        .map(|index| {
+            func.param_name(index)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let input_values = input_values
+        .into_positional_values(&argument_names)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
     if pir_dump_node_values && mode != EvalMode::PirInterp {
         return Err(anyhow::anyhow!(
             "--pir_dump_node_values is only supported with --eval_mode=pir-interp"
         ));
     }
 
-    // Parse each line as a tuple value; evaluate; write outputs.
-    for (lineno, line) in input_values_ir_text.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return Err(anyhow::anyhow!(format!(
-                "empty line at {} not allowed",
-                lineno + 1
-            )));
-        }
-        let tuple_val = xlsynth::IrValue::parse_typed(trimmed)
-            .map_err(|e| anyhow::anyhow!(format!("parse error at line {}: {}", lineno + 1, e)))?;
+    // Evaluate each positional tuple, including tuples bound from named input
+    // records.
+    for (lineno, tuple_val) in input_values.iter().enumerate() {
         // Enforce that the value is a tuple (unary requires (v,)).
         tuple_val.get_elements().map_err(|e| {
             anyhow::anyhow!(format!(

@@ -337,7 +337,6 @@ At minimum, update these places:
 - [Operand traversal/remapping](../src/ir_utils.rs)
 - [Reference verification](../src/ir_verify.rs)
 - [Type deduction](../src/ir_deduce.rs)
-- [Validation](../src/ir_validate.rs)
 - [Parser and FFI-wrapper lift-back](../src/ir_parser.rs)
 - [Evaluator](../src/ir_eval.rs)
 - [Desugaring and FFI-wrapper export](../src/desugar_extensions.rs)

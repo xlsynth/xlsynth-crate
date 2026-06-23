@@ -3,3 +3,4 @@
 pub mod count_toggles;
 pub mod gate_sim;
 pub mod gate_simd;
+pub mod sequential;

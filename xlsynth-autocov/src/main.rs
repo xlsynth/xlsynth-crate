@@ -17,8 +17,9 @@ struct Args {
     #[arg(long)]
     entry_fn: String,
 
-    /// Newline-delimited corpus file. Each line is a typed IR tuple value whose
-    /// elements are the function arguments.
+    /// Newline-delimited corpus file. Each line is either a typed IR tuple or
+    /// a named argument record whose names exactly match the function
+    /// parameters.
     #[arg(long)]
     corpus_file: PathBuf,
 

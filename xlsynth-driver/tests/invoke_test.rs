@@ -2993,6 +2993,66 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
 }
 
 #[test]
+fn test_ir_fn_autocov_preserves_named_irvals_corpus() {
+    let ir_text = r#"package sample
+
+top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
+  ret out: bits[1] = sel(sel, cases=[a, b], id=4)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    let corpus_path = temp_dir.path().join("interesting.irvals");
+    std::fs::write(&ir_path, ir_text).unwrap();
+    std::fs::write(
+        &corpus_path,
+        "{b: bits[1]:0, sel: bits[1]:0, a: bits[1]:0}\n",
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-autocov")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--corpus-file")
+        .arg(corpus_path.to_str().unwrap())
+        .arg("--max-corpus-len")
+        .arg("4")
+        .arg("--max-iters")
+        .arg("128")
+        .arg("--progress-every")
+        .arg("0")
+        .arg("--seed-two-hot-max-bits")
+        .arg("64")
+        .arg("--seed-structured=true")
+        .arg("--no-mux-space=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let corpus_text = std::fs::read_to_string(&corpus_path).unwrap();
+    let lines = corpus_text.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 4, "unexpected corpus:\n{}", corpus_text);
+    assert!(
+        lines.iter().all(|line| line.starts_with('{')),
+        "corpus form changed while appending:\n{}",
+        corpus_text
+    );
+    let values = xlsynth::parse_ir_values(&corpus_text)
+        .unwrap()
+        .into_positional_values(&["sel".to_string(), "a".to_string(), "b".to_string()])
+        .unwrap();
+    assert_eq!(values.len(), 4);
+}
+
+#[test]
 fn test_ir_fn_to_json() {
     let ir_text = r#"package sample
 
@@ -6103,6 +6163,197 @@ fn test_g8r2v_add_clk_port_behavior() {
 }
 
 #[test]
+fn test_g8r_eval_sequential_named_inputs_final_state_and_toggles() {
+    let mut design = make_pipeline_sequential_design();
+    design.registers[0].initial_value = Some(IrBits::make_ubits(1, 1).unwrap());
+    design.validate().unwrap();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("pipeline.g8r");
+    let inputs_path = temp_dir.path().join("inputs.irvals");
+    let final_state_path = temp_dir.path().join("final-state.irvals");
+    let toggles_path = temp_dir.path().join("toggles.json");
+    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+    std::fs::write(&inputs_path, "{data: bits[1]:0}\n{data: bits[1]:1}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("--input-irvals")
+        .arg(&inputs_path)
+        .arg("--initial-state-from-g8r-initial-values")
+        .arg("--final-state-irvals")
+        .arg(&final_state_path)
+        .arg("--toggle-output-json")
+        .arg(&toggles_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:1\nbits[1]:0\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&final_state_path).unwrap(),
+        "{state: bits[1]:1}\n"
+    );
+    compare_golden_text(
+        &std::fs::read_to_string(&toggles_path).unwrap(),
+        "tests/test_g8r_eval_toggles.golden.txt",
+    );
+}
+
+#[test]
+fn test_g8r_eval_accepts_zero_and_file_initial_state() {
+    let design = make_pipeline_sequential_design();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8rbin_path = temp_dir.path().join("pipeline.g8rbin");
+    let state_path = temp_dir.path().join("state.irvals");
+    std::fs::write(&g8rbin_path, encode_g8r_binary(&design).unwrap()).unwrap();
+    std::fs::write(&state_path, "{state: bits[1]:1}\n").unwrap();
+
+    let zero_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8rbin_path)
+        .arg("(bits[1]:0)")
+        .arg("--initial-state-all-zeros")
+        .output()
+        .unwrap();
+    assert!(zero_output.status.success());
+    assert_eq!(String::from_utf8_lossy(&zero_output.stdout), "bits[1]:0\n");
+
+    let file_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8rbin_path)
+        .arg("(bits[1]:0)")
+        .arg("--initial-state-file")
+        .arg(&state_path)
+        .output()
+        .unwrap();
+    assert!(
+        file_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&file_output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&file_output.stdout), "bits[1]:1\n");
+}
+
+#[test]
+fn test_g8r_eval_accepts_combinational_design_without_initial_state() {
+    let gate_fn = two_input_gate_fn("and", |a, b, builder| builder.add_and_binary(a, b));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("and.g8r");
+    let inputs_path = temp_dir.path().join("inputs.irvals");
+    write_g8r_file(&g8r_path, &gate_fn);
+    std::fs::write(
+        &inputs_path,
+        "{b: bits[1]:0, a: bits[1]:1}\n{a: bits[1]:1, b: bits[1]:1}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("--input-irvals")
+        .arg(&inputs_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\n"
+    );
+
+    let invalid_state = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("(bits[1]:1, bits[1]:1)")
+        .arg("--initial-state-all-zeros")
+        .output()
+        .unwrap();
+    assert!(!invalid_state.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_state.stderr)
+            .contains("invalid for a G8R design without registers")
+    );
+}
+
+#[test]
+fn test_g8r_eval_requires_complete_initial_state_policy() {
+    let design = make_pipeline_sequential_design();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("pipeline.g8r");
+    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+
+    let missing_policy = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("(bits[1]:0)")
+        .output()
+        .unwrap();
+    assert!(!missing_policy.status.success());
+    assert!(String::from_utf8_lossy(&missing_policy.stderr).contains("requires exactly one of"));
+
+    let missing_value = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("(bits[1]:0)")
+        .arg("--initial-state-from-g8r-initial-values")
+        .output()
+        .unwrap();
+    assert!(!missing_value.status.success());
+    let stderr = String::from_utf8_lossy(&missing_value.stderr);
+    assert!(
+        stderr.contains("registers without initial values"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("state"), "{stderr}");
+}
+
+#[test]
+fn test_g8r_eval_rejects_short_toggle_trace_before_emitting_output() {
+    let design = make_pipeline_sequential_design();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("pipeline.g8r");
+    let inputs_path = temp_dir.path().join("inputs.irvals");
+    let toggles_path = temp_dir.path().join("toggles.json");
+    let final_state_path = temp_dir.path().join("final-state.irvals");
+    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+    std::fs::write(&inputs_path, "{data: bits[1]:0}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-eval")
+        .arg(&g8r_path)
+        .arg("--input-irvals")
+        .arg(&inputs_path)
+        .arg("--initial-state-all-zeros")
+        .arg("--final-state-irvals")
+        .arg(&final_state_path)
+        .arg("--toggle-output-json")
+        .arg(&toggles_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "unexpected stdout: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires at least two --input-irvals cycles; got 1"),
+        "{stderr}"
+    );
+    assert!(!toggles_path.exists());
+    assert!(!final_state_path.exists());
+}
+
+#[test]
 fn test_g8r2v_emits_stored_sequential_gate_fn_registers() {
     let design = make_pipeline_sequential_design();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -6878,6 +7129,83 @@ fn test_aig_eval_input_irvals_writes_toggle_activity_json() {
   ]
 }
 "#
+    );
+}
+
+#[test]
+fn test_aig_eval_accepts_named_irvals_in_aig_input_order() {
+    let gate_fn = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "and.aag", &gate_fn);
+    let irvals_path = dir.path().join("and.named.irvals");
+    std::fs::write(
+        &irvals_path,
+        "{b: bits[1]:0, a: bits[1]:0}\n{a: bits[1]:1, b: bits[1]:1}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig-eval")
+        .arg(aag_path)
+        .arg("--input-irvals")
+        .arg(irvals_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\n"
+    );
+
+    let fn_type_irvals_path = dir.path().join("and.fn-type.named.irvals");
+    std::fs::write(&fn_type_irvals_path, "{arg1: bits[1]:0, arg0: bits[1]:1}\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig-eval")
+        .arg(dir.path().join("and.aag"))
+        .arg("--input-irvals")
+        .arg(fn_type_irvals_path)
+        .arg("--fn-type")
+        .arg("(bits[1], bits[1]) -> bits[1]")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "aig-eval --fn-type failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[1]:0\n");
+}
+
+#[test]
+fn test_aig_eval_rejects_named_irvals_with_wrong_argument_name() {
+    let gate_fn = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "and.aag", &gate_fn);
+    let irvals_path = dir.path().join("and.bad-name.irvals");
+    std::fs::write(&irvals_path, "{a: bits[1]:1, wrong: bits[1]:1}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig-eval")
+        .arg(aag_path)
+        .arg("--input-irvals")
+        .arg(irvals_path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing [\"b\"]"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("unknown [\"wrong\"]"),
+        "unexpected stderr: {stderr}"
     );
 }
 

@@ -69,6 +69,7 @@ mod g8r2ir_fn;
 mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
+mod g8r_eval;
 mod g8r_ir_equiv;
 mod g8r_stitch_pipeline;
 mod g8r_table;
@@ -780,7 +781,7 @@ fn main() {
                     clap::Arg::new("input_ir_path")
                         .long("input_ir_path")
                         .value_name("PATH")
-                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .help("Path to an .irvals file with one positional tuple or named argument set per line")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2042,7 +2043,7 @@ fn main() {
                     Arg::new("input_irvals")
                         .long("input-irvals")
                         .value_name("IRVALS_PATH")
-                        .help("Path to an .irvals file with one typed IR tuple per line")
+                        .help("Path to an .irvals file with one positional tuple or named argument set per line")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2606,6 +2607,77 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("g8r-eval")
+                .about("Evaluates a combinational or sequential .g8r design over one or more cycles")
+                .arg(
+                    clap::Arg::new("g8r_file")
+                        .help("The native G8R design (.g8r or .g8rbin)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("arg_tuple")
+                        .help("Tuple of typed IR values for one cycle of external inputs")
+                        .index(2),
+                )
+                .arg(
+                    clap::Arg::new("input_irvals")
+                        .long("input-irvals")
+                        .value_name("IRVALS_PATH")
+                        .help("Path to an .irvals file with one positional tuple or named external-input set per cycle")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("initial_state_all_zeros")
+                        .long("initial-state-all-zeros")
+                        .help("Initialize every G8R register to all zeros")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("initial_state_from_g8r_initial_values")
+                        .long("initial-state-from-g8r-initial-values")
+                        .help("Initialize registers from their G8R initial_value fields; error if any are missing")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("initial_state_file")
+                        .long("initial-state-file")
+                        .value_name("IRVALS_PATH")
+                        .help("Initialize registers from exactly one positional or named .irvals record")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("final_state_irvals")
+                        .long("final-state-irvals")
+                        .value_name("PATH")
+                        .help("Write final register values as one named .irvals record")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("toggle_output_json")
+                        .long("toggle-output-json")
+                        .value_name("PATH")
+                        .help("Write categorized logic, interface, and register toggle activity; requires --input-irvals")
+                        .requires("input_irvals")
+                        .action(ArgAction::Set),
+                )
+                .group(
+                    clap::ArgGroup::new("g8r_eval_input")
+                        .args(["arg_tuple", "input_irvals"])
+                        .required(true)
+                        .multiple(false),
+                )
+                .group(
+                    clap::ArgGroup::new("g8r_eval_initial_state")
+                        .args([
+                            "initial_state_all_zeros",
+                            "initial_state_from_g8r_initial_values",
+                            "initial_state_file",
+                        ])
+                        .multiple(false),
+                ),
+        )
+        .subcommand(
             clap::Command::new("aig-eval")
                 .about("Evaluates an AIGER file with one tuple or tuples from an .irvals file")
                 .arg(
@@ -2623,7 +2695,7 @@ fn main() {
                     clap::Arg::new("input_irvals")
                         .long("input-irvals")
                         .value_name("IRVALS_PATH")
-                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .help("Path to an .irvals file with one positional tuple or named argument set per line")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2882,7 +2954,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                     clap::Arg::new("corpus_file")
                         .long("corpus-file")
                         .value_name("CORPUS_FILE")
-                        .help("Newline-delimited .irvals corpus file to append to")
+                        .help("Newline-delimited positional or named .irvals corpus file to append to")
                         .required(true)
                         .action(clap::ArgAction::Set),
                 )
@@ -3823,6 +3895,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("g8r-ir-equiv", subm)) => {
             g8r_ir_equiv::handle_g8r_ir_equiv(subm, &config);
+        }
+        Some(("g8r-eval", subm)) => {
+            if let Err(e) = g8r_eval::handle_g8r_eval(subm) {
+                eprintln!("g8r-eval error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(("aig-equiv", subm)) => {
             aig_equiv::handle_aig_equiv(subm, &config);

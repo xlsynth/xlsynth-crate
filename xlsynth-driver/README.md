@@ -306,6 +306,26 @@ evaluates either one typed input tuple or an ordered `.irvals` stimulus file.
 Inputs are supplied in module-header order. A module with one output prints a
 bits value; multiple outputs print a tuple in module-header order.
 
+An `.irvals` input file is a homogeneous sequence using one of two forms. The
+positional form contains one typed value per line:
+
+```text
+(bits[8]:7, bits[8]:13)
+(bits[8]:9, bits[8]:4)
+```
+
+The named form contains one named argument set per line:
+
+```text
+{a: bits[8]:7, b: bits[8]:13}
+{b: bits[8]:4, a: bits[8]:9}
+```
+
+Named entries are bound by name, so their textual order is immaterial. Every
+record must contain each module input name exactly once; missing, unknown, and
+duplicate names are rejected. Positional and named records cannot be mixed in
+one file.
+
 ```shell
 xlsynth-driver gv-eval \
   --netlist /path/to/design.gv \
@@ -1169,7 +1189,7 @@ This subcommand is the user-facing CLI for PIR MCMC optimization.
   - `--max-delay <LEVELS>` – optional hard cap on gate depth for gate-based objectives. It applies to raw `g8r_depth` for `g8r-*` metrics and postprocessed depth for `g8r-post-*` metrics. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
   - `--max-area <GATES>` – optional hard cap on gate count for gate-based objectives. It applies to raw `g8r_nodes` for `g8r-*` metrics and postprocessed AND-node count for `g8r-post-*` metrics.
   - At most one of `--max-delay` and `--max-area` may be specified. `--max-area` is also incompatible with `g8r-nodes-times-weighted-switching-no-depth-regress` and `g8r-post-and-nodes-times-weighted-switching-no-depth-regress`, because those objectives already impose a depth cap.
-  - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one typed tuple stimulus per line; required for toggle/stimulus-based metrics (`g8r-nodes-times-depth-times-toggles`, `g8r-weighted-switching`, `g8r-nodes-times-weighted-switching-no-depth-regress`, `g8r-post-and-nodes-times-depth-times-toggles`, `g8r-post-weighted-switching`, and `g8r-post-and-nodes-times-weighted-switching-no-depth-regress`) and invalid with other metrics.
+  - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one positional tuple or named argument set per line; named entries must exactly match the selected IR function's parameter names. This is required for toggle/stimulus-based metrics (`g8r-nodes-times-depth-times-toggles`, `g8r-weighted-switching`, `g8r-nodes-times-weighted-switching-no-depth-regress`, `g8r-post-and-nodes-times-depth-times-toggles`, `g8r-post-weighted-switching`, and `g8r-post-and-nodes-times-weighted-switching-no-depth-regress`) and invalid with other metrics.
   - `--switching-beta1 <BETA1>` – linear load coefficient for weighted-switching objectives (default: `1.0`).
   - `--switching-beta2 <BETA2>` – quadratic load coefficient for weighted-switching objectives (default: `0.0`).
   - `--switching-primary-output-load <LOAD>` – additional load per primary-output use for weighted-switching objectives (default: `1.0`).
@@ -1942,6 +1962,49 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `g8r-eval`
+
+Evaluates a native combinational or sequential G8R design (`.g8r` or
+`.g8rbin`) for one or more cycles. One typed IR result is printed per cycle.
+Each input record supplies only the externally visible inputs; register Q
+values are supplied by the selected initial state and prior cycles. The G8R
+clock is metadata and is not an input record field.
+
+- Required:
+  - `<G8R_FILE>`
+  - Exactly one input source:
+    - `<ARG_TUPLE>` – positional external inputs for one cycle.
+    - `--input-irvals <IRVALS_PATH>` – one positional tuple or named external
+      input set per cycle. Named entries must exactly match the external G8R
+      input names.
+  - For a design containing registers, exactly one initial-state option:
+    - `--initial-state-all-zeros`
+    - `--initial-state-from-g8r-initial-values` – errors and lists the
+      registers if any lack an `initial_value`.
+    - `--initial-state-file <IRVALS_PATH>` – exactly one positional tuple in
+      G8R register order or named record matching the G8R register names.
+- Optional:
+  - `--final-state-irvals <PATH>` – write the final register state as one named
+    record that can subsequently be passed to `--initial-state-file`.
+  - `--toggle-output-json <PATH>` – with at least two `--input-irvals` cycles,
+    write separate combinational-logic, external-interface, register-D, and
+    clocked register-Q toggle counts, plus output-reachable per-node activity.
+
+One input record represents one active clock cycle. External outputs are
+observed from the current state, then register D values are committed for the
+next cycle. Register-input toggles compare D between consecutive evaluations
+(`N - 1` intervals). Register-output toggles count actual Q changes across all
+simulated clock edges (`N` possible changes). Initialization itself is not a
+toggle from an unknown prior state.
+
+```shell
+xlsynth-driver g8r-eval pipeline.g8r \
+  --input-irvals inputs.irvals \
+  --initial-state-from-g8r-initial-values \
+  --final-state-irvals final-state.irvals \
+  --toggle-output-json toggles.json
+```
+
 ### `aig-eval`
 
 Evaluates an AIGER file (`.aag` or `.aig`) with one typed IR argument tuple or
@@ -1952,8 +2015,10 @@ sample.
   - `<AIG_FILE>`
   - Exactly one of:
     - `<ARG_TUPLE>` – typed tuple, e.g. `(bits[8]:7, bits[8]:13)`.
-    - `--input-irvals <IRVALS_PATH>` – `.irvals` file containing one typed tuple
-      per line.
+    - `--input-irvals <IRVALS_PATH>` – `.irvals` file containing one positional
+      tuple or named argument set per line. Named entries must exactly match the
+      effective AIG input names. With `--fn-type`, those names are `arg0`,
+      `arg1`, and so on.
 - Optional:
   - `--fn-type <FN_TYPE>` – explicit function type used to impose structured
     params / return values on the raw AIGER bitstream, e.g.
@@ -1981,7 +2046,10 @@ xlsynth-driver aig-eval add.aag \
 ### `ir-fn-autocov`
 
 Runs coverage-guided corpus growth for an IR function and appends interesting
-typed argument tuples to a newline-delimited `.irvals` file.
+inputs to a newline-delimited `.irvals` file. Existing corpora may use positional
+tuples or named records whose names exactly match the IR function parameters.
+New samples preserve an existing corpus's form; new and empty files use
+positional tuples.
 
 - Required:
   - `<ir_input_file>` – input IR package path.
@@ -2036,12 +2104,15 @@ xlsynth-driver ir-fn-generate-inputs my_design.opt.ir \
 
 ### `dslx-fn-eval`
 
-Evaluates a DSLX function for each input tuple in a `.irvals` file and prints one output per line (XLS IR typed values).
+Evaluates a DSLX function for each input record in a `.irvals` file and prints one output per line (XLS IR typed values).
 
 - Inputs:
   - `--dslx_input_file <FILE>` – the DSLX source file.
   - `--dslx_top <NAME>` – the entry function to evaluate.
-- `--input_ir_path <PATH>` – path to a file with one typed IR tuple per line. Unary functions require a 1‑tuple like `(bits[32]:42)`.
+- `--input_ir_path <PATH>` – path to a file with one positional typed IR tuple
+  or named argument set per line. Unary positional inputs require a 1-tuple
+  like `(bits[32]:42)`. Named entries must exactly match the DSLX function
+  parameter names.
   - `--eval_mode <interp|jit|pir-interp>` – backend mode (default `interp`).
 - When using `--eval_mode=pir-interp`:
   - `--pir_dump_node_values` – dump intermediate PIR node values (in topological evaluation order) to stdout immediately before the final output line for each sample. Each dump line is:
@@ -2058,6 +2129,9 @@ xlsynth-driver dslx-fn-eval \
 # inputs.irvals lines, e.g.:
 # (bits[32]:0x1, bits[32]:0x2)
 # (bits[32]:0x3, bits[32]:0x4)
+# Or equivalently:
+# {a: bits[32]:0x1, b: bits[32]:0x2}
+# {b: bits[32]:0x4, a: bits[32]:0x3}
 ```
 
 Float32 struct example (uses DSLX stdlib `float32::F32` as a tuple `(u1, u8, u23)`):

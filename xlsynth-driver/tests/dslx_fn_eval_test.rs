@@ -43,6 +43,58 @@ fn test_dslx_fn_eval_add() {
 }
 
 #[test]
+fn test_dslx_fn_eval_accepts_named_irvals_and_rejects_wrong_names() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let tmp = xlsynth_test_helpers::make_test_tmpdir("dslx_fn_eval_named");
+    let dir = tmp.path();
+    let dslx_path = dir.join("add.x");
+    std::fs::write(&dslx_path, "fn add(a: u32, b: u32) -> u32 { a + b }").expect("write dslx");
+    let irvals_path = dir.join("inputs.irvals");
+    std::fs::write(
+        &irvals_path,
+        "{b: bits[32]:2, a: bits[32]:1}\n{a: bits[32]:3, b: bits[32]:4}\n",
+    )
+    .expect("write named irvals");
+
+    let run = || {
+        Command::new(driver)
+            .arg("dslx-fn-eval")
+            .arg("--dslx_input_file")
+            .arg(&dslx_path)
+            .arg("--dslx_top")
+            .arg("add")
+            .arg("--input_ir_path")
+            .arg(&irvals_path)
+            .output()
+            .expect("run driver")
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[32]:3\nbits[32]:7\n"
+    );
+
+    std::fs::write(&irvals_path, "{a: bits[32]:1, wrong: bits[32]:2}\n")
+        .expect("write bad named irvals");
+    let output = run();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing [\"b\"]"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("unknown [\"wrong\"]"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 fn test_dslx_fn_eval_unary_requires_tuple() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
 

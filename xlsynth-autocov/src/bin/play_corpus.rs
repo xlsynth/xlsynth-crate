@@ -26,13 +26,14 @@ struct Args {
     #[arg(long)]
     entry_fn: String,
 
-    /// Newline-delimited corpus file. Each line is a typed IR tuple value whose
-    /// elements are the function arguments.
+    /// Newline-delimited corpus file. Each line is either a typed IR tuple or
+    /// a named argument record whose names exactly match the function
+    /// parameters.
     #[arg(long)]
     corpus_file: Option<PathBuf>,
 
     /// Directory containing corpus samples. Each file must contain a single
-    /// typed IR tuple value (whitespace allowed).
+    /// positional or named IR value record (whitespace allowed).
     #[arg(long)]
     corpus_dir: Option<PathBuf>,
 
@@ -380,6 +381,22 @@ fn eval_one_sample(
     Ok((ok, corners, bools))
 }
 
+fn parse_corpus_sample(
+    text: &str,
+    argument_names: &[String],
+) -> anyhow::Result<(xlsynth::IrValue, xlsynth::IrValuesFileKind)> {
+    let parsed = xlsynth::parse_ir_values(text)?;
+    let kind = parsed.kind();
+    let mut values = parsed.into_positional_values(argument_names)?;
+    let value = values
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("sample had no IR value record"))?;
+    if !values.is_empty() {
+        return Err(anyhow::anyhow!("sample had more than one IR value record"));
+    }
+    Ok((value, kind))
+}
+
 fn replay_corpus(
     corpus: CorpusInput<'_>,
     max_samples: Option<usize>,
@@ -387,10 +404,12 @@ fn replay_corpus(
     bool_nodes: &BTreeSet<usize>,
     acc: &mut RunAccumulator,
 ) -> anyhow::Result<()> {
+    let argument_names = engine.argument_names();
     match corpus {
         CorpusInput::File(path) => {
             let f = std::fs::File::open(path)?;
             let rdr = std::io::BufReader::new(f);
+            let mut file_kind = None;
             for (lineno, line) in rdr.lines().enumerate() {
                 if max_samples.is_some_and(|m| acc.samples_total >= m) {
                     break;
@@ -400,9 +419,23 @@ fn replay_corpus(
                 if t.is_empty() {
                     continue;
                 }
-                let v = xlsynth::IrValue::parse_typed(t)?;
-                let (ok, corners, bools) = eval_one_sample(engine, &v).map_err(|e| {
+                let (v, line_kind) = parse_corpus_sample(t, &argument_names).map_err(|e| {
                     anyhow::anyhow!("corpus parse error at line {}: {}", lineno + 1, e)
+                })?;
+                if let Some(kind) = file_kind {
+                    if line_kind != kind {
+                        return Err(anyhow::anyhow!(
+                            "corpus mixes {:?} and {:?} records at line {}",
+                            kind,
+                            line_kind,
+                            lineno + 1
+                        ));
+                    }
+                } else {
+                    file_kind = Some(line_kind);
+                }
+                let (ok, corners, bools) = eval_one_sample(engine, &v).map_err(|e| {
+                    anyhow::anyhow!("corpus evaluation error at line {}: {}", lineno + 1, e)
                 })?;
                 let sample_idx = acc.samples_total;
                 acc.on_sample_result(sample_idx, &v, ok, corners, bools, bool_nodes);
@@ -419,7 +452,8 @@ fn replay_corpus(
                 let s = std::fs::read_to_string(&p)?;
                 let line = first_non_empty_trimmed_line(&s)
                     .map_err(|e| anyhow::anyhow!("{}: {}", p.display(), e))?;
-                let v = xlsynth::IrValue::parse_typed(line)?;
+                let (v, _) = parse_corpus_sample(line, &argument_names)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", p.display(), e))?;
                 let (ok, corners, bools) = eval_one_sample(engine, &v)
                     .map_err(|e| anyhow::anyhow!("{}: {}", p.display(), e))?;
                 let sample_idx = acc.samples_total;
@@ -648,4 +682,33 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_corpus_sample_binds_named_arguments() {
+        let (value, kind) = parse_corpus_sample(
+            "{y: bits[1]:1, x: bits[8]:2}",
+            &["x".to_string(), "y".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(kind, xlsynth::IrValuesFileKind::Named);
+        assert_eq!(value.to_string(), "(bits[8]:2, bits[1]:1)");
+    }
+
+    #[test]
+    fn parse_corpus_sample_rejects_wrong_names() {
+        let error = parse_corpus_sample(
+            "{x: bits[8]:2, z: bits[1]:1}",
+            &["x".to_string(), "y".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing [\"y\"]"));
+        assert!(error.to_string().contains("unknown [\"z\"]"));
+    }
 }

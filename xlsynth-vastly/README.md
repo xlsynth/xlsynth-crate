@@ -87,7 +87,10 @@ CLI stimuli are expressed as XLS-style IR value text. In practice this means:
 - `--inputs` accepts scalar literal text values (`0x...`, decimal, etc.) in
   positional order.
 - `vastly-sim-pipeline` can also read cycle-by-cycle stimuli from an XLS
-  `.irvals` text file via `--input-irvals`.
+  `.irvals` text file via `--input-irvals`. Each line may be a positional value
+  or a named input set such as `{a: bits[8]:1, b: bits[8]:2}`; named entries
+  must exactly match the module input names. `.irvals` support is always
+  available; it does not require a Cargo feature.
 
 ## Command Details
 

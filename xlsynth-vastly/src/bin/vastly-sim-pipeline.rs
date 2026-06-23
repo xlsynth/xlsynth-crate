@@ -36,8 +36,8 @@ struct Args {
     #[arg(long)]
     inputs: Option<String>,
 
-    /// Read cycle-by-cycle inputs from an XLS `.irvals` file (one value per
-    /// line).
+    /// Read cycle inputs from `.irvals` (one positional value or named input
+    /// set per line).
     #[arg(long = "input-irvals")]
     input_irvals: Option<PathBuf>,
 

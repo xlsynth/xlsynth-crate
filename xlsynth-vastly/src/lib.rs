@@ -19,7 +19,6 @@ mod coverage_render2;
 mod eval;
 mod fixture_runner;
 mod generate_constructs;
-#[cfg(feature = "irvals")]
 mod irvals;
 mod iverilog_combo;
 mod lexer;
@@ -76,22 +75,9 @@ pub use crate::fixture_runner::InputPortHandle;
 pub use crate::fixture_runner::ObserveContext;
 pub use crate::fixture_runner::OutputPortHandle;
 pub use crate::fixture_runner::PortBindings;
-#[cfg(feature = "irvals")]
 pub use crate::irvals::cycles_from_irvals_file;
-#[cfg(feature = "irvals")]
 pub use crate::irvals::irbits_to_value4;
-#[cfg(feature = "irvals")]
 pub use crate::irvals::pipeline_cycle_from_irvalue;
-#[cfg(not(feature = "irvals"))]
-pub fn cycles_from_irvals_file(
-    _m: &crate::pipeline_compile::CompiledPipelineModule,
-    _path: &std::path::Path,
-    _cycles_override: Option<u64>,
-) -> Result<Vec<crate::pipeline_harness::PipelineCycle>> {
-    Err(Error::Parse(
-        "irvals support is disabled; build xlsynth-vastly with the `irvals` feature".to_string(),
-    ))
-}
 pub use crate::iverilog_combo::run_iverilog_combo_and_collect_vcd;
 pub use crate::module_eval::step_module_with_env;
 pub use crate::parser_spanned::parse_expr_spanned;

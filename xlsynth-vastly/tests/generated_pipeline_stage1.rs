@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "irvals")]
-
 use std::collections::BTreeMap;
 
 use xlsynth_vastly::LogicBit;

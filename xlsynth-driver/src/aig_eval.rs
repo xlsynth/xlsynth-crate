@@ -3,7 +3,7 @@
 use std::{io::Write, path::Path};
 
 use clap::ArgMatches;
-use xlsynth::{IrBits, IrValue};
+use xlsynth::{IrBits, IrValue, parse_ir_values_file};
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::{
     GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
@@ -17,7 +17,6 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_value_utils::{
     flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
 };
-use xlsynth_pir::irvals::parse_irvals_tuple_file;
 
 use crate::fn_type_arg::parse_function_type_text;
 use crate::toolchain_config::ToolchainConfig;
@@ -199,14 +198,21 @@ fn eval_batch_inputs(
         .collect()
 }
 
-fn read_input_samples(matches: &ArgMatches) -> Result<Vec<IrValue>, String> {
+fn read_input_samples(matches: &ArgMatches, gate_fn: &GateFn) -> Result<Vec<IrValue>, String> {
     if let Some(arg_tuple) = matches.get_one::<String>("arg_tuple") {
         return Ok(vec![parse_arg_tuple(arg_tuple)?]);
     }
     let input_irvals = matches
         .get_one::<String>("input_irvals")
         .expect("clap requires either arg_tuple or input_irvals");
-    parse_irvals_tuple_file(Path::new(input_irvals)).map_err(|e| e.to_string())
+    let argument_names = gate_fn
+        .inputs
+        .iter()
+        .map(|input| input.name.clone())
+        .collect::<Vec<_>>();
+    parse_ir_values_file(Path::new(input_irvals))
+        .and_then(|file| file.into_positional_values(&argument_names))
+        .map_err(|e| e.to_string())
 }
 
 fn write_toggle_activity_json(
@@ -235,7 +241,7 @@ pub fn handle_aig_eval(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         eprintln!("aig-eval error: {e}");
         std::process::exit(1);
     });
-    let input_samples = read_input_samples(matches).unwrap_or_else(|e| {
+    let input_samples = read_input_samples(matches, &gate_fn).unwrap_or_else(|e| {
         eprintln!("aig-eval error: {e}");
         std::process::exit(1);
     });

@@ -1015,6 +1015,15 @@ pub struct AutocovEngine {
 }
 
 impl AutocovEngine {
+    /// Returns function parameter names in argument order.
+    pub fn argument_names(&self) -> Vec<String> {
+        self.f
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect()
+    }
+
     pub fn args_bit_count(&self) -> usize {
         self.args_bit_count
     }
