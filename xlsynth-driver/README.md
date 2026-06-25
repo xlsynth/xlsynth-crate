@@ -312,9 +312,12 @@ It searches cells on the slowest register paths. The `area-under-delay`
 objective instead fixes the input netlist's initial worst register-to-register
 delay as a hard cap and hill-climbs toward lower cell area. Every accepted area
 move must remain under that original cap, preventing cumulative timing drift.
-Both objectives rerun full static timing analysis for every trial substitution.
-They do not change connectivity, insert buffers, retime registers, model hold
-timing, or use physical wire parasitics.
+Both objectives prepare connectivity and the initial static timing state once.
+Each trial updates the substituted cell's input loads, incrementally recomputes
+its affected forward timing cone, evaluates all register endpoints, and then
+rolls the timing state back unless the move is accepted. They do not change
+connectivity, insert buffers, retime registers, model hold timing, or use
+physical wire parasitics.
 
 Equivalent combinational cells must have the same pin interface and output
 functions. Equivalent sequential cells additionally require identical
@@ -358,7 +361,7 @@ Key flags:
 - `--module_output_load <VALUE>`: extra module-output capacitance (default: `0.0`).
 - `--max_iterations <N>`: maximum accepted substitutions (default: `25`).
 - `--max_candidate_paths <N>`: slow endpoint paths searched per delay-objective iteration; ignored by `area-under-delay` (default: `8`).
-- `--max_evaluations_per_iteration <N>`: full-STA trials per iteration (default: `128`).
+- `--max_evaluations_per_iteration <N>`: incremental timing trials per iteration (default: `128`).
 - `--max_cell_candidates_per_instance <N>`: replacement cells tried per instance (default: `4`).
 - `--improvement_epsilon <VALUE>`: timing comparison epsilon, including the area objective's fixed delay cap (default: `1e-9`).
 - `--area_epsilon <VALUE>`: area values within this difference compare equal (default: `1e-12`).

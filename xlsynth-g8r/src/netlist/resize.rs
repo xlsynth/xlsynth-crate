@@ -8,7 +8,7 @@ use crate::netlist::io::resolve_symbol;
 use crate::netlist::parse::{Net, NetlistModule};
 use crate::netlist::report::build_area_report;
 use crate::netlist::sta::{
-    StaOptions, StaReport, analyze_register_boundary_max_arrival, is_sequential_boundary_cell,
+    IncrementalRegisterBoundarySta, StaOptions, StaReport, is_sequential_boundary_cell,
 };
 use crate::netlist::stages::analyze_register_stages;
 use anyhow::{Result, anyhow};
@@ -178,7 +178,6 @@ impl TimingScore {
 struct TrialMove {
     instance_index: usize,
     new_cell: String,
-    report: StaReport,
     score: TimingScore,
 }
 
@@ -186,7 +185,6 @@ struct TrialMove {
 struct AreaTrialMove {
     instance_index: usize,
     new_cell: String,
-    report: StaReport,
     delay: f64,
     area: f64,
 }
@@ -216,7 +214,7 @@ pub fn resize_for_minimum_register_delay(
     )?;
     let initial_area = build_area_report(module, interner, library.as_proto())?.area;
     let mut resized_module = module.clone();
-    let mut current_report = analyze_register_boundary_max_arrival(
+    let mut incremental_sta = IncrementalRegisterBoundarySta::new(
         &resized_module,
         nets,
         interner,
@@ -225,6 +223,7 @@ pub fn resize_for_minimum_register_delay(
         false,
         stages.register_indices.as_slice(),
     )?;
+    let mut current_report = incremental_sta.report()?;
     let mut current_score = TimingScore::from_report(&current_report);
     if current_score.endpoint_delays.is_empty() {
         return Err(anyhow!(
@@ -267,22 +266,10 @@ pub fn resize_for_minimum_register_delay(
                 iteration_evaluations += 1;
                 evaluations += 1;
 
-                let old_type = resized_module.instances[instance_index].type_name;
-                let new_type = interner.get_or_intern(new_cell.as_str());
-                resized_module.instances[instance_index].type_name = new_type;
-                let trial_report = analyze_register_boundary_max_arrival(
-                    &resized_module,
-                    nets,
-                    interner,
-                    library,
-                    options.sta_options,
-                    false,
-                    stages.register_indices.as_slice(),
-                );
-                resized_module.instances[instance_index].type_name = old_type;
-
-                let trial_report = match trial_report {
-                    Ok(report) => report,
+                let trial_evaluation =
+                    incremental_sta.evaluate_cell_substitution(instance_index, new_cell.as_str());
+                let trial_report = match trial_evaluation {
+                    Ok(evaluation) => evaluation.report,
                     Err(error) => {
                         failed_evaluations += 1;
                         log::debug!(
@@ -304,7 +291,6 @@ pub fn resize_for_minimum_register_delay(
                     best_move = Some(TrialMove {
                         instance_index,
                         new_cell: new_cell.clone(),
-                        report: trial_report,
                         score: trial_score,
                     });
                 }
@@ -318,8 +304,12 @@ pub fn resize_for_minimum_register_delay(
         let old_cell = resolve_symbol(interner, instance.type_name, "instance cell type")?;
         let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")?;
         let delay_before = current_score.worst_delay();
+        let committed = incremental_sta
+            .commit_cell_substitution(best_move.instance_index, &best_move.new_cell)?;
         instance.type_name = interner.get_or_intern(best_move.new_cell.as_str());
-        let delay_after = best_move.score.worst_delay();
+        current_report = committed.report;
+        current_score = TimingScore::from_report(&current_report);
+        let delay_after = current_score.worst_delay();
         replacements.push(DelayResizeStep {
             iteration,
             instance_index: best_move.instance_index,
@@ -341,8 +331,6 @@ pub fn resize_for_minimum_register_delay(
             replacement.delay_before,
             replacement.delay_after
         );
-        current_report = best_move.report;
-        current_score = best_move.score;
     }
 
     let final_area = build_area_report(&resized_module, interner, library.as_proto())?.area;
@@ -393,7 +381,7 @@ pub fn resize_for_minimum_area_under_register_delay(
     let mut resized_module = module.clone();
     let mut current_area = build_area_report(&resized_module, interner, library.as_proto())?.area;
     let initial_area = current_area;
-    let mut current_report = analyze_register_boundary_max_arrival(
+    let mut incremental_sta = IncrementalRegisterBoundarySta::new(
         &resized_module,
         nets,
         interner,
@@ -402,6 +390,7 @@ pub fn resize_for_minimum_area_under_register_delay(
         false,
         stages.register_indices.as_slice(),
     )?;
+    let mut current_report = incremental_sta.report()?;
     let current_score = TimingScore::from_report(&current_report);
     if current_score.endpoint_delays.is_empty() {
         return Err(anyhow!(
@@ -456,22 +445,10 @@ pub fn resize_for_minimum_area_under_register_delay(
 
                 let new_cell_proto = cell_by_name[new_cell.as_str()];
                 let trial_area = current_area - current_cell_proto.area + new_cell_proto.area;
-                let old_type = resized_module.instances[instance_index].type_name;
-                let new_type = interner.get_or_intern(new_cell.as_str());
-                resized_module.instances[instance_index].type_name = new_type;
-                let trial_report = analyze_register_boundary_max_arrival(
-                    &resized_module,
-                    nets,
-                    interner,
-                    library,
-                    options.sta_options,
-                    false,
-                    stages.register_indices.as_slice(),
-                );
-                resized_module.instances[instance_index].type_name = old_type;
-
-                let trial_report = match trial_report {
-                    Ok(report) => report,
+                let trial_evaluation =
+                    incremental_sta.evaluate_cell_substitution(instance_index, new_cell.as_str());
+                let trial_report = match trial_evaluation {
+                    Ok(evaluation) => evaluation.report,
                     Err(error) => {
                         failed_evaluations += 1;
                         log::debug!(
@@ -508,7 +485,6 @@ pub fn resize_for_minimum_area_under_register_delay(
                     best_move = Some(AreaTrialMove {
                         instance_index,
                         new_cell: new_cell.clone(),
-                        report: trial_report,
                         delay: trial_delay,
                         area: trial_area,
                     });
@@ -524,7 +500,11 @@ pub fn resize_for_minimum_area_under_register_delay(
         let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")?;
         let area_before = current_area;
         let delay_before = current_delay;
+        let committed = incremental_sta
+            .commit_cell_substitution(best_move.instance_index, &best_move.new_cell)?;
         instance.type_name = interner.get_or_intern(best_move.new_cell.as_str());
+        current_report = committed.report;
+        current_delay = TimingScore::from_report(&current_report).worst_delay();
         replacements.push(AreaResizeStep {
             iteration,
             instance_index: best_move.instance_index,
@@ -532,7 +512,7 @@ pub fn resize_for_minimum_area_under_register_delay(
             old_cell,
             new_cell: best_move.new_cell,
             delay_before,
-            delay_after: best_move.delay,
+            delay_after: current_delay,
             area_before,
             area_after: best_move.area,
         });
@@ -550,8 +530,6 @@ pub fn resize_for_minimum_area_under_register_delay(
             replacement.delay_before,
             replacement.delay_after
         );
-        current_report = best_move.report;
-        current_delay = best_move.delay;
         current_area = best_move.area;
     }
 
@@ -897,6 +875,7 @@ mod tests {
         Library, Pin, PinDirection, Sequential, SequentialKind, TimingArc, TimingTable,
     };
     use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
+    use crate::netlist::sta::analyze_register_boundary_max_arrival;
 
     fn scalar_table(kind: &str, value: f64) -> TimingTable {
         TimingTable {
@@ -999,6 +978,113 @@ mod tests {
             area,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn incremental_sta_matches_full_sta_for_trials_and_commits() {
+        let src = r#"
+module top (clk, d0, d1, y0, y1);
+  input clk;
+  input d0;
+  input d1;
+  output y0;
+  output y1;
+  wire q0;
+  wire q1;
+  wire n0;
+  wire n1;
+  DFF_X1 launch0 (.D(d0), .CLK(clk), .Q(q0));
+  BUF_X1 logic0 (.A(q0), .Y(n0));
+  DFF_X1 capture0 (.D(n0), .CLK(clk), .Q(y0));
+  DFF_X1 launch1 (.D(d1), .CLK(clk), .Q(q1));
+  BUF_X1 logic1 (.A(q1), .Y(n1));
+  DFF_X1 capture1 (.D(n1), .CLK(clk), .Q(y1));
+endmodule
+"#;
+        let scanner = TokenScanner::from_str(src);
+        let mut parser = NetlistParser::new(scanner);
+        let modules = parser.parse_file().expect("netlist should parse");
+        let module = modules[0].clone();
+        let library = LibraryWithTimingData::from_proto(Library {
+            cells: vec![
+                dff_cell("DFF_X1", 1.0, 5.0, 5.0),
+                dff_cell("DFF_X2", 2.0, 2.0, 2.0),
+                buffer_cell("BUF_X1", 1.0, 10.0),
+                buffer_cell("BUF_X2", 2.0, 4.0),
+            ],
+            ..Default::default()
+        });
+        let stages = analyze_register_stages(
+            &module,
+            parser.nets.as_slice(),
+            &parser.interner,
+            library.as_proto(),
+        )
+        .expect("stage analysis should succeed");
+        let options = StaOptions::default();
+        let full_initial = analyze_register_boundary_max_arrival(
+            &module,
+            parser.nets.as_slice(),
+            &parser.interner,
+            &library,
+            options,
+            false,
+            stages.register_indices.as_slice(),
+        )
+        .expect("full STA should succeed");
+        let mut incremental = IncrementalRegisterBoundarySta::new(
+            &module,
+            parser.nets.as_slice(),
+            &parser.interner,
+            &library,
+            options,
+            false,
+            stages.register_indices.as_slice(),
+        )
+        .expect("incremental STA should initialize");
+        assert_eq!(incremental.report().unwrap(), full_initial);
+
+        let mut changed_module = module.clone();
+        changed_module.instances[1].type_name = parser.interner.get_or_intern("BUF_X2");
+        let full_buffer_trial = analyze_register_boundary_max_arrival(
+            &changed_module,
+            parser.nets.as_slice(),
+            &parser.interner,
+            &library,
+            options,
+            false,
+            stages.register_indices.as_slice(),
+        )
+        .expect("full STA should accept buffer substitution");
+        let buffer_trial = incremental
+            .evaluate_cell_substitution(1, "BUF_X2")
+            .expect("incremental buffer trial should succeed");
+        assert_eq!(buffer_trial.report, full_buffer_trial);
+        assert!(buffer_trial.recomputed_instances < module.instances.len());
+        assert_eq!(incremental.report().unwrap(), full_initial);
+
+        let buffer_commit = incremental
+            .commit_cell_substitution(1, "BUF_X2")
+            .expect("incremental buffer commit should succeed");
+        assert_eq!(buffer_commit.report, full_buffer_trial);
+        assert_eq!(incremental.report().unwrap(), full_buffer_trial);
+
+        changed_module.instances[0].type_name = parser.interner.get_or_intern("DFF_X2");
+        let full_register_commit = analyze_register_boundary_max_arrival(
+            &changed_module,
+            parser.nets.as_slice(),
+            &parser.interner,
+            &library,
+            options,
+            false,
+            stages.register_indices.as_slice(),
+        )
+        .expect("full STA should accept register substitution");
+        let register_commit = incremental
+            .commit_cell_substitution(0, "DFF_X2")
+            .expect("incremental register commit should succeed");
+        assert_eq!(register_commit.report, full_register_commit);
+        assert_eq!(incremental.report().unwrap(), full_register_commit);
     }
 
     #[test]

@@ -69,6 +69,10 @@ use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
+mod incremental;
+
+pub use incremental::{IncrementalCellSubstitutionEvaluation, IncrementalRegisterBoundarySta};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
     pub arrival: f64,
