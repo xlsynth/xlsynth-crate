@@ -1,9 +1,10 @@
 # Version Map
 
-Updated for tags as of: 2026-06-21 15:46:01 -0700
+Updated for tags as of: 2026-06-25 14:27:23 -0700
 
 | xlsynth crate version                               | xlsynth release version                                             | crate release datetime (Los_Angeles) |
 | --------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------ |
+| [0.59.0](https://crates.io/crates/xlsynth/0.59.0)   | [0.53.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.53.0)   | 2026-06-25 14:27:23 PDT              |
 | [0.58.0](https://crates.io/crates/xlsynth/0.58.0)   | [0.53.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.53.0)   | 2026-06-21 15:46:01 PDT              |
 | [0.57.0](https://crates.io/crates/xlsynth/0.57.0)   | [0.52.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.52.0)   | 2026-06-20 22:13:53 PDT              |
 | [0.56.0](https://crates.io/crates/xlsynth/0.56.0)   | [0.52.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.52.0)   | 2026-06-10 20:28:36 PDT              |
