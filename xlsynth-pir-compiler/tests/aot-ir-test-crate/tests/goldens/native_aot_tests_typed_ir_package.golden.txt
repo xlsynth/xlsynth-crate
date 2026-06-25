@@ -3,7 +3,7 @@
 
 pub use xlsynth_pir_compiler_runtime::{AllZeros, ExecutionOptions, Token};
 pub type U0 = xlsynth_pir_compiler_runtime::UnsignedBits0;
-pub type U1 = xlsynth_pir_compiler_runtime::UnsignedBitsInU8<1>;
+pub type U1 = xlsynth_pir_compiler_runtime::Bool;
 pub type U2 = xlsynth_pir_compiler_runtime::UnsignedBitsInU8<2>;
 pub type U8 = xlsynth_pir_compiler_runtime::UnsignedBitsInU8<8>;
 pub type U32 = xlsynth_pir_compiler_runtime::UnsignedBitsInU32<32>;

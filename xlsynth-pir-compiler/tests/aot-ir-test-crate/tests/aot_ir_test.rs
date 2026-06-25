@@ -118,7 +118,7 @@ fn multiple_generated_entrypoints_link_and_run() -> Result<(), Box<dyn std::erro
     let rhs = native_aot_tests_aot::U8::new(20);
     let mut output = native_aot_tests_aot::U8::all_zeros();
     runner.run(&lhs, &rhs, &mut output)?;
-    assert_eq!(output.to_u64(), 30);
+    assert_eq!(output.to_u8(), 30);
     Ok(())
 }
 
@@ -133,7 +133,7 @@ fn generated_runner_accepts_zero_bit_input() -> Result<(), Box<dyn std::error::E
     let mut runner = native_aot_tests::aot_zero_bit_input::new_runner()?;
     let mut output = native_aot_tests_aot::U1::all_zeros();
     runner.run(&input, &mut output)?;
-    assert_eq!(output.to_u64(), 1);
+    assert!(output.to_bool());
     Ok(())
 }
 
@@ -193,12 +193,12 @@ fn generated_runner_executes_runtime_backed_wide_operations()
     assert_unsigned_wide_limbs(&output.left, [6, 0, 0]);
     assert_unsigned_wide_limbs(&output.right, [1, 0, 0]);
     assert_unsigned_wide_limbs(&output.slice, [1, 0]);
-    assert_eq!(output.low_slice.to_u64(), 1);
+    assert_eq!(output.low_slice.to_u32(), 1);
     assert_unsigned_wide_limbs(&output.updated, [0xab, 0, 0]);
     assert_unsigned_wide_limbs(&output.unsigned_sum, [15, 0, 0]);
     assert_signed_wide_limbs(&output.signed_sum, [15, 0, 0]);
     assert_unsigned_wide_limbs(&output.hot, [1, 0, 0]);
-    assert_eq!(output.encoded.to_u64(), 0);
+    assert_eq!(output.encoded.to_u8(), 0);
     assert_unsigned_wide_limbs(&output.decoded, [2, 0, 0]);
 
     let negative_x = native_aot_tests_aot::U129::from_limbs([u64::MAX - 7, u64::MAX, 1])?;
@@ -222,10 +222,10 @@ fn generated_runner_collects_events() -> Result<(), Box<dyn std::error::Error>> 
     let mut runner = native_aot_tests::aot_events::new_runner()?;
     let x = native_aot_tests_aot::U8::new(0xa5);
     let y = native_aot_tests_aot::U8::new(0x3c);
-    let emit = native_aot_tests_aot::U1::new(1);
-    let suppress = native_aot_tests_aot::U1::new(0);
-    let passed = native_aot_tests_aot::U1::new(1);
-    let failed = native_aot_tests_aot::U1::new(0);
+    let emit = native_aot_tests_aot::U1::new(true);
+    let suppress = native_aot_tests_aot::U1::new(false);
+    let passed = native_aot_tests_aot::U1::new(true);
+    let failed = native_aot_tests_aot::U1::new(false);
 
     let mut successful_output = native_aot_tests_aot::U8::all_zeros();
     let successful = runner.run_with_events(
@@ -236,7 +236,7 @@ fn generated_runner_collects_events() -> Result<(), Box<dyn std::error::Error>> 
         &mut successful_output,
         ExecutionOptions::collect_all(),
     )?;
-    assert_eq!(successful_output.to_u64(), 0xe1);
+    assert_eq!(successful_output.to_u8(), 0xe1);
     assert!(successful.assertion_failures.is_empty());
     assert_eq!(cover_count(&successful, "covered"), 1);
     assert_eq!(cover_count(&successful, "accepted"), 1);
@@ -322,7 +322,7 @@ fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn s
         &mut safe_output,
         ExecutionOptions::collect_all(),
     )?;
-    assert_eq!(safe_output.to_u64(), 99);
+    assert_eq!(safe_output.to_u8(), 99);
     assert!(safe.assumption_failures.is_empty());
 
     let mut failed_output = native_aot_tests_aot::U8::all_zeros();
@@ -333,7 +333,7 @@ fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn s
         &mut failed_output,
         ExecutionOptions::collect_all(),
     )?;
-    assert_eq!(failed_output.to_u64(), 99);
+    assert_eq!(failed_output.to_u8(), 99);
     let mut failures = failed
         .assumption_failures
         .iter()
@@ -356,7 +356,7 @@ fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn s
         &mut caller_owned_output,
         ExecutionOptions::collect_all(),
     )?;
-    assert_eq!(caller_owned_output.to_u64(), 99);
+    assert_eq!(caller_owned_output.to_u8(), 99);
     assert_eq!(events.assumption_failures.len(), 2);
     let mut rejected_output = native_aot_tests_aot::U8::all_zeros();
     assert!(
@@ -380,7 +380,7 @@ fn generated_runner_executes_invokes_and_counted_for() -> Result<(), Box<dyn std
     let mut runner = native_aot_tests::aot_invokes_and_counted_for::new_runner()?;
     let mut output = native_aot_tests_aot::U8::all_zeros();
     runner.run(&init, &increment, &mut output)?;
-    assert_eq!(output.to_u64(), 20);
+    assert_eq!(output.to_u8(), 20);
     Ok(())
 }
 

@@ -27,8 +27,8 @@ fn bench_generated_scalar_runner(c: &mut Criterion) {
 fn bench_generated_event_runner(c: &mut Criterion) {
     let x = native_aot_tests_aot::U8::new(0xa5);
     let y = native_aot_tests_aot::U8::new(0x3c);
-    let passed = native_aot_tests_aot::U1::new(1);
-    let emit = native_aot_tests_aot::U1::new(1);
+    let passed = native_aot_tests_aot::U1::new(true);
+    let emit = native_aot_tests_aot::U1::new(true);
 
     c.bench_function("pir_aot_generated_runner_event_sites_run", |b| {
         let mut runner =
