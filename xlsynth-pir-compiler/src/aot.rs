@@ -1404,7 +1404,15 @@ fn scalar_runtime_type(signedness: PirAotSignedness, bit_count: usize) -> String
                 PirAotSignedness::Signed => "xlsynth_pir_compiler_runtime::SignedBits0".to_string(),
             };
         }
-        1..=8 => ("UnsignedBitsInU8", "SignedBitsInU8"),
+        1 => {
+            return match signedness {
+                PirAotSignedness::Unsigned => "xlsynth_pir_compiler_runtime::Bool".to_string(),
+                PirAotSignedness::Signed => {
+                    "xlsynth_pir_compiler_runtime::SignedBitsInU8<1>".to_string()
+                }
+            };
+        }
+        2..=8 => ("UnsignedBitsInU8", "SignedBitsInU8"),
         9..=16 => ("UnsignedBitsInU16", "SignedBitsInU16"),
         17..=32 => ("UnsignedBitsInU32", "SignedBitsInU32"),
         33..=64 => ("UnsignedBitsInU64", "SignedBitsInU64"),
@@ -2269,6 +2277,34 @@ mod tests {
             "Bits0"
         );
         assert!(declarations.is_empty());
+    }
+
+    #[test]
+    fn scalar_aot_types_use_narrow_runtime_carriers() {
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Unsigned, 1),
+            "xlsynth_pir_compiler_runtime::Bool"
+        );
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Signed, 1),
+            "xlsynth_pir_compiler_runtime::SignedBitsInU8<1>"
+        );
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Unsigned, 8),
+            "xlsynth_pir_compiler_runtime::UnsignedBitsInU8<8>"
+        );
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Signed, 9),
+            "xlsynth_pir_compiler_runtime::SignedBitsInU16<9>"
+        );
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Unsigned, 17),
+            "xlsynth_pir_compiler_runtime::UnsignedBitsInU32<17>"
+        );
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Signed, 33),
+            "xlsynth_pir_compiler_runtime::SignedBitsInU64<33>"
+        );
     }
 
     #[test]

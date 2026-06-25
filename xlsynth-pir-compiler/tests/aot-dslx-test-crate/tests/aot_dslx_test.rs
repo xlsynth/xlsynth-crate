@@ -120,10 +120,10 @@ fn typed_dslx_gizmo_runner_executes_without_marshalling() -> Result<(), Box<dyn 
     let mut runner = dslx_aot::gizmo_types::aot_gizmo_frob::new_runner()?;
     let mut output = dslx_aot::gizmo_types::GizmoOutcome::all_zeros();
     runner.run(&gizmo, &garnish, &mut output)?;
-    assert_eq!(output.next_gizmo_id.to_u64(), 10);
-    assert_eq!(output.selected_frob.to_u64(), 13);
+    assert_eq!(output.next_gizmo_id.to_u8(), 10);
+    assert_eq!(output.selected_frob.to_u8(), 13);
     assert_eq!(output.mode, GizmoMode::Frob);
-    assert_eq!(output.adjusted_wobble.to_i64(), 4);
+    assert_eq!(output.adjusted_wobble.to_i8(), 4);
     assert_eq!(output.signed_mode, SignedGizmoMode::Negative);
     Ok(())
 }
@@ -189,15 +189,15 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
         &wide_pair,
         &mut result,
     )?;
-    assert_eq!(result.box8.value.to_u64(), 8);
-    assert_eq!(result.box16.value.to_u64(), 16);
-    assert_eq!(result.matrix.rows[0][2].to_u64(), 3);
-    assert_eq!(result.matrix.rows[1][1].to_u64(), 5);
-    assert_eq!(result.array_box.items[3].to_u64(), 13);
-    assert_eq!(result.box_array[2].value.to_u64(), 22);
-    assert_eq!(result.expr_box.value.to_u64(), 77);
-    assert_eq!(result.negative.payload.to_u64(), 88);
-    assert_eq!(result.huge.payload.to_u64(), 99);
+    assert_eq!(result.box8.value.to_u8(), 8);
+    assert_eq!(result.box16.value.to_u16(), 16);
+    assert_eq!(result.matrix.rows[0][2].to_u8(), 3);
+    assert_eq!(result.matrix.rows[1][1].to_u8(), 5);
+    assert_eq!(result.array_box.items[3].to_u8(), 13);
+    assert_eq!(result.box_array[2].value.to_u8(), 22);
+    assert_eq!(result.expr_box.value.to_u8(), 77);
+    assert_eq!(result.negative.payload.to_u8(), 88);
+    assert_eq!(result.huge.payload.to_u8(), 99);
     assert_eq!(result.wide_pair, wide_pair);
     Ok(())
 }
@@ -215,8 +215,8 @@ fn typed_dslx_tuple_runner_executes() -> Result<(), Box<dyn std::error::Error>> 
     let mut output = dslx_aot::XlsynthPirAotTuple0::all_zeros();
     runner.run(&pair, &increment, &mut output)?;
 
-    assert_eq!(output.field0.to_u64(), 17);
-    assert_eq!(output.field1.to_u64(), 1007);
+    assert_eq!(output.field0.to_u8(), 17);
+    assert_eq!(output.field1.to_u16(), 1007);
     assert_eq!(
         std::mem::offset_of!(dslx_aot::XlsynthPirAotTuple0, field1),
         2
@@ -234,7 +234,7 @@ fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::
     let mut runner = dslx_aot::invokes_and_loop::aot_invokes_and_loop::new_runner()?;
     let mut output = dslx_aot::U8::all_zeros();
     runner.run(&init, &increment, &mut output)?;
-    assert_eq!(output.to_u64(), 18);
+    assert_eq!(output.to_u8(), 18);
     Ok(())
 }
 
@@ -245,10 +245,10 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
 -> Result<(), Box<dyn std::error::Error>> {
     let x = dslx_aot::U8::new(0xa5);
     let y = dslx_aot::U8::new(0x3c);
-    let emit = dslx_aot::U1::new(1);
-    let suppress = dslx_aot::U1::new(0);
-    let passed = dslx_aot::U1::new(1);
-    let failed = dslx_aot::U1::new(0);
+    let emit = dslx_aot::U1::new(true);
+    let suppress = dslx_aot::U1::new(false);
+    let passed = dslx_aot::U1::new(true);
+    let failed = dslx_aot::U1::new(false);
     let mut runner = dslx_aot::events::aot_events::new_runner()?;
 
     let mut successful_output = dslx_aot::U8::all_zeros();
@@ -260,7 +260,7 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
         &mut successful_output,
         ExecutionOptions::collect_all(),
     )?;
-    assert_eq!(successful_output.to_u64(), 0xe1);
+    assert_eq!(successful_output.to_u8(), 0xe1);
     assert!(successful.assertion_failures.is_empty());
     assert_eq!(cover_count(&successful, "covered"), 1);
     assert_eq!(cover_count(&successful, "accepted"), 1);
@@ -302,7 +302,7 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
         &mut failure_output,
         ExecutionOptions::collect_all(),
     )?;
-    assert_eq!(failure_output.to_u64(), 0xe1);
+    assert_eq!(failure_output.to_u8(), 0xe1);
     assert!(
         with_failure.assertion_failures[0]
             .message
@@ -349,10 +349,10 @@ fn typed_dslx_imported_parametric_structs_execute_without_marshalling()
     let mut result = parametric_imports::ParametricImportsResult::all_zeros();
     runner.run(&remote, &imported_direct, &imported_pair, &mut result)?;
 
-    assert_eq!(result.remote.id.to_u64(), 40);
-    assert_eq!(result.imported_direct.value.to_u64(), 60);
-    assert_eq!(result.imported_pair.left.to_u64(), 61);
-    assert_eq!(result.imported_pair.right.to_u64(), 62);
+    assert_eq!(result.remote.id.to_u8(), 40);
+    assert_eq!(result.imported_direct.value.to_u8(), 60);
+    assert_eq!(result.imported_pair.left.to_u8(), 61);
+    assert_eq!(result.imported_pair.right.to_u32(), 62);
     Ok(())
 }
 
@@ -367,7 +367,7 @@ fn typed_dslx_duplicate_imported_names_use_canonical_paths()
     let mut runner = dslx_aot::frobber::aot_duplicate_widget::new_runner()?;
     let mut output = dslx_aot::bar::widget::Widget::all_zeros();
     runner.run(&widget, &mut output)?;
-    assert_eq!(output.widget_id.to_u64(), 42);
+    assert_eq!(output.widget_id.to_u8(), 42);
     Ok(())
 }
 
@@ -385,7 +385,7 @@ fn typed_dslx_namespaced_package_runners_preserve_module_paths()
     echo.run(&doodle, &mut echoed)?;
     let mut bumped = dslx_aot::types::shared_types::Doodle::all_zeros();
     bump.run(&echoed, &mut bumped)?;
-    assert_eq!(bumped.doodle_id.to_u64(), 52);
+    assert_eq!(bumped.doodle_id.to_u8(), 52);
     Ok(())
 }
 

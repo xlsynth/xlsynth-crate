@@ -281,6 +281,8 @@ macro_rules! define_public_bits_wrappers {
         $raw_name:ident,
         $unsigned_carrier:ty,
         $signed_carrier:ty,
+        $to_unsigned:ident,
+        $to_signed:ident,
         $carrier_bits:expr
     ) => {
         #[repr(transparent)]
@@ -303,8 +305,8 @@ macro_rules! define_public_bits_wrappers {
 
             /// Constructs an unsigned DSLX-style bit value, panicking if the
             /// value does not fit the requested width.
-            pub fn new(value: u64) -> Self {
-                Self::try_from(value).unwrap_or_else(|error| panic!("{error}"))
+            pub fn new(value: $unsigned_carrier) -> Self {
+                Self::try_from(u64::from(value)).unwrap_or_else(|error| panic!("{error}"))
             }
 
             /// Constructs an unsigned DSLX-style bit value from raw ABI bits.
@@ -324,13 +326,12 @@ macro_rules! define_public_bits_wrappers {
                 Self($raw_name::<BIT_COUNT>::from_raw_bits(value))
             }
 
-            /// Returns the unsigned native carrier value.
-            /// Returns the unsigned value widened to `u64`.
-            pub const fn to_u64(self) -> u64 {
-                self.0.to_u64()
+            /// Returns the unsigned value in its narrowest native carrier.
+            pub const fn $to_unsigned(self) -> $unsigned_carrier {
+                self.0.get()
             }
 
-            /// Returns the raw ABI bits in the native carrier.
+            /// Returns the raw ABI bits widened to `u64`.
             pub const fn raw_bits(self) -> u64 {
                 self.0.to_u64()
             }
@@ -389,8 +390,8 @@ macro_rules! define_public_bits_wrappers {
 
             /// Constructs a signed DSLX-style bit value, panicking if the
             /// value does not fit the requested width.
-            pub fn new(value: i64) -> Self {
-                Self::try_from(value).unwrap_or_else(|error| panic!("{error}"))
+            pub fn new(value: $signed_carrier) -> Self {
+                Self::try_from(i64::from(value)).unwrap_or_else(|error| panic!("{error}"))
             }
 
             /// Constructs a signed DSLX-style bit value from raw ABI bits.
@@ -421,12 +422,12 @@ macro_rules! define_public_bits_wrappers {
                 }
             }
 
-            /// Returns the sign-extended value widened to `i64`.
-            pub fn to_i64(self) -> i64 {
-                self.to_signed_carrier() as i64
+            /// Returns the signed value in its narrowest native carrier.
+            pub fn $to_signed(self) -> $signed_carrier {
+                self.to_signed_carrier()
             }
 
-            /// Returns the raw ABI bits in the native carrier.
+            /// Returns the raw ABI bits widened to `u64`.
             pub const fn raw_bits(self) -> u64 {
                 self.0.to_u64()
             }
@@ -450,10 +451,98 @@ macro_rules! define_public_bits_wrappers {
     };
 }
 
-define_public_bits_wrappers!(UnsignedBitsInU8, SignedBitsInU8, BitsInU8, u8, i8, 8);
-define_public_bits_wrappers!(UnsignedBitsInU16, SignedBitsInU16, BitsInU16, u16, i16, 16);
-define_public_bits_wrappers!(UnsignedBitsInU32, SignedBitsInU32, BitsInU32, u32, i32, 32);
-define_public_bits_wrappers!(UnsignedBitsInU64, SignedBitsInU64, BitsInU64, u64, i64, 64);
+/// Public boolean wrapper for a DSLX-style `u1` value.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Bool(BitsInU8<1>);
+
+impl Bool {
+    /// Constructs the canonical false value.
+    pub const fn all_zeros() -> Self {
+        Self::new(false)
+    }
+
+    /// Constructs a DSLX-style `u1` value from a Rust boolean.
+    pub const fn new(value: bool) -> Self {
+        Self(BitsInU8::<1>::from_raw_bits(value as u64))
+    }
+
+    /// Constructs a DSLX-style `u1` value from raw ABI bits.
+    pub const fn from_raw_bits(value: u64) -> Self {
+        Self(BitsInU8::<1>::from_raw_bits(value))
+    }
+
+    /// Returns the value as a Rust boolean.
+    pub const fn to_bool(self) -> bool {
+        self.0.get() != 0
+    }
+
+    /// Returns the raw ABI bits widened to `u64`.
+    pub const fn raw_bits(self) -> u64 {
+        self.0.to_u64()
+    }
+}
+
+impl AllZeros for Bool {
+    fn all_zeros() -> Self {
+        Self::all_zeros()
+    }
+}
+
+impl From<bool> for Bool {
+    fn from(value: bool) -> Self {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<u64> for Bool {
+    type Error = RunError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Ok(Self(BitsInU8::<1>::try_from(value)?))
+    }
+}
+
+define_public_bits_wrappers!(
+    UnsignedBitsInU8,
+    SignedBitsInU8,
+    BitsInU8,
+    u8,
+    i8,
+    to_u8,
+    to_i8,
+    8
+);
+define_public_bits_wrappers!(
+    UnsignedBitsInU16,
+    SignedBitsInU16,
+    BitsInU16,
+    u16,
+    i16,
+    to_u16,
+    to_i16,
+    16
+);
+define_public_bits_wrappers!(
+    UnsignedBitsInU32,
+    SignedBitsInU32,
+    BitsInU32,
+    u32,
+    i32,
+    to_u32,
+    to_i32,
+    32
+);
+define_public_bits_wrappers!(
+    UnsignedBitsInU64,
+    SignedBitsInU64,
+    BitsInU64,
+    u64,
+    i64,
+    to_u64,
+    to_i64,
+    64
+);
 
 /// Native least-significant-first limb storage for a bitvector wider than 64
 /// bits.
@@ -1969,13 +2058,13 @@ mod tests {
     #[test]
     fn all_zeros_recursively_initializes_native_values() {
         let scalar = UnsignedBitsInU16::<12>::all_zeros();
-        assert_eq!(scalar.to_u64(), 0);
+        assert_eq!(scalar.to_u16(), 0);
 
         let wide = SignedWideBits::<129, 3>::all_zeros();
         assert_eq!(wide.limbs(), &[0, 0, 0]);
 
         let nested: [[UnsignedBitsInU8<4>; 2]; 3] = AllZeros::all_zeros();
-        assert!(nested.iter().flatten().all(|value| value.to_u64() == 0));
+        assert!(nested.iter().flatten().all(|value| value.to_u8() == 0));
     }
 
     #[test]
@@ -1991,24 +2080,56 @@ mod tests {
     #[test]
     fn public_signed_and_unsigned_bits_wrappers_preserve_raw_abi_bits() {
         let unsigned = UnsignedBitsInU8::<4>::new(15);
-        assert_eq!(unsigned.to_u64(), 15);
+        assert_eq!(unsigned.to_u8(), 15);
         assert_eq!(unsigned.raw_bits(), 15);
         assert!(UnsignedBitsInU8::<4>::try_from(16).is_err());
         assert!(std::panic::catch_unwind(|| UnsignedBitsInU8::<4>::new(16)).is_err());
         assert!(std::panic::catch_unwind(|| UnsignedBitsInU8::<4>::from_raw_bits(16)).is_err());
 
         let signed = SignedBitsInU8::<4>::new(-1);
-        assert_eq!(signed.to_i64(), -1);
+        assert_eq!(signed.to_i8(), -1);
         assert_eq!(signed.raw_bits(), 15);
         assert!(SignedBitsInU8::<4>::try_from(8).is_err());
         assert!(SignedBitsInU8::<4>::try_from(-9).is_err());
         assert!(std::panic::catch_unwind(|| SignedBitsInU8::<4>::new(8)).is_err());
         assert!(std::panic::catch_unwind(|| SignedBitsInU8::<4>::from_raw_bits(16)).is_err());
-        assert_eq!(SignedBitsInU16::<9>::from_raw_bits(0x101).to_i64(), -255);
+        assert_eq!(SignedBitsInU16::<9>::from_raw_bits(0x101).to_i16(), -255);
 
         let wide = SignedWideBits::<65, 2>::from_limbs([u64::MAX, 1]).expect("s65 -1");
         assert_eq!(wide.to_bigint(), BigInt::from(-1));
         assert_eq!(wide.limbs(), &[u64::MAX, 1]);
+    }
+
+    #[test]
+    fn bool_wrapper_uses_rust_bool_values() {
+        let value = Bool::new(true);
+        assert!(value.to_bool());
+        assert_eq!(value.raw_bits(), 1);
+        assert_eq!(Bool::from(false), Bool::all_zeros());
+        assert_eq!(Bool::try_from(1_u64).expect("1 fits in u1"), value);
+        assert!(Bool::try_from(2_u64).is_err());
+        assert!(std::panic::catch_unwind(|| Bool::from_raw_bits(2)).is_err());
+    }
+
+    #[test]
+    fn public_bits_wrappers_use_narrow_rust_carriers() {
+        let unsigned8: u8 = UnsignedBitsInU8::<8>::new(255_u8).to_u8();
+        let unsigned16: u16 = UnsignedBitsInU16::<9>::new(0x1ff_u16).to_u16();
+        let unsigned32: u32 = UnsignedBitsInU32::<17>::new(0x1ffff_u32).to_u32();
+        let unsigned64: u64 = UnsignedBitsInU64::<33>::new(0x1ffffffff_u64).to_u64();
+        assert_eq!(
+            (unsigned8, unsigned16, unsigned32, unsigned64),
+            (255, 0x1ff, 0x1ffff, 0x1ffffffff)
+        );
+
+        let signed8: i8 = SignedBitsInU8::<4>::new(-8_i8).to_i8();
+        let signed16: i16 = SignedBitsInU16::<9>::new(-256_i16).to_i16();
+        let signed32: i32 = SignedBitsInU32::<17>::new(-65_536_i32).to_i32();
+        let signed64: i64 = SignedBitsInU64::<33>::new(-4_294_967_296_i64).to_i64();
+        assert_eq!(
+            (signed8, signed16, signed32, signed64),
+            (-8, -256, -65_536, -4_294_967_296)
+        );
     }
 
     #[test]
@@ -2068,7 +2189,7 @@ mod tests {
         assert_eq!(
             UnsignedBitsInU8::<4>::try_from(15_u64)
                 .expect("15 fits in u4")
-                .to_u64(),
+                .to_u8(),
             15
         );
         assert!(UnsignedBitsInU8::<4>::try_from(16_u64).is_err());
@@ -2076,13 +2197,13 @@ mod tests {
         assert_eq!(
             UnsignedBitsInU16::<9>::try_from(0x1ff_u64)
                 .expect("0x1ff fits in u9")
-                .to_u64(),
+                .to_u16(),
             0x1ff
         );
         assert_eq!(
             UnsignedBitsInU32::<17>::try_from(0x1ffff_u64)
                 .expect("0x1ffff fits in u17")
-                .to_u64(),
+                .to_u32(),
             0x1ffff
         );
         assert_eq!(
@@ -2095,7 +2216,7 @@ mod tests {
         assert_eq!(
             SignedBitsInU8::<4>::try_from(-8_i64)
                 .expect("-8 fits in s4")
-                .to_i64(),
+                .to_i8(),
             -8
         );
         assert!(SignedBitsInU8::<4>::try_from(-9_i64).is_err());
@@ -2103,13 +2224,13 @@ mod tests {
         assert_eq!(
             SignedBitsInU16::<9>::try_from(-256_i64)
                 .expect("-256 fits in s9")
-                .to_i64(),
+                .to_i16(),
             -256
         );
         assert_eq!(
             SignedBitsInU32::<17>::try_from(-65_536_i64)
                 .expect("-65536 fits in s17")
-                .to_i64(),
+                .to_i32(),
             -65_536
         );
         assert_eq!(
