@@ -6,6 +6,7 @@ use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, DEFAULT_MAX_FRAIG_SIM_SAMPLES};
 use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
+use xlsynth_g8r::prove_gate_fn_equiv_sat::DEFAULT_CADICAL_TERMINATE_LIMIT;
 
 fn parse_adder_mapping(value: Option<&str>) -> AdderMapping {
     match value {
@@ -79,6 +80,24 @@ fn parse_u64_default(matches: &ArgMatches, name: &str, default: u64) -> u64 {
         .get_one::<String>(name)
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn parse_u32_or_exit(
+    matches: &ArgMatches,
+    name: &str,
+    flag_name_for_error: &str,
+    default: u32,
+) -> u32 {
+    let Some(value) = matches.get_one::<String>(name) else {
+        return default;
+    };
+    match value.parse::<u32>() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("Invalid {flag_name_for_error}: {value:?}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn parse_optional_usize_or_exit(
@@ -200,6 +219,12 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         DEFAULT_MAX_FRAIG_SIM_SAMPLES,
     );
     let gate_formal_backend = parse_gate_formal_backend_or_exit(matches);
+    let cadical_terminate_limit = parse_u32_or_exit(
+        matches,
+        "cadical_terminate_limit",
+        "--cadical-terminate-limit",
+        DEFAULT_CADICAL_TERMINATE_LIMIT,
+    );
 
     CanonicalG8rOptions {
         fold,
@@ -224,6 +249,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         fraig_max_iterations,
         max_fraig_sim_samples,
         gate_formal_backend,
+        cadical_terminate_limit,
     }
 }
 
