@@ -224,6 +224,13 @@ impl GateBuilder {
 
     pub fn add_and_binary(&mut self, lhs: AigOperand, rhs: AigOperand) -> AigOperand {
         if self.options.fold {
+            // x & x = x; x & !x = false.
+            if lhs.node == rhs.node {
+                if lhs.negated == rhs.negated {
+                    return self.union_current_pir_node_id_into_operand(lhs);
+                }
+                return self.union_current_pir_node_id_into_operand(self.get_false());
+            }
             // If either side is known false, the result is false.
             if self.is_known_false(lhs) || self.is_known_false(rhs) {
                 return self.union_current_pir_node_id_into_operand(self.get_false());
@@ -768,6 +775,10 @@ impl GateBuilder {
         on_false: AigOperand,
     ) -> AigOperand {
         if self.options.fold {
+            // mux(s, x, x) = x.
+            if on_true == on_false {
+                return self.union_current_pir_node_id_into_operand(on_true);
+            }
             if self.is_known_false(selector) {
                 return self.union_current_pir_node_id_into_operand(on_false);
             }
@@ -995,6 +1006,21 @@ mod tests {
     }
 
     #[test]
+    fn test_and_folds_idempotence_and_complement() {
+        let mut builder = GateBuilder::new("and_folds".to_string(), GateBuilderOptions::opt());
+        let a = builder.add_input("a".to_string(), 1);
+        let a0 = *a.get_lsb(0);
+        let gate_count = builder.gates.len();
+
+        assert_eq!(builder.add_and_binary(a0, a0), a0);
+        assert_eq!(builder.gates.len(), gate_count);
+
+        assert_eq!(builder.add_and_binary(a0, a0.negate()), builder.get_false());
+        assert_eq!(builder.add_and_binary(a0.negate(), a0), builder.get_false());
+        assert_eq!(builder.gates.len(), gate_count);
+    }
+
+    #[test]
     fn test_one_bit_mux_vec() {
         let mut builder = GateBuilder::new("my_mux".to_string(), GateBuilderOptions::no_opt());
         let selector = builder.add_input("selector".to_string(), 1);
@@ -1019,6 +1045,19 @@ mod tests {
   o[0] = not(%6)
 }"
         );
+    }
+
+    #[test]
+    fn test_mux_folds_identical_arms() {
+        let mut builder = GateBuilder::new("mux_fold".to_string(), GateBuilderOptions::opt());
+        let selector = builder.add_input("selector".to_string(), 1);
+        let value = builder.add_input("value".to_string(), 1);
+        let selector0 = *selector.get_lsb(0);
+        let value0 = *value.get_lsb(0);
+        let gate_count = builder.gates.len();
+
+        assert_eq!(builder.add_mux2(selector0, value0, value0), value0);
+        assert_eq!(builder.gates.len(), gate_count);
     }
 
     // Builds a diamong out of simple and gates and ensures that:

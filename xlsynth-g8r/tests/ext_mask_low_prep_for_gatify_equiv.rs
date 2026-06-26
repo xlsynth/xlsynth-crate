@@ -297,13 +297,13 @@ fn prep_rewrites_shifted_shrl_all_ones_to_not_ext_mask_low() {
 }
 
 #[test]
-fn prep_rewrites_return_shrl_all_ones_to_ext_mask_low() {
+fn prep_keeps_return_shrl_all_ones_native() {
     let pir_fn = parse_top_fn(&build_shrl_all_ones_ir_text(8, 4));
     let prepared = prep_with_mask_low(&pir_fn);
     let prepared_text = prepared.to_string();
     assert!(
-        prepared_text.contains("ext_mask_low(") && !prepared_text.contains("shrl("),
-        "expected shrl(all_ones, count) to become ext_mask_low over remaining count; got:\n{prepared_text}"
+        prepared_text.contains("shrl(") && !prepared_text.contains("ext_mask_low("),
+        "expected direct shrl(all_ones, count) to remain native; got:\n{prepared_text}"
     );
     assert_ir_fns_equivalent(&pir_fn, &prepared);
 }
@@ -414,10 +414,6 @@ fn prep_rewrites_additional_mask_low_families_across_width_sweep() {
                     "shifted_shrl_all_ones",
                     build_shifted_shrl_all_ones_ir_text(output_width, count_width),
                 ),
-                (
-                    "shrl_all_ones",
-                    build_shrl_all_ones_ir_text(output_width, count_width),
-                ),
             ] {
                 let pir_fn = parse_top_fn(&ir_text);
                 let prepared = prep_with_mask_low(&pir_fn);
@@ -433,6 +429,21 @@ fn prep_rewrites_additional_mask_low_families_across_width_sweep() {
                         "prepared mismatch for output_width={output_width} count_width={count_width} family={family} count={count}"
                     );
                 }
+            }
+
+            let pir_fn = parse_top_fn(&build_shrl_all_ones_ir_text(output_width, count_width));
+            let prepared = prep_with_mask_low(&pir_fn);
+            let prepared_text = prepared.to_string();
+            assert!(
+                prepared_text.contains("shrl(") && !prepared_text.contains("ext_mask_low("),
+                "expected direct shrl all-ones form to remain native for output_width={output_width} count_width={count_width}; got:\n{prepared_text}"
+            );
+            for count in 0..=max_count {
+                assert_eq!(
+                    eval_success(&prepared, count_width, count),
+                    eval_success(&pir_fn, count_width, count),
+                    "prepared mismatch for output_width={output_width} count_width={count_width} family=shrl_all_ones count={count}"
+                );
             }
         }
     }

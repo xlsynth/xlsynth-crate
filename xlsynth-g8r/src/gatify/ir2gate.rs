@@ -5672,31 +5672,31 @@ top fn main(x: bits[{width}], amt: bits[{amount_width}]) -> bits[{width}] {{
 
         #[rustfmt::skip]
         let want: &[ShraQorRow] = &[
-            ShraQorRow { width: 3, amount_width: 2, old_and_nodes: 23, old_depth: 6, public_and_nodes: 16, public_depth: 4 },
-            ShraQorRow { width: 3, amount_width: 3, old_and_nodes: 24, old_depth: 6, public_and_nodes: 23, public_depth: 6 },
-            ShraQorRow { width: 3, amount_width: 4, old_and_nodes: 25, old_depth: 6, public_and_nodes: 24, public_depth: 6 },
-            ShraQorRow { width: 4, amount_width: 2, old_and_nodes: 21, old_depth: 4, public_and_nodes: 21, public_depth: 4 },
-            ShraQorRow { width: 4, amount_width: 3, old_and_nodes: 30, old_depth: 6, public_and_nodes: 30, public_depth: 6 },
-            ShraQorRow { width: 4, amount_width: 4, old_and_nodes: 31, old_depth: 6, public_and_nodes: 31, public_depth: 6 },
-            ShraQorRow { width: 5, amount_width: 2, old_and_nodes: 27, old_depth: 4, public_and_nodes: 27, public_depth: 4 },
-            ShraQorRow { width: 5, amount_width: 3, old_and_nodes: 57, old_depth: 8, public_and_nodes: 40, public_depth: 6 },
-            ShraQorRow { width: 5, amount_width: 4, old_and_nodes: 58, old_depth: 8, public_and_nodes: 51, public_depth: 8 },
-            ShraQorRow { width: 5, amount_width: 5, old_and_nodes: 59, old_depth: 8, public_and_nodes: 52, public_depth: 8 },
-            ShraQorRow { width: 6, amount_width: 2, old_and_nodes: 33, old_depth: 4, public_and_nodes: 33, public_depth: 4 },
-            ShraQorRow { width: 6, amount_width: 3, old_and_nodes: 67, old_depth: 8, public_and_nodes: 49, public_depth: 6 },
-            ShraQorRow { width: 6, amount_width: 4, old_and_nodes: 68, old_depth: 8, public_and_nodes: 62, public_depth: 8 },
-            ShraQorRow { width: 7, amount_width: 2, old_and_nodes: 39, old_depth: 4, public_and_nodes: 39, public_depth: 4 },
-            ShraQorRow { width: 7, amount_width: 3, old_and_nodes: 73, old_depth: 8, public_and_nodes: 58, public_depth: 6 },
-            ShraQorRow { width: 7, amount_width: 4, old_and_nodes: 74, old_depth: 8, public_and_nodes: 73, public_depth: 8 },
-            ShraQorRow { width: 8, amount_width: 3, old_and_nodes: 65, old_depth: 6, public_and_nodes: 65, public_depth: 6 },
-            ShraQorRow { width: 8, amount_width: 4, old_and_nodes: 82, old_depth: 8, public_and_nodes: 82, public_depth: 8 },
-            ShraQorRow { width: 9, amount_width: 3, old_and_nodes: 74, old_depth: 6, public_and_nodes: 74, public_depth: 6 },
-            ShraQorRow { width: 9, amount_width: 4, old_and_nodes: 135, old_depth: 10, public_and_nodes: 96, public_depth: 8 },
-            ShraQorRow { width: 9, amount_width: 5, old_and_nodes: 136, old_depth: 10, public_and_nodes: 115, public_depth: 10 },
-            ShraQorRow { width: 16, amount_width: 4, old_and_nodes: 177, old_depth: 8, public_and_nodes: 177, public_depth: 8 },
-            ShraQorRow { width: 16, amount_width: 5, old_and_nodes: 210, old_depth: 10, public_and_nodes: 210, public_depth: 10 },
-            ShraQorRow { width: 32, amount_width: 5, old_and_nodes: 449, old_depth: 10, public_and_nodes: 449, public_depth: 10 },
-            ShraQorRow { width: 32, amount_width: 6, old_and_nodes: 514, old_depth: 12, public_and_nodes: 514, public_depth: 12 },
+            ShraQorRow { width: 3, amount_width: 2, old_and_nodes: 17, old_depth: 6, public_and_nodes: 11, public_depth: 4 },
+            ShraQorRow { width: 3, amount_width: 3, old_and_nodes: 18, old_depth: 6, public_and_nodes: 16, public_depth: 6 },
+            ShraQorRow { width: 3, amount_width: 4, old_and_nodes: 19, old_depth: 6, public_and_nodes: 17, public_depth: 6 },
+            ShraQorRow { width: 4, amount_width: 2, old_and_nodes: 17, old_depth: 4, public_and_nodes: 17, public_depth: 4 },
+            ShraQorRow { width: 4, amount_width: 3, old_and_nodes: 24, old_depth: 6, public_and_nodes: 24, public_depth: 6 },
+            ShraQorRow { width: 4, amount_width: 4, old_and_nodes: 25, old_depth: 6, public_and_nodes: 25, public_depth: 6 },
+            ShraQorRow { width: 5, amount_width: 2, old_and_nodes: 23, old_depth: 4, public_and_nodes: 23, public_depth: 4 },
+            ShraQorRow { width: 5, amount_width: 3, old_and_nodes: 55, old_depth: 8, public_and_nodes: 32, public_depth: 6 },
+            ShraQorRow { width: 5, amount_width: 4, old_and_nodes: 56, old_depth: 8, public_and_nodes: 41, public_depth: 8 },
+            ShraQorRow { width: 5, amount_width: 5, old_and_nodes: 57, old_depth: 8, public_and_nodes: 42, public_depth: 8 },
+            ShraQorRow { width: 6, amount_width: 2, old_and_nodes: 29, old_depth: 4, public_and_nodes: 29, public_depth: 4 },
+            ShraQorRow { width: 6, amount_width: 3, old_and_nodes: 65, old_depth: 8, public_and_nodes: 41, public_depth: 6 },
+            ShraQorRow { width: 6, amount_width: 4, old_and_nodes: 66, old_depth: 8, public_and_nodes: 52, public_depth: 8 },
+            ShraQorRow { width: 7, amount_width: 2, old_and_nodes: 35, old_depth: 4, public_and_nodes: 35, public_depth: 4 },
+            ShraQorRow { width: 7, amount_width: 3, old_and_nodes: 65, old_depth: 8, public_and_nodes: 50, public_depth: 6 },
+            ShraQorRow { width: 7, amount_width: 4, old_and_nodes: 66, old_depth: 8, public_and_nodes: 63, public_depth: 8 },
+            ShraQorRow { width: 8, amount_width: 3, old_and_nodes: 59, old_depth: 6, public_and_nodes: 59, public_depth: 6 },
+            ShraQorRow { width: 8, amount_width: 4, old_and_nodes: 74, old_depth: 8, public_and_nodes: 74, public_depth: 8 },
+            ShraQorRow { width: 9, amount_width: 3, old_and_nodes: 68, old_depth: 6, public_and_nodes: 68, public_depth: 6 },
+            ShraQorRow { width: 9, amount_width: 4, old_and_nodes: 132, old_depth: 10, public_and_nodes: 85, public_depth: 8 },
+            ShraQorRow { width: 9, amount_width: 5, old_and_nodes: 133, old_depth: 10, public_and_nodes: 102, public_depth: 10 },
+            ShraQorRow { width: 16, amount_width: 4, old_and_nodes: 169, old_depth: 8, public_and_nodes: 169, public_depth: 8 },
+            ShraQorRow { width: 16, amount_width: 5, old_and_nodes: 200, old_depth: 10, public_and_nodes: 200, public_depth: 10 },
+            ShraQorRow { width: 32, amount_width: 5, old_and_nodes: 439, old_depth: 10, public_and_nodes: 439, public_depth: 10 },
+            ShraQorRow { width: 32, amount_width: 6, old_and_nodes: 502, old_depth: 12, public_and_nodes: 502, public_depth: 12 },
         ];
 
         assert_eq!(got.as_slice(), want);
@@ -5943,22 +5943,22 @@ top fn main(x: bits[{arg_width}], start: bits[{start_width}], update: bits[{upda
         #[rustfmt::skip]
         let want: &[BitSliceUpdateQorRow] = &[
             BitSliceUpdateQorRow { arg_width: 8, update_width: 1, old_and_nodes: 50, old_depth: 5, public_and_nodes: 42, public_depth: 4 },
-            BitSliceUpdateQorRow { arg_width: 8, update_width: 2, old_and_nodes: 64, old_depth: 6, public_and_nodes: 56, public_depth: 5 },
-            BitSliceUpdateQorRow { arg_width: 8, update_width: 3, old_and_nodes: 75, old_depth: 7, public_and_nodes: 67, public_depth: 6 },
-            BitSliceUpdateQorRow { arg_width: 8, update_width: 5, old_and_nodes: 95, old_depth: 8, public_and_nodes: 87, public_depth: 7 },
-            BitSliceUpdateQorRow { arg_width: 8, update_width: 8, old_and_nodes: 101, old_depth: 8, public_and_nodes: 93, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 2, old_and_nodes: 61, old_depth: 6, public_and_nodes: 53, public_depth: 5 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 3, old_and_nodes: 72, old_depth: 7, public_and_nodes: 64, public_depth: 6 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 5, old_and_nodes: 89, old_depth: 8, public_and_nodes: 81, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 8, old_and_nodes: 91, old_depth: 8, public_and_nodes: 84, public_depth: 7 },
             BitSliceUpdateQorRow { arg_width: 16, update_width: 1, old_and_nodes: 106, old_depth: 6, public_and_nodes: 90, public_depth: 5 },
-            BitSliceUpdateQorRow { arg_width: 16, update_width: 2, old_and_nodes: 126, old_depth: 7, public_and_nodes: 110, public_depth: 6 },
-            BitSliceUpdateQorRow { arg_width: 16, update_width: 3, old_and_nodes: 143, old_depth: 8, public_and_nodes: 127, public_depth: 7 },
-            BitSliceUpdateQorRow { arg_width: 16, update_width: 5, old_and_nodes: 174, old_depth: 9, public_and_nodes: 158, public_depth: 8 },
-            BitSliceUpdateQorRow { arg_width: 16, update_width: 8, old_and_nodes: 216, old_depth: 10, public_and_nodes: 200, public_depth: 9 },
-            BitSliceUpdateQorRow { arg_width: 16, update_width: 16, old_and_nodes: 253, old_depth: 10, public_and_nodes: 237, public_depth: 9 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 2, old_and_nodes: 123, old_depth: 7, public_and_nodes: 107, public_depth: 6 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 3, old_and_nodes: 140, old_depth: 8, public_and_nodes: 124, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 5, old_and_nodes: 168, old_depth: 9, public_and_nodes: 152, public_depth: 8 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 8, old_and_nodes: 207, old_depth: 10, public_and_nodes: 191, public_depth: 9 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 16, old_and_nodes: 240, old_depth: 10, public_and_nodes: 225, public_depth: 9 },
             BitSliceUpdateQorRow { arg_width: 32, update_width: 1, old_and_nodes: 218, old_depth: 7, public_and_nodes: 186, public_depth: 6 },
-            BitSliceUpdateQorRow { arg_width: 32, update_width: 2, old_and_nodes: 244, old_depth: 8, public_and_nodes: 212, public_depth: 7 },
-            BitSliceUpdateQorRow { arg_width: 32, update_width: 3, old_and_nodes: 267, old_depth: 9, public_and_nodes: 235, public_depth: 8 },
-            BitSliceUpdateQorRow { arg_width: 32, update_width: 5, old_and_nodes: 310, old_depth: 10, public_and_nodes: 278, public_depth: 9 },
-            BitSliceUpdateQorRow { arg_width: 32, update_width: 8, old_and_nodes: 370, old_depth: 11, public_and_nodes: 338, public_depth: 10 },
-            BitSliceUpdateQorRow { arg_width: 32, update_width: 16, old_and_nodes: 506, old_depth: 12, public_and_nodes: 474, public_depth: 11 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 2, old_and_nodes: 241, old_depth: 8, public_and_nodes: 209, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 3, old_and_nodes: 264, old_depth: 9, public_and_nodes: 232, public_depth: 8 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 5, old_and_nodes: 304, old_depth: 10, public_and_nodes: 272, public_depth: 9 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 8, old_and_nodes: 361, old_depth: 11, public_and_nodes: 329, public_depth: 10 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 16, old_and_nodes: 494, old_depth: 12, public_and_nodes: 462, public_depth: 11 },
         ];
 
         assert_eq!(got.as_slice(), want);
@@ -6269,44 +6269,44 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
 
         #[rustfmt::skip]
         let want: &[ArraySliceQorRow] = &[
-            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 1, old_and_nodes: 22, old_depth: 10, elem_mux_and_nodes: 18, elem_mux_depth: 6, public_and_nodes: 18, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 2, old_and_nodes: 36, old_depth: 10, elem_mux_and_nodes: 28, elem_mux_depth: 6, public_and_nodes: 28, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 3, old_and_nodes: 44, old_depth: 10, elem_mux_and_nodes: 32, elem_mux_depth: 6, public_and_nodes: 32, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 4, old_and_nodes: 50, old_depth: 10, elem_mux_and_nodes: 36, elem_mux_depth: 6, public_and_nodes: 36, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 1, old_and_nodes: 136, old_depth: 14, elem_mux_and_nodes: 54, elem_mux_depth: 6, public_and_nodes: 54, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 2, old_and_nodes: 189, old_depth: 15, elem_mux_and_nodes: 84, elem_mux_depth: 6, public_and_nodes: 84, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 3, old_and_nodes: 221, old_depth: 15, elem_mux_and_nodes: 96, elem_mux_depth: 6, public_and_nodes: 96, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 4, old_and_nodes: 241, old_depth: 15, elem_mux_and_nodes: 108, elem_mux_depth: 6, public_and_nodes: 108, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 1, old_and_nodes: 252, old_depth: 15, elem_mux_and_nodes: 90, elem_mux_depth: 6, public_and_nodes: 90, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 2, old_and_nodes: 340, old_depth: 15, elem_mux_and_nodes: 140, elem_mux_depth: 6, public_and_nodes: 140, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 3, old_and_nodes: 398, old_depth: 16, elem_mux_and_nodes: 160, elem_mux_depth: 6, public_and_nodes: 160, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 4, old_and_nodes: 442, old_depth: 16, elem_mux_and_nodes: 180, elem_mux_depth: 6, public_and_nodes: 180, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 1, old_and_nodes: 22, old_depth: 10, elem_mux_and_nodes: 12, elem_mux_depth: 6, public_and_nodes: 12, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 2, old_and_nodes: 35, old_depth: 10, elem_mux_and_nodes: 23, elem_mux_depth: 6, public_and_nodes: 23, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 3, old_and_nodes: 43, old_depth: 10, elem_mux_and_nodes: 28, elem_mux_depth: 6, public_and_nodes: 28, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 4, old_and_nodes: 48, old_depth: 10, elem_mux_and_nodes: 32, elem_mux_depth: 6, public_and_nodes: 32, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 1, old_and_nodes: 136, old_depth: 14, elem_mux_and_nodes: 36, elem_mux_depth: 6, public_and_nodes: 36, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 2, old_and_nodes: 189, old_depth: 15, elem_mux_and_nodes: 69, elem_mux_depth: 6, public_and_nodes: 69, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 3, old_and_nodes: 221, old_depth: 15, elem_mux_and_nodes: 84, elem_mux_depth: 6, public_and_nodes: 84, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 4, old_and_nodes: 241, old_depth: 15, elem_mux_and_nodes: 96, elem_mux_depth: 6, public_and_nodes: 96, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 1, old_and_nodes: 252, old_depth: 15, elem_mux_and_nodes: 60, elem_mux_depth: 6, public_and_nodes: 60, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 2, old_and_nodes: 340, old_depth: 15, elem_mux_and_nodes: 115, elem_mux_depth: 6, public_and_nodes: 115, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 3, old_and_nodes: 398, old_depth: 16, elem_mux_and_nodes: 140, elem_mux_depth: 6, public_and_nodes: 140, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 4, old_and_nodes: 442, old_depth: 16, elem_mux_and_nodes: 160, elem_mux_depth: 6, public_and_nodes: 160, public_depth: 6 },
 
             ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 1, old_and_nodes: 21, old_depth: 6, elem_mux_and_nodes: 21, elem_mux_depth: 6, public_and_nodes: 21, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 2, old_and_nodes: 41, old_depth: 6, elem_mux_and_nodes: 41, elem_mux_depth: 6, public_and_nodes: 41, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 3, old_and_nodes: 49, old_depth: 6, elem_mux_and_nodes: 49, elem_mux_depth: 6, public_and_nodes: 49, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 4, old_and_nodes: 57, old_depth: 6, elem_mux_and_nodes: 57, elem_mux_depth: 6, public_and_nodes: 57, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 2, old_and_nodes: 39, old_depth: 6, elem_mux_and_nodes: 39, elem_mux_depth: 6, public_and_nodes: 39, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 3, old_and_nodes: 47, old_depth: 6, elem_mux_and_nodes: 47, elem_mux_depth: 6, public_and_nodes: 47, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 4, old_and_nodes: 53, old_depth: 6, elem_mux_and_nodes: 53, elem_mux_depth: 6, public_and_nodes: 53, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 1, old_and_nodes: 193, old_depth: 10, elem_mux_and_nodes: 63, elem_mux_depth: 6, public_and_nodes: 63, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 2, old_and_nodes: 272, old_depth: 10, elem_mux_and_nodes: 123, elem_mux_depth: 6, public_and_nodes: 123, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 3, old_and_nodes: 318, old_depth: 10, elem_mux_and_nodes: 147, elem_mux_depth: 6, public_and_nodes: 147, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 4, old_and_nodes: 344, old_depth: 10, elem_mux_and_nodes: 171, elem_mux_depth: 6, public_and_nodes: 171, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 2, old_and_nodes: 272, old_depth: 10, elem_mux_and_nodes: 117, elem_mux_depth: 6, public_and_nodes: 117, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 3, old_and_nodes: 318, old_depth: 10, elem_mux_and_nodes: 141, elem_mux_depth: 6, public_and_nodes: 141, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 4, old_and_nodes: 344, old_depth: 10, elem_mux_and_nodes: 159, elem_mux_depth: 6, public_and_nodes: 159, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 1, old_and_nodes: 389, old_depth: 12, elem_mux_and_nodes: 105, elem_mux_depth: 6, public_and_nodes: 105, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 2, old_and_nodes: 525, old_depth: 12, elem_mux_and_nodes: 205, elem_mux_depth: 6, public_and_nodes: 205, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 3, old_and_nodes: 607, old_depth: 12, elem_mux_and_nodes: 245, elem_mux_depth: 6, public_and_nodes: 245, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 4, old_and_nodes: 664, old_depth: 12, elem_mux_and_nodes: 285, elem_mux_depth: 6, public_and_nodes: 285, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 2, old_and_nodes: 525, old_depth: 12, elem_mux_and_nodes: 195, elem_mux_depth: 6, public_and_nodes: 195, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 3, old_and_nodes: 607, old_depth: 12, elem_mux_and_nodes: 235, elem_mux_depth: 6, public_and_nodes: 235, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 4, old_and_nodes: 664, old_depth: 12, elem_mux_and_nodes: 265, elem_mux_depth: 6, public_and_nodes: 265, public_depth: 6 },
 
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 1, old_and_nodes: 45, old_depth: 8, elem_mux_and_nodes: 45, elem_mux_depth: 8, public_and_nodes: 45, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 89, old_depth: 8, elem_mux_and_nodes: 89, elem_mux_depth: 8, public_and_nodes: 89, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 3, old_and_nodes: 109, old_depth: 8, elem_mux_and_nodes: 109, elem_mux_depth: 8, public_and_nodes: 109, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 4, old_and_nodes: 129, old_depth: 8, elem_mux_and_nodes: 129, elem_mux_depth: 8, public_and_nodes: 129, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 87, old_depth: 8, elem_mux_and_nodes: 87, elem_mux_depth: 8, public_and_nodes: 87, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 3, old_and_nodes: 107, old_depth: 8, elem_mux_and_nodes: 107, elem_mux_depth: 8, public_and_nodes: 107, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 4, old_and_nodes: 125, old_depth: 8, elem_mux_and_nodes: 125, elem_mux_depth: 8, public_and_nodes: 125, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 388, old_depth: 13, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 542, old_depth: 13, elem_mux_and_nodes: 267, elem_mux_depth: 8, public_and_nodes: 267, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 636, old_depth: 13, elem_mux_and_nodes: 327, elem_mux_depth: 8, public_and_nodes: 327, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 694, old_depth: 13, elem_mux_and_nodes: 387, elem_mux_depth: 8, public_and_nodes: 387, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 542, old_depth: 13, elem_mux_and_nodes: 261, elem_mux_depth: 8, public_and_nodes: 261, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 636, old_depth: 13, elem_mux_and_nodes: 321, elem_mux_depth: 8, public_and_nodes: 321, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 694, old_depth: 13, elem_mux_and_nodes: 375, elem_mux_depth: 8, public_and_nodes: 375, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 1, old_and_nodes: 790, old_depth: 14, elem_mux_and_nodes: 225, elem_mux_depth: 8, public_and_nodes: 225, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1051, old_depth: 14, elem_mux_and_nodes: 445, elem_mux_depth: 8, public_and_nodes: 445, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1211, old_depth: 14, elem_mux_and_nodes: 545, elem_mux_depth: 8, public_and_nodes: 545, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 4, old_and_nodes: 1311, old_depth: 14, elem_mux_and_nodes: 645, elem_mux_depth: 8, public_and_nodes: 645, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1051, old_depth: 14, elem_mux_and_nodes: 435, elem_mux_depth: 8, public_and_nodes: 435, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1211, old_depth: 14, elem_mux_and_nodes: 535, elem_mux_depth: 8, public_and_nodes: 535, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 4, old_and_nodes: 1311, old_depth: 14, elem_mux_and_nodes: 625, elem_mux_depth: 8, public_and_nodes: 625, public_depth: 8 },
         ];
 
         assert_eq!(got.as_slice(), want);
@@ -7247,7 +7247,7 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
             5,
             super::ArrayIndexLoweringStrategy::Auto,
         );
-        assert_eq!(got.live_nodes, 118);
+        assert_eq!(got.live_nodes, 113);
         assert_eq!(got.deepest_path, 11);
     }
 
@@ -7268,7 +7268,7 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         assert_eq!(oob_27.deepest_path, 15);
         assert_eq!(padded_27.live_nodes, 143);
         assert_eq!(padded_27.deepest_path, 10);
-        assert_eq!(public_27.live_nodes, 118);
+        assert_eq!(public_27.live_nodes, 113);
         assert_eq!(public_27.deepest_path, 11);
         assert_eq!(exact_32.live_nodes, 148);
         assert_eq!(exact_32.deepest_path, 10);
