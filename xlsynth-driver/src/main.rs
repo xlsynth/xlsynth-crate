@@ -437,6 +437,16 @@ impl AppExt for clap::Command {
                     .default_value("cadical")
                     .action(clap::ArgAction::Set),
             )
+            .arg(
+                clap::Arg::new("cadical_terminate_limit")
+                    .long("cadical-terminate-limit")
+                    .value_name("N")
+                    .help(
+                        "CaDiCaL internal termination-check budget per solve; 0 disables it (default: 100)",
+                    )
+                    .default_value("100")
+                    .action(clap::ArgAction::Set),
+            )
             .add_bool_arg(
                 "compute_graph_logical_effort",
                 "Compute the graph logical effort worst case delay",

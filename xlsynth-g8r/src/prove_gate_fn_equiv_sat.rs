@@ -73,17 +73,26 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 pub const CADICAL_CONFIG_ENV: &str = "XLSYNTH_G8R_CADICAL_CONFIG";
+pub const DEFAULT_CADICAL_TERMINATE_LIMIT: u32 = 100;
 
 /// Optional resource limits for gate-level formal proof backends.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GateFormalOptions {
     pub cadical_timeout: Option<Duration>,
+    pub cadical_terminate_limit: Option<u32>,
 }
 
 impl GateFormalOptions {
     /// Applies a timeout to each CaDiCaL solve call.
     pub fn with_cadical_timeout(mut self, timeout: Duration) -> Self {
         self.cadical_timeout = Some(timeout);
+        self
+    }
+
+    /// Applies a deterministic internal termination-check limit to each
+    /// CaDiCaL solve call. A value of zero disables the limit.
+    pub fn with_cadical_terminate_limit(mut self, limit: u32) -> Self {
+        self.cadical_terminate_limit = (limit != 0).then_some(limit);
         self
     }
 }
@@ -182,6 +191,7 @@ impl Not for CadicalLit {
 pub(crate) struct CadicalSat {
     solver: cadical::Solver,
     next_var: i32,
+    terminate_limit: Option<u32>,
 }
 
 impl CadicalSat {
@@ -206,6 +216,7 @@ impl CadicalSat {
         Ok(Self {
             solver,
             next_var: 1,
+            terminate_limit: options.cadical_terminate_limit,
         })
     }
 }
@@ -241,6 +252,18 @@ impl IncrementalSat for CadicalSat {
         &mut self,
         assumptions: &[Self::Lit],
     ) -> Result<SatSolveResult, ValidationError> {
+        if let Some(limit) = self.terminate_limit {
+            let limit = i32::try_from(limit).map_err(|_| {
+                ValidationError::CadicalConfigError(format!(
+                    "terminate limit {limit} exceeds CaDiCaL's i32 range"
+                ))
+            })?;
+            // CaDiCaL resets limits after each solve, so apply this before every
+            // incremental query.
+            self.solver
+                .set_limit("terminate", limit)
+                .map_err(|e| ValidationError::CadicalConfigError(e.to_string()))?;
+        }
         match self.solver.solve_with(assumptions.iter().map(|lit| lit.0)) {
             Some(true) => Ok(SatSolveResult::Sat),
             Some(false) => Ok(SatSolveResult::Unsat),
@@ -923,6 +946,7 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
         sorted_equiv_classes
     };
     let mut counterexample_models: Vec<S::Model> = Vec::new();
+    let mut interrupted_proof_count = 0usize;
 
     // Now iterate through the equivalence classes -- for each equivalence class
     // we'll advance a representative and check each next value against it.
@@ -948,12 +972,12 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
 
                 // Assume the miter output is true, which asks for a counterexample where
                 // the candidate is unequal to the representative.
-                match solver.sat_solve_assuming(&[miter])? {
-                    SatSolveResult::Unsat => {
+                match solver.sat_solve_assuming(&[miter]) {
+                    Ok(SatSolveResult::Unsat) => {
                         // No counterexample found, expand the known equivalent set.
                         known_equiv.push(candidate);
                     }
-                    SatSolveResult::Sat => {
+                    Ok(SatSolveResult::Sat) => {
                         // Counterexample found, extract it from the model.
                         let model = solver.sat_model()?;
                         let cex = solver_model_to_cex(
@@ -972,6 +996,12 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
                         split_bucket = true;
                         break;
                     }
+                    Err(ValidationError::CadicalSolveInterrupted) => {
+                        // A resource-limited proof is inconclusive. Leaving the
+                        // candidate out of the proven set preserves correctness.
+                        interrupted_proof_count += 1;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
 
@@ -979,6 +1009,13 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
                 validation_result.proven_equiv_sets.push(known_equiv);
             }
         }
+    }
+
+    if interrupted_proof_count != 0 {
+        log::info!(
+            "equivalence-class validation skipped {} resource-limited candidate proofs as unproven",
+            interrupted_proof_count
+        );
     }
 
     Ok(validation_result)
@@ -996,8 +1033,9 @@ mod tests {
     };
 
     use super::{
-        CadicalSat, GateFormalBackend, GateFormalOptions, IncrementalSat, ValidationError,
-        ValidationResult, validate_equivalence_classes, validate_equivalence_classes_with_backend,
+        CadicalSat, GateFormalBackend, GateFormalOptions, IncrementalSat, SatModel, SatSolveResult,
+        ValidationError, ValidationResult, validate_equivalence_classes,
+        validate_equivalence_classes_with_backend, validate_equivalence_classes_with_solver,
     };
     #[allow(unused_imports)]
     use crate::assert_within;
@@ -1023,6 +1061,75 @@ mod tests {
             solver.sat_solve_assuming(&[lit]),
             Err(ValidationError::CadicalSolveInterrupted)
         ));
+    }
+
+    #[test]
+    fn test_cadical_terminate_limit_configuration() {
+        let options = GateFormalOptions::default().with_cadical_terminate_limit(100);
+        assert_eq!(options.cadical_terminate_limit, Some(100));
+        let solver = CadicalSat::new_with_options(options).unwrap();
+        assert_eq!(solver.terminate_limit, Some(100));
+
+        let unlimited = options.with_cadical_terminate_limit(0);
+        assert_eq!(unlimited.cadical_terminate_limit, None);
+    }
+
+    #[derive(Clone)]
+    struct InterruptingModel;
+
+    impl SatModel<usize> for InterruptingModel {
+        fn lit_value(&self, _lit: usize) -> bool {
+            false
+        }
+    }
+
+    struct InterruptingSat {
+        next_lit: usize,
+    }
+
+    impl IncrementalSat for InterruptingSat {
+        type Lit = usize;
+        type Model = InterruptingModel;
+
+        fn sat_new_lit(&mut self) -> Self::Lit {
+            let lit = self.next_lit;
+            self.next_lit += 1;
+            lit
+        }
+
+        fn sat_add_clause(&mut self, _clause: &[Self::Lit]) {}
+
+        fn sat_solve_assuming(
+            &mut self,
+            _assumptions: &[Self::Lit],
+        ) -> Result<SatSolveResult, ValidationError> {
+            Err(ValidationError::CadicalSolveInterrupted)
+        }
+
+        fn sat_model(&self) -> Result<Self::Model, ValidationError> {
+            Ok(InterruptingModel)
+        }
+    }
+
+    #[test]
+    fn test_interrupted_class_proof_is_treated_as_unproven() {
+        let setup = setup_graph_with_redundancies();
+        let proposed_class = &[
+            EquivNode::Normal(setup.inner0.node),
+            EquivNode::Normal(setup.inner1.node),
+        ];
+        let mut solver = InterruptingSat { next_lit: 0 };
+
+        let result = validate_equivalence_classes_with_solver(
+            &setup.g,
+            &[proposed_class],
+            &mut solver,
+            true,
+        )
+        .unwrap();
+
+        assert!(result.proven_equiv_sets.is_empty());
+        assert!(result.cex_inputs.is_empty());
     }
 
     #[test]

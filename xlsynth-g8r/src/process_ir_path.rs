@@ -29,6 +29,7 @@ use crate::check_equivalence;
 use crate::gatify::ir2gate;
 use crate::ir2gates;
 use crate::prove_gate_fn_equiv_common::GateFormalBackend;
+use crate::prove_gate_fn_equiv_sat::{DEFAULT_CADICAL_TERMINATE_LIMIT, GateFormalOptions};
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
@@ -36,6 +37,10 @@ use xlsynth_pir::ir_utils;
 use xlsynth_prover::prover::SolverChoice;
 
 pub const DEFAULT_MAX_FRAIG_SIM_SAMPLES: usize = 8 * 1024;
+
+fn default_cadical_terminate_limit() -> u32 {
+    DEFAULT_CADICAL_TERMINATE_LIMIT
+}
 
 #[derive(Debug, serde::Serialize)]
 pub struct Ir2GatesSummaryStats {
@@ -177,6 +182,9 @@ pub struct Options {
     /// Gate-level formal backend used for proof steps.
     pub gate_formal_backend: GateFormalBackend,
 
+    /// CaDiCaL internal termination-check budget per solve; zero disables it.
+    pub cadical_terminate_limit: u32,
+
     pub quiet: bool,
     pub emit_netlist: bool,
     /// If > 0, generate this many random input samples and print toggle stats.
@@ -230,6 +238,9 @@ pub struct CanonicalG8rOptions {
     pub fraig_max_iterations: Option<usize>,
     pub max_fraig_sim_samples: usize,
     pub gate_formal_backend: GateFormalBackend,
+    /// CaDiCaL internal termination-check budget per solve; zero disables it.
+    #[serde(default = "default_cadical_terminate_limit")]
+    pub cadical_terminate_limit: u32,
     pub compute_graph_logical_effort: bool,
     pub graph_logical_effort_beta1: f64,
     pub graph_logical_effort_beta2: f64,
@@ -258,6 +269,7 @@ impl Default for CanonicalG8rOptions {
             fraig_max_iterations: None,
             max_fraig_sim_samples: DEFAULT_MAX_FRAIG_SIM_SAMPLES,
             gate_formal_backend: GateFormalBackend::default(),
+            cadical_terminate_limit: DEFAULT_CADICAL_TERMINATE_LIMIT,
             compute_graph_logical_effort: true,
             graph_logical_effort_beta1: 1.0,
             graph_logical_effort_beta2: 0.0,
@@ -299,6 +311,7 @@ impl CanonicalG8rOptions {
             fraig_max_iterations: self.fraig_max_iterations,
             max_fraig_sim_samples: Some(self.max_fraig_sim_samples),
             gate_formal_backend: self.gate_formal_backend,
+            cadical_terminate_limit: self.cadical_terminate_limit,
             quiet,
             emit_netlist,
             toggle_sample_count: self.toggle_sample_count,
@@ -676,11 +689,14 @@ pub fn process_ir_text_with_gatefn(
             sim_samples
         );
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend(
+        let gate_formal_options = GateFormalOptions::default()
+            .with_cadical_terminate_limit(options.cadical_terminate_limit);
+        let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend_and_options(
             &gate_fn,
             sim_samples,
             iteration_bounds,
             options.gate_formal_backend,
+            gate_formal_options,
             &mut rng,
         );
         let (optimized_fn, did_converge, iteration_stats) =
@@ -1049,5 +1065,39 @@ fn print_op_freqs(ir_top: &ir::Fn) {
     });
     for (op, freq) in op_freqs_vec.iter() {
         println!("  {:4} :: {}", freq, op);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CanonicalG8rOptions, DEFAULT_CADICAL_TERMINATE_LIMIT};
+
+    #[test]
+    fn canonical_options_default_to_bounded_cadical_solves() {
+        let canonical = CanonicalG8rOptions::default();
+        assert_eq!(
+            canonical.cadical_terminate_limit,
+            DEFAULT_CADICAL_TERMINATE_LIMIT
+        );
+        let process = canonical.to_process_ir_path_options(None, true, false, false, None);
+        assert_eq!(
+            process.cadical_terminate_limit,
+            DEFAULT_CADICAL_TERMINATE_LIMIT
+        );
+    }
+
+    #[test]
+    fn missing_serialized_cadical_limit_uses_canonical_default() {
+        let mut value = serde_json::to_value(CanonicalG8rOptions::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("cadical_terminate_limit");
+
+        let canonical: CanonicalG8rOptions = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            canonical.cadical_terminate_limit,
+            DEFAULT_CADICAL_TERMINATE_LIMIT
+        );
     }
 }

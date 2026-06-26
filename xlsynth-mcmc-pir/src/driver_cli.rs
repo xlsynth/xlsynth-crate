@@ -285,6 +285,15 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("cadical_terminate_limit")
+                .long("cadical-terminate-limit")
+                .value_name("N")
+                .help("CaDiCaL internal termination-check budget per solve; 0 disables it.")
+                .value_parser(clap::value_parser!(u32))
+                .default_value("100")
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("compute_graph_logical_effort")
                 .long("compute-graph-logical-effort")
                 .value_name("BOOL")
@@ -541,6 +550,10 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
                     .expect("clap validates gate_formal_backend")
             })
             .unwrap_or(defaults.gate_formal_backend),
+        cadical_terminate_limit: matches
+            .get_one::<u32>("cadical_terminate_limit")
+            .copied()
+            .unwrap_or(defaults.cadical_terminate_limit),
         compute_graph_logical_effort: parse_cli_bool(
             matches,
             "compute_graph_logical_effort",
@@ -1761,6 +1774,38 @@ mod tests {
             .unwrap();
         let cli = super::parse_pir_mcmc_args(&matches);
         assert!(!cli.canonical_g8r_options.reassociation);
+    }
+
+    #[test]
+    fn parser_accepts_cadical_terminate_limit_override() {
+        let matches = super::add_pir_mcmc_args(clap::Command::new("test"))
+            .try_get_matches_from([
+                "test",
+                "sample.ir",
+                "--iters",
+                "0",
+                "--cadical-terminate-limit",
+                "1000",
+            ])
+            .unwrap();
+        let cli = super::parse_pir_mcmc_args(&matches);
+        assert_eq!(cli.canonical_g8r_options.cadical_terminate_limit, 1000);
+    }
+
+    #[test]
+    fn parser_accepts_unlimited_cadical_solves() {
+        let matches = super::add_pir_mcmc_args(clap::Command::new("test"))
+            .try_get_matches_from([
+                "test",
+                "sample.ir",
+                "--iters",
+                "0",
+                "--cadical-terminate-limit",
+                "0",
+            ])
+            .unwrap();
+        let cli = super::parse_pir_mcmc_args(&matches);
+        assert_eq!(cli.canonical_g8r_options.cadical_terminate_limit, 0);
     }
 
     use xlsynth_pir::ir::Package;

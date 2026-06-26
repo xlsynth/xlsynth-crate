@@ -102,6 +102,8 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
         options.max_fraig_sim_samples.to_string(),
         "--gate-formal-backend".to_string(),
         options.gate_formal_backend.to_string(),
+        "--cadical-terminate-limit".to_string(),
+        options.cadical_terminate_limit.to_string(),
         "--compute_graph_logical_effort".to_string(),
         bool_arg(options.compute_graph_logical_effort),
         "--graph-logical-effort-beta1".to_string(),

@@ -13,6 +13,7 @@ use xlsynth_g8r::process_ir_path::{
     DEFAULT_MAX_FRAIG_SIM_SAMPLES, Options, process_ir_path_for_cli,
 };
 use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
+use xlsynth_g8r::prove_gate_fn_equiv_sat::DEFAULT_CADICAL_TERMINATE_LIMIT;
 use xlsynth_g8r::result_proto;
 use xlsynth_prover::prover::SolverChoice;
 
@@ -52,6 +53,10 @@ struct Args {
     /// Formal backend for gate-level proof steps.
     #[arg(long, default_value = GateFormalBackend::DEFAULT_CLI_VALUE, value_parser = GateFormalBackend::CLI_VALUES)]
     gate_formal_backend: String,
+
+    /// CaDiCaL internal termination-check budget per solve; zero disables it.
+    #[arg(long, default_value_t = DEFAULT_CADICAL_TERMINATE_LIMIT)]
+    cadical_terminate_limit: u32,
 
     /// Whether to check equivalence between the IR and the gate function.
     #[arg(long, default_value_t = true)]
@@ -148,6 +153,7 @@ fn main() {
         fraig_max_iterations: args.fraig_max_iterations,
         max_fraig_sim_samples: Some(args.max_fraig_sim_samples),
         gate_formal_backend,
+        cadical_terminate_limit: args.cadical_terminate_limit,
         cut_db,
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
