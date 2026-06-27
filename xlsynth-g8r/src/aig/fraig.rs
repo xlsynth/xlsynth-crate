@@ -15,7 +15,7 @@
 //! for now.
 
 use rand::Rng;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::time::Instant;
 use xlsynth::IrBits;
@@ -28,14 +28,17 @@ use crate::{
     propose_equiv::{
         EquivNode, SimulationPatternBank, SimulationSignature,
         propose_equivalence_classes_from_patterns,
-        propose_equivalence_classes_with_constant_from_patterns,
     },
     prove_gate_fn_equiv_common::GateFormalBackend,
     prove_gate_fn_equiv_sat::{
-        GateFormalOptions, validate_equivalence_classes_presorted_with_backend_and_options,
+        GateFormalOptions, validate_constant_groups_with_backend_and_options,
+        validate_equivalence_classes_presorted_with_backend_and_options,
         validate_equivalence_classes_presorted_with_virtual_rewrite_and_options,
+        validate_full_graph_fraig_with_grouped_constants_and_options,
     },
 };
+
+const FRAIG_CONSTANT_GROUP_SIZE: usize = 8;
 
 pub enum IterationBounds {
     MaxIterations(usize),
@@ -154,6 +157,106 @@ fn sort_equiv_classes_by_depth(
         )
     });
     sorted_classes
+}
+
+fn constant_signatures(
+    pattern_bank: &SimulationPatternBank,
+) -> Option<(SimulationSignature, SimulationSignature)> {
+    (pattern_bank.sample_count() != 0).then(|| {
+        (
+            SimulationSignature::constant_value(false, pattern_bank.sample_count()),
+            SimulationSignature::constant_value(true, pattern_bank.sample_count()),
+        )
+    })
+}
+
+/// Returns each underlying simulation-constant node once, with polarity
+/// normalized so the candidate is expected to be false.
+fn normalized_constant_candidates(
+    equiv_classes: &HashMap<SimulationSignature, Vec<EquivNode>>,
+    pattern_bank: &SimulationPatternBank,
+    depth_stats: &GateDepthStats,
+) -> Vec<EquivNode> {
+    let Some((zero_signature, _)) = constant_signatures(pattern_bank) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<EquivNode> = equiv_classes
+        .get(&zero_signature)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|candidate| candidate.aig_ref().id != 0)
+        .collect();
+    candidates.sort_unstable_by_key(|candidate| {
+        let node_ref = candidate.aig_ref();
+        (
+            depth_stats.ref_to_depth[&node_ref],
+            candidate.is_inverted(),
+            node_ref.id,
+        )
+    });
+    candidates.dedup_by_key(|candidate| candidate.aig_ref());
+    candidates
+}
+
+/// Selects proposal classes for one FRAIG phase. The constant-one class is the
+/// polarity mirror of the normalized constant-zero class, so only the latter
+/// is retained when constant-like nodes participate in ordinary FRAIG.
+fn select_and_sort_equivalence_classes(
+    equiv_classes: &HashMap<SimulationSignature, Vec<EquivNode>>,
+    pattern_bank: &SimulationPatternBank,
+    include_normalized_constants: bool,
+    proven_constant_refs: &HashSet<AigRef>,
+    depth_stats: &GateDepthStats,
+) -> Vec<Vec<EquivNode>> {
+    let signatures = constant_signatures(pattern_bank);
+    let mut selected: HashMap<SimulationSignature, Vec<EquivNode>> = HashMap::new();
+    for (&signature, equiv_class) in equiv_classes {
+        let is_zero = signatures
+            .map(|(zero_signature, _)| signature == zero_signature)
+            .unwrap_or(false);
+        let is_one = signatures
+            .map(|(_, one_signature)| signature == one_signature)
+            .unwrap_or(false);
+        let include = !is_one && (include_normalized_constants || !is_zero);
+        if !include {
+            continue;
+        }
+        let filtered: Vec<EquivNode> = equiv_class
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate.aig_ref().id != 0 && !proven_constant_refs.contains(&candidate.aig_ref())
+            })
+            .collect();
+        if filtered.len() > 1 {
+            selected.insert(signature, filtered);
+        }
+    }
+    sort_equiv_classes_by_depth(&selected, depth_stats)
+}
+
+fn proven_nonliteral_refs(proven_sets: &[Vec<EquivNode>]) -> HashSet<AigRef> {
+    proven_sets
+        .iter()
+        .flatten()
+        .map(EquivNode::aig_ref)
+        .filter(|node_ref| node_ref.id != 0)
+        .collect()
+}
+
+fn append_new_counterexamples(
+    pattern_bank: &mut SimulationPatternBank,
+    all_counterexamples: &mut Vec<Vec<IrBits>>,
+    seen: &mut HashSet<Vec<IrBits>>,
+    counterexamples: Vec<Vec<IrBits>>,
+) {
+    let new_counterexamples: Vec<Vec<IrBits>> = counterexamples
+        .into_iter()
+        .filter(|counterexample| seen.insert(counterexample.clone()))
+        .collect();
+    pattern_bank.append_counterexamples(&new_counterexamples);
+    all_counterexamples.extend(new_counterexamples);
 }
 
 /// Builds substitutions from SAT-proven equivalence sets.
@@ -444,10 +547,10 @@ pub fn fraig_optimize_with_backend_and_options(
         return Ok((f.clone(), DidConverge::No, Vec::new()));
     }
 
-    let simulation_patterns =
+    let fraig_start = Instant::now();
+    let simulation_start = Instant::now();
+    let mut simulation_patterns =
         SimulationPatternBank::with_random_samples(f, input_sample_count, rng);
-    let equiv_classes =
-        propose_equivalence_classes_with_constant_from_patterns(f, &simulation_patterns);
     let live_nodes: Vec<AigRef> = f
         .gates
         .iter()
@@ -455,38 +558,125 @@ pub fn fraig_optimize_with_backend_and_options(
         .map(|(id, _)| AigRef { id })
         .collect();
     let depth_stats = get_gate_depth(f, &live_nodes);
-    let sorted_equiv_classes = sort_equiv_classes_by_depth(&equiv_classes, &depth_stats);
-    let class_refs: Vec<&[EquivNode]> = sorted_equiv_classes.iter().map(Vec::as_slice).collect();
+    let initial_equiv_classes = propose_equivalence_classes_from_patterns(f, &simulation_patterns);
+    let simulation_seconds = simulation_start.elapsed().as_secs_f64();
     log::info!(
-        "fraig_optimize: validating {} classes in one pass",
-        class_refs.len()
+        "fraig simulation and class proposal: seconds={:.6}, samples={}, classes={}",
+        simulation_seconds,
+        simulation_patterns.sample_count(),
+        initial_equiv_classes.len(),
     );
-    let validation_result =
-        validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
+    let proposed_equiv_class_count = initial_equiv_classes.len();
+    let mut all_counterexamples = Vec::new();
+    let mut counterexample_seen = HashSet::new();
+
+    let constant_candidates =
+        normalized_constant_candidates(&initial_equiv_classes, &simulation_patterns, &depth_stats);
+    let final_validation = if matches!(
+        validation_backend,
+        GateFormalBackend::Cadical | GateFormalBackend::Varisat
+    ) {
+        let ordinary_classes = select_and_sort_equivalence_classes(
+            &initial_equiv_classes,
+            &simulation_patterns,
+            /* include_normalized_constants= */ false,
+            &HashSet::new(),
+            &depth_stats,
+        );
+        let full_result = validate_full_graph_fraig_with_grouped_constants_and_options(
             f,
-            &class_refs,
+            &constant_candidates,
+            &ordinary_classes,
+            FRAIG_CONSTANT_GROUP_SIZE,
             validation_backend,
             gate_formal_options,
         )?;
+        log::info!(
+            "fraig single-session full-graph validation: {:?}",
+            full_result.stat
+        );
+        let mut validation = full_result.validation;
+        append_new_counterexamples(
+            &mut simulation_patterns,
+            &mut all_counterexamples,
+            &mut counterexample_seen,
+            std::mem::take(&mut validation.cex_inputs),
+        );
+        validation
+    } else {
+        let constant_result = validate_constant_groups_with_backend_and_options(
+            f,
+            &constant_candidates,
+            FRAIG_CONSTANT_GROUP_SIZE,
+            validation_backend,
+            gate_formal_options,
+        )?;
+        log::info!(
+            "fraig grouped constants first: candidates={}, queries={}, proven={}, disproven={}, interrupted_groups={}, unresolved={}, counterexamples={}",
+            constant_candidates.len(),
+            constant_result.proof_query_count,
+            constant_result.proven_candidate_count,
+            constant_result.disproven_candidate_count,
+            constant_result.interrupted_group_count,
+            constant_result.unresolved_candidate_count,
+            constant_result.cex_inputs.len(),
+        );
+        let constant_proven_sets = constant_result.proven_equiv_sets;
+        append_new_counterexamples(
+            &mut simulation_patterns,
+            &mut all_counterexamples,
+            &mut counterexample_seen,
+            constant_result.cex_inputs,
+        );
+        let refined_equiv_classes =
+            propose_equivalence_classes_from_patterns(f, &simulation_patterns);
+        let proven_constant_refs = proven_nonliteral_refs(&constant_proven_sets);
+        let sorted_classes = select_and_sort_equivalence_classes(
+            &refined_equiv_classes,
+            &simulation_patterns,
+            /* include_normalized_constants= */ true,
+            &proven_constant_refs,
+            &depth_stats,
+        );
+        let class_refs: Vec<&[EquivNode]> = sorted_classes.iter().map(Vec::as_slice).collect();
+        let mut validation =
+            validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
+                f,
+                &class_refs,
+                validation_backend,
+                gate_formal_options,
+            )?;
+        validation.proven_equiv_sets.extend(constant_proven_sets);
+        append_new_counterexamples(
+            &mut simulation_patterns,
+            &mut all_counterexamples,
+            &mut counterexample_seen,
+            std::mem::take(&mut validation.cex_inputs),
+        );
+        validation
+    };
 
-    let mut counterexample_seen = HashSet::new();
-    for counterexample in validation_result.cex_inputs {
-        counterexample_seen.insert(counterexample);
-    }
     let replacements =
-        build_replacements_from_proven_sets(&depth_stats, validation_result.proven_equiv_sets);
+        build_replacements_from_proven_sets(&depth_stats, final_validation.proven_equiv_sets);
     let stat = FraigIterationStat {
         gate_count: f.gates.len(),
-        counterexample_count: counterexample_seen.len(),
-        proposed_equiv_classes: equiv_classes.len(),
+        counterexample_count: all_counterexamples.len(),
+        proposed_equiv_classes: proposed_equiv_class_count,
         replacements_count: replacements.len(),
     };
-    log::info!("fraig_optimize: one-pass result: {stat:?}");
+    log::info!("fraig_optimize: grouped-constant result: {stat:?}");
+    let rewrite_start = Instant::now();
     let optimized_fn = if replacements.len() == 0 {
         f.clone()
     } else {
         bulk_replace(f, &replacements, GateBuilderOptions::opt())
     };
+    log::info!(
+        "fraig timing summary: total_seconds={:.6}, simulation_seconds={:.6}, rewrite_seconds={:.6}",
+        fraig_start.elapsed().as_secs_f64(),
+        simulation_seconds,
+        rewrite_start.elapsed().as_secs_f64(),
+    );
     Ok((optimized_fn, DidConverge::Yes(1), vec![stat]))
 }
 

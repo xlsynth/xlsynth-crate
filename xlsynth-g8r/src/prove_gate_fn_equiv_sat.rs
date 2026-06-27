@@ -13,11 +13,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 use std::ops::Not;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output};
 use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::topo::extract_cone;
+use crate::aig_sim::gate_sim;
 use crate::propose_equiv::EquivNode;
 pub use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use varisat::ExtendFormula;
@@ -56,6 +57,60 @@ pub struct ValidationResult {
     /// Number of proof queries that exhausted their deterministic resource
     /// limit and were conservatively left unresolved.
     pub interrupted_proof_count: usize,
+}
+
+/// Result of proving normalized simulation-constant candidates in groups.
+pub struct ConstantGroupValidationResult {
+    /// Sets proven equal to false; each set contains the false literal followed
+    /// by every candidate proved by one grouped query.
+    pub proven_equiv_sets: Vec<Vec<EquivNode>>,
+
+    /// Counterexamples that disproved at least one candidate in a group.
+    pub cex_inputs: Vec<Vec<IrBits>>,
+
+    /// Number of grouped formal queries issued.
+    pub proof_query_count: usize,
+
+    /// Number of grouped queries left unresolved by the resource limit.
+    pub interrupted_group_count: usize,
+
+    /// Number of normalized candidates proved constant.
+    pub proven_candidate_count: usize,
+
+    /// Number of normalized candidates disproved by a SAT model.
+    pub disproven_candidate_count: usize,
+
+    /// Number of candidates left unresolved, including a final singleton.
+    pub unresolved_candidate_count: usize,
+}
+
+/// Statistics for a single-solver FRAIG validation run.
+#[derive(Debug, Clone)]
+pub struct FullGraphFraigValidationStat {
+    pub solver_build_seconds: f64,
+    pub constant_seconds: f64,
+    pub equivalence_seconds: f64,
+    pub constant_candidate_count: usize,
+    pub constant_group_query_count: usize,
+    pub constant_interrupted_group_count: usize,
+    pub constant_deferred_candidate_count: usize,
+    pub constant_proven_candidate_count: usize,
+    pub constant_disproven_candidate_count: usize,
+    pub constant_counterexample_count: usize,
+    pub equivalence_class_visit_count: usize,
+    pub equivalence_proof_query_count: usize,
+    pub equivalence_interrupted_proof_count: usize,
+    pub interrupted_relation_skip_count: usize,
+    pub virtual_proof_count: usize,
+    pub equivalence_counterexample_count: usize,
+    pub initial_class_histogram: BTreeMap<usize, usize>,
+    pub post_constant_class_histogram: BTreeMap<usize, usize>,
+}
+
+/// Result of grouped constant proving and ordinary FRAIG in one SAT session.
+pub struct FullGraphFraigValidationResult {
+    pub validation: ValidationResult,
+    pub stat: FullGraphFraigValidationStat,
 }
 
 #[derive(Debug)]
@@ -587,6 +642,91 @@ impl VirtualEquivalence {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CanonicalEquivRelation {
+    lower_node_id: usize,
+    upper_node_id: usize,
+    inversion_parity: bool,
+}
+
+impl CanonicalEquivRelation {
+    /// Canonicalizes operand order and collapses `a == b` with `!a == !b`.
+    fn new(lhs: EquivNode, rhs: EquivNode) -> Self {
+        let lhs_id = lhs.aig_ref().id;
+        let rhs_id = rhs.aig_ref().id;
+        let (lower_node_id, upper_node_id) = if lhs_id <= rhs_id {
+            (lhs_id, rhs_id)
+        } else {
+            (rhs_id, lhs_id)
+        };
+        Self {
+            lower_node_id,
+            upper_node_id,
+            inversion_parity: lhs.is_inverted() ^ rhs.is_inverted(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MutableEquivalenceClass {
+    nodes: Vec<EquivNode>,
+    is_normalized_constant: bool,
+}
+
+fn class_size_histogram(
+    equiv_classes: impl IntoIterator<Item = impl AsRef<[EquivNode]>>,
+) -> BTreeMap<usize, usize> {
+    let mut histogram = BTreeMap::new();
+    for equiv_class in equiv_classes {
+        *histogram.entry(equiv_class.as_ref().len()).or_default() += 1;
+    }
+    histogram
+}
+
+fn split_mutable_class_by_model<Lit: Copy>(
+    equiv_class: MutableEquivalenceClass,
+    model: &impl SatModel<Lit>,
+    aig_ref_to_lit: &HashMap<AigRef, Lit>,
+) -> Vec<MutableEquivalenceClass> {
+    let mut false_values = Vec::new();
+    let mut true_values = Vec::new();
+    for node in equiv_class.nodes {
+        if model_value_for_equiv_node(model, aig_ref_to_lit, node) {
+            true_values.push(node);
+        } else {
+            false_values.push(node);
+        }
+    }
+
+    let mut split = Vec::new();
+    if false_values.len() > 1 {
+        split.push(MutableEquivalenceClass {
+            nodes: false_values,
+            is_normalized_constant: equiv_class.is_normalized_constant,
+        });
+    }
+    if true_values.len() > 1 {
+        split.push(MutableEquivalenceClass {
+            nodes: true_values,
+            // A true result under a counterexample removes this child from the
+            // normalized zero class, while preserving it as an ordinary class.
+            is_normalized_constant: false,
+        });
+    }
+    split
+}
+
+fn refine_mutable_classes_by_model<Lit: Copy>(
+    equiv_classes: VecDeque<MutableEquivalenceClass>,
+    model: &impl SatModel<Lit>,
+    aig_ref_to_lit: &HashMap<AigRef, Lit>,
+) -> VecDeque<MutableEquivalenceClass> {
+    equiv_classes
+        .into_iter()
+        .flat_map(|equiv_class| split_mutable_class_by_model(equiv_class, model, aig_ref_to_lit))
+        .collect()
+}
+
 fn model_value_for_equiv_node<Lit: Copy>(
     model: &impl SatModel<Lit>,
     aig_ref_to_lit: &HashMap<AigRef, Lit>,
@@ -686,6 +826,522 @@ fn solver_model_to_cex<Lit: Copy, Model: SatModel<Lit>>(
     // Now map_to_inputs should receive a map covering all expected inputs
     let cex = gate_fn.map_to_inputs(inputs_map);
     cex
+}
+
+/// Proves groups of normalized candidates that simulation predicts are false.
+fn validate_constant_groups_with_solver<S: IncrementalSat>(
+    gate_fn: &GateFn,
+    normalized_candidates: &[EquivNode],
+    group_size: usize,
+    solver: &mut S,
+) -> Result<ConstantGroupValidationResult, ValidationError> {
+    assert!(group_size > 1);
+    let mut unique_refs = HashSet::new();
+    debug_assert!(
+        normalized_candidates
+            .iter()
+            .all(|candidate| candidate.aig_ref().id != 0)
+    );
+    debug_assert!(
+        normalized_candidates
+            .iter()
+            .all(|candidate| unique_refs.insert(candidate.aig_ref()))
+    );
+
+    if normalized_candidates.is_empty() {
+        return Ok(ConstantGroupValidationResult {
+            proven_equiv_sets: Vec::new(),
+            cex_inputs: Vec::new(),
+            proof_query_count: 0,
+            interrupted_group_count: 0,
+            proven_candidate_count: 0,
+            disproven_candidate_count: 0,
+            unresolved_candidate_count: 0,
+        });
+    }
+
+    let frontier: Vec<AigRef> = normalized_candidates
+        .iter()
+        .map(EquivNode::aig_ref)
+        .collect();
+    let (cone_gates, cone_inputs) = extract_cone(&frontier, &gate_fn.gates);
+    let aig_ref_to_lit = build_sat_clauses(solver, &cone_gates, &cone_inputs, &gate_fn.gates);
+    let all_primary_inputs: HashSet<AigRef> = gate_fn
+        .inputs
+        .iter()
+        .flat_map(|input_vec| input_vec.bit_vector.iter_lsb_to_msb())
+        .map(|operand| operand.node)
+        .collect();
+    let false_literal = EquivNode::Normal(AigRef { id: 0 });
+    let mut pending: VecDeque<EquivNode> = normalized_candidates.iter().copied().collect();
+    let mut result = ConstantGroupValidationResult {
+        proven_equiv_sets: Vec::new(),
+        cex_inputs: Vec::new(),
+        proof_query_count: 0,
+        interrupted_group_count: 0,
+        proven_candidate_count: 0,
+        disproven_candidate_count: 0,
+        unresolved_candidate_count: 0,
+    };
+
+    while pending.len() > 1 {
+        let query_size = group_size.min(pending.len());
+        let query_group: Vec<EquivNode> = pending.drain(..query_size).collect();
+        let activation = solver.sat_new_lit();
+        let mut clause = Vec::with_capacity(query_group.len() + 1);
+        clause.push(!activation);
+        clause.extend(query_group.iter().map(|candidate| {
+            let base_lit = aig_ref_to_lit[&candidate.aig_ref()];
+            if candidate.is_inverted() {
+                !base_lit
+            } else {
+                base_lit
+            }
+        }));
+        solver.sat_add_clause(&clause);
+        result.proof_query_count += 1;
+
+        match solver.sat_solve_assuming(&[activation]) {
+            Ok(SatSolveResult::Unsat) => {
+                result.proven_candidate_count += query_group.len();
+                let mut proven_set = Vec::with_capacity(query_group.len() + 1);
+                proven_set.push(false_literal);
+                proven_set.extend(query_group);
+                result.proven_equiv_sets.push(proven_set);
+            }
+            Ok(SatSolveResult::Sat) => {
+                let model = solver.sat_model()?;
+                let cex =
+                    solver_model_to_cex(&model, &all_primary_inputs, &aig_ref_to_lit, gate_fn);
+                result.cex_inputs.push(cex);
+
+                let mut refined = VecDeque::new();
+                for candidate in query_group.into_iter().chain(pending.drain(..)) {
+                    if model_value_for_equiv_node(&model, &aig_ref_to_lit, candidate) {
+                        result.disproven_candidate_count += 1;
+                    } else {
+                        refined.push_back(candidate);
+                    }
+                }
+                pending = refined;
+            }
+            Err(ValidationError::CadicalSolveInterrupted) => {
+                // A grouped interruption remains unresolved as a group. It is
+                // deliberately never decomposed into individual retries.
+                result.interrupted_group_count += 1;
+                result.unresolved_candidate_count += query_group.len();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    result.unresolved_candidate_count += pending.len();
+    Ok(result)
+}
+
+/// Implements grouped constant queries for non-incremental formal backends.
+fn validate_constant_groups_with_pairwise_backend(
+    gate_fn: &GateFn,
+    normalized_candidates: &[EquivNode],
+    group_size: usize,
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
+) -> Result<ConstantGroupValidationResult, ValidationError> {
+    assert!(group_size > 1);
+    let false_literal = EquivNode::Normal(AigRef { id: 0 });
+    let all_candidates_fn =
+        gate_fn_with_equiv_outputs(gate_fn, normalized_candidates, "constant_candidates");
+    let mut pending: VecDeque<EquivNode> = normalized_candidates.iter().copied().collect();
+    let mut result = ConstantGroupValidationResult {
+        proven_equiv_sets: Vec::new(),
+        cex_inputs: Vec::new(),
+        proof_query_count: 0,
+        interrupted_group_count: 0,
+        proven_candidate_count: 0,
+        disproven_candidate_count: 0,
+        unresolved_candidate_count: 0,
+    };
+
+    while pending.len() > 1 {
+        let query_size = group_size.min(pending.len());
+        let query_group: Vec<EquivNode> = pending.drain(..query_size).collect();
+        let candidate_fn = gate_fn_with_equiv_outputs(gate_fn, &query_group, "candidates");
+        let false_candidates = vec![false_literal; query_group.len()];
+        let false_fn = gate_fn_with_equiv_outputs(gate_fn, &false_candidates, "false_values");
+        result.proof_query_count += 1;
+        match prove_gate_fn_equiv_with_backend_and_options(
+            &candidate_fn,
+            &false_fn,
+            backend,
+            options,
+        )? {
+            EquivResult::Proved => {
+                result.proven_candidate_count += query_group.len();
+                let mut proven_set = Vec::with_capacity(query_group.len() + 1);
+                proven_set.push(false_literal);
+                proven_set.extend(query_group);
+                result.proven_equiv_sets.push(proven_set);
+            }
+            EquivResult::Disproved(cex) if cex.is_empty() => {
+                // Some backends report inequivalence without a model. The
+                // group is unresolved because no member can be singled out.
+                result.unresolved_candidate_count += query_group.len();
+            }
+            EquivResult::Disproved(cex) => {
+                let simulation = gate_sim::eval(&all_candidates_fn, &cex, gate_sim::Collect::None);
+                let values = &simulation.outputs[0];
+                let value_by_candidate: HashMap<EquivNode, bool> = normalized_candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &candidate)| (candidate, values.get_bit(index).unwrap()))
+                    .collect();
+                result.cex_inputs.push(cex);
+                let mut refined = VecDeque::new();
+                for candidate in query_group.into_iter().chain(pending.drain(..)) {
+                    if value_by_candidate[&candidate] {
+                        result.disproven_candidate_count += 1;
+                    } else {
+                        refined.push_back(candidate);
+                    }
+                }
+                pending = refined;
+            }
+        }
+    }
+    result.unresolved_candidate_count += pending.len();
+    Ok(result)
+}
+
+/// Proves normalized simulation-constant candidates in groups with one shared
+/// SAT encoding of their combined cone.
+pub fn validate_constant_groups_with_backend_and_options(
+    gate_fn: &GateFn,
+    normalized_candidates: &[EquivNode],
+    group_size: usize,
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
+) -> Result<ConstantGroupValidationResult, ValidationError> {
+    if normalized_candidates.is_empty() {
+        return Ok(ConstantGroupValidationResult {
+            proven_equiv_sets: Vec::new(),
+            cex_inputs: Vec::new(),
+            proof_query_count: 0,
+            interrupted_group_count: 0,
+            proven_candidate_count: 0,
+            disproven_candidate_count: 0,
+            unresolved_candidate_count: 0,
+        });
+    }
+    match resolve_equivalence_class_backend(backend)? {
+        GateFormalBackend::Varisat => {
+            let mut solver = varisat::Solver::new();
+            validate_constant_groups_with_solver(
+                gate_fn,
+                normalized_candidates,
+                group_size,
+                &mut solver,
+            )
+        }
+        GateFormalBackend::Cadical => {
+            let mut solver = CadicalSat::new_with_options(options)?;
+            validate_constant_groups_with_solver(
+                gate_fn,
+                normalized_candidates,
+                group_size,
+                &mut solver,
+            )
+        }
+        GateFormalBackend::Z3 | GateFormalBackend::Ir => {
+            validate_constant_groups_with_pairwise_backend(
+                gate_fn,
+                normalized_candidates,
+                group_size,
+                backend,
+                options,
+            )
+        }
+    }
+}
+
+fn validate_full_graph_fraig_with_grouped_constants_with_solver<S: IncrementalSat>(
+    gate_fn: &GateFn,
+    normalized_constant_candidates: &[EquivNode],
+    ordinary_equiv_classes: &[Vec<EquivNode>],
+    constant_group_size: usize,
+    solver: &mut S,
+) -> Result<FullGraphFraigValidationResult, ValidationError> {
+    assert!(constant_group_size > 1);
+    let solver_build_start = Instant::now();
+    let mut frontier: Vec<AigRef> = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+        .map(|operand| operand.node)
+        .collect();
+    frontier.push(AigRef { id: 0 });
+    let (cone_gates, cone_inputs) = extract_cone(&frontier, &gate_fn.gates);
+    let aig_ref_to_lit = build_sat_clauses(solver, &cone_gates, &cone_inputs, &gate_fn.gates);
+    let solver_build_seconds = solver_build_start.elapsed().as_secs_f64();
+    let all_primary_inputs: HashSet<AigRef> = gate_fn
+        .inputs
+        .iter()
+        .flat_map(|input_vec| input_vec.bit_vector.iter_lsb_to_msb())
+        .map(|operand| operand.node)
+        .collect();
+
+    let mut classes = VecDeque::new();
+    if normalized_constant_candidates.len() > 1 {
+        classes.push_back(MutableEquivalenceClass {
+            nodes: normalized_constant_candidates.to_vec(),
+            is_normalized_constant: true,
+        });
+    }
+    classes.extend(
+        ordinary_equiv_classes
+            .iter()
+            .filter(|equiv_class| equiv_class.len() > 1)
+            .cloned()
+            .map(|nodes| MutableEquivalenceClass {
+                nodes,
+                is_normalized_constant: false,
+            }),
+    );
+    let initial_class_histogram = class_size_histogram(
+        classes
+            .iter()
+            .map(|equiv_class| equiv_class.nodes.as_slice()),
+    );
+
+    let false_literal = EquivNode::Normal(AigRef { id: 0 });
+    let mut virtual_equivalence = VirtualEquivalence::new(gate_fn);
+    let mut proven_constant_refs = HashSet::new();
+    let mut constant_pending: VecDeque<EquivNode> =
+        normalized_constant_candidates.iter().copied().collect();
+    let mut all_counterexamples = Vec::new();
+    let mut counterexample_seen = HashSet::new();
+    let mut constant_group_query_count = 0usize;
+    let mut constant_interrupted_group_count = 0usize;
+    let mut constant_deferred_candidate_count = 0usize;
+    let mut constant_proven_candidate_count = 0usize;
+    let mut constant_disproven_candidate_count = 0usize;
+    let mut constant_counterexample_count = 0usize;
+    let constant_start = Instant::now();
+
+    while constant_pending.len() > 1 {
+        let query_size = constant_group_size.min(constant_pending.len());
+        let query_group: Vec<EquivNode> = constant_pending.drain(..query_size).collect();
+        let activation = solver.sat_new_lit();
+        let mut clause = Vec::with_capacity(query_group.len() + 1);
+        clause.push(!activation);
+        clause.extend(query_group.iter().map(|candidate| {
+            let base_lit = aig_ref_to_lit[&candidate.aig_ref()];
+            if candidate.is_inverted() {
+                !base_lit
+            } else {
+                base_lit
+            }
+        }));
+        solver.sat_add_clause(&clause);
+        constant_group_query_count += 1;
+
+        match solver.sat_solve_assuming(&[activation]) {
+            Ok(SatSolveResult::Unsat) => {
+                constant_proven_candidate_count += query_group.len();
+                for candidate in query_group {
+                    proven_constant_refs.insert(candidate.aig_ref());
+                    virtual_equivalence.union_equiv_nodes(false_literal, candidate);
+                }
+            }
+            Ok(SatSolveResult::Sat) => {
+                let model = solver.sat_model()?;
+                let counterexample =
+                    solver_model_to_cex(&model, &all_primary_inputs, &aig_ref_to_lit, gate_fn);
+                if counterexample_seen.insert(counterexample.clone()) {
+                    all_counterexamples.push(counterexample);
+                    constant_counterexample_count += 1;
+                }
+                classes = refine_mutable_classes_by_model(classes, &model, &aig_ref_to_lit);
+
+                let mut refined_pending = VecDeque::new();
+                for candidate in query_group.into_iter().chain(constant_pending.drain(..)) {
+                    if model_value_for_equiv_node(&model, &aig_ref_to_lit, candidate) {
+                        constant_disproven_candidate_count += 1;
+                    } else {
+                        refined_pending.push_back(candidate);
+                    }
+                }
+                constant_pending = refined_pending;
+            }
+            Err(ValidationError::CadicalSolveInterrupted) => {
+                // An interrupted grouped query is deferred wholesale. Its
+                // members remain eligible for node-to-node FRAIG, but are not
+                // retried against the constant literal.
+                constant_interrupted_group_count += 1;
+                constant_deferred_candidate_count += query_group.len();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    constant_deferred_candidate_count += constant_pending.len();
+    let constant_seconds = constant_start.elapsed().as_secs_f64();
+
+    classes = classes
+        .into_iter()
+        .filter_map(|mut equiv_class| {
+            equiv_class
+                .nodes
+                .retain(|node| !proven_constant_refs.contains(&node.aig_ref()));
+            (equiv_class.nodes.len() > 1).then_some(equiv_class)
+        })
+        .collect();
+    let all_nodes: Vec<AigRef> = gate_fn
+        .gates
+        .iter()
+        .enumerate()
+        .map(|(id, _)| AigRef { id })
+        .collect();
+    let depth_stats = get_gate_depth(gate_fn, &all_nodes);
+    let mut classes: Vec<MutableEquivalenceClass> = classes.into();
+    classes.sort_unstable_by_key(|equiv_class| {
+        let representative = equiv_class.nodes[0];
+        (
+            !equiv_class.is_normalized_constant,
+            equiv_node_depth_key(&depth_stats.ref_to_depth, representative),
+            equiv_class.nodes.len(),
+        )
+    });
+    let post_constant_class_histogram = class_size_histogram(
+        classes
+            .iter()
+            .map(|equiv_class| equiv_class.nodes.as_slice()),
+    );
+    let mut pending: VecDeque<MutableEquivalenceClass> = classes.into();
+
+    let equivalence_start = Instant::now();
+    let mut interrupted_relations = HashSet::new();
+    let mut equivalence_class_visit_count = 0usize;
+    let mut equivalence_proof_query_count = 0usize;
+    let mut equivalence_interrupted_proof_count = 0usize;
+    let mut interrupted_relation_skip_count = 0usize;
+    let mut virtual_proof_count = 0usize;
+    let mut equivalence_counterexample_count = 0usize;
+
+    while let Some(equiv_class) = pending.pop_front() {
+        equivalence_class_visit_count += 1;
+        let representative = equiv_class.nodes[0];
+        let mut found_counterexample = false;
+        for &candidate in &equiv_class.nodes[1..] {
+            if virtual_equivalence.prove_by_structure(gate_fn, representative, candidate) {
+                virtual_proof_count += 1;
+                continue;
+            }
+            let relation = CanonicalEquivRelation::new(representative, candidate);
+            if interrupted_relations.contains(&relation) {
+                interrupted_relation_skip_count += 1;
+                continue;
+            }
+
+            let miter = add_miter(solver, &aig_ref_to_lit, representative, candidate);
+            equivalence_proof_query_count += 1;
+            match solver.sat_solve_assuming(&[miter]) {
+                Ok(SatSolveResult::Unsat) => {
+                    virtual_equivalence.union_equiv_nodes(representative, candidate);
+                }
+                Ok(SatSolveResult::Sat) => {
+                    let model = solver.sat_model()?;
+                    let counterexample =
+                        solver_model_to_cex(&model, &all_primary_inputs, &aig_ref_to_lit, gate_fn);
+                    if counterexample_seen.insert(counterexample.clone()) {
+                        all_counterexamples.push(counterexample);
+                        equivalence_counterexample_count += 1;
+                    }
+
+                    let mut classes_to_refine = VecDeque::new();
+                    classes_to_refine.push_back(equiv_class.clone());
+                    classes_to_refine.append(&mut pending);
+                    pending =
+                        refine_mutable_classes_by_model(classes_to_refine, &model, &aig_ref_to_lit);
+                    found_counterexample = true;
+                    break;
+                }
+                Err(ValidationError::CadicalSolveInterrupted) => {
+                    interrupted_relations.insert(relation);
+                    equivalence_interrupted_proof_count += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if found_counterexample {
+            continue;
+        }
+    }
+    let equivalence_seconds = equivalence_start.elapsed().as_secs_f64();
+
+    let validation = ValidationResult {
+        proven_equiv_sets: virtual_equivalence.into_proven_equiv_sets(),
+        cex_inputs: all_counterexamples,
+        proof_query_count: constant_group_query_count + equivalence_proof_query_count,
+        interrupted_proof_count: constant_interrupted_group_count
+            + equivalence_interrupted_proof_count,
+    };
+    let stat = FullGraphFraigValidationStat {
+        solver_build_seconds,
+        constant_seconds,
+        equivalence_seconds,
+        constant_candidate_count: normalized_constant_candidates.len(),
+        constant_group_query_count,
+        constant_interrupted_group_count,
+        constant_deferred_candidate_count,
+        constant_proven_candidate_count,
+        constant_disproven_candidate_count,
+        constant_counterexample_count,
+        equivalence_class_visit_count,
+        equivalence_proof_query_count,
+        equivalence_interrupted_proof_count,
+        interrupted_relation_skip_count,
+        virtual_proof_count,
+        equivalence_counterexample_count,
+        initial_class_histogram,
+        post_constant_class_histogram,
+    };
+    Ok(FullGraphFraigValidationResult { validation, stat })
+}
+
+/// Runs grouped constant proving followed by ordinary FRAIG using one shared
+/// full-live-graph incremental SAT instance.
+pub fn validate_full_graph_fraig_with_grouped_constants_and_options(
+    gate_fn: &GateFn,
+    normalized_constant_candidates: &[EquivNode],
+    ordinary_equiv_classes: &[Vec<EquivNode>],
+    constant_group_size: usize,
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
+) -> Result<FullGraphFraigValidationResult, ValidationError> {
+    match resolve_equivalence_class_backend(backend)? {
+        GateFormalBackend::Varisat => {
+            let mut solver = varisat::Solver::new();
+            validate_full_graph_fraig_with_grouped_constants_with_solver(
+                gate_fn,
+                normalized_constant_candidates,
+                ordinary_equiv_classes,
+                constant_group_size,
+                &mut solver,
+            )
+        }
+        GateFormalBackend::Cadical => {
+            let mut solver = CadicalSat::new_with_options(options)?;
+            validate_full_graph_fraig_with_grouped_constants_with_solver(
+                gate_fn,
+                normalized_constant_candidates,
+                ordinary_equiv_classes,
+                constant_group_size,
+                &mut solver,
+            )
+        }
+        GateFormalBackend::Z3 | GateFormalBackend::Ir => Err(ValidationError::UnsupportedBackend {
+            backend,
+            operation: "single-session full-graph FRAIG",
+        }),
+    }
 }
 
 fn build_gate_fn<S: IncrementalSat>(
@@ -1050,14 +1706,29 @@ fn gate_fn_with_single_output(
     equiv_node: EquivNode,
     output_name: &str,
 ) -> GateFn {
-    let mut operand = AigOperand::from(equiv_node.aig_ref());
-    if equiv_node.is_inverted() {
-        operand = operand.negate();
-    }
+    gate_fn_with_equiv_outputs(gate_fn, &[equiv_node], output_name)
+}
+
+fn gate_fn_with_equiv_outputs(
+    gate_fn: &GateFn,
+    equiv_nodes: &[EquivNode],
+    output_name: &str,
+) -> GateFn {
+    let operands: Vec<AigOperand> = equiv_nodes
+        .iter()
+        .map(|equiv_node| {
+            let operand = AigOperand::from(equiv_node.aig_ref());
+            if equiv_node.is_inverted() {
+                operand.negate()
+            } else {
+                operand
+            }
+        })
+        .collect();
     let mut out = gate_fn.clone();
     out.outputs = vec![Output {
         name: output_name.to_string(),
-        bit_vector: AigBitVector::from_bit(operand),
+        bit_vector: AigBitVector::from_lsb_is_index_0(&operands),
     }];
     out
 }
@@ -1140,6 +1811,34 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
     classes_are_depth_sorted: bool,
     use_virtual_rewrite: bool,
 ) -> Result<ValidationResult, ValidationError> {
+    let mut virtual_equivalence = use_virtual_rewrite.then(|| VirtualEquivalence::new(gate_fn));
+    let mut virtual_proof_count = 0usize;
+    let mut validation_result = validate_equivalence_classes_with_solver_and_virtual_state(
+        gate_fn,
+        equiv_classes,
+        solver,
+        classes_are_depth_sorted,
+        virtual_equivalence.as_mut(),
+        &mut virtual_proof_count,
+    )?;
+    if let Some(equivalence) = virtual_equivalence {
+        validation_result.proven_equiv_sets = equivalence.into_proven_equiv_sets();
+        log::info!(
+            "virtual FRAIG rewrite avoided {} SAT proof queries",
+            virtual_proof_count
+        );
+    }
+    Ok(validation_result)
+}
+
+fn validate_equivalence_classes_with_solver_and_virtual_state<S: IncrementalSat>(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+    solver: &mut S,
+    classes_are_depth_sorted: bool,
+    mut virtual_equivalence: Option<&mut VirtualEquivalence>,
+    virtual_proof_count: &mut usize,
+) -> Result<ValidationResult, ValidationError> {
     // Extract the combined cone for all of the references we're trying to determine
     // equivalence for.
     let mut frontier: Vec<AigRef> = vec![];
@@ -1195,8 +1894,6 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
         sorted_equiv_classes
     };
     let mut counterexample_models: Vec<S::Model> = Vec::new();
-    let mut virtual_equivalence = use_virtual_rewrite.then(|| VirtualEquivalence::new(gate_fn));
-    let mut virtual_proof_count = 0usize;
 
     // Now iterate through the equivalence classes -- for each equivalence class
     // we'll advance a representative and check each next value against it.
@@ -1226,7 +1923,7 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
                     .unwrap_or(false)
                 {
                     known_equiv.push(candidate);
-                    virtual_proof_count += 1;
+                    *virtual_proof_count += 1;
                     continue;
                 }
                 let miter = add_miter(solver, &aig_ref_to_lit, representative, candidate);
@@ -1282,14 +1979,6 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
             validation_result.interrupted_proof_count
         );
     }
-    if let Some(equivalence) = virtual_equivalence {
-        validation_result.proven_equiv_sets = equivalence.into_proven_equiv_sets();
-        log::info!(
-            "virtual FRAIG rewrite avoided {} SAT proof queries",
-            virtual_proof_count
-        );
-    }
-
     Ok(validation_result)
 }
 
@@ -1307,10 +1996,14 @@ mod tests {
     };
 
     use super::{
-        CadicalSat, GateFormalBackend, GateFormalOptions, IncrementalSat, SatModel, SatSolveResult,
-        ValidationError, ValidationResult, validate_equivalence_classes,
+        CadicalSat, CanonicalEquivRelation, GateFormalBackend, GateFormalOptions, IncrementalSat,
+        SatModel, SatSolveResult, ValidationError, ValidationResult,
+        validate_constant_groups_with_backend_and_options, validate_constant_groups_with_solver,
+        validate_equivalence_classes,
         validate_equivalence_classes_presorted_with_virtual_rewrite_and_options,
         validate_equivalence_classes_with_backend, validate_equivalence_classes_with_solver,
+        validate_full_graph_fraig_with_grouped_constants_and_options,
+        validate_full_graph_fraig_with_grouped_constants_with_solver,
     };
     #[allow(unused_imports)]
     use crate::assert_within;
@@ -1406,6 +2099,184 @@ mod tests {
 
         assert!(result.proven_equiv_sets.is_empty());
         assert!(result.cex_inputs.is_empty());
+    }
+
+    #[test]
+    fn test_grouped_constant_proof_refines_all_remaining_candidates() {
+        let mut builder = GateBuilder::new(
+            "grouped_constants".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let input = *builder.add_input("input".to_string(), 1).get_lsb(0);
+        let constant_zero = builder.add_and_binary(input, input.negate());
+        let constant_one = builder.add_and_binary(constant_zero.negate(), constant_zero.negate());
+        builder.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[input, constant_zero, constant_one]),
+        );
+        let gate_fn = builder.build();
+        let candidates = [
+            EquivNode::Normal(constant_zero.node),
+            EquivNode::Inverted(constant_one.node),
+            EquivNode::Normal(input.node),
+        ];
+
+        let result = validate_constant_groups_with_backend_and_options(
+            &gate_fn,
+            &candidates,
+            8,
+            GateFormalBackend::Varisat,
+            GateFormalOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result.proof_query_count, 2);
+        assert_eq!(result.proven_candidate_count, 2);
+        assert_eq!(result.disproven_candidate_count, 1);
+        assert_eq!(result.unresolved_candidate_count, 0);
+        assert_eq!(result.cex_inputs.len(), 1);
+        assert_eq!(result.proven_equiv_sets.len(), 1);
+        assert_eq!(result.proven_equiv_sets[0].len(), 3);
+    }
+
+    #[test]
+    fn test_grouped_constant_interruption_is_not_retried_individually() {
+        let setup = setup_graph_with_redundancies();
+        let candidates = [
+            EquivNode::Normal(setup.inner0.node),
+            EquivNode::Normal(setup.inner1.node),
+            EquivNode::Normal(setup.outer0.node),
+        ];
+        let mut solver = InterruptingSat { next_lit: 0 };
+
+        let result =
+            validate_constant_groups_with_solver(&setup.g, &candidates, 8, &mut solver).unwrap();
+
+        assert_eq!(result.proof_query_count, 1);
+        assert_eq!(result.interrupted_group_count, 1);
+        assert_eq!(result.unresolved_candidate_count, candidates.len());
+        assert!(result.proven_equiv_sets.is_empty());
+        assert!(result.cex_inputs.is_empty());
+    }
+
+    #[test]
+    fn canonical_relation_collapses_inverse_and_operand_order() {
+        let a = crate::aig::AigRef { id: 3 };
+        let b = crate::aig::AigRef { id: 7 };
+        let normal = CanonicalEquivRelation::new(EquivNode::Normal(a), EquivNode::Normal(b));
+
+        assert_eq!(
+            normal,
+            CanonicalEquivRelation::new(EquivNode::Inverted(a), EquivNode::Inverted(b))
+        );
+        assert_eq!(
+            normal,
+            CanonicalEquivRelation::new(EquivNode::Normal(b), EquivNode::Normal(a))
+        );
+        assert_ne!(
+            normal,
+            CanonicalEquivRelation::new(EquivNode::Normal(a), EquivNode::Inverted(b))
+        );
+    }
+
+    #[test]
+    fn full_graph_constant_counterexample_refines_ordinary_classes() {
+        let mut builder = GateBuilder::new(
+            "full_graph_global_refinement".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        let constant_zero_a = builder.add_and_binary(a, a.negate());
+        let constant_zero_b = builder.add_and_binary(b, b.negate());
+        builder.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[a, b, constant_zero_a, constant_zero_b]),
+        );
+        let gate_fn = builder.build();
+        let constant_candidates = [
+            EquivNode::Normal(constant_zero_a.node),
+            EquivNode::Normal(constant_zero_b.node),
+            EquivNode::Normal(a.node),
+        ];
+        let ordinary_classes = vec![vec![EquivNode::Normal(a.node), EquivNode::Inverted(a.node)]];
+
+        let result = validate_full_graph_fraig_with_grouped_constants_and_options(
+            &gate_fn,
+            &constant_candidates,
+            &ordinary_classes,
+            8,
+            GateFormalBackend::Varisat,
+            GateFormalOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result.stat.constant_group_query_count, 2);
+        assert_eq!(result.stat.constant_counterexample_count, 1);
+        assert_eq!(result.stat.constant_proven_candidate_count, 2);
+        assert_eq!(result.stat.constant_disproven_candidate_count, 1);
+        assert_eq!(result.stat.equivalence_proof_query_count, 0);
+        assert!(result.stat.post_constant_class_histogram.is_empty());
+    }
+
+    #[test]
+    fn full_graph_fraig_does_not_retry_interrupted_inverse_relation() {
+        let mut builder = GateBuilder::new(
+            "full_graph_no_retry".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        builder.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[a, b]),
+        );
+        let gate_fn = builder.build();
+        let ordinary_classes = vec![
+            vec![EquivNode::Normal(a.node), EquivNode::Normal(b.node)],
+            vec![EquivNode::Inverted(a.node), EquivNode::Inverted(b.node)],
+        ];
+        let mut solver = InterruptingSat { next_lit: 0 };
+
+        let result = validate_full_graph_fraig_with_grouped_constants_with_solver(
+            &gate_fn,
+            &[],
+            &ordinary_classes,
+            8,
+            &mut solver,
+        )
+        .unwrap();
+
+        assert_eq!(result.stat.equivalence_proof_query_count, 1);
+        assert_eq!(result.stat.equivalence_interrupted_proof_count, 1);
+        assert_eq!(result.stat.interrupted_relation_skip_count, 1);
+    }
+
+    #[test]
+    fn full_graph_fraig_defers_an_interrupted_constant_group_wholesale() {
+        let setup = setup_graph_with_redundancies();
+        let candidates = [
+            EquivNode::Normal(setup.inner0.node),
+            EquivNode::Normal(setup.inner1.node),
+            EquivNode::Normal(setup.outer0.node),
+        ];
+        let mut solver = InterruptingSat { next_lit: 0 };
+
+        let result = validate_full_graph_fraig_with_grouped_constants_with_solver(
+            &setup.g,
+            &candidates,
+            &[],
+            8,
+            &mut solver,
+        )
+        .unwrap();
+
+        assert_eq!(result.stat.constant_group_query_count, 1);
+        assert_eq!(result.stat.constant_interrupted_group_count, 1);
+        assert_eq!(result.stat.constant_deferred_candidate_count, 3);
+        // The deferred candidates remain eligible for ordinary node-to-node
+        // FRAIG, but no candidate-to-literal singleton query is issued.
+        assert_eq!(result.stat.equivalence_proof_query_count, 1);
     }
 
     #[test]
