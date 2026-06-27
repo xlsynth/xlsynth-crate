@@ -15,7 +15,9 @@
 //! for now.
 
 use rand::Rng;
-use std::{collections::HashSet, error::Error};
+use std::collections::{BTreeMap, HashSet};
+use std::error::Error;
+use std::time::Instant;
 use xlsynth::IrBits;
 
 use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
@@ -23,8 +25,7 @@ use crate::aig::get_summary_stats::{GateDepthStats, get_gate_depth};
 use crate::aig::{AigOperand, AigRef, GateFn};
 use crate::{
     gate_builder::GateBuilderOptions,
-    propose_equiv::EquivNode,
-    propose_equiv::propose_equivalence_classes,
+    propose_equiv::{EquivNode, SimulationSignature, propose_equivalence_classes},
     prove_gate_fn_equiv_common::GateFormalBackend,
     prove_gate_fn_equiv_sat::{
         GateFormalOptions, validate_equivalence_classes_presorted_with_backend_and_options,
@@ -73,6 +74,37 @@ pub struct FraigIterationStat {
     pub counterexample_count: usize,
     pub proposed_equiv_classes: usize,
     pub replacements_count: usize,
+}
+
+/// Statistics for the one-shot simulation-constant sweep before FRAIG.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SimulationConstantSweepStat {
+    pub gate_count_before: usize,
+    pub gate_count_after: usize,
+    pub candidate_count: usize,
+    pub initially_zero_candidate_count: usize,
+    pub initially_one_candidate_count: usize,
+    pub proof_query_count: usize,
+    pub interrupted_proof_count: usize,
+    pub counterexample_count: usize,
+    pub proven_zero_count: usize,
+    pub proven_one_count: usize,
+    pub replacement_count: usize,
+    pub simulation_seconds: f64,
+    pub proof_seconds: f64,
+}
+
+/// Result of proving and replacing simulation-constant AIG nodes.
+pub struct SimulationConstantSweepResult {
+    pub gate_fn: GateFn,
+    pub stat: SimulationConstantSweepStat,
+    pub counterexamples: Vec<Vec<IrBits>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimulationConstantTarget {
+    node_ref: AigRef,
+    observed_value: bool,
 }
 
 impl Into<crate::result_proto::FraigIterationStat> for FraigIterationStat {
@@ -192,6 +224,161 @@ fn build_replacements_from_proven_sets(
     replacements
 }
 
+/// Uses one full-graph SAT instance to prove simulation-constant nodes one at
+/// a time, then replaces all proven constants in one graph rebuild.
+pub fn sweep_simulation_constants_with_backend_and_options(
+    gate_fn: &GateFn,
+    input_sample_count: usize,
+    validation_backend: GateFormalBackend,
+    gate_formal_options: GateFormalOptions,
+    rng: &mut impl Rng,
+) -> Result<SimulationConstantSweepResult, Box<dyn Error>> {
+    let simulation_start = Instant::now();
+    let equiv_classes = propose_equivalence_classes(gate_fn, input_sample_count, rng, &[]);
+    let simulation_seconds = simulation_start.elapsed().as_secs_f64();
+
+    let mut targets_by_ref: BTreeMap<AigRef, bool> = BTreeMap::new();
+    if input_sample_count != 0 {
+        let zero_signature = SimulationSignature::constant_value(false, input_sample_count);
+        if let Some(zero_class) = equiv_classes.get(&zero_signature) {
+            for equiv_node in zero_class {
+                let node_ref = equiv_node.aig_ref();
+                if node_ref.id != 0 {
+                    targets_by_ref
+                        .entry(node_ref)
+                        .or_insert(equiv_node.is_inverted());
+                }
+            }
+        }
+    }
+    let targets: Vec<SimulationConstantTarget> = targets_by_ref
+        .into_iter()
+        .map(|(node_ref, observed_value)| SimulationConstantTarget {
+            node_ref,
+            observed_value,
+        })
+        .collect();
+    let initially_zero_candidate_count = targets
+        .iter()
+        .filter(|target| !target.observed_value)
+        .count();
+    let initially_one_candidate_count = targets.len() - initially_zero_candidate_count;
+
+    if targets.is_empty() {
+        return Ok(SimulationConstantSweepResult {
+            gate_fn: gate_fn.clone(),
+            stat: SimulationConstantSweepStat {
+                gate_count_before: gate_fn.gates.len(),
+                gate_count_after: gate_fn.gates.len(),
+                candidate_count: 0,
+                initially_zero_candidate_count: 0,
+                initially_one_candidate_count: 0,
+                proof_query_count: 0,
+                interrupted_proof_count: 0,
+                counterexample_count: 0,
+                proven_zero_count: 0,
+                proven_one_count: 0,
+                replacement_count: 0,
+                simulation_seconds,
+                proof_seconds: 0.0,
+            },
+            counterexamples: Vec::new(),
+        });
+    }
+
+    let false_literal = EquivNode::Normal(AigRef { id: 0 });
+    // The output singletons force the combined cone to contain the complete
+    // live graph. They issue no proof queries themselves.
+    let mut classes: Vec<Vec<EquivNode>> = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+        .map(|operand| {
+            vec![if operand.negated {
+                EquivNode::Inverted(operand.node)
+            } else {
+                EquivNode::Normal(operand.node)
+            }]
+        })
+        .collect();
+    classes.extend(targets.iter().map(|target| {
+        let normalized_target = if target.observed_value {
+            EquivNode::Inverted(target.node_ref)
+        } else {
+            EquivNode::Normal(target.node_ref)
+        };
+        vec![false_literal, normalized_target]
+    }));
+    let class_refs: Vec<&[EquivNode]> = classes.iter().map(Vec::as_slice).collect();
+    let proof_start = Instant::now();
+    let validation = validate_equivalence_classes_presorted_with_backend_and_options(
+        gate_fn,
+        &class_refs,
+        validation_backend,
+        gate_formal_options,
+    )?;
+    let proof_seconds = proof_start.elapsed().as_secs_f64();
+
+    let mut proven_constant_refs = HashSet::new();
+    for proven_set in validation.proven_equiv_sets {
+        for equiv_node in proven_set {
+            if equiv_node.aig_ref().id != 0 {
+                proven_constant_refs.insert(equiv_node.aig_ref());
+            }
+        }
+    }
+    let mut counterexample_seen = HashSet::new();
+    let counterexamples: Vec<Vec<IrBits>> = validation
+        .cex_inputs
+        .into_iter()
+        .filter(|counterexample| counterexample_seen.insert(counterexample.clone()))
+        .collect();
+
+    let constant_false = AigOperand::from(AigRef { id: 0 });
+    let mut replacements = SubstitutionMap::new();
+    let mut proven_zero_count = 0usize;
+    let mut proven_one_count = 0usize;
+    for target in &targets {
+        if !proven_constant_refs.contains(&target.node_ref) {
+            continue;
+        }
+        if target.observed_value {
+            proven_one_count += 1;
+            replacements.add(target.node_ref, constant_false.negate());
+        } else {
+            proven_zero_count += 1;
+            replacements.add(target.node_ref, constant_false);
+        }
+    }
+    let replacement_count = replacements.len();
+    let swept_fn = if replacement_count == 0 {
+        gate_fn.clone()
+    } else {
+        bulk_replace(gate_fn, &replacements, GateBuilderOptions::opt())
+    };
+    let stat = SimulationConstantSweepStat {
+        gate_count_before: gate_fn.gates.len(),
+        gate_count_after: swept_fn.gates.len(),
+        candidate_count: targets.len(),
+        initially_zero_candidate_count,
+        initially_one_candidate_count,
+        proof_query_count: validation.proof_query_count,
+        interrupted_proof_count: validation.interrupted_proof_count,
+        counterexample_count: counterexamples.len(),
+        proven_zero_count,
+        proven_one_count,
+        replacement_count,
+        simulation_seconds,
+        proof_seconds,
+    };
+    log::info!("pre-fraig simulation-constant sweep: {stat:?}");
+    Ok(SimulationConstantSweepResult {
+        gate_fn: swept_fn,
+        stat,
+        counterexamples,
+    })
+}
+
 /// Runs FRAIG using the default validation backend.
 pub fn fraig_optimize(
     f: &GateFn,
@@ -239,6 +426,7 @@ pub fn fraig_optimize_with_backend_and_options(
     let mut current_fn = f.clone();
     let mut counterexample_seen: HashSet<Vec<IrBits>> = HashSet::new();
     let mut counterexamples: Vec<Vec<IrBits>> = Vec::new();
+    let mut ran_simulation_constant_sweep = false;
     // Initialize iteration stats collection
     let mut iteration_stats: Vec<FraigIterationStat> = Vec::new();
     loop {
@@ -255,6 +443,27 @@ pub fn fraig_optimize_with_backend_and_options(
             }
             IterationBounds::ToConvergence => {
                 // Keep going!
+            }
+        }
+        if !ran_simulation_constant_sweep {
+            ran_simulation_constant_sweep = true;
+            if matches!(
+                validation_backend,
+                GateFormalBackend::Cadical | GateFormalBackend::Varisat
+            ) {
+                let sweep = sweep_simulation_constants_with_backend_and_options(
+                    &current_fn,
+                    input_sample_count,
+                    validation_backend,
+                    gate_formal_options,
+                    rng,
+                )?;
+                for counterexample in sweep.counterexamples {
+                    if counterexample_seen.insert(counterexample.clone()) {
+                        counterexamples.push(counterexample);
+                    }
+                }
+                current_fn = sweep.gate_fn;
             }
         }
         let equiv_classes =
@@ -370,11 +579,54 @@ mod tests {
     #[allow(unused_imports)]
     use crate::assert_within;
     use crate::{
-        aig::get_summary_stats::get_summary_stats, check_equivalence, gate_builder::GateBuilder,
+        aig::{AigBitVector, get_summary_stats::get_summary_stats},
+        aig_sim::gate_sim,
+        check_equivalence,
+        gate_builder::GateBuilder,
         test_utils::setup_padded_graph_with_equal_depth_opposite_polarity,
     };
     use rand::SeedableRng;
     use rand_xoshiro::Xoshiro256PlusPlus;
+
+    #[test]
+    fn simulation_constant_sweep_replaces_only_proven_constants() {
+        let mut builder =
+            GateBuilder::new("constant_sweep".to_string(), GateBuilderOptions::no_opt());
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        let constant_zero = builder.add_and_binary(a, a.negate());
+        let constant_one = builder.add_and_binary(constant_zero.negate(), constant_zero.negate());
+        let input_dependent = builder.add_and_binary(a, b);
+        builder.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[constant_zero, constant_one, input_dependent]),
+        );
+        let gate_fn = builder.build();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        let result = sweep_simulation_constants_with_backend_and_options(
+            &gate_fn,
+            1,
+            GateFormalBackend::Cadical,
+            GateFormalOptions::default().with_cadical_terminate_limit(100),
+            &mut rng,
+        )
+        .unwrap();
+
+        assert_eq!(result.stat.candidate_count, 3);
+        assert_eq!(result.stat.proven_zero_count, 1);
+        assert_eq!(result.stat.proven_one_count, 1);
+        assert_eq!(result.stat.replacement_count, 2);
+        assert_eq!(result.stat.counterexample_count, 1);
+        assert!(result.stat.gate_count_after < result.stat.gate_count_before);
+        for a in [false, true] {
+            for b in [false, true] {
+                let inputs = [IrBits::bool(a), IrBits::bool(b)];
+                let original = gate_sim::eval(&gate_fn, &inputs, gate_sim::Collect::None);
+                let swept = gate_sim::eval(&result.gate_fn, &inputs, gate_sim::Collect::None);
+                assert_eq!(original.outputs, swept.outputs);
+            }
+        }
+    }
 
     #[test]
     fn test_equiv_class_with_equal_depth_and_opposite_polarity_canonicalizes() {

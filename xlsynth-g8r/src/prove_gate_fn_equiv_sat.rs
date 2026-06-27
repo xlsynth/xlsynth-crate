@@ -49,6 +49,13 @@ pub struct ValidationResult {
     /// that these can be used as concrete stimulus for distinguishing proposals
     /// in subsequent iterations.
     pub cex_inputs: Vec<Vec<IrBits>>,
+
+    /// Number of formal proof queries issued while validating the classes.
+    pub proof_query_count: usize,
+
+    /// Number of proof queries that exhausted their deterministic resource
+    /// limit and were conservatively left unresolved.
+    pub interrupted_proof_count: usize,
 }
 
 #[derive(Debug)]
@@ -856,6 +863,8 @@ fn validate_equivalence_classes_pairwise_with_backend(
     let mut validation_result = ValidationResult {
         proven_equiv_sets: Vec::new(),
         cex_inputs: Vec::new(),
+        proof_query_count: 0,
+        interrupted_proof_count: 0,
     };
     for equiv_class in sorted_equiv_classes {
         let mut known_equiv = vec![equiv_class[0]];
@@ -864,6 +873,7 @@ fn validate_equivalence_classes_pairwise_with_backend(
             let representative_fn =
                 gate_fn_with_single_output(gate_fn, representative, "representative");
             let candidate_fn = gate_fn_with_single_output(gate_fn, candidate, "candidate");
+            validation_result.proof_query_count += 1;
             match prove_gate_fn_equiv_with_backend_and_options(
                 &representative_fn,
                 &candidate_fn,
@@ -918,6 +928,8 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
     let mut validation_result = ValidationResult {
         proven_equiv_sets: Vec::new(),
         cex_inputs: Vec::new(),
+        proof_query_count: 0,
+        interrupted_proof_count: 0,
     };
     let sorted_equiv_classes: Vec<Vec<EquivNode>> = if classes_are_depth_sorted {
         equiv_classes
@@ -946,7 +958,6 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
         sorted_equiv_classes
     };
     let mut counterexample_models: Vec<S::Model> = Vec::new();
-    let mut interrupted_proof_count = 0usize;
 
     // Now iterate through the equivalence classes -- for each equivalence class
     // we'll advance a representative and check each next value against it.
@@ -972,6 +983,7 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
 
                 // Assume the miter output is true, which asks for a counterexample where
                 // the candidate is unequal to the representative.
+                validation_result.proof_query_count += 1;
                 match solver.sat_solve_assuming(&[miter]) {
                     Ok(SatSolveResult::Unsat) => {
                         // No counterexample found, expand the known equivalent set.
@@ -999,7 +1011,7 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
                     Err(ValidationError::CadicalSolveInterrupted) => {
                         // A resource-limited proof is inconclusive. Leaving the
                         // candidate out of the proven set preserves correctness.
-                        interrupted_proof_count += 1;
+                        validation_result.interrupted_proof_count += 1;
                     }
                     Err(e) => return Err(e),
                 }
@@ -1011,10 +1023,10 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
         }
     }
 
-    if interrupted_proof_count != 0 {
+    if validation_result.interrupted_proof_count != 0 {
         log::info!(
             "equivalence-class validation skipped {} resource-limited candidate proofs as unproven",
-            interrupted_proof_count
+            validation_result.interrupted_proof_count
         );
     }
 

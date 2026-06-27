@@ -68,6 +68,25 @@ impl SimulationSignature {
         );
         self
     }
+
+    /// Returns the signature produced by a constant value over `total_samples`.
+    pub fn constant_value(value: bool, total_samples: usize) -> Self {
+        let mut signature = Self::new();
+        let mut remaining_samples = total_samples;
+        let mut batch_index = 0u64;
+        while remaining_samples > 0 {
+            let valid_lanes = min(remaining_samples, SIMD_LANES);
+            let words = if value {
+                lane_mask(valid_lanes)
+            } else {
+                [0u64; 4]
+            };
+            signature.update_words(words, batch_index);
+            remaining_samples -= valid_lanes;
+            batch_index += 1;
+        }
+        signature.finalize(total_samples)
+    }
 }
 
 /// Represents a node within a proposed equivalence class, indicating whether
