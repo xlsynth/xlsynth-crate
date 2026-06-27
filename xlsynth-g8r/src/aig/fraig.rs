@@ -33,6 +33,7 @@ use crate::{
     prove_gate_fn_equiv_common::GateFormalBackend,
     prove_gate_fn_equiv_sat::{
         GateFormalOptions, validate_equivalence_classes_presorted_with_backend_and_options,
+        validate_equivalence_classes_presorted_with_virtual_rewrite_and_options,
     },
 };
 
@@ -460,12 +461,13 @@ pub fn fraig_optimize_with_backend_and_options(
         "fraig_optimize: validating {} classes in one pass",
         class_refs.len()
     );
-    let validation_result = validate_equivalence_classes_presorted_with_backend_and_options(
-        f,
-        &class_refs,
-        validation_backend,
-        gate_formal_options,
-    )?;
+    let validation_result =
+        validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
+            f,
+            &class_refs,
+            validation_backend,
+            gate_formal_options,
+        )?;
 
     let mut counterexample_seen = HashSet::new();
     for counterexample in validation_result.cex_inputs {
