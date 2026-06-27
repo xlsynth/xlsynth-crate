@@ -318,6 +318,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("cut_db_rewrite")
+                .long("cut-db-rewrite")
+                .value_name("BOOL")
+                .help("Run cut-db rewrite optimization.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("toggle_sample_count")
                 .long("toggle-sample-count")
                 .value_name("N")
@@ -567,6 +575,7 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             .get_one::<f64>("graph_logical_effort_beta2")
             .copied()
             .unwrap_or(defaults.graph_logical_effort_beta2),
+        cut_db_rewrite: parse_cli_bool(matches, "cut_db_rewrite", defaults.cut_db_rewrite),
         cut_db_enable_large_cone_rewrite: defaults.cut_db_enable_large_cone_rewrite,
         cut_db_rewrite_mode: defaults.cut_db_rewrite_mode,
         toggle_sample_count: matches

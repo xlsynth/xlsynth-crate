@@ -42,6 +42,10 @@ fn default_cadical_terminate_limit() -> u32 {
     DEFAULT_CADICAL_TERMINATE_LIMIT
 }
 
+fn default_cut_db_rewrite() -> bool {
+    true
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct Ir2GatesSummaryStats {
     pub live_nodes: usize,
@@ -244,6 +248,9 @@ pub struct CanonicalG8rOptions {
     pub compute_graph_logical_effort: bool,
     pub graph_logical_effort_beta1: f64,
     pub graph_logical_effort_beta2: f64,
+    /// Whether to run the cut-db rewrite stages.
+    #[serde(default = "default_cut_db_rewrite")]
+    pub cut_db_rewrite: bool,
     pub cut_db_enable_large_cone_rewrite: bool,
     pub cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode,
     pub toggle_sample_count: usize,
@@ -273,6 +280,7 @@ impl Default for CanonicalG8rOptions {
             compute_graph_logical_effort: true,
             graph_logical_effort_beta1: 1.0,
             graph_logical_effort_beta2: 0.0,
+            cut_db_rewrite: true,
             cut_db_enable_large_cone_rewrite: true,
             cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode::default(),
             toggle_sample_count: 0,
@@ -319,7 +327,9 @@ impl CanonicalG8rOptions {
             compute_graph_logical_effort: self.compute_graph_logical_effort,
             graph_logical_effort_beta1: self.graph_logical_effort_beta1,
             graph_logical_effort_beta2: self.graph_logical_effort_beta2,
-            cut_db: Some(crate::cut_db::loader::CutDb::load_default()),
+            cut_db: self
+                .cut_db_rewrite
+                .then(crate::cut_db::loader::CutDb::load_default),
             cut_db_rewrite_max_iterations:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
             cut_db_rewrite_max_cuts_per_node:
@@ -1099,5 +1109,33 @@ mod tests {
             canonical.cadical_terminate_limit,
             DEFAULT_CADICAL_TERMINATE_LIMIT
         );
+    }
+
+    #[test]
+    fn canonical_options_can_disable_cut_db_rewrite() {
+        let mut canonical = CanonicalG8rOptions::default();
+        assert!(
+            canonical
+                .to_process_ir_path_options(None, true, false, false, None)
+                .cut_db
+                .is_some()
+        );
+
+        canonical.cut_db_rewrite = false;
+        assert!(
+            canonical
+                .to_process_ir_path_options(None, true, false, false, None)
+                .cut_db
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_serialized_cut_db_rewrite_uses_canonical_default() {
+        let mut value = serde_json::to_value(CanonicalG8rOptions::default()).unwrap();
+        value.as_object_mut().unwrap().remove("cut_db_rewrite");
+
+        let canonical: CanonicalG8rOptions = serde_json::from_value(value).unwrap();
+        assert!(canonical.cut_db_rewrite);
     }
 }

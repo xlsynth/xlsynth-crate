@@ -204,6 +204,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         "graph_logical_effort_beta2",
         defaults.graph_logical_effort_beta2,
     );
+    let cut_db_rewrite = parse_bool(matches, "cut-db-rewrite", defaults.cut_db_rewrite);
     let cut_db_enable_large_cone_rewrite = parse_bool(
         matches,
         "cut-db-enable-large-cone-rewrite",
@@ -244,6 +245,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         compute_graph_logical_effort,
         graph_logical_effort_beta1,
         graph_logical_effort_beta2,
+        cut_db_rewrite,
         cut_db_enable_large_cone_rewrite,
         cut_db_rewrite_mode,
         fraig_max_iterations,

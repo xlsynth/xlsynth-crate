@@ -467,6 +467,7 @@ impl AppExt for clap::Command {
                     .default_value("0.0")
                     .action(clap::ArgAction::Set),
             )
+            .add_bool_arg("cut-db-rewrite", "Run cut-db rewrite optimization")
             .add_bool_arg(
                 "cut-db-enable-large-cone-rewrite",
                 "Run large-cone cut-db rewrite phases after the 4-input cut-db phases",

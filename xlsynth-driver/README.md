@@ -576,6 +576,7 @@ combinational transition logic is lowered into the stored transition function.
     the candidate is left unproven and synthesis continues. Default `100`; use
     `0` for unlimited solving. This flag only affects the `cadical` formal backend.
   - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
+  - `--cut-db-rewrite=<BOOL>` – when `true`, run the cut-db rewrite stages after FRAIG and reassociation. Default `true`; when `false`, the cut-db mode and large-cone settings have no effect.
   - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
   - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
   - `--top <TOP>` – override the selected function or block. If the IR package
@@ -1899,6 +1900,7 @@ Supported flags include the common gate-optimization controls:
 - `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
 - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
 - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
+- `--cut-db-rewrite=<BOOL>` – when `true`, run the cut-db rewrite stages after FRAIG and reassociation. Default `true`; when `false`, the cut-db mode and large-cone settings have no effect.
 - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
 - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
 - `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
