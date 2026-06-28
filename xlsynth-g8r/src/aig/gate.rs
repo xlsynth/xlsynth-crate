@@ -122,6 +122,20 @@ impl AigNode {
 
     pub fn add_pir_node_id(&mut self, pir_node_id: u32) {
         let pir_node_ids = self.pir_node_ids_mut();
+        match pir_node_ids.last().copied() {
+            None => {
+                pir_node_ids.push(pir_node_id);
+                return;
+            }
+            Some(last) if last == pir_node_id => return,
+            Some(last) if last < pir_node_id => {
+                pir_node_ids.push(pir_node_id);
+                return;
+            }
+            Some(_) => {
+                // Fall through for the uncommon out-of-order insertion.
+            }
+        }
         match pir_node_ids.binary_search(&pir_node_id) {
             Ok(_) => {}
             Err(index) => pir_node_ids.insert(index, pir_node_id),
@@ -685,9 +699,22 @@ impl GateFn {
 
 #[cfg(test)]
 mod tests {
+    use super::{AigNode, PirNodeIds};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use std::collections::HashMap;
     use xlsynth::IrBits;
+
+    #[test]
+    fn test_pir_node_ids_remain_sorted_with_fast_and_fallback_insertions() {
+        let mut node = AigNode::Literal {
+            value: false,
+            pir_node_ids: PirNodeIds::new(),
+        };
+        for pir_node_id in [3, 4, 4, 2, 5, 1, 3] {
+            node.add_pir_node_id(pir_node_id);
+        }
+        assert_eq!(node.get_pir_node_ids(), &[1, 2, 3, 4, 5]);
+    }
 
     #[test]
     fn test_map_to_inputs_single_input() {

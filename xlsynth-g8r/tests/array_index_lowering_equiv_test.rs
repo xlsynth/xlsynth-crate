@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use xlsynth_g8r::aig::AigNode;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{ArrayIndexLoweringStrategy, GatifyOptions, gatify};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
@@ -35,6 +36,35 @@ top fn main(arr: (bits[1], bits[{payload_width}])[{array_len}], idx: bits[{index
 }}
 "#
     )
+}
+
+fn build_literal_array_index_ir_text(
+    array_len: u32,
+    element_width: u32,
+    index_width: u32,
+    index_value: u32,
+    assumed_in_bounds: bool,
+) -> String {
+    format!(
+        r#"package sample
+
+top fn main(arr: bits[{element_width}][{array_len}]) -> bits[{element_width}] {{
+  idx: bits[{index_width}] = literal(value={index_value}, id=2)
+  ret r: bits[{element_width}] = array_index(arr, indices=[idx], assumed_in_bounds={assumed_in_bounds}, id=3)
+}}
+"#
+    )
+}
+
+fn build_multidimensional_static_suffix_array_index_ir_text() -> String {
+    r#"package sample
+
+top fn main(arr: bits[4][8][2], outer: bits[1]) -> bits[4] {
+  inner: bits[3] = literal(value=5, id=3)
+  ret r: bits[4] = array_index(arr, indices=[outer, inner], assumed_in_bounds=true, id=4)
+}
+"#
+    .to_string()
 }
 
 fn gatify_ir_text_with_strategy(
@@ -112,5 +142,45 @@ fn test_near_pow2_mux_tree_matches_ir_and_oob_one_hot_for_tuple_field_array_inde
         &ir_text,
         ArrayIndexLoweringStrategy::ForceNearPow2MuxTree,
         ArrayIndexLoweringStrategy::ForceOobOneHot,
+    );
+}
+
+#[test]
+fn test_literal_array_index_uses_direct_slice_and_preserves_oob_semantics() {
+    for (index_width, index_value, assumed_in_bounds) in
+        [(3, 2, true), (96, 2, true), (3, 7, false)]
+    {
+        let ir_text = build_literal_array_index_ir_text(
+            /* array_len= */ 4,
+            /* element_width= */ 5,
+            index_width,
+            index_value,
+            assumed_in_bounds,
+        );
+        assert_strategy_matches_ir(&ir_text, ArrayIndexLoweringStrategy::Auto);
+        let gate_fn = gatify_ir_text_with_strategy(&ir_text, ArrayIndexLoweringStrategy::Auto);
+        assert!(
+            gate_fn
+                .gates
+                .iter()
+                .all(|node| !matches!(node, AigNode::And2 { .. })),
+            "literal array index should be a direct bit-vector slice"
+        );
+    }
+}
+
+#[test]
+fn test_multidimensional_literal_suffix_is_sliced_after_dynamic_outer_index() {
+    let ir_text = build_multidimensional_static_suffix_array_index_ir_text();
+    assert_strategy_matches_ir(&ir_text, ArrayIndexLoweringStrategy::Auto);
+    let gate_fn = gatify_ir_text_with_strategy(&ir_text, ArrayIndexLoweringStrategy::Auto);
+    let and_count = gate_fn
+        .gates
+        .iter()
+        .filter(|node| matches!(node, AigNode::And2 { .. }))
+        .count();
+    assert_eq!(
+        and_count, 96,
+        "the full outer dimension should be selected before the literal slice"
     );
 }

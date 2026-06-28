@@ -393,6 +393,53 @@ fn gatify_priority_sel_masking(
     gb.add_or_vec_nary(&masked_cases, ReductionKind::Tree)
 }
 
+fn bits_to_usize_if_representable(bits: &xlsynth::IrBits) -> Option<usize> {
+    let bytes = bits.to_bytes().ok()?;
+    let mut value = 0usize;
+    for (byte_index, byte) in bytes.into_iter().enumerate() {
+        if byte_index >= std::mem::size_of::<usize>() {
+            if byte != 0 {
+                return None;
+            }
+            continue;
+        }
+        value |= usize::from(byte) << (byte_index * 8);
+    }
+    Some(value)
+}
+
+fn attach_current_provenance_to_bits(gb: &mut GateBuilder, bits: &AigBitVector) -> AigBitVector {
+    let operands = bits
+        .iter_lsb_to_msb()
+        .map(|operand| gb.union_current_pir_node_id_into_operand(*operand))
+        .collect::<Vec<_>>();
+    AigBitVector::from_lsb_is_index_0(&operands)
+}
+
+/// Selects a literal array index without constructing a decode/mask network.
+fn gatify_literal_array_index(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    literal_index: &xlsynth::IrBits,
+    assumed_in_bounds: bool,
+) -> AigBitVector {
+    let element_bit_count = array_ty.element_type.bit_count();
+    let selected = match bits_to_usize_if_representable(literal_index) {
+        Some(index) if index < array_ty.element_count => {
+            array_bits.get_lsb_slice(index * element_bit_count, element_bit_count)
+        }
+        _ if assumed_in_bounds || array_ty.element_count == 0 => {
+            AigBitVector::zeros(element_bit_count)
+        }
+        _ => array_bits.get_lsb_slice(
+            (array_ty.element_count - 1) * element_bit_count,
+            element_bit_count,
+        ),
+    };
+    attach_current_provenance_to_bits(gb, &selected)
+}
+
 fn gatify_array_index(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
@@ -427,6 +474,72 @@ fn gatify_array_index(
     }
 
     gatify_array_index_oob_one_hot(gb, array_ty, array_bits, index_bits)
+}
+
+/// Lowers array-index dimensions in source order, directly slicing literal
+/// dimensions when they are reached.
+fn gatify_array_index_dimensions(
+    f: &ir::Fn,
+    gb: &mut GateBuilder,
+    env: &GateEnv,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    indices: &[ir::NodeRef],
+    assumed_in_bounds: bool,
+    range_info: Option<&IrRangeInfo>,
+    strategy: ArrayIndexLoweringStrategy,
+) -> AigBitVector {
+    assert!(!indices.is_empty());
+    let index_node = indices[0];
+    let index_bits = env
+        .get_bit_vector(index_node)
+        .expect("array index should be present");
+    let proven_in_bounds = range_info
+        .is_some_and(|ri| ri.proves_ult(f.get_node(index_node).text_id, array_ty.element_count));
+    let dimension_in_bounds = assumed_in_bounds || proven_in_bounds;
+    let literal_index = literal_bits_if_bits_node(f, index_node);
+
+    let selected = if let Some(literal_index) = literal_index {
+        gatify_literal_array_index(
+            gb,
+            array_ty,
+            array_bits,
+            &literal_index,
+            dimension_in_bounds,
+        )
+    } else {
+        gatify_array_index(
+            gb,
+            array_ty,
+            array_bits,
+            &index_bits,
+            dimension_in_bounds,
+            strategy,
+        )
+    };
+
+    if indices.len() == 1 {
+        return selected;
+    }
+
+    let next_ty = match array_ty.element_type.as_ref() {
+        ir::Type::Array(next_ty) => next_ty,
+        other => panic!(
+            "Expected array type for multidimensional array index, got {:?}",
+            other
+        ),
+    };
+    gatify_array_index_dimensions(
+        f,
+        gb,
+        env,
+        next_ty,
+        &selected,
+        &indices[1..],
+        assumed_in_bounds,
+        range_info,
+        strategy,
+    )
 }
 
 fn aig_bit_vectors_equal(lhs: &AigBitVector, rhs: &AigBitVector) -> bool {
@@ -2902,38 +3015,27 @@ fn gatify_node(
             indices,
             assumed_in_bounds,
         } => {
-            let mut array_ty = match f.get_node_ty(*array) {
+            let array_ty = match f.get_node_ty(*array) {
                 ir::Type::Array(array_ty_data) => array_ty_data,
                 other => panic!("Expected array type for array_index, got {:?}", other),
             };
-            let mut array_bits = env.get_bit_vector(*array).unwrap();
-
-            for (i, index_node) in indices.iter().enumerate() {
-                let index_bits = env.get_bit_vector(*index_node).unwrap();
-                let proven_in_bounds = options.range_info.as_ref().is_some_and(|ri| {
-                    ri.proves_ult(f.get_node(*index_node).text_id, array_ty.element_count)
-                });
-                array_bits = gatify_array_index(
+            let array_bits = env.get_bit_vector(*array).unwrap();
+            let result = if indices.is_empty() {
+                array_bits
+            } else {
+                gatify_array_index_dimensions(
+                    f,
                     g8_builder,
+                    env,
                     array_ty,
                     &array_bits,
-                    &index_bits,
-                    *assumed_in_bounds || proven_in_bounds,
+                    indices,
+                    *assumed_in_bounds,
+                    options.range_info.as_deref(),
                     options.array_index_lowering_strategy,
-                );
-                if i + 1 < indices.len() {
-                    array_ty = match array_ty.element_type.as_ref() {
-                        ir::Type::Array(next_ty) => next_ty,
-                        other => panic!(
-                            "Expected array type for index dimension {}, got {:?}",
-                            i + 1,
-                            other
-                        ),
-                    };
-                }
-            }
-
-            env.add(node_ref, GateOrVec::BitVector(array_bits));
+                )
+            };
+            env.add(node_ref, GateOrVec::BitVector(result));
         }
         ir::NodePayload::ArraySlice {
             array,

@@ -30,9 +30,9 @@ use std::iter::zip;
 use xlsynth::IrBits;
 
 use crate::{
-    aig::aig_hasher::AigHasher,
     aig::aig_simplify,
     aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds},
+    aig::structural_hash_cons::StructuralHashCons,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub struct GateBuilder {
     pub inputs: Vec<Input>,
     pub outputs: Vec<Output>,
     pub options: GateBuilderOptions,
-    pub hasher: Option<AigHasher>,
+    hash_cons: Option<StructuralHashCons>,
     current_pir_node_id: Option<u32>,
 }
 
@@ -88,10 +88,6 @@ impl GateBuilderOptions {
 }
 
 impl GateBuilder {
-    fn current_pir_node_ids(&self) -> PirNodeIds {
-        AigNode::with_pir_node_id(self.current_pir_node_id)
-    }
-
     fn union_pir_node_ids_into_operand(
         &mut self,
         operand: AigOperand,
@@ -101,26 +97,32 @@ impl GateBuilder {
         operand
     }
 
-    fn union_current_pir_node_id_into_operand(&mut self, operand: AigOperand) -> AigOperand {
-        let pir_node_ids = self.current_pir_node_ids();
-        self.union_pir_node_ids_into_operand(operand, pir_node_ids.as_slice())
+    pub(crate) fn union_current_pir_node_id_into_operand(
+        &mut self,
+        operand: AigOperand,
+    ) -> AigOperand {
+        if let Some(pir_node_id) = self.current_pir_node_id {
+            self.add_pir_node_id(operand.node, pir_node_id);
+        }
+        operand
     }
 
     pub fn new(name: String, options: GateBuilderOptions) -> Self {
+        let gates = vec![AigNode::Literal {
+            value: false,
+            pir_node_ids: PirNodeIds::new(),
+        }];
+        let mut hash_cons = options.hash.then(StructuralHashCons::new);
+        if let Some(hash_cons) = &mut hash_cons {
+            hash_cons.register_literal(AigRef { id: 0 }, false);
+        }
         Self {
             name,
-            gates: vec![AigNode::Literal {
-                value: false,
-                pir_node_ids: PirNodeIds::new(),
-            }],
+            gates,
             inputs: Vec::new(),
             outputs: Vec::new(),
             options,
-            hasher: if options.hash {
-                Some(AigHasher::new())
-            } else {
-                None
-            },
+            hash_cons,
             current_pir_node_id: None,
         }
     }
@@ -195,6 +197,9 @@ impl GateBuilder {
                 lsb_index: lsb_i,
                 pir_node_ids: AigNode::with_pir_node_id(self.current_pir_node_id),
             });
+            if let Some(hash_cons) = &mut self.hash_cons {
+                hash_cons.register_input(gate_ref, &name, lsb_i);
+            }
             bits.push(gate_ref.into());
         }
         let bit_vector = AigBitVector::from_lsb_is_index_0(&bits);
@@ -247,6 +252,13 @@ impl GateBuilder {
                 return self.union_current_pir_node_id_into_operand(lhs);
             }
         }
+        if let Some(existing) = self
+            .hash_cons
+            .as_ref()
+            .and_then(|hash_cons| hash_cons.find_and(lhs, rhs))
+        {
+            return self.union_current_pir_node_id_into_operand(existing.into());
+        }
         let gate = AigNode::And2 {
             a: lhs,
             b: rhs,
@@ -268,12 +280,8 @@ impl GateBuilder {
                 return self.union_pir_node_ids_into_operand(simplified, &pir_node_ids);
             }
         }
-        if let Some(hasher) = &mut self.hasher {
-            let existing = hasher.feed_ref(&gate_ref, &self.gates);
-            if let Some(existing) = existing {
-                let pir_node_ids = self.gates[gate_ref.id].get_pir_node_ids().to_vec();
-                return self.union_pir_node_ids_into_operand(existing.into(), &pir_node_ids);
-            }
+        if let Some(hash_cons) = &mut self.hash_cons {
+            hash_cons.register_and(gate_ref, lhs, rhs);
         }
         AigOperand {
             node: gate_ref,
@@ -1291,18 +1299,17 @@ mod tests {
         assert_eq!(stats.live_nodes, 6);
         assert_eq!(stats.deepest_path, 2);
 
-        // Note: The specific node IDs (%3, %4, %5, %6) might vary depending on hash
-        // implementation details, but the key is that the deduplicated outputs
-        // refer to the same underlying AND gate IDs.
-        let expected_str = "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%3], a_notb: bits[1] = [%5], nota_b: bits[1] = [%7], nota_notb: bits[1] = [%9]) {
-  %9 = and(not(a[0]), not(b[0]))
-  %7 = and(not(a[0]), b[0])
-  %5 = and(a[0], not(b[0]))
+        // Hash-consing rejects duplicate nodes before appending them, so the four
+        // distinct AND expressions occupy consecutive node IDs.
+        let expected_str = "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%3], a_notb: bits[1] = [%4], nota_b: bits[1] = [%5], nota_notb: bits[1] = [%6]) {
+  %6 = and(not(a[0]), not(b[0]))
+  %5 = and(not(a[0]), b[0])
+  %4 = and(a[0], not(b[0]))
   %3 = and(a[0], b[0])
   ab[0] = %3
-  a_notb[0] = %5
-  nota_b[0] = %7
-  nota_notb[0] = %9
+  a_notb[0] = %4
+  nota_b[0] = %5
+  nota_notb[0] = %6
 }";
         assert_eq!(gate_fn.to_string(), expected_str);
     }
@@ -1357,11 +1364,32 @@ mod tests {
 
         builder.set_current_pir_node_id(Some(7));
         let first = builder.add_and_binary(a0, b0);
+        let gate_count = builder.gates.len();
         builder.set_current_pir_node_id(Some(8));
         let second = builder.add_and_binary(b0, a0);
         builder.set_current_pir_node_id(None);
 
         assert_eq!(first, second);
+        assert_eq!(builder.gates.len(), gate_count);
         assert_eq!(builder.gates[first.node.id].get_pir_node_ids(), &[7, 8]);
+    }
+
+    #[test]
+    fn test_hash_cons_uses_structural_input_identity() {
+        let mut builder = GateBuilder::new(
+            "structural_input_identity".to_string(),
+            GateBuilderOptions {
+                fold: false,
+                hash: true,
+            },
+        );
+        let a0 = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b0 = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        let duplicate_a0 = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let duplicate_b0 = *builder.add_input("b".to_string(), 1).get_lsb(0);
+
+        let first = builder.add_and_binary(a0, b0);
+        let second = builder.add_and_binary(duplicate_b0, duplicate_a0);
+        assert_eq!(first, second);
     }
 }

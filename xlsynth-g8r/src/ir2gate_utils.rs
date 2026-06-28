@@ -627,16 +627,18 @@ pub fn gatify_one_hot_select(
             "all cases must have the same bit count"
         );
     }
-    let mut masked: Vec<AigBitVector> = Vec::new();
-    for i in 0..selector_bits.get_bit_count() {
-        let case = cases[i].clone();
-        let selector_bit = selector_bits.get_lsb(i);
-        let replicated = gb.replicate(*selector_bit, case_bit_count);
-        masked.push(gb.add_and_vec(&replicated, &case));
+    let mut result_bits = Vec::with_capacity(case_bit_count);
+    let mut masked_bits = Vec::with_capacity(cases.len());
+    for bit_index in 0..case_bit_count {
+        masked_bits.clear();
+        for (case_index, case) in cases.iter().enumerate() {
+            masked_bits.push(
+                gb.add_and_binary(*selector_bits.get_lsb(case_index), *case.get_lsb(bit_index)),
+            );
+        }
+        result_bits.push(gb.add_or_nary(&masked_bits, ReductionKind::Tree));
     }
-    // Or-reduce the cases bitwise.
-    let result = gb.add_or_vec_nary(&masked, ReductionKind::Tree);
-    result
+    AigBitVector::from_lsb_is_index_0(&result_bits)
 }
 
 /// Selects from `cases` using `index_bits` via a balanced binary mux tree.
