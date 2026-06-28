@@ -2156,7 +2156,7 @@ fn rewrite_predicate_hoist_across_select(f: &mut ir::Fn) -> usize {
 }
 
 fn selected_opposite_subtract_width_allowed(width: usize) -> bool {
-    width >= 3
+    width >= 4
 }
 
 /// Factor selected opposite subtracts into selected operands:
@@ -3134,7 +3134,7 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
         for width in 1..=8usize {
             let ir_text = selected_opposite_subtracts_ir(width);
             let out = run_selected_sub_aug_opt(&ir_text);
-            let expected_rewrites = usize::from(width >= 3);
+            let expected_rewrites = usize::from(width >= 4);
             assert_eq!(
                 out.rewrite_stats.selected_opposite_subtracts, expected_rewrites,
                 "unexpected rewrite count for width {width}; output:\n{}",

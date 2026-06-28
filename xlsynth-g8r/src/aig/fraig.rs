@@ -15,69 +15,43 @@
 //! for now.
 
 use rand::Rng;
-use std::{collections::HashSet, error::Error};
-use xlsynth::IrBits;
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::time::Instant;
 
 use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
 use crate::aig::get_summary_stats::{GateDepthStats, get_gate_depth};
 use crate::aig::{AigOperand, AigRef, GateFn};
 use crate::{
     gate_builder::GateBuilderOptions,
-    propose_equiv::EquivNode,
-    propose_equiv::propose_equivalence_classes,
+    propose_equiv::{
+        EquivNode, SimulationPatternBank, SimulationSignature,
+        propose_equivalence_classes_from_patterns,
+    },
     prove_gate_fn_equiv_common::GateFormalBackend,
     prove_gate_fn_equiv_sat::{
-        GateFormalOptions, validate_equivalence_classes_presorted_with_backend_and_options,
+        GateFormalOptions, prove_fraig_equivalence_classes_with_backend_and_options,
     },
 };
 
-/// Number of proposed equivalence classes validated before applying
-/// replacements and re-proposing.
-const FRAIG_CLASS_BATCH_SIZE: usize = 256;
-
-pub enum IterationBounds {
-    MaxIterations(usize),
-    ToConvergence,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize)]
-pub enum DidConverge {
-    // Payload is the number of iterations taken to converge.
-    Yes(usize),
-    No,
-}
-
-// NB Direct impl of Into to avoid import issues with From not being in the same
-// file as the struct definition.
-impl Into<crate::result_proto::DidConverge> for DidConverge {
-    fn into(self) -> crate::result_proto::DidConverge {
-        match self {
-            Self::Yes(val) => crate::result_proto::DidConverge {
-                result: Some(crate::result_proto::did_converge::Result::Yes(
-                    crate::result_proto::did_converge::Yes { count: val as u64 },
-                )),
-            },
-            Self::No => crate::result_proto::DidConverge {
-                result: Some(crate::result_proto::did_converge::Result::No(
-                    crate::result_proto::did_converge::No {},
-                )),
-            },
-        }
-    }
-}
-
-// Add struct to record stats for each fraig iteration
+/// Statistics for the single FRAIG proposal-and-validation pass.
 #[derive(Debug, serde::Serialize)]
-pub struct FraigIterationStat {
+pub struct FraigPassStat {
     pub gate_count: usize,
     pub counterexample_count: usize,
     pub proposed_equiv_classes: usize,
     pub replacements_count: usize,
 }
 
-impl Into<crate::result_proto::FraigIterationStat> for FraigIterationStat {
-    fn into(self) -> crate::result_proto::FraigIterationStat {
-        crate::result_proto::FraigIterationStat {
+/// Result of the single FRAIG proposal-and-validation pass.
+pub struct FraigOptimizationResult {
+    pub optimized_fn: GateFn,
+    pub stat: FraigPassStat,
+}
+
+impl Into<crate::result_proto::FraigPassStat> for FraigPassStat {
+    fn into(self) -> crate::result_proto::FraigPassStat {
+        crate::result_proto::FraigPassStat {
             gate_count: self.gate_count as u64,
             counterexample_count: self.counterexample_count as u64,
             proposed_equiv_classes: self.proposed_equiv_classes as u64,
@@ -115,12 +89,45 @@ fn sort_equiv_classes_by_depth(
         let node_ref = representative.aig_ref();
         (
             stats.ref_to_depth[&node_ref],
-            equiv_class.len(),
             representative.is_inverted(),
             node_ref.id,
+            equiv_class.len(),
         )
     });
     sorted_classes
+}
+
+fn constant_one_signature(pattern_bank: &SimulationPatternBank) -> Option<SimulationSignature> {
+    (pattern_bank.sample_count() != 0)
+        .then(|| SimulationSignature::constant_value(true, pattern_bank.sample_count()))
+}
+
+/// Selects proposal classes for FRAIG. The constant-one class is the polarity
+/// mirror of the constant-zero class, so only the latter is retained.
+fn select_and_sort_equivalence_classes(
+    equiv_classes: &HashMap<SimulationSignature, Vec<EquivNode>>,
+    pattern_bank: &SimulationPatternBank,
+    depth_stats: &GateDepthStats,
+) -> Vec<Vec<EquivNode>> {
+    let one_signature = constant_one_signature(pattern_bank);
+    let mut selected: HashMap<SimulationSignature, Vec<EquivNode>> = HashMap::new();
+    for (&signature, equiv_class) in equiv_classes {
+        let is_one = one_signature
+            .map(|one_signature| signature == one_signature)
+            .unwrap_or(false);
+        if is_one {
+            continue;
+        }
+        let filtered: Vec<EquivNode> = equiv_class
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.aig_ref().id != 0)
+            .collect();
+        if filtered.len() > 1 {
+            selected.insert(signature, filtered);
+        }
+    }
+    sort_equiv_classes_by_depth(&selected, depth_stats)
 }
 
 /// Builds substitutions from SAT-proven equivalence sets.
@@ -196,30 +203,23 @@ fn build_replacements_from_proven_sets(
 pub fn fraig_optimize(
     f: &GateFn,
     input_sample_count: usize,
-    iteration_bounds: IterationBounds,
     rng: &mut impl Rng,
-) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
-    fraig_optimize_with_backend(
-        f,
-        input_sample_count,
-        iteration_bounds,
-        GateFormalBackend::Cadical,
-        rng,
-    )
+) -> Result<FraigOptimizationResult, Box<dyn Error>> {
+    fraig_optimize_with_backend(f, input_sample_count, GateFormalBackend::Cadical, rng)
 }
 
 /// Runs FRAIG using an explicit formal backend for equivalence validation.
+///
+/// FRAIG requires CaDiCaL and returns an error for every other backend.
 pub fn fraig_optimize_with_backend(
     f: &GateFn,
     input_sample_count: usize,
-    iteration_bounds: IterationBounds,
     validation_backend: GateFormalBackend,
     rng: &mut impl Rng,
-) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
+) -> Result<FraigOptimizationResult, Box<dyn Error>> {
     fraig_optimize_with_backend_and_options(
         f,
         input_sample_count,
-        iteration_bounds,
         validation_backend,
         GateFormalOptions::default(),
         rng,
@@ -227,141 +227,80 @@ pub fn fraig_optimize_with_backend(
 }
 
 /// Runs FRAIG with backend-specific formal proof limits.
+///
+/// FRAIG requires CaDiCaL and returns an error for every other backend.
 pub fn fraig_optimize_with_backend_and_options(
     f: &GateFn,
     input_sample_count: usize,
-    iteration_bounds: IterationBounds,
     validation_backend: GateFormalBackend,
     gate_formal_options: GateFormalOptions,
     rng: &mut impl Rng,
-) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
-    let mut iteration_count = 0;
-    let mut current_fn = f.clone();
-    let mut counterexample_seen: HashSet<Vec<IrBits>> = HashSet::new();
-    let mut counterexamples: Vec<Vec<IrBits>> = Vec::new();
-    // Initialize iteration stats collection
-    let mut iteration_stats: Vec<FraigIterationStat> = Vec::new();
-    loop {
-        log::info!(
-            "fraig_optimize; iteration: {} counterexamples: {}",
-            iteration_count,
-            counterexamples.len()
-        );
-        match iteration_bounds {
-            IterationBounds::MaxIterations(max_iterations) => {
-                if iteration_count >= max_iterations {
-                    break;
-                }
-            }
-            IterationBounds::ToConvergence => {
-                // Keep going!
-            }
-        }
-        let equiv_classes =
-            propose_equivalence_classes(&current_fn, input_sample_count, rng, &counterexamples);
+) -> Result<FraigOptimizationResult, Box<dyn Error>> {
+    let fraig_start = Instant::now();
+    let simulation_start = Instant::now();
+    let simulation_patterns =
+        SimulationPatternBank::with_random_samples(f, input_sample_count, rng);
+    let live_nodes: Vec<AigRef> = f
+        .gates
+        .iter()
+        .enumerate()
+        .map(|(id, _)| AigRef { id })
+        .collect();
+    let depth_stats = get_gate_depth(f, &live_nodes);
+    let initial_equiv_classes = propose_equivalence_classes_from_patterns(f, &simulation_patterns);
+    let simulation_seconds = simulation_start.elapsed().as_secs_f64();
+    log::info!(
+        "fraig simulation and class proposal: seconds={:.6}, samples={}, classes={}",
+        simulation_seconds,
+        simulation_patterns.sample_count(),
+        initial_equiv_classes.len(),
+    );
+    let proposed_equiv_class_count = initial_equiv_classes.len();
+    let sorted_classes = select_and_sort_equivalence_classes(
+        &initial_equiv_classes,
+        &simulation_patterns,
+        &depth_stats,
+    );
 
-        log::info!(
-            "fraig_optimize: propose_equiv proposed {} classes",
-            equiv_classes.len()
-        );
+    let full_result = prove_fraig_equivalence_classes_with_backend_and_options(
+        f,
+        &sorted_classes,
+        validation_backend,
+        gate_formal_options,
+    )?;
+    log::info!(
+        "fraig single-session full-graph validation: {}",
+        full_result.stat
+    );
+    let final_validation = full_result.validation;
+    let counterexample_count = final_validation
+        .cex_inputs
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .len();
 
-        let live_nodes: Vec<AigRef> = current_fn
-            .gates
-            .iter()
-            .enumerate()
-            .map(|(i, _)| AigRef { id: i })
-            .collect();
-        let stats = get_gate_depth(&current_fn, &live_nodes);
-        let sorted_equiv_classes = sort_equiv_classes_by_depth(&equiv_classes, &stats);
-        let batch_size = FRAIG_CLASS_BATCH_SIZE.min(sorted_equiv_classes.len().max(1));
-        let is_batched = batch_size < sorted_equiv_classes.len();
-        let mut applied_replacements = false;
-        let mut restarted_after_counterexample = false;
-
-        for (batch_index, batch) in sorted_equiv_classes.chunks(batch_size).enumerate() {
-            if is_batched {
-                log::info!(
-                    "fraig_optimize: validating class batch {} classes [{}..{}) of {}",
-                    batch_index,
-                    batch_index * batch_size,
-                    batch_index * batch_size + batch.len(),
-                    sorted_equiv_classes.len()
-                );
-            }
-            let equiv_classes_vec: Vec<&[EquivNode]> = batch.iter().map(|v| v.as_slice()).collect();
-            let validation_result =
-                validate_equivalence_classes_presorted_with_backend_and_options(
-                    &current_fn,
-                    &equiv_classes_vec,
-                    validation_backend,
-                    gate_formal_options,
-                )?;
-
-            let mut new_counterexample_count = 0usize;
-            for cex in validation_result.cex_inputs {
-                if counterexample_seen.insert(cex.clone()) {
-                    counterexamples.push(cex);
-                    new_counterexample_count += 1;
-                }
-            }
-
-            let replacements =
-                build_replacements_from_proven_sets(&stats, validation_result.proven_equiv_sets);
-
-            if replacements.len() == 0 {
-                if is_batched && new_counterexample_count > 0 {
-                    log::info!(
-                        "fraig_optimize: class batch {} found {} new counterexamples and no replacements; reproposing",
-                        batch_index,
-                        new_counterexample_count
-                    );
-                    iteration_stats.push(FraigIterationStat {
-                        gate_count: current_fn.gates.len(),
-                        counterexample_count: counterexamples.len(),
-                        proposed_equiv_classes: equiv_classes.len(),
-                        replacements_count: 0,
-                    });
-                    restarted_after_counterexample = true;
-                    break;
-                }
-                continue;
-            }
-
-            // Record stats for this iteration before replacements
-            iteration_stats.push(FraigIterationStat {
-                gate_count: current_fn.gates.len(),
-                counterexample_count: counterexamples.len(),
-                proposed_equiv_classes: equiv_classes.len(),
-                replacements_count: replacements.len(),
-            });
-
-            // We get the updated function by bulk replacing nodes with their lower-depth
-            // equivalents here.
-            let new_fn = bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt());
-            current_fn = new_fn;
-            applied_replacements = true;
-            break;
-        }
-
-        if !applied_replacements && !restarted_after_counterexample {
-            // Converged -- no proven equivalences found.
-            // Record stats for this iteration with zero replacements
-            iteration_stats.push(FraigIterationStat {
-                gate_count: current_fn.gates.len(),
-                counterexample_count: counterexamples.len(),
-                proposed_equiv_classes: equiv_classes.len(),
-                replacements_count: 0,
-            });
-            return Ok((
-                current_fn,
-                DidConverge::Yes(iteration_count),
-                iteration_stats,
-            ));
-        }
-
-        iteration_count += 1;
-    }
-    Ok((current_fn, DidConverge::No, iteration_stats))
+    let replacements =
+        build_replacements_from_proven_sets(&depth_stats, final_validation.proven_equiv_sets);
+    let stat = FraigPassStat {
+        gate_count: f.gates.len(),
+        counterexample_count,
+        proposed_equiv_classes: proposed_equiv_class_count,
+        replacements_count: replacements.len(),
+    };
+    log::info!("fraig_optimize: single-session result: {stat:?}");
+    let rewrite_start = Instant::now();
+    let optimized_fn = if replacements.len() == 0 {
+        f.clone()
+    } else {
+        bulk_replace(f, &replacements, GateBuilderOptions::opt())
+    };
+    log::info!(
+        "fraig timing summary: total_seconds={:.6}, simulation_seconds={:.6}, rewrite_seconds={:.6}",
+        fraig_start.elapsed().as_secs_f64(),
+        simulation_seconds,
+        rewrite_start.elapsed().as_secs_f64(),
+    );
+    Ok(FraigOptimizationResult { optimized_fn, stat })
 }
 
 #[cfg(test)]
@@ -370,10 +309,14 @@ mod tests {
     #[allow(unused_imports)]
     use crate::assert_within;
     use crate::{
-        aig::get_summary_stats::get_summary_stats, check_equivalence, gate_builder::GateBuilder,
-        test_utils::setup_padded_graph_with_equal_depth_opposite_polarity,
+        aig::get_summary_stats::get_summary_stats,
+        check_equivalence,
+        gate_builder::GateBuilder,
+        test_utils::{
+            setup_graph_with_redundancies, setup_padded_graph_with_equal_depth_opposite_polarity,
+        },
     };
-    use rand::SeedableRng;
+    use rand::{RngCore, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
 
     #[test]
@@ -381,9 +324,9 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let test_graph = setup_padded_graph_with_equal_depth_opposite_polarity();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        let (optimized_fn, _did_converge, _iteration_stats) =
-            fraig_optimize(&test_graph.g, 8, IterationBounds::ToConvergence, &mut rng)
-                .expect("fraig_optimize should not panic");
+        let optimized_fn = fraig_optimize(&test_graph.g, 8, &mut rng)
+            .expect("fraig_optimize should not panic")
+            .optimized_fn;
 
         // The original graph has 2 inputs, 1 constant literal node (e.g., 'true', which
         // is node 0), and 2 AND nodes (one for the AND, one for the
@@ -428,9 +371,9 @@ mod tests {
         let gate_fn = gb.build();
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        let (optimized_fn, _did_conv, _stats) =
-            fraig_optimize(&gate_fn, 64, IterationBounds::ToConvergence, &mut rng)
-                .expect("fraig_optimize should not panic on dead redundant nodes");
+        let optimized_fn = fraig_optimize(&gate_fn, 64, &mut rng)
+            .expect("fraig_optimize should not panic on dead redundant nodes")
+            .optimized_fn;
 
         // The optimized function must remain equivalent to the original.
         crate::check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_fn, &optimized_fn)
@@ -438,5 +381,22 @@ mod tests {
 
         // Ensure the optimized function still respects basic invariants.
         optimized_fn.check_invariants_with_debug_assert();
+    }
+
+    #[test]
+    fn fraig_generates_random_patterns_once() {
+        let graph = setup_graph_with_redundancies();
+        let sample_count = 64;
+
+        let mut expected_rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        let _expected_patterns =
+            SimulationPatternBank::with_random_samples(&graph.g, sample_count, &mut expected_rng);
+        let expected_next = expected_rng.next_u64();
+
+        let mut actual_rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        fraig_optimize(&graph.g, sample_count, &mut actual_rng).unwrap();
+        let actual_next = actual_rng.next_u64();
+
+        assert_eq!(actual_next, expected_next);
     }
 }

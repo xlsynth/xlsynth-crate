@@ -15,7 +15,7 @@ use crate::aig::dce;
 use crate::aig::fanout::fanout_histogram;
 use crate::aig::find_structures;
 use crate::aig::fraig;
-use crate::aig::fraig::{DidConverge, FraigIterationStat, IterationBounds};
+use crate::aig::fraig::FraigPassStat;
 use crate::aig::gate;
 use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
@@ -42,6 +42,10 @@ fn default_cadical_terminate_limit() -> u32 {
     DEFAULT_CADICAL_TERMINATE_LIMIT
 }
 
+fn default_cut_db_rewrite() -> bool {
+    true
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct Ir2GatesSummaryStats {
     pub live_nodes: usize,
@@ -51,8 +55,7 @@ pub struct Ir2GatesSummaryStats {
     pub toggle_transitions: Option<usize>,
     pub logical_effort_deepest_path_min_delay: f64,
     pub graph_logical_effort_worst_case_delay: Option<f64>,
-    pub fraig_did_converge: Option<DidConverge>,
-    pub fraig_iteration_stats: Option<Vec<FraigIterationStat>>,
+    pub fraig_pass_stat: Option<FraigPassStat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub independent_op_stats: Option<IndependentOpStats>,
 }
@@ -136,12 +139,7 @@ impl Into<crate::result_proto::Ir2GatesSummaryStats> for Ir2GatesSummaryStats {
             graph_logical_effort_worst_case_delay: self
                 .graph_logical_effort_worst_case_delay
                 .into(),
-            fraig_did_converge: self.fraig_did_converge.map(Into::into),
-            fraig_iteration_stats: self.fraig_iteration_stats.map_or(vec![], |x| {
-                x.into_iter()
-                    .map(|v| v.into())
-                    .collect::<Vec<crate::result_proto::FraigIterationStat>>()
-            }),
+            fraig_pass_stat: self.fraig_pass_stat.map(Into::into),
         }
     }
 }
@@ -169,9 +167,6 @@ pub struct Options {
     ///
     /// If unset, we require the IR package to have an explicit top function.
     pub ir_top: Option<String>,
-
-    /// If not set, we fraig to convergence.
-    pub fraig_max_iterations: Option<usize>,
 
     /// Maximum random simulation samples used for FRAIG candidate discovery.
     ///
@@ -235,7 +230,6 @@ pub struct CanonicalG8rOptions {
     pub unsafe_gatify_gate_operation: bool,
     pub fraig: bool,
     pub reassociation: bool,
-    pub fraig_max_iterations: Option<usize>,
     pub max_fraig_sim_samples: usize,
     pub gate_formal_backend: GateFormalBackend,
     /// CaDiCaL internal termination-check budget per solve; zero disables it.
@@ -244,6 +238,9 @@ pub struct CanonicalG8rOptions {
     pub compute_graph_logical_effort: bool,
     pub graph_logical_effort_beta1: f64,
     pub graph_logical_effort_beta2: f64,
+    /// Whether to run the cut-db rewrite stages.
+    #[serde(default = "default_cut_db_rewrite")]
+    pub cut_db_rewrite: bool,
     pub cut_db_enable_large_cone_rewrite: bool,
     pub cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode,
     pub toggle_sample_count: usize,
@@ -266,13 +263,13 @@ impl Default for CanonicalG8rOptions {
             unsafe_gatify_gate_operation: false,
             fraig: true,
             reassociation: true,
-            fraig_max_iterations: None,
             max_fraig_sim_samples: DEFAULT_MAX_FRAIG_SIM_SAMPLES,
             gate_formal_backend: GateFormalBackend::default(),
             cadical_terminate_limit: DEFAULT_CADICAL_TERMINATE_LIMIT,
             compute_graph_logical_effort: true,
             graph_logical_effort_beta1: 1.0,
             graph_logical_effort_beta2: 0.0,
+            cut_db_rewrite: true,
             cut_db_enable_large_cone_rewrite: true,
             cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode::default(),
             toggle_sample_count: 0,
@@ -308,7 +305,6 @@ impl CanonicalG8rOptions {
             reassociation: self.reassociation,
             emit_independent_op_stats,
             ir_top: ir_top.map(|s| s.to_string()),
-            fraig_max_iterations: self.fraig_max_iterations,
             max_fraig_sim_samples: Some(self.max_fraig_sim_samples),
             gate_formal_backend: self.gate_formal_backend,
             cadical_terminate_limit: self.cadical_terminate_limit,
@@ -319,7 +315,9 @@ impl CanonicalG8rOptions {
             compute_graph_logical_effort: self.compute_graph_logical_effort,
             graph_logical_effort_beta1: self.graph_logical_effort_beta1,
             graph_logical_effort_beta2: self.graph_logical_effort_beta2,
-            cut_db: Some(crate::cut_db::loader::CutDb::load_default()),
+            cut_db: self
+                .cut_db_rewrite
+                .then(crate::cut_db::loader::CutDb::load_default),
             cut_db_rewrite_max_iterations:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
             cut_db_rewrite_max_cuts_per_node:
@@ -659,20 +657,14 @@ pub fn process_ir_text_with_gatefn(
     );
     gate_fn.check_invariants_with_debug_assert();
 
-    // Prepare to capture fraig statistics if enabled
-    let mut fraig_did_converge: Option<DidConverge> = None;
-    let mut fraig_iteration_stats: Option<Vec<FraigIterationStat>> = None;
+    // Prepare to capture FRAIG statistics if enabled.
+    let mut fraig_pass_stat: Option<FraigPassStat> = None;
     if options.fraig {
         log::info!(
             "fraig is enabled for GateFn {:?} with {} nodes",
             gate_fn.name,
             gate_fn.gates.len()
         );
-        let iteration_bounds = if let Some(max_iterations) = options.fraig_max_iterations {
-            IterationBounds::MaxIterations(max_iterations)
-        } else {
-            IterationBounds::ToConvergence
-        };
         let live_node_count = get_id_to_use_count(&gate_fn).len().max(1);
         let scaled = (live_node_count as f64 / 8.0).ceil() as usize;
         // Round the scaled value to the nearest 256, it must be more than zero.
@@ -694,20 +686,13 @@ pub fn process_ir_text_with_gatefn(
         let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend_and_options(
             &gate_fn,
             sim_samples,
-            iteration_bounds,
             options.gate_formal_backend,
             gate_formal_options,
             &mut rng,
         );
-        let (optimized_fn, did_converge, iteration_stats) =
-            fraig_result.map_err(|e| format!("Fraig optimization failed: {e}"))?;
-        if !options.quiet {
-            println!("== Fraig convergence: {:?}", did_converge);
-        }
-        gate_fn = optimized_fn;
-        // Capture fraig results for JSON
-        fraig_did_converge = Some(did_converge);
-        fraig_iteration_stats = Some(iteration_stats);
+        let result = fraig_result.map_err(|e| format!("Fraig optimization failed: {e}"))?;
+        gate_fn = result.optimized_fn;
+        fraig_pass_stat = Some(result.stat);
     }
 
     if options.reassociation {
@@ -819,8 +804,7 @@ pub fn process_ir_text_with_gatefn(
         toggle_transitions,
         logical_effort_deepest_path_min_delay,
         graph_logical_effort_worst_case_delay,
-        fraig_did_converge,
-        fraig_iteration_stats,
+        fraig_pass_stat,
         independent_op_stats,
     };
 
@@ -1099,5 +1083,33 @@ mod tests {
             canonical.cadical_terminate_limit,
             DEFAULT_CADICAL_TERMINATE_LIMIT
         );
+    }
+
+    #[test]
+    fn canonical_options_can_disable_cut_db_rewrite() {
+        let mut canonical = CanonicalG8rOptions::default();
+        assert!(
+            canonical
+                .to_process_ir_path_options(None, true, false, false, None)
+                .cut_db
+                .is_some()
+        );
+
+        canonical.cut_db_rewrite = false;
+        assert!(
+            canonical
+                .to_process_ir_path_options(None, true, false, false, None)
+                .cut_db
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_serialized_cut_db_rewrite_uses_canonical_default() {
+        let mut value = serde_json::to_value(CanonicalG8rOptions::default()).unwrap();
+        value.as_object_mut().unwrap().remove("cut_db_rewrite");
+
+        let canonical: CanonicalG8rOptions = serde_json::from_value(value).unwrap();
+        assert!(canonical.cut_db_rewrite);
     }
 }

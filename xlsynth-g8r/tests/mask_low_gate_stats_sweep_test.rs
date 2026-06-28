@@ -233,7 +233,6 @@ fn ir2gates_additional_mask_low_families_qor_improve_with_mask_low_rewrite() {
             "shifted_shrl_all_ones",
             build_shifted_shrl_all_ones_ir_text(16, 5),
         ),
-        ("shrl_all_ones", build_shrl_all_ones_ir_text(16, 5)),
         (
             "zero_concat_low_mask",
             build_zero_concat_not_shifted_all_ones_ir_text(4, 8, 3),
@@ -251,6 +250,16 @@ fn ir2gates_additional_mask_low_families_qor_improve_with_mask_low_rewrite() {
             "expected {case_name} rewrite not to increase depth; off={depth_off} on={depth_on} (nodes off={nodes_off} on={nodes_on})"
         );
     }
+}
+
+#[test]
+fn ir2gates_direct_shrl_all_ones_stays_native_with_mask_low_rewrite_enabled() {
+    let ir_text = build_shrl_all_ones_ir_text(16, 5);
+    let without_rewrite = stats_for_ir_text_via_ir2gates(&ir_text, false);
+    let with_rewrite = stats_for_ir_text_via_ir2gates(&ir_text, true);
+
+    assert_eq!(without_rewrite, (53, 8));
+    assert_eq!(with_rewrite, without_rewrite);
 }
 
 #[test]

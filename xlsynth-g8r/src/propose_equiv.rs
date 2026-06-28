@@ -68,6 +68,25 @@ impl SimulationSignature {
         );
         self
     }
+
+    /// Returns the signature produced by a constant value over `total_samples`.
+    pub fn constant_value(value: bool, total_samples: usize) -> Self {
+        let mut signature = Self::new();
+        let mut remaining_samples = total_samples;
+        let mut batch_index = 0u64;
+        while remaining_samples > 0 {
+            let valid_lanes = min(remaining_samples, SIMD_LANES);
+            let words = if value {
+                lane_mask(valid_lanes)
+            } else {
+                [0u64; 4]
+            };
+            signature.update_words(words, batch_index);
+            remaining_samples -= valid_lanes;
+            batch_index += 1;
+        }
+        signature.finalize(total_samples)
+    }
 }
 
 /// Represents a node within a proposed equivalence class, indicating whether
@@ -130,7 +149,7 @@ fn byte_bit(bytes: &[u8], bit_idx: usize) -> bool {
     ((bytes[bit_idx / 8] >> (bit_idx % 8)) & 1) != 0
 }
 
-fn set_lane_counterexample_inputs(
+fn set_lane_inputs(
     input_widths: &[usize],
     lane: usize,
     inputs: &[IrBits],
@@ -142,6 +161,7 @@ fn set_lane_counterexample_inputs(
     let bit_mask = 1u64 << (lane % 64);
     let mut bit_cursor = 0;
     for (input_value, &input_width) in inputs.iter().zip(input_widths.iter()) {
+        assert_eq!(input_value.get_bit_count(), input_width);
         let bytes = input_value.to_le_bytes().unwrap();
         for bit_idx in 0..input_width {
             if byte_bit(&bytes, bit_idx) {
@@ -152,46 +172,103 @@ fn set_lane_counterexample_inputs(
     }
 }
 
-fn random_simd_inputs(
-    input_widths: &[usize],
-    lane_count: usize,
-    rng: &mut impl Rng,
-) -> Vec<Vec256> {
-    assert!(lane_count <= SIMD_LANES);
-    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(input_widths)];
-    let samples = generate_flat_bitvector_argument_sets_with_rng(rng, input_widths, lane_count);
-    for (lane, sample) in samples.iter().enumerate() {
-        let limb = lane / 64;
-        let offset = lane % 64;
-        let mut bit_cursor = 0;
-        for bits in sample {
-            for bit_idx in 0..bits.get_bit_count() {
-                if bits.get_bit(bit_idx).unwrap() {
-                    words_per_input_bit[bit_cursor + bit_idx][limb] |= 1u64 << offset;
-                }
-            }
-            bit_cursor += bits.get_bit_count();
-        }
-    }
-    words_per_input_bit
-        .into_iter()
-        .map(Vec256::from_words)
-        .collect()
+#[derive(Debug, Clone)]
+struct SimulationPatternBatch {
+    words_per_input_bit: Vec<[u64; 4]>,
+    valid_lanes: usize,
 }
 
-fn counterexample_simd_inputs(
-    input_widths: &[usize],
-    counterexamples: &[&Vec<IrBits>],
-) -> Vec<Vec256> {
-    assert!(counterexamples.len() <= SIMD_LANES);
-    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(input_widths)];
-    for (lane, inputs) in counterexamples.iter().enumerate() {
-        set_lane_counterexample_inputs(input_widths, lane, inputs, &mut words_per_input_bit);
+impl SimulationPatternBatch {
+    fn new(input_bit_count: usize) -> Self {
+        Self {
+            words_per_input_bit: vec![[0u64; 4]; input_bit_count],
+            valid_lanes: 0,
+        }
     }
-    words_per_input_bit
-        .into_iter()
-        .map(Vec256::from_words)
-        .collect()
+
+    fn simd_inputs(&self) -> Vec<Vec256> {
+        self.words_per_input_bit
+            .iter()
+            .copied()
+            .map(Vec256::from_words)
+            .collect()
+    }
+}
+
+/// Retained primary-input patterns used to refine FRAIG simulation classes.
+#[derive(Debug, Clone)]
+pub struct SimulationPatternBank {
+    input_widths: Vec<usize>,
+    batches: Vec<SimulationPatternBatch>,
+    sample_count: usize,
+}
+
+impl SimulationPatternBank {
+    /// Creates an empty pattern bank compatible with `gate_fn`.
+    pub fn new(gate_fn: &GateFn) -> Self {
+        Self {
+            input_widths: input_widths(gate_fn),
+            batches: Vec::new(),
+            sample_count: 0,
+        }
+    }
+
+    /// Creates a bank populated with a deterministic sequence from `rng`.
+    pub fn with_random_samples(gate_fn: &GateFn, sample_count: usize, rng: &mut impl Rng) -> Self {
+        let mut bank = Self::new(gate_fn);
+        bank.append_random_samples(sample_count, rng);
+        bank
+    }
+
+    /// Appends random argument sets while retaining all existing patterns.
+    pub fn append_random_samples(&mut self, sample_count: usize, rng: &mut impl Rng) {
+        let mut remaining = sample_count;
+        while remaining != 0 {
+            let count = min(remaining, SIMD_LANES);
+            let samples =
+                generate_flat_bitvector_argument_sets_with_rng(rng, &self.input_widths, count);
+            self.append_argument_sets(&samples);
+            remaining -= count;
+        }
+    }
+
+    /// Appends formal counterexamples while retaining all existing patterns.
+    pub fn append_counterexamples(&mut self, counterexamples: &[Vec<IrBits>]) {
+        self.append_argument_sets(counterexamples);
+    }
+
+    /// Returns the number of retained primary-input argument sets.
+    pub fn sample_count(&self) -> usize {
+        self.sample_count
+    }
+
+    fn append_argument_sets(&mut self, argument_sets: &[Vec<IrBits>]) {
+        let input_bit_count = total_input_bits(&self.input_widths);
+        for inputs in argument_sets {
+            let needs_new_batch = self
+                .batches
+                .last()
+                .map(|batch| batch.valid_lanes == SIMD_LANES)
+                .unwrap_or(true);
+            if needs_new_batch {
+                self.batches
+                    .push(SimulationPatternBatch::new(input_bit_count));
+            }
+            let batch = self.batches.last_mut().unwrap();
+            set_lane_inputs(
+                &self.input_widths,
+                batch.valid_lanes,
+                inputs,
+                &mut batch.words_per_input_bit,
+            );
+            batch.valid_lanes += 1;
+            self.sample_count += 1;
+        }
+    }
+
+    fn assert_compatible(&self, gate_fn: &GateFn) {
+        assert_eq!(self.input_widths, input_widths(gate_fn));
+    }
 }
 
 fn lane_mask(valid_lanes: usize) -> [u64; 4] {
@@ -268,9 +345,36 @@ pub fn propose_equivalence_classes(
     rng: &mut impl Rng,
     counterexamples: &[Vec<IrBits>],
 ) -> HashMap<SimulationSignature, Vec<EquivNode>> {
+    let mut pattern_bank =
+        SimulationPatternBank::with_random_samples(gate_fn, input_sample_count, rng);
+    pattern_bank.append_counterexamples(counterexamples);
+    propose_equivalence_classes_from_patterns(gate_fn, &pattern_bank)
+}
+
+/// Proposes equivalence classes using every retained pattern in `pattern_bank`.
+pub fn propose_equivalence_classes_from_patterns(
+    gate_fn: &GateFn,
+    pattern_bank: &SimulationPatternBank,
+) -> HashMap<SimulationSignature, Vec<EquivNode>> {
+    propose_equivalence_classes_from_patterns_impl(gate_fn, pattern_bank, false)
+}
+
+/// Proposes classes with false included in the normalized constant class.
+pub fn propose_equivalence_classes_with_constant_from_patterns(
+    gate_fn: &GateFn,
+    pattern_bank: &SimulationPatternBank,
+) -> HashMap<SimulationSignature, Vec<EquivNode>> {
+    propose_equivalence_classes_from_patterns_impl(gate_fn, pattern_bank, true)
+}
+
+fn propose_equivalence_classes_from_patterns_impl(
+    gate_fn: &GateFn,
+    pattern_bank: &SimulationPatternBank,
+    include_constant_false: bool,
+) -> HashMap<SimulationSignature, Vec<EquivNode>> {
+    pattern_bank.assert_compatible(gate_fn);
     let gate_count = gate_fn.gates.len();
     let live_nodes = output_reachable_nodes(gate_fn);
-    let input_widths = input_widths(gate_fn);
     let candidate_node_indices: Vec<usize> = gate_fn
         .gates
         .iter()
@@ -288,14 +392,8 @@ pub fn propose_equivalence_classes(
     let mut normal_signatures = vec![SimulationSignature::new(); gate_count];
     let mut inverse_signatures = vec![SimulationSignature::new(); gate_count];
     let mut node_values = Vec::with_capacity(gate_count);
-    let mut batch_index = 0u64;
-
-    // Push `input_sample_count` random samples through the gate function in
-    // 256-wide batches and stream each node's sampled value into a signature.
-    let mut remaining_random_samples = input_sample_count;
-    while remaining_random_samples > 0 {
-        let lane_count = min(remaining_random_samples, SIMD_LANES);
-        let inputs = random_simd_inputs(&input_widths, lane_count, rng);
+    for (batch_index, batch) in pattern_bank.batches.iter().enumerate() {
+        let inputs = batch.simd_inputs();
         update_signatures(
             gate_fn,
             &live_nodes,
@@ -303,34 +401,14 @@ pub fn propose_equivalence_classes(
             &mut normal_signatures,
             &mut inverse_signatures,
             &inputs,
-            lane_count,
-            batch_index,
+            batch.valid_lanes,
+            batch_index as u64,
             &mut node_values,
         );
-        batch_index += 1;
-        remaining_random_samples -= lane_count;
-    }
-
-    // Now do it for all explicitly-provided counterexamples.
-    let counterexample_refs: Vec<&Vec<IrBits>> = counterexamples.iter().collect();
-    for batch in counterexample_refs.chunks(SIMD_LANES) {
-        let inputs = counterexample_simd_inputs(&input_widths, batch);
-        update_signatures(
-            gate_fn,
-            &live_nodes,
-            &candidate_node_indices,
-            &mut normal_signatures,
-            &mut inverse_signatures,
-            &inputs,
-            batch.len(),
-            batch_index,
-            &mut node_values,
-        );
-        batch_index += 1;
     }
 
     // Group by hash
-    let total_samples = input_sample_count + counterexamples.len();
+    let total_samples = pattern_bank.sample_count();
     let mut grouped_classes: HashMap<SimulationSignature, Vec<EquivNode>> = HashMap::new();
     for node_index in candidate_node_indices {
         let node_ref = AigRef { id: node_index };
@@ -350,6 +428,13 @@ pub fn propose_equivalence_classes(
                 .or_insert_with(Vec::new)
                 .push(equiv_node);
         }
+    }
+
+    if include_constant_false {
+        grouped_classes
+            .entry(SimulationSignature::constant_value(false, total_samples))
+            .or_insert_with(Vec::new)
+            .push(EquivNode::Normal(AigRef { id: 0 }));
     }
 
     for nodes in grouped_classes.values_mut() {
@@ -409,7 +494,10 @@ fn propose_equivalence_classes_scalar_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{setup_graph_with_redundancies, setup_simple_graph};
+    use crate::test_utils::{
+        setup_graph_for_constant_replace, setup_graph_with_redundancies,
+        setup_partially_equiv_graph, setup_simple_graph,
+    };
     use rand::SeedableRng;
 
     fn sorted_classes<K>(classes: &HashMap<K, Vec<EquivNode>>) -> Vec<Vec<EquivNode>>
@@ -509,5 +597,54 @@ mod tests {
             sorted_classes(&simd_classes),
             sorted_classes(&scalar_classes)
         );
+    }
+
+    #[test]
+    fn test_pattern_bank_monotonically_refines_classes() {
+        let graph = setup_partially_equiv_graph();
+        let mut pattern_bank = SimulationPatternBank::new(&graph.g);
+        pattern_bank.append_counterexamples(&[vec![
+            IrBits::bool(false),
+            IrBits::bool(false),
+            IrBits::bool(false),
+        ]]);
+
+        let initial_classes = propose_equivalence_classes_from_patterns(&graph.g, &pattern_bank);
+        let initial_class = initial_classes
+            .values()
+            .find(|class| class.contains(&EquivNode::Normal(graph.a.node)))
+            .unwrap();
+        assert!(initial_class.contains(&EquivNode::Normal(graph.b.node)));
+        assert!(initial_class.contains(&EquivNode::Normal(graph.c.node)));
+
+        pattern_bank.append_counterexamples(&[vec![
+            IrBits::bool(true),
+            IrBits::bool(true),
+            IrBits::bool(false),
+        ]]);
+        let refined_classes = propose_equivalence_classes_from_patterns(&graph.g, &pattern_bank);
+        let refined_class = refined_classes
+            .values()
+            .find(|class| class.contains(&EquivNode::Normal(graph.a.node)))
+            .unwrap();
+
+        assert_eq!(pattern_bank.sample_count(), 2);
+        assert!(refined_class.contains(&EquivNode::Normal(graph.b.node)));
+        assert!(!refined_class.contains(&EquivNode::Normal(graph.c.node)));
+    }
+
+    #[test]
+    fn test_constant_aware_proposal_retains_single_constant_candidate() {
+        let graph = setup_graph_for_constant_replace();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let pattern_bank = SimulationPatternBank::with_random_samples(&graph.g, 1, &mut rng);
+        let classes =
+            propose_equivalence_classes_with_constant_from_patterns(&graph.g, &pattern_bank);
+        let constant_class = classes
+            .get(&SimulationSignature::constant_value(false, 1))
+            .unwrap();
+
+        assert!(constant_class.contains(&EquivNode::Normal(AigRef { id: 0 })));
+        assert!(constant_class.contains(&EquivNode::Inverted(graph.and_true_true.node)));
     }
 }

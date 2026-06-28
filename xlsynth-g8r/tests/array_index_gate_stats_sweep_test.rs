@@ -110,17 +110,17 @@ fn test_array_index_gate_stats_sweep_27elem_width1_to_32() {
 
     #[rustfmt::skip]
     let want: &[ArrayIndexRow] = &[
-        ArrayIndexRow { element_width: 1, live_nodes_ohs: 155, deepest_path_ohs: 15, live_nodes_mux: 118, deepest_path_mux: 11, live_nodes_auto: 118, deepest_path_auto: 11 },
-        ArrayIndexRow { element_width: 2, live_nodes_ohs: 237, deepest_path_ohs: 15, live_nodes_mux: 231, deepest_path_mux: 11, live_nodes_auto: 231, deepest_path_auto: 11 },
-        ArrayIndexRow { element_width: 3, live_nodes_ohs: 319, deepest_path_ohs: 15, live_nodes_mux: 344, deepest_path_mux: 11, live_nodes_auto: 319, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 4, live_nodes_ohs: 401, deepest_path_ohs: 15, live_nodes_mux: 457, deepest_path_mux: 11, live_nodes_auto: 401, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 5, live_nodes_ohs: 483, deepest_path_ohs: 15, live_nodes_mux: 570, deepest_path_mux: 11, live_nodes_auto: 483, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 6, live_nodes_ohs: 565, deepest_path_ohs: 15, live_nodes_mux: 683, deepest_path_mux: 11, live_nodes_auto: 565, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 8, live_nodes_ohs: 729, deepest_path_ohs: 15, live_nodes_mux: 909, deepest_path_mux: 11, live_nodes_auto: 729, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 12, live_nodes_ohs: 1057, deepest_path_ohs: 15, live_nodes_mux: 1361, deepest_path_mux: 11, live_nodes_auto: 1057, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 16, live_nodes_ohs: 1385, deepest_path_ohs: 15, live_nodes_mux: 1813, deepest_path_mux: 11, live_nodes_auto: 1385, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 24, live_nodes_ohs: 2041, deepest_path_ohs: 15, live_nodes_mux: 2717, deepest_path_mux: 11, live_nodes_auto: 2041, deepest_path_auto: 15 },
-        ArrayIndexRow { element_width: 32, live_nodes_ohs: 2697, deepest_path_ohs: 15, live_nodes_mux: 3621, deepest_path_mux: 11, live_nodes_auto: 2697, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 1, live_nodes_ohs: 155, deepest_path_ohs: 15, live_nodes_mux: 113, deepest_path_mux: 11, live_nodes_auto: 113, deepest_path_auto: 11 },
+        ArrayIndexRow { element_width: 2, live_nodes_ohs: 237, deepest_path_ohs: 15, live_nodes_mux: 221, deepest_path_mux: 11, live_nodes_auto: 221, deepest_path_auto: 11 },
+        ArrayIndexRow { element_width: 3, live_nodes_ohs: 319, deepest_path_ohs: 15, live_nodes_mux: 329, deepest_path_mux: 11, live_nodes_auto: 319, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 4, live_nodes_ohs: 401, deepest_path_ohs: 15, live_nodes_mux: 437, deepest_path_mux: 11, live_nodes_auto: 401, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 5, live_nodes_ohs: 483, deepest_path_ohs: 15, live_nodes_mux: 545, deepest_path_mux: 11, live_nodes_auto: 483, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 6, live_nodes_ohs: 565, deepest_path_ohs: 15, live_nodes_mux: 653, deepest_path_mux: 11, live_nodes_auto: 565, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 8, live_nodes_ohs: 729, deepest_path_ohs: 15, live_nodes_mux: 869, deepest_path_mux: 11, live_nodes_auto: 729, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 12, live_nodes_ohs: 1057, deepest_path_ohs: 15, live_nodes_mux: 1301, deepest_path_mux: 11, live_nodes_auto: 1057, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 16, live_nodes_ohs: 1385, deepest_path_ohs: 15, live_nodes_mux: 1733, deepest_path_mux: 11, live_nodes_auto: 1385, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 24, live_nodes_ohs: 2041, deepest_path_ohs: 15, live_nodes_mux: 2597, deepest_path_mux: 11, live_nodes_auto: 2041, deepest_path_auto: 15 },
+        ArrayIndexRow { element_width: 32, live_nodes_ohs: 2697, deepest_path_ohs: 15, live_nodes_mux: 3461, deepest_path_mux: 11, live_nodes_auto: 2697, deepest_path_auto: 15 },
     ];
 
     assert_eq!(got.as_slice(), want);

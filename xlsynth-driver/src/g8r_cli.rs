@@ -100,26 +100,6 @@ fn parse_u32_or_exit(
     }
 }
 
-fn parse_optional_usize_or_exit(
-    matches: &ArgMatches,
-    name: &str,
-    flag_name_for_error: &str,
-) -> Option<usize> {
-    let value = matches.get_one::<String>(name);
-    let parsed = value.map(|s| s.parse::<usize>());
-    match parsed {
-        Some(Ok(n)) => Some(n),
-        Some(Err(_)) => {
-            eprintln!(
-                "Invalid {flag_name_for_error}: {:?}",
-                matches.get_one::<String>(name).unwrap()
-            );
-            std::process::exit(1);
-        }
-        None => None,
-    }
-}
-
 fn parse_gate_formal_backend_or_exit(matches: &ArgMatches) -> GateFormalBackend {
     let value = matches
         .get_one::<String>("gate_formal_backend")
@@ -204,14 +184,13 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         "graph_logical_effort_beta2",
         defaults.graph_logical_effort_beta2,
     );
+    let cut_db_rewrite = parse_bool(matches, "cut-db-rewrite", defaults.cut_db_rewrite);
     let cut_db_enable_large_cone_rewrite = parse_bool(
         matches,
         "cut-db-enable-large-cone-rewrite",
         defaults.cut_db_enable_large_cone_rewrite,
     );
     let cut_db_rewrite_mode = parse_cut_db_rewrite_mode_or_exit(matches);
-    let fraig_max_iterations =
-        parse_optional_usize_or_exit(matches, "fraig_max_iterations", "--fraig-max-iterations");
     let max_fraig_sim_samples = parse_usize_or_exit(
         matches,
         "max_fraig_sim_samples",
@@ -244,9 +223,9 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         compute_graph_logical_effort,
         graph_logical_effort_beta1,
         graph_logical_effort_beta2,
+        cut_db_rewrite,
         cut_db_enable_large_cone_rewrite,
         cut_db_rewrite_mode,
-        fraig_max_iterations,
         max_fraig_sim_samples,
         gate_formal_backend,
         cadical_terminate_limit,

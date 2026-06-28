@@ -260,14 +260,6 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
-            Arg::new("fraig_max_iterations")
-                .long("fraig-max-iterations")
-                .value_name("N")
-                .help("Maximum number of iterations for fraig optimization.")
-                .value_parser(clap::value_parser!(usize))
-                .action(ArgAction::Set),
-        )
-        .arg(
             Arg::new("max_fraig_sim_samples")
                 .long("max-fraig-sim-samples")
                 .alias("fraig-sim-samples")
@@ -290,7 +282,7 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .value_name("N")
                 .help("CaDiCaL internal termination-check budget per solve; 0 disables it.")
                 .value_parser(clap::value_parser!(u32))
-                .default_value("100")
+                .default_value("1000")
                 .action(ArgAction::Set),
         )
         .arg(
@@ -315,6 +307,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .value_name("BETA2")
                 .help("Beta2 value for graph logical effort computation.")
                 .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("cut_db_rewrite")
+                .long("cut-db-rewrite")
+                .value_name("BOOL")
+                .help("Run cut-db rewrite optimization.")
+                .value_parser(["true", "false"])
                 .action(ArgAction::Set),
         )
         .arg(
@@ -538,7 +538,6 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             .map(|v| parse_adder_mapping(Some(v))),
         fraig: parse_cli_bool(matches, "fraig", defaults.fraig),
         reassociation: parse_cli_bool(matches, "reassociation", defaults.reassociation),
-        fraig_max_iterations: matches.get_one::<usize>("fraig_max_iterations").copied(),
         max_fraig_sim_samples: matches
             .get_one::<usize>("max_fraig_sim_samples")
             .copied()
@@ -567,6 +566,7 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             .get_one::<f64>("graph_logical_effort_beta2")
             .copied()
             .unwrap_or(defaults.graph_logical_effort_beta2),
+        cut_db_rewrite: parse_cli_bool(matches, "cut_db_rewrite", defaults.cut_db_rewrite),
         cut_db_enable_large_cone_rewrite: defaults.cut_db_enable_large_cone_rewrite,
         cut_db_rewrite_mode: defaults.cut_db_rewrite_mode,
         toggle_sample_count: matches

@@ -110,6 +110,8 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
         options.graph_logical_effort_beta1.to_string(),
         "--graph-logical-effort-beta2".to_string(),
         options.graph_logical_effort_beta2.to_string(),
+        "--cut-db-rewrite".to_string(),
+        bool_arg(options.cut_db_rewrite),
         "--toggle-sample-count".to_string(),
         options.toggle_sample_count.to_string(),
         "--toggle-seed".to_string(),
@@ -117,9 +119,6 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
     ];
     if let Some(mapping) = options.mul_adder_mapping {
         args.extend(["--mul-adder-mapping".to_string(), mapping.to_string()]);
-    }
-    if let Some(iterations) = options.fraig_max_iterations {
-        args.extend(["--fraig-max-iterations".to_string(), iterations.to_string()]);
     }
     args
 }

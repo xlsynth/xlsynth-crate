@@ -413,13 +413,6 @@ impl AppExt for clap::Command {
                 "Reassociate single-fanout AND supergates into balanced trees",
             )
             .arg(
-                clap::Arg::new("fraig_max_iterations")
-                    .long("fraig-max-iterations")
-                    .value_name("N")
-                    .help("Maximum number of iterations for fraig optimization")
-                    .action(clap::ArgAction::Set),
-            )
-            .arg(
                 clap::Arg::new("max_fraig_sim_samples")
                     .long("max-fraig-sim-samples")
                     .alias("fraig-sim-samples")
@@ -432,7 +425,7 @@ impl AppExt for clap::Command {
                 clap::Arg::new("gate_formal_backend")
                     .long("gate-formal-backend")
                     .value_name("BACKEND")
-                    .help("Formal backend for gate-level proof steps (default: cadical)")
+                    .help("Formal backend for gate-level proof steps; FRAIG requires cadical (default: cadical)")
                     .value_parser(["cadical", "varisat", "z3", "ir"])
                     .default_value("cadical")
                     .action(clap::ArgAction::Set),
@@ -442,9 +435,9 @@ impl AppExt for clap::Command {
                     .long("cadical-terminate-limit")
                     .value_name("N")
                     .help(
-                        "CaDiCaL internal termination-check budget per solve; 0 disables it (default: 100)",
+                        "CaDiCaL internal termination-check budget per solve; 0 disables it (default: 1000)",
                     )
-                    .default_value("100")
+                    .default_value("1000")
                     .action(clap::ArgAction::Set),
             )
             .add_bool_arg(
@@ -467,6 +460,7 @@ impl AppExt for clap::Command {
                     .default_value("0.0")
                     .action(clap::ArgAction::Set),
             )
+            .add_bool_arg("cut-db-rewrite", "Run cut-db rewrite optimization")
             .add_bool_arg(
                 "cut-db-enable-large-cone-rewrite",
                 "Run large-cone cut-db rewrite phases after the 4-input cut-db phases",

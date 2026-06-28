@@ -170,7 +170,7 @@ fn affine_shift_qor_characterization_covers_all_shift_ops() {
     let want: &[AffineShiftQorRow] = &[
         AffineShiftQorRow { op: "shrl", source_width: 12, amount_width: 4, k: 3, consumer: "low_bitslice", dynamic_shift_and_nodes: 86, dynamic_shift_depth: 6, affine_select_and_nodes: 21, affine_select_depth: 2 },
         AffineShiftQorRow { op: "shll", source_width: 12, amount_width: 4, k: 3, consumer: "low_mid_bitslice", dynamic_shift_and_nodes: 65, dynamic_shift_depth: 6, affine_select_and_nodes: 16, affine_select_depth: 2 },
-        AffineShiftQorRow { op: "shra", source_width: 12, amount_width: 4, k: 3, consumer: "sign_fill_bitslice", dynamic_shift_and_nodes: 56, dynamic_shift_depth: 6, affine_select_and_nodes: 11, affine_select_depth: 2 },
+        AffineShiftQorRow { op: "shra", source_width: 12, amount_width: 4, k: 3, consumer: "sign_fill_bitslice", dynamic_shift_and_nodes: 49, dynamic_shift_depth: 6, affine_select_and_nodes: 9, affine_select_depth: 2 },
     ];
     assert_eq!(got, want);
 }

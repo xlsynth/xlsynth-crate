@@ -3,7 +3,6 @@
      1 :: identity(bits[1]) -> bits[1]
      1 :: nil() -> ()
      1 :: priority_sel(bits[1], bits[1], bits[1]) -> bits[1]
-== Fraig convergence: Yes(0)
 == Deepest path (3):
      6 :: And2(~Ref(5), ~Ref(4))
           tags: priority_sel_4_output_bit_0

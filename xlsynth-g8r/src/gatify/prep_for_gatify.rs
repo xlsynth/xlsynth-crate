@@ -18,7 +18,7 @@
 //! that need analysis should project to the XLS basis ops separately (see
 //! `xlsynth_pir::desugar_extensions`).
 
-use xlsynth::{IrBits, IrValue};
+use xlsynth::IrValue;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_match;
 use xlsynth_pir::ir_match::MatchCtx;
@@ -1325,17 +1325,6 @@ fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> 
     push_node(f, Type::Bits(bit_count), NodePayload::Literal(lit))
 }
 
-fn push_usize_literal_bits(f: &mut ir::Fn, bit_count: usize, value: usize) -> NodeRef {
-    let bits = (0..bit_count)
-        .map(|i| i < usize::BITS as usize && ((value >> i) & 1) != 0)
-        .collect::<Vec<_>>();
-    push_node(
-        f,
-        Type::Bits(bit_count),
-        NodePayload::Literal(IrValue::from_bits(&IrBits::from_lsb_is_0(&bits))),
-    )
-}
-
 fn is_ubits_literal_0_or_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> Option<bool> {
     let node = f.get_node(nr);
     if node.ty.bit_count() != w {
@@ -2116,24 +2105,6 @@ fn not_shifted_all_ones_count(
     Some(count)
 }
 
-fn shrl_all_ones_count(f: &ir::Fn, node_ref: NodeRef, output_width: usize) -> Option<NodeRef> {
-    if !is_bits_w(f, node_ref, output_width) {
-        return None;
-    }
-    let ctx = MatchCtx::new(f);
-    let bindings = ctx.matches(
-        node_ref,
-        ir_match::binop(Binop::Shrl, ir_match::any("ones"), ir_match::any("count")),
-    )?;
-    let ones = bindings.get_node("ones").expect("ones binding");
-    let count = bindings.get_node("count").expect("count binding");
-    if !is_ubits_literal_all_ones_of_width(f, ones, output_width) {
-        return None;
-    }
-    let _ = bits_width_of(f, count);
-    Some(count)
-}
-
 fn shifted_shrl_all_ones_match(
     f: &ir::Fn,
     node_ref: NodeRef,
@@ -2185,79 +2156,6 @@ fn count_always_le_width(
     }
     range_info
         .is_some_and(|ri| ri.proves_ult(f.get_node(count).text_id, low_width.saturating_add(1)))
-}
-
-fn append_count_zero_ext_to_width(f: &mut ir::Fn, count: NodeRef, width: usize) -> NodeRef {
-    let count_width = bits_width_of(f, count);
-    if count_width == width {
-        count
-    } else {
-        debug_assert!(count_width < width);
-        push_node(
-            f,
-            Type::Bits(width),
-            NodePayload::ZeroExt {
-                arg: count,
-                new_bit_count: width,
-            },
-        )
-    }
-}
-
-fn append_saturating_width_minus_count(
-    f: &mut ir::Fn,
-    count: NodeRef,
-    output_width: usize,
-    range_info: Option<&IrRangeInfo>,
-) -> NodeRef {
-    let count_width = bits_width_of(f, count);
-    let remaining_width = count_width.max(ceil_log2(output_width.saturating_add(1)));
-    let count_wide = append_count_zero_ext_to_width(f, count, remaining_width);
-    let width_lit = push_usize_literal_bits(f, remaining_width, output_width);
-    let remaining = push_node(
-        f,
-        Type::Bits(remaining_width),
-        NodePayload::Binop(Binop::Sub, width_lit, count_wide),
-    );
-    if count_always_le_width(f, count, output_width, range_info) {
-        return remaining;
-    }
-
-    let zero = push_usize_literal_bits(f, remaining_width, 0);
-    let count_lt_width = push_node(
-        f,
-        Type::Bits(1),
-        NodePayload::Binop(Binop::Ult, count_wide, width_lit),
-    );
-    push_node(
-        f,
-        Type::Bits(remaining_width),
-        NodePayload::Sel {
-            selector: count_lt_width,
-            cases: vec![zero, remaining],
-            default: None,
-        },
-    )
-}
-
-fn return_only_rewrite_target(
-    f: &ir::Fn,
-    use_counts: &[usize],
-    target: NodeRef,
-) -> Option<(NodeRef, Option<NodeRef>)> {
-    let ret_nr = f.ret_node_ref?;
-    let (ret_target, target_to_nil): (NodeRef, Option<NodeRef>) = if ret_nr == target {
-        (target, None)
-    } else {
-        match f.get_node(ret_nr).payload {
-            NodePayload::Unop(Unop::Identity, arg) if arg == target => (ret_nr, Some(target)),
-            _ => return None,
-        }
-    };
-    if use_counts[target.index] != 1 || use_counts[ret_target.index] != 1 {
-        return None;
-    }
-    Some((ret_target, target_to_nil))
 }
 
 /// Rewrites low-mask idioms into `ext_mask_low(count)`.
@@ -2354,49 +2252,6 @@ fn rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
             Some(Type::Bits(output_width)),
         )
         .expect("prep_for_gatify: rewriting shifted shrl all-ones to not failed");
-        rewrites += 1;
-    }
-    rewrites
-}
-
-/// Rewrites return-only `shrl(bits[N]:all_ones, count)` into
-/// `ext_mask_low(saturating_sub(N, count))`.
-fn rewrite_shrl_all_ones_to_ext_mask_low(
-    f: &mut ir::Fn,
-    range_info: Option<&IrRangeInfo>,
-) -> usize {
-    let use_counts = get_use_counts(f);
-    let mut rewrites = 0usize;
-    let original_len = f.nodes.len();
-    for node_index in 0..original_len {
-        let Some(output_width) = bits_width(&f.nodes[node_index].ty) else {
-            continue;
-        };
-        if output_width == 0 {
-            continue;
-        }
-        let node_ref = NodeRef { index: node_index };
-        let Some(count) = shrl_all_ones_count(f, node_ref, output_width) else {
-            continue;
-        };
-        let Some((ret_target, target_to_nil)) =
-            return_only_rewrite_target(f, &use_counts, node_ref)
-        else {
-            continue;
-        };
-
-        let remaining = append_saturating_width_minus_count(f, count, output_width, range_info);
-        let ext_nr = push_node(
-            f,
-            Type::Bits(output_width),
-            NodePayload::ExtMaskLow { count: remaining },
-        );
-        ir_utils::replace_node_with_ref(f, ret_target, ext_nr)
-            .expect("prep_for_gatify: redirecting shrl all-ones return to ext_mask_low failed");
-        nil_out_node(f, ret_target);
-        if let Some(target) = target_to_nil {
-            nil_out_node(f, target);
-        }
         rewrites += 1;
     }
     rewrites
@@ -2593,7 +2448,6 @@ pub fn prep_for_gatify(
         let mut _rewrites = rewrite_not_shifted_all_ones_to_ext_mask_low(&mut cloned);
         _rewrites += rewrite_shift_minus_one_idioms_to_ext_mask_low(&mut cloned);
         _rewrites += rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(&mut cloned);
-        _rewrites += rewrite_shrl_all_ones_to_ext_mask_low(&mut cloned, range_info);
         _rewrites += rewrite_shifted_all_ones_to_not_ext_mask_low(&mut cloned);
         _rewrites += rewrite_zero_concat_mask_low_to_ext_mask_low(&mut cloned, range_info);
     }

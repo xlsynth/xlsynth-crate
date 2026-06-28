@@ -10,10 +10,10 @@
 //! context-reuse testing; Z3 and IR backends are dispatched through the common
 //! gate-formal backend API where supported.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 use std::ops::Not;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output};
 use crate::aig::get_summary_stats::get_gate_depth;
@@ -49,6 +49,51 @@ pub struct ValidationResult {
     /// that these can be used as concrete stimulus for distinguishing proposals
     /// in subsequent iterations.
     pub cex_inputs: Vec<Vec<IrBits>>,
+
+    /// Number of formal proof queries issued while validating the classes.
+    pub proof_query_count: usize,
+
+    /// Number of proof queries that exhausted their deterministic resource
+    /// limit and were conservatively left unresolved.
+    pub interrupted_proof_count: usize,
+}
+
+/// Statistics for a single-solver FRAIG validation run.
+#[derive(Debug, Clone)]
+pub(crate) struct FullGraphFraigValidationStat {
+    solver_build_seconds: f64,
+    equivalence_seconds: f64,
+    equivalence_class_visit_count: usize,
+    equivalence_proof_query_count: usize,
+    equivalence_interrupted_proof_count: usize,
+    interrupted_relation_skip_count: usize,
+    virtual_proof_count: usize,
+    equivalence_counterexample_count: usize,
+    initial_class_histogram: BTreeMap<usize, usize>,
+}
+
+impl std::fmt::Display for FullGraphFraigValidationStat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "solver_build_seconds={:.6}, equivalence_seconds={:.6}, class_visits={}, proof_queries={}, interrupted_proofs={}, interrupted_relation_skips={}, virtual_proofs={}, counterexamples={}, initial_class_histogram={:?}",
+            self.solver_build_seconds,
+            self.equivalence_seconds,
+            self.equivalence_class_visit_count,
+            self.equivalence_proof_query_count,
+            self.equivalence_interrupted_proof_count,
+            self.interrupted_relation_skip_count,
+            self.virtual_proof_count,
+            self.equivalence_counterexample_count,
+            self.initial_class_histogram,
+        )
+    }
+}
+
+/// Result of ordinary FRAIG using one full-graph SAT session.
+pub(crate) struct FullGraphFraigValidationResult {
+    pub(crate) validation: ValidationResult,
+    pub(crate) stat: FullGraphFraigValidationStat,
 }
 
 #[derive(Debug)]
@@ -73,7 +118,7 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 pub const CADICAL_CONFIG_ENV: &str = "XLSYNTH_G8R_CADICAL_CONFIG";
-pub const DEFAULT_CADICAL_TERMINATE_LIMIT: u32 = 100;
+pub const DEFAULT_CADICAL_TERMINATE_LIMIT: u32 = 1000;
 
 /// Optional resource limits for gate-level formal proof backends.
 #[derive(Debug, Clone, Copy, Default)]
@@ -389,6 +434,275 @@ fn add_miter<S: IncrementalSat>(
     xor_miter
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VirtualExpression {
+    Operand(AigOperand),
+    And2 {
+        a: AigOperand,
+        b: AigOperand,
+        output_negated: bool,
+    },
+}
+
+/// Tracks proven relationships and recognizes downstream structural congruence.
+struct VirtualEquivalence {
+    parent: Vec<usize>,
+    parity_to_parent: Vec<bool>,
+    depth: Vec<usize>,
+}
+
+impl VirtualEquivalence {
+    fn new(gate_fn: &GateFn) -> Self {
+        let all_nodes: Vec<AigRef> = gate_fn
+            .gates
+            .iter()
+            .enumerate()
+            .map(|(id, _)| AigRef { id })
+            .collect();
+        let depth_stats = get_gate_depth(gate_fn, &all_nodes);
+        let depth = all_nodes
+            .iter()
+            .map(|node| depth_stats.ref_to_depth[node])
+            .collect();
+        Self {
+            parent: (0..gate_fn.gates.len()).collect(),
+            parity_to_parent: vec![false; gate_fn.gates.len()],
+            depth,
+        }
+    }
+
+    /// Returns the representative and whether `node` is its logical inverse.
+    fn find(&mut self, node: AigRef) -> (AigRef, bool) {
+        let mut current = node.id;
+        let mut parity = false;
+        let mut path = Vec::new();
+        while self.parent[current] != current {
+            path.push((current, parity));
+            parity ^= self.parity_to_parent[current];
+            current = self.parent[current];
+        }
+        for (path_node, parity_from_start) in path {
+            self.parent[path_node] = current;
+            self.parity_to_parent[path_node] = parity ^ parity_from_start;
+        }
+        (AigRef { id: current }, parity)
+    }
+
+    fn canonical_operand(&mut self, operand: AigOperand) -> AigOperand {
+        let (root, parity) = self.find(operand.node);
+        AigOperand {
+            node: root,
+            negated: operand.negated ^ parity,
+        }
+    }
+
+    fn canonical_equiv_node(&mut self, node: EquivNode) -> AigOperand {
+        self.canonical_operand(AigOperand {
+            node: node.aig_ref(),
+            negated: node.is_inverted(),
+        })
+    }
+
+    /// Records a proven equality between the values represented by two nodes.
+    fn union_equiv_nodes(&mut self, lhs: EquivNode, rhs: EquivNode) -> bool {
+        let (lhs_root, lhs_parity) = self.find(lhs.aig_ref());
+        let (rhs_root, rhs_parity) = self.find(rhs.aig_ref());
+        let root_parity = lhs_parity ^ lhs.is_inverted() ^ rhs_parity ^ rhs.is_inverted();
+        if lhs_root == rhs_root {
+            debug_assert!(!root_parity, "inconsistent proven AIG relationship");
+            return false;
+        }
+
+        let lhs_key = (self.depth[lhs_root.id], lhs_root.id);
+        let rhs_key = (self.depth[rhs_root.id], rhs_root.id);
+        if lhs_key <= rhs_key {
+            self.parent[rhs_root.id] = lhs_root.id;
+            self.parity_to_parent[rhs_root.id] = root_parity;
+        } else {
+            self.parent[lhs_root.id] = rhs_root.id;
+            self.parity_to_parent[lhs_root.id] = root_parity;
+        }
+        true
+    }
+
+    fn are_equivalent(&mut self, lhs: EquivNode, rhs: EquivNode) -> bool {
+        self.canonical_equiv_node(lhs) == self.canonical_equiv_node(rhs)
+    }
+
+    fn folded_and(lhs: AigOperand, rhs: AigOperand) -> Option<AigOperand> {
+        let false_operand = AigOperand::from(AigRef { id: 0 });
+        let true_operand = false_operand.negate();
+        if lhs.node == rhs.node {
+            return if lhs.negated == rhs.negated {
+                Some(lhs)
+            } else {
+                Some(false_operand)
+            };
+        }
+        if lhs == false_operand || rhs == false_operand {
+            return Some(false_operand);
+        }
+        if lhs == true_operand {
+            return Some(rhs);
+        }
+        if rhs == true_operand {
+            return Some(lhs);
+        }
+        None
+    }
+
+    /// Describes a node after applying all relationships proven so far.
+    fn virtual_expression(&mut self, gate_fn: &GateFn, node: EquivNode) -> VirtualExpression {
+        let canonical = self.canonical_equiv_node(node);
+        match gate_fn.gates[canonical.node.id] {
+            AigNode::Literal { value, .. } => {
+                let constant = AigOperand {
+                    node: AigRef { id: 0 },
+                    negated: value ^ canonical.negated,
+                };
+                let constant_node = if constant.negated {
+                    EquivNode::Inverted(constant.node)
+                } else {
+                    EquivNode::Normal(constant.node)
+                };
+                self.union_equiv_nodes(node, constant_node);
+                VirtualExpression::Operand(self.canonical_equiv_node(node))
+            }
+            AigNode::Input { .. } => VirtualExpression::Operand(canonical),
+            AigNode::And2 { a, b, .. } => {
+                let a = self.canonical_operand(a);
+                let b = self.canonical_operand(b);
+                if let Some(mut folded) = Self::folded_and(a, b) {
+                    folded.negated ^= canonical.negated;
+                    let folded_node = if folded.negated {
+                        EquivNode::Inverted(folded.node)
+                    } else {
+                        EquivNode::Normal(folded.node)
+                    };
+                    self.union_equiv_nodes(node, folded_node);
+                    return VirtualExpression::Operand(self.canonical_equiv_node(node));
+                }
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                VirtualExpression::And2 {
+                    a,
+                    b,
+                    output_negated: canonical.negated,
+                }
+            }
+        }
+    }
+
+    /// Returns true when prior proofs make this query structurally redundant.
+    fn prove_by_structure(&mut self, gate_fn: &GateFn, lhs: EquivNode, rhs: EquivNode) -> bool {
+        if self.are_equivalent(lhs, rhs) {
+            return true;
+        }
+        let lhs_expression = self.virtual_expression(gate_fn, lhs);
+        let rhs_expression = self.virtual_expression(gate_fn, rhs);
+        if self.are_equivalent(lhs, rhs) || lhs_expression == rhs_expression {
+            self.union_equiv_nodes(lhs, rhs);
+            return true;
+        }
+        false
+    }
+
+    /// Returns one normalized equality set for every non-singleton component.
+    fn into_proven_equiv_sets(mut self) -> Vec<Vec<EquivNode>> {
+        let mut groups: BTreeMap<AigRef, Vec<EquivNode>> = BTreeMap::new();
+        for id in 0..self.parent.len() {
+            let node = AigRef { id };
+            let (root, parity) = self.find(node);
+            groups.entry(root).or_default().push(if parity {
+                EquivNode::Inverted(node)
+            } else {
+                EquivNode::Normal(node)
+            });
+        }
+        groups
+            .into_values()
+            .filter(|group| group.len() > 1)
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CanonicalEquivRelation {
+    lower_node_id: usize,
+    upper_node_id: usize,
+    inversion_parity: bool,
+}
+
+impl CanonicalEquivRelation {
+    /// Canonicalizes operand order and collapses `a == b` with `!a == !b`.
+    fn new(lhs: EquivNode, rhs: EquivNode) -> Self {
+        let lhs_id = lhs.aig_ref().id;
+        let rhs_id = rhs.aig_ref().id;
+        let (lower_node_id, upper_node_id) = if lhs_id <= rhs_id {
+            (lhs_id, rhs_id)
+        } else {
+            (rhs_id, lhs_id)
+        };
+        Self {
+            lower_node_id,
+            upper_node_id,
+            inversion_parity: lhs.is_inverted() ^ rhs.is_inverted(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MutableEquivalenceClass {
+    nodes: Vec<EquivNode>,
+}
+
+fn class_size_histogram(
+    equiv_classes: impl IntoIterator<Item = impl AsRef<[EquivNode]>>,
+) -> BTreeMap<usize, usize> {
+    let mut histogram = BTreeMap::new();
+    for equiv_class in equiv_classes {
+        *histogram.entry(equiv_class.as_ref().len()).or_default() += 1;
+    }
+    histogram
+}
+
+fn split_mutable_class_by_model<Lit: Copy>(
+    equiv_class: MutableEquivalenceClass,
+    model: &impl SatModel<Lit>,
+    aig_ref_to_lit: &HashMap<AigRef, Lit>,
+) -> Vec<MutableEquivalenceClass> {
+    let mut false_values = Vec::new();
+    let mut true_values = Vec::new();
+    for node in equiv_class.nodes {
+        if model_value_for_equiv_node(model, aig_ref_to_lit, node) {
+            true_values.push(node);
+        } else {
+            false_values.push(node);
+        }
+    }
+
+    let mut split = Vec::new();
+    if false_values.len() > 1 {
+        split.push(MutableEquivalenceClass {
+            nodes: false_values,
+        });
+    }
+    if true_values.len() > 1 {
+        split.push(MutableEquivalenceClass { nodes: true_values });
+    }
+    split
+}
+
+fn refine_mutable_classes_by_model<Lit: Copy>(
+    equiv_classes: VecDeque<MutableEquivalenceClass>,
+    model: &impl SatModel<Lit>,
+    aig_ref_to_lit: &HashMap<AigRef, Lit>,
+) -> VecDeque<MutableEquivalenceClass> {
+    equiv_classes
+        .into_iter()
+        .flat_map(|equiv_class| split_mutable_class_by_model(equiv_class, model, aig_ref_to_lit))
+        .collect()
+}
+
 fn model_value_for_equiv_node<Lit: Copy>(
     model: &impl SatModel<Lit>,
     aig_ref_to_lit: &HashMap<AigRef, Lit>,
@@ -488,6 +802,143 @@ fn solver_model_to_cex<Lit: Copy, Model: SatModel<Lit>>(
     // Now map_to_inputs should receive a map covering all expected inputs
     let cex = gate_fn.map_to_inputs(inputs_map);
     cex
+}
+
+fn prove_fraig_equivalence_classes_with_solver<S: IncrementalSat>(
+    gate_fn: &GateFn,
+    equiv_classes: &[Vec<EquivNode>],
+    solver: &mut S,
+) -> Result<FullGraphFraigValidationResult, ValidationError> {
+    let solver_build_start = Instant::now();
+    let mut frontier: Vec<AigRef> = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+        .map(|operand| operand.node)
+        .collect();
+    frontier.push(AigRef { id: 0 });
+    let (cone_gates, cone_inputs) = extract_cone(&frontier, &gate_fn.gates);
+    let aig_ref_to_lit = build_sat_clauses(solver, &cone_gates, &cone_inputs, &gate_fn.gates);
+    let solver_build_seconds = solver_build_start.elapsed().as_secs_f64();
+    let all_primary_inputs: HashSet<AigRef> = gate_fn
+        .inputs
+        .iter()
+        .flat_map(|input_vec| input_vec.bit_vector.iter_lsb_to_msb())
+        .map(|operand| operand.node)
+        .collect();
+
+    let classes: Vec<MutableEquivalenceClass> = equiv_classes
+        .iter()
+        .filter(|equiv_class| equiv_class.len() > 1)
+        .cloned()
+        .map(|nodes| MutableEquivalenceClass { nodes })
+        .collect();
+    let initial_class_histogram = class_size_histogram(
+        classes
+            .iter()
+            .map(|equiv_class| equiv_class.nodes.as_slice()),
+    );
+
+    let mut virtual_equivalence = VirtualEquivalence::new(gate_fn);
+    let mut all_counterexamples = Vec::new();
+    let mut counterexample_seen = HashSet::new();
+    let mut pending: VecDeque<MutableEquivalenceClass> = classes.into();
+
+    let equivalence_start = Instant::now();
+    let mut interrupted_relations = HashSet::new();
+    let mut equivalence_class_visit_count = 0usize;
+    let mut equivalence_proof_query_count = 0usize;
+    let mut equivalence_interrupted_proof_count = 0usize;
+    let mut interrupted_relation_skip_count = 0usize;
+    let mut virtual_proof_count = 0usize;
+    let mut equivalence_counterexample_count = 0usize;
+
+    while let Some(equiv_class) = pending.pop_front() {
+        equivalence_class_visit_count += 1;
+        let representative = equiv_class.nodes[0];
+        let mut found_counterexample = false;
+        for &candidate in &equiv_class.nodes[1..] {
+            if virtual_equivalence.prove_by_structure(gate_fn, representative, candidate) {
+                virtual_proof_count += 1;
+                continue;
+            }
+            let relation = CanonicalEquivRelation::new(representative, candidate);
+            if interrupted_relations.contains(&relation) {
+                interrupted_relation_skip_count += 1;
+                continue;
+            }
+
+            let miter = add_miter(solver, &aig_ref_to_lit, representative, candidate);
+            equivalence_proof_query_count += 1;
+            match solver.sat_solve_assuming(&[miter]) {
+                Ok(SatSolveResult::Unsat) => {
+                    virtual_equivalence.union_equiv_nodes(representative, candidate);
+                }
+                Ok(SatSolveResult::Sat) => {
+                    let model = solver.sat_model()?;
+                    let counterexample =
+                        solver_model_to_cex(&model, &all_primary_inputs, &aig_ref_to_lit, gate_fn);
+                    if counterexample_seen.insert(counterexample.clone()) {
+                        all_counterexamples.push(counterexample);
+                        equivalence_counterexample_count += 1;
+                    }
+
+                    let mut classes_to_refine = VecDeque::new();
+                    classes_to_refine.push_back(equiv_class.clone());
+                    classes_to_refine.append(&mut pending);
+                    pending =
+                        refine_mutable_classes_by_model(classes_to_refine, &model, &aig_ref_to_lit);
+                    found_counterexample = true;
+                    break;
+                }
+                Err(ValidationError::CadicalSolveInterrupted) => {
+                    interrupted_relations.insert(relation);
+                    equivalence_interrupted_proof_count += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if found_counterexample {
+            continue;
+        }
+    }
+    let equivalence_seconds = equivalence_start.elapsed().as_secs_f64();
+
+    let validation = ValidationResult {
+        proven_equiv_sets: virtual_equivalence.into_proven_equiv_sets(),
+        cex_inputs: all_counterexamples,
+        proof_query_count: equivalence_proof_query_count,
+        interrupted_proof_count: equivalence_interrupted_proof_count,
+    };
+    let stat = FullGraphFraigValidationStat {
+        solver_build_seconds,
+        equivalence_seconds,
+        equivalence_class_visit_count,
+        equivalence_proof_query_count,
+        equivalence_interrupted_proof_count,
+        interrupted_relation_skip_count,
+        virtual_proof_count,
+        equivalence_counterexample_count,
+        initial_class_histogram,
+    };
+    Ok(FullGraphFraigValidationResult { validation, stat })
+}
+
+/// Proves FRAIG candidates using one shared full-live-graph CaDiCaL instance.
+pub(crate) fn prove_fraig_equivalence_classes_with_backend_and_options(
+    gate_fn: &GateFn,
+    equiv_classes: &[Vec<EquivNode>],
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
+) -> Result<FullGraphFraigValidationResult, ValidationError> {
+    if backend != GateFormalBackend::Cadical {
+        return Err(ValidationError::UnsupportedBackend {
+            backend,
+            operation: "FRAIG equivalence-class proof; CaDiCaL is required",
+        });
+    }
+    let mut solver = CadicalSat::new_with_options(options)?;
+    prove_fraig_equivalence_classes_with_solver(gate_fn, equiv_classes, &mut solver)
 }
 
 fn build_gate_fn<S: IncrementalSat>(
@@ -728,6 +1179,7 @@ pub fn validate_equivalence_classes_with_backend_and_options(
                 equiv_classes,
                 &mut solver,
                 /* classes_are_depth_sorted= */ false,
+                /* use_virtual_rewrite= */ false,
             )
         }
         GateFormalBackend::Cadical => {
@@ -737,6 +1189,7 @@ pub fn validate_equivalence_classes_with_backend_and_options(
                 equiv_classes,
                 &mut solver,
                 /* classes_are_depth_sorted= */ false,
+                /* use_virtual_rewrite= */ false,
             )
         }
         GateFormalBackend::Z3 | GateFormalBackend::Ir => {
@@ -779,6 +1232,7 @@ pub fn validate_equivalence_classes_presorted_with_backend_and_options(
                 equiv_classes,
                 &mut solver,
                 /* classes_are_depth_sorted= */ true,
+                /* use_virtual_rewrite= */ false,
             )
         }
         GateFormalBackend::Cadical => {
@@ -788,6 +1242,48 @@ pub fn validate_equivalence_classes_presorted_with_backend_and_options(
                 equiv_classes,
                 &mut solver,
                 /* classes_are_depth_sorted= */ true,
+                /* use_virtual_rewrite= */ false,
+            )
+        }
+        GateFormalBackend::Z3 | GateFormalBackend::Ir => {
+            validate_equivalence_classes_pairwise_with_backend(
+                gate_fn,
+                equiv_classes,
+                backend,
+                /* classes_are_depth_sorted= */ true,
+                options,
+            )
+        }
+    }
+}
+
+/// Validates depth-sorted classes while carrying proven equivalences forward
+/// through a virtual structural rewrite of later AIG nodes.
+pub fn validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
+) -> Result<ValidationResult, ValidationError> {
+    match resolve_equivalence_class_backend(backend)? {
+        GateFormalBackend::Varisat => {
+            let mut solver = varisat::Solver::new();
+            validate_equivalence_classes_with_solver(
+                gate_fn,
+                equiv_classes,
+                &mut solver,
+                /* classes_are_depth_sorted= */ true,
+                /* use_virtual_rewrite= */ true,
+            )
+        }
+        GateFormalBackend::Cadical => {
+            let mut solver = CadicalSat::new_with_options(options)?;
+            validate_equivalence_classes_with_solver(
+                gate_fn,
+                equiv_classes,
+                &mut solver,
+                /* classes_are_depth_sorted= */ true,
+                /* use_virtual_rewrite= */ true,
             )
         }
         GateFormalBackend::Z3 | GateFormalBackend::Ir => {
@@ -807,14 +1303,29 @@ fn gate_fn_with_single_output(
     equiv_node: EquivNode,
     output_name: &str,
 ) -> GateFn {
-    let mut operand = AigOperand::from(equiv_node.aig_ref());
-    if equiv_node.is_inverted() {
-        operand = operand.negate();
-    }
+    gate_fn_with_equiv_outputs(gate_fn, &[equiv_node], output_name)
+}
+
+fn gate_fn_with_equiv_outputs(
+    gate_fn: &GateFn,
+    equiv_nodes: &[EquivNode],
+    output_name: &str,
+) -> GateFn {
+    let operands: Vec<AigOperand> = equiv_nodes
+        .iter()
+        .map(|equiv_node| {
+            let operand = AigOperand::from(equiv_node.aig_ref());
+            if equiv_node.is_inverted() {
+                operand.negate()
+            } else {
+                operand
+            }
+        })
+        .collect();
     let mut out = gate_fn.clone();
     out.outputs = vec![Output {
         name: output_name.to_string(),
-        bit_vector: AigBitVector::from_bit(operand),
+        bit_vector: AigBitVector::from_lsb_is_index_0(&operands),
     }];
     out
 }
@@ -856,6 +1367,8 @@ fn validate_equivalence_classes_pairwise_with_backend(
     let mut validation_result = ValidationResult {
         proven_equiv_sets: Vec::new(),
         cex_inputs: Vec::new(),
+        proof_query_count: 0,
+        interrupted_proof_count: 0,
     };
     for equiv_class in sorted_equiv_classes {
         let mut known_equiv = vec![equiv_class[0]];
@@ -864,6 +1377,7 @@ fn validate_equivalence_classes_pairwise_with_backend(
             let representative_fn =
                 gate_fn_with_single_output(gate_fn, representative, "representative");
             let candidate_fn = gate_fn_with_single_output(gate_fn, candidate, "candidate");
+            validation_result.proof_query_count += 1;
             match prove_gate_fn_equiv_with_backend_and_options(
                 &representative_fn,
                 &candidate_fn,
@@ -892,6 +1406,35 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
     equiv_classes: &[&[EquivNode]],
     solver: &mut S,
     classes_are_depth_sorted: bool,
+    use_virtual_rewrite: bool,
+) -> Result<ValidationResult, ValidationError> {
+    let mut virtual_equivalence = use_virtual_rewrite.then(|| VirtualEquivalence::new(gate_fn));
+    let mut virtual_proof_count = 0usize;
+    let mut validation_result = validate_equivalence_classes_with_solver_and_virtual_state(
+        gate_fn,
+        equiv_classes,
+        solver,
+        classes_are_depth_sorted,
+        virtual_equivalence.as_mut(),
+        &mut virtual_proof_count,
+    )?;
+    if let Some(equivalence) = virtual_equivalence {
+        validation_result.proven_equiv_sets = equivalence.into_proven_equiv_sets();
+        log::info!(
+            "virtual FRAIG rewrite avoided {} SAT proof queries",
+            virtual_proof_count
+        );
+    }
+    Ok(validation_result)
+}
+
+fn validate_equivalence_classes_with_solver_and_virtual_state<S: IncrementalSat>(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+    solver: &mut S,
+    classes_are_depth_sorted: bool,
+    mut virtual_equivalence: Option<&mut VirtualEquivalence>,
+    virtual_proof_count: &mut usize,
 ) -> Result<ValidationResult, ValidationError> {
     // Extract the combined cone for all of the references we're trying to determine
     // equivalence for.
@@ -918,6 +1461,8 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
     let mut validation_result = ValidationResult {
         proven_equiv_sets: Vec::new(),
         cex_inputs: Vec::new(),
+        proof_query_count: 0,
+        interrupted_proof_count: 0,
     };
     let sorted_equiv_classes: Vec<Vec<EquivNode>> = if classes_are_depth_sorted {
         equiv_classes
@@ -946,7 +1491,6 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
         sorted_equiv_classes
     };
     let mut counterexample_models: Vec<S::Model> = Vec::new();
-    let mut interrupted_proof_count = 0usize;
 
     // Now iterate through the equivalence classes -- for each equivalence class
     // we'll advance a representative and check each next value against it.
@@ -968,13 +1512,28 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
             for &candidate in &bucket[1..] {
                 // Create a miter between this candidate and the class representative.
                 let representative = known_equiv[0];
+                if virtual_equivalence
+                    .as_mut()
+                    .map(|equivalence| {
+                        equivalence.prove_by_structure(gate_fn, representative, candidate)
+                    })
+                    .unwrap_or(false)
+                {
+                    known_equiv.push(candidate);
+                    *virtual_proof_count += 1;
+                    continue;
+                }
                 let miter = add_miter(solver, &aig_ref_to_lit, representative, candidate);
 
                 // Assume the miter output is true, which asks for a counterexample where
                 // the candidate is unequal to the representative.
+                validation_result.proof_query_count += 1;
                 match solver.sat_solve_assuming(&[miter]) {
                     Ok(SatSolveResult::Unsat) => {
                         // No counterexample found, expand the known equivalent set.
+                        if let Some(equivalence) = virtual_equivalence.as_mut() {
+                            equivalence.union_equiv_nodes(representative, candidate);
+                        }
                         known_equiv.push(candidate);
                     }
                     Ok(SatSolveResult::Sat) => {
@@ -999,7 +1558,7 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
                     Err(ValidationError::CadicalSolveInterrupted) => {
                         // A resource-limited proof is inconclusive. Leaving the
                         // candidate out of the proven set preserves correctness.
-                        interrupted_proof_count += 1;
+                        validation_result.interrupted_proof_count += 1;
                     }
                     Err(e) => return Err(e),
                 }
@@ -1011,13 +1570,12 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
         }
     }
 
-    if interrupted_proof_count != 0 {
+    if validation_result.interrupted_proof_count != 0 {
         log::info!(
             "equivalence-class validation skipped {} resource-limited candidate proofs as unproven",
-            interrupted_proof_count
+            validation_result.interrupted_proof_count
         );
     }
-
     Ok(validation_result)
 }
 
@@ -1028,13 +1586,18 @@ mod tests {
     use rand::SeedableRng;
 
     use crate::{
+        aig::AigBitVector,
+        gate_builder::{GateBuilder, GateBuilderOptions},
         propose_equiv::{EquivNode, propose_equivalence_classes},
         test_utils::{setup_graph_with_redundancies, setup_partially_equiv_graph},
     };
 
     use super::{
-        CadicalSat, GateFormalBackend, GateFormalOptions, IncrementalSat, SatModel, SatSolveResult,
-        ValidationError, ValidationResult, validate_equivalence_classes,
+        CadicalSat, CanonicalEquivRelation, GateFormalBackend, GateFormalOptions, IncrementalSat,
+        SatModel, SatSolveResult, ValidationError, ValidationResult,
+        prove_fraig_equivalence_classes_with_backend_and_options,
+        prove_fraig_equivalence_classes_with_solver, validate_equivalence_classes,
+        validate_equivalence_classes_presorted_with_virtual_rewrite_and_options,
         validate_equivalence_classes_with_backend, validate_equivalence_classes_with_solver,
     };
     #[allow(unused_imports)]
@@ -1125,11 +1688,82 @@ mod tests {
             &[proposed_class],
             &mut solver,
             true,
+            false,
         )
         .unwrap();
 
         assert!(result.proven_equiv_sets.is_empty());
         assert!(result.cex_inputs.is_empty());
+    }
+
+    #[test]
+    fn canonical_relation_collapses_inverse_and_operand_order() {
+        let a = crate::aig::AigRef { id: 3 };
+        let b = crate::aig::AigRef { id: 7 };
+        let normal = CanonicalEquivRelation::new(EquivNode::Normal(a), EquivNode::Normal(b));
+
+        assert_eq!(
+            normal,
+            CanonicalEquivRelation::new(EquivNode::Inverted(a), EquivNode::Inverted(b))
+        );
+        assert_eq!(
+            normal,
+            CanonicalEquivRelation::new(EquivNode::Normal(b), EquivNode::Normal(a))
+        );
+        assert_ne!(
+            normal,
+            CanonicalEquivRelation::new(EquivNode::Normal(a), EquivNode::Inverted(b))
+        );
+    }
+
+    #[test]
+    fn fraig_equivalence_class_proof_requires_cadical() {
+        let setup = setup_graph_with_redundancies();
+        let error = match prove_fraig_equivalence_classes_with_backend_and_options(
+            &setup.g,
+            &[],
+            GateFormalBackend::Varisat,
+            GateFormalOptions::default(),
+        ) {
+            Ok(_) => panic!("non-CaDiCaL FRAIG proof should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ValidationError::UnsupportedBackend {
+                backend: GateFormalBackend::Varisat,
+                operation: "FRAIG equivalence-class proof; CaDiCaL is required",
+            }
+        ));
+    }
+
+    #[test]
+    fn full_graph_fraig_does_not_retry_interrupted_inverse_relation() {
+        let mut builder = GateBuilder::new(
+            "full_graph_no_retry".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        builder.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[a, b]),
+        );
+        let gate_fn = builder.build();
+        let ordinary_classes = vec![
+            vec![EquivNode::Normal(a.node), EquivNode::Normal(b.node)],
+            vec![EquivNode::Inverted(a.node), EquivNode::Inverted(b.node)],
+        ];
+        let mut solver = InterruptingSat { next_lit: 0 };
+
+        let result =
+            prove_fraig_equivalence_classes_with_solver(&gate_fn, &ordinary_classes, &mut solver)
+                .unwrap();
+
+        assert_eq!(result.stat.equivalence_proof_query_count, 1);
+        assert_eq!(result.stat.equivalence_interrupted_proof_count, 1);
+        assert_eq!(result.stat.interrupted_relation_skip_count, 1);
     }
 
     #[test]
@@ -1305,5 +1939,39 @@ mod tests {
             1,
             "The second class should be split by the first class's counterexample"
         );
+    }
+
+    #[test]
+    fn test_virtual_rewrite_avoids_downstream_sat_query() {
+        let mut builder =
+            GateBuilder::new("virtual_rewrite".to_string(), GateBuilderOptions::no_opt());
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        let z = *builder.add_input("z".to_string(), 1).get_lsb(0);
+        let x1 = builder.add_and_binary(a, b);
+        let x2 = builder.add_and_binary(x1, a);
+        let y1 = builder.add_and_binary(x1, z);
+        let y2 = builder.add_and_binary(x2, z);
+        builder.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[y1, y2]),
+        );
+        let gate_fn = builder.build();
+        let x_class = [EquivNode::Normal(x1.node), EquivNode::Normal(x2.node)];
+        let y_class = [EquivNode::Normal(y1.node), EquivNode::Normal(y2.node)];
+
+        let result = validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
+            &gate_fn,
+            &[&x_class, &y_class],
+            GateFormalBackend::Varisat,
+            GateFormalOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result.proof_query_count, 1);
+        assert!(canonical_proven_sets(&result).contains(&vec![
+            EquivNode::Normal(y1.node),
+            EquivNode::Normal(y2.node),
+        ]));
     }
 }

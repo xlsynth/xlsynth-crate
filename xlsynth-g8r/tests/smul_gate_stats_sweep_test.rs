@@ -218,7 +218,7 @@ fn test_smul_widening_qor_and_equivalence_sweep() {
         SmulWideningRow { operand_width: 3, output_width: 6, sign_extend_live_nodes: 114, sign_extend_deepest_path: 18, native_signed_live_nodes: 62, native_signed_deepest_path: 12 },
         SmulWideningRow { operand_width: 4, output_width: 5, sign_extend_live_nodes: 87, sign_extend_deepest_path: 16, native_signed_live_nodes: 81, native_signed_deepest_path: 13 },
         SmulWideningRow { operand_width: 4, output_width: 6, sign_extend_live_nodes: 129, sign_extend_deepest_path: 18, native_signed_live_nodes: 106, native_signed_deepest_path: 14 },
-        SmulWideningRow { operand_width: 4, output_width: 8, sign_extend_live_nodes: 231, sign_extend_deepest_path: 22, native_signed_live_nodes: 132, native_signed_deepest_path: 18 },
+        SmulWideningRow { operand_width: 4, output_width: 8, sign_extend_live_nodes: 226, sign_extend_deepest_path: 22, native_signed_live_nodes: 132, native_signed_deepest_path: 18 },
         SmulWideningRow { operand_width: 5, output_width: 6, sign_extend_live_nodes: 138, sign_extend_deepest_path: 18, native_signed_live_nodes: 132, native_signed_deepest_path: 17 },
         SmulWideningRow { operand_width: 5, output_width: 8, sign_extend_live_nodes: 258, sign_extend_deepest_path: 22, native_signed_live_nodes: 202, native_signed_deepest_path: 21 },
         SmulWideningRow { operand_width: 5, output_width: 10, sign_extend_live_nodes: 400, sign_extend_deepest_path: 28, native_signed_live_nodes: 228, native_signed_deepest_path: 25 },
