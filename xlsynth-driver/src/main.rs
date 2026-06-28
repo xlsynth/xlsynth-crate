@@ -425,7 +425,7 @@ impl AppExt for clap::Command {
                 clap::Arg::new("gate_formal_backend")
                     .long("gate-formal-backend")
                     .value_name("BACKEND")
-                    .help("Formal backend for gate-level proof steps (default: cadical)")
+                    .help("Formal backend for gate-level proof steps; FRAIG requires cadical (default: cadical)")
                     .value_parser(["cadical", "varisat", "z3", "ir"])
                     .default_value("cadical")
                     .action(clap::ArgAction::Set),

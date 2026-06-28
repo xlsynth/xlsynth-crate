@@ -1189,7 +1189,7 @@ This subcommand is the user-facing CLI for PIR MCMC optimization.
   - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-nodes|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress|g8r-post-and-nodes|g8r-post-and-nodes-times-depth|g8r-post-and-nodes-times-depth-times-toggles|g8r-post-le-graph|g8r-post-le-graph-times-and-nodes|g8r-post-le-graph-times-product|g8r-post-weighted-switching|g8r-post-and-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
   - `--extension-costing-mode <preserve|desugar>` – controls how PIR extension ops are projected before XLS optimization and g8r costing (default: `preserve`). Use `desugar` when the run should score and record best artifacts through standard non-extension XLS IR, which is more source-grounded for DSLX follow-up.
   - `--g8r-postprocess-program <PATH>` – external postprocessor for the `g8r-post-*` metric family. It is invoked as `<PATH> <input.aig> --output-path <output.aig>`, where the input is binary AIGER and the output may be ASCII or binary AIGER. Diagnostics should go to stderr.
-  - Gate-lowering flags are shared with `ir2g8r` / `ir2gates`, with the same defaults: `--fold`, `--hash`, `--enable-rewrite-carry-out`, `--enable-rewrite-prio-encode`, `--enable-rewrite-nary-add`, `--enable-rewrite-mask-low`, `--unsafe-gatify-gate-operation`, `--adder-mapping`, `--mul-adder-mapping`, `--fraig`, `--reassociation`, `--max-fraig-sim-samples`, `--gate-formal-backend`, `--cadical-terminate-limit`, `--compute-graph-logical-effort`, `--graph-logical-effort-beta1`, `--graph-logical-effort-beta2`, `--toggle-sample-count`, and `--toggle-seed`.
+  - Gate-lowering flags are shared with `ir2g8r` / `ir2gates`, with the same defaults: `--fold`, `--hash`, `--enable-rewrite-carry-out`, `--enable-rewrite-prio-encode`, `--enable-rewrite-nary-add`, `--enable-rewrite-mask-low`, `--unsafe-gatify-gate-operation`, `--adder-mapping`, `--mul-adder-mapping`, `--fraig`, `--reassociation`, `--cut-db-rewrite`, `--max-fraig-sim-samples`, `--gate-formal-backend`, `--cadical-terminate-limit`, `--compute-graph-logical-effort`, `--graph-logical-effort-beta1`, `--graph-logical-effort-beta2`, `--toggle-sample-count`, and `--toggle-seed`.
   - `--verify-origin-alignment` – rerun the exact scored origin package through the external canonical flow (`ir2g8r`, optional postprocessor, then `aig-stats`) and compare it with the in-process MCMC origin score. It writes that `scored.ir`, the exact commands, plus `raw.*`, `post.*`, and `comparison.json` artifacts under `<output>/origin-alignment/`.
   - `--max-delay <LEVELS>` – optional hard cap on gate depth for gate-based objectives. It applies to raw `g8r_depth` for `g8r-*` metrics and postprocessed depth for `g8r-post-*` metrics. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
   - `--max-area <GATES>` – optional hard cap on gate count for gate-based objectives. It applies to raw `g8r_nodes` for `g8r-*` metrics and postprocessed AND-node count for `g8r-post-*` metrics.
@@ -1922,8 +1922,8 @@ Supported flags include the common gate-optimization controls:
   used for FRAIG candidate discovery. The uncapped count is scaled from the
   live node count and rounded to a SIMD batch boundary; default `8192`.
 - `--gate-formal-backend=<cadical|varisat|z3|ir>` – formal backend for
-  gate-level proof steps (default `cadical`). For FRAIG validation, `z3` and
-  `ir` use a slower pairwise validation path.
+  gate-level proof steps (default `cadical`). FRAIG requires `cadical` and
+  returns an error when another backend is selected.
 - `--cadical-terminate-limit=<N>` – deterministic CaDiCaL internal
   termination-check budget for each FRAIG proof. Exhausted candidates are left
   unproven and synthesis continues. Default `1000`; use `0` for unlimited

@@ -804,7 +804,7 @@ fn solver_model_to_cex<Lit: Copy, Model: SatModel<Lit>>(
     cex
 }
 
-fn validate_full_graph_fraig_with_solver<S: IncrementalSat>(
+fn prove_fraig_equivalence_classes_with_solver<S: IncrementalSat>(
     gate_fn: &GateFn,
     equiv_classes: &[Vec<EquivNode>],
     solver: &mut S,
@@ -924,27 +924,21 @@ fn validate_full_graph_fraig_with_solver<S: IncrementalSat>(
     Ok(FullGraphFraigValidationResult { validation, stat })
 }
 
-/// Runs ordinary FRAIG using one shared full-live-graph SAT instance.
-pub(crate) fn validate_full_graph_fraig_with_backend_and_options(
+/// Proves FRAIG candidates using one shared full-live-graph CaDiCaL instance.
+pub(crate) fn prove_fraig_equivalence_classes_with_backend_and_options(
     gate_fn: &GateFn,
     equiv_classes: &[Vec<EquivNode>],
     backend: GateFormalBackend,
     options: GateFormalOptions,
 ) -> Result<FullGraphFraigValidationResult, ValidationError> {
-    match resolve_equivalence_class_backend(backend)? {
-        GateFormalBackend::Varisat => {
-            let mut solver = varisat::Solver::new();
-            validate_full_graph_fraig_with_solver(gate_fn, equiv_classes, &mut solver)
-        }
-        GateFormalBackend::Cadical => {
-            let mut solver = CadicalSat::new_with_options(options)?;
-            validate_full_graph_fraig_with_solver(gate_fn, equiv_classes, &mut solver)
-        }
-        GateFormalBackend::Z3 | GateFormalBackend::Ir => Err(ValidationError::UnsupportedBackend {
+    if backend != GateFormalBackend::Cadical {
+        return Err(ValidationError::UnsupportedBackend {
             backend,
-            operation: "single-session full-graph FRAIG",
-        }),
+            operation: "FRAIG equivalence-class proof; CaDiCaL is required",
+        });
     }
+    let mut solver = CadicalSat::new_with_options(options)?;
+    prove_fraig_equivalence_classes_with_solver(gate_fn, equiv_classes, &mut solver)
 }
 
 fn build_gate_fn<S: IncrementalSat>(
@@ -1600,10 +1594,11 @@ mod tests {
 
     use super::{
         CadicalSat, CanonicalEquivRelation, GateFormalBackend, GateFormalOptions, IncrementalSat,
-        SatModel, SatSolveResult, ValidationError, ValidationResult, validate_equivalence_classes,
+        SatModel, SatSolveResult, ValidationError, ValidationResult,
+        prove_fraig_equivalence_classes_with_backend_and_options,
+        prove_fraig_equivalence_classes_with_solver, validate_equivalence_classes,
         validate_equivalence_classes_presorted_with_virtual_rewrite_and_options,
         validate_equivalence_classes_with_backend, validate_equivalence_classes_with_solver,
-        validate_full_graph_fraig_with_solver,
     };
     #[allow(unused_imports)]
     use crate::assert_within;
@@ -1722,6 +1717,28 @@ mod tests {
     }
 
     #[test]
+    fn fraig_equivalence_class_proof_requires_cadical() {
+        let setup = setup_graph_with_redundancies();
+        let error = match prove_fraig_equivalence_classes_with_backend_and_options(
+            &setup.g,
+            &[],
+            GateFormalBackend::Varisat,
+            GateFormalOptions::default(),
+        ) {
+            Ok(_) => panic!("non-CaDiCaL FRAIG proof should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ValidationError::UnsupportedBackend {
+                backend: GateFormalBackend::Varisat,
+                operation: "FRAIG equivalence-class proof; CaDiCaL is required",
+            }
+        ));
+    }
+
+    #[test]
     fn full_graph_fraig_does_not_retry_interrupted_inverse_relation() {
         let mut builder = GateBuilder::new(
             "full_graph_no_retry".to_string(),
@@ -1741,7 +1758,7 @@ mod tests {
         let mut solver = InterruptingSat { next_lit: 0 };
 
         let result =
-            validate_full_graph_fraig_with_solver(&gate_fn, &ordinary_classes, &mut solver)
+            prove_fraig_equivalence_classes_with_solver(&gate_fn, &ordinary_classes, &mut solver)
                 .unwrap();
 
         assert_eq!(result.stat.equivalence_proof_query_count, 1);

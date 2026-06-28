@@ -47,7 +47,7 @@ struct Args {
     )]
     max_fraig_sim_samples: usize,
 
-    /// Formal backend for gate-level proof steps.
+    /// Formal backend for gate-level proof steps; FRAIG requires CaDiCaL.
     #[arg(long, default_value = GateFormalBackend::DEFAULT_CLI_VALUE, value_parser = GateFormalBackend::CLI_VALUES)]
     gate_formal_backend: String,
 

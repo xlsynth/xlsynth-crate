@@ -30,8 +30,7 @@ use crate::{
     },
     prove_gate_fn_equiv_common::GateFormalBackend,
     prove_gate_fn_equiv_sat::{
-        GateFormalOptions, validate_equivalence_classes_presorted_with_virtual_rewrite_and_options,
-        validate_full_graph_fraig_with_backend_and_options,
+        GateFormalOptions, prove_fraig_equivalence_classes_with_backend_and_options,
     },
 };
 
@@ -210,6 +209,8 @@ pub fn fraig_optimize(
 }
 
 /// Runs FRAIG using an explicit formal backend for equivalence validation.
+///
+/// FRAIG requires CaDiCaL and returns an error for every other backend.
 pub fn fraig_optimize_with_backend(
     f: &GateFn,
     input_sample_count: usize,
@@ -226,6 +227,8 @@ pub fn fraig_optimize_with_backend(
 }
 
 /// Runs FRAIG with backend-specific formal proof limits.
+///
+/// FRAIG requires CaDiCaL and returns an error for every other backend.
 pub fn fraig_optimize_with_backend_and_options(
     f: &GateFn,
     input_sample_count: usize,
@@ -259,30 +262,17 @@ pub fn fraig_optimize_with_backend_and_options(
         &depth_stats,
     );
 
-    let final_validation = if matches!(
+    let full_result = prove_fraig_equivalence_classes_with_backend_and_options(
+        f,
+        &sorted_classes,
         validation_backend,
-        GateFormalBackend::Cadical | GateFormalBackend::Varisat
-    ) {
-        let full_result = validate_full_graph_fraig_with_backend_and_options(
-            f,
-            &sorted_classes,
-            validation_backend,
-            gate_formal_options,
-        )?;
-        log::info!(
-            "fraig single-session full-graph validation: {}",
-            full_result.stat
-        );
-        full_result.validation
-    } else {
-        let class_refs: Vec<&[EquivNode]> = sorted_classes.iter().map(Vec::as_slice).collect();
-        validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
-            f,
-            &class_refs,
-            validation_backend,
-            gate_formal_options,
-        )?
-    };
+        gate_formal_options,
+    )?;
+    log::info!(
+        "fraig single-session full-graph validation: {}",
+        full_result.stat
+    );
+    let final_validation = full_result.validation;
     let counterexample_count = final_validation
         .cex_inputs
         .into_iter()
