@@ -9,6 +9,9 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_prover::prover::SolverChoice;
 
+/// Whether solver-backed array-read rewriting is enabled by default.
+pub const DEFAULT_ENABLE_FORMAL_ARRAY_READ_REWRITE: bool = true;
+
 pub struct Ir2GatesOptions {
     pub fold: bool,
     pub hash: bool,
@@ -42,7 +45,7 @@ impl Ir2GatesOptions {
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
-            enable_formal_array_read_rewrite: false,
+            enable_formal_array_read_rewrite: DEFAULT_ENABLE_FORMAL_ARRAY_READ_REWRITE,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
@@ -128,7 +131,10 @@ fn apply_formal_array_read_rewrite(
     {
         let _ = package;
         let _ = top_fn_name;
-        Err("formal array-read prep requires a build with Bitwuzla enabled".to_string())
+        Err(
+            "formal array-read prep requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-read-rewrite=false"
+                .to_string(),
+        )
     }
 }
 
@@ -279,11 +285,38 @@ pub fn ir2gates_from_ir_text(
     })
 }
 
-#[cfg(all(test, feature = "has-bitwuzla"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "has-bitwuzla")]
     use xlsynth_pir::ir::NodePayload;
 
+    #[test]
+    fn formal_array_read_rewrite_defaults_on() {
+        assert!(Ir2GatesOptions::default().enable_formal_array_read_rewrite);
+        assert!(!Ir2GatesOptions::all_opts_disabled().enable_formal_array_read_rewrite);
+    }
+
+    #[cfg(not(feature = "has-bitwuzla"))]
+    #[test]
+    fn missing_bitwuzla_error_explains_how_to_disable_rewrite() {
+        let mut parser = ir_parser::Parser::new(
+            r#"package sample
+
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#,
+        );
+        let mut package = parser.parse_and_validate_package().unwrap();
+        let error = apply_formal_array_read_rewrite(&mut package, "main", true).unwrap_err();
+        assert_eq!(
+            error,
+            "formal array-read prep requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-read-rewrite=false"
+        );
+    }
+
+    #[cfg(feature = "has-bitwuzla")]
     #[test]
     fn formal_array_read_rewrite_runs_during_gatify_preparation() {
         let ir_text = r#"package sample

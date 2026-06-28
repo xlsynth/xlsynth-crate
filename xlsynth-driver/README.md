@@ -570,7 +570,7 @@ combinational transition logic is lowered into the stored transition function.
   - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
   - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
   - `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
-  - `--enable-formal-array-read-rewrite=<BOOL>` – when `true`, use Bitwuzla before `prep_for_gatify` to prove whether reads can observe individual layers of an `array_update` chain. Proven non-aliasing layers are bypassed and proven always-aliasing reads are replaced by the written value. Default `false`; requires a Bitwuzla-enabled build. Solver checks are currently unbounded.
+  - `--enable-formal-array-read-rewrite=<BOOL>` – when `true`, use Bitwuzla before `prep_for_gatify` to prove whether reads can observe individual layers of an `array_update` chain. Proven non-aliasing layers are bypassed and proven always-aliasing reads are replaced by the written value. Default `true`. Builds without Bitwuzla must pass `false`. Solver checks are currently unbounded.
   - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
   - `--cadical-terminate-limit=<N>` – set the deterministic CaDiCaL internal
     termination-check budget for each FRAIG proof. When the budget is exhausted,
@@ -1900,7 +1900,7 @@ Supported flags include the common gate-optimization controls:
 - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
 - `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
 - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
-- `--enable-formal-array-read-rewrite=<BOOL>` – use Bitwuzla to conservatively simplify reads through `array_update` chains before `prep_for_gatify`. Default `false`; requires a Bitwuzla-enabled build. Solver checks are currently unbounded.
+- `--enable-formal-array-read-rewrite=<BOOL>` – use Bitwuzla to conservatively simplify reads through `array_update` chains before `prep_for_gatify`. Default `true`. Builds without Bitwuzla must pass `false`. Solver checks are currently unbounded.
 - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
 - `--cut-db-rewrite=<BOOL>` – when `true`, run the cut-db rewrite stages after FRAIG and reassociation. Default `true`; when `false`, the cut-db mode and large-cone settings have no effect.
 - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.

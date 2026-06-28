@@ -9,6 +9,7 @@ use xlsynth_g8r::cut_db_cli_defaults::{
     CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
+use xlsynth_g8r::ir2gates::DEFAULT_ENABLE_FORMAL_ARRAY_READ_REWRITE;
 use xlsynth_g8r::process_ir_path::{
     DEFAULT_MAX_FRAIG_SIM_SAMPLES, Options, process_ir_path_for_cli,
 };
@@ -70,7 +71,7 @@ struct Args {
     unsafe_gatify_gate_operation: bool,
 
     /// Prove and simplify array reads through update chains before gatify.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = DEFAULT_ENABLE_FORMAL_ARRAY_READ_REWRITE)]
     #[arg(action = clap::ArgAction::Set)]
     enable_formal_array_read_rewrite: bool,
 
