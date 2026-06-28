@@ -90,6 +90,8 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
         bool_arg(options.enable_rewrite_mask_low),
         "--enable-rewrite-normalize-left".to_string(),
         bool_arg(options.enable_rewrite_normalize_left),
+        "--enable-formal-array-read-rewrite".to_string(),
+        bool_arg(options.enable_formal_array_read_rewrite),
         "--unsafe-gatify-gate-operation".to_string(),
         bool_arg(options.unsafe_gatify_gate_operation),
         "--adder-mapping".to_string(),

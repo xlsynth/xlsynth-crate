@@ -220,6 +220,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("enable_formal_array_read_rewrite")
+                .long("enable-formal-array-read-rewrite")
+                .value_name("BOOL")
+                .help("Use Bitwuzla to simplify array reads through update chains before gatify.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("unsafe_gatify_gate_operation")
                 .long("unsafe-gatify-gate-operation")
                 .value_name("BOOL")
@@ -526,6 +534,11 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             matches,
             "enable_rewrite_normalize_left",
             defaults.enable_rewrite_normalize_left,
+        ),
+        enable_formal_array_read_rewrite: parse_cli_bool(
+            matches,
+            "enable_formal_array_read_rewrite",
+            defaults.enable_formal_array_read_rewrite,
         ),
         unsafe_gatify_gate_operation: parse_cli_bool(
             matches,

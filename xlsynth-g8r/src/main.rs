@@ -69,6 +69,11 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     unsafe_gatify_gate_operation: bool,
 
+    /// Prove and simplify array reads through update chains before gatify.
+    #[arg(long, default_value_t = false)]
+    #[arg(action = clap::ArgAction::Set)]
+    enable_formal_array_read_rewrite: bool,
+
     /// Whether to emit the netlist.
     #[arg(long, default_value_t = false)]
     #[arg(action = clap::ArgAction::Set)]
@@ -133,6 +138,7 @@ fn main() {
         enable_rewrite_nary_add: false,
         enable_rewrite_mask_low: false,
         enable_rewrite_normalize_left: false,
+        enable_formal_array_read_rewrite: args.enable_formal_array_read_rewrite,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
         unsafe_gatify_gate_operation: args.unsafe_gatify_gate_operation,
