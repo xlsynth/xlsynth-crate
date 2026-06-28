@@ -15,7 +15,7 @@ use crate::aig::dce;
 use crate::aig::fanout::fanout_histogram;
 use crate::aig::find_structures;
 use crate::aig::fraig;
-use crate::aig::fraig::{DidConverge, FraigIterationStat, IterationBounds};
+use crate::aig::fraig::FraigPassStat;
 use crate::aig::gate;
 use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
@@ -55,8 +55,7 @@ pub struct Ir2GatesSummaryStats {
     pub toggle_transitions: Option<usize>,
     pub logical_effort_deepest_path_min_delay: f64,
     pub graph_logical_effort_worst_case_delay: Option<f64>,
-    pub fraig_did_converge: Option<DidConverge>,
-    pub fraig_iteration_stats: Option<Vec<FraigIterationStat>>,
+    pub fraig_pass_stat: Option<FraigPassStat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub independent_op_stats: Option<IndependentOpStats>,
 }
@@ -140,12 +139,7 @@ impl Into<crate::result_proto::Ir2GatesSummaryStats> for Ir2GatesSummaryStats {
             graph_logical_effort_worst_case_delay: self
                 .graph_logical_effort_worst_case_delay
                 .into(),
-            fraig_did_converge: self.fraig_did_converge.map(Into::into),
-            fraig_iteration_stats: self.fraig_iteration_stats.map_or(vec![], |x| {
-                x.into_iter()
-                    .map(|v| v.into())
-                    .collect::<Vec<crate::result_proto::FraigIterationStat>>()
-            }),
+            fraig_pass_stat: self.fraig_pass_stat.map(Into::into),
         }
     }
 }
@@ -173,9 +167,6 @@ pub struct Options {
     ///
     /// If unset, we require the IR package to have an explicit top function.
     pub ir_top: Option<String>,
-
-    /// If not set, we fraig to convergence.
-    pub fraig_max_iterations: Option<usize>,
 
     /// Maximum random simulation samples used for FRAIG candidate discovery.
     ///
@@ -239,7 +230,6 @@ pub struct CanonicalG8rOptions {
     pub unsafe_gatify_gate_operation: bool,
     pub fraig: bool,
     pub reassociation: bool,
-    pub fraig_max_iterations: Option<usize>,
     pub max_fraig_sim_samples: usize,
     pub gate_formal_backend: GateFormalBackend,
     /// CaDiCaL internal termination-check budget per solve; zero disables it.
@@ -273,7 +263,6 @@ impl Default for CanonicalG8rOptions {
             unsafe_gatify_gate_operation: false,
             fraig: true,
             reassociation: true,
-            fraig_max_iterations: None,
             max_fraig_sim_samples: DEFAULT_MAX_FRAIG_SIM_SAMPLES,
             gate_formal_backend: GateFormalBackend::default(),
             cadical_terminate_limit: DEFAULT_CADICAL_TERMINATE_LIMIT,
@@ -316,7 +305,6 @@ impl CanonicalG8rOptions {
             reassociation: self.reassociation,
             emit_independent_op_stats,
             ir_top: ir_top.map(|s| s.to_string()),
-            fraig_max_iterations: self.fraig_max_iterations,
             max_fraig_sim_samples: Some(self.max_fraig_sim_samples),
             gate_formal_backend: self.gate_formal_backend,
             cadical_terminate_limit: self.cadical_terminate_limit,
@@ -669,20 +657,14 @@ pub fn process_ir_text_with_gatefn(
     );
     gate_fn.check_invariants_with_debug_assert();
 
-    // Prepare to capture fraig statistics if enabled
-    let mut fraig_did_converge: Option<DidConverge> = None;
-    let mut fraig_iteration_stats: Option<Vec<FraigIterationStat>> = None;
+    // Prepare to capture FRAIG statistics if enabled.
+    let mut fraig_pass_stat: Option<FraigPassStat> = None;
     if options.fraig {
         log::info!(
             "fraig is enabled for GateFn {:?} with {} nodes",
             gate_fn.name,
             gate_fn.gates.len()
         );
-        let iteration_bounds = if let Some(max_iterations) = options.fraig_max_iterations {
-            IterationBounds::MaxIterations(max_iterations)
-        } else {
-            IterationBounds::ToConvergence
-        };
         let live_node_count = get_id_to_use_count(&gate_fn).len().max(1);
         let scaled = (live_node_count as f64 / 8.0).ceil() as usize;
         // Round the scaled value to the nearest 256, it must be more than zero.
@@ -704,20 +686,13 @@ pub fn process_ir_text_with_gatefn(
         let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend_and_options(
             &gate_fn,
             sim_samples,
-            iteration_bounds,
             options.gate_formal_backend,
             gate_formal_options,
             &mut rng,
         );
-        let (optimized_fn, did_converge, iteration_stats) =
-            fraig_result.map_err(|e| format!("Fraig optimization failed: {e}"))?;
-        if !options.quiet {
-            println!("== Fraig convergence: {:?}", did_converge);
-        }
-        gate_fn = optimized_fn;
-        // Capture fraig results for JSON
-        fraig_did_converge = Some(did_converge);
-        fraig_iteration_stats = Some(iteration_stats);
+        let result = fraig_result.map_err(|e| format!("Fraig optimization failed: {e}"))?;
+        gate_fn = result.optimized_fn;
+        fraig_pass_stat = Some(result.stat);
     }
 
     if options.reassociation {
@@ -829,8 +804,7 @@ pub fn process_ir_text_with_gatefn(
         toggle_transitions,
         logical_effort_deepest_path_min_delay,
         graph_logical_effort_worst_case_delay,
-        fraig_did_converge,
-        fraig_iteration_stats,
+        fraig_pass_stat,
         independent_op_stats,
     };
 

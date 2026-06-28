@@ -413,13 +413,6 @@ impl AppExt for clap::Command {
                 "Reassociate single-fanout AND supergates into balanced trees",
             )
             .arg(
-                clap::Arg::new("fraig_max_iterations")
-                    .long("fraig-max-iterations")
-                    .value_name("N")
-                    .help("Maximum number of iterations for fraig optimization")
-                    .action(clap::ArgAction::Set),
-            )
-            .arg(
                 clap::Arg::new("max_fraig_sim_samples")
                     .long("max-fraig-sim-samples")
                     .alias("fraig-sim-samples")
@@ -442,9 +435,9 @@ impl AppExt for clap::Command {
                     .long("cadical-terminate-limit")
                     .value_name("N")
                     .help(
-                        "CaDiCaL internal termination-check budget per solve; 0 disables it (default: 100)",
+                        "CaDiCaL internal termination-check budget per solve; 0 disables it (default: 1000)",
                     )
-                    .default_value("100")
+                    .default_value("1000")
                     .action(clap::ArgAction::Set),
             )
             .add_bool_arg(

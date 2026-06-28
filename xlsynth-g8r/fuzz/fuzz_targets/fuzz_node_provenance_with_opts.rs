@@ -8,7 +8,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
-use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize_with_backend_and_options};
+use xlsynth_g8r::aig::fraig::fraig_optimize_with_backend_and_options;
 use xlsynth_g8r::aig::gate::AigNode;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
@@ -35,12 +35,11 @@ fuzz_target!(|data: &[u8]| {
     let optimized_gate_fn = match fraig_optimize_with_backend_and_options(
         &gatify_output.gate_fn,
         64,
-        IterationBounds::MaxIterations(1),
         GateFormalBackend::Cadical,
         fuzz_gate_formal_options(),
         &mut rng,
     ) {
-        Ok(result) => result.0,
+        Ok(result) => result.optimized_fn,
         Err(err)
             if matches!(
                 err.downcast_ref::<ValidationError>(),

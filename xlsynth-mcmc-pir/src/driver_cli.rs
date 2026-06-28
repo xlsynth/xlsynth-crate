@@ -260,14 +260,6 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
-            Arg::new("fraig_max_iterations")
-                .long("fraig-max-iterations")
-                .value_name("N")
-                .help("Maximum number of iterations for fraig optimization.")
-                .value_parser(clap::value_parser!(usize))
-                .action(ArgAction::Set),
-        )
-        .arg(
             Arg::new("max_fraig_sim_samples")
                 .long("max-fraig-sim-samples")
                 .alias("fraig-sim-samples")
@@ -290,7 +282,7 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .value_name("N")
                 .help("CaDiCaL internal termination-check budget per solve; 0 disables it.")
                 .value_parser(clap::value_parser!(u32))
-                .default_value("100")
+                .default_value("1000")
                 .action(ArgAction::Set),
         )
         .arg(
@@ -546,7 +538,6 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             .map(|v| parse_adder_mapping(Some(v))),
         fraig: parse_cli_bool(matches, "fraig", defaults.fraig),
         reassociation: parse_cli_bool(matches, "reassociation", defaults.reassociation),
-        fraig_max_iterations: matches.get_one::<usize>("fraig_max_iterations").copied(),
         max_fraig_sim_samples: matches
             .get_one::<usize>("max_fraig_sim_samples")
             .copied()

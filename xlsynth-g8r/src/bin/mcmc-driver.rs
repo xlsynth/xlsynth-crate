@@ -17,7 +17,7 @@ use xlsynth_g8r::aig::get_summary_stats::SummaryStats;
 use xlsynth_g8r::aig::{GateFn, SequentialGateFn};
 use xlsynth_g8r::aig_serdes::g8r::emit_g8r;
 
-use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize_with_backend};
+use xlsynth_g8r::aig::fraig::fraig_optimize_with_backend;
 use xlsynth_g8r::aig::get_summary_stats;
 use xlsynth_g8r::mcmc_logic::{Best, McmcOptions, Objective, cost, load_start, mcmc};
 use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
@@ -201,12 +201,11 @@ fn run_chain(
         match fraig_optimize_with_backend(
             &gfn,
             64, // sample count
-            IterationBounds::MaxIterations(1),
             GateFormalBackend::parse(&cfg.gate_formal_backend)
                 .expect("validated by clap value_parser"),
             &mut rng_f,
         ) {
-            Ok((g, _conv, _stats)) => g,
+            Ok(result) => result.optimized_fn,
             Err(_e) => gfn.clone(),
         }
     };
@@ -297,12 +296,11 @@ fn run_explore_exploit(
                             match fraig_optimize_with_backend(
                                 &local_gfn,
                                 64, // sample count
-                                IterationBounds::MaxIterations(1),
                                 GateFormalBackend::parse(&cfg_cl.gate_formal_backend)
                                     .expect("validated by clap value_parser"),
                                 &mut rng_f,
                             ) {
-                                Ok((g, _conv, _stats)) => g,
+                                Ok(result) => result.optimized_fn,
                                 Err(_e) => local_gfn.clone(),
                             }
                         };

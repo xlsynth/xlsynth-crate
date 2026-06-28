@@ -2,7 +2,7 @@
 
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
-use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize};
+use xlsynth_g8r::aig::fraig::fraig_optimize;
 use xlsynth_g8r::aig::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::aig::{AigBitVector, GateFn};
 use xlsynth_g8r::check_equivalence;
@@ -14,9 +14,7 @@ use xlsynth_g8r::use_count::get_id_to_use_count;
 
 fn fraig_optimized(g: GateFn) -> GateFn {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-    let (opt, _did_converge, _stats) =
-        fraig_optimize(&g, 8, IterationBounds::ToConvergence, &mut rng).unwrap();
-    opt
+    fraig_optimize(&g, 8, &mut rng).unwrap().optimized_fn
 }
 
 fn make_ripple(bits: usize) -> GateFn {

@@ -40,9 +40,6 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     reassociation: bool,
 
-    #[arg(long)]
-    fraig_max_iterations: Option<usize>,
-
     #[arg(
         long = "max-fraig-sim-samples",
         alias = "fraig-sim-samples",
@@ -150,7 +147,6 @@ fn main() {
         compute_graph_logical_effort: args.compute_graph_logical_effort,
         graph_logical_effort_beta1: args.graph_logical_effort_beta1,
         graph_logical_effort_beta2: args.graph_logical_effort_beta2,
-        fraig_max_iterations: args.fraig_max_iterations,
         max_fraig_sim_samples: Some(args.max_fraig_sim_samples),
         gate_formal_backend,
         cadical_terminate_limit: args.cadical_terminate_limit,

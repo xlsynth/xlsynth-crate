@@ -4,17 +4,6 @@ syntax = "proto3";
 
 package g8r_results;
 
-message DidConverge {
-  message Yes {
-    uint64 count = 1;
-  }
-  message No {}
-  oneof result {
-    Yes yes = 1;
-    No no = 2;
-  }
-}
-
 message ToggleStats {
   // The number of toggles at all gate outputs, where a gate is an AND2 node
   // in the graph.
@@ -31,7 +20,7 @@ message ToggleStats {
   uint64 primary_output_toggles = 4;
 }
 
-message FraigIterationStat {
+message FraigPassStat {
   uint64 gate_count = 1;
   uint64 counterexample_count = 2;
   uint64 proposed_equiv_classes = 3;
@@ -46,6 +35,6 @@ message Ir2GatesSummaryStats {
   optional uint64 toggle_transitions = 5;
   double logical_effort_deepest_path_min_delay = 6;
   optional double graph_logical_effort_worst_case_delay = 7;
-  optional DidConverge fraig_did_converge = 8;
-  repeated FraigIterationStat fraig_iteration_stats = 9;
+  reserved 8;
+  optional FraigPassStat fraig_pass_stat = 9;
 }

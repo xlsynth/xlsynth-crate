@@ -120,9 +120,6 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
     if let Some(mapping) = options.mul_adder_mapping {
         args.extend(["--mul-adder-mapping".to_string(), mapping.to_string()]);
     }
-    if let Some(iterations) = options.fraig_max_iterations {
-        args.extend(["--fraig-max-iterations".to_string(), iterations.to_string()]);
-    }
     args
 }
 
