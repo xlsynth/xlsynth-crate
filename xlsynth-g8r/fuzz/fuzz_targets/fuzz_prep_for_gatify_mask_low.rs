@@ -246,7 +246,9 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
 }}
 "
                 ),
-                true,
+                // The direct form intentionally stays native because it gatifies better than
+                // the ext_mask_low specialization.
+                false,
                 None,
                 count_width,
             ),
