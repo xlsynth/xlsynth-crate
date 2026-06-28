@@ -18,6 +18,7 @@ pub mod match_and_rewrite;
 pub mod reassociation;
 pub mod sequential_gate;
 pub mod sequential_pipeline;
+pub(crate) mod structural_hash_cons;
 pub mod table;
 pub mod topo;
 

@@ -820,10 +820,10 @@ fn test_gatify_one_hot() {
     let want = &[
         (1, SummaryStats { live_nodes: 1, deepest_path: 1, fanout_histogram: btreemap!{} }),
         (2, SummaryStats { live_nodes: 4, deepest_path: 2, fanout_histogram: btreemap!{2 => 1} }),
-        (3, SummaryStats { live_nodes: 7, deepest_path: 3, fanout_histogram: btreemap!{0 => 1, 2 => 1, 3 => 2} }),
+        (3, SummaryStats { live_nodes: 7, deepest_path: 3, fanout_histogram: btreemap!{2 => 3} }),
         (4, SummaryStats { live_nodes: 11, deepest_path: 4, fanout_histogram: btreemap!{1 => 2, 2 => 2, 3 => 2} }),
-        (5, SummaryStats { live_nodes: 14, deepest_path: 4, fanout_histogram: btreemap!{0 => 2, 1 => 2, 2 => 2, 3 => 2, 4 => 2} }),
-        (6, SummaryStats { live_nodes: 18, deepest_path: 5, fanout_histogram: btreemap!{0 => 1, 1 => 3, 2 => 4, 3 => 3, 4 => 1} }),
+        (5, SummaryStats { live_nodes: 14, deepest_path: 4, fanout_histogram: btreemap!{1 => 2, 2 => 4, 3 => 2} }),
+        (6, SummaryStats { live_nodes: 18, deepest_path: 5, fanout_histogram: btreemap!{1 => 4, 2 => 3, 3 => 4} }),
         (7, SummaryStats { live_nodes: 21, deepest_path: 5, fanout_histogram: btreemap!{0 => 1, 1 => 4, 2 => 5, 3 => 4, 4 => 1} }),
         (8, SummaryStats { live_nodes: 26, deepest_path: 6, fanout_histogram: btreemap!{1 => 6, 2 => 6, 3 => 4, 4 => 1} }),
     ];
@@ -883,14 +883,14 @@ fn test_gatify_ule() {
     }
     #[rustfmt::skip]
     let want = &[
-        (1, SummaryStats { live_nodes: 3, deepest_path: 2, fanout_histogram: btreemap!{0 => 2, 1 => 1, 3 => 2} }),
-        (2, SummaryStats { live_nodes: 10, deepest_path: 5, fanout_histogram: btreemap!{0 => 3, 1 => 4, 2 => 3, 3 => 4} }),
-        (3, SummaryStats { live_nodes: 18, deepest_path: 6, fanout_histogram: btreemap!{0 => 4, 1 => 8, 2 => 5, 3 => 6} }),
-        (4, SummaryStats { live_nodes: 25, deepest_path: 7, fanout_histogram: btreemap!{0 => 5, 1 => 12, 2 => 7, 3 => 8} }),
-        (5, SummaryStats { live_nodes: 33, deepest_path: 7, fanout_histogram: btreemap!{0 => 6, 1 => 16, 2 => 9, 3 => 10} }),
-        (6, SummaryStats { live_nodes: 41, deepest_path: 8, fanout_histogram: btreemap!{0 => 7, 1 => 20, 2 => 11, 3 => 12} }),
-        (7, SummaryStats { live_nodes: 49, deepest_path: 8, fanout_histogram: btreemap!{0 => 8, 1 => 24, 2 => 13, 3 => 14} }),
-        (8, SummaryStats { live_nodes: 56, deepest_path: 9, fanout_histogram: btreemap!{0 => 9, 1 => 28, 2 => 15, 3 => 16} }),
+        (1, SummaryStats { live_nodes: 3, deepest_path: 2, fanout_histogram: btreemap!{0 => 1, 1 => 1, 2 => 2} }),
+        (2, SummaryStats { live_nodes: 10, deepest_path: 5, fanout_histogram: btreemap!{0 => 1, 1 => 4, 2 => 7} }),
+        (3, SummaryStats { live_nodes: 18, deepest_path: 6, fanout_histogram: btreemap!{0 => 1, 1 => 8, 2 => 11} }),
+        (4, SummaryStats { live_nodes: 25, deepest_path: 7, fanout_histogram: btreemap!{0 => 1, 1 => 12, 2 => 15} }),
+        (5, SummaryStats { live_nodes: 33, deepest_path: 7, fanout_histogram: btreemap!{0 => 1, 1 => 16, 2 => 19} }),
+        (6, SummaryStats { live_nodes: 41, deepest_path: 8, fanout_histogram: btreemap!{0 => 1, 1 => 20, 2 => 23} }),
+        (7, SummaryStats { live_nodes: 49, deepest_path: 8, fanout_histogram: btreemap!{0 => 1, 1 => 24, 2 => 27} }),
+        (8, SummaryStats { live_nodes: 56, deepest_path: 9, fanout_histogram: btreemap!{0 => 1, 1 => 28, 2 => 31} }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
