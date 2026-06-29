@@ -31,7 +31,10 @@ use xlsynth::IrBits;
 
 use crate::{
     aig::aig_simplify,
-    aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds},
+    aig::gate::{
+        AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds,
+        PirNodeIdsInterner,
+    },
     aig::structural_hash_cons::StructuralHashCons,
 };
 
@@ -155,6 +158,24 @@ impl GateBuilder {
 
     pub fn add_pir_node_ids(&mut self, aig_ref: AigRef, pir_node_ids: &[u32]) {
         self.gates[aig_ref.id].try_add_pir_node_ids(pir_node_ids);
+    }
+
+    pub(crate) fn add_interned_pir_node_ids(
+        &mut self,
+        aig_ref: AigRef,
+        pir_node_ids: &[u32],
+        interner: &mut PirNodeIdsInterner,
+    ) {
+        self.gates[aig_ref.id].try_add_interned_pir_node_ids(pir_node_ids, interner);
+    }
+
+    pub(crate) fn add_interned_pir_node_id_set(
+        &mut self,
+        aig_ref: AigRef,
+        pir_node_ids: &PirNodeIds,
+        interner: &mut PirNodeIdsInterner,
+    ) {
+        self.gates[aig_ref.id].try_add_interned_pir_node_id_set(pir_node_ids, interner);
     }
 
     pub fn to_operand(&self, aig_ref: AigRef) -> AigOperand {

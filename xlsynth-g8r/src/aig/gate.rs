@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use serde::{Deserialize, Serialize};
-use smallvec::{SmallVec, smallvec};
-use std::collections::{BTreeSet, HashMap};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use smallvec::SmallVec;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::ops::Deref;
+use std::sync::Arc;
 
 use bitvec::vec::BitVec;
 use xlsynth::IrBits;
@@ -54,7 +59,254 @@ impl From<&AigRef> for AigOperand {
     }
 }
 
-pub type PirNodeIds = SmallVec<[u32; 2]>;
+#[derive(Clone)]
+enum PirNodeIdsRepr {
+    Inline(SmallVec<[u32; 2]>),
+    Shared(Arc<[u32]>),
+}
+
+/// A sorted, deduplicated set of PIR provenance IDs.
+///
+/// Small sets remain inline. Larger sets can be interned and shared immutably
+/// across AIG nodes, which avoids repeatedly copying large provenance unions
+/// during graph rewrites.
+#[derive(Clone)]
+pub struct PirNodeIds {
+    repr: PirNodeIdsRepr,
+}
+
+impl PirNodeIds {
+    pub fn new() -> Self {
+        Self {
+            repr: PirNodeIdsRepr::Inline(SmallVec::new()),
+        }
+    }
+
+    fn from_normalized_vec(ids: Vec<u32>) -> Self {
+        debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        if ids.len() <= 2 {
+            Self {
+                repr: PirNodeIdsRepr::Inline(SmallVec::from_vec(ids)),
+            }
+        } else {
+            Self {
+                repr: PirNodeIdsRepr::Shared(Arc::from(ids)),
+            }
+        }
+    }
+
+    fn singleton(id: u32) -> Self {
+        Self {
+            repr: PirNodeIdsRepr::Inline(SmallVec::from_slice(&[id])),
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u32] {
+        match &self.repr {
+            PirNodeIdsRepr::Inline(ids) => ids.as_slice(),
+            PirNodeIdsRepr::Shared(ids) => ids.as_ref(),
+        }
+    }
+
+    /// Unions `ids` into this set using a linear merge of sorted inputs.
+    pub fn union_with_slice(&mut self, ids: &[u32]) {
+        let normalized = normalize_ids(ids);
+        if let Some(merged) = merge_sorted_unique(self.as_slice(), normalized.as_ref()) {
+            *self = Self::from_normalized_vec(merged);
+        }
+    }
+
+    pub fn insert(&mut self, index: usize, id: u32) {
+        let mut ids = self.as_slice().to_vec();
+        ids.insert(index, id);
+        *self = Self::from_normalized_vec(ids);
+    }
+
+    pub fn extend(&mut self, ids: impl IntoIterator<Item = u32>) {
+        let ids = ids.into_iter().collect::<Vec<_>>();
+        self.union_with_slice(&ids);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        matches!(
+            (&self.repr, &other.repr),
+            (PirNodeIdsRepr::Shared(lhs), PirNodeIdsRepr::Shared(rhs))
+                if Arc::ptr_eq(lhs, rhs)
+        )
+    }
+}
+
+impl Default for PirNodeIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FromIterator<u32> for PirNodeIds {
+    fn from_iter<T: IntoIterator<Item = u32>>(iter: T) -> Self {
+        let mut ids = iter.into_iter().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        Self::from_normalized_vec(ids)
+    }
+}
+
+impl Deref for PirNodeIds {
+    type Target = [u32];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl fmt::Debug for PirNodeIds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl PartialEq for PirNodeIds {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for PirNodeIds {}
+
+impl Hash for PirNodeIds {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
+impl Serialize for PirNodeIds {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PirNodeIds {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut ids = Vec::<u32>::deserialize(deserializer)?;
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(Self::from_normalized_vec(ids))
+    }
+}
+
+/// Interns immutable provenance sets for a single graph construction.
+#[derive(Default)]
+pub(crate) struct PirNodeIdsInterner {
+    shared: HashSet<Arc<[u32]>>,
+}
+
+impl PirNodeIdsInterner {
+    pub(crate) fn intern_slice(&mut self, ids: &[u32]) -> PirNodeIds {
+        let normalized = normalize_ids(ids);
+        self.intern_normalized_slice(normalized.as_ref())
+    }
+
+    pub(crate) fn union(&mut self, lhs: &PirNodeIds, rhs: &[u32]) -> PirNodeIds {
+        let normalized_rhs = normalize_ids(rhs);
+        if normalized_rhs.is_empty() || lhs.as_slice() == normalized_rhs.as_ref() {
+            return lhs.clone();
+        }
+        if lhs.is_empty() {
+            return self.intern_normalized_slice(normalized_rhs.as_ref());
+        }
+        match merge_sorted_unique(lhs.as_slice(), normalized_rhs.as_ref()) {
+            None => lhs.clone(),
+            Some(merged) => self.intern_normalized_vec(merged),
+        }
+    }
+
+    pub(crate) fn union_sets(&mut self, lhs: &PirNodeIds, rhs: &PirNodeIds) -> PirNodeIds {
+        if rhs.is_empty() || lhs == rhs {
+            return lhs.clone();
+        }
+        if lhs.is_empty() {
+            return rhs.clone();
+        }
+        match merge_sorted_unique(lhs.as_slice(), rhs.as_slice()) {
+            None => lhs.clone(),
+            Some(merged) => self.intern_normalized_vec(merged),
+        }
+    }
+
+    fn intern_normalized_slice(&mut self, ids: &[u32]) -> PirNodeIds {
+        debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        if ids.len() <= 2 {
+            return PirNodeIds::from_normalized_vec(ids.to_vec());
+        }
+        if let Some(existing) = self.shared.get(ids) {
+            return PirNodeIds {
+                repr: PirNodeIdsRepr::Shared(existing.clone()),
+            };
+        }
+        let shared: Arc<[u32]> = Arc::from(ids);
+        self.shared.insert(shared.clone());
+        PirNodeIds {
+            repr: PirNodeIdsRepr::Shared(shared),
+        }
+    }
+
+    fn intern_normalized_vec(&mut self, ids: Vec<u32>) -> PirNodeIds {
+        debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        if ids.len() <= 2 {
+            return PirNodeIds::from_normalized_vec(ids);
+        }
+        if let Some(existing) = self.shared.get(ids.as_slice()) {
+            return PirNodeIds {
+                repr: PirNodeIdsRepr::Shared(existing.clone()),
+            };
+        }
+        let shared: Arc<[u32]> = Arc::from(ids);
+        self.shared.insert(shared.clone());
+        PirNodeIds {
+            repr: PirNodeIdsRepr::Shared(shared),
+        }
+    }
+}
+
+fn normalize_ids(ids: &[u32]) -> Cow<'_, [u32]> {
+    if ids.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Cow::Borrowed(ids);
+    }
+    let mut normalized = ids.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    Cow::Owned(normalized)
+}
+
+/// Returns `None` when `rhs` is already a subset of `lhs`.
+fn merge_sorted_unique(lhs: &[u32], rhs: &[u32]) -> Option<Vec<u32>> {
+    if rhs.is_empty() {
+        return None;
+    }
+    let mut merged = Vec::with_capacity(lhs.len() + rhs.len());
+    let (mut lhs_index, mut rhs_index) = (0, 0);
+    while lhs_index < lhs.len() && rhs_index < rhs.len() {
+        match lhs[lhs_index].cmp(&rhs[rhs_index]) {
+            std::cmp::Ordering::Less => {
+                merged.push(lhs[lhs_index]);
+                lhs_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push(lhs[lhs_index]);
+                lhs_index += 1;
+                rhs_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(rhs[rhs_index]);
+                rhs_index += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&lhs[lhs_index..]);
+    merged.extend_from_slice(&rhs[rhs_index..]);
+    (merged.as_slice() != lhs).then_some(merged)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AigNode {
@@ -77,12 +329,6 @@ pub enum AigNode {
 }
 
 impl AigNode {
-    fn add_pir_node_ids_iter(&mut self, pir_node_ids_to_add: impl IntoIterator<Item = u32>) {
-        for pir_node_id in pir_node_ids_to_add {
-            self.add_pir_node_id(pir_node_id);
-        }
-    }
-
     pub fn get_operands(&self) -> Vec<AigOperand> {
         match self {
             AigNode::Input { .. } => vec![],
@@ -122,20 +368,6 @@ impl AigNode {
 
     pub fn add_pir_node_id(&mut self, pir_node_id: u32) {
         let pir_node_ids = self.pir_node_ids_mut();
-        match pir_node_ids.last().copied() {
-            None => {
-                pir_node_ids.push(pir_node_id);
-                return;
-            }
-            Some(last) if last == pir_node_id => return,
-            Some(last) if last < pir_node_id => {
-                pir_node_ids.push(pir_node_id);
-                return;
-            }
-            Some(_) => {
-                // Fall through for the uncommon out-of-order insertion.
-            }
-        }
         match pir_node_ids.binary_search(&pir_node_id) {
             Ok(_) => {}
             Err(index) => pir_node_ids.insert(index, pir_node_id),
@@ -143,7 +375,40 @@ impl AigNode {
     }
 
     pub fn try_add_pir_node_ids(&mut self, pir_node_ids_to_add: &[u32]) {
-        self.add_pir_node_ids_iter(pir_node_ids_to_add.iter().copied());
+        self.pir_node_ids_mut()
+            .union_with_slice(pir_node_ids_to_add);
+    }
+
+    pub(crate) fn try_add_interned_pir_node_ids(
+        &mut self,
+        pir_node_ids_to_add: &[u32],
+        interner: &mut PirNodeIdsInterner,
+    ) {
+        let merged = interner.union(
+            match self {
+                AigNode::Input { pir_node_ids, .. }
+                | AigNode::Literal { pir_node_ids, .. }
+                | AigNode::And2 { pir_node_ids, .. } => pir_node_ids,
+            },
+            pir_node_ids_to_add,
+        );
+        *self.pir_node_ids_mut() = merged;
+    }
+
+    pub(crate) fn try_add_interned_pir_node_id_set(
+        &mut self,
+        pir_node_ids_to_add: &PirNodeIds,
+        interner: &mut PirNodeIdsInterner,
+    ) {
+        let merged = interner.union_sets(
+            match self {
+                AigNode::Input { pir_node_ids, .. }
+                | AigNode::Literal { pir_node_ids, .. }
+                | AigNode::And2 { pir_node_ids, .. } => pir_node_ids,
+            },
+            pir_node_ids_to_add,
+        );
+        *self.pir_node_ids_mut() = merged;
     }
 
     pub fn get_pir_node_ids(&self) -> &[u32] {
@@ -154,15 +419,30 @@ impl AigNode {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn shares_pir_node_id_storage_with(&self, other: &AigNode) -> bool {
+        self.pir_node_id_set()
+            .shares_storage_with(other.pir_node_id_set())
+    }
+
+    #[cfg(test)]
+    fn pir_node_id_set(&self) -> &PirNodeIds {
+        match self {
+            AigNode::Input { pir_node_ids, .. }
+            | AigNode::Literal { pir_node_ids, .. }
+            | AigNode::And2 { pir_node_ids, .. } => pir_node_ids,
+        }
+    }
+
     pub fn with_pir_node_id(pir_node_id: Option<u32>) -> PirNodeIds {
         match pir_node_id {
-            Some(pir_node_id) => smallvec![pir_node_id],
+            Some(pir_node_id) => PirNodeIds::singleton(pir_node_id),
             None => PirNodeIds::new(),
         }
     }
 
     pub fn union_pir_node_ids_from_node(&mut self, other: &AigNode) {
-        self.add_pir_node_ids_iter(other.get_pir_node_ids().iter().copied());
+        self.try_add_pir_node_ids(other.get_pir_node_ids());
     }
 
     /// Attempts to add multiple tags to the node.
@@ -699,7 +979,7 @@ impl GateFn {
 
 #[cfg(test)]
 mod tests {
-    use super::{AigNode, PirNodeIds};
+    use super::{AigNode, PirNodeIds, PirNodeIdsInterner};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use std::collections::HashMap;
     use xlsynth::IrBits;
@@ -714,6 +994,21 @@ mod tests {
             node.add_pir_node_id(pir_node_id);
         }
         assert_eq!(node.get_pir_node_ids(), &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_pir_node_ids_bulk_union_sorts_and_deduplicates() {
+        let mut ids = PirNodeIds::from_iter([1, 3, 5]);
+        ids.union_with_slice(&[6, 3, 2, 2, 4]);
+        assert_eq!(ids.as_slice(), &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_pir_node_ids_interner_shares_large_sets() {
+        let mut interner = PirNodeIdsInterner::default();
+        let first = interner.intern_slice(&[1, 2, 3, 4]);
+        let second = interner.intern_slice(&[1, 2, 3, 4]);
+        assert!(first.shares_storage_with(&second));
     }
 
     #[test]
