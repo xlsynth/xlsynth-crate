@@ -202,6 +202,11 @@ impl DynamicStructuralHash {
         self.use_counts.get(node.id).copied().unwrap_or(0)
     }
 
+    /// Returns active use counts indexed by `AigRef::id`.
+    pub(crate) fn use_counts(&self) -> &[usize] {
+        &self.use_counts
+    }
+
     /// Returns the active fanout count of `node`.
     pub fn fanout_count(&self, node: AigRef) -> usize {
         self.fanouts

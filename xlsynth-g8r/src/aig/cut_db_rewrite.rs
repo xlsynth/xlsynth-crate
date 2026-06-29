@@ -479,12 +479,6 @@ fn live_forward_depth(
         .expect("live cut-db node should have a forward depth")
 }
 
-fn dense_use_counts_from_dynamic_hash(state: &DynamicStructuralHash) -> Vec<usize> {
-    (0..state.gate_fn().gates.len())
-        .map(|id| state.use_count(AigRef { id }))
-        .collect()
-}
-
 fn dynamic_false() -> AigOperand {
     AigOperand {
         node: AigRef { id: 0 },
@@ -913,11 +907,6 @@ struct RootAreaCandidates {
 struct ConstructedLargeConeCandidates {
     candidates: Vec<LargeConeCandidate>,
     candidates_considered: usize,
-}
-
-fn finite_backward_depth(backward_depths: &[usize], node: AigRef) -> Option<usize> {
-    let backward_depth = backward_depths.get(node.id).copied()?;
-    (backward_depth != usize::MAX).then_some(backward_depth)
 }
 
 fn replacement_preserves_output_depth(
@@ -1963,14 +1952,12 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
         let t0 = Instant::now();
         let mut structural_hash_state = DynamicStructuralHash::new(cur.clone())
             .expect("dynamic local strash should initialize from cut-db input graph");
-        let mut dense_counts = dense_use_counts_from_dynamic_hash(&structural_hash_state);
         let t_use_count_ms = t0.elapsed().as_millis();
 
         let t1 = Instant::now();
         let mut depth_state = DynamicDepthState::new(&structural_hash_state)
             .expect("dynamic depth state should initialize from cut-db input graph");
         let t_depth_ms = t1.elapsed().as_millis();
-        let mut depths = depth_state.forward_depths().to_vec();
         let mut cur_output_node_depth = depth_state
             .max_output_node_depth(&structural_hash_state)
             .expect("dynamic depth state should compute output depth");
@@ -2025,8 +2012,8 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
             let constructed = construct_large_cone_candidate_replacements_for_root(
                 structural_hash_state.gate_fn(),
                 root,
-                &depths,
-                &dense_counts,
+                depth_state.forward_depths(),
+                structural_hash_state.use_counts(),
                 &mut candidate_evals,
                 &mut candidate_stats,
                 &structural_hash_state,
@@ -2119,7 +2106,6 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                     );
                 }
 
-                depths = depth_state.forward_depths().to_vec();
                 cur_output_node_depth = after_output_node_depth;
                 let rebuilt_critical_roots = critical_roots.refresh_after_depth_update(
                     &structural_hash_state,
@@ -2127,7 +2113,6 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                     cur_output_node_depth,
                     &affected_depth_nodes,
                 );
-                dense_counts = dense_use_counts_from_dynamic_hash(&structural_hash_state);
                 after_path_len =
                     output_path_len(structural_hash_state.gate_fn(), cur_output_node_depth);
                 accepted_count += 1;
@@ -2254,7 +2239,6 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
         let t0 = Instant::now();
         let mut structural_hash_state = DynamicStructuralHash::new(cur.clone())
             .expect("dynamic local strash should initialize from cut-db input graph");
-        let mut dense_counts = dense_use_counts_from_dynamic_hash(&structural_hash_state);
         let t_use_count_ms = t0.elapsed().as_millis();
         let live_nodes = structural_hash_state.live_nodes();
         let live_and_count = structural_hash_state.live_and_count();
@@ -2263,8 +2247,6 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
         let mut depth_state = DynamicDepthState::new(&structural_hash_state)
             .expect("dynamic depth state should initialize from cut-db input graph");
         let t_depth_ms = t1.elapsed().as_millis();
-        let mut depths = depth_state.forward_depths().to_vec();
-        let mut backward_depths = depth_state.backward_depths().to_vec();
         let cur_output_node_depth = depth_state
             .max_output_node_depth(&structural_hash_state)
             .expect("dynamic depth state should compute output depth");
@@ -2281,8 +2263,8 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
         let t_phase = Instant::now();
         let mut roots = structural_hash_state.live_and_nodes();
         roots.sort_by(|a, b| {
-            depths[b.id]
-                .cmp(&depths[a.id])
+            depth_state.forward_depths()[b.id]
+                .cmp(&depth_state.forward_depths()[a.id])
                 .then_with(|| a.id.cmp(&b.id))
         });
         let roots_total = roots.len();
@@ -2317,7 +2299,9 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
             ) {
                 continue;
             }
-            let Some(root_backward_depth) = finite_backward_depth(&backward_depths, root) else {
+            let Some(root_backward_depth) =
+                depth_state.backward_depth(&structural_hash_state, root)
+            else {
                 candidate_stats.skipped_unrequired_depth += 1;
                 continue;
             };
@@ -2325,8 +2309,8 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
             let constructed = construct_large_cone_candidate_replacements_for_root(
                 structural_hash_state.gate_fn(),
                 root,
-                &depths,
-                &dense_counts,
+                depth_state.forward_depths(),
+                structural_hash_state.use_counts(),
                 &mut candidate_evals,
                 &mut candidate_stats,
                 &structural_hash_state,
@@ -2334,7 +2318,7 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
             );
             let root_result = cost_large_cone_area_candidates_for_root(
                 constructed,
-                depths[root.id],
+                depth_state.forward_depths()[root.id],
                 root_backward_depth,
                 cur_output_node_depth,
                 opts.mode.allows_area_depth_increase(),
@@ -2435,9 +2419,6 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                         "cut-db large-cone rewrite unexpectedly increased live output depth from {cur_output_node_depth} to {after_output_node_depth}"
                     );
                 }
-                depths = depth_state.forward_depths().to_vec();
-                backward_depths = depth_state.backward_depths().to_vec();
-                dense_counts = dense_use_counts_from_dynamic_hash(&structural_hash_state);
                 accepted_count += 1;
 
                 enqueue_live_and_roots(
