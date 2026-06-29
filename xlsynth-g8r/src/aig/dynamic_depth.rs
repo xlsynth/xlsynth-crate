@@ -113,14 +113,14 @@ impl DynamicDepthState {
             }
             self.forward_depths[node.id] = new_depth;
             affected_nodes.push(node);
-            for fanout in state.fanout_nodes(node) {
+            state.for_each_live_fanout(node, |fanout| {
                 enqueue_node(
                     fanout,
                     &mut forward_queue,
                     &mut self.forward_queue_marks,
                     queue_epoch,
                 );
-            }
+            });
             if !state.is_live(node) {
                 for fanin in node_fanins(state.gate_fn(), node) {
                     enqueue_node(
@@ -284,18 +284,21 @@ impl DynamicDepthState {
         } else {
             usize::MAX
         };
-        for fanout in state.fanout_nodes(node) {
-            let fanout_depth = self
-                .backward_depths
-                .get(fanout.id)
-                .copied()
-                .ok_or_else(|| format!("fanout {:?} has no backward depth entry", fanout))?;
+        let mut missing_fanout = None;
+        state.for_each_live_fanout(node, |fanout| {
+            let Some(fanout_depth) = self.backward_depths.get(fanout.id).copied() else {
+                missing_fanout = Some(fanout);
+                return;
+            };
             if fanout_depth != usize::MAX {
                 let candidate = fanout_depth.saturating_add(1);
                 if depth == usize::MAX || candidate > depth {
                     depth = candidate;
                 }
             }
+        });
+        if let Some(fanout) = missing_fanout {
+            return Err(format!("fanout {:?} has no backward depth entry", fanout));
         }
         Ok(depth)
     }

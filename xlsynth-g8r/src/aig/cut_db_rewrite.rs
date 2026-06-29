@@ -597,12 +597,13 @@ fn collect_critical_roots(
 
 fn collect_live_fanout_cone(state: &DynamicStructuralHash, root: AigRef) -> BTreeSet<AigRef> {
     let mut seen = BTreeSet::new();
-    let mut stack = state.fanout_nodes(root);
+    let mut stack = Vec::new();
+    state.for_each_live_fanout(root, |fanout| stack.push(fanout));
     while let Some(node) = stack.pop() {
         if !seen.insert(node) {
             continue;
         }
-        stack.extend(state.fanout_nodes(node));
+        state.for_each_live_fanout(node, |fanout| stack.push(fanout));
     }
     seen
 }
@@ -619,7 +620,9 @@ fn collect_new_nodes_and_fanouts(
             continue;
         }
         roots.insert(node);
-        roots.extend(state.fanout_nodes(node));
+        state.for_each_live_fanout(node, |fanout| {
+            roots.insert(fanout);
+        });
     }
     roots
 }

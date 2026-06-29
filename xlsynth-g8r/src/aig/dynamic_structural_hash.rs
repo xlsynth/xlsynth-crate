@@ -92,6 +92,13 @@ impl FanoutBucket {
         }
     }
 
+    fn for_each(&self, mut visit: impl FnMut(AigRef)) {
+        match self {
+            Self::Small(nodes) => nodes.iter().copied().for_each(&mut visit),
+            Self::Large(nodes) => nodes.iter().copied().for_each(&mut visit),
+        }
+    }
+
     fn contents_equal(&self, other: &Self) -> bool {
         self.len() == other.len() && self.to_vec().into_iter().all(|node| other.contains(node))
     }
@@ -206,6 +213,20 @@ impl DynamicStructuralHash {
             .into_iter()
             .filter(|fanout| self.is_live(*fanout))
             .collect()
+    }
+
+    /// Visits active direct fanouts without allocating a snapshot vector.
+    ///
+    /// Callers that mutate this structural hash while visiting must use
+    /// `fanout_nodes()` instead so the traversal owns a stable snapshot.
+    pub fn for_each_live_fanout(&self, node: AigRef, mut visit: impl FnMut(AigRef)) {
+        if let Some(fanouts) = self.fanouts.get(node.id) {
+            fanouts.for_each(|fanout| {
+                if self.is_live(fanout) {
+                    visit(fanout);
+                }
+            });
+        }
     }
 
     /// Returns the number of output bits that currently reference `node`.
