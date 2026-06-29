@@ -7,9 +7,7 @@ use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::time::Instant;
 
 use crate::aig::dce::dce;
-use crate::aig::gate::{
-    AigBitVector, AigNode, AigOperand, AigRef, GateFn, PirNodeIds, PirNodeIdsInterner,
-};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, PirNodeIds};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::use_count::get_id_to_use_count;
 
@@ -43,7 +41,6 @@ pub fn reassociate_gatefn(orig_fn: &GateFn) -> GateFn {
         maximal_supergate_count,
         absorbed_node_count
     );
-    let mut provenance_interner = PirNodeIdsInterner::default();
     let mut builder = GateBuilder::new(
         orig_fn.name.clone(),
         GateBuilderOptions {
@@ -54,12 +51,7 @@ pub fn reassociate_gatefn(orig_fn: &GateFn) -> GateFn {
     let mut orig_to_new: Vec<Option<AigOperand>> = vec![None; orig_fn.gates.len()];
     let mut new_depths = vec![0usize];
 
-    map_inputs(
-        orig_fn,
-        &mut builder,
-        &mut orig_to_new,
-        &mut provenance_interner,
-    );
+    map_inputs(orig_fn, &mut builder, &mut orig_to_new);
     sync_depths(&builder, &mut new_depths);
 
     for orig_ref in post_order_refs {
@@ -78,34 +70,15 @@ pub fn reassociate_gatefn(orig_fn: &GateFn) -> GateFn {
                 } else {
                     builder.get_false()
                 };
-                builder.add_interned_pir_node_ids(
-                    op.node,
-                    orig_node.get_pir_node_ids(),
-                    &mut provenance_interner,
-                );
+                builder.add_pir_node_ids(op.node, orig_node.get_pir_node_ids());
                 op
             }
             AigNode::And2 { .. } => {
-                let supergate = collect_plain_and_supergate(
-                    orig_fn,
-                    orig_ref,
-                    &use_counts,
-                    &mut provenance_interner,
-                );
-                rebuild_plain_and_supergate(
-                    &mut builder,
-                    &mut new_depths,
-                    &orig_to_new,
-                    supergate,
-                    &mut provenance_interner,
-                )
+                let supergate = collect_plain_and_supergate(orig_fn, orig_ref, &use_counts);
+                rebuild_plain_and_supergate(&mut builder, &mut new_depths, &orig_to_new, supergate)
             }
         };
-        builder.add_interned_pir_node_ids(
-            new_op.node,
-            orig_node.get_pir_node_ids(),
-            &mut provenance_interner,
-        );
+        builder.add_pir_node_ids(new_op.node, orig_node.get_pir_node_ids());
         orig_to_new[orig_ref.id] = Some(new_op);
     }
 
@@ -155,21 +128,15 @@ fn find_absorbed_plain_and_nodes(
     absorbed
 }
 
-fn map_inputs(
-    orig_fn: &GateFn,
-    builder: &mut GateBuilder,
-    orig_to_new: &mut [Option<AigOperand>],
-    provenance_interner: &mut PirNodeIdsInterner,
-) {
+fn map_inputs(orig_fn: &GateFn, builder: &mut GateBuilder, orig_to_new: &mut [Option<AigOperand>]) {
     for orig_input in &orig_fn.inputs {
         let new_input = builder.add_input(orig_input.name.clone(), orig_input.get_bit_count());
         for bit_index in 0..orig_input.get_bit_count() {
             let orig_bit = *orig_input.bit_vector.get_lsb(bit_index);
             let new_bit = *new_input.get_lsb(bit_index);
-            builder.add_interned_pir_node_ids(
+            builder.add_pir_node_ids(
                 new_bit.node,
                 orig_fn.gates[orig_bit.node.id].get_pir_node_ids(),
-                provenance_interner,
             );
             orig_to_new[orig_bit.node.id] = Some(new_bit);
         }
@@ -180,7 +147,6 @@ fn collect_plain_and_supergate(
     g: &GateFn,
     root: AigRef,
     use_counts: &HashMap<AigRef, usize>,
-    provenance_interner: &mut PirNodeIdsInterner,
 ) -> PlainAndSupergate {
     let mut leaf_ops = Vec::new();
     let mut pir_node_ids = Vec::new();
@@ -205,7 +171,7 @@ fn collect_plain_and_supergate(
 
     PlainAndSupergate {
         leaf_ops,
-        pir_node_ids: provenance_interner.intern_slice(&pir_node_ids),
+        pir_node_ids: PirNodeIds::from_vec(pir_node_ids),
         root_tags: g.gates[root.id]
             .get_tags()
             .map_or_else(Vec::new, |tags| tags.to_vec()),
@@ -227,7 +193,6 @@ fn rebuild_plain_and_supergate(
     new_depths: &mut Vec<usize>,
     orig_to_new: &[Option<AigOperand>],
     supergate: PlainAndSupergate,
-    provenance_interner: &mut PirNodeIdsInterner,
 ) -> AigOperand {
     let PlainAndSupergate {
         leaf_ops,
@@ -242,15 +207,11 @@ fn rebuild_plain_and_supergate(
     );
     let output = match normalized {
         NormalizedLeaves::Constant(op) | NormalizedLeaves::Single(op) => op,
-        NormalizedLeaves::Many(leaf_ops) => build_balanced_and_tree(
-            builder,
-            new_depths,
-            &leaf_ops,
-            &pir_node_ids,
-            provenance_interner,
-        ),
+        NormalizedLeaves::Many(leaf_ops) => {
+            build_balanced_and_tree(builder, new_depths, &leaf_ops, &pir_node_ids)
+        }
     };
-    builder.add_interned_pir_node_id_set(output.node, &pir_node_ids, provenance_interner);
+    builder.add_pir_node_ids(output.node, &pir_node_ids);
     add_tags(builder, output.node, &root_tags);
     output
 }
@@ -291,8 +252,7 @@ fn build_balanced_and_tree(
     builder: &mut GateBuilder,
     new_depths: &mut Vec<usize>,
     leaf_ops: &[AigOperand],
-    pir_node_ids: &PirNodeIds,
-    provenance_interner: &mut PirNodeIdsInterner,
+    pir_node_ids: &[u32],
 ) -> AigOperand {
     let mut heap = BinaryHeap::new();
     for operand in leaf_ops.iter().copied() {
@@ -303,7 +263,7 @@ fn build_balanced_and_tree(
         let Reverse((_, lhs)) = heap.pop().unwrap();
         let Reverse((_, rhs)) = heap.pop().unwrap();
         let output = builder.add_and_binary(lhs, rhs);
-        builder.add_interned_pir_node_id_set(output.node, pir_node_ids, provenance_interner);
+        builder.add_pir_node_ids(output.node, pir_node_ids);
         sync_depths(builder, new_depths);
         heap.push(Reverse((operand_depth(new_depths, output), output)));
     }
@@ -423,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn reassociate_interns_large_supergate_provenance_sets() {
+    fn reassociate_propagates_large_supergate_provenance_sets() {
         let mut builder =
             GateBuilder::new("and4_provenance".to_string(), GateBuilderOptions::opt());
         let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
@@ -447,8 +407,8 @@ mod tests {
         assert_eq!(and_nodes.len(), 3);
         assert!(
             and_nodes
-                .windows(2)
-                .all(|pair| pair[0].shares_pir_node_id_storage_with(pair[1]))
+                .iter()
+                .all(|node| node.get_pir_node_ids() == [1, 2, 3, 4])
         );
     }
 
