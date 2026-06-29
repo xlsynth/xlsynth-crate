@@ -237,15 +237,14 @@ impl CutEnumerator {
         }
     }
 
-    pub(super) fn cuts_for_root(&mut self, g: &GateFn, root: AigRef) -> Vec<Cut> {
+    pub(super) fn cuts_for_root(&mut self, g: &GateFn, root: AigRef) -> &[Cut] {
         let t0 = Instant::now();
         self.ensure_cuts_for_node(g, root);
-        let cuts = self.memo[root.id]
+        self.stats.elapsed_ms += t0.elapsed().as_millis();
+        self.memo[root.id]
             .as_ref()
             .expect("root cuts should be computed")
-            .clone();
-        self.stats.elapsed_ms += t0.elapsed().as_millis();
-        cuts
+            .as_slice()
     }
 
     fn cuts_for_operand_from_memo(&self, op: AigOperand) -> Vec<Cut> {

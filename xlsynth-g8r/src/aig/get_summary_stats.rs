@@ -215,17 +215,18 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
         if matches!(gate, AigNode::Input { .. } | AigNode::Literal { .. }) {
             break;
         }
-        let args: Vec<gate::AigRef> = gate.get_args();
-        assert!(!args.is_empty(), "gate {:?} should have args", gate);
-        let max_arg_depth = args
-            .iter()
-            .map(|arg| depths.get(arg).unwrap())
-            .max()
-            .unwrap();
-        current_gate_ref = args
-            .iter()
-            .find(|arg| depths.get(arg).unwrap() == max_arg_depth)
-            .map(|arg| *arg);
+        current_gate_ref = gate.args().reduce(|deepest, arg| {
+            if depths.get(&arg).unwrap() > depths.get(&deepest).unwrap() {
+                arg
+            } else {
+                deepest
+            }
+        });
+        assert!(
+            current_gate_ref.is_some(),
+            "gate {:?} should have args",
+            gate
+        );
     }
 
     let mut depth_to_count: HashMap<usize, usize> = HashMap::new();

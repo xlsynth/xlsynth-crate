@@ -40,7 +40,7 @@ pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usiz
 
         // Get the node's arguments and process them
         let gate: &gate::AigNode = &gate_fn.gates[node.id];
-        for arg in gate.get_args() {
+        for arg in gate.args() {
             bump_use_count(arg);
             worklist.push(arg);
         }

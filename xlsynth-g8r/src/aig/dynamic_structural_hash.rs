@@ -164,6 +164,11 @@ impl DynamicStructuralHash {
         &self.g
     }
 
+    /// Consumes this dynamic state and returns its underlying graph.
+    pub(crate) fn into_gate_fn(self) -> GateFn {
+        self.g
+    }
+
     /// Returns the active-node bitset indexed by `AigRef::id`.
     pub fn live_mask(&self) -> &[bool] {
         &self.live

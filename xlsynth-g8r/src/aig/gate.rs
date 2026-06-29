@@ -126,20 +126,18 @@ pub enum AigNode {
 }
 
 impl AigNode {
-    pub fn get_operands(&self) -> Vec<AigOperand> {
-        match self {
-            AigNode::Input { .. } => vec![],
-            AigNode::Literal { .. } => vec![],
-            AigNode::And2 { a, b, .. } => vec![a.clone(), b.clone()],
-        }
+    /// Iterates over this node's operands, including edge polarity.
+    pub fn operands(&self) -> impl Iterator<Item = AigOperand> + '_ {
+        let operands = match self {
+            AigNode::And2 { a, b, .. } => [Some(*a), Some(*b)],
+            AigNode::Input { .. } | AigNode::Literal { .. } => [None, None],
+        };
+        operands.into_iter().flatten()
     }
 
-    pub fn get_args(&self) -> Vec<AigRef> {
-        match self {
-            AigNode::Input { .. } => vec![],
-            AigNode::Literal { .. } => vec![],
-            AigNode::And2 { a, b, .. } => vec![a.node, b.node],
-        }
+    /// Iterates over this node's operand references without edge polarity.
+    pub fn args(&self) -> impl Iterator<Item = AigRef> + '_ {
+        self.operands().map(|operand| operand.node)
     }
 
     pub fn add_tag(&mut self, tag: String) {

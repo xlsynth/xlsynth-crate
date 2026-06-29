@@ -939,7 +939,7 @@ fn choose_area_candidate_replacements_for_root(
         };
     };
 
-    for cut in &root_cuts {
+    for cut in root_cuts {
         let cut_leaves = cut.leaves.as_slice();
         if cut_leaves.len() == 1 && cut_leaves[0].node == root && !cut_leaves[0].negated {
             stats.skipped_identity_cut += 1;
@@ -1403,7 +1403,7 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
     {
         let t_iter0 = Instant::now();
         let t0 = Instant::now();
-        let mut structural_hash_state = DynamicStructuralHash::new(cur.clone())
+        let mut structural_hash_state = DynamicStructuralHash::new(cur)
             .expect("dynamic local strash should initialize from cut-db input graph");
         let t_use_count_ms = t0.elapsed().as_millis();
         let t1 = Instant::now();
@@ -1451,15 +1451,17 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
             ) {
                 continue;
             }
-            let root_cuts = cut_enumerator.cuts_for_root(structural_hash_state.gate_fn(), root);
             let root_depth = live_forward_depth(&depth_state, &structural_hash_state, root);
-            let cands = choose_candidate_replacements_for_root(
-                root,
-                &root_cuts,
-                &structural_hash_state,
-                &depth_state,
-                db,
-            );
+            let cands = {
+                let root_cuts = cut_enumerator.cuts_for_root(structural_hash_state.gate_fn(), root);
+                choose_candidate_replacements_for_root(
+                    root,
+                    root_cuts,
+                    &structural_hash_state,
+                    &depth_state,
+                    db,
+                )
+            };
             candidates_considered += cands.len();
             for cand in cands {
                 candidate_evals += 1;
@@ -1577,7 +1579,7 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
         let cut_stats = cut_enumerator.stats();
         let t_phase_ms = t_phase.elapsed().as_millis();
 
-        if accepted_count != 0 {
+        cur = if accepted_count != 0 {
             let new_g = dce(structural_hash_state.gate_fn());
             if opts.verify_delay_costing {
                 let checked_depth = independent_output_node_depth(&new_g);
@@ -1586,8 +1588,10 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
                     "cut-db depth final DCE changed output depth from tracked {cur_output_node_depth} to checked {checked_depth}"
                 );
             }
-            cur = new_g;
-        }
+            new_g
+        } else {
+            structural_hash_state.into_gate_fn()
+        };
 
         log::debug!(
             "cut-db depth round timings: use_count_ms={} depth_ms={} cuts_ms={} phase_ms={} critical_roots={} roots_visited={} cands_considered={} candidate_evals={} accepted={} before_path_len={} after_path_len={} round_elapsed_ms={}",
@@ -1950,7 +1954,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
     {
         let t_iter0 = Instant::now();
         let t0 = Instant::now();
-        let mut structural_hash_state = DynamicStructuralHash::new(cur.clone())
+        let mut structural_hash_state = DynamicStructuralHash::new(cur)
             .expect("dynamic local strash should initialize from cut-db input graph");
         let t_use_count_ms = t0.elapsed().as_millis();
 
@@ -2150,7 +2154,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
         let t_phase_ms = t_phase.elapsed().as_millis();
 
         let mut after_live_and_count = before_live_and_count;
-        if accepted_count != 0 {
+        cur = if accepted_count != 0 {
             after_live_and_count = structural_hash_state.live_and_count();
             let new_g = dce(structural_hash_state.gate_fn());
             if opts.verify_delay_costing {
@@ -2160,8 +2164,10 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                     "cut-db large-cone depth final DCE changed output depth from tracked {cur_output_node_depth} to checked {checked_depth}"
                 );
             }
-            cur = new_g;
-        }
+            new_g
+        } else {
+            structural_hash_state.into_gate_fn()
+        };
 
         log::debug!(
             "cut-db large-cone depth round timings: use_count_ms={} depth_ms={} phase_ms={} critical_roots={} roots_visited={} cands_considered={} candidate_evals={} accepted={} before_ands={} after_ands={} before_path_len={} after_path_len={} round_elapsed_ms={}",
@@ -2686,6 +2692,26 @@ mod tests {
             out = gb.add_and_binary(out, *arg);
         }
         out
+    }
+
+    #[test]
+    fn test_depth_rewrites_return_unchanged_graph_without_candidates() {
+        let frag = make_and2_frag();
+        let db = make_single_entry_db(frag.eval_tt16(), frag);
+        let mut gb = GateBuilder::new("t".to_string(), GateBuilderOptions::opt());
+        let a = gb.add_input("a".to_string(), 1);
+        let b = gb.add_input("b".to_string(), 1);
+        let ab = gb.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+        gb.add_output("o".to_string(), crate::aig::AigBitVector::from_bit(ab));
+        let g = gb.build();
+
+        let small_cut_rewritten =
+            rewrite_gatefn_depth_with_cut_db(&g, &db, RewriteOptions::default());
+        let large_cone_rewritten =
+            rewrite_gatefn_large_cone_depth_refactor(&g, RewriteOptions::default());
+
+        assert_eq!(small_cut_rewritten.gates, g.gates);
+        assert_eq!(large_cone_rewritten.gates, g.gates);
     }
 
     #[test]
