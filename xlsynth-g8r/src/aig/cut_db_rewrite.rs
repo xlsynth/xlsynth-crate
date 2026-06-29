@@ -141,6 +141,10 @@ impl DenseAigRefMembership {
         true
     }
 
+    fn contains(&self, node: AigRef) -> bool {
+        self.present.get(node.id).copied().unwrap_or(false)
+    }
+
     fn len(&self) -> usize {
         self.len
     }
@@ -1331,10 +1335,10 @@ impl CriticalRootTracker {
         depth_state: &DynamicDepthState,
         max_output_node_depth: usize,
         affected_nodes: &[AigRef],
-    ) {
+    ) -> bool {
         if max_output_node_depth != self.max_output_node_depth {
             *self = Self::new(structural_hash_state, depth_state, max_output_node_depth);
-            return;
+            return true;
         }
 
         for node in affected_nodes {
@@ -1349,6 +1353,7 @@ impl CriticalRootTracker {
                 self.roots.remove(*node);
             }
         }
+        false
     }
 
     fn enqueue_all(
@@ -1358,7 +1363,31 @@ impl CriticalRootTracker {
         pending_roots: &mut DenseAigRefMembership,
         root_queue: &mut VecDeque<AigRef>,
     ) -> usize {
-        let mut roots: Vec<AigRef> = self.iter().collect();
+        let roots: Vec<AigRef> = self.iter().collect();
+        self.enqueue_affected(
+            structural_hash_state,
+            depth_state,
+            &roots,
+            pending_roots,
+            root_queue,
+        )
+    }
+
+    fn enqueue_affected(
+        &self,
+        structural_hash_state: &DynamicStructuralHash,
+        depth_state: &DynamicDepthState,
+        affected_nodes: &[AigRef],
+        pending_roots: &mut DenseAigRefMembership,
+        root_queue: &mut VecDeque<AigRef>,
+    ) -> usize {
+        let mut roots: Vec<AigRef> = affected_nodes
+            .iter()
+            .copied()
+            .filter(|node| self.roots.contains(*node))
+            .collect();
+        roots.sort_unstable_by_key(|node| node.id);
+        roots.dedup();
         roots.sort_by(|a, b| {
             live_forward_depth(depth_state, structural_hash_state, *b)
                 .cmp(&live_forward_depth(depth_state, structural_hash_state, *a))
@@ -1381,8 +1410,7 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
 
     // Walk critical-path roots from the current graph once. Accepted
     // replacements are materialized immediately into the dynamic graph state,
-    // and all current critical-path roots are requeued before the round
-    // continues.
+    // and affected critical-path roots are requeued before the round continues.
     {
         let t_iter0 = Instant::now();
         let t0 = Instant::now();
@@ -1421,6 +1449,7 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
         let mut fanout_cone_nodes = DenseAigRefSet::default();
         let mut invalidated_cut_nodes = DenseAigRefSet::default();
         let mut depth_dirty_nodes = DenseAigRefSet::default();
+        let mut requeue_nodes = DenseAigRefSet::default();
         let t_phase = Instant::now();
         while let Some(root) = root_queue.pop_front() {
             pending_roots.remove(root);
@@ -1521,7 +1550,7 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
                 }
 
                 cur_output_node_depth = after_output_node_depth;
-                critical_roots.refresh_after_depth_update(
+                let rebuilt_critical_roots = critical_roots.refresh_after_depth_update(
                     &structural_hash_state,
                     &depth_state,
                     cur_output_node_depth,
@@ -1534,12 +1563,25 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
                 cut_enumerator.sync_len(structural_hash_state.gate_fn());
                 cut_enumerator.invalidate_nodes(invalidated_cut_nodes.as_slice());
 
-                critical_roots.enqueue_all(
-                    &structural_hash_state,
-                    &depth_state,
-                    &mut pending_roots,
-                    &mut root_queue,
-                );
+                requeue_nodes.clear();
+                requeue_nodes.extend(invalidated_cut_nodes.iter());
+                requeue_nodes.extend(affected_depth_nodes.iter().copied());
+                if rebuilt_critical_roots {
+                    critical_roots.enqueue_all(
+                        &structural_hash_state,
+                        &depth_state,
+                        &mut pending_roots,
+                        &mut root_queue,
+                    );
+                } else {
+                    critical_roots.enqueue_affected(
+                        &structural_hash_state,
+                        &depth_state,
+                        requeue_nodes.as_slice(),
+                        &mut pending_roots,
+                        &mut root_queue,
+                    );
+                }
                 break;
             }
         }
@@ -1966,6 +2008,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
         let mut fanout_cone_nodes = DenseAigRefSet::default();
         let mut invalidated_nodes = DenseAigRefSet::default();
         let mut depth_dirty_nodes = DenseAigRefSet::default();
+        let mut requeue_nodes = DenseAigRefSet::default();
         while let Some(root) = root_queue.pop_front() {
             pending_roots.remove(root);
             candidate_stats.roots_visited += 1;
@@ -2078,7 +2121,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
 
                 depths = depth_state.forward_depths().to_vec();
                 cur_output_node_depth = after_output_node_depth;
-                critical_roots.refresh_after_depth_update(
+                let rebuilt_critical_roots = critical_roots.refresh_after_depth_update(
                     &structural_hash_state,
                     &depth_state,
                     cur_output_node_depth,
@@ -2096,12 +2139,25 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                     &mut selected_sop_factored,
                 );
 
-                candidate_stats.roots_total += critical_roots.enqueue_all(
-                    &structural_hash_state,
-                    &depth_state,
-                    &mut pending_roots,
-                    &mut root_queue,
-                );
+                requeue_nodes.clear();
+                requeue_nodes.extend(invalidated_nodes.iter());
+                requeue_nodes.extend(affected_depth_nodes.iter().copied());
+                candidate_stats.roots_total += if rebuilt_critical_roots {
+                    critical_roots.enqueue_all(
+                        &structural_hash_state,
+                        &depth_state,
+                        &mut pending_roots,
+                        &mut root_queue,
+                    )
+                } else {
+                    critical_roots.enqueue_affected(
+                        &structural_hash_state,
+                        &depth_state,
+                        requeue_nodes.as_slice(),
+                        &mut pending_roots,
+                        &mut root_queue,
+                    )
+                };
                 break;
             }
         }
