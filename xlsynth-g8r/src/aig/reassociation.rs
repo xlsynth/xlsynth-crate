@@ -4,6 +4,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::time::Instant;
 
 use crate::aig::dce::dce;
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, PirNodeIds};
@@ -23,7 +24,23 @@ struct PlainAndSupergate {
 /// stay as ordinary operands, so De Morgan-encoded OR cones use the same
 /// machinery without a separate OR representation.
 pub fn reassociate_gatefn(orig_fn: &GateFn) -> GateFn {
+    let started = Instant::now();
     let use_counts = get_id_to_use_count(orig_fn);
+    let post_order_refs = orig_fn.post_order_refs();
+    let absorbed_nodes = find_absorbed_plain_and_nodes(orig_fn, &post_order_refs, &use_counts);
+    let maximal_supergate_count = post_order_refs
+        .iter()
+        .filter(|node_ref| {
+            matches!(orig_fn.gates[node_ref.id], AigNode::And2 { .. })
+                && !absorbed_nodes[node_ref.id]
+        })
+        .count();
+    let absorbed_node_count = absorbed_nodes.iter().filter(|absorbed| **absorbed).count();
+    log::info!(
+        "reassociation rebuilding {} maximal supergates and absorbing {} internal AND nodes",
+        maximal_supergate_count,
+        absorbed_node_count
+    );
     let mut builder = GateBuilder::new(
         orig_fn.name.clone(),
         GateBuilderOptions {
@@ -37,8 +54,11 @@ pub fn reassociate_gatefn(orig_fn: &GateFn) -> GateFn {
     map_inputs(orig_fn, &mut builder, &mut orig_to_new);
     sync_depths(&builder, &mut new_depths);
 
-    for orig_ref in orig_fn.post_order_refs() {
+    for orig_ref in post_order_refs {
         if orig_to_new[orig_ref.id].is_some() {
+            continue;
+        }
+        if absorbed_nodes[orig_ref.id] {
             continue;
         }
         let orig_node = &orig_fn.gates[orig_ref.id];
@@ -77,7 +97,35 @@ pub fn reassociate_gatefn(orig_fn: &GateFn) -> GateFn {
     rebuilt.check_invariants_with_debug_assert();
     let result = dce(&rebuilt);
     result.check_invariants_with_debug_assert();
+    log::info!(
+        "reassociation complete: input_nodes={}, output_nodes={}, maximal_supergates={}, absorbed_internal_ands={}, seconds={:.6}",
+        orig_fn.gates.len(),
+        result.gates.len(),
+        maximal_supergate_count,
+        absorbed_node_count,
+        started.elapsed().as_secs_f64()
+    );
     result
+}
+
+/// Marks internal AND nodes that belong to a larger maximal supergate.
+fn find_absorbed_plain_and_nodes(
+    g: &GateFn,
+    post_order_refs: &[AigRef],
+    use_counts: &HashMap<AigRef, usize>,
+) -> Vec<bool> {
+    let mut absorbed = vec![false; g.gates.len()];
+    for node_ref in post_order_refs {
+        let AigNode::And2 { a, b, .. } = g.gates[node_ref.id] else {
+            continue;
+        };
+        for operand in [a, b] {
+            if can_flatten_plain_and_operand(g, operand, use_counts) {
+                absorbed[operand.node.id] = true;
+            }
+        }
+    }
+    absorbed
 }
 
 fn map_inputs(orig_fn: &GateFn, builder: &mut GateBuilder, orig_to_new: &mut [Option<AigOperand>]) {
@@ -294,6 +342,54 @@ mod tests {
         assert_eq!(get_aig_stats(&after).and_nodes, 3);
         assert_eq!(get_aig_stats(&before).max_depth, 3);
         assert_eq!(get_aig_stats(&after).max_depth, 2);
+    }
+
+    #[test]
+    fn identifies_only_maximal_plain_and_supergate_roots() {
+        let mut builder = GateBuilder::new("maximal_and".to_string(), GateBuilderOptions::opt());
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        let c = *builder.add_input("c".to_string(), 1).get_lsb(0);
+        let d = *builder.add_input("d".to_string(), 1).get_lsb(0);
+        let ab = builder.add_and_binary(a, b);
+        let abc = builder.add_and_binary(ab, c);
+        let abcd = builder.add_and_binary(abc, d);
+        builder.add_output("o".to_string(), abcd.into());
+        let gate_fn = builder.build();
+
+        let post_order_refs = gate_fn.post_order_refs();
+        let use_counts = get_id_to_use_count(&gate_fn);
+        let absorbed = find_absorbed_plain_and_nodes(&gate_fn, &post_order_refs, &use_counts);
+
+        assert!(absorbed[ab.node.id]);
+        assert!(absorbed[abc.node.id]);
+        assert!(!absorbed[abcd.node.id]);
+    }
+
+    #[test]
+    fn shared_fanout_and_is_a_supergate_boundary() {
+        let mut builder = GateBuilder::new("shared_and".to_string(), GateBuilderOptions::opt());
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        let c = *builder.add_input("c".to_string(), 1).get_lsb(0);
+        let d = *builder.add_input("d".to_string(), 1).get_lsb(0);
+        let ab = builder.add_and_binary(a, b);
+        let abc = builder.add_and_binary(ab, c);
+        let abd = builder.add_and_binary(ab, d);
+        let root = builder.add_and_binary(abc, abd);
+        builder.add_output("o".to_string(), root.into());
+        let before = builder.build();
+
+        let post_order_refs = before.post_order_refs();
+        let use_counts = get_id_to_use_count(&before);
+        let absorbed = find_absorbed_plain_and_nodes(&before, &post_order_refs, &use_counts);
+        assert!(!absorbed[ab.node.id]);
+        assert!(absorbed[abc.node.id]);
+        assert!(absorbed[abd.node.id]);
+        assert!(!absorbed[root.node.id]);
+
+        let after = reassociate_gatefn(&before);
+        assert!(oracle_equiv_sat(&before, &after).unwrap());
     }
 
     #[test]
