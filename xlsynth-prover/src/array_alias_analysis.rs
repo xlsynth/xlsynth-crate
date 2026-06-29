@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
-use xlsynth_pir::array_access::{
+use xlsynth_pir::array_alias_rewrite::{
     ArrayAccessPair, ArrayAliasFact, ArrayAliasRelation, ArrayReadRewriteOutcome,
     rewrite_array_reads_with_alias_facts,
 };

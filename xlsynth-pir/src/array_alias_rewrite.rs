@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Solver-independent facts and rewrites for reads through array updates.
+//! Solver-independent alias facts and rewrites for array operations.
 
 use std::collections::BTreeMap;
 

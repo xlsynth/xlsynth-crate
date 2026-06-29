@@ -5,7 +5,7 @@
 //! Functionality that is purely related to the XLS IR, i.e. parsing,
 //! representing, querying/manipulating, etc.
 
-pub mod array_access;
+pub mod array_alias_rewrite;
 pub mod aug_opt;
 pub mod block2fn;
 pub mod block_inline;

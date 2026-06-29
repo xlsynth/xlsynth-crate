@@ -87,7 +87,7 @@ fn apply_formal_array_alias_analysis(
 
     #[cfg(feature = "has-bitwuzla")]
     {
-        use xlsynth_prover::array_access::prove_and_rewrite_array_reads;
+        use xlsynth_prover::array_alias_analysis::prove_and_rewrite_array_reads;
         use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions, BitwuzlaSatSolver};
 
         let original = package
