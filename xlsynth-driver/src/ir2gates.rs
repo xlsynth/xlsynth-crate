@@ -115,6 +115,7 @@ fn block_gatify_options(options: &CanonicalG8rOptions) -> GatifyOptions {
     GatifyOptions {
         fold: options.fold,
         hash: options.hash,
+        track_pir_node_ids: options.track_pir_node_ids,
         adder_mapping: options.adder_mapping,
         mul_adder_mapping: options.mul_adder_mapping,
         enable_rewrite_carry_out: options.enable_rewrite_carry_out,

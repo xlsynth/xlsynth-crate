@@ -180,6 +180,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("track_pir_node_ids")
+                .long("track-pir-node-ids")
+                .value_name("BOOL")
+                .help("Track and propagate PIR node provenance on AIG nodes.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("enable_rewrite_carry_out")
                 .long("enable-rewrite-carry-out")
                 .value_name("BOOL")
@@ -510,6 +518,11 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
     CanonicalG8rOptions {
         fold: parse_cli_bool(matches, "fold", defaults.fold),
         hash: parse_cli_bool(matches, "hash", defaults.hash),
+        track_pir_node_ids: parse_cli_bool(
+            matches,
+            "track_pir_node_ids",
+            defaults.track_pir_node_ids,
+        ),
         enable_rewrite_carry_out: parse_cli_bool(
             matches,
             "enable_rewrite_carry_out",

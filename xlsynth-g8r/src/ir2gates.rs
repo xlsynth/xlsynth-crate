@@ -15,6 +15,8 @@ pub const DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS: bool = true;
 pub struct Ir2GatesOptions {
     pub fold: bool,
     pub hash: bool,
+    /// Whether gatification records originating PIR node IDs on AIG nodes.
+    pub track_pir_node_ids: bool,
     pub check_equivalence: bool,
     pub equivalence_solver: SolverChoice,
     pub enable_rewrite_carry_out: bool,
@@ -38,6 +40,7 @@ impl Ir2GatesOptions {
         Self {
             fold: true,
             hash: true,
+            track_pir_node_ids: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
@@ -59,6 +62,7 @@ impl Ir2GatesOptions {
         Self {
             fold: true,
             hash: true,
+            track_pir_node_ids: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
@@ -262,6 +266,7 @@ pub fn ir2gates_from_ir_text(
         ir2gate::GatifyOptions {
             fold: options.fold,
             hash: options.hash,
+            track_pir_node_ids: options.track_pir_node_ids,
             check_equivalence: options.check_equivalence,
             equivalence_solver: options.equivalence_solver,
             adder_mapping: options.adder_mapping,
@@ -295,6 +300,12 @@ mod tests {
     fn formal_array_alias_analysis_defaults_on() {
         assert!(Ir2GatesOptions::default().enable_formal_array_alias_analysis);
         assert!(!Ir2GatesOptions::all_opts_disabled().enable_formal_array_alias_analysis);
+    }
+
+    #[test]
+    fn pir_node_id_tracking_defaults_off() {
+        assert!(!Ir2GatesOptions::default().track_pir_node_ids);
+        assert!(!Ir2GatesOptions::all_opts_disabled().track_pir_node_ids);
     }
 
     #[cfg(not(feature = "has-bitwuzla"))]

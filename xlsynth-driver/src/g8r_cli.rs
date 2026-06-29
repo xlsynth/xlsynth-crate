@@ -167,6 +167,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
     let defaults = CanonicalG8rOptions::default();
     let fold = parse_bool(matches, "fold", defaults.fold);
     let hash = parse_bool(matches, "hash", defaults.hash);
+    let track_pir_node_ids = parse_bool(matches, "track-pir-node-ids", defaults.track_pir_node_ids);
     let fraig = parse_bool(matches, "fraig", defaults.fraig);
     let reassociation = parse_bool(matches, "reassociation", defaults.reassociation);
     let enable_rewrite_carry_out = parse_bool(
@@ -248,6 +249,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
     CanonicalG8rOptions {
         fold,
         hash,
+        track_pir_node_ids,
         enable_rewrite_carry_out,
         enable_rewrite_prio_encode,
         enable_rewrite_nary_add,

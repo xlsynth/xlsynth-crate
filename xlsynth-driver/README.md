@@ -572,6 +572,7 @@ combinational transition logic is lowered into the stored transition function.
   - `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
   - `--enable-formal-array-alias-analysis=<BOOL>` – when `true`, use Bitwuzla before `prep_for_gatify` to prove whether reads can observe individual layers of an `array_update` chain. Proven non-aliasing layers are bypassed and proven always-aliasing reads are replaced by the written value. Default `true`. Builds without Bitwuzla must pass `false`. Solver checks are currently unbounded.
   - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
+  - `--track-pir-node-ids=<BOOL>` – when `true`, record originating PIR node IDs on AIG nodes and propagate them through optimization for provenance and per-IR-node reports. Default `false` because provenance propagation adds substantial runtime and memory overhead.
   - `--cadical-terminate-limit=<N>` – set the deterministic CaDiCaL internal
     termination-check budget for each FRAIG proof. When the budget is exhausted,
     the candidate is left unproven and synthesis continues. Default `1000`; use
@@ -908,6 +909,8 @@ xlsynth-driver aig2ir my_module.aag --fn-type '(bits[8][4]) -> bits[8][4]' > my_
 
 Reads a combinational `.g8r` or `.g8rbin` design plus an XLS IR package and prints a table that attributes live AIG AND-node area back to PIR node ids carried in g8r provenance. Designs with clocks or registers are not accepted by this combinational attribution command.
 
+Generate the input design with `ir2g8r --track-pir-node-ids=true`; provenance tracking is disabled by default.
+
 - One row is emitted per PIR node id that appears on at least one live `And2` node and resolves against the selected IR member.
 
 - `--group-by-opcode` switches the table to one row per PIR opcode (`add`, `shrl`, `param`, etc.) instead of one row per PIR node id.
@@ -949,6 +952,8 @@ xlsynth-driver g8r-area-table my_module.g8r my_module.ir --group-by-opcode
 ### `g8r-critical-path-table`: Per-PIR-node attribution for level-critical AIG nodes
 
 Reads a combinational `.g8r` or `.g8rbin` design plus an XLS IR package and prints the same attribution table shape as `g8r-area-table`, but only for live AIG `And2` nodes that lie on at least one critical path as measured by AIG levels from primary inputs to primary outputs. Designs with clocks or registers are not accepted by this combinational attribution command.
+
+Generate the input design with `ir2g8r --track-pir-node-ids=true`; provenance tracking is disabled by default.
 
 - One row is emitted per PIR node id that appears on at least one critical-path `And2` node and resolves against the selected IR member.
 
@@ -1183,7 +1188,7 @@ optimization, and gatification using either the toolchain or the runtime APIs.
 
 - The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
   **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
-- Gate-lowering flags are shared with `ir2g8r` / `ir2gates` (e.g. `--fold`, `--hash`, `--fraig`, `--adder-mapping`, and `--enable-rewrite-*`).
+- Gate-lowering flags are shared with `ir2g8r` / `ir2gates` (e.g. `--fold`, `--hash`, `--track-pir-node-ids`, `--fraig`, `--adder-mapping`, and `--enable-rewrite-*`).
 
 ### `ir2opt`: optimize IR
 
@@ -1242,7 +1247,7 @@ This subcommand is the user-facing CLI for PIR MCMC optimization.
   - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-nodes|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress|g8r-post-and-nodes|g8r-post-and-nodes-times-depth|g8r-post-and-nodes-times-depth-times-toggles|g8r-post-le-graph|g8r-post-le-graph-times-and-nodes|g8r-post-le-graph-times-product|g8r-post-weighted-switching|g8r-post-and-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
   - `--extension-costing-mode <preserve|desugar>` – controls how PIR extension ops are projected before XLS optimization and g8r costing (default: `preserve`). Use `desugar` when the run should score and record best artifacts through standard non-extension XLS IR, which is more source-grounded for DSLX follow-up.
   - `--g8r-postprocess-program <PATH>` – external postprocessor for the `g8r-post-*` metric family. It is invoked as `<PATH> <input.aig> --output-path <output.aig>`, where the input is binary AIGER and the output may be ASCII or binary AIGER. Diagnostics should go to stderr.
-  - Gate-lowering flags are shared with `ir2g8r` / `ir2gates`, with the same defaults: `--fold`, `--hash`, `--enable-rewrite-carry-out`, `--enable-rewrite-prio-encode`, `--enable-rewrite-nary-add`, `--enable-rewrite-mask-low`, `--enable-formal-array-alias-analysis`, `--unsafe-gatify-gate-operation`, `--adder-mapping`, `--mul-adder-mapping`, `--fraig`, `--reassociation`, `--cut-db-rewrite`, `--max-fraig-sim-samples`, `--gate-formal-backend`, `--cadical-terminate-limit`, `--compute-graph-logical-effort`, `--graph-logical-effort-beta1`, `--graph-logical-effort-beta2`, `--toggle-sample-count`, and `--toggle-seed`.
+  - Gate-lowering flags are shared with `ir2g8r` / `ir2gates`, with the same defaults: `--fold`, `--hash`, `--track-pir-node-ids`, `--enable-rewrite-carry-out`, `--enable-rewrite-prio-encode`, `--enable-rewrite-nary-add`, `--enable-rewrite-mask-low`, `--enable-formal-array-alias-analysis`, `--unsafe-gatify-gate-operation`, `--adder-mapping`, `--mul-adder-mapping`, `--fraig`, `--reassociation`, `--cut-db-rewrite`, `--max-fraig-sim-samples`, `--gate-formal-backend`, `--cadical-terminate-limit`, `--compute-graph-logical-effort`, `--graph-logical-effort-beta1`, `--graph-logical-effort-beta2`, `--toggle-sample-count`, and `--toggle-seed`.
   - `--verify-origin-alignment` – rerun the exact scored origin package through the external canonical flow (`ir2g8r`, optional postprocessor, then `aig-stats`) and compare it with the in-process MCMC origin score. It writes that `scored.ir`, the exact commands, plus `raw.*`, `post.*`, and `comparison.json` artifacts under `<output>/origin-alignment/`.
   - `--max-delay <LEVELS>` – optional hard cap on gate depth for gate-based objectives. It applies to raw `g8r_depth` for `g8r-*` metrics and postprocessed depth for `g8r-post-*` metrics. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
   - `--max-area <GATES>` – optional hard cap on gate count for gate-based objectives. It applies to raw `g8r_nodes` for `g8r-*` metrics and postprocessed AND-node count for `g8r-post-*` metrics.
@@ -1946,6 +1951,7 @@ Supported flags include the common gate-optimization controls:
 - `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
 - `--fold` – fold the gate representation (default `true`).
 - `--hash` – hash-cons the gate representation (default `true`).
+- `--track-pir-node-ids=<BOOL>` – record and propagate originating PIR node IDs for provenance and per-IR-node reports. Default `false`.
 - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `true`.
 - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
 - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.

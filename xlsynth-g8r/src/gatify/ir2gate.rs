@@ -4165,10 +4165,14 @@ fn gatify_internal(
         let param_ref = ir::NodeRef { index: i + 1 };
         assert!(f.nodes[i + 1].payload == ir::NodePayload::GetParam(param.id));
         log::debug!("Gatifying param {:?}", param);
-        let provenance_id = provenance_by_node.map_or_else(
-            || Some(f.nodes[i + 1].text_id as u32),
-            |by_node| by_node.get(&param_ref).copied().flatten(),
-        );
+        let provenance_id = if options.track_pir_node_ids {
+            provenance_by_node.map_or_else(
+                || Some(f.nodes[i + 1].text_id as u32),
+                |by_node| by_node.get(&param_ref).copied().flatten(),
+            )
+        } else {
+            None
+        };
         g8_builder.set_current_pir_node_id(provenance_id);
         let gate_ref_vec = g8_builder.add_input(param.name.clone(), param.ty.bit_count());
         g8_builder.set_current_pir_node_id(None);
@@ -4185,10 +4189,14 @@ fn gatify_internal(
             node.ty,
             node.payload
         );
-        let provenance_id = provenance_by_node.map_or_else(
-            || Some(u32::try_from(node.text_id).expect("node id too large for u32")),
-            |by_node| by_node.get(&node_ref).copied().flatten(),
-        );
+        let provenance_id = if options.track_pir_node_ids {
+            provenance_by_node.map_or_else(
+                || Some(u32::try_from(node.text_id).expect("node id too large for u32")),
+                |by_node| by_node.get(&node_ref).copied().flatten(),
+            )
+        } else {
+            None
+        };
         g8_builder.set_current_pir_node_id(provenance_id);
         gatify_node(
             f,
@@ -4255,6 +4263,8 @@ fn build_prepared_provenance_map(
 pub struct GatifyOptions {
     pub fold: bool,
     pub hash: bool,
+    /// Whether lowered AIG nodes retain their originating PIR node IDs.
+    pub track_pir_node_ids: bool,
     pub check_equivalence: bool,
     pub equivalence_solver: SolverChoice,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
@@ -4276,6 +4286,7 @@ impl GatifyOptions {
         Self {
             fold: true,
             hash: true,
+            track_pir_node_ids: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
@@ -4297,6 +4308,7 @@ impl GatifyOptions {
         Self {
             fold: true,
             hash: true,
+            track_pir_node_ids: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
@@ -4352,8 +4364,11 @@ fn gatify_lower_prepared_fn(
         },
     );
     let mut env = GateEnv::new();
-    let provenance_by_node =
-        orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original));
+    let provenance_by_node = if options.track_pir_node_ids {
+        orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original))
+    } else {
+        None
+    };
     gatify_internal(
         f,
         &mut g8_builder,
@@ -4753,6 +4768,7 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
             GatifyOptions {
                 fold: false,
                 hash: false,
+                track_pir_node_ids: true,
                 ..GatifyOptions::all_opts_disabled()
             },
         )
@@ -4784,6 +4800,29 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
     }
 
     #[test]
+    fn test_gatify_defaults_to_no_pir_node_ids() {
+        let ir_text = r#"package sample
+fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
+  ret add.3: bits[2] = add(a, b, id=3)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+
+        let gate_fn = gatify(&ir_fn, GatifyOptions::all_opts_disabled())
+            .unwrap()
+            .gate_fn;
+
+        assert!(
+            gate_fn
+                .gates
+                .iter()
+                .all(|node| node.get_pir_node_ids().is_empty())
+        );
+    }
+
+    #[test]
     fn test_gatify_prep_created_nodes_keep_original_provenance() {
         let ir_text = r#"package sample
 fn f(x: bits[2] id=1, selector: bits[2] id=2) -> bits[2] {
@@ -4807,6 +4846,7 @@ fn f(x: bits[2] id=1, selector: bits[2] id=2) -> bits[2] {
             GatifyOptions {
                 fold: false,
                 hash: false,
+                track_pir_node_ids: true,
                 ..GatifyOptions::all_opts_disabled()
             },
         )

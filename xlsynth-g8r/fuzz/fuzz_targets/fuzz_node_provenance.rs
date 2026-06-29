@@ -27,6 +27,7 @@ fuzz_target!(|data: &[u8]| {
         GatifyOptions {
             fold: false,
             hash: false,
+            track_pir_node_ids: true,
             ..GatifyOptions::all_opts_disabled()
         },
     )
@@ -51,7 +52,7 @@ fuzz_target!(|data: &[u8]| {
                     "literal node provenance ids should be sorted and deduped: node={:?}",
                     node
                 );
-                for pir_node_id in pir_node_ids {
+                for pir_node_id in pir_node_ids.iter() {
                     assert!(
                         original_text_ids.contains(pir_node_id),
                         "literal provenance id {} should correspond to an original pre-prep PIR node",
@@ -70,7 +71,7 @@ fuzz_target!(|data: &[u8]| {
                     "lowered g8r node provenance ids should be sorted and deduped: node={:?}",
                     node
                 );
-                for pir_node_id in pir_node_ids {
+                for pir_node_id in pir_node_ids.iter() {
                     assert!(
                         original_text_ids.contains(pir_node_id),
                         "provenance id {} should correspond to an original pre-prep PIR node",
