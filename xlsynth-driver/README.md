@@ -663,9 +663,7 @@ xlsynth-driver g8r-optimize gatified.g8rbin \
   --stats-out reassociated.stats.json
 ```
 
-Similarly, a FRAIG-only run uses `--fraig=true --reassociation=false
---cut-db-rewrite=false`, and a cut-DB-only run uses `--fraig=false
---reassociation=false --cut-db-rewrite=true`.
+Similarly, a FRAIG-only run uses `--fraig=true --reassociation=false --cut-db-rewrite=false`, and a cut-DB-only run uses `--fraig=false --reassociation=false --cut-db-rewrite=true`.
 
 ### `ir-prep-for-gates`: IR to prepared residual PIR
 
