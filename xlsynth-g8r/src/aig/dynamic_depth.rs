@@ -2,7 +2,7 @@
 
 //! Exact forward and backward depth side state for a dynamic AIG.
 
-use std::collections::VecDeque;
+use std::collections::{BinaryHeap, VecDeque};
 
 use crate::aig::dynamic_structural_hash::DynamicStructuralHash;
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
@@ -17,24 +17,35 @@ use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 pub struct DynamicDepthState {
     forward_depths: Vec<usize>,
     backward_depths: Vec<usize>,
+    backward_fanout_depths: Vec<BinaryHeap<FanoutDepthEntry>>,
     forward_queue_marks: Vec<usize>,
     backward_queue_marks: Vec<usize>,
     affected_marks: Vec<usize>,
     queue_epoch: usize,
 }
 
+/// A cached finite backward-depth contribution from one direct fanout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct FanoutDepthEntry {
+    depth: usize,
+    fanout: AigRef,
+}
+
 impl DynamicDepthState {
     /// Builds depth state over the live graph in `state`.
     pub fn new(state: &DynamicStructuralHash) -> Result<Self, String> {
         let (forward_depths, backward_depths) = compute_depths(state)?;
-        Ok(Self {
+        let mut result = Self {
             forward_depths,
             backward_depths,
+            backward_fanout_depths: vec![BinaryHeap::new(); state.gate_fn().gates.len()],
             forward_queue_marks: vec![0; state.gate_fn().gates.len()],
             backward_queue_marks: vec![0; state.gate_fn().gates.len()],
             affected_marks: vec![0; state.gate_fn().gates.len()],
             queue_epoch: 0,
-        })
+        };
+        result.rebuild_backward_fanout_depths(state)?;
+        Ok(result)
     }
 
     /// Rebuilds all depth side state from the live graph in `state`.
@@ -43,6 +54,7 @@ impl DynamicDepthState {
         self.forward_depths = forward_depths;
         self.backward_depths = backward_depths;
         self.resize_queue_marks(state.gate_fn().gates.len());
+        self.rebuild_backward_fanout_depths(state)?;
         Ok(())
     }
 
@@ -77,6 +89,8 @@ impl DynamicDepthState {
         let node_count = state.gate_fn().gates.len();
         self.forward_depths.resize(node_count, 0);
         self.backward_depths.resize(node_count, usize::MAX);
+        self.backward_fanout_depths
+            .resize_with(node_count, BinaryHeap::new);
         self.resize_queue_marks(node_count);
 
         let mut forward_queue = VecDeque::new();
@@ -109,6 +123,11 @@ impl DynamicDepthState {
                 &mut self.backward_queue_marks,
                 queue_epoch,
             );
+            // A changed live node may have acquired new fanin edges without
+            // changing its previously stored backward depth. Seed those
+            // current edges; entries for removed or superseded edges are
+            // discarded lazily when their old parent next queries its maximum.
+            self.push_current_fanout_depth_to_fanins(state, node)?;
         }
 
         while let Some(node) = forward_queue.pop_front() {
@@ -153,6 +172,7 @@ impl DynamicDepthState {
                 continue;
             }
             self.backward_depths[node.id] = new_depth;
+            self.push_current_fanout_depth_to_fanins(state, node)?;
             record_affected(
                 node,
                 &mut affected_nodes,
@@ -283,7 +303,7 @@ impl DynamicDepthState {
     }
 
     fn compute_local_backward_depth(
-        &self,
+        &mut self,
         state: &DynamicStructuralHash,
         node: AigRef,
     ) -> Result<usize, String> {
@@ -299,23 +319,67 @@ impl DynamicDepthState {
         } else {
             usize::MAX
         };
-        let mut missing_fanout = None;
-        state.for_each_live_fanout(node, |fanout| {
-            let Some(fanout_depth) = self.backward_depths.get(fanout.id).copied() else {
-                missing_fanout = Some(fanout);
-                return;
-            };
-            if fanout_depth != usize::MAX {
-                let candidate = fanout_depth.saturating_add(1);
-                if depth == usize::MAX || candidate > depth {
-                    depth = candidate;
+        let backward_depths = &self.backward_depths;
+        let fanout_depths = &mut self.backward_fanout_depths[node.id];
+        while let Some(entry) = fanout_depths.peek().copied() {
+            let current_depth = backward_depths.get(entry.fanout.id).copied();
+            let current_contribution = current_depth
+                .filter(|candidate| *candidate != usize::MAX)
+                .map(|candidate| candidate.saturating_add(1));
+            if state.has_live_fanout(node, entry.fanout)
+                && current_contribution == Some(entry.depth)
+            {
+                if depth == usize::MAX || entry.depth > depth {
+                    depth = entry.depth;
                 }
+                break;
             }
-        });
-        if let Some(fanout) = missing_fanout {
-            return Err(format!("fanout {:?} has no backward depth entry", fanout));
+            fanout_depths.pop();
         }
         Ok(depth)
+    }
+
+    /// Rebuilds cached fanout contributions after a full depth computation.
+    fn rebuild_backward_fanout_depths(
+        &mut self,
+        state: &DynamicStructuralHash,
+    ) -> Result<(), String> {
+        self.backward_fanout_depths = vec![BinaryHeap::new(); state.gate_fn().gates.len()];
+        for id in 0..state.gate_fn().gates.len() {
+            self.push_current_fanout_depth_to_fanins(state, AigRef { id })?;
+        }
+        Ok(())
+    }
+
+    /// Publishes one fanout's current contribution to its live fanins.
+    fn push_current_fanout_depth_to_fanins(
+        &mut self,
+        state: &DynamicStructuralHash,
+        fanout: AigRef,
+    ) -> Result<(), String> {
+        if !state.is_live(fanout) {
+            return Ok(());
+        }
+        let fanout_depth = self
+            .backward_depths
+            .get(fanout.id)
+            .copied()
+            .ok_or_else(|| format!("fanout {:?} has no backward depth entry", fanout))?;
+        if fanout_depth == usize::MAX {
+            return Ok(());
+        }
+        let AigNode::And2 { a, b, .. } = state.gate_fn().gates[fanout.id] else {
+            return Ok(());
+        };
+        let entry = FanoutDepthEntry {
+            depth: fanout_depth.saturating_add(1),
+            fanout,
+        };
+        self.backward_fanout_depths[a.node.id].push(entry);
+        if b.node != a.node {
+            self.backward_fanout_depths[b.node.id].push(entry);
+        }
+        Ok(())
     }
 
     fn resize_queue_marks(&mut self, node_count: usize) {

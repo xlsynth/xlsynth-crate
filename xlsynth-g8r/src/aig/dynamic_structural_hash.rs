@@ -235,6 +235,15 @@ impl DynamicStructuralHash {
         }
     }
 
+    /// Returns whether `fanout` is an active direct fanout of `node`.
+    pub(crate) fn has_live_fanout(&self, node: AigRef, fanout: AigRef) -> bool {
+        self.is_live(fanout)
+            && self
+                .fanouts
+                .get(node.id)
+                .is_some_and(|fanouts| fanouts.contains(fanout))
+    }
+
     /// Returns the number of output bits that currently reference `node`.
     pub fn output_use_count(&self, node: AigRef) -> usize {
         self.output_uses.get(node.id).copied().unwrap_or(0)
