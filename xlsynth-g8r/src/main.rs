@@ -31,6 +31,11 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     hash: bool,
 
+    /// Whether to track and propagate PIR node provenance on AIG nodes.
+    #[arg(long, default_value_t = false)]
+    #[arg(action = clap::ArgAction::Set)]
+    track_pir_node_ids: bool,
+
     /// Whether to run "fraiging" optimization.
     #[arg(long, default_value_t = true)]
     #[arg(action = clap::ArgAction::Set)]
@@ -134,6 +139,7 @@ fn main() {
         equivalence_solver,
         fold: args.fold,
         hash: args.hash,
+        track_pir_node_ids: args.track_pir_node_ids,
         enable_rewrite_carry_out: false,
         enable_rewrite_prio_encode: false,
         enable_rewrite_nary_add: false,
