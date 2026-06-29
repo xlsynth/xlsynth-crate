@@ -92,6 +92,13 @@ impl FanoutBucket {
         }
     }
 
+    fn for_each(&self, mut visit: impl FnMut(AigRef)) {
+        match self {
+            Self::Small(nodes) => nodes.iter().copied().for_each(&mut visit),
+            Self::Large(nodes) => nodes.iter().copied().for_each(&mut visit),
+        }
+    }
+
     fn contents_equal(&self, other: &Self) -> bool {
         self.len() == other.len() && self.to_vec().into_iter().all(|node| other.contains(node))
     }
@@ -118,6 +125,12 @@ pub struct DynamicStructuralHash {
     use_counts: Vec<usize>,
     by_key: BTreeMap<LocalAndKey, LocalAndBucket>,
     live_and_count: usize,
+}
+
+/// Exact graph nodes whose depth state may have changed during a replacement.
+#[derive(Debug, Default)]
+pub(crate) struct DynamicReplacementChanges {
+    pub(crate) depth_seed_nodes: Vec<AigRef>,
 }
 
 /// Identifies a mutable edge in a live AIG.
@@ -149,6 +162,11 @@ impl DynamicStructuralHash {
     /// Returns the underlying append-only graph.
     pub fn gate_fn(&self) -> &GateFn {
         &self.g
+    }
+
+    /// Consumes this dynamic state and returns its underlying graph.
+    pub(crate) fn into_gate_fn(self) -> GateFn {
+        self.g
     }
 
     /// Returns the active-node bitset indexed by `AigRef::id`.
@@ -189,6 +207,11 @@ impl DynamicStructuralHash {
         self.use_counts.get(node.id).copied().unwrap_or(0)
     }
 
+    /// Returns active use counts indexed by `AigRef::id`.
+    pub(crate) fn use_counts(&self) -> &[usize] {
+        &self.use_counts
+    }
+
     /// Returns the active fanout count of `node`.
     pub fn fanout_count(&self, node: AigRef) -> usize {
         self.fanouts
@@ -206,6 +229,29 @@ impl DynamicStructuralHash {
             .into_iter()
             .filter(|fanout| self.is_live(*fanout))
             .collect()
+    }
+
+    /// Visits active direct fanouts without allocating a snapshot vector.
+    ///
+    /// Callers that mutate this structural hash while visiting must use
+    /// `fanout_nodes()` instead so the traversal owns a stable snapshot.
+    pub fn for_each_live_fanout(&self, node: AigRef, mut visit: impl FnMut(AigRef)) {
+        if let Some(fanouts) = self.fanouts.get(node.id) {
+            fanouts.for_each(|fanout| {
+                if self.is_live(fanout) {
+                    visit(fanout);
+                }
+            });
+        }
+    }
+
+    /// Returns whether `fanout` is an active direct fanout of `node`.
+    pub(crate) fn has_live_fanout(&self, node: AigRef, fanout: AigRef) -> bool {
+        self.is_live(fanout)
+            && self
+                .fanouts
+                .get(node.id)
+                .is_some_and(|fanouts| fanouts.contains(fanout))
     }
 
     /// Returns the number of output bits that currently reference `node`.
@@ -640,6 +686,17 @@ impl DynamicStructuralHash {
         old: AigRef,
         replacement: AigOperand,
     ) -> Result<(), String> {
+        self.replace_node_with_operand_collecting_changes(old, replacement)
+            .map(|_| ())
+    }
+
+    /// Replaces a node and returns exact seeds for incremental depth updates.
+    pub(crate) fn replace_node_with_operand_collecting_changes(
+        &mut self,
+        old: AigRef,
+        replacement: AigOperand,
+    ) -> Result<DynamicReplacementChanges, String> {
+        let mut changes = DynamicReplacementChanges::default();
         let mut queue = VecDeque::from([ReplacementQueueItem {
             old,
             replacement,
@@ -668,8 +725,11 @@ impl DynamicStructuralHash {
                 return Err(format!("only And2 nodes can be replaced; got {:?}", old));
             }
 
+            changes.depth_seed_nodes.push(old);
+            changes.depth_seed_nodes.push(replacement.node);
+
             self.remove_index_node_if_present(old)?;
-            self.rewrite_outputs(old, replacement);
+            self.rewrite_outputs(old, replacement, &mut changes);
 
             let direct_fanouts = self.fanouts[old.id].to_vec();
             for fanout in direct_fanouts {
@@ -677,12 +737,17 @@ impl DynamicStructuralHash {
                     continue;
                 }
                 let (old_a, old_b) = self.and_operands(fanout)?;
+                changes.depth_seed_nodes.push(fanout);
+                changes.depth_seed_nodes.push(old_a.node);
+                changes.depth_seed_nodes.push(old_b.node);
                 // A previous queued duplicate merge may have left this fanout
                 // live but temporarily unindexed until its queue item runs.
                 self.remove_index_node_if_present(fanout)?;
                 self.remove_fanin_links(fanout, old_a, old_b);
                 let new_a = replace_operand_node(old_a, old, replacement);
                 let new_b = replace_operand_node(old_b, old, replacement);
+                changes.depth_seed_nodes.push(new_a.node);
+                changes.depth_seed_nodes.push(new_b.node);
                 match &mut self.g.gates[fanout.id] {
                     AigNode::And2 { a, b, .. } => {
                         *a = new_a;
@@ -704,9 +769,9 @@ impl DynamicStructuralHash {
                 }
             }
 
-            self.delete_dangling_mffc_from(old)?;
+            self.delete_dangling_mffc_from_collecting_changes(old, Some(&mut changes))?;
         }
-        Ok(())
+        Ok(changes)
     }
 
     fn resolve_duplicate_merge_replacement(
@@ -746,7 +811,12 @@ impl DynamicStructuralHash {
         Ok(operand)
     }
 
-    fn rewrite_outputs(&mut self, old: AigRef, replacement: AigOperand) {
+    fn rewrite_outputs(
+        &mut self,
+        old: AigRef,
+        replacement: AigOperand,
+        changes: &mut DynamicReplacementChanges,
+    ) {
         for output_index in 0..self.g.outputs.len() {
             let width = self.g.outputs[output_index].get_bit_count();
             for bit_index in 0..width {
@@ -755,6 +825,8 @@ impl DynamicStructuralHash {
                     continue;
                 }
                 let new_operand = replace_operand_node(old_operand, old, replacement);
+                changes.depth_seed_nodes.push(old_operand.node);
+                changes.depth_seed_nodes.push(new_operand.node);
                 self.output_uses[old.id] = self.output_uses[old.id]
                     .checked_sub(1)
                     .expect("old output operand should have a positive output use count");
@@ -771,6 +843,14 @@ impl DynamicStructuralHash {
     }
 
     fn delete_dangling_mffc_from(&mut self, root: AigRef) -> Result<(), String> {
+        self.delete_dangling_mffc_from_collecting_changes(root, None)
+    }
+
+    fn delete_dangling_mffc_from_collecting_changes(
+        &mut self,
+        root: AigRef,
+        mut changes: Option<&mut DynamicReplacementChanges>,
+    ) -> Result<(), String> {
         self.validate_live_node(root)?;
         if !matches!(self.g.gates[root.id], AigNode::And2 { .. }) {
             return Err(format!("only And2 nodes can be deleted; got {:?}", root));
@@ -795,6 +875,11 @@ impl DynamicStructuralHash {
 
             self.remove_index_node_if_present(node)?;
             let (a, b) = self.and_operands(node)?;
+            if let Some(changes) = changes.as_deref_mut() {
+                changes.depth_seed_nodes.push(node);
+                changes.depth_seed_nodes.push(a.node);
+                changes.depth_seed_nodes.push(b.node);
+            }
             self.remove_fanin_links(node, a, b);
             self.live[node.id] = false;
             self.live_and_count = self

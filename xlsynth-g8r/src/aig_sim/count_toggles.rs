@@ -121,7 +121,7 @@ fn collect_and2_indices(gate_fn: &GateFn) -> Vec<usize> {
 fn collect_and2_input_uses(gate_fn: &GateFn) -> Vec<usize> {
     let mut use_counts = vec![0usize; gate_fn.gates.len()];
     for gate in &gate_fn.gates {
-        for operand in gate.get_operands() {
+        for operand in gate.operands() {
             use_counts[operand.node.id] += 1;
         }
     }

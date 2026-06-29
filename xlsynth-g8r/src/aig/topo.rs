@@ -20,7 +20,7 @@ pub fn postorder_for_aig_ref(
         }
         let node = &nodes[current.id];
         let mut all_deps_visited = true;
-        for dep in node.get_operands() {
+        for dep in node.operands() {
             if !cache.contains_key(&dep.node) && !visited.contains(&dep.node) {
                 worklist.push_back(current); // Revisit after dependencies
                 worklist.push_back(dep.node);
@@ -71,7 +71,7 @@ pub fn post_order_operands(
         );
         let node = &nodes[current.node.id];
         let mut all_deps_visited = true;
-        for dep in node.get_operands() {
+        for dep in node.operands() {
             if !visited.contains(&dep) {
                 debug_assert!(
                     dep.node.id < nodes.len(),
@@ -116,7 +116,7 @@ pub fn postorder_for_aig_refs_node_only(
         }
         let node = &nodes[current.id];
         let mut all_deps_visited = true;
-        for dep in node.get_operands() {
+        for dep in node.operands() {
             if !cache.contains_key(&dep.node) && !visited.contains(&dep.node) {
                 worklist.push_back(current); // Revisit after dependencies
                 worklist.push_back(dep.node);

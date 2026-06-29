@@ -422,6 +422,10 @@ impl AppExt for clap::Command {
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
             .add_bool_arg(
+                "track-pir-node-ids",
+                "Track and propagate PIR node provenance on AIG nodes",
+            )
+            .add_bool_arg(
                 "enable-rewrite-carry-out",
                 "Enable carry-out rewrite in prep_for_gatify (introduces ext_carry_out)",
             )

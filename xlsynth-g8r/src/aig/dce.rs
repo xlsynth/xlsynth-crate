@@ -38,7 +38,7 @@ pub fn dce_safe(orig_fn: &GateFn) -> GateFn {
         if !reachable.insert(current.node) {
             continue;
         }
-        for op in orig_fn.gates[current.node.id].get_operands() {
+        for op in orig_fn.gates[current.node.id].operands() {
             stack.push(op);
         }
     }
@@ -130,7 +130,7 @@ pub fn dce_safe(orig_fn: &GateFn) -> GateFn {
                 continue;
             }
             let node = &result.gates[id];
-            for op in node.get_operands() {
+            for op in node.operands() {
                 worklist.push(op.node.id);
             }
         }
@@ -190,7 +190,7 @@ fn dce_simple(orig_fn: &GateFn) -> GateFn {
         if !reachable.insert(current.node) {
             continue;
         }
-        for op in orig_fn.gates[current.node.id].get_operands() {
+        for op in orig_fn.gates[current.node.id].operands() {
             stack.push(op);
         }
     }

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
 use bitvec::vec::BitVec;
@@ -54,7 +55,55 @@ impl From<&AigRef> for AigOperand {
     }
 }
 
+/// A sorted, deduplicated set of PIR provenance IDs.
 pub type PirNodeIds = SmallVec<[u32; 2]>;
+
+/// Unions `ids` into `pir_node_ids` using a linear merge of sorted inputs.
+fn union_pir_node_ids_with_slice(pir_node_ids: &mut PirNodeIds, ids: &[u32]) {
+    let normalized = normalize_ids(ids);
+    if let Some(merged) = merge_sorted_unique(pir_node_ids.as_slice(), normalized.as_ref()) {
+        *pir_node_ids = SmallVec::from_vec(merged);
+    }
+}
+
+fn normalize_ids(ids: &[u32]) -> Cow<'_, [u32]> {
+    if ids.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Cow::Borrowed(ids);
+    }
+    let mut normalized = ids.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    Cow::Owned(normalized)
+}
+
+/// Returns `None` when `rhs` is already a subset of `lhs`.
+fn merge_sorted_unique(lhs: &[u32], rhs: &[u32]) -> Option<Vec<u32>> {
+    if rhs.is_empty() {
+        return None;
+    }
+    let mut merged = Vec::with_capacity(lhs.len() + rhs.len());
+    let (mut lhs_index, mut rhs_index) = (0, 0);
+    while lhs_index < lhs.len() && rhs_index < rhs.len() {
+        match lhs[lhs_index].cmp(&rhs[rhs_index]) {
+            std::cmp::Ordering::Less => {
+                merged.push(lhs[lhs_index]);
+                lhs_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push(lhs[lhs_index]);
+                lhs_index += 1;
+                rhs_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(rhs[rhs_index]);
+                rhs_index += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&lhs[lhs_index..]);
+    merged.extend_from_slice(&rhs[rhs_index..]);
+    (merged.as_slice() != lhs).then_some(merged)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AigNode {
@@ -77,26 +126,18 @@ pub enum AigNode {
 }
 
 impl AigNode {
-    fn add_pir_node_ids_iter(&mut self, pir_node_ids_to_add: impl IntoIterator<Item = u32>) {
-        for pir_node_id in pir_node_ids_to_add {
-            self.add_pir_node_id(pir_node_id);
-        }
+    /// Iterates over this node's operands, including edge polarity.
+    pub fn operands(&self) -> impl Iterator<Item = AigOperand> + '_ {
+        let operands = match self {
+            AigNode::And2 { a, b, .. } => [Some(*a), Some(*b)],
+            AigNode::Input { .. } | AigNode::Literal { .. } => [None, None],
+        };
+        operands.into_iter().flatten()
     }
 
-    pub fn get_operands(&self) -> Vec<AigOperand> {
-        match self {
-            AigNode::Input { .. } => vec![],
-            AigNode::Literal { .. } => vec![],
-            AigNode::And2 { a, b, .. } => vec![a.clone(), b.clone()],
-        }
-    }
-
-    pub fn get_args(&self) -> Vec<AigRef> {
-        match self {
-            AigNode::Input { .. } => vec![],
-            AigNode::Literal { .. } => vec![],
-            AigNode::And2 { a, b, .. } => vec![a.node, b.node],
-        }
+    /// Iterates over this node's operand references without edge polarity.
+    pub fn args(&self) -> impl Iterator<Item = AigRef> + '_ {
+        self.operands().map(|operand| operand.node)
     }
 
     pub fn add_tag(&mut self, tag: String) {
@@ -143,7 +184,7 @@ impl AigNode {
     }
 
     pub fn try_add_pir_node_ids(&mut self, pir_node_ids_to_add: &[u32]) {
-        self.add_pir_node_ids_iter(pir_node_ids_to_add.iter().copied());
+        union_pir_node_ids_with_slice(self.pir_node_ids_mut(), pir_node_ids_to_add);
     }
 
     pub fn get_pir_node_ids(&self) -> &[u32] {
@@ -162,7 +203,7 @@ impl AigNode {
     }
 
     pub fn union_pir_node_ids_from_node(&mut self, other: &AigNode) {
-        self.add_pir_node_ids_iter(other.get_pir_node_ids().iter().copied());
+        self.try_add_pir_node_ids(other.get_pir_node_ids());
     }
 
     /// Attempts to add multiple tags to the node.
@@ -714,6 +755,16 @@ mod tests {
             node.add_pir_node_id(pir_node_id);
         }
         assert_eq!(node.get_pir_node_ids(), &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_pir_node_ids_bulk_union_sorts_and_deduplicates() {
+        let mut node = AigNode::Literal {
+            value: false,
+            pir_node_ids: PirNodeIds::from_slice(&[1, 3, 5]),
+        };
+        node.try_add_pir_node_ids(&[6, 3, 2, 2, 4]);
+        assert_eq!(node.get_pir_node_ids(), &[1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

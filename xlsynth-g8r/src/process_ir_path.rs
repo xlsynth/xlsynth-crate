@@ -151,6 +151,8 @@ pub struct Options {
     pub equivalence_solver: SolverChoice,
     pub fold: bool,
     pub hash: bool,
+    /// Whether gatification and later rewrites retain PIR node provenance.
+    pub track_pir_node_ids: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
@@ -223,6 +225,9 @@ pub struct Options {
 pub struct CanonicalG8rOptions {
     pub fold: bool,
     pub hash: bool,
+    /// Whether gatification records and propagates PIR node provenance.
+    #[serde(default)]
+    pub track_pir_node_ids: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
@@ -259,6 +264,7 @@ impl Default for CanonicalG8rOptions {
         Self {
             fold: true,
             hash: true,
+            track_pir_node_ids: false,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
@@ -320,6 +326,7 @@ impl CanonicalG8rOptions {
             equivalence_solver: SolverChoice::Bitwuzla,
             fold: self.fold,
             hash: self.hash,
+            track_pir_node_ids: self.track_pir_node_ids,
             enable_rewrite_carry_out: self.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: self.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: self.enable_rewrite_nary_add,
@@ -391,6 +398,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
         Self {
             fold: options.fold,
             hash: options.hash,
+            track_pir_node_ids: options.track_pir_node_ids,
             check_equivalence: false, // check is done below if requested
             equivalence_solver: options.equivalence_solver,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
@@ -413,6 +421,7 @@ impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
         Self {
             fold: options.fold,
             hash: options.hash,
+            track_pir_node_ids: options.track_pir_node_ids,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
@@ -528,6 +537,7 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
         Self {
             fold: input.options.fold,
             hash: input.options.hash,
+            track_pir_node_ids: input.options.track_pir_node_ids,
             adder_mapping: input.options.adder_mapping,
             mul_adder_mapping: input.options.mul_adder_mapping,
             range_info: Some(input.range_info),
@@ -1041,6 +1051,26 @@ mod tests {
     fn canonical_options_default_to_formal_array_alias_analysis() {
         let canonical = CanonicalG8rOptions::default();
         assert!(canonical.enable_formal_array_alias_analysis);
+    }
+
+    #[test]
+    fn canonical_options_default_to_no_pir_node_id_tracking() {
+        let canonical = CanonicalG8rOptions::default();
+        assert!(!canonical.track_pir_node_ids);
+        assert!(
+            !canonical
+                .to_process_ir_path_options(None, true, false, false, None)
+                .track_pir_node_ids
+        );
+    }
+
+    #[test]
+    fn missing_serialized_pir_node_id_tracking_defaults_off() {
+        let mut value = serde_json::to_value(CanonicalG8rOptions::default()).unwrap();
+        value.as_object_mut().unwrap().remove("track_pir_node_ids");
+
+        let canonical: CanonicalG8rOptions = serde_json::from_value(value).unwrap();
+        assert!(!canonical.track_pir_node_ids);
     }
 
     #[test]

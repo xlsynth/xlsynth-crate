@@ -375,6 +375,17 @@ fn handle_g8r_attribution_table(
         eprintln!("{} error: {}", subcommand, e);
         std::process::exit(2)
     });
+    if gate_fn
+        .gates
+        .iter()
+        .all(|node| node.get_pir_node_ids().is_empty())
+    {
+        eprintln!(
+            "{} error: input g8r design contains no PIR provenance data; regenerate it with `xlsynth-driver ir2g8r ... --track-pir-node-ids=true`.",
+            subcommand
+        );
+        std::process::exit(2);
+    }
     let ir_fn = load_selected_ir_fn(ir_path, ir_top).unwrap_or_else(|e| {
         eprintln!("{} error: {}", subcommand, e);
         std::process::exit(2)

@@ -5208,6 +5208,52 @@ fn test_aig2ir_accepts_unit_signature_for_empty_aiger() {
 }
 
 #[test]
+fn test_g8r_attribution_tables_explain_how_to_enable_missing_provenance() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+    let output = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+    builder.add_output("o".to_string(), AigBitVector::from_bit(output));
+    let gate_fn = builder.build();
+
+    let ir_text = r#"package sample
+top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod.g8rbin");
+    let ir_path = temp_dir.path().join("sample.ir");
+    write_g8r_binary_file(&g8r_path, &gate_fn);
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    for subcommand in ["g8r-area-table", "g8r-critical-path-table"] {
+        let output = Command::new(command_path)
+            .arg(subcommand)
+            .arg(g8r_path.to_str().unwrap())
+            .arg(ir_path.to_str().unwrap())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("input g8r design contains no PIR provenance data"),
+            "expected missing-provenance error from {subcommand}, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--track-pir-node-ids=true"),
+            "expected enablement instructions from {subcommand}, got:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn test_g8r_area_table_reports_weighted_area_by_pir_node() {
     let _ = env_logger::builder().is_test(true).try_init();
 

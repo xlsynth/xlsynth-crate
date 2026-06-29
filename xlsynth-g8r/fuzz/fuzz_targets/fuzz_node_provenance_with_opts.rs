@@ -29,8 +29,14 @@ fuzz_target!(|data: &[u8]| {
         .map(|node| node.text_id as u32)
         .collect();
 
-    let gatify_output = ir2gate::gatify(parsed_fn, GatifyOptions::all_opts_disabled())
-        .expect("generated standard PIR should lower successfully");
+    let gatify_output = ir2gate::gatify(
+        parsed_fn,
+        GatifyOptions {
+            track_pir_node_ids: true,
+            ..GatifyOptions::all_opts_disabled()
+        },
+    )
+    .expect("generated standard PIR should lower successfully");
     let mut rng = StdRng::seed_from_u64(0);
     let optimized_gate_fn = match fraig_optimize_with_backend_and_options(
         &gatify_output.gate_fn,
