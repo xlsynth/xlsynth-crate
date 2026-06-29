@@ -4,6 +4,8 @@
 
 use std::collections::{BinaryHeap, VecDeque};
 
+use smallvec::{SmallVec, smallvec};
+
 use crate::aig::dynamic_structural_hash::DynamicStructuralHash;
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 
@@ -425,13 +427,14 @@ fn enqueue_node(
     }
 }
 
-fn node_fanins(g: &GateFn, node: AigRef) -> Vec<AigRef> {
+/// Returns a node's fanins in an allocation-free inline collection.
+fn node_fanins(g: &GateFn, node: AigRef) -> SmallVec<[AigRef; 2]> {
     if node.id >= g.gates.len() {
-        return Vec::new();
+        return SmallVec::new();
     }
     match g.gates[node.id] {
-        AigNode::And2 { a, b, .. } => vec![a.node, b.node],
-        AigNode::Input { .. } | AigNode::Literal { .. } => Vec::new(),
+        AigNode::And2 { a, b, .. } => smallvec![a.node, b.node],
+        AigNode::Input { .. } | AigNode::Literal { .. } => SmallVec::new(),
     }
 }
 
