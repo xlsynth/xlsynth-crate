@@ -385,7 +385,7 @@ impl AppExt for clap::Command {
                 "Enable left-normalize rewrite in prep_for_gatify (introduces ext_normalize_left)",
             )
             .add_bool_arg(
-                "enable-formal-array-read-rewrite",
+                "enable-formal-array-alias-analysis",
                 "Use Bitwuzla to prove and simplify array reads through update chains before gatification",
             )
             .add_bool_arg(

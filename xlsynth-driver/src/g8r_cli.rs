@@ -159,10 +159,10 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         "enable-rewrite-normalize-left",
         defaults.enable_rewrite_normalize_left,
     );
-    let enable_formal_array_read_rewrite = parse_bool(
+    let enable_formal_array_alias_analysis = parse_bool(
         matches,
-        "enable-formal-array-read-rewrite",
-        defaults.enable_formal_array_read_rewrite,
+        "enable-formal-array-alias-analysis",
+        defaults.enable_formal_array_alias_analysis,
     );
     let unsafe_gatify_gate_operation = parse_bool(
         matches,
@@ -218,7 +218,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         enable_rewrite_nary_add,
         enable_rewrite_mask_low,
         enable_rewrite_normalize_left,
-        enable_formal_array_read_rewrite,
+        enable_formal_array_alias_analysis,
         unsafe_gatify_gate_operation,
         adder_mapping,
         mul_adder_mapping,

@@ -9,8 +9,8 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_prover::prover::SolverChoice;
 
-/// Whether solver-backed array-read rewriting is enabled by default.
-pub const DEFAULT_ENABLE_FORMAL_ARRAY_READ_REWRITE: bool = true;
+/// Whether solver-backed array alias analysis is enabled by default.
+pub const DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS: bool = true;
 
 pub struct Ir2GatesOptions {
     pub fold: bool,
@@ -24,7 +24,7 @@ pub struct Ir2GatesOptions {
     pub enable_rewrite_normalize_left: bool,
     /// Whether to prove and rewrite array reads through update chains before
     /// the lightweight prep-for-gatify rewrites.
-    pub enable_formal_array_read_rewrite: bool,
+    pub enable_formal_array_alias_analysis: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub unsafe_gatify_gate_operation: bool,
@@ -45,7 +45,7 @@ impl Ir2GatesOptions {
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
-            enable_formal_array_read_rewrite: DEFAULT_ENABLE_FORMAL_ARRAY_READ_REWRITE,
+            enable_formal_array_alias_analysis: DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
@@ -66,7 +66,7 @@ impl Ir2GatesOptions {
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
-            enable_formal_array_read_rewrite: false,
+            enable_formal_array_alias_analysis: false,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
@@ -76,7 +76,7 @@ impl Ir2GatesOptions {
 }
 
 /// Applies the optional solver-backed portion of prep-for-gatify.
-fn apply_formal_array_read_rewrite(
+fn apply_formal_array_alias_analysis(
     package: &mut ir::Package,
     top_fn_name: &str,
     enabled: bool,
@@ -102,7 +102,7 @@ fn apply_formal_array_read_rewrite(
         let outcome =
             prove_and_rewrite_array_reads::<Bitwuzla>(&solver_options, package, &original)?;
         log::info!(
-            "formal array-read prep analysis: {:?}; rewrite: {:?}",
+            "formal array alias analysis: {:?}; rewrite: {:?}",
             outcome.analysis.stats,
             outcome.rewrite.stats
         );
@@ -132,7 +132,7 @@ fn apply_formal_array_read_rewrite(
         let _ = package;
         let _ = top_fn_name;
         Err(
-            "formal array-read prep requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-read-rewrite=false"
+            "formal array alias analysis requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-alias-analysis=false"
                 .to_string(),
         )
     }
@@ -211,10 +211,10 @@ pub fn prepare_ir_for_gatify_from_ir_text(
             .map_err(|e| format!("PIR parse/validate failed after aug_opt: {e}"))?;
     }
 
-    apply_formal_array_read_rewrite(
+    apply_formal_array_alias_analysis(
         &mut pir_package,
         &top_fn_name,
-        options.enable_formal_array_read_rewrite,
+        options.enable_formal_array_alias_analysis,
     )?;
 
     let pir_fn = pir_package
@@ -292,9 +292,9 @@ mod tests {
     use xlsynth_pir::ir::NodePayload;
 
     #[test]
-    fn formal_array_read_rewrite_defaults_on() {
-        assert!(Ir2GatesOptions::default().enable_formal_array_read_rewrite);
-        assert!(!Ir2GatesOptions::all_opts_disabled().enable_formal_array_read_rewrite);
+    fn formal_array_alias_analysis_defaults_on() {
+        assert!(Ir2GatesOptions::default().enable_formal_array_alias_analysis);
+        assert!(!Ir2GatesOptions::all_opts_disabled().enable_formal_array_alias_analysis);
     }
 
     #[cfg(not(feature = "has-bitwuzla"))]
@@ -309,16 +309,16 @@ top fn main(x: bits[1] id=1) -> bits[1] {
 "#,
         );
         let mut package = parser.parse_and_validate_package().unwrap();
-        let error = apply_formal_array_read_rewrite(&mut package, "main", true).unwrap_err();
+        let error = apply_formal_array_alias_analysis(&mut package, "main", true).unwrap_err();
         assert_eq!(
             error,
-            "formal array-read prep requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-read-rewrite=false"
+            "formal array alias analysis requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-alias-analysis=false"
         );
     }
 
     #[cfg(feature = "has-bitwuzla")]
     #[test]
-    fn formal_array_read_rewrite_runs_during_gatify_preparation() {
+    fn formal_array_alias_analysis_runs_during_gatify_preparation() {
         let ir_text = r#"package sample
 
 top fn main(a: bits[8][4] id=1, value: bits[8] id=2, read_index: bits[2] id=3) -> bits[8] {
@@ -329,7 +329,7 @@ top fn main(a: bits[8][4] id=1, value: bits[8] id=2, read_index: bits[2] id=3) -
 }
 "#;
         let mut options = Ir2GatesOptions::all_opts_disabled();
-        options.enable_formal_array_read_rewrite = true;
+        options.enable_formal_array_alias_analysis = true;
 
         let prepared = prepare_ir_for_gatify_from_ir_text(ir_text, None, &options).unwrap();
         let function = prepared.pir_top_fn();
