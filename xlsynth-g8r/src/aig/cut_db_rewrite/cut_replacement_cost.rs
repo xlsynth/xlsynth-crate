@@ -15,12 +15,14 @@ use super::{
 };
 
 /// Summary of a replacement that was materialized into the dynamic AIG.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct MaterializedReplacement {
     /// First gate id that did not exist before materializing the replacement.
     pub(super) first_new_id: usize,
     /// Root operand produced by the replacement fragment after local strashing.
     pub(super) replacement_op: AigOperand,
+    /// Exact local nodes whose depth state may have changed while rewiring.
+    pub(super) depth_seed_nodes: Vec<AigRef>,
 }
 
 /// Exact live-AND delta for applying one replacement to a dynamic AIG state.
@@ -66,13 +68,16 @@ pub(super) fn materialize_replacement(
     replacement: &Replacement,
 ) -> Result<Option<MaterializedReplacement>, String> {
     let first_new_id = state.gate_fn().gates.len();
-    let Some(replacement_op) = apply_replacement_to_dynamic_hash(state, replacement)? else {
+    let Some((replacement_op, depth_seed_nodes)) =
+        apply_replacement_to_dynamic_hash(state, replacement)?
+    else {
         return Ok(None);
     };
     cleanup_dangling_new_dynamic_hash_nodes(state, first_new_id)?;
     Ok(Some(MaterializedReplacement {
         first_new_id,
         replacement_op,
+        depth_seed_nodes,
     }))
 }
 

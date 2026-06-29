@@ -760,22 +760,16 @@ fn add_depth_dirty_node_and_fanins(nodes: &mut DenseAigRefSet, g: &GateFn, node:
 fn collect_replacement_depth_changed_nodes(
     state: &DynamicStructuralHash,
     first_new_id: usize,
-    initial_dirty_nodes: &[AigRef],
+    exact_seed_nodes: &[AigRef],
     dirty_nodes: &mut DenseAigRefSet,
 ) {
     let g = state.gate_fn();
 
     dirty_nodes.clear();
-    dirty_nodes.extend(initial_dirty_nodes.iter().copied());
+    dirty_nodes.extend(exact_seed_nodes.iter().copied());
 
     for id in first_new_id..g.gates.len() {
         add_depth_dirty_node_and_fanins(dirty_nodes, g, AigRef { id });
-    }
-
-    for output in &g.outputs {
-        for op in output.bit_vector.iter_lsb_to_msb() {
-            dirty_nodes.insert(op.node);
-        }
     }
 
     let seed_count = dirty_nodes.nodes.len();
@@ -1220,7 +1214,7 @@ fn replacement_pir_node_ids(g: &GateFn, repl: &Replacement) -> PirNodeIds {
 pub(super) fn apply_replacement_to_dynamic_hash(
     state: &mut DynamicStructuralHash,
     repl: &Replacement,
-) -> Result<Option<AigOperand>, String> {
+) -> Result<Option<(AigOperand, Vec<AigRef>)>, String> {
     if !state.is_live(repl.root) {
         return Ok(None);
     }
@@ -1233,8 +1227,8 @@ pub(super) fn apply_replacement_to_dynamic_hash(
         pir_node_ids.as_slice(),
         &excluded,
     )?;
-    state.replace_node_with_operand(repl.root, new_op)?;
-    Ok(Some(new_op))
+    let changes = state.replace_node_with_operand_collecting_changes(repl.root, new_op)?;
+    Ok(Some((new_op, changes.depth_seed_nodes)))
 }
 
 pub(super) fn cleanup_dangling_new_dynamic_hash_nodes(
@@ -1488,7 +1482,7 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
                 collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_cut_nodes.as_slice(),
+                    &materialized.depth_seed_nodes,
                     &mut depth_dirty_nodes,
                 );
                 let affected_depth_nodes = depth_state
@@ -1768,7 +1762,7 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
                 collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_cut_nodes.as_slice(),
+                    &materialized.depth_seed_nodes,
                     &mut depth_dirty_nodes,
                 );
                 depth_state
@@ -2044,7 +2038,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                 collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_nodes.as_slice(),
+                    &materialized.depth_seed_nodes,
                     &mut depth_dirty_nodes,
                 );
                 let affected_depth_nodes = depth_state
@@ -2365,7 +2359,7 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                 collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_nodes.as_slice(),
+                    &materialized.depth_seed_nodes,
                     &mut depth_dirty_nodes,
                 );
                 depth_state
