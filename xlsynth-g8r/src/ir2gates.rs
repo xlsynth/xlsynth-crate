@@ -9,6 +9,9 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_prover::prover::SolverChoice;
 
+/// Whether solver-backed array alias analysis is enabled by default.
+pub const DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS: bool = true;
+
 pub struct Ir2GatesOptions {
     pub fold: bool,
     pub hash: bool,
@@ -19,6 +22,9 @@ pub struct Ir2GatesOptions {
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
     pub enable_rewrite_normalize_left: bool,
+    /// Whether to prove and rewrite array reads through update chains before
+    /// the lightweight prep-for-gatify rewrites.
+    pub enable_formal_array_alias_analysis: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub unsafe_gatify_gate_operation: bool,
@@ -39,6 +45,7 @@ impl Ir2GatesOptions {
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
+            enable_formal_array_alias_analysis: DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
@@ -59,11 +66,75 @@ impl Ir2GatesOptions {
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
+            enable_formal_array_alias_analysis: false,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
             aug_opt: AugOptOptions::default(),
         }
+    }
+}
+
+/// Applies the optional solver-backed portion of prep-for-gatify.
+fn apply_formal_array_alias_analysis(
+    package: &mut ir::Package,
+    top_fn_name: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+
+    #[cfg(feature = "has-bitwuzla")]
+    {
+        use xlsynth_prover::array_alias_analysis::prove_and_rewrite_array_reads;
+        use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions, BitwuzlaSatSolver};
+
+        let original = package
+            .get_fn(top_fn_name)
+            .ok_or_else(|| format!("PIR package has no function named '{top_fn_name}'"))?
+            .clone();
+        let mut solver_options = BitwuzlaOptions::new();
+        solver_options
+            .disable_produce_models()
+            .set_sat_solver(BitwuzlaSatSolver::CaDiCaL)
+            .set_nthreads(1);
+        let outcome =
+            prove_and_rewrite_array_reads::<Bitwuzla>(&solver_options, package, &original)?;
+        log::info!(
+            "formal array alias analysis: {:?}; rewrite: {:?}",
+            outcome.analysis.stats,
+            outcome.rewrite.stats
+        );
+        for member in &mut package.members {
+            match member {
+                ir::PackageMember::Function(function) if function.name == top_fn_name => {
+                    *function = outcome.rewrite.rewritten_fn.clone();
+                    return Ok(());
+                }
+                ir::PackageMember::Block { func, .. } if func.name == top_fn_name => {
+                    *func = outcome.rewrite.rewritten_fn.clone();
+                    return Ok(());
+                }
+                _ => {
+                    // Only the selected top function participates in
+                    // gatification.
+                }
+            }
+        }
+        Err(format!(
+            "PIR package has no function or block named '{top_fn_name}'"
+        ))
+    }
+
+    #[cfg(not(feature = "has-bitwuzla"))]
+    {
+        let _ = package;
+        let _ = top_fn_name;
+        Err(
+            "formal array alias analysis requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-alias-analysis=false"
+                .to_string(),
+        )
     }
 }
 
@@ -140,6 +211,12 @@ pub fn prepare_ir_for_gatify_from_ir_text(
             .map_err(|e| format!("PIR parse/validate failed after aug_opt: {e}"))?;
     }
 
+    apply_formal_array_alias_analysis(
+        &mut pir_package,
+        &top_fn_name,
+        options.enable_formal_array_alias_analysis,
+    )?;
+
     let pir_fn = pir_package
         .get_fn(&top_fn_name)
         .ok_or_else(|| format!("PIR package has no function named '{top_fn_name}'"))?;
@@ -206,4 +283,70 @@ pub fn ir2gates_from_ir_text(
         gatify_output,
         range_info,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(feature = "has-bitwuzla")]
+    use xlsynth_pir::ir::NodePayload;
+
+    #[test]
+    fn formal_array_alias_analysis_defaults_on() {
+        assert!(Ir2GatesOptions::default().enable_formal_array_alias_analysis);
+        assert!(!Ir2GatesOptions::all_opts_disabled().enable_formal_array_alias_analysis);
+    }
+
+    #[cfg(not(feature = "has-bitwuzla"))]
+    #[test]
+    fn missing_bitwuzla_error_explains_how_to_disable_rewrite() {
+        let mut parser = ir_parser::Parser::new(
+            r#"package sample
+
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#,
+        );
+        let mut package = parser.parse_and_validate_package().unwrap();
+        let error = apply_formal_array_alias_analysis(&mut package, "main", true).unwrap_err();
+        assert_eq!(
+            error,
+            "formal array alias analysis requires a build with Bitwuzla enabled; rebuild with a \"with-bitwuzla-*\" feature or disable the optimization with --enable-formal-array-alias-analysis=false"
+        );
+    }
+
+    #[cfg(feature = "has-bitwuzla")]
+    #[test]
+    fn formal_array_alias_analysis_runs_during_gatify_preparation() {
+        let ir_text = r#"package sample
+
+top fn main(a: bits[8][4] id=1, value: bits[8] id=2, read_index: bits[2] id=3) -> bits[8] {
+  one: bits[2] = literal(value=1, id=4)
+  write_index: bits[2] = xor(read_index, one, id=5)
+  updated: bits[8][4] = array_update(a, value, indices=[write_index], id=6)
+  ret read: bits[8] = array_index(updated, indices=[read_index], id=7)
+}
+"#;
+        let mut options = Ir2GatesOptions::all_opts_disabled();
+        options.enable_formal_array_alias_analysis = true;
+
+        let prepared = prepare_ir_for_gatify_from_ir_text(ir_text, None, &options).unwrap();
+        let function = prepared.pir_top_fn();
+        let array_param = function
+            .nodes
+            .iter()
+            .position(|node| node.text_id == 1)
+            .unwrap();
+        let read = function
+            .nodes
+            .iter()
+            .find(|node| node.text_id == 7)
+            .unwrap();
+
+        assert!(matches!(
+            &read.payload,
+            NodePayload::ArrayIndex { array, .. } if array.index == array_param
+        ));
+    }
 }

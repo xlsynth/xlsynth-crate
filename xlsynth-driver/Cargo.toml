@@ -61,7 +61,11 @@ default = []
 unstable-dslx-specialize = ["xlsynth-prover/unstable-dslx-specialize"]
 has-boolector = ["xlsynth-prover/has-boolector", "xlsynth-autocov/has-boolector"]
 has-easy-smt = ["xlsynth-prover/has-easy-smt", "xlsynth-autocov/has-easy-smt"]
-has-bitwuzla = ["xlsynth-prover/has-bitwuzla", "xlsynth-autocov/has-bitwuzla"]
+has-bitwuzla = [
+    "xlsynth-prover/has-bitwuzla",
+    "xlsynth-autocov/has-bitwuzla",
+    "xlsynth-g8r/has-bitwuzla",
+]
 # Enables boolector support, defaulting to system linking
 with-boolector-system = [
     "xlsynth-prover/with-boolector-system",

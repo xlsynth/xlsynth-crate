@@ -27,7 +27,7 @@ use crate::aig_serdes::emit_netlist;
 use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
 use crate::gatify::ir2gate;
-use crate::ir2gates;
+use crate::ir2gates::{self, DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS};
 use crate::prove_gate_fn_equiv_common::GateFormalBackend;
 use crate::prove_gate_fn_equiv_sat::{DEFAULT_CADICAL_TERMINATE_LIMIT, GateFormalOptions};
 use crate::use_count::get_id_to_use_count;
@@ -44,6 +44,10 @@ fn default_cadical_terminate_limit() -> u32 {
 
 fn default_cut_db_rewrite() -> bool {
     true
+}
+
+fn default_enable_formal_array_alias_analysis() -> bool {
+    DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -154,6 +158,7 @@ pub struct Options {
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
     pub enable_rewrite_normalize_left: bool,
+    pub enable_formal_array_alias_analysis: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     /// Opt into lowering XLS `gate` operations by masking the value with the
@@ -225,6 +230,9 @@ pub struct CanonicalG8rOptions {
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
     pub enable_rewrite_normalize_left: bool,
+    /// Whether to run solver-backed array read/update rewrites before gatify.
+    #[serde(default = "default_enable_formal_array_alias_analysis")]
+    pub enable_formal_array_alias_analysis: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub unsafe_gatify_gate_operation: bool,
@@ -258,6 +266,7 @@ impl Default for CanonicalG8rOptions {
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
+            enable_formal_array_alias_analysis: DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
@@ -298,6 +307,7 @@ impl CanonicalG8rOptions {
             enable_rewrite_nary_add: self.enable_rewrite_nary_add,
             enable_rewrite_mask_low: self.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: self.enable_rewrite_normalize_left,
+            enable_formal_array_alias_analysis: self.enable_formal_array_alias_analysis,
             adder_mapping: self.adder_mapping,
             mul_adder_mapping: self.mul_adder_mapping,
             unsafe_gatify_gate_operation: self.unsafe_gatify_gate_operation,
@@ -353,6 +363,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
+            enable_formal_array_alias_analysis: options.enable_formal_array_alias_analysis,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
@@ -374,6 +385,7 @@ impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
+            enable_formal_array_alias_analysis: options.enable_formal_array_alias_analysis,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
@@ -1068,6 +1080,24 @@ mod tests {
             process.cadical_terminate_limit,
             DEFAULT_CADICAL_TERMINATE_LIMIT
         );
+    }
+
+    #[test]
+    fn canonical_options_default_to_formal_array_alias_analysis() {
+        let canonical = CanonicalG8rOptions::default();
+        assert!(canonical.enable_formal_array_alias_analysis);
+    }
+
+    #[test]
+    fn missing_serialized_formal_array_alias_analysis_uses_canonical_default() {
+        let mut value = serde_json::to_value(CanonicalG8rOptions::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("enable_formal_array_alias_analysis");
+
+        let canonical: CanonicalG8rOptions = serde_json::from_value(value).unwrap();
+        assert!(canonical.enable_formal_array_alias_analysis);
     }
 
     #[test]

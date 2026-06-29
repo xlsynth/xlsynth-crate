@@ -907,23 +907,30 @@ fn gatify_array_slice_bit_shift(
     shifted.get_lsb_slice(0, out_width_bits)
 }
 
-fn gatify_array_update(
+/// Recursively lowers an array update using one combined selector per leaf.
+fn gatify_array_update_dimension(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
     array_bits: &AigBitVector,
     value_bits: &AigBitVector,
     index_bits: &[AigBitVector],
+    outer_selected: Option<AigOperand>,
 ) -> AigBitVector {
-    assert!(!index_bits.is_empty());
-
     let element_bit_count = array_ty.element_type.bit_count();
     let index_decoded = gatify_decode(gb, array_ty.element_count, &index_bits[0]);
     let mut updated_elems: Vec<AigBitVector> = Vec::new();
 
     for i in 0..array_ty.element_count {
         let orig_elem = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
-        let updated_value = if index_bits.len() == 1 {
-            value_bits.clone()
+        let this_selected = *index_decoded.get_lsb(i);
+        let selected = match outer_selected {
+            Some(outer_selected) => gb.add_and_binary(outer_selected, this_selected),
+            None => this_selected,
+        };
+        let updated = if gb.is_known_false(selected) {
+            orig_elem
+        } else if index_bits.len() == 1 {
+            gb.add_mux2_vec(&selected, value_bits, &orig_elem)
         } else {
             let next_ty = match array_ty.element_type.as_ref() {
                 ir::Type::Array(ty) => ty,
@@ -932,10 +939,15 @@ fn gatify_array_update(
                     other
                 ),
             };
-            gatify_array_update(gb, next_ty, &orig_elem, value_bits, &index_bits[1..])
+            gatify_array_update_dimension(
+                gb,
+                next_ty,
+                &orig_elem,
+                value_bits,
+                &index_bits[1..],
+                Some(selected),
+            )
         };
-        let selector = index_decoded.get_lsb(i);
-        let updated = gb.add_mux2_vec(selector, &updated_value, &orig_elem);
         updated_elems.push(updated);
     }
 
@@ -944,6 +956,17 @@ fn gatify_array_update(
         lsb_to_msb.extend(elem_bits.iter_lsb_to_msb().cloned());
     }
     AigBitVector::from_lsb_is_index_0(&lsb_to_msb)
+}
+
+fn gatify_array_update(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    value_bits: &AigBitVector,
+    index_bits: &[AigBitVector],
+) -> AigBitVector {
+    assert!(!index_bits.is_empty());
+    gatify_array_update_dimension(gb, array_ty, array_bits, value_bits, index_bits, None)
 }
 
 fn gatify_sel(
@@ -6661,6 +6684,99 @@ top fn f(a: bits[3][2] id=1, replacement: bits[3][2] id=2) -> bits[3][2] {
         .outputs[0]
             .clone();
         assert_eq!(updated, replacement_bits);
+    }
+
+    #[test]
+    fn test_multidimensional_array_update_combines_dimension_selectors() {
+        let gate_fn = gatify_ir_text(
+            r#"package sample
+
+top fn f(a: bits[2][2][3] id=1, replacement: bits[2] id=2, outer: bits[2] id=3, inner: bits[2] id=4) -> bits[2][2][3] {
+  ret updated: bits[2][2][3] = array_update(a, replacement, indices=[outer, inner], id=5)
+}
+"#,
+        );
+
+        for array_value in [0, 0x539, 0xaaa] {
+            let array_bits = IrBits::make_ubits(12, array_value).unwrap();
+            for replacement_value in 0..4 {
+                let replacement_bits = IrBits::make_ubits(2, replacement_value).unwrap();
+                for outer in 0..4 {
+                    for inner in 0..4 {
+                        let got = gate_sim::eval(
+                            &gate_fn,
+                            &[
+                                array_bits.clone(),
+                                replacement_bits.clone(),
+                                IrBits::make_ubits(2, outer).unwrap(),
+                                IrBits::make_ubits(2, inner).unwrap(),
+                            ],
+                            gate_sim::Collect::None,
+                        )
+                        .outputs[0]
+                            .clone();
+
+                        let mut want_bits = (0..array_bits.get_bit_count())
+                            .map(|i| array_bits.get_bit(i).unwrap())
+                            .collect::<Vec<_>>();
+                        if outer < 3 && inner < 2 {
+                            let leaf_start = ((outer * 2 + inner) * 2) as usize;
+                            for bit_index in 0..2 {
+                                want_bits[leaf_start + bit_index] =
+                                    replacement_bits.get_bit(bit_index).unwrap();
+                            }
+                        }
+                        assert_eq!(
+                            got,
+                            IrBits::from_lsb_is_0(&want_bits),
+                            "mismatch for array={array_bits} replacement={replacement_bits} outer={outer} inner={inner}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_three_dimensional_array_update_combines_all_selectors() {
+        let gate_fn = gatify_ir_text(
+            r#"package sample
+
+top fn f(a: bits[1][2][2][2] id=1, replacement: bits[1] id=2, i: bits[1] id=3, j: bits[1] id=4, k: bits[1] id=5) -> bits[1][2][2][2] {
+  ret updated: bits[1][2][2][2] = array_update(a, replacement, indices=[i, j, k], id=6)
+}
+"#,
+        );
+        let array_bits = IrBits::make_ubits(8, 0x69).unwrap();
+
+        for replacement in 0..2 {
+            for i in 0..2 {
+                for j in 0..2 {
+                    for k in 0..2 {
+                        let got = gate_sim::eval(
+                            &gate_fn,
+                            &[
+                                array_bits.clone(),
+                                IrBits::make_ubits(1, replacement).unwrap(),
+                                IrBits::make_ubits(1, i).unwrap(),
+                                IrBits::make_ubits(1, j).unwrap(),
+                                IrBits::make_ubits(1, k).unwrap(),
+                            ],
+                            gate_sim::Collect::None,
+                        )
+                        .outputs[0]
+                            .clone();
+
+                        let mut want_bits = (0..array_bits.get_bit_count())
+                            .map(|bit_index| array_bits.get_bit(bit_index).unwrap())
+                            .collect::<Vec<_>>();
+                        let leaf_index = (i * 4 + j * 2 + k) as usize;
+                        want_bits[leaf_index] = replacement != 0;
+                        assert_eq!(got, IrBits::from_lsb_is_0(&want_bits));
+                    }
+                }
+            }
+        }
     }
 
     fn gate_eval_1bit(gate_fn: &GateFn, lhs: u64, lhs_width: usize) -> bool {

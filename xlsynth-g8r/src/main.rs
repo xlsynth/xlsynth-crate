@@ -9,6 +9,7 @@ use xlsynth_g8r::cut_db_cli_defaults::{
     CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
+use xlsynth_g8r::ir2gates::DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS;
 use xlsynth_g8r::process_ir_path::{
     DEFAULT_MAX_FRAIG_SIM_SAMPLES, Options, process_ir_path_for_cli,
 };
@@ -68,6 +69,11 @@ struct Args {
     #[arg(long = "unsafe-gatify-gate-operation", default_value_t = false)]
     #[arg(action = clap::ArgAction::Set)]
     unsafe_gatify_gate_operation: bool,
+
+    /// Prove and simplify array reads through update chains before gatify.
+    #[arg(long, default_value_t = DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS)]
+    #[arg(action = clap::ArgAction::Set)]
+    enable_formal_array_alias_analysis: bool,
 
     /// Whether to emit the netlist.
     #[arg(long, default_value_t = false)]
@@ -133,6 +139,7 @@ fn main() {
         enable_rewrite_nary_add: false,
         enable_rewrite_mask_low: false,
         enable_rewrite_normalize_left: false,
+        enable_formal_array_alias_analysis: args.enable_formal_array_alias_analysis,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
         unsafe_gatify_gate_operation: args.unsafe_gatify_gate_operation,
