@@ -2,7 +2,6 @@
 
 //! 4-input cut enumeration and cut-db candidate construction.
 
-use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crate::aig::dynamic_depth::DynamicDepthState;
@@ -232,7 +231,7 @@ impl CutEnumerator {
         }
     }
 
-    pub(super) fn invalidate_nodes(&mut self, nodes: &BTreeSet<AigRef>) {
+    pub(super) fn invalidate_nodes(&mut self, nodes: &[AigRef]) {
         for node in nodes {
             self.invalidate_node(*node);
         }

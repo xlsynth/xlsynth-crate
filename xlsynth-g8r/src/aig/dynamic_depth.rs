@@ -19,6 +19,7 @@ pub struct DynamicDepthState {
     backward_depths: Vec<usize>,
     forward_queue_marks: Vec<usize>,
     backward_queue_marks: Vec<usize>,
+    affected_marks: Vec<usize>,
     queue_epoch: usize,
 }
 
@@ -31,6 +32,7 @@ impl DynamicDepthState {
             backward_depths,
             forward_queue_marks: vec![0; state.gate_fn().gates.len()],
             backward_queue_marks: vec![0; state.gate_fn().gates.len()],
+            affected_marks: vec![0; state.gate_fn().gates.len()],
             queue_epoch: 0,
         })
     }
@@ -89,7 +91,12 @@ impl DynamicDepthState {
                     node, node_count
                 ));
             }
-            affected_nodes.push(node);
+            record_affected(
+                node,
+                &mut affected_nodes,
+                &mut self.affected_marks,
+                queue_epoch,
+            );
             enqueue_node(
                 node,
                 &mut forward_queue,
@@ -112,7 +119,12 @@ impl DynamicDepthState {
                 continue;
             }
             self.forward_depths[node.id] = new_depth;
-            affected_nodes.push(node);
+            record_affected(
+                node,
+                &mut affected_nodes,
+                &mut self.affected_marks,
+                queue_epoch,
+            );
             state.for_each_live_fanout(node, |fanout| {
                 enqueue_node(
                     fanout,
@@ -141,7 +153,12 @@ impl DynamicDepthState {
                 continue;
             }
             self.backward_depths[node.id] = new_depth;
-            affected_nodes.push(node);
+            record_affected(
+                node,
+                &mut affected_nodes,
+                &mut self.affected_marks,
+                queue_epoch,
+            );
             for fanin in node_fanins(state.gate_fn(), node) {
                 enqueue_node(
                     fanin,
@@ -152,8 +169,6 @@ impl DynamicDepthState {
             }
         }
 
-        affected_nodes.sort_unstable_by_key(|node| node.id);
-        affected_nodes.dedup();
         Ok(affected_nodes)
     }
 
@@ -306,6 +321,7 @@ impl DynamicDepthState {
     fn resize_queue_marks(&mut self, node_count: usize) {
         self.forward_queue_marks.resize(node_count, 0);
         self.backward_queue_marks.resize(node_count, 0);
+        self.affected_marks.resize(node_count, 0);
     }
 
     fn next_queue_epoch(&mut self) -> usize {
@@ -317,9 +333,19 @@ impl DynamicDepthState {
             for mark in &mut self.backward_queue_marks {
                 *mark = 0;
             }
+            for mark in &mut self.affected_marks {
+                *mark = 0;
+            }
             self.queue_epoch = 1;
         }
         self.queue_epoch
+    }
+}
+
+fn record_affected(node: AigRef, affected: &mut Vec<AigRef>, marks: &mut [usize], epoch: usize) {
+    if marks[node.id] != epoch {
+        marks[node.id] = epoch;
+        affected.push(node);
     }
 }
 

@@ -42,6 +42,117 @@ use self::large_cone::{
 };
 use self::small_cut::{CutEnumerationStats, CutEnumerator, choose_candidate_replacements_for_root};
 
+/// Reusable dense set for append-only AIG node identifiers.
+#[derive(Debug)]
+struct DenseAigRefSet {
+    marks: Vec<u32>,
+    epoch: u32,
+    nodes: Vec<AigRef>,
+}
+
+impl Default for DenseAigRefSet {
+    fn default() -> Self {
+        Self {
+            marks: Vec::new(),
+            epoch: 1,
+            nodes: Vec::new(),
+        }
+    }
+}
+
+impl DenseAigRefSet {
+    fn clear(&mut self) {
+        self.nodes.clear();
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.marks.fill(0);
+            self.epoch = 1;
+        }
+    }
+
+    fn insert(&mut self, node: AigRef) -> bool {
+        if node.id >= self.marks.len() {
+            self.marks.resize(node.id + 1, 0);
+        }
+        if self.marks[node.id] == self.epoch {
+            return false;
+        }
+        self.marks[node.id] = self.epoch;
+        self.nodes.push(node);
+        true
+    }
+
+    fn extend(&mut self, nodes: impl IntoIterator<Item = AigRef>) {
+        for node in nodes {
+            self.insert(node);
+        }
+    }
+
+    fn sort_by_id(&mut self) {
+        self.nodes.sort_unstable_by_key(|node| node.id);
+    }
+
+    fn as_slice(&self) -> &[AigRef] {
+        &self.nodes
+    }
+
+    fn iter(&self) -> impl Iterator<Item = AigRef> + '_ {
+        self.nodes.iter().copied()
+    }
+}
+
+/// Dense membership map used where nodes are also stored in a work queue.
+#[derive(Debug, Clone, Default)]
+struct DenseAigRefMembership {
+    present: Vec<bool>,
+    len: usize,
+}
+
+impl DenseAigRefMembership {
+    fn from_nodes(nodes: impl IntoIterator<Item = AigRef>) -> Self {
+        let mut result = Self::default();
+        for node in nodes {
+            result.insert(node);
+        }
+        result
+    }
+
+    fn insert(&mut self, node: AigRef) -> bool {
+        if node.id >= self.present.len() {
+            self.present.resize(node.id + 1, false);
+        }
+        if self.present[node.id] {
+            return false;
+        }
+        self.present[node.id] = true;
+        self.len += 1;
+        true
+    }
+
+    fn remove(&mut self, node: AigRef) -> bool {
+        let Some(present) = self.present.get_mut(node.id) else {
+            return false;
+        };
+        if !*present {
+            return false;
+        }
+        *present = false;
+        self.len -= 1;
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn iter(&self) -> impl Iterator<Item = AigRef> + '_ {
+        self.present
+            .iter()
+            .enumerate()
+            .filter_map(|(id, present)| present.then_some(AigRef { id }))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CutDbRewriteMode {
     /// Run delay-focused phases first, then area phases under the achieved
@@ -595,39 +706,47 @@ fn collect_critical_roots(
     roots
 }
 
-fn collect_live_fanout_cone(state: &DynamicStructuralHash, root: AigRef) -> BTreeSet<AigRef> {
-    let mut seen = BTreeSet::new();
-    let mut stack = Vec::new();
-    state.for_each_live_fanout(root, |fanout| stack.push(fanout));
-    while let Some(node) = stack.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        state.for_each_live_fanout(node, |fanout| stack.push(fanout));
+fn collect_live_fanout_cone(
+    state: &DynamicStructuralHash,
+    root: AigRef,
+    result: &mut DenseAigRefSet,
+) {
+    result.clear();
+    state.for_each_live_fanout(root, |fanout| {
+        result.insert(fanout);
+    });
+    let mut index = 0usize;
+    while index < result.nodes.len() {
+        let node = result.nodes[index];
+        index += 1;
+        state.for_each_live_fanout(node, |fanout| {
+            result.insert(fanout);
+        });
     }
-    seen
+    result.sort_by_id();
 }
 
 fn collect_new_nodes_and_fanouts(
     state: &DynamicStructuralHash,
     first_new_id: usize,
     after_gate_len: usize,
-) -> BTreeSet<AigRef> {
-    let mut roots = BTreeSet::new();
+    result: &mut DenseAigRefSet,
+) {
+    result.clear();
     for id in first_new_id..after_gate_len {
         let node = AigRef { id };
         if !state.is_live(node) {
             continue;
         }
-        roots.insert(node);
+        result.insert(node);
         state.for_each_live_fanout(node, |fanout| {
-            roots.insert(fanout);
+            result.insert(fanout);
         });
     }
-    roots
+    result.sort_by_id();
 }
 
-fn add_depth_dirty_node_and_fanins(nodes: &mut BTreeSet<AigRef>, g: &GateFn, node: AigRef) {
+fn add_depth_dirty_node_and_fanins(nodes: &mut DenseAigRefSet, g: &GateFn, node: AigRef) {
     if node.id >= g.gates.len() {
         return;
     }
@@ -641,12 +760,16 @@ fn add_depth_dirty_node_and_fanins(nodes: &mut BTreeSet<AigRef>, g: &GateFn, nod
 fn collect_replacement_depth_changed_nodes(
     state: &DynamicStructuralHash,
     first_new_id: usize,
-    mut dirty_nodes: BTreeSet<AigRef>,
-) -> Vec<AigRef> {
+    initial_dirty_nodes: &[AigRef],
+    dirty_nodes: &mut DenseAigRefSet,
+) {
     let g = state.gate_fn();
 
+    dirty_nodes.clear();
+    dirty_nodes.extend(initial_dirty_nodes.iter().copied());
+
     for id in first_new_id..g.gates.len() {
-        add_depth_dirty_node_and_fanins(&mut dirty_nodes, g, AigRef { id });
+        add_depth_dirty_node_and_fanins(dirty_nodes, g, AigRef { id });
     }
 
     for output in &g.outputs {
@@ -655,12 +778,12 @@ fn collect_replacement_depth_changed_nodes(
         }
     }
 
-    let seeds: Vec<AigRef> = dirty_nodes.iter().copied().collect();
-    for node in seeds {
-        add_depth_dirty_node_and_fanins(&mut dirty_nodes, g, node);
+    let seed_count = dirty_nodes.nodes.len();
+    for index in 0..seed_count {
+        let node = dirty_nodes.nodes[index];
+        add_depth_dirty_node_and_fanins(dirty_nodes, g, node);
     }
-
-    dirty_nodes.into_iter().collect()
+    dirty_nodes.sort_by_id();
 }
 
 fn collect_mffc_nodes_under_cut(
@@ -1134,7 +1257,7 @@ pub(super) fn cleanup_dangling_new_dynamic_hash_nodes(
 fn enqueue_live_and_roots<I>(
     structural_hash_state: &DynamicStructuralHash,
     roots: I,
-    pending_roots: &mut BTreeSet<AigRef>,
+    pending_roots: &mut DenseAigRefMembership,
     root_queue: &mut VecDeque<AigRef>,
     roots_total: &mut usize,
 ) where
@@ -1180,7 +1303,7 @@ fn is_live_critical_and_root(
 }
 
 struct CriticalRootTracker {
-    roots: BTreeSet<AigRef>,
+    roots: DenseAigRefMembership,
     max_output_node_depth: usize,
 }
 
@@ -1191,13 +1314,11 @@ impl CriticalRootTracker {
         max_output_node_depth: usize,
     ) -> Self {
         Self {
-            roots: collect_critical_roots(
+            roots: DenseAigRefMembership::from_nodes(collect_critical_roots(
                 structural_hash_state,
                 depth_state,
                 max_output_node_depth,
-            )
-            .into_iter()
-            .collect(),
+            )),
             max_output_node_depth,
         }
     }
@@ -1207,7 +1328,7 @@ impl CriticalRootTracker {
     }
 
     fn iter(&self) -> impl Iterator<Item = AigRef> + '_ {
-        self.roots.iter().copied()
+        self.roots.iter()
     }
 
     fn refresh_after_depth_update(
@@ -1231,7 +1352,7 @@ impl CriticalRootTracker {
             ) {
                 self.roots.insert(*node);
             } else {
-                self.roots.remove(node);
+                self.roots.remove(*node);
             }
         }
     }
@@ -1240,7 +1361,7 @@ impl CriticalRootTracker {
         &self,
         structural_hash_state: &DynamicStructuralHash,
         depth_state: &DynamicDepthState,
-        pending_roots: &mut BTreeSet<AigRef>,
+        pending_roots: &mut DenseAigRefMembership,
         root_queue: &mut VecDeque<AigRef>,
     ) -> usize {
         let mut roots: Vec<AigRef> = self.iter().collect();
@@ -1303,9 +1424,12 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
         let mut roots_visited = 0usize;
         let mut cut_enumerator =
             CutEnumerator::new(structural_hash_state.gate_fn(), opts.max_cuts_per_node);
+        let mut fanout_cone_nodes = DenseAigRefSet::default();
+        let mut invalidated_cut_nodes = DenseAigRefSet::default();
+        let mut depth_dirty_nodes = DenseAigRefSet::default();
         let t_phase = Instant::now();
         while let Some(root) = root_queue.pop_front() {
-            pending_roots.remove(&root);
+            pending_roots.remove(root);
             roots_visited += 1;
             if !is_live_critical_and_root(
                 &structural_hash_state,
@@ -1336,8 +1460,9 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
                 } else {
                     None
                 };
-                let mut invalidated_cut_nodes =
-                    collect_live_fanout_cone(&structural_hash_state, cand.root);
+                collect_live_fanout_cone(&structural_hash_state, cand.root, &mut fanout_cone_nodes);
+                invalidated_cut_nodes.clear();
+                invalidated_cut_nodes.extend(fanout_cone_nodes.iter());
                 invalidated_cut_nodes.insert(cand.root);
                 for leaf in &cand.leaf_ops {
                     invalidated_cut_nodes.insert(leaf.node);
@@ -1360,15 +1485,16 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
                 };
                 invalidated_cut_nodes.insert(materialized.replacement_op.node);
 
-                let changed_nodes = collect_replacement_depth_changed_nodes(
+                collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_cut_nodes.clone(),
+                    invalidated_cut_nodes.as_slice(),
+                    &mut depth_dirty_nodes,
                 );
                 let affected_depth_nodes = depth_state
                     .refresh_from_changed_nodes_collecting_affected(
                         &structural_hash_state,
-                        &changed_nodes,
+                        depth_dirty_nodes.as_slice(),
                     )
                     .expect(
                         "incremental dynamic depth update should succeed for cut-db output graph",
@@ -1412,7 +1538,7 @@ fn rewrite_gatefn_depth_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions
                 accepted_count += 1;
 
                 cut_enumerator.sync_len(structural_hash_state.gate_fn());
-                cut_enumerator.invalidate_nodes(&invalidated_cut_nodes);
+                cut_enumerator.invalidate_nodes(invalidated_cut_nodes.as_slice());
 
                 critical_roots.enqueue_all(
                     &structural_hash_state,
@@ -1526,8 +1652,12 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
         let mut cut_stats = CutEnumerationStats::default();
         let mut cut_enumerator =
             CutEnumerator::new(structural_hash_state.gate_fn(), opts.max_cuts_per_node);
-        let mut pending_roots: BTreeSet<AigRef> = roots.iter().copied().collect();
+        let mut pending_roots = DenseAigRefMembership::from_nodes(roots.iter().copied());
         let mut root_queue: VecDeque<AigRef> = roots.into();
+        let mut fanout_cone_nodes = DenseAigRefSet::default();
+        let mut invalidated_cut_nodes = DenseAigRefSet::default();
+        let mut new_nodes_and_fanouts = DenseAigRefSet::default();
+        let mut depth_dirty_nodes = DenseAigRefSet::default();
         let mut candidates_considered = 0usize;
         let mut candidate_evals = 0usize;
         let mut area_candidate_count = 0usize;
@@ -1537,7 +1667,7 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
             let root = root_queue
                 .pop_front()
                 .expect("root queue checked non-empty above");
-            pending_roots.remove(&root);
+            pending_roots.remove(root);
             candidate_stats.roots_visited += 1;
             if !structural_hash_state.is_live(root) {
                 continue;
@@ -1605,9 +1735,13 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
                 rewrite_stats.selected_raw_score_ands += cand.replacement.raw_score_ands;
                 rewrite_stats.selected_hash_score_ands += cand.replacement.score_ands;
 
-                let fanout_cone_nodes =
-                    collect_live_fanout_cone(&structural_hash_state, cand.replacement.root);
-                let mut invalidated_cut_nodes = fanout_cone_nodes.clone();
+                collect_live_fanout_cone(
+                    &structural_hash_state,
+                    cand.replacement.root,
+                    &mut fanout_cone_nodes,
+                );
+                invalidated_cut_nodes.clear();
+                invalidated_cut_nodes.extend(fanout_cone_nodes.iter());
                 invalidated_cut_nodes.insert(cand.replacement.root);
                 for leaf in &cand.replacement.leaf_ops {
                     invalidated_cut_nodes.insert(leaf.node);
@@ -1625,18 +1759,23 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
                     "exact replacement cost did not match materialized live AND count"
                 );
                 let after_gate_len = structural_hash_state.gate_fn().gates.len();
-                let new_nodes_and_fanouts = collect_new_nodes_and_fanouts(
+                collect_new_nodes_and_fanouts(
                     &structural_hash_state,
                     first_new_id,
                     after_gate_len,
+                    &mut new_nodes_and_fanouts,
                 );
-                let changed_nodes = collect_replacement_depth_changed_nodes(
+                collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_cut_nodes.clone(),
+                    invalidated_cut_nodes.as_slice(),
+                    &mut depth_dirty_nodes,
                 );
                 depth_state
-                    .refresh_from_changed_nodes(&structural_hash_state, &changed_nodes)
+                    .refresh_from_changed_nodes(
+                        &structural_hash_state,
+                        depth_dirty_nodes.as_slice(),
+                    )
                     .expect(
                         "incremental dynamic depth update should succeed for cut-db output graph",
                     );
@@ -1650,15 +1789,12 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
                     );
                 }
                 cut_enumerator.sync_len(structural_hash_state.gate_fn());
-                cut_enumerator.invalidate_nodes(&invalidated_cut_nodes);
+                cut_enumerator.invalidate_nodes(invalidated_cut_nodes.as_slice());
                 accepted_count += 1;
 
                 enqueue_live_and_roots(
                     &structural_hash_state,
-                    fanout_cone_nodes
-                        .iter()
-                        .copied()
-                        .chain(new_nodes_and_fanouts.iter().copied()),
+                    fanout_cone_nodes.iter().chain(new_nodes_and_fanouts.iter()),
                     &mut pending_roots,
                     &mut root_queue,
                     &mut candidate_stats.roots_total,
@@ -1833,8 +1969,11 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
         let mut selected_sop_factored = 0usize;
         let mut after_path_len = cur_path_len;
         let before_live_and_count = structural_hash_state.live_and_count();
+        let mut fanout_cone_nodes = DenseAigRefSet::default();
+        let mut invalidated_nodes = DenseAigRefSet::default();
+        let mut depth_dirty_nodes = DenseAigRefSet::default();
         while let Some(root) = root_queue.pop_front() {
-            pending_roots.remove(&root);
+            pending_roots.remove(root);
             candidate_stats.roots_visited += 1;
             if !is_live_critical_and_root(
                 &structural_hash_state,
@@ -1870,13 +2009,18 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                 } else {
                     None
                 };
-                let mut invalidated_cut_nodes =
-                    collect_live_fanout_cone(&structural_hash_state, cand.replacement.root);
-                invalidated_cut_nodes.insert(cand.replacement.root);
+                collect_live_fanout_cone(
+                    &structural_hash_state,
+                    cand.replacement.root,
+                    &mut fanout_cone_nodes,
+                );
+                invalidated_nodes.clear();
+                invalidated_nodes.extend(fanout_cone_nodes.iter());
+                invalidated_nodes.insert(cand.replacement.root);
                 for leaf in &cand.replacement.leaf_ops {
-                    invalidated_cut_nodes.insert(leaf.node);
+                    invalidated_nodes.insert(leaf.node);
                 }
-                invalidated_cut_nodes.extend(cand.mffc_nodes.iter().copied());
+                invalidated_nodes.extend(cand.mffc_nodes.iter().copied());
                 let materialized = match materialize_replacement(
                     &mut structural_hash_state,
                     &cand.replacement,
@@ -1895,17 +2039,18 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                         );
                     }
                 };
-                invalidated_cut_nodes.insert(materialized.replacement_op.node);
+                invalidated_nodes.insert(materialized.replacement_op.node);
 
-                let changed_nodes = collect_replacement_depth_changed_nodes(
+                collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_cut_nodes,
+                    invalidated_nodes.as_slice(),
+                    &mut depth_dirty_nodes,
                 );
                 let affected_depth_nodes = depth_state
                     .refresh_from_changed_nodes_collecting_affected(
                         &structural_hash_state,
-                        &changed_nodes,
+                        depth_dirty_nodes.as_slice(),
                     )
                     .expect(
                         "incremental dynamic depth update should succeed for cut-db output graph",
@@ -2096,18 +2241,22 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
             ..LargeConeCandidateStats::default()
         };
         let mut rewrite_stats = AreaRewriteSelectionStats::default();
-        let mut pending_roots: BTreeSet<AigRef> = roots.iter().copied().collect();
+        let mut pending_roots = DenseAigRefMembership::from_nodes(roots.iter().copied());
         let mut root_queue: VecDeque<AigRef> = roots.into();
         let mut candidates_considered = 0usize;
         let mut candidate_evals = 0usize;
         let mut area_candidate_count = 0usize;
         let mut accepted_count = 0usize;
+        let mut fanout_cone_nodes = DenseAigRefSet::default();
+        let mut invalidated_nodes = DenseAigRefSet::default();
+        let mut new_nodes_and_fanouts = DenseAigRefSet::default();
+        let mut depth_dirty_nodes = DenseAigRefSet::default();
 
         while !root_queue.is_empty() {
             let root = root_queue
                 .pop_front()
                 .expect("root queue checked non-empty above");
-            pending_roots.remove(&root);
+            pending_roots.remove(root);
             candidate_stats.roots_visited += 1;
             if !structural_hash_state.is_live(root) {
                 continue;
@@ -2183,9 +2332,13 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                     &mut rewrite_stats.selected_sop_factored,
                 );
 
-                let fanout_cone_nodes =
-                    collect_live_fanout_cone(&structural_hash_state, cand.replacement.root);
-                let mut invalidated_nodes = fanout_cone_nodes.clone();
+                collect_live_fanout_cone(
+                    &structural_hash_state,
+                    cand.replacement.root,
+                    &mut fanout_cone_nodes,
+                );
+                invalidated_nodes.clear();
+                invalidated_nodes.extend(fanout_cone_nodes.iter());
                 invalidated_nodes.insert(cand.replacement.root);
                 for leaf in &cand.replacement.leaf_ops {
                     invalidated_nodes.insert(leaf.node);
@@ -2203,18 +2356,23 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                     "exact replacement cost did not match materialized live AND count"
                 );
                 let after_gate_len = structural_hash_state.gate_fn().gates.len();
-                let new_nodes_and_fanouts = collect_new_nodes_and_fanouts(
+                collect_new_nodes_and_fanouts(
                     &structural_hash_state,
                     materialized.first_new_id,
                     after_gate_len,
+                    &mut new_nodes_and_fanouts,
                 );
-                let changed_nodes = collect_replacement_depth_changed_nodes(
+                collect_replacement_depth_changed_nodes(
                     &structural_hash_state,
                     materialized.first_new_id,
-                    invalidated_nodes.clone(),
+                    invalidated_nodes.as_slice(),
+                    &mut depth_dirty_nodes,
                 );
                 depth_state
-                    .refresh_from_changed_nodes(&structural_hash_state, &changed_nodes)
+                    .refresh_from_changed_nodes(
+                        &structural_hash_state,
+                        depth_dirty_nodes.as_slice(),
+                    )
                     .expect(
                         "incremental dynamic depth update should succeed for cut-db output graph",
                     );
@@ -2234,10 +2392,7 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
 
                 enqueue_live_and_roots(
                     &structural_hash_state,
-                    fanout_cone_nodes
-                        .iter()
-                        .copied()
-                        .chain(new_nodes_and_fanouts.iter().copied()),
+                    fanout_cone_nodes.iter().chain(new_nodes_and_fanouts.iter()),
                     &mut pending_roots,
                     &mut root_queue,
                     &mut candidate_stats.roots_total,
