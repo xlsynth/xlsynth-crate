@@ -71,6 +71,7 @@ mod g8r_cli;
 mod g8r_equiv;
 mod g8r_eval;
 mod g8r_ir_equiv;
+mod g8r_optimize;
 mod g8r_stitch_pipeline;
 mod g8r_table;
 mod gate_ir_equiv;
@@ -182,6 +183,7 @@ trait AppExt {
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
     fn add_ir_top_arg(self, required: bool) -> Self;
     fn add_g8r_lowering_flags(self) -> Self;
+    fn add_g8r_optimization_flags(self) -> Self;
 }
 
 // TODO: Change flags from using strings to using clap::ValueEnum.
@@ -360,6 +362,61 @@ impl AppExt for clap::Command {
         )
     }
 
+    fn add_g8r_optimization_flags(self) -> Self {
+        (self as clap::Command)
+            .add_bool_arg("fraig", "Run fraig optimization")
+            .add_bool_arg(
+                "reassociation",
+                "Reassociate single-fanout AND supergates into balanced trees",
+            )
+            .arg(
+                clap::Arg::new("max_fraig_sim_samples")
+                    .long("max-fraig-sim-samples")
+                    .alias("fraig-sim-samples")
+                    .default_value("8192")
+                    .value_name("N")
+                    .help("Maximum number of random simulation samples to use for FRAIG candidate discovery")
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("gate_formal_backend")
+                    .long("gate-formal-backend")
+                    .value_name("BACKEND")
+                    .help("Formal backend for gate-level proof steps; FRAIG requires cadical (default: cadical)")
+                    .value_parser(["cadical", "varisat", "z3", "ir"])
+                    .default_value("cadical")
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("cadical_terminate_limit")
+                    .long("cadical-terminate-limit")
+                    .value_name("N")
+                    .help(
+                        "CaDiCaL internal termination-check budget per solve; 0 disables it (default: 1000)",
+                    )
+                    .default_value("1000")
+                    .action(clap::ArgAction::Set),
+            )
+            .add_bool_arg("cut-db-rewrite", "Run cut-db rewrite optimization")
+            .add_bool_arg(
+                "cut-db-enable-large-cone-rewrite",
+                "Run large-cone cut-db rewrite phases after the 4-input cut-db phases",
+            )
+            .arg(
+                clap::Arg::new("cut_db_rewrite_mode")
+                    .long("cut-db-rewrite-mode")
+                    .value_name("MODE")
+                    .help(
+                        "Cut-db rewrite mode: delay, balanced, or area (default delay)",
+                    )
+                    .default_value(CutDbRewriteMode::DEFAULT_CLI_VALUE)
+                    .value_parser(clap::builder::PossibleValuesParser::new(
+                        CutDbRewriteMode::CLI_VALUES,
+                    ))
+                    .action(clap::ArgAction::Set),
+            )
+    }
+
     fn add_g8r_lowering_flags(self) -> Self {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
@@ -411,39 +468,7 @@ impl AppExt for clap::Command {
                     .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
                     .action(clap::ArgAction::Set),
             )
-            .add_bool_arg("fraig", "Run fraig optimization")
-            .add_bool_arg(
-                "reassociation",
-                "Reassociate single-fanout AND supergates into balanced trees",
-            )
-            .arg(
-                clap::Arg::new("max_fraig_sim_samples")
-                    .long("max-fraig-sim-samples")
-                    .alias("fraig-sim-samples")
-                    .default_value("8192")
-                    .value_name("N")
-                    .help("Maximum number of random simulation samples to use for FRAIG candidate discovery")
-                    .action(clap::ArgAction::Set),
-            )
-            .arg(
-                clap::Arg::new("gate_formal_backend")
-                    .long("gate-formal-backend")
-                    .value_name("BACKEND")
-                    .help("Formal backend for gate-level proof steps; FRAIG requires cadical (default: cadical)")
-                    .value_parser(["cadical", "varisat", "z3", "ir"])
-                    .default_value("cadical")
-                    .action(clap::ArgAction::Set),
-            )
-            .arg(
-                clap::Arg::new("cadical_terminate_limit")
-                    .long("cadical-terminate-limit")
-                    .value_name("N")
-                    .help(
-                        "CaDiCaL internal termination-check budget per solve; 0 disables it (default: 1000)",
-                    )
-                    .default_value("1000")
-                    .action(clap::ArgAction::Set),
-            )
+            .add_g8r_optimization_flags()
             .add_bool_arg(
                 "compute_graph_logical_effort",
                 "Compute the graph logical effort worst case delay",
@@ -462,24 +487,6 @@ impl AppExt for clap::Command {
                     .value_name("BETA2")
                     .help("Beta2 value for graph logical effort computation (default 0.0)")
                     .default_value("0.0")
-                    .action(clap::ArgAction::Set),
-            )
-            .add_bool_arg("cut-db-rewrite", "Run cut-db rewrite optimization")
-            .add_bool_arg(
-                "cut-db-enable-large-cone-rewrite",
-                "Run large-cone cut-db rewrite phases after the 4-input cut-db phases",
-            )
-            .arg(
-                clap::Arg::new("cut_db_rewrite_mode")
-                    .long("cut-db-rewrite-mode")
-                    .value_name("MODE")
-                    .help(
-                        "Cut-db rewrite mode: delay, balanced, or area (default delay)",
-                    )
-                    .default_value(CutDbRewriteMode::DEFAULT_CLI_VALUE)
-                    .value_parser(clap::builder::PossibleValuesParser::new(
-                        CutDbRewriteMode::CLI_VALUES,
-                    ))
                     .action(clap::ArgAction::Set),
             )
             .arg(
@@ -1745,6 +1752,46 @@ fn main() {
                         .help("Path to write the gate-level netlist (human-readable)")
                         .action(clap::ArgAction::Set),
                 )
+        )
+        .subcommand(
+            clap::Command::new("g8r-optimize")
+                .about("Runs post-gatification optimizations on a clockless, register-free .g8r or .g8rbin design")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8r or .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_g8r_optimization_flags()
+                .add_bool_arg("quiet", "Do not emit optimized text g8r to stdout")
+                .arg(
+                    clap::Arg::new("bin_out")
+                        .long("bin-out")
+                        .value_name("PATH")
+                        .help("Path to write the optimized .g8rbin file")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("aiger_out")
+                        .long("aiger-out")
+                        .value_name("PATH")
+                        .help("Path to write optimized AIGER; use .aag for ASCII or .aig for binary")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("stats_out")
+                        .long("stats-out")
+                        .value_name("PATH")
+                        .help("Path to write deterministic input/output AIG metrics and FRAIG statistics as JSON")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("netlist_out")
+                        .long("netlist-out")
+                        .value_name("PATH")
+                        .help("Path to write the optimized human-readable gate-level netlist")
+                        .action(clap::ArgAction::Set),
+                ),
         )
         .subcommand(
             clap::Command::new("dslx2pipeline-eco")
@@ -3810,6 +3857,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir2g8r", subm)) => {
             ir2gates::handle_ir2g8r(subm, &config);
+        }
+        Some(("g8r-optimize", subm)) => {
+            if let Err(error) = g8r_optimize::handle_g8r_optimize(subm) {
+                report_cli_error::report_cli_error_and_exit(&error, Some("g8r-optimize"), vec![]);
+            }
         }
         Some(("dslx2pipeline-eco", subm)) => {
             dslx2pipeline_eco::handle_dslx2pipeline_eco(subm, &config);

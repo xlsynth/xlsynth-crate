@@ -11,32 +11,30 @@ use xlsynth_pir::random_inputs::generate_uniform_irbits_with_rng;
 
 use crate::aig::SequentialGateFn;
 use crate::aig::cut_db_rewrite;
-use crate::aig::dce;
 use crate::aig::fanout::fanout_histogram;
 use crate::aig::find_structures;
-use crate::aig::fraig;
 use crate::aig::fraig::FraigPassStat;
 use crate::aig::gate;
 use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
 use crate::aig::logical_effort;
 use crate::aig::logical_effort::compute_logical_effort_min_delay;
-use crate::aig::reassociation;
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use crate::aig_serdes::emit_netlist;
 use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
+use crate::gate_fn_optimize::{GateFnOptimizeOptions, optimize_gate_fn};
 use crate::gatify::ir2gate;
 use crate::ir2gates::{self, DEFAULT_ENABLE_FORMAL_ARRAY_ALIAS_ANALYSIS};
 use crate::prove_gate_fn_equiv_common::GateFormalBackend;
-use crate::prove_gate_fn_equiv_sat::{DEFAULT_CADICAL_TERMINATE_LIMIT, GateFormalOptions};
+use crate::prove_gate_fn_equiv_sat::DEFAULT_CADICAL_TERMINATE_LIMIT;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_prover::prover::SolverChoice;
 
-pub const DEFAULT_MAX_FRAIG_SIM_SAMPLES: usize = 8 * 1024;
+pub use crate::gate_fn_optimize::DEFAULT_MAX_FRAIG_SIM_SAMPLES;
 
 fn default_cadical_terminate_limit() -> u32 {
     DEFAULT_CADICAL_TERMINATE_LIMIT
@@ -288,6 +286,26 @@ impl Default for CanonicalG8rOptions {
 }
 
 impl CanonicalG8rOptions {
+    /// Expands the post-gatification subset into typed GateFn options.
+    pub fn to_gate_fn_optimize_options(&self) -> GateFnOptimizeOptions {
+        GateFnOptimizeOptions {
+            fraig: self.fraig,
+            reassociation: self.reassociation,
+            max_fraig_sim_samples: Some(self.max_fraig_sim_samples),
+            gate_formal_backend: self.gate_formal_backend,
+            cadical_terminate_limit: self.cadical_terminate_limit,
+            cut_db: self
+                .cut_db_rewrite
+                .then(crate::cut_db::loader::CutDb::load_default),
+            cut_db_rewrite_max_iterations:
+                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+            cut_db_rewrite_max_cuts_per_node:
+                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+            cut_db_enable_large_cone_rewrite: self.cut_db_enable_large_cone_rewrite,
+            cut_db_rewrite_mode: self.cut_db_rewrite_mode,
+        }
+    }
+
     /// Expands canonical lowering knobs into the concrete process options.
     pub fn to_process_ir_path_options(
         &self,
@@ -335,6 +353,23 @@ impl CanonicalG8rOptions {
             cut_db_enable_large_cone_rewrite: self.cut_db_enable_large_cone_rewrite,
             cut_db_rewrite_mode: self.cut_db_rewrite_mode,
             prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
+        }
+    }
+}
+
+impl From<&Options> for GateFnOptimizeOptions {
+    fn from(options: &Options) -> Self {
+        Self {
+            fraig: options.fraig,
+            reassociation: options.reassociation,
+            max_fraig_sim_samples: options.max_fraig_sim_samples,
+            gate_formal_backend: options.gate_formal_backend,
+            cadical_terminate_limit: options.cadical_terminate_limit,
+            cut_db: options.cut_db.clone(),
+            cut_db_rewrite_max_iterations: options.cut_db_rewrite_max_iterations,
+            cut_db_rewrite_max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
+            cut_db_enable_large_cone_rewrite: options.cut_db_enable_large_cone_rewrite,
+            cut_db_rewrite_mode: options.cut_db_rewrite_mode,
         }
     }
 }
@@ -660,77 +695,9 @@ pub fn process_ir_text_with_gatefn(
         }
     }
 
-    let pre_dce_gate_count = gate_fn.gates.len();
-    gate_fn = dce::dce(&gate_fn);
-    log::info!(
-        "pre-fraig dce: gate count {} -> {}",
-        pre_dce_gate_count,
-        gate_fn.gates.len()
-    );
-    gate_fn.check_invariants_with_debug_assert();
-
-    // Prepare to capture FRAIG statistics if enabled.
-    let mut fraig_pass_stat: Option<FraigPassStat> = None;
-    if options.fraig {
-        log::info!(
-            "fraig is enabled for GateFn {:?} with {} nodes",
-            gate_fn.name,
-            gate_fn.gates.len()
-        );
-        let live_node_count = get_id_to_use_count(&gate_fn).len().max(1);
-        let scaled = (live_node_count as f64 / 8.0).ceil() as usize;
-        // Round the scaled value to the nearest 256, it must be more than zero.
-        let uncapped = round_up_to_nearest_multiple(scaled, 256);
-        let sim_samples = options
-            .max_fraig_sim_samples
-            .map_or(uncapped, |max_samples| uncapped.min(max_samples));
-        log::info!(
-            "fraig sim samples; live node count: {}, scaled: {}, uncapped: {}, max: {:?}, result: {}",
-            live_node_count,
-            scaled,
-            uncapped,
-            options.max_fraig_sim_samples,
-            sim_samples
-        );
-        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        let gate_formal_options = GateFormalOptions::default()
-            .with_cadical_terminate_limit(options.cadical_terminate_limit);
-        let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend_and_options(
-            &gate_fn,
-            sim_samples,
-            options.gate_formal_backend,
-            gate_formal_options,
-            &mut rng,
-        );
-        let result = fraig_result.map_err(|e| format!("Fraig optimization failed: {e}"))?;
-        gate_fn = result.optimized_fn;
-        fraig_pass_stat = Some(result.stat);
-    }
-
-    if options.reassociation {
-        log::info!("reassociation enabled");
-        gate_fn = reassociation::reassociate_gatefn(&gate_fn);
-    }
-
-    if let Some(db) = options.cut_db.as_ref() {
-        log::info!("cut-db rewrite enabled");
-        gate_fn = cut_db_rewrite::rewrite_gatefn_with_cut_db(
-            &gate_fn,
-            db.as_ref(),
-            cut_db_rewrite::RewriteOptions {
-                max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
-                max_iterations: options.cut_db_rewrite_max_iterations,
-                verify_area_costing: false,
-                verify_delay_costing: false,
-                enable_large_cone_rewrite: options.cut_db_enable_large_cone_rewrite,
-                mode: options.cut_db_rewrite_mode,
-            },
-        );
-        if options.reassociation {
-            log::info!("post-cut-db reassociation enabled");
-            gate_fn = reassociation::reassociate_gatefn(&gate_fn);
-        }
-    }
+    let optimize_outcome = optimize_gate_fn(gate_fn, &GateFnOptimizeOptions::from(options))?;
+    gate_fn = optimize_outcome.gate_fn;
+    let fraig_pass_stat = optimize_outcome.fraig_pass_stat;
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
 
@@ -1006,18 +973,6 @@ pub fn process_ir_path_for_cli(
 ) -> Ir2GatesSummaryStats {
     let (_gate_fn, stats) = process_ir_path_with_gatefn(ir_path, options);
     stats
-}
-
-fn round_up_to_nearest_multiple<T>(x: T, y: T) -> T
-where
-    T: std::ops::Mul<Output = T>
-        + std::ops::Add<Output = T>
-        + std::ops::Sub<Output = T>
-        + std::ops::Div<Output = T>
-        + num_traits::One
-        + Copy,
-{
-    ((x + y - T::one()) / y) * y
 }
 
 fn format_aig_operand(op: &gate::AigOperand) -> String {

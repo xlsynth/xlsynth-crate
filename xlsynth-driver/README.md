@@ -613,6 +613,58 @@ block clock port; the native representation does not include an alternate
 clock-edge selector. Combinational consumers accept only designs with no clock
 and no registers, converting those designs to `GateFn` after loading.
 
+### `g8r-optimize`: run post-gatification optimizations
+
+Runs the same post-gatification optimization sequence used for function inputs
+by `ir2g8r`, starting from an existing `.g8r` or `.g8rbin` design. The input
+must be clockless and register-free. This makes it possible to gatify once,
+save a checkpoint, and independently exercise FRAIG, reassociation, or cut-DB
+rewriting.
+
+- By default, the optimized text `.g8r` design is emitted to stdout.
+- `--quiet=<BOOL>` – suppress text `.g8r` output. Default `false`; useful when
+  profiling or when another output flag is used.
+- `--bin-out <PATH>` – write the optimized design as `.g8rbin`.
+- `--aiger-out <PATH>` – write AIGER, using `.aag` for ASCII and `.aig` for
+  binary output.
+- `--stats-out <PATH>` – write deterministic input/output AIG node and level
+  metrics plus FRAIG statistics as JSON.
+- `--netlist-out <PATH>` – write the optimized human-readable gate netlist.
+- `--fraig=<BOOL>` – run FRAIG. Default `true`.
+- `--reassociation=<BOOL>` – rebalance single-fanout AND supergates after
+  FRAIG and again after cut-DB when cut-DB is enabled. Default `true`.
+- `--cut-db-rewrite=<BOOL>` – run cut-DB rewriting. Default `true`.
+- `--max-fraig-sim-samples=<N>` – cap random FRAIG simulation samples.
+  Default `8192`.
+- `--gate-formal-backend=<BACKEND>` – select the FRAIG formal backend;
+  FRAIG currently requires `cadical`. Default `cadical`.
+- `--cadical-terminate-limit=<N>` – set the deterministic per-query CaDiCaL
+  termination-check budget. Default `1000`; `0` is unlimited.
+- `--cut-db-enable-large-cone-rewrite=<BOOL>` – enable large-cone cut-DB
+  phases. Default `true`.
+- `--cut-db-rewrite-mode=<delay|balanced|area>` – select the cut-DB QoR
+  policy. Default `delay`.
+
+Create a gatification checkpoint and run only reassociation:
+
+```shell
+xlsynth-driver ir2g8r my_module.opt.ir \
+  --fraig=false \
+  --reassociation=false \
+  --cut-db-rewrite=false \
+  --bin-out gatified.g8rbin >/dev/null
+
+xlsynth-driver g8r-optimize gatified.g8rbin \
+  --fraig=false \
+  --reassociation=true \
+  --cut-db-rewrite=false \
+  --quiet=true \
+  --bin-out reassociated.g8rbin \
+  --stats-out reassociated.stats.json
+```
+
+Similarly, a FRAIG-only run uses `--fraig=true --reassociation=false --cut-db-rewrite=false`, and a cut-DB-only run uses `--fraig=false --reassociation=false --cut-db-rewrite=true`.
+
 ### `ir-prep-for-gates`: IR to prepared residual PIR
 
 Runs the same `prep_for_gatify` stage used by `ir2gates` / `ir2g8r`, then emits

@@ -2,6 +2,7 @@
 
 use clap::ArgMatches;
 use xlsynth_g8r::aig::cut_db_rewrite::CutDbRewriteMode;
+use xlsynth_g8r::gate_fn_optimize::GateFnOptimizeOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, DEFAULT_MAX_FRAIG_SIM_SAMPLES};
@@ -125,6 +126,40 @@ fn parse_cut_db_rewrite_mode_or_exit(matches: &ArgMatches) -> CutDbRewriteMode {
             eprintln!("Invalid --cut-db-rewrite-mode: {:?}", value);
             std::process::exit(1);
         }
+    }
+}
+
+/// Parses the flags shared by post-gatification GateFn optimization clients.
+pub(crate) fn parse_gate_fn_optimize_options(matches: &ArgMatches) -> GateFnOptimizeOptions {
+    let defaults = CanonicalG8rOptions::default();
+    let cut_db_rewrite = parse_bool(matches, "cut-db-rewrite", defaults.cut_db_rewrite);
+    GateFnOptimizeOptions {
+        fraig: parse_bool(matches, "fraig", defaults.fraig),
+        reassociation: parse_bool(matches, "reassociation", defaults.reassociation),
+        max_fraig_sim_samples: Some(parse_usize_or_exit(
+            matches,
+            "max_fraig_sim_samples",
+            "--max-fraig-sim-samples",
+            DEFAULT_MAX_FRAIG_SIM_SAMPLES,
+        )),
+        gate_formal_backend: parse_gate_formal_backend_or_exit(matches),
+        cadical_terminate_limit: parse_u32_or_exit(
+            matches,
+            "cadical_terminate_limit",
+            "--cadical-terminate-limit",
+            DEFAULT_CADICAL_TERMINATE_LIMIT,
+        ),
+        cut_db: cut_db_rewrite.then(xlsynth_g8r::cut_db::loader::CutDb::load_default),
+        cut_db_rewrite_max_iterations:
+            xlsynth_g8r::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+        cut_db_rewrite_max_cuts_per_node:
+            xlsynth_g8r::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+        cut_db_enable_large_cone_rewrite: parse_bool(
+            matches,
+            "cut-db-enable-large-cone-rewrite",
+            defaults.cut_db_enable_large_cone_rewrite,
+        ),
+        cut_db_rewrite_mode: parse_cut_db_rewrite_mode_or_exit(matches),
     }
 }
 
