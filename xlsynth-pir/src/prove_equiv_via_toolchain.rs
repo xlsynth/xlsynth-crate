@@ -218,7 +218,14 @@ mod tests {
     fn toolchain_checker_watchdog_interrupts_slow_process() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("slow-checker");
-        std::fs::write(&exe, "#!/bin/sh\nexec sleep 10\n").unwrap();
+        // Stay alive without depending on an external `sleep` executable.
+        std::fs::write(
+            &exe,
+            r#"#!/bin/sh
+while :; do :; done
+"#,
+        )
+        .unwrap();
         let mut permissions = std::fs::metadata(&exe).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&exe, permissions).unwrap();
@@ -228,12 +235,13 @@ mod tests {
             "package rhs\n",
             None,
             exe,
-            Duration::from_millis(10),
+            Duration::from_millis(100),
         );
-        assert!(matches!(
-            result,
-            ToolchainEquivResult::TimedOutOrInterrupted(msg)
-                if msg.contains("tool timed out after 10 ms")
-        ));
+        match result {
+            ToolchainEquivResult::TimedOutOrInterrupted(message) => {
+                assert_eq!(message, "tool timed out after 100 ms");
+            }
+            other => panic!("expected watchdog timeout, got: {other:?}"),
+        }
     }
 }

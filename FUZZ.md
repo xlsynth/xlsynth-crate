@@ -79,16 +79,48 @@ Primarily tests:
 - Canonical Signed Digit (CSD) / Non-Adjacent Form (NAF) decomposition plus
   shift/add/sub array-add accumulation remain equivalent
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gatify.rs
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_g8r_evaluation.rs
 
-Generates gatify-supported PIR, including PIR extension operations, then
-converts it to `GateFn` with folding on and off and checks equivalence.
-Product-pair operations and opt-in XLS `gate` remain outside this target.
+Generates random gatify-supported PIR functions with up to 64 generated nodes
+and runs them through the canonical production g8r pipeline with all default
+optimization stages enabled. It then
+differentially evaluates the source PIR and optimized `GateFn` over 1,024
+deterministic, corner-biased input samples. Input generation is seeded from the
+generated IR text so coverage-guided entropy is dedicated to exploring program
+structure instead of stimulus values.
 
 Primarily tests:
 
-- IR→gates conversion correctness with/without folding
-- Equivalence of different conversion modes
+- End-to-end prep, gatify, FRAIG, reassociation, and cut-DB rewrite correctness
+- Aggregate input/output flattening stays aligned between PIR and g8r evaluation
+- Broad concrete-value equivalence at higher throughput than formal proof
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_g8r_formal.rs
+
+Generates random gatify-supported PIR functions with up to 64 generated nodes,
+runs the same canonical production g8r pipeline, exports the source and
+optimized gate forms to standard XLS IR, and
+asks the in-process Bitwuzla prover to establish formal equivalence. Each solver
+query has a 10-second time limit and a 512-MiB memory limit; resource-limit
+inconclusive results are not treated as correctness failures.
+
+Primarily tests:
+
+- Exhaustive source-to-final-g8r equivalence for solver-proven samples
+- End-to-end correctness across the complete default g8r optimization pipeline
+- Gate-to-IR export remains compatible with formal equivalence checking
+
+Both `fuzz_g8r_evaluation` and `fuzz_g8r_formal` require Bitwuzla because the
+canonical production g8r pipeline enables formal array alias analysis. Run the
+targets against a system Bitwuzla installation with:
+
+```bash
+cargo fuzz run --features=with-bitwuzla-system --sanitizer=none fuzz_g8r_evaluation
+cargo fuzz run --features=with-bitwuzla-system --sanitizer=none fuzz_g8r_formal
+```
+
+Use `with-bitwuzla-built` instead of `with-bitwuzla-system` to build the solver
+from source.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_fn_roundtrip.rs
 
