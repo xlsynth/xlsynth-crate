@@ -110,6 +110,18 @@ Primarily tests:
 - End-to-end correctness across the complete default g8r optimization pipeline
 - Gate-to-IR export remains compatible with formal equivalence checking
 
+Both `fuzz_g8r_evaluation` and `fuzz_g8r_formal` require Bitwuzla because the
+canonical production g8r pipeline enables formal array alias analysis. Run the
+targets against a system Bitwuzla installation with:
+
+```bash
+cargo fuzz run --features=with-bitwuzla-system --sanitizer=none fuzz_g8r_evaluation
+cargo fuzz run --features=with-bitwuzla-system --sanitizer=none fuzz_g8r_formal
+```
+
+Use `with-bitwuzla-built` instead of `with-bitwuzla-system` to build the solver
+from source.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_fn_roundtrip.rs
 
 Builds a random `GateFn`, serializes to text, parses it back, and checks structural equivalence of the original vs parsed `GateFn`.
