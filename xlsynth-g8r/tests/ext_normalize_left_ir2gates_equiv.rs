@@ -19,6 +19,208 @@ fn gatify_for_test(pir_fn: &ir::Fn) -> xlsynth_g8r::aig::GateFn {
         .gate_fn
 }
 
+fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
+    let mut orig_desugared = orig_fn.clone();
+    desugar_extensions_in_fn(&mut orig_desugared).expect("desugar original PIR");
+    let mut prepared_desugared = prepared_fn.clone();
+    desugar_extensions_in_fn(&mut prepared_desugared).expect("desugar prepared PIR");
+    let orig_pkg_text = format!("package orig\n\ntop {}", orig_desugared);
+    let prepared_pkg_text = format!("package prepared\n\ntop {}", prepared_desugared);
+    check_equivalence::check_equivalence_via_toolchain(&orig_pkg_text, &prepared_pkg_text)
+        .expect("prepared PIR should be equivalent to original PIR");
+}
+
+fn build_adjusted_clz_shift_ir(offset: usize) -> String {
+    format!(
+        r#"package sample
+
+top fn adjusted_clz_shift(input: bits[20] id=1) -> bits[20] {{
+  reversed: bits[20] = reverse(input, id=2)
+  one_hot: bits[21] = one_hot(reversed, lsb_prio=true, id=3)
+  clz: bits[5] = encode(one_hot, id=4)
+  offset: bits[5] = literal(value={offset}, id=5)
+  amount: bits[5] = add(clz, offset, id=6)
+  ret shifted: bits[20] = shll(input, amount, id=7)
+}}
+"#
+    )
+}
+
+fn prep_adjusted_clz_shift(offset: usize) -> (ir::Fn, ir::Fn) {
+    let original = parse_top_fn(&build_adjusted_clz_shift_ir(offset));
+    let prepared = prep_for_gatify(
+        &original,
+        None,
+        PrepForGatifyOptions {
+            enable_rewrite_prio_encode: true,
+            enable_rewrite_normalize_left: true,
+            ..PrepForGatifyOptions::default()
+        },
+    );
+    (original, prepared)
+}
+
+fn build_zero_extended_adjusted_clz_shift_ir(offset: usize) -> String {
+    format!(
+        r#"package sample
+
+top fn zero_extended_adjusted_clz_shift(input: bits[20] id=1) -> bits[20] {{
+  reversed: bits[20] = reverse(input, id=2)
+  one_hot: bits[21] = one_hot(reversed, lsb_prio=true, id=3)
+  clz: bits[5] = encode(one_hot, id=4)
+  offset: bits[5] = literal(value={offset}, id=5)
+  wrapped_amount: bits[5] = add(clz, offset, id=6)
+  amount: bits[6] = zero_ext(wrapped_amount, new_bit_count=6, id=7)
+  ret shifted: bits[20] = shll(input, amount, id=8)
+}}
+"#
+    )
+}
+
+#[test]
+fn prep_rewrites_nonwrapping_adjusted_clz_shift() {
+    // For a 20-bit input and 5-bit shift amount, 20 + 11 = 31 is the
+    // largest adjusted CLZ value that remains representable without wrapping.
+    let (original, prepared) = prep_adjusted_clz_shift(11);
+    assert!(
+        prepared.nodes.iter().any(|node| matches!(
+            node.payload,
+            ir::NodePayload::ExtNormalizeLeft {
+                shift_offset: 11,
+                normalized_bit_count: 20,
+                ..
+            }
+        )),
+        "expected lossless adjusted CLZ shift to become ext_normalize_left:\n{prepared}"
+    );
+    assert!(
+        !prepared
+            .nodes
+            .iter()
+            .any(|node| matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Shll, _, _))),
+        "did not expect generic shll to remain:\n{prepared}"
+    );
+    assert_ir_fns_equivalent(&original, &prepared);
+}
+
+#[test]
+fn prep_keeps_wrapping_adjusted_clz_shift() {
+    // The 5-bit amount (clz(input) + 29) mod 32 can wrap, so replacing it
+    // with an unbounded ext_normalize_left offset would change semantics.
+    let (original, prepared) = prep_adjusted_clz_shift(29);
+    assert!(
+        prepared.nodes.iter().any(|node| matches!(
+            node.payload,
+            ir::NodePayload::ExtClz {
+                offset: 29,
+                new_bit_count: 5,
+                ..
+            }
+        )),
+        "expected adjusted ext_clz to remain as the shift amount:\n{prepared}"
+    );
+    assert!(
+        prepared
+            .nodes
+            .iter()
+            .any(|node| matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Shll, _, _))),
+        "expected generic shll to remain for wrapping shift amount:\n{prepared}"
+    );
+    assert!(
+        !prepared
+            .nodes
+            .iter()
+            .any(|node| matches!(node.payload, ir::NodePayload::ExtNormalizeLeft { .. })),
+        "did not expect wrapping shift to become ext_normalize_left:\n{prepared}"
+    );
+    assert_ir_fns_equivalent(&original, &prepared);
+}
+
+#[test]
+fn prep_rewrites_zero_extended_nonwrapping_adjusted_clz_shift() {
+    let original = parse_top_fn(&build_zero_extended_adjusted_clz_shift_ir(11));
+    let prepared = prep_for_gatify(
+        &original,
+        None,
+        PrepForGatifyOptions {
+            enable_rewrite_prio_encode: true,
+            enable_rewrite_normalize_left: true,
+            ..PrepForGatifyOptions::default()
+        },
+    );
+    assert!(
+        prepared.nodes.iter().any(|node| matches!(
+            node.payload,
+            ir::NodePayload::ExtNormalizeLeft {
+                shift_offset: 11,
+                normalized_bit_count: 20,
+                ..
+            }
+        )),
+        "expected zero-extended lossless amount to become ext_normalize_left:\n{prepared}"
+    );
+    assert!(
+        !prepared
+            .nodes
+            .iter()
+            .any(|node| matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Shll, _, _))),
+        "did not expect generic shll to remain:\n{prepared}"
+    );
+    assert_ir_fns_equivalent(&original, &prepared);
+}
+
+#[test]
+fn prep_keeps_zero_extended_wrapping_adjusted_clz_shift() {
+    // Widening the result of the original 5-bit add must not expose the
+    // unwrapped value: for clz(input) == 3, (3 + 29) mod 32 is zero.
+    let original = parse_top_fn(&build_zero_extended_adjusted_clz_shift_ir(29));
+    let prepared = prep_for_gatify(
+        &original,
+        None,
+        PrepForGatifyOptions {
+            enable_rewrite_prio_encode: true,
+            enable_rewrite_normalize_left: true,
+            ..PrepForGatifyOptions::default()
+        },
+    );
+    assert!(
+        prepared.nodes.iter().any(|node| matches!(
+            node.payload,
+            ir::NodePayload::ExtClz {
+                offset: 29,
+                new_bit_count: 5,
+                ..
+            }
+        )),
+        "expected the wrapped 5-bit ext_clz to remain:\n{prepared}"
+    );
+    assert!(
+        prepared.nodes.iter().any(|node| matches!(
+            node.payload,
+            ir::NodePayload::ZeroExt {
+                new_bit_count: 6,
+                ..
+            }
+        )),
+        "expected zero-extension after the wrapped amount to remain:\n{prepared}"
+    );
+    assert!(
+        prepared
+            .nodes
+            .iter()
+            .any(|node| matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Shll, _, _))),
+        "expected generic shll to remain for the wrapped shift amount:\n{prepared}"
+    );
+    assert!(
+        !prepared
+            .nodes
+            .iter()
+            .any(|node| matches!(node.payload, ir::NodePayload::ExtNormalizeLeft { .. })),
+        "did not expect wrapped shift to become ext_normalize_left:\n{prepared}"
+    );
+    assert_ir_fns_equivalent(&original, &prepared);
+}
+
 #[test]
 fn direct_ext_normalize_left_matches_desugared_semantics() {
     let pir_fn = parse_top_fn(
