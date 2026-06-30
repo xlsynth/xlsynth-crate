@@ -549,11 +549,17 @@ fn rewrite_left_normalize_shift_to_ext_normalize_left(f: &mut ir::Fn) -> usize {
         let NodePayload::ExtClz {
             arg,
             offset: shift_offset,
-            ..
+            new_bit_count,
         } = f.get_node(shift_amount).payload
         else {
             continue;
         };
+        let Some(lossless_width) = lossless_ext_clz_output_width(f, arg, shift_offset) else {
+            continue;
+        };
+        if new_bit_count < lossless_width {
+            continue;
+        }
         let Some(normalized_bit_count) = zero_extended_shift_input_width(f, shift_input, arg)
         else {
             continue;
