@@ -264,13 +264,20 @@ fn ext_clz_for_adjustment(
     }
 }
 
+/// Matches an `ext_clz` whose value can be widened without exposing prior
+/// wraparound.
 fn widened_ext_clz(f: &ir::Fn, nr: NodeRef, output_width: usize) -> Option<(NodeRef, usize)> {
     match f.get_node(nr).payload {
         NodePayload::ExtClz {
             arg,
             offset,
             new_bit_count,
-        } if new_bit_count <= output_width => Some((arg, offset)),
+        } if new_bit_count <= output_width
+            && lossless_ext_clz_output_width(f, arg, offset)
+                .is_some_and(|lossless_width| new_bit_count >= lossless_width) =>
+        {
+            Some((arg, offset))
+        }
         _ => None,
     }
 }
