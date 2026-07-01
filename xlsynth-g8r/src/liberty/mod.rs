@@ -7,6 +7,7 @@ pub mod descriptor;
 pub mod indexed;
 pub mod liberty_parser;
 pub mod load;
+pub mod lut;
 pub mod model;
 pub mod parser;
 pub mod proto_info;

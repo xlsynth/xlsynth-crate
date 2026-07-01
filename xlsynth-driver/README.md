@@ -343,6 +343,19 @@ xlsynth-driver gv-eval \
   --toggle-output-json /path/to/activity.json
 ```
 
+The same ordered stimulus can drive dynamic-power analysis:
+
+```shell
+xlsynth-driver gv-eval \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.textproto \
+  --input-irvals /path/to/stimulus.irvals \
+  --power-output-json /path/to/power.json \
+  --primary-input-transition 0.01 \
+  --module-output-load 0.0 \
+  --cycle-time 1.0
+```
+
 Flags:
 
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
@@ -351,6 +364,33 @@ Flags:
 - Exactly one positional typed argument tuple or `--input-irvals <PATH>` is required.
 - `--toggle-output-json <PATH>`: with `--input-irvals`, write source-labeled
   toggle activity JSON. At least two input samples are required.
+- `--power-output-json <PATH>`: with `--input-irvals`, write sample-driven
+  dynamic-energy JSON. At least two input samples and Liberty
+  `nominal_voltage` are required.
+- `--primary-input-transition <TIME>`: input rise/fall transition time used by
+  power analysis. Defaults to `0.01` in the Liberty time unit.
+- `--module-output-load <CAPACITANCE>`: external load added to every design
+  output bit. Defaults to `0` in the Liberty capacitance unit.
+- `--cycle-time <TIME>`: optional time represented by each adjacent sample
+  pair. When present, the report includes average dynamic power.
+
+Power analysis is edge-based and intentionally excludes leakage and glitches.
+It computes internal energy from Liberty `internal_power` tables and switching
+energy as `0.5 * C * V^2` for each observed rise and fall. Net capacitance is
+the sum of connected cell-input capacitances plus the requested design-output
+load. Internal-power table values already have the Liberty energy scale
+(`voltage_unit^2 * capacitance_unit`), so `nominal_voltage` is applied only to
+the explicit capacitive-switching term.
+
+Rise and fall slews are propagated separately as weighted histograms. The
+analyzer creates 32 logarithmically spaced buckets over the transition range
+present in the Liberty timing and power tables; each lookup uses the arithmetic
+midpoint of its bucket. Output transitions with multiple simultaneously
+eligible related inputs are fractionally attributed so one observed output edge
+still has total weight one. Liberty `when` expressions use the stable pin
+values from the earlier sample in each adjacent sample pair. Consequently, an
+`.irvals` record should represent one stable cycle boundary rather than an
+intra-cycle event trace.
 
 The toggle JSON has this structure:
 
