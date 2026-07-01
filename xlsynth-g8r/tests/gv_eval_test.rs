@@ -349,6 +349,92 @@ endmodule
 }
 
 #[test]
+fn dynamic_power_uses_owner_output_direction_for_negative_unate_cells() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+units: {
+  time_unit: "ns"
+  capacitance_unit: "pf"
+  voltage_unit: "V"
+}
+nominal_voltage: 1.0
+cells: {
+  name: "INV"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: {
+    name_string_id: 2
+    direction: OUTPUT
+    function_string_id: 3
+    internal_power: {
+      related_pin_string_ids: 1
+      tables: {
+        transition: POWER_TRANSITION_RISE
+        shape_id: 1
+        values: 10.0
+      }
+      tables: {
+        transition: POWER_TRANSITION_FALL
+        shape_id: 1
+        values: 20.0
+      }
+    }
+  }
+}
+lut_shapes: {}
+interned_strings: ["A", "Y", "!A"]
+"#;
+    let netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  INV u_inv (.A(a), .Y(y));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default())
+        .expect("build negative-unate power evaluation model");
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
+        .expect("reload negative-unate power library");
+    let options = GvDynamicPowerOptions {
+        primary_input_transition: 1.0,
+        module_output_load: 0.0,
+        cycle_time: None,
+    };
+
+    let output_fall = model
+        .analyze_dynamic_power(
+            &library,
+            &[
+                IrValue::parse_typed("(bits[1]:0)").unwrap(),
+                IrValue::parse_typed("(bits[1]:1)").unwrap(),
+            ],
+            options,
+        )
+        .expect("analyze inverter output fall");
+    assert_eq!(output_fall.cell_internal_energy, 20.0);
+    assert_eq!(
+        output_fall.instances[0].pin_internal_energy[0].internal_energy,
+        20.0
+    );
+
+    let output_rise = model
+        .analyze_dynamic_power(
+            &library,
+            &[
+                IrValue::parse_typed("(bits[1]:1)").unwrap(),
+                IrValue::parse_typed("(bits[1]:0)").unwrap(),
+            ],
+            options,
+        )
+        .expect("analyze inverter output rise");
+    assert_eq!(output_rise.cell_internal_energy, 10.0);
+    assert_eq!(
+        output_rise.instances[0].pin_internal_energy[0].internal_energy,
+        10.0
+    );
+}
+
+#[test]
 fn sequential_cells_are_rejected_before_projection() {
     let liberty = r#"
 format_magic: 5496997758177923663

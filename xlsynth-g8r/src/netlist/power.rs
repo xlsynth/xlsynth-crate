@@ -1266,12 +1266,15 @@ fn calculate_internal_energy(
         let cell = &library.cells[topology_instance.cell];
         let liberty_pin = topology_instance.liberty_pins[event.owner_pin];
         let group = &cell.pins[liberty_pin].internal_power[event.group];
+        // Directional power tables describe the owning pin's transition. The
+        // related/source pin transition instead selects the slew histogram.
+        let power_rise = event.owner_output_rise.unwrap_or(event.source_rise);
         let exact: Vec<_> = group
             .tables
             .iter()
             .filter(|table| {
                 table.transition
-                    == if event.source_rise {
+                    == if power_rise {
                         PowerTransition::Rise
                     } else {
                         PowerTransition::Fall
