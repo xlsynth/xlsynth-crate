@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.60.0"
+version = "0.61.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -20,7 +20,7 @@ default = []
 clap = ["dep:clap"]
 
 [dependencies]
-xlsynth-sys = {path = "../xlsynth-sys", version = "0.60.0"}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.61.0"}
 thiserror = "1"
 clap = { version = "4.5.21", features = ["derive"], optional = true }
 log = "0.4"

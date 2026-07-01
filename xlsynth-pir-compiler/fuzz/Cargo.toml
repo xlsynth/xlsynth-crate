@@ -6,7 +6,7 @@ warnings = "deny"
 
 [package]
 name = "xlsynth-pir-compiler-fuzz"
-version = "0.60.0"
+version = "0.61.0"
 publish = false
 edition = "2024"
 
@@ -15,9 +15,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-xlsynth = { path = "../../xlsynth", version = "0.60.0" }
-xlsynth-pir-compiler = { path = "..", version = "0.60.0" }
-xlsynth-pir = { path = "../../xlsynth-pir", version = "0.60.0" }
+xlsynth = { path = "../../xlsynth", version = "0.61.0" }
+xlsynth-pir-compiler = { path = "..", version = "0.61.0" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.61.0" }
 
 [[bin]]
 name = "fuzz_pir_function_compiler_eval_equiv"
