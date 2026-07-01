@@ -6,15 +6,17 @@ use xlsynth_test_helpers::compare_golden_text;
 
 const COMBINATIONAL_LIBERTY: &str = r#"
 format_magic: 5496997758177923663
+units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
+nominal_voltage: 1.0
 cells: {
   name: "AND2"
-  pins: { name_string_id: 1 direction: INPUT }
-  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
+  pins: { name_string_id: 2 direction: INPUT capacitance: 1.0 }
   pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
 }
 cells: {
   name: "INV"
-  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
   pins: { name_string_id: 3 direction: OUTPUT function_string_id: 5 }
 }
 interned_strings: ["A", "B", "Y", "A & B", "!A"]
@@ -92,6 +94,55 @@ endmodule
         &std::fs::read_to_string(toggle_json_path).expect("read toggle JSON"),
         "tests/test_gv_eval_toggles.golden.txt",
     );
+}
+
+#[test]
+fn gv_eval_writes_dynamic_power_json() {
+    let netlist = r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  wire n;
+  AND2 u_and (.A(a), .B(b), .Y(n));
+  INV u_inv (.A(n), .Y(y));
+endmodule
+"#;
+    let temp_dir = write_fixture(netlist, COMBINATIONAL_LIBERTY);
+    let irvals_path = temp_dir.path().join("samples.irvals");
+    let power_json_path = temp_dir.path().join("power.json");
+    std::fs::write(
+        &irvals_path,
+        "(bits[1]:0, bits[1]:0)\n(bits[1]:1, bits[1]:0)\n(bits[1]:1, bits[1]:1)\n",
+    )
+    .expect("write input samples");
+
+    let output = run_gv_eval(
+        &temp_dir,
+        &[
+            "--input-irvals",
+            irvals_path.to_str().unwrap(),
+            "--power-output-json",
+            power_json_path.to_str().unwrap(),
+            "--module-output-load",
+            "2",
+            "--cycle-time",
+            "4",
+        ],
+    );
+    assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(power_json_path).expect("read power JSON"))
+            .expect("parse power JSON");
+    assert_eq!(report["slew_buckets"].as_array().unwrap().len(), 32);
+    assert_eq!(report["primary_input_transition"], 0.01);
+    assert_eq!(report["module_output_load"], 2.0);
+    assert_eq!(report["cycle_time"], 4.0);
+    assert_eq!(report["cell_internal_energy"], 0.0);
+    assert_eq!(report["primary_input_switching_energy"], 1.0);
+    assert_eq!(report["cell_output_switching_energy"], 1.5);
+    assert_eq!(report["total_dynamic_energy"], 2.5);
+    assert_eq!(report["average_dynamic_power"], 0.3125);
 }
 
 #[test]

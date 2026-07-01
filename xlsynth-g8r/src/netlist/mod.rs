@@ -15,6 +15,7 @@ pub mod integrity;
 pub mod io;
 pub mod normalized;
 pub mod parse;
+pub mod power;
 pub mod report;
 pub mod sta;
 pub mod stages;

@@ -6,6 +6,7 @@ use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, GvToggleAggregate, PinConnection, TogglePinConnection, load_labeled_netlist_aig,
 };
 use xlsynth_g8r::netlist::parse::PortDirection;
+use xlsynth_g8r::netlist::power::{GV_POWER_SLEW_BUCKET_COUNT, GvDynamicPowerOptions};
 
 fn write_fixture(
     netlist: &str,
@@ -163,6 +164,7 @@ cells: {
   pins: { name_string_id: 1 direction: INPUT }
   pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
 }
+
 interned_strings: ["A", "Y"]
 "#;
     let netlist = r#"
@@ -203,6 +205,147 @@ endmodule
     );
     assert_eq!(activity.instances[1].pins[1].toggle_count, 2);
     assert_eq!(activity.instances[1].pins[1].toggle_rate, 1.0);
+}
+
+#[test]
+fn dynamic_power_uses_slew_histograms_loads_and_previous_when_values() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+units: {
+  time_unit: "ns"
+  capacitance_unit: "pf"
+  voltage_unit: "V"
+}
+nominal_voltage: 2.0
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT capacitance: 2.0 }
+  pins: {
+    name_string_id: 2
+    direction: OUTPUT
+    function_string_id: 1
+    timing_arcs: {
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_POSITIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: {
+        kind: TIMING_TABLE_KIND_RISE_TRANSITION
+        shape_id: 1
+        values: 2.0
+        values: 2.0
+        values: 2.0
+        values: 2.0
+      }
+      tables: {
+        kind: TIMING_TABLE_KIND_FALL_TRANSITION
+        shape_id: 1
+        values: 2.0
+        values: 2.0
+        values: 2.0
+        values: 2.0
+      }
+    }
+    internal_power: {
+      related_pin_string_ids: 1
+      when_string_id: 3
+      tables: {
+        transition: POWER_TRANSITION_RISE
+        shape_id: 2
+        values: 10.0
+        values: 10.0
+        values: 10.0
+        values: 10.0
+      }
+      tables: {
+        transition: POWER_TRANSITION_FALL
+        shape_id: 2
+        values: 20.0
+        values: 20.0
+        values: 20.0
+        values: 20.0
+      }
+    }
+  }
+}
+lu_table_templates: {
+  kind: LUT_TEMPLATE_KIND_TIMING
+  name: "timing"
+  variable_1: LUT_VARIABLE_INPUT_NET_TRANSITION
+  variable_2: LUT_VARIABLE_TOTAL_OUTPUT_NET_CAPACITANCE
+  index_1_id: 1
+  index_2_id: 2
+}
+lu_table_templates: {
+  kind: LUT_TEMPLATE_KIND_POWER
+  name: "power"
+  variable_1: LUT_VARIABLE_INPUT_TRANSITION_TIME
+  variable_2: LUT_VARIABLE_TOTAL_OUTPUT_NET_CAPACITANCE
+  index_1_id: 1
+  index_2_id: 2
+}
+lut_axes: { values: 1.0 values: 3.0 }
+lut_axes: { values: 0.0 values: 4.0 }
+lut_shapes: { template_id: 1 dimensions: 2 dimensions: 2 }
+lut_shapes: { template_id: 2 dimensions: 2 dimensions: 2 }
+interned_strings: ["A", "Y", "!Y"]
+"#;
+    let netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  BUF u_buf (.A(a), .Y(y));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default())
+        .expect("build power evaluation model");
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
+        .expect("reload power library");
+    let samples = [
+        IrValue::parse_typed("(bits[1]:0)").unwrap(),
+        IrValue::parse_typed("(bits[1]:1)").unwrap(),
+        IrValue::parse_typed("(bits[1]:0)").unwrap(),
+    ];
+
+    let report = model
+        .analyze_dynamic_power(
+            &library,
+            &samples,
+            GvDynamicPowerOptions {
+                primary_input_transition: 1.0,
+                module_output_load: 3.0,
+                cycle_time: Some(5.0),
+            },
+        )
+        .expect("analyze dynamic power");
+
+    assert_eq!(report.slew_buckets.len(), GV_POWER_SLEW_BUCKET_COUNT);
+    assert_eq!(report.primary_input_switching_energy, 8.0);
+    assert_eq!(report.cell_output_switching_energy, 12.0);
+    assert_eq!(report.cell_internal_energy, 10.0);
+    assert_eq!(report.total_dynamic_energy, 30.0);
+    assert_eq!(report.average_energy_per_transition, 15.0);
+    assert_eq!(report.average_dynamic_power, Some(3.0));
+    assert_eq!(report.instances[0].outputs[0].rise_count, 1);
+    assert_eq!(report.instances[0].outputs[0].fall_count, 1);
+    assert_eq!(
+        report.instances[0].outputs[0]
+            .slew_histogram
+            .rise
+            .iter()
+            .sum::<f64>(),
+        1.0
+    );
+    assert_eq!(
+        report.instances[0].outputs[0]
+            .slew_histogram
+            .fall
+            .iter()
+            .sum::<f64>(),
+        1.0
+    );
+    assert_eq!(report.diagnostics.when_evaluation_count, 2);
+    assert_eq!(report.diagnostics.when_changed_during_transition_count, 2);
 }
 
 #[test]

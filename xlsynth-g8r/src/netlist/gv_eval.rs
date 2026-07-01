@@ -16,6 +16,7 @@ use crate::liberty_model::PinDirection;
 use crate::netlist::gatefn_from_netlist::project_labeled_netlist_aig;
 use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
 use crate::netlist::parse::PortDirection;
+use crate::netlist::power::{GvDynamicPowerOptions, GvDynamicPowerReport};
 
 pub use crate::netlist::gatefn_from_netlist::{
     InstanceAigBinding, InstancePinAigBinding, LabeledAigBit, LabeledNetlistAig,
@@ -146,6 +147,17 @@ impl LabeledNetlistAig {
     pub fn count_toggle_activity(&self, args: &[IrValue]) -> Result<GvToggleActivity, String> {
         let batch_inputs = self.lower_ir_values(args)?;
         self.count_toggle_activity_bits(&batch_inputs)
+    }
+
+    /// Estimates dynamic energy from ordered samples and Liberty power data.
+    pub fn analyze_dynamic_power(
+        &self,
+        library: &crate::liberty_model::Library,
+        args: &[IrValue],
+        options: GvDynamicPowerOptions,
+    ) -> Result<GvDynamicPowerReport, String> {
+        let batch_inputs = self.lower_ir_values(args)?;
+        crate::netlist::power::analyze_dynamic_power_bits(self, library, &batch_inputs, options)
     }
 
     /// Counts source-labeled toggles across consecutive lowered input vectors.

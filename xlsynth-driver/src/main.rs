@@ -2113,6 +2113,40 @@ fn main() {
                         .requires("input_irvals")
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    Arg::new("power_output_json")
+                        .long("power-output-json")
+                        .value_name("PATH")
+                        .help("Write sample-driven dynamic-power JSON; requires --input-irvals")
+                        .requires("input_irvals")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary-input-transition")
+                        .value_name("TIME")
+                        .default_value("0.01")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Input rise/fall transition time used for primary inputs")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module-output-load")
+                        .value_name("CAPACITANCE")
+                        .default_value("0")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("External capacitive load added to every module-output bit")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("cycle_time")
+                        .long("cycle-time")
+                        .value_name("TIME")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Optional time per sample transition, enabling average-power reporting")
+                        .action(ArgAction::Set),
+                )
                 .group(
                     clap::ArgGroup::new("gv_eval_input")
                         .args(["arg_tuple", "input_irvals"])
