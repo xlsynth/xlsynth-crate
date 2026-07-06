@@ -97,6 +97,7 @@ pub struct Parser {
     chars: Vec<char>,
     offset: usize,
     options: ParseOptions,
+    preserve_block_port_order: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -870,7 +871,16 @@ impl Parser {
             chars: input.chars().collect(),
             offset: 0,
             options,
+            preserve_block_port_order: false,
         }
+    }
+
+    /// Parses blocks while retaining their exact mixed header order for
+    /// callers that opt into the DSLX block-language extension.
+    pub fn new_preserving_block_port_order(input: &str) -> Self {
+        let mut parser = Self::new(input);
+        parser.preserve_block_port_order = true;
+        parser
     }
 
     fn rest(&self) -> String {
@@ -1939,6 +1949,7 @@ impl Parser {
         }
         self.drop_or_error("(")?;
         let mut block_ref: Option<String> = None;
+        let mut foreign_function_ref: Option<String> = None;
         let mut kind: Option<String> = None;
         loop {
             self.drop_whitespace_and_comments();
@@ -1946,8 +1957,25 @@ impl Parser {
                 break;
             }
             if self.peek_is("block=") {
+                if block_ref.is_some() {
+                    return Err(ParseError::new(
+                        "instantiation repeats block attribute".to_string(),
+                    ));
+                }
                 block_ref = Some(self.parse_identifier_attribute("block")?);
+            } else if self.peek_is("foreign_function=") {
+                if foreign_function_ref.is_some() {
+                    return Err(ParseError::new(
+                        "instantiation repeats foreign_function attribute".to_string(),
+                    ));
+                }
+                foreign_function_ref = Some(self.parse_identifier_attribute("foreign_function")?);
             } else if self.peek_is("kind=") {
+                if kind.is_some() {
+                    return Err(ParseError::new(
+                        "instantiation repeats kind attribute".to_string(),
+                    ));
+                }
                 kind = Some(self.parse_identifier_attribute("kind")?);
             } else {
                 return Err(ParseError::new(format!(
@@ -1960,19 +1988,47 @@ impl Parser {
                 break;
             }
         }
-        let block_ref = block_ref
-            .ok_or_else(|| ParseError::new("instantiation missing block attribute".to_string()))?;
         let kind = kind
             .ok_or_else(|| ParseError::new("instantiation missing kind attribute".to_string()))?;
-        if kind != "block" {
-            return Err(ParseError::new(format!(
-                "unsupported instantiation kind '{}'",
-                kind
-            )));
-        }
+        let (target, kind) = match kind.as_str() {
+            "block" => {
+                if foreign_function_ref.is_some() {
+                    return Err(ParseError::new(
+                        "block instantiation cannot specify foreign_function".to_string(),
+                    ));
+                }
+                (
+                    block_ref.ok_or_else(|| {
+                        ParseError::new("block instantiation missing block attribute".to_string())
+                    })?,
+                    ir::InstantiationKind::Block,
+                )
+            }
+            "extern" => {
+                if block_ref.is_some() {
+                    return Err(ParseError::new(
+                        "extern instantiation cannot specify block".to_string(),
+                    ));
+                }
+                (
+                    foreign_function_ref.ok_or_else(|| {
+                        ParseError::new(
+                            "extern instantiation missing foreign_function attribute".to_string(),
+                        )
+                    })?,
+                    ir::InstantiationKind::Extern,
+                )
+            }
+            other => {
+                return Err(ParseError::new(format!(
+                    "unsupported instantiation kind '{other}'"
+                )));
+            }
+        };
         Ok(ir::Instantiation {
             name: inst_name,
-            block: block_ref,
+            block: target,
+            kind,
         })
     }
 
@@ -3675,6 +3731,7 @@ impl Parser {
 
         // Parse port list from the block header: `name: type, ...` (no ids).
         let mut header_ports: Vec<(String, ir::Type)> = Vec::new();
+        let mut header_entries: Vec<(String, Option<ir::Type>)> = Vec::new();
         self.drop_or_error("(")?;
         loop {
             if self.try_drop(")") {
@@ -3683,12 +3740,19 @@ impl Parser {
             let pname = self.pop_identifier_or_error("block port name")?;
             self.drop_or_error(":")?;
             if self.try_drop("clock") {
-                if !header_ports.is_empty() {
+                if clock_port_name.is_some() {
+                    return Err(ParseError::new(
+                        "block declares more than one clock port".to_string(),
+                    ));
+                }
+                if !self.preserve_block_port_order && !header_ports.is_empty() {
                     return Err(ParseError::new("clock must be first port".to_string()));
                 }
-                clock_port_name = Some(pname);
+                clock_port_name = Some(pname.clone());
+                header_entries.push((pname, None));
             } else {
                 let pty = self.parse_type()?;
+                header_entries.push((pname.clone(), Some(pty.clone())));
                 header_ports.push((pname, pty));
             }
             if !self.try_drop(",") {
@@ -3950,6 +4014,24 @@ impl Parser {
                     inner_attrs,
                 },
                 BlockMetadata {
+                    ports: if self.preserve_block_port_order {
+                        header_entries
+                            .iter()
+                            .map(|(name, ty)| ir::BlockPort {
+                                name: name.clone(),
+                                kind: if ty.is_none() {
+                                    ir::BlockPortKind::Clock
+                                } else if input_params.iter().any(|(n, _, _)| n == name) {
+                                    ir::BlockPortKind::Input
+                                } else {
+                                    ir::BlockPortKind::Output
+                                },
+                                ty: ty.clone(),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                     clock_port_name,
                     input_port_ids: input_params
                         .iter()
@@ -3989,6 +4071,24 @@ impl Parser {
                 inner_attrs,
             },
             BlockMetadata {
+                ports: if self.preserve_block_port_order {
+                    header_entries
+                        .iter()
+                        .map(|(name, ty)| ir::BlockPort {
+                            name: name.clone(),
+                            kind: if ty.is_none() {
+                                ir::BlockPortKind::Clock
+                            } else if input_params.iter().any(|(n, _, _)| n == name) {
+                                ir::BlockPortKind::Input
+                            } else {
+                                ir::BlockPortKind::Output
+                            },
+                            ty: ty.clone(),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 clock_port_name,
                 input_port_ids: input_params
                     .iter()
@@ -4197,18 +4297,47 @@ pub fn emit_fn_as_block(
         (0..ret_nodes.len()).map(|i| format!("out{}", i)).collect()
     };
 
-    // Construct header: optional clock, then inputs, then outputs.
+    // Construct header. New metadata preserves the exact mixed source order;
+    // legacy metadata falls back to clock, inputs, then outputs.
     let mut header_parts: Vec<String> = Vec::new();
-    if let Some(pi) = port_ids {
-        if let Some(clk_name) = &pi.clock_port_name {
+    if let Some(pi) = port_ids
+        && !pi.ports.is_empty()
+    {
+        let mut output_index = 0usize;
+        for port in &pi.ports {
+            match port.kind {
+                ir::BlockPortKind::Clock => {
+                    header_parts.push(format!("{}: clock", port.name));
+                }
+                ir::BlockPortKind::Input => {
+                    let ty = port
+                        .ty
+                        .as_ref()
+                        .expect("non-clock BlockPort must carry a type");
+                    header_parts.push(format!("{}: {}", port.name, ty));
+                }
+                ir::BlockPortKind::Output => {
+                    let ty = port
+                        .ty
+                        .as_ref()
+                        .expect("non-clock BlockPort must carry a type");
+                    header_parts.push(format!("{}: {}", decided_out_names[output_index], ty));
+                    output_index += 1;
+                }
+            }
+        }
+    } else {
+        if let Some(pi) = port_ids
+            && let Some(clk_name) = &pi.clock_port_name
+        {
             header_parts.push(format!("{}: clock", clk_name));
         }
-    }
-    for p in f.params.iter() {
-        header_parts.push(format!("{}: {}", p.name, p.ty));
-    }
-    for (i, ty) in ret_types.iter().enumerate() {
-        header_parts.push(format!("{}: {}", decided_out_names[i], ty));
+        for p in f.params.iter() {
+            header_parts.push(format!("{}: {}", p.name, p.ty));
+        }
+        for (i, ty) in ret_types.iter().enumerate() {
+            header_parts.push(format!("{}: {}", decided_out_names[i], ty));
+        }
     }
 
     // Emit body lines.
@@ -4240,10 +4369,16 @@ pub fn emit_fn_as_block(
             }
         }
         for inst in &pi.instantiations {
-            lines.push(format!(
-                "  instantiation {}(block={}, kind=block)",
-                inst.name, inst.block
-            ));
+            lines.push(match inst.kind {
+                ir::InstantiationKind::Block => format!(
+                    "  instantiation {}(block={}, kind=block)",
+                    inst.name, inst.block
+                ),
+                ir::InstantiationKind::Extern => format!(
+                    "  instantiation {}(foreign_function={}, kind=extern)",
+                    inst.name, inst.block
+                ),
+            });
         }
     }
     // input_port lines for each param (in order).
@@ -5514,6 +5649,13 @@ fn id(x: bits[1] id=1) -> bits[1] {
   out1: () = output_port(instantiation_output.26, name=out1, id=22)
 }"#;
 
+    const BLK_MIXED_PORT_ORDER: &str = r#"block mixed(clk: clock, ready: bits[1], valid: bits[1], data_out: bits[8], data_in: bits[8]) {
+  valid: bits[1] = input_port(name=valid, id=1)
+  data_in: bits[8] = input_port(name=data_in, id=2)
+  ready: () = output_port(valid, name=ready, id=3)
+  data_out: () = output_port(data_in, name=data_out, id=4)
+}"#;
+
     #[test]
     fn test_roundtrip_block_parse_then_emit_single_output() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -5540,6 +5682,59 @@ fn id(x: bits[1] id=1) -> bits[1] {
             false,
         );
         assert_eq!(emitted, BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_mixed_port_order() {
+        let mut parser = Parser::new_preserving_block_port_order(BLK_MIXED_PORT_ORDER);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        assert_eq!(
+            metadata
+                .ports
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clk", "ready", "valid", "data_out", "data_in"]
+        );
+        let emitted = emit_fn_as_block(&f, None, Some(&metadata), false);
+        assert_eq!(emitted, BLK_MIXED_PORT_ORDER);
+    }
+
+    #[test]
+    fn output_name_override_updates_ordered_header_and_body_together() {
+        let mut parser = Parser::new_preserving_block_port_order(BLK_MIXED_PORT_ORDER);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(
+            &f,
+            Some(&["renamed_ready".to_string(), "renamed_data".to_string()]),
+            Some(&metadata),
+            false,
+        );
+        assert!(emitted.starts_with(
+            "block mixed(clk: clock, renamed_ready: bits[1], valid: bits[1], renamed_data: bits[8], data_in: bits[8])"
+        ));
+        assert!(emitted.contains("name=renamed_ready"));
+        assert!(emitted.contains("name=renamed_data"));
+        Parser::new_preserving_block_port_order(&emitted)
+            .parse_block_to_fn_with_ports()
+            .expect("renamed ordered block should reparse");
+    }
+
+    #[test]
+    fn test_default_roundtrip_keeps_legacy_canonical_port_order() {
+        let mut parser = Parser::new(BLK_MIXED_PORT_ORDER);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        assert!(metadata.ports.is_empty());
+        let emitted = emit_fn_as_block(&f, None, Some(&metadata), false);
+        assert_eq!(
+            emitted,
+            r#"block mixed(clk: clock, valid: bits[1], data_in: bits[8], ready: bits[1], data_out: bits[8]) {
+  valid: bits[1] = input_port(name=valid, id=1)
+  data_in: bits[8] = input_port(name=data_in, id=2)
+  ready: () = output_port(valid, name=ready, id=3)
+  data_out: () = output_port(data_in, name=data_out, id=4)
+}"#
+        );
     }
 
     #[test]
@@ -5605,6 +5800,75 @@ fn id(x: bits[1] id=1) -> bits[1] {
         );
         assert_eq!(emitted, BLK_WITH_INSTANTIATION);
     }
+
+    #[test]
+    fn test_roundtrip_block_extern_instantiation() {
+        let input = r#"package extern_block
+
+#[ffi_proto("""code_template: "assign {return} = ~{x};"
+""")]
+fn ffi_not(x: bits[8] id=1) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=1)
+}
+
+top block wrapper(x: bits[8], y: bits[8]) {
+  instantiation ffi_call(foreign_function=ffi_not, kind=extern)
+  x: bits[8] = input_port(name=x, id=2)
+  result: bits[8] = instantiation_output(instantiation=ffi_call, port_name=return, id=3)
+  instantiation_input.4: () = instantiation_input(x, instantiation=ffi_call, port_name=x, id=4)
+  y: () = output_port(result, name=y, id=5)
+}
+"#;
+        let package = Parser::new(input).parse_and_validate_package().unwrap();
+        let emitted = package.to_string();
+        assert!(emitted.contains("foreign_function=ffi_not, kind=extern"));
+        let reparsed = Parser::new(&emitted).parse_and_validate_package().unwrap();
+        let PackageMember::Block { metadata, .. } = reparsed.get_top_block().unwrap() else {
+            panic!("expected top block");
+        };
+        assert_eq!(metadata.instantiations.len(), 1);
+        assert_eq!(
+            metadata.instantiations[0].kind,
+            ir::InstantiationKind::Extern
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_or_duplicate_instantiation_attributes() {
+        for declaration in [
+            "instantiation child(block=callee, foreign_function=ffi, kind=block)",
+            "instantiation child(block=callee, block=other, kind=block)",
+            "instantiation child(block=callee, kind=block, kind=block)",
+        ] {
+            let input = format!(
+                "block caller(x: bits[1], y: bits[1]) {{\n  {declaration}\n  x: bits[1] = input_port(name=x, id=1)\n  y: () = output_port(x, name=y, id=2)\n}}"
+            );
+            assert!(Parser::new(&input).parse_block_to_fn_with_ports().is_err());
+        }
+    }
+
+    #[test]
+    fn mixed_clock_order_is_opt_in_and_duplicate_clocks_are_rejected() {
+        let mixed = r#"block mixed(x: bits[1], clk: clock, y: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+  y: () = output_port(x, name=y, id=2)
+}"#;
+        assert!(Parser::new(mixed).parse_block_to_fn_with_ports().is_err());
+        Parser::new_preserving_block_port_order(mixed)
+            .parse_block_to_fn_with_ports()
+            .expect("ordered parser should accept a non-leading clock");
+
+        let duplicate = r#"block duplicate(clk_a: clock, x: bits[1], clk_b: clock, y: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+  y: () = output_port(x, name=y, id=2)
+}"#;
+        assert!(
+            Parser::new_preserving_block_port_order(duplicate)
+                .parse_block_to_fn_with_ports()
+                .is_err()
+        );
+    }
+
     #[test]
     fn test_parse_block_to_fn_add_two_inputs_one_output() {
         let _ = env_logger::builder().is_test(true).try_init();

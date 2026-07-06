@@ -5,7 +5,8 @@
 use std::collections::HashSet;
 
 use crate::ir::{
-    Binop, BlockMetadata, Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type,
+    Binop, BlockMetadata, BlockPortKind, Fn, InstantiationKind, MemberType, NaryOp, NodePayload,
+    Package, PackageMember, Type,
 };
 use crate::ir_deduce::deduce_result_type_with_registers;
 use crate::ir_utils::operands;
@@ -147,6 +148,9 @@ pub enum ValidationError {
         expected: usize,
         actual: usize,
     },
+    /// Ordered block ports disagree with compatibility metadata or the
+    /// function-shaped representation of the block.
+    BlockPortMetadataMismatch { func: String, reason: String },
     /// Bitwise n-ary ops (and/or/xor/nand/nor) must have identical bits-typed
     /// operands.
     NaryBitwiseOperandTypeMismatch { func: String, node_index: usize },
@@ -466,6 +470,9 @@ impl std::fmt::Display for ValidationError {
                     func, expected, actual
                 )
             }
+            ValidationError::BlockPortMetadataMismatch { func, reason } => {
+                write!(f, "block '{func}' has inconsistent port metadata: {reason}")
+            }
             ValidationError::NaryBitwiseOperandTypeMismatch { func, node_index } => {
                 write!(
                     f,
@@ -660,10 +667,11 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     // Enforce package-wide uniqueness of node text ids (including parameter nodes).
     let mut seen_ids: HashSet<usize> = HashSet::new();
     for member in &p.members {
-        let (f, synthetic_block_ret) = match member {
-            PackageMember::Function(f) => (f, None),
+        let (f, metadata, synthetic_block_ret) = match member {
+            PackageMember::Function(f) => (f, None, None),
             PackageMember::Block { func, metadata } => (
                 func,
+                Some(metadata),
                 if metadata.output_names.len() != 1 {
                     func.ret_node_ref
                 } else {
@@ -688,6 +696,28 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
                     func: f.name.clone(),
                     text_id: node.text_id,
                 });
+            }
+        }
+        if let Some(metadata) = metadata {
+            let mut output_ids = metadata
+                .output_port_ids
+                .values()
+                .copied()
+                .collect::<Vec<_>>();
+            output_ids.sort_unstable();
+            for output_id in output_ids {
+                if output_id == 0 {
+                    return Err(ValidationError::BlockPortMetadataMismatch {
+                        func: f.name.clone(),
+                        reason: "output port id 0 is reserved".to_string(),
+                    });
+                }
+                if !seen_ids.insert(output_id) {
+                    return Err(ValidationError::DuplicateTextId {
+                        func: f.name.clone(),
+                        text_id: output_id,
+                    });
+                }
             }
         }
     }
@@ -769,17 +799,44 @@ pub fn validate_block(
     parent: &Package,
     member_index: usize,
 ) -> Result<(), ValidationError> {
+    validate_ordered_block_ports(f, metadata)?;
     let prior_blocks = collect_prior_blocks(parent, member_index);
     for inst in metadata.instantiations.iter() {
-        if !prior_blocks.contains_key(&inst.block) {
-            return Err(ValidationError::InstantiationBlockNotFound {
-                func: f.name.clone(),
-                instantiation: inst.name.clone(),
-                block: inst.block.clone(),
-            });
+        match inst.kind {
+            InstantiationKind::Block if !prior_blocks.contains_key(&inst.block) => {
+                return Err(ValidationError::InstantiationBlockNotFound {
+                    func: f.name.clone(),
+                    instantiation: inst.name.clone(),
+                    block: inst.block.clone(),
+                });
+            }
+            InstantiationKind::Extern => {
+                let foreign =
+                    parent
+                        .get_fn(&inst.block)
+                        .ok_or_else(|| ValidationError::UnknownCallee {
+                            func: f.name.clone(),
+                            callee: inst.block.clone(),
+                        })?;
+                if !foreign
+                    .outer_attrs
+                    .iter()
+                    .any(|attribute| attribute.trim_start().starts_with("#[ffi_proto("))
+                {
+                    return Err(ValidationError::NodeSemanticViolation {
+                        func: f.name.clone(),
+                        node_index: 0,
+                        reason: format!(
+                            "extern instantiation '{}' references function '{}' without ffi_proto metadata",
+                            inst.name, inst.block
+                        ),
+                    });
+                }
+            }
+            _ => {}
         }
     }
-    let instantiation_info = build_instantiation_info(metadata, &prior_blocks)?;
+    let instantiation_info = build_instantiation_info(metadata, &prior_blocks, parent)?;
     validate_fn_with(
         f,
         Some(parent),
@@ -794,6 +851,154 @@ pub fn validate_block(
         Some(&instantiation_info),
         true,
     )
+}
+
+/// Checks the authoritative ordered port list against the compatibility maps
+/// and the function-shaped inputs/outputs used by PIR internally.
+fn validate_ordered_block_ports(f: &Fn, metadata: &BlockMetadata) -> Result<(), ValidationError> {
+    if metadata.ports.is_empty() {
+        // Legacy programmatic metadata predates the ordered port vector.
+        return Ok(());
+    }
+    let mismatch = |reason: String| ValidationError::BlockPortMetadataMismatch {
+        func: f.name.clone(),
+        reason,
+    };
+    let mut names = HashSet::new();
+    for port in &metadata.ports {
+        if !names.insert(port.name.as_str()) {
+            return Err(mismatch(format!("duplicate ordered port '{}'", port.name)));
+        }
+        match (port.kind, &port.ty) {
+            (BlockPortKind::Clock, None)
+            | (BlockPortKind::Input | BlockPortKind::Output, Some(_)) => {}
+            (BlockPortKind::Clock, Some(_)) => {
+                return Err(mismatch(format!(
+                    "clock port '{}' unexpectedly has a value type",
+                    port.name
+                )));
+            }
+            (BlockPortKind::Input | BlockPortKind::Output, None) => {
+                return Err(mismatch(format!(
+                    "data port '{}' is missing its value type",
+                    port.name
+                )));
+            }
+        }
+    }
+
+    let clock_names = metadata
+        .ports
+        .iter()
+        .filter(|port| port.kind == BlockPortKind::Clock)
+        .map(|port| port.name.as_str())
+        .collect::<Vec<_>>();
+    match (metadata.clock_port_name.as_deref(), clock_names.as_slice()) {
+        (None, []) => {}
+        (Some(recorded), [ordered]) if recorded == *ordered => {}
+        _ => {
+            return Err(mismatch(format!(
+                "clock_port_name {:?} does not match ordered clock ports {:?}",
+                metadata.clock_port_name, clock_names
+            )));
+        }
+    }
+
+    let ordered_inputs = metadata
+        .ports
+        .iter()
+        .filter(|port| port.kind == BlockPortKind::Input)
+        .collect::<Vec<_>>();
+    if ordered_inputs.len() != f.params.len() {
+        return Err(mismatch(format!(
+            "ordered input count {} does not match parameter count {}",
+            ordered_inputs.len(),
+            f.params.len()
+        )));
+    }
+    if metadata.input_port_ids.len() != ordered_inputs.len() {
+        return Err(mismatch(format!(
+            "input_port_ids count {} does not match ordered input count {}",
+            metadata.input_port_ids.len(),
+            ordered_inputs.len()
+        )));
+    }
+    for (ordered, param) in ordered_inputs.iter().zip(&f.params) {
+        if ordered.name != param.name || ordered.ty.as_ref() != Some(&param.ty) {
+            return Err(mismatch(format!(
+                "ordered input '{}: {:?}' does not match parameter '{}: {}'",
+                ordered.name, ordered.ty, param.name, param.ty
+            )));
+        }
+        if metadata.input_port_ids.get(&ordered.name) != Some(&param.id.get_wrapped_id()) {
+            return Err(mismatch(format!(
+                "input id for '{}' does not match parameter id {}",
+                ordered.name,
+                param.id.get_wrapped_id()
+            )));
+        }
+    }
+
+    let ordered_outputs = metadata
+        .ports
+        .iter()
+        .filter(|port| port.kind == BlockPortKind::Output)
+        .collect::<Vec<_>>();
+    let output_types = match ordered_outputs.len() {
+        0 if f.ret_ty.is_nil() => Vec::new(),
+        1 => vec![f.ret_ty.clone()],
+        _ => match &f.ret_ty {
+            Type::Tuple(types) if types.len() == ordered_outputs.len() => {
+                types.iter().map(|ty| (**ty).clone()).collect()
+            }
+            _ => {
+                return Err(mismatch(format!(
+                    "return type {} does not match {} ordered outputs",
+                    f.ret_ty,
+                    ordered_outputs.len()
+                )));
+            }
+        },
+    };
+    if metadata.output_names.len() != ordered_outputs.len()
+        || metadata.output_port_ids.len() != ordered_outputs.len()
+    {
+        return Err(mismatch(format!(
+            "output compatibility metadata counts ({}, {}) do not match {} ordered outputs",
+            metadata.output_names.len(),
+            metadata.output_port_ids.len(),
+            ordered_outputs.len()
+        )));
+    }
+    for (index, (ordered, ty)) in ordered_outputs.iter().zip(output_types).enumerate() {
+        if ordered.ty.as_ref() != Some(&ty) {
+            return Err(mismatch(format!(
+                "ordered output '{}' type {:?} does not match return element {}",
+                ordered.name, ordered.ty, ty
+            )));
+        }
+        if metadata.output_names[index] != ordered.name
+            || !metadata.output_port_ids.contains_key(&ordered.name)
+        {
+            return Err(mismatch(format!(
+                "ordered output '{}' does not match output compatibility metadata",
+                ordered.name
+            )));
+        }
+    }
+    if let Some(reset) = &metadata.reset {
+        let reset_port = ordered_inputs
+            .iter()
+            .find(|port| port.name == reset.port_name)
+            .ok_or_else(|| mismatch(format!("reset port '{}' is not an input", reset.port_name)))?;
+        if reset_port.ty.as_ref() != Some(&Type::Bits(1)) {
+            return Err(mismatch(format!(
+                "reset port '{}' must have type bits[1]",
+                reset.port_name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Validates a function within the context of its parent package, using a
@@ -1477,9 +1682,30 @@ fn collect_prior_blocks<'a>(
 fn build_instantiation_info(
     metadata: &BlockMetadata,
     prior_blocks: &std::collections::HashMap<String, (&Fn, &BlockMetadata)>,
+    parent: &Package,
 ) -> Result<std::collections::HashMap<String, InstantiationInfo>, ValidationError> {
     let mut info_map = std::collections::HashMap::new();
     for inst in metadata.instantiations.iter() {
+        if inst.kind == InstantiationKind::Extern {
+            let callee_fn = parent
+                .get_fn(&inst.block)
+                .expect("foreign function existence was validated");
+            let input_types = callee_fn
+                .params
+                .iter()
+                .map(|param| (param.name.clone(), param.ty.clone()))
+                .collect();
+            let output_types =
+                std::collections::HashMap::from([("return".to_string(), callee_fn.ret_ty.clone())]);
+            info_map.insert(
+                inst.name.clone(),
+                InstantiationInfo {
+                    input_types,
+                    output_types,
+                },
+            );
+            continue;
+        }
         let (callee_fn, callee_meta) = prior_blocks
             .get(&inst.block)
             .expect("prior block missing after check");
@@ -1547,6 +1773,61 @@ mod tests {
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
         validate_package(&pkg).unwrap();
+    }
+
+    #[test]
+    fn ordered_block_ports_must_match_compatibility_metadata() {
+        let ir = r#"
+package test
+
+top block mixed(x: bits[8], y: bits[8], clk: clock, rst: bits[1]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  x: bits[8] = input_port(name=x, id=1)
+  rst: bits[1] = input_port(name=rst, id=2)
+  y: () = output_port(x, name=y, id=3)
+}
+"#;
+        let mut pkg = Parser::new_preserving_block_port_order(ir)
+            .parse_package()
+            .unwrap();
+        validate_package(&pkg).unwrap();
+        let PackageMember::Block { metadata, .. } = &mut pkg.members[0] else {
+            panic!("expected block");
+        };
+        metadata.output_names[0] = "wrong".to_string();
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::BlockPortMetadataMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn output_port_ids_participate_in_package_wide_uniqueness() {
+        let ir = r#"
+package test
+
+top block passthrough(x: bits[1], y: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+  y: () = output_port(x, name=y, id=2)
+}
+"#;
+        let mut pkg = Parser::new(ir).parse_package().unwrap();
+        let PackageMember::Block { metadata, .. } = &mut pkg.members[0] else {
+            panic!("expected block");
+        };
+        metadata.output_port_ids.insert("y".to_string(), 1);
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::DuplicateTextId { text_id: 1, .. })
+        ));
+        let PackageMember::Block { metadata, .. } = &mut pkg.members[0] else {
+            panic!("expected block");
+        };
+        metadata.output_port_ids.insert("y".to_string(), 0);
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::BlockPortMetadataMismatch { .. })
+        ));
     }
 
     #[test]

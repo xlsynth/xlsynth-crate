@@ -14,13 +14,22 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
         .get_one::<String>("strip_pos_attrs")
         .map(|s| s == "true")
         .unwrap_or(false);
+    let preserve_block_port_order = matches
+        .get_one::<String>("preserve_block_port_order")
+        .map(|value| value == "true")
+        .unwrap_or(false);
     let ir_text = std::fs::read_to_string(ir_path).expect("read IR input should succeed");
 
     // Grammar-based prefix scanning: package vs block.
     let trimmed = ir_text.trim_start();
     if trimmed.starts_with("package") {
-        let mut pkg =
-            ir_parser::parse_path_to_package(ir_path).expect("parse IR package should succeed");
+        let mut pkg = if preserve_block_port_order {
+            Parser::new_preserving_block_port_order(&ir_text)
+                .parse_and_validate_package()
+                .expect("parse IR package should succeed")
+        } else {
+            ir_parser::parse_path_to_package(ir_path).expect("parse IR package should succeed")
+        };
         if strip_pos {
             pkg.file_table = ir::FileTable::new();
             pkg.for_each_fn_mut(|f| {
@@ -32,7 +41,11 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
         print!("{}", pkg);
     } else {
         // Treat as a standalone block (allowing outer attributes).
-        let mut parser = Parser::new(&ir_text);
+        let mut parser = if preserve_block_port_order {
+            Parser::new_preserving_block_port_order(&ir_text)
+        } else {
+            Parser::new(&ir_text)
+        };
         let (mut f, metadata) = parser
             .parse_block_to_fn_with_ports()
             .expect("parse block IR should succeed");

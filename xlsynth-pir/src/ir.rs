@@ -1725,7 +1725,35 @@ pub struct Register {
 #[derive(Debug, Clone)]
 pub struct Instantiation {
     pub name: String,
+    /// Referenced block or foreign-function member name.
     pub block: String,
+    pub kind: InstantiationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstantiationKind {
+    Block,
+    Extern,
+}
+
+impl Instantiation {
+    /// Creates an ordinary child-block instantiation.
+    pub fn block(name: impl Into<String>, block: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            block: block.into(),
+            kind: InstantiationKind::Block,
+        }
+    }
+
+    /// Creates an extern-function instantiation.
+    pub fn extern_function(name: impl Into<String>, function: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            block: function.into(),
+            kind: InstantiationKind::Extern,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1735,8 +1763,28 @@ pub struct BlockResetMetadata {
     pub active_low: bool,
 }
 
+/// Semantic role for a port in an XLS Block IR header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockPortKind {
+    Clock,
+    Input,
+    Output,
+}
+
+/// One block port in externally observable header order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockPort {
+    pub name: String,
+    pub kind: BlockPortKind,
+    /// Clock ports have no XLS value type; data and reset ports do.
+    pub ty: Option<Type>,
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockMetadata {
+    /// Authoritative mixed clock/input/output order. Empty means legacy
+    /// metadata whose order must be reconstructed from compatibility fields.
+    pub ports: Vec<BlockPort>,
     pub clock_port_name: Option<String>,
     pub input_port_ids: std::collections::HashMap<String, usize>,
     pub output_port_ids: std::collections::HashMap<String, usize>,
@@ -1744,6 +1792,21 @@ pub struct BlockMetadata {
     pub reset: Option<BlockResetMetadata>,
     pub registers: Vec<Register>,
     pub instantiations: Vec<Instantiation>,
+}
+
+impl Default for BlockMetadata {
+    fn default() -> Self {
+        Self {
+            ports: Vec::new(),
+            clock_port_name: None,
+            input_port_ids: std::collections::HashMap::new(),
+            output_port_ids: std::collections::HashMap::new(),
+            output_names: Vec::new(),
+            reset: None,
+            registers: Vec::new(),
+            instantiations: Vec::new(),
+        }
+    }
 }
 
 impl Package {

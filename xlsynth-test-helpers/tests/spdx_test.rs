@@ -126,17 +126,11 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
 
-            // DSOs are binary files don't check for SPDX.
-            if path.file_name().unwrap().to_str().unwrap().ends_with(".so") {
-                continue;
-            }
-            if path
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .ends_with(".bin")
-            {
+            // Binary formats cannot carry a source-comment header.
+            if matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("so" | "bin" | "png" | "jpg" | "jpeg" | "gif")
+            ) {
                 continue;
             }
             // VCDs are generated simulation waveforms, not maintained source files.
@@ -227,6 +221,19 @@ fn test_accepts_json_spdx_field() {
         "{\n  \"_spdx\": \"SPDX-License-Identifier: Apache-2.0\"\n}\n",
     )
     .unwrap();
+
+    let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
+    assert!(
+        missing_spdx_files.is_empty(),
+        "unexpected missing SPDX files: {:?}",
+        missing_spdx_files
+    );
+}
+
+#[test]
+fn test_ignores_binary_image_files() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    fs::write(temp_dir.path().join("diagram.png"), b"\x89PNG\r\n\x1a\n").unwrap();
 
     let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
     assert!(

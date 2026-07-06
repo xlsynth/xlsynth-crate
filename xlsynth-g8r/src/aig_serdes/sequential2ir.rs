@@ -116,6 +116,7 @@ pub fn sequential_gate_fn_to_pir_block_package(
         })
         .collect::<HashMap<String, usize>>();
     let metadata = BlockMetadata {
+        ports: Vec::new(),
         clock_port_name: design.clock.as_ref().map(|clock| clock.name.clone()),
         input_port_ids: block
             .params

@@ -17,6 +17,7 @@ workspace = true
 xlsynth = { path = "../xlsynth", version = "0.60.0", features = ["clap"] }
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.60.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.60.0" }
+xlsynth-block-lang = { path = "../xlsynth-block-lang", version = "0.60.0" }
 xlsynth-mcmc-pir = { path = "../xlsynth-mcmc-pir", version = "0.60.0" }
 xlsynth-autocov = { path = "../xlsynth-autocov", version = "0.60.0" }
 xlsynth-prover = { path = "../xlsynth-prover", version = "0.60.0" }

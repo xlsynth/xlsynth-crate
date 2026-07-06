@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use xlsynth::IrValue;
 use xlsynth_pir::ir::{
-    BlockMetadata, BlockResetMetadata, Fn as PirFn, Instantiation, NaryOp, Node, NodePayload,
-    NodeRef, Package, PackageMember, Param, ParamId, Register, Type, Unop,
+    BlockMetadata, BlockResetMetadata, Fn as PirFn, Instantiation, InstantiationKind, NaryOp, Node,
+    NodePayload, NodeRef, Package, PackageMember, Param, ParamId, Register, Type, Unop,
 };
 
 pub fn convert_gv2block_paths(netlist_path: &Path, liberty_proto_path: &Path) -> Result<Package> {
@@ -970,6 +970,7 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
     }
 
     let meta = BlockMetadata {
+        ports: Vec::new(),
         clock_port_name: clock_pin,
         input_port_ids,
         output_port_ids,
@@ -1286,6 +1287,7 @@ fn build_top_block(
         instantiations.push(Instantiation {
             name: inst_name.clone(),
             block: cell_name.clone(),
+            kind: InstantiationKind::Block,
         });
 
         let outputs = lib_indexed
@@ -1474,6 +1476,7 @@ fn build_top_block(
         .map(|name| top_port_name_legalizer.legalize(name));
 
     let meta = BlockMetadata {
+        ports: Vec::new(),
         clock_port_name,
         input_port_ids,
         output_port_ids: HashMap::new(),

@@ -50,6 +50,7 @@ mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2pipeline_eco;
 mod dslx2sv_types;
+mod dslx_block;
 mod dslx_equiv;
 mod dslx_fn_eval;
 mod dslx_fn_prove_assertions;
@@ -180,6 +181,7 @@ trait AppExt {
     fn add_pipeline_args(self) -> Self;
     fn add_dslx_input_args(self, include_top: bool) -> Self;
     fn add_codegen_args(self) -> Self;
+    fn add_block_codegen_args(self) -> Self;
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
     fn add_ir_top_arg(self, required: bool) -> Self;
     fn add_g8r_lowering_flags(self) -> Self;
@@ -348,6 +350,24 @@ impl AppExt for clap::Command {
                     .long("reference_residual_data_path")
                     .value_name("REFERENCE_RESIDUAL_DATA_PATH")
                     .help("Path to reference residual data for comparison"),
+            )
+    }
+
+    fn add_block_codegen_args(self) -> Self {
+        (self as clap::Command)
+            .arg(
+                Arg::new("module_name")
+                    .long("module_name")
+                    .value_name("MODULE_NAME")
+                    .help("Name of the generated top module"),
+            )
+            .add_bool_arg(
+                "array_index_bounds_checking",
+                "Emit checks for out-of-bounds array indices",
+            )
+            .add_bool_arg(
+                "separate_lines",
+                "Separate generated expressions onto lines",
             )
     }
 
@@ -884,6 +904,65 @@ fn main() {
                     "convert_tests",
                     "Convert test procs/functions to IR",
                 )
+        )
+        .subcommand(
+            clap::Command::new("dslx-block2ir")
+                .about("Compiles an explicit DSLX block to XLS Block IR")
+                .add_dslx_input_args(false)
+                .arg(
+                    Arg::new("dslx_top")
+                        .long("dslx_top")
+                        .value_name("BLOCK")
+                        .help("Top block; optional when the source has one public block"),
+                )
+                .arg(
+                    Arg::new("param")
+                        .long("param")
+                        .value_name("NAME=DSLX_CONST_EXPR")
+                        .help("Concrete top-block parametric binding (repeatable)")
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("comb_opt")
+                        .long("comb-opt")
+                        .value_name("MODE")
+                        .value_parser([
+                            "free",
+                            "preserve-names",
+                            "preserve-names-and-functions",
+                        ])
+                        .default_value("free"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-block2sv")
+                .about("Compiles an explicit DSLX block to SystemVerilog")
+                .add_dslx_input_args(false)
+                .add_block_codegen_args()
+                .arg(
+                    Arg::new("dslx_top")
+                        .long("dslx_top")
+                        .value_name("BLOCK")
+                        .help("Top block; optional when the source has one public block"),
+                )
+                .arg(
+                    Arg::new("param")
+                        .long("param")
+                        .value_name("NAME=DSLX_CONST_EXPR")
+                        .help("Concrete top-block parametric binding (repeatable)")
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("comb_opt")
+                        .long("comb-opt")
+                        .value_name("MODE")
+                        .value_parser([
+                            "free",
+                            "preserve-names",
+                            "preserve-names-and-functions",
+                        ])
+                        .default_value("free"),
+                ),
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
@@ -1655,6 +1734,15 @@ fn main() {
                         .value_parser(["true", "false"])
                         .num_args(1)
                         .help("If true, strip file_number and (future) node pos attributes from output"),
+                )
+                .arg(
+                    clap::Arg::new("preserve_block_port_order")
+                        .long("preserve-block-port-order")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .default_value("false")
+                        .help("Preserve exact mixed Block IR header order instead of legacy canonical ordering"),
                 ),
         )
         .subcommand(
@@ -3763,6 +3851,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx2ir", subm)) => {
             dslx2ir::handle_dslx2ir(subm, &config);
+        }
+        Some(("dslx-block2ir", subm)) => {
+            dslx_block::handle_dslx_block2ir(subm, &config);
+        }
+        Some(("dslx-block2sv", subm)) => {
+            dslx_block::handle_dslx_block2sv(subm, &config);
         }
         #[cfg(feature = "unstable-dslx-specialize")]
         Some(("dslx-specialize", subm)) => {

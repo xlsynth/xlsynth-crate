@@ -1,0 +1,24 @@
+[package]
+name = "xlsynth-block-lang"
+version = "0.60.0"
+edition = "2024"
+authors = ["The XLSynth Authors"]
+description = "Experimental DSLX block-language frontend for XLS Block IR"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"
+xlsynth = { path = "../xlsynth", version = "0.60.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.60.0" }
+tempfile = "3.20"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+
+[lib]
+name = "xlsynth_block_lang"
+path = "src/lib.rs"

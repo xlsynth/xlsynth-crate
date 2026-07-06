@@ -993,13 +993,17 @@ xlsynth-driver g8r-critical-path-table my_module.g8r my_module.ir --group-by-opc
 Parses an IR file and writes it back to stdout. Useful for validating round-trip stability and (optionally) removing position metadata.
 
 - Positional arguments: `<ir_input_file>`
-- Option:
+- Options:
   - `--strip-pos-attrs=<BOOL>` – when `true`, strip `file_number` lines and any `pos=[(fileno,line,col), ...]` attributes from the output.
+  - `--preserve-block-port-order=<BOOL>` – opt into exact mixed Block IR header
+    order. The default is `false`, which retains the legacy canonical
+    clock/input/output ordering.
 
 Example:
 
 ```shell
 xlsynth-driver ir-round-trip my_pkg.ir --strip-pos-attrs=true > my_pkg.nopos.ir
+xlsynth-driver ir-round-trip block.ir --preserve-block-port-order=true > block.roundtrip.ir
 ```
 
 ### `ir-annotate-ranges`
@@ -1065,6 +1069,105 @@ Optional optimization:
 Additional flags:
 
 - `--convert_tests=<BOOL>` – convert DSLX `#[test]` procs/functions to IR as regular IR functions (default `false`).
+
+### `dslx-block2ir`: explicit DSLX block to Block IR
+
+Compiles the experimental DSLX-adjacent `block` construct directly to
+package-form XLS Block IR. Register placement and hierarchy are explicit; the
+frontend does not schedule or retime ordinary function calls used by a block.
+
+- `--dslx_input_file=<FILE>` – source containing one or more block declarations.
+- `--dslx_top=<BLOCK>` – optional when the source has exactly one public block,
+  or only one block in total. Otherwise required.
+- `--param=NAME=DSLX_CONST_EXPR` – concrete top-block parametric binding;
+  repeat for multiple bindings.
+- `--comb-opt=free|preserve-names|preserve-names-and-functions` – requested
+  combinational optimization freedom; default `free`.
+- `--dslx_path` and `--dslx_stdlib_path` use the normal DSLX search rules.
+- `--warnings_as_errors=true|false` uses the normal DSLX warning policy.
+- `--toolchain=<FILE>` is optional for ordinary blocks and required when the
+  selected block reaches a proc instance.
+
+Block and instance names are preserved. A name reserved by the active XLS IR
+backend, such as `top`, or by SystemVerilog, such as `module` or `wire`, is
+rejected with a source diagnostic instead of silently mangled.
+Block-local `const` values may be used by later types, registers, and child
+parametric arguments.
+
+```shell
+xlsynth-driver dslx-block2ir \
+  --dslx_input_file=br_flow_reg_fwd.x \
+  --param=WIDTH=u32:8 > br_flow_reg_fwd.ir
+```
+
+The MVP requires exactly one positive-edge clock input and one synchronous
+active-high or active-low reset input. Outputs use `assign`; registers use
+`reg` contracts with required `next`, optional `en`, and optional `init_value`.
+Omitted `en` means true. Omitted `init_value`, or `init_value: none`, creates a
+non-resettable register. `init_value` is the value loaded by synchronous reset,
+not a SystemVerilog `initial` value or power-on state. Dynamic `init_value`
+expressions are lowered as synchronous reset mux and load-enable logic.
+
+Reset ports retain their active-high/low synchronous interface type and are
+also readable as one-bit values inside combinational expressions. Runtime
+`assert!` and `cover!` predicates are automatically masked while reset is
+active. Their message strings are preserved separately from sanitized, unique
+IR/SystemVerilog labels.
+
+Do not bind `clk` or `rst` in an `inst` body. The compiler connects the child
+reset to the parent reset after checking polarity. The child shares the
+parent's structural Block IR clock, so the clock is not an ordinary data
+binding.
+
+`preserve-names` anchors all authored `let` bindings after combinational helper
+optimization. `preserve-names-and-functions` currently does the same and emits
+a warning because XLS 0.53 requires calls to be inlined; combinational child
+materialization is follow-up work.
+
+### `dslx-block2sv`: explicit DSLX block to SystemVerilog
+
+Accepts the same block-language flags as `dslx-block2ir`, writes temporary
+Block IR, and invokes official `block_to_verilog_main`. A `--toolchain` with a
+valid `tool_path` is required. The command always emits SystemVerilog and
+accepts only `--module_name`, `--array_index_bounds_checking`, and
+`--separate_lines` from the codegen surface. Pipeline, reset, boundary-flop,
+valid-control, codegen-sidecar, `gate_format`, and `assert_format` settings are
+intentionally unavailable and are not inherited from toolchain configuration.
+The driver applies
+`--module_name` to a codegen-only Block IR package before official codegen,
+updating the selected top and any retained instance references. The
+authoritative `dslx-block2ir` package keeps its source block name. The override
+must also be an unreserved XLS IR and SystemVerilog identifier.
+
+The command selects `block_to_verilog_main --generator=combinational`. In the
+pinned XLS toolchain this bypasses cosmetic pipeline-stage reconstruction and
+emits the already-lowered Block IR directly; explicit registers, feedback,
+reset/load-enable behavior, hierarchy, assertions, and covers remain intact.
+The command restores the authoritative source/Block-IR port order in every
+generated block header after XLS 0.53 canonicalizes clock/reset ports first.
+
+```shell
+xlsynth-driver --toolchain=/path/to/xlsynth-toolchain.toml \
+  dslx-block2sv \
+  --dslx_input_file=br_flow_reg_fwd.x \
+  --param=WIDTH=u32:8 > br_flow_reg_fwd.sv
+```
+
+Combinational DSLX `#[extern_verilog(...)]` functions are supported and remain
+explicit `kind=extern` instantiations in roundtrippable Block IR. XLS 0.53 cannot
+reparse the `foreign_function=` syntax emitted by its own `codegen_main`, so
+`dslx-block2sv` uses a temporary placeholder package for official block codegen.
+Compiler-owned SV-safe anchors bind FFI operands, and the driver replaces only
+the placeholder assignments with templates using `{fn}`, `{return}`, and exact
+function-parameter placeholders. Direct FFI calls are kept opaque during
+ordinary function inlining. Only the selected top's reachable block closure is
+patched. Structural and parametric constexpr expressions reject FFI calls
+because an FFI function's DSLX fallback body is not its hardware behavior. FFI
+calls hidden inside another function and sequential external modules are not
+supported.
+
+Proc instances require official proc-to-Block-IR lowering and use the fixed
+scheduling policy documented in the block-language architecture notes.
 
 ### `dslx2sv-types`: DSLX type definitions to SystemVerilog
 

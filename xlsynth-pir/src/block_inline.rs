@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::ir::{self, BlockMetadata, MemberType, NodePayload, NodeRef, PackageMember, Register};
+use crate::ir::{
+    self, BlockMetadata, InstantiationKind, MemberType, NodePayload, NodeRef, PackageMember,
+    Register,
+};
 use crate::ir_utils::{compact_and_toposort_in_place, get_topological, remap_payload_with};
 
 // Inlines all block instantiations in the package. All blocks are removed after
@@ -24,7 +27,12 @@ pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String>
                 Some(PackageMember::Block { func, metadata }) => (func.clone(), metadata.clone()),
                 _ => continue,
             };
-            if block.1.instantiations.is_empty() {
+            if !block
+                .1
+                .instantiations
+                .iter()
+                .any(|instantiation| instantiation.kind == InstantiationKind::Block)
+            {
                 continue;
             }
             has_instantiations = true;
@@ -50,7 +58,150 @@ pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String>
         }
     }
     prune_to_single_top_block(pkg)?;
+    rebase_member_ids_for_package_uniqueness(pkg)?;
     Ok(())
+}
+
+/// Rebases only retained members whose emitted ids collide with an earlier
+/// member. Flat legacy blocks therefore keep their observable ids unchanged.
+fn rebase_member_ids_for_package_uniqueness(pkg: &mut ir::Package) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    let mut seen_max = 0usize;
+    for member in &mut pkg.members {
+        repair_output_port_id_collisions(member, &seen, seen_max)?;
+        let ids = emitted_member_ids(member);
+        let unique = ids.iter().copied().collect::<BTreeSet<_>>();
+        if unique.len() != ids.len() {
+            return Err(
+                "block_inline: retained member has internally duplicate text ids".to_string(),
+            );
+        }
+        if ids.iter().any(|id| seen.contains(id)) {
+            let base = seen_max
+                .checked_add(1)
+                .ok_or_else(|| "block_inline: package text-id rebase overflowed".to_string())?;
+            match member {
+                PackageMember::Function(function) => {
+                    *function = crate::ir_rebase_ids::rebase_fn_ids(function, base);
+                }
+                PackageMember::Block { func, metadata } => {
+                    *func = crate::ir_rebase_ids::rebase_fn_ids(func, base);
+                    for id in metadata.output_port_ids.values_mut() {
+                        *id = id.checked_add(base).ok_or_else(|| {
+                            "block_inline: output-port text-id rebase overflowed".to_string()
+                        })?;
+                    }
+                    metadata.input_port_ids = func
+                        .params
+                        .iter()
+                        .map(|param| (param.name.clone(), param.id.get_wrapped_id()))
+                        .collect();
+                }
+            }
+        }
+        for id in emitted_member_ids(member) {
+            seen_max = seen_max.max(id);
+            seen.insert(id);
+        }
+    }
+    Ok(())
+}
+
+fn repair_output_port_id_collisions(
+    member: &mut PackageMember,
+    prior_ids: &BTreeSet<usize>,
+    prior_max: usize,
+) -> Result<(), String> {
+    let PackageMember::Block { func, metadata } = member else {
+        return Ok(());
+    };
+    let mut occupied = prior_ids.clone();
+    let synthetic_return = if metadata.output_names.len() != 1 {
+        func.ret_node_ref
+    } else {
+        None
+    };
+    occupied.extend(
+        func.nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| {
+                !matches!(node.payload, NodePayload::Nil)
+                    && !(synthetic_return == Some(NodeRef { index: *index })
+                        && matches!(node.payload, NodePayload::Tuple(_)))
+            })
+            .map(|(_, node)| node.text_id),
+    );
+    let mut next_id = occupied
+        .iter()
+        .copied()
+        .chain(metadata.output_port_ids.values().copied())
+        .max()
+        .unwrap_or(prior_max)
+        .checked_add(1)
+        .ok_or_else(|| "block_inline: output-port text-id allocation overflowed".to_string())?;
+    let mut output_names = metadata.output_names.clone();
+    let mut remaining = metadata
+        .output_port_ids
+        .keys()
+        .filter(|name| !output_names.contains(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    remaining.sort();
+    output_names.extend(remaining);
+    for name in output_names {
+        let id = metadata
+            .output_port_ids
+            .get_mut(&name)
+            .ok_or_else(|| format!("block_inline: output '{name}' has no output-port text id"))?;
+        if *id == 0 || !occupied.insert(*id) {
+            while occupied.contains(&next_id) {
+                next_id = next_id.checked_add(1).ok_or_else(|| {
+                    "block_inline: output-port text-id allocation overflowed".to_string()
+                })?;
+            }
+            *id = next_id;
+            occupied.insert(next_id);
+            next_id = next_id.checked_add(1).ok_or_else(|| {
+                "block_inline: output-port text-id allocation overflowed".to_string()
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn emitted_member_ids(member: &PackageMember) -> Vec<usize> {
+    let (function, metadata, synthetic_return) = match member {
+        PackageMember::Function(function) => (function, None, None),
+        PackageMember::Block { func, metadata } => (
+            func,
+            Some(metadata),
+            if metadata.output_names.len() != 1 {
+                func.ret_node_ref
+            } else {
+                None
+            },
+        ),
+    };
+    let mut ids = function
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| {
+            if matches!(node.payload, NodePayload::Nil)
+                || (synthetic_return == Some(NodeRef { index })
+                    && matches!(node.payload, NodePayload::Tuple(_)))
+            {
+                None
+            } else {
+                Some(node.text_id)
+            }
+        })
+        .collect::<Vec<_>>();
+    if let Some(metadata) = metadata {
+        ids.extend(metadata.output_port_ids.values().copied());
+    }
+    ids
 }
 
 fn inline_block_instantiations(
@@ -62,6 +213,9 @@ fn inline_block_instantiations(
         let instantiations = block.1.instantiations.clone();
         let mut did_inline = false;
         for inst in instantiations {
+            if inst.kind == InstantiationKind::Extern {
+                continue;
+            }
             let callee = match pkg.get_block(&inst.block) {
                 Some(PackageMember::Block { func, metadata }) => (func.clone(), metadata.clone()),
                 _ => {
@@ -71,7 +225,12 @@ fn inline_block_instantiations(
                     ));
                 }
             };
-            if !callee.1.instantiations.is_empty() {
+            if callee
+                .1
+                .instantiations
+                .iter()
+                .any(|child| child.kind == InstantiationKind::Block)
+            {
                 continue;
             }
             inline_single_instantiation(&mut block.0, &mut block.1, &inst.name, &callee)?;
@@ -95,6 +254,29 @@ fn inline_single_instantiation(
     let (callee_fn, callee_meta) = callee;
     let input_map = collect_instantiation_inputs(caller_fn, inst_name)?;
     let output_map = collect_callee_outputs(callee_fn, callee_meta)?;
+
+    let mut used_instantiation_names: HashMap<String, usize> = caller_meta
+        .instantiations
+        .iter()
+        .map(|instantiation| (instantiation.name.clone(), 1))
+        .collect();
+    let mut instantiation_name_map = HashMap::new();
+    for child in &callee_meta.instantiations {
+        if child.kind == InstantiationKind::Block {
+            return Err(format!(
+                "block_inline: callee '{}' still has child block instantiation '{}'",
+                callee_fn.name, child.name
+            ));
+        }
+        let base = format!("{}__{}", inst_name, child.name);
+        let unique_name = uniquify_node_name(&base, &mut used_instantiation_names);
+        instantiation_name_map.insert(child.name.clone(), unique_name.clone());
+        caller_meta.instantiations.push(ir::Instantiation {
+            name: unique_name,
+            block: child.block.clone(),
+            kind: child.kind,
+        });
+    }
 
     let mut register_name_map: HashMap<String, String> = HashMap::new();
     let mut used_register_names: HashMap<String, usize> = caller_meta
@@ -146,12 +328,6 @@ fn inline_single_instantiation(
                 })?;
                 mapping.insert(nr.index, *arg);
             }
-            NodePayload::InstantiationInput { .. } | NodePayload::InstantiationOutput { .. } => {
-                return Err(format!(
-                    "block_inline: callee '{}' still has instantiation nodes",
-                    callee_fn.name
-                ));
-            }
             _ => {
                 let new_payload =
                     remap_payload_with(&node.payload, |(_, dep): (usize, NodeRef)| {
@@ -160,6 +336,8 @@ fn inline_single_instantiation(
                         })
                     });
                 let new_payload = rewrite_register_payload(new_payload, &register_name_map);
+                let new_payload =
+                    rewrite_instantiation_payload(new_payload, &instantiation_name_map);
                 max_text_id += 1;
                 let new_node = ir::Node {
                     text_id: max_text_id,
@@ -295,6 +473,37 @@ fn rewrite_register_payload(
     }
 }
 
+fn rewrite_instantiation_payload(
+    payload: NodePayload,
+    instantiation_map: &HashMap<String, String>,
+) -> NodePayload {
+    match payload {
+        NodePayload::InstantiationInput {
+            arg,
+            instantiation,
+            port_name,
+        } => NodePayload::InstantiationInput {
+            arg,
+            instantiation: instantiation_map
+                .get(&instantiation)
+                .cloned()
+                .unwrap_or(instantiation),
+            port_name,
+        },
+        NodePayload::InstantiationOutput {
+            instantiation,
+            port_name,
+        } => NodePayload::InstantiationOutput {
+            instantiation: instantiation_map
+                .get(&instantiation)
+                .cloned()
+                .unwrap_or(instantiation),
+            port_name,
+        },
+        _ => payload,
+    }
+}
+
 fn uniquify_register_name(base: &str, used: &mut HashMap<String, usize>) -> String {
     if !used.contains_key(base) {
         used.insert(base.to_string(), 1);
@@ -343,9 +552,42 @@ fn prune_to_single_top_block(pkg: &mut ir::Package) -> Result<(), String> {
             first.ok_or_else(|| "block_inline: no block members to keep".to_string())?
         }
     };
+    let foreign_functions = pkg
+        .get_block(&top_name)
+        .and_then(|member| match member {
+            PackageMember::Block { metadata, .. } => Some(
+                metadata
+                    .instantiations
+                    .iter()
+                    .filter(|instantiation| instantiation.kind == InstantiationKind::Extern)
+                    .map(|instantiation| instantiation.block.clone())
+                    .collect::<BTreeSet<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut reachable_functions = foreign_functions.clone();
+    let mut worklist = foreign_functions.into_iter().collect::<Vec<_>>();
+    while let Some(name) = worklist.pop() {
+        let function = pkg
+            .get_fn(&name)
+            .ok_or_else(|| format!("block_inline: retained extern function '{name}' is missing"))?;
+        for node in &function.nodes {
+            let callee = match &node.payload {
+                NodePayload::Invoke { to_apply, .. } => Some(to_apply),
+                NodePayload::CountedFor { body, .. } => Some(body),
+                _ => None,
+            };
+            if let Some(callee) = callee
+                && reachable_functions.insert(callee.clone())
+            {
+                worklist.push(callee.clone());
+            }
+        }
+    }
     pkg.members.retain(|m| match m {
         PackageMember::Block { func, .. } => func.name == top_name,
-        _ => false,
+        PackageMember::Function(function) => reachable_functions.contains(&function.name),
     });
     pkg.top = Some((top_name, MemberType::Block));
     Ok(())
@@ -362,6 +604,22 @@ mod tests {
         parser
             .parse_and_validate_package()
             .expect("parse package should succeed")
+    }
+
+    #[test]
+    fn flat_top_block_keeps_existing_text_ids() {
+        let mut package = parse_pkg(
+            r#"package flat
+
+top block passthrough(x: bits[1], y: bits[1]) {
+  x: bits[1] = input_port(name=x, id=7)
+  y: () = output_port(x, name=y, id=11)
+}
+"#,
+        );
+        let before = package.to_string();
+        inline_all_blocks_in_package(&mut package).expect("flat package should inline");
+        assert_eq!(package.to_string(), before);
     }
 
     fn assert_no_instantiation_nodes(f: &ir::Fn) {
@@ -456,6 +714,56 @@ top block top(a: bits[1], y: bits[1]) {
         assert!(metadata.instantiations.is_empty());
         assert_no_instantiation_nodes(func);
         assert_output_matches(func, metadata, "y", "not(get_param(name=\"a\"))");
+    }
+
+    #[test]
+    fn inline_child_preserves_and_renames_extern_instantiation() {
+        let pkg_text = r#"package test
+
+fn helper(x: bits[8] id=10) -> bits[8] {
+  ret not.11: bits[8] = not(x, id=11)
+}
+
+#[ffi_proto("""code_template: "assign {return} = ~{x};"
+""")]
+fn ffi_not(x: bits[8] id=1) -> bits[8] {
+  ret invoke.12: bits[8] = invoke(x, to_apply=helper, id=12)
+}
+
+block child(x: bits[8], y: bits[8]) {
+  instantiation call(foreign_function=ffi_not, kind=extern)
+  x: bits[8] = input_port(name=x, id=2)
+  result: bits[8] = instantiation_output(instantiation=call, port_name=return, id=3)
+  instantiation_input.4: () = instantiation_input(x, instantiation=call, port_name=x, id=4)
+  y: () = output_port(result, name=y, id=5)
+}
+
+top block top(x: bits[8], y: bits[8]) {
+  instantiation u0(block=child, kind=block)
+  x: bits[8] = input_port(name=x, id=6)
+  result: bits[8] = instantiation_output(instantiation=u0, port_name=y, id=7)
+  instantiation_input.8: () = instantiation_input(x, instantiation=u0, port_name=x, id=8)
+  y: () = output_port(result, name=y, id=9)
+}
+"#;
+        let mut pkg = parse_pkg(pkg_text);
+        inline_all_blocks_in_package(&mut pkg).expect("inline should succeed");
+        crate::ir_verify::verify_package(&pkg).expect("inlined extern package should verify");
+        let PackageMember::Block { func, metadata } = pkg.get_block("top").unwrap() else {
+            panic!("expected top block");
+        };
+        assert_eq!(metadata.instantiations.len(), 1);
+        assert_eq!(metadata.instantiations[0].kind, InstantiationKind::Extern);
+        assert_eq!(metadata.instantiations[0].name, "u0__call");
+        assert!(func.nodes.iter().any(|node| {
+            matches!(
+                &node.payload,
+                NodePayload::InstantiationOutput { instantiation, .. }
+                    if instantiation == "u0__call"
+            )
+        }));
+        assert!(pkg.get_fn("ffi_not").is_some());
+        assert!(pkg.get_fn("helper").is_some());
     }
 
     #[test]

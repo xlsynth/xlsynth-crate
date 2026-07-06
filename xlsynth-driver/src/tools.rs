@@ -6,6 +6,10 @@
 use crate::common::{CodegenFlags, PipelineSpec, add_codegen_flags};
 use std::process;
 use std::process::Command;
+use std::time::Duration;
+
+const BLOCK_CODEGEN_TIMEOUT: Duration = Duration::from_secs(60);
+const BLOCK_CODEGEN_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Constructs the path to `binary_name` inside `tool_dir` and exits the process
 /// with an error if the binary does not exist.
@@ -237,7 +241,6 @@ pub fn run_block_to_verilog(
     let output = command
         .output()
         .expect("block_to_verilog_main should succeed");
-
     if !output.status.success() {
         eprintln!(
             "block_to_verilog_main failed with status: {}",
@@ -246,6 +249,50 @@ pub fn run_block_to_verilog(
         eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
         process::exit(1);
     }
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
 
+/// Emits arbitrary Block IR without asking XLS to reconstruct cosmetic
+/// feed-forward pipeline stages. Registers and their feedback remain intact.
+pub fn run_block_to_verilog_non_pipeline(
+    block_ir_file: &std::path::Path,
+    codegen_flags: &CodegenFlags,
+    tool_path: &str,
+) -> String {
+    log::info!("run_block_to_verilog_non_pipeline");
+    let b2v_path = tool_path_or_exit(tool_path, "block_to_verilog_main", "block_to_verilog_main");
+    let mut command = Command::new(b2v_path);
+    command.arg(block_ir_file).arg("--generator=combinational");
+    add_codegen_flags(&mut command, codegen_flags);
+    log::info!("Running command: {:?}", command);
+    run_block_to_verilog_command_with_limits(&mut command)
+}
+
+fn run_block_to_verilog_command_with_limits(command: &mut Command) -> String {
+    let output = xlsynth_block_lang::run_tool_with_limits(
+        command,
+        BLOCK_CODEGEN_TIMEOUT,
+        BLOCK_CODEGEN_MAX_OUTPUT_BYTES,
+    )
+    .expect("block_to_verilog_main should start");
+    if output.timed_out {
+        eprintln!("block_to_verilog_main exceeded {:?}", BLOCK_CODEGEN_TIMEOUT);
+        process::exit(1);
+    }
+    if output.output_truncated {
+        eprintln!(
+            "block_to_verilog_main output exceeded the {}-byte stream limit",
+            BLOCK_CODEGEN_MAX_OUTPUT_BYTES
+        );
+        process::exit(1);
+    }
+    if !output.status.success() {
+        eprintln!(
+            "block_to_verilog_main failed with status: {}",
+            output.status
+        );
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        process::exit(1);
+    }
     String::from_utf8_lossy(&output.stdout).to_string()
 }

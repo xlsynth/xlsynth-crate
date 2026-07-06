@@ -325,6 +325,8 @@ jobs:
         env:
           BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
           LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+          XLSYNTH_TEST_TOOL_PATH: ${{ github.workspace }}/xlsynth_tools
+          XLSYNTH_REQUIRE_BLOCK_E2E: "1"
         run: |
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
