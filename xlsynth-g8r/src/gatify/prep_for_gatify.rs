@@ -664,7 +664,10 @@ fn ext_clz_eq_literal_target_clz_count(
             matches.push(clz_value);
         }
     }
-    (matches.len() == 1).then_some((arg, matches[0]))
+    match matches.as_slice() {
+        [clz_count] => Some((arg, *clz_count)),
+        _ => None,
+    }
 }
 
 fn negate_predicate_payload(f: &mut ir::Fn, payload: NodePayload) -> NodePayload {
@@ -2634,6 +2637,39 @@ top fn f(x: bits[4] id=1) -> bits[1] {
         );
         for x in 0u64..16 {
             let args = [IrValue::make_ubits(4, x).unwrap()];
+            let got_orig = match eval_fn(&f, &args) {
+                FnEvalResult::Success(s) => s.value,
+                FnEvalResult::Failure(f) => panic!("unexpected original eval failure: {:?}", f),
+            };
+            let got_opt = match eval_fn(&optimized, &args) {
+                FnEvalResult::Success(s) => s.value,
+                FnEvalResult::Failure(f) => panic!("unexpected optimized eval failure: {:?}", f),
+            };
+            assert_eq!(got_orig, got_opt, "mismatch at x={x}");
+        }
+    }
+
+    #[test]
+    fn eq_clz_unreachable_literal_is_not_rewritten() {
+        let f = parse_test_fn(
+            r#"package sample
+
+top fn f(x: bits[1] id=1) -> bits[1] {
+  clz: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
+  target: bits[3] = literal(value=7, id=3)
+  ret out: bits[1] = eq(clz, target, id=4)
+}"#,
+        );
+        let optimized = prep_for_gatify(&f, None, PrepForGatifyOptions::all_opts_enabled());
+        let expected = r#"fn f(x: bits[1] id=1) -> bits[1] {
+  clz: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
+  target: bits[3] = literal(value=7, id=3)
+  ret out: bits[1] = eq(clz, target, id=4)
+}"#;
+        assert_eq!(optimized.to_string(), expected);
+
+        for x in 0u64..2 {
+            let args = [IrValue::make_ubits(1, x).unwrap()];
             let got_orig = match eval_fn(&f, &args) {
                 FnEvalResult::Success(s) => s.value,
                 FnEvalResult::Failure(f) => panic!("unexpected original eval failure: {:?}", f),
