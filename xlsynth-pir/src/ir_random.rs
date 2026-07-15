@@ -2,7 +2,7 @@
 
 //! Direct construction of random, typed PIR functions.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -10,8 +10,9 @@ use rand::RngCore;
 use xlsynth::IrValue;
 
 use crate::ir::{
-    Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, Fn, MemberType, NaryOp, Node,
-    NodePayload, NodeRef, Package, PackageMember, Param, ParamId, Type, Unop,
+    Binop, BlockMetadata, BlockResetMetadata, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable,
+    Fn, MemberType, NaryOp, Node, NodePayload, NodeRef, Package, PackageMember, Param, ParamId,
+    Register, Type, Unop,
 };
 use crate::ir_rebase_ids::rebase_fn_ids;
 use crate::ir_utils::{is_observable_effect_root, operands};
@@ -590,6 +591,141 @@ pub struct GeneratedPackage {
     pub function_stats: Vec<GeneratedFnStats>,
 }
 
+/// Controls reset timing metadata for generated random PIR blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RandomBlockResetTiming {
+    /// Generates only synchronous block reset metadata.
+    Synchronous,
+    /// Generates only asynchronous block reset metadata.
+    Asynchronous,
+    /// Chooses synchronous or asynchronous block reset metadata with equal
+    /// probability.
+    Either,
+}
+
+/// Configures shape and state limits for random PIR blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RandomBlockOptions {
+    /// Options used for random data types and combinational body operations.
+    pub function_options: RandomFnOptions,
+    /// Minimum number of data input ports, excluding any generated reset port.
+    pub min_input_ports: usize,
+    /// Maximum number of data input ports, excluding any generated reset port.
+    pub max_input_ports: usize,
+    /// Minimum number of output ports; zero-output blocks are supported.
+    pub min_output_ports: usize,
+    pub max_output_ports: usize,
+    pub min_registers: usize,
+    pub max_registers: usize,
+    /// Permits port and register types whose flattened bit count is zero,
+    /// including zero-width aggregates such as arrays of empty tuples.
+    pub allow_zero_width_ports_and_registers: bool,
+    /// Permits generated register writes to use an available `bits[1]` value as
+    /// a load-enable.
+    pub allow_load_enable: bool,
+    /// Permits generated blocks with registers to add a reset port and use it
+    /// on some register writes.
+    pub allow_reset: bool,
+    /// Controls the timing kind when a reset port is generated.
+    pub reset_timing: RandomBlockResetTiming,
+}
+
+impl Default for RandomBlockOptions {
+    fn default() -> Self {
+        Self {
+            function_options: RandomFnOptions::default(),
+            min_input_ports: 0,
+            max_input_ports: 5,
+            min_output_ports: 0,
+            max_output_ports: 3,
+            min_registers: 0,
+            max_registers: 3,
+            allow_zero_width_ports_and_registers: false,
+            allow_load_enable: true,
+            allow_reset: true,
+            reset_timing: RandomBlockResetTiming::Either,
+        }
+    }
+}
+
+impl RandomBlockOptions {
+    fn validate(&self) -> Result<(), GenerationError> {
+        self.function_options.validate()?;
+        if self.min_input_ports > self.max_input_ports {
+            return Err(GenerationError::InvalidOptions(format!(
+                "min_input_ports {} exceeds max_input_ports {}",
+                self.min_input_ports, self.max_input_ports
+            )));
+        }
+        if self.min_output_ports > self.max_output_ports {
+            return Err(GenerationError::InvalidOptions(format!(
+                "min_output_ports {} exceeds max_output_ports {}",
+                self.min_output_ports, self.max_output_ports
+            )));
+        }
+        if self.min_registers > self.max_registers {
+            return Err(GenerationError::InvalidOptions(format!(
+                "min_registers {} exceeds max_registers {}",
+                self.min_registers, self.max_registers
+            )));
+        }
+        if self.min_input_ports > self.function_options.max_params {
+            return Err(GenerationError::InvalidOptions(format!(
+                "min_input_ports {} exceeds function_options.max_params {}",
+                self.min_input_ports, self.function_options.max_params
+            )));
+        }
+
+        let min_output_tuple_node = usize::from(self.min_output_ports != 1);
+        let min_seed_node = usize::from(
+            self.min_output_ports > 0 && self.min_input_ports == 0 && self.min_registers == 0,
+        );
+        let required_nodes = self
+            .min_input_ports
+            .saturating_add(self.min_registers.saturating_mul(2))
+            .saturating_add(min_output_tuple_node)
+            .saturating_add(min_seed_node);
+        if required_nodes > self.function_options.max_nodes {
+            return Err(GenerationError::InvalidOptions(format!(
+                "minimum block shape requires {required_nodes} nodes but max_nodes is {}",
+                self.function_options.max_nodes
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A directly constructed PIR block and its generation statistics.
+#[derive(Debug, Clone)]
+pub struct GeneratedBlock {
+    pub function: Fn,
+    pub metadata: BlockMetadata,
+    pub stats: GeneratedFnStats,
+}
+
+impl GeneratedBlock {
+    /// Moves the generated block into a package with that block marked top.
+    pub fn into_top_package(self, package_name: impl Into<String>) -> Package {
+        let block_name = self.function.name.clone();
+        Package {
+            name: package_name.into(),
+            file_table: FileTable::new(),
+            members: vec![PackageMember::Block {
+                func: self.function,
+                metadata: self.metadata,
+            }],
+            top: Some((block_name, MemberType::Block)),
+        }
+    }
+}
+
+/// A directly constructed PIR block package and per-block statistics.
+#[derive(Debug, Clone)]
+pub struct GeneratedBlockPackage {
+    pub package: Package,
+    pub block_stats: Vec<GeneratedFnStats>,
+}
+
 /// Parameter and return types required for constrained random function
 /// generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,6 +794,506 @@ pub fn generate_package<S: EntropySource>(
     options.validate()?;
     validate_stop_policy(stop_policy)?;
     PackageGenerator::new(source, options, stop_policy).generate()
+}
+
+/// Generates a typed PIR block directly from an entropy source.
+pub fn generate_block<S: EntropySource>(
+    source: &mut S,
+    options: &RandomBlockOptions,
+    stop_policy: StopPolicy,
+) -> Result<GeneratedBlock, GenerationError> {
+    options.validate()?;
+    validate_stop_policy(stop_policy)?;
+    BlockGenerator::new(source, options, stop_policy).generate_block("random_block_0".to_string())
+}
+
+/// Generates a package containing one top block directly from an entropy
+/// source.
+pub fn generate_block_package<S: EntropySource>(
+    source: &mut S,
+    options: &RandomBlockOptions,
+    stop_policy: StopPolicy,
+) -> Result<GeneratedBlockPackage, GenerationError> {
+    let generated = generate_block(source, options, stop_policy)?;
+    let stats = generated.stats.clone();
+    let package = generated.into_top_package("random_block_package");
+    crate::ir_verify::verify_package(&package)
+        .map_err(|error| GenerationError::Construction(error.to_string()))?;
+    Ok(GeneratedBlockPackage {
+        package,
+        block_stats: vec![stats],
+    })
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedRegisterState {
+    name: String,
+    ty: Type,
+    read_ref: NodeRef,
+    reset_ref: Option<NodeRef>,
+}
+
+struct GeneratedRegisterWrite {
+    next_ref: NodeRef,
+    load_enable: Option<NodeRef>,
+}
+
+struct BlockGenerator<'a, S> {
+    source: &'a mut S,
+    options: &'a RandomBlockOptions,
+    stop_policy: StopPolicy,
+}
+
+impl<'a, S: EntropySource> BlockGenerator<'a, S> {
+    fn new(source: &'a mut S, options: &'a RandomBlockOptions, stop_policy: StopPolicy) -> Self {
+        Self {
+            source,
+            options,
+            stop_policy,
+        }
+    }
+
+    fn generate_block(&mut self, name: String) -> Result<GeneratedBlock, GenerationError> {
+        let mut generator = FunctionGenerator::new(&self.options.function_options);
+        let mut metadata = BlockMetadata {
+            clock_port_name: None,
+            input_port_ids: HashMap::new(),
+            output_port_ids: HashMap::new(),
+            output_names: Vec::new(),
+            reset: None,
+            registers: Vec::new(),
+            instantiations: Vec::new(),
+        };
+
+        let input_count = self.choose_input_count()?;
+        for index in 0..input_count {
+            let ty = random_block_interface_type(
+                self.source,
+                &self.options.function_options,
+                self.options.allow_zero_width_ports_and_registers,
+            );
+            self.add_block_param(&mut generator, &mut metadata, format!("in{index}"), ty);
+        }
+
+        let register_count = self.choose_register_count(generator.params.len())?;
+        let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
+        let reset_ref = self.maybe_add_reset_port(
+            &mut generator,
+            &mut metadata,
+            register_count,
+            output_tuple_reserve,
+        );
+        let registers =
+            self.add_registers(&mut generator, &mut metadata, register_count, reset_ref);
+
+        self.generate_body(&mut generator, register_count, output_tuple_reserve)?;
+
+        let output_count = self.choose_output_count(&generator, register_count)?;
+        let output_refs = self.choose_output_refs(&generator, output_count)?;
+        let mut register_writes = Vec::with_capacity(registers.len());
+        for register in &registers {
+            let next_ref = self.choose_register_next_ref(&generator, register)?;
+            let load_enable = self.maybe_choose_load_enable_ref(&generator);
+            register_writes.push(GeneratedRegisterWrite {
+                next_ref,
+                load_enable,
+            });
+        }
+
+        // For zero or multiple outputs, the synthetic tuple return is omitted
+        // when the function is emitted as a block. Keep it out of the register
+        // D-value candidate set so register writes cannot reference that
+        // suppressed internal node.
+        let ret_node_ref = self.materialize_block_return(&mut generator, &output_refs)?;
+
+        for (register, write) in registers.iter().zip(register_writes) {
+            generator.add_node(
+                Type::nil(),
+                NodePayload::RegisterWrite {
+                    arg: write.next_ref,
+                    register: register.name.clone(),
+                    load_enable: write.load_enable,
+                    reset: register.reset_ref,
+                },
+                Some(format!("{}_d", register.name)),
+            );
+        }
+
+        self.populate_output_metadata(&generator, &mut metadata, output_count);
+        let mut function = generator.finish_with_return(ret_node_ref)?;
+        function.name = name;
+        let stats = gather_block_stats(&function);
+
+        Ok(GeneratedBlock {
+            function,
+            metadata,
+            stats,
+        })
+    }
+
+    fn choose_input_count(&mut self) -> Result<usize, GenerationError> {
+        let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
+        let reserved_nodes = self
+            .options
+            .min_registers
+            .saturating_mul(2)
+            .saturating_add(output_tuple_reserve);
+        let max_by_nodes = self
+            .options
+            .function_options
+            .max_nodes
+            .saturating_sub(reserved_nodes);
+        let max_input_count = self
+            .options
+            .max_input_ports
+            .min(self.options.function_options.max_params)
+            .min(max_by_nodes);
+        if max_input_count < self.options.min_input_ports {
+            return Err(GenerationError::InvalidOptions(format!(
+                "minimum block input count {} cannot fit with max_nodes {}",
+                self.options.min_input_ports, self.options.function_options.max_nodes
+            )));
+        }
+        Ok(choose_between(
+            self.source,
+            self.options.min_input_ports,
+            max_input_count,
+        ))
+    }
+
+    fn choose_register_count(&mut self, input_count: usize) -> Result<usize, GenerationError> {
+        let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
+        let max_by_nodes = self
+            .options
+            .function_options
+            .max_nodes
+            .saturating_sub(input_count.saturating_add(output_tuple_reserve))
+            / 2;
+        let max_register_count = self.options.max_registers.min(max_by_nodes);
+        if max_register_count < self.options.min_registers {
+            return Err(GenerationError::InvalidOptions(format!(
+                "minimum register count {} cannot fit with {} input nodes and max_nodes {}",
+                self.options.min_registers, input_count, self.options.function_options.max_nodes
+            )));
+        }
+        Ok(choose_between(
+            self.source,
+            self.options.min_registers,
+            max_register_count,
+        ))
+    }
+
+    fn add_block_param(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+        metadata: &mut BlockMetadata,
+        name: String,
+        ty: Type,
+    ) -> NodeRef {
+        let node_ref = generator.add_named_param(name.clone(), ty);
+        metadata
+            .input_port_ids
+            .insert(name, generator.params.last().unwrap().id.get_wrapped_id());
+        node_ref
+    }
+
+    fn maybe_add_reset_port(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+        metadata: &mut BlockMetadata,
+        register_count: usize,
+        output_tuple_reserve: usize,
+    ) -> Option<NodeRef> {
+        if register_count == 0 || !self.options.allow_reset || self.source.take_u64() & 1 == 0 {
+            return None;
+        }
+        let used_nodes = generator.nodes.len().saturating_sub(1);
+        let reserved_nodes = register_count
+            .saturating_mul(2)
+            .saturating_add(output_tuple_reserve);
+        if generator.params.len() >= self.options.function_options.max_params
+            || used_nodes.saturating_add(1).saturating_add(reserved_nodes)
+                > self.options.function_options.max_nodes
+        {
+            return None;
+        }
+
+        let reset_ref = self.add_block_param(generator, metadata, "rst".to_string(), Type::Bits(1));
+        let asynchronous = match self.options.reset_timing {
+            RandomBlockResetTiming::Synchronous => false,
+            RandomBlockResetTiming::Asynchronous => true,
+            RandomBlockResetTiming::Either => self.source.take_u64() & 1 != 0,
+        };
+        metadata.reset = Some(BlockResetMetadata {
+            port_name: "rst".to_string(),
+            asynchronous,
+            active_low: self.source.take_u64() & 1 != 0,
+        });
+        Some(reset_ref)
+    }
+
+    fn add_registers(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+        metadata: &mut BlockMetadata,
+        register_count: usize,
+        reset_ref: Option<NodeRef>,
+    ) -> Vec<GeneratedRegisterState> {
+        if register_count != 0 {
+            metadata.clock_port_name = Some("clk".to_string());
+        }
+
+        let reset_enabled = self.choose_register_reset_enabled(register_count, reset_ref);
+        let mut registers = Vec::with_capacity(register_count);
+        for index in 0..register_count {
+            let name = format!("r{index}");
+            let ty = random_block_interface_type(
+                self.source,
+                &self.options.function_options,
+                self.options.allow_zero_width_ports_and_registers,
+            );
+            let register_reset_ref = if reset_enabled[index] {
+                reset_ref
+            } else {
+                None
+            };
+            let reset_value = register_reset_ref.map(|_| generate_uniform_value(self.source, &ty));
+            metadata.registers.push(Register {
+                name: name.clone(),
+                ty: ty.clone(),
+                reset_value,
+            });
+            let read_ref = generator.add_node(
+                ty.clone(),
+                NodePayload::RegisterRead {
+                    register: name.clone(),
+                },
+                Some(format!("{name}_q")),
+            );
+            registers.push(GeneratedRegisterState {
+                name,
+                ty,
+                read_ref,
+                reset_ref: register_reset_ref,
+            });
+        }
+        registers
+    }
+
+    fn choose_register_reset_enabled(
+        &mut self,
+        register_count: usize,
+        reset_ref: Option<NodeRef>,
+    ) -> Vec<bool> {
+        if reset_ref.is_none() {
+            return vec![false; register_count];
+        }
+        let mut enabled: Vec<bool> = (0..register_count)
+            .map(|_| self.source.take_u64() & 1 != 0)
+            .collect();
+        if register_count > 1 {
+            if enabled.iter().all(|value| *value) {
+                enabled[register_count - 1] = false;
+            } else if enabled.iter().all(|value| !*value) {
+                enabled[0] = true;
+            }
+        }
+        enabled
+    }
+
+    fn generate_body(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+        register_count: usize,
+        output_tuple_reserve: usize,
+    ) -> Result<(), GenerationError> {
+        let used_nodes = generator.nodes.len().saturating_sub(1);
+        let reserved_nodes = register_count.saturating_add(output_tuple_reserve);
+        let body_capacity = self
+            .options
+            .function_options
+            .max_nodes
+            .saturating_sub(used_nodes.saturating_add(reserved_nodes));
+        let mut body_nodes = 0;
+        if block_data_types(generator, self.options.allow_zero_width_ports_and_registers).is_empty()
+            && self.options.max_output_ports > 0
+        {
+            if body_capacity == 0 {
+                if self.options.min_output_ports == 0 {
+                    return Ok(());
+                }
+                return Err(GenerationError::Construction(
+                    "block has no data value available for an output".to_string(),
+                ));
+            }
+            self.add_random_data_literal(generator);
+            body_nodes += 1;
+        }
+
+        while body_nodes < body_capacity
+            && should_add_node(self.source, self.stop_policy, body_nodes)
+        {
+            generator.add_random_body_node(self.source)?;
+            body_nodes += 1;
+        }
+        Ok(())
+    }
+
+    fn add_random_data_literal(&mut self, generator: &mut FunctionGenerator<'_>) -> NodeRef {
+        let ty = random_block_interface_type(
+            self.source,
+            &self.options.function_options,
+            self.options.allow_zero_width_ports_and_registers,
+        );
+        generator.add_node(
+            ty.clone(),
+            NodePayload::Literal(generate_uniform_value(self.source, &ty)),
+            None,
+        )
+    }
+
+    fn choose_output_count(
+        &mut self,
+        generator: &FunctionGenerator<'_>,
+        register_count: usize,
+    ) -> Result<usize, GenerationError> {
+        let used_nodes = generator.nodes.len().saturating_sub(1);
+        let remaining_after_register_writes = self
+            .options
+            .function_options
+            .max_nodes
+            .saturating_sub(used_nodes.saturating_add(register_count));
+        let data_available =
+            !block_data_types(generator, self.options.allow_zero_width_ports_and_registers)
+                .is_empty();
+        let (min_output_count, max_output_count) = if !data_available {
+            (self.options.min_output_ports, 0)
+        } else if remaining_after_register_writes == 0 {
+            (self.options.min_output_ports.max(1), 1)
+        } else {
+            (self.options.min_output_ports, self.options.max_output_ports)
+        };
+        if max_output_count < min_output_count {
+            return Err(GenerationError::Construction(format!(
+                "minimum output count {} cannot fit after generated body",
+                self.options.min_output_ports
+            )));
+        }
+        Ok(choose_between(
+            self.source,
+            min_output_count,
+            max_output_count,
+        ))
+    }
+
+    fn choose_output_refs(
+        &mut self,
+        generator: &FunctionGenerator<'_>,
+        output_count: usize,
+    ) -> Result<Vec<NodeRef>, GenerationError> {
+        if output_count == 0 {
+            return Ok(Vec::new());
+        }
+        if block_data_types(generator, self.options.allow_zero_width_ports_and_registers).is_empty()
+        {
+            return Err(GenerationError::Construction(
+                "block has no data value available for an output".to_string(),
+            ));
+        }
+        Ok((0..output_count)
+            .map(|_| self.choose_block_data_ref(generator))
+            .collect())
+    }
+
+    fn choose_block_data_ref(&mut self, generator: &FunctionGenerator<'_>) -> NodeRef {
+        let types = block_data_types(generator, self.options.allow_zero_width_ports_and_registers);
+        let ty = &types[choose_count(self.source, types.len())];
+        generator.choose_ref_for_type(self.source, ty)
+    }
+
+    fn materialize_block_return(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+        output_refs: &[NodeRef],
+    ) -> Result<NodeRef, GenerationError> {
+        if output_refs.len() == 1 {
+            return Ok(output_refs[0]);
+        }
+        let fields = output_refs
+            .iter()
+            .map(|node_ref| Box::new(generator.get_node(*node_ref).ty.clone()))
+            .collect();
+        Ok(generator.add_node(
+            Type::Tuple(fields),
+            NodePayload::Tuple(output_refs.to_vec()),
+            Some("outputs".to_string()),
+        ))
+    }
+
+    fn choose_register_next_ref(
+        &mut self,
+        generator: &FunctionGenerator<'_>,
+        register: &GeneratedRegisterState,
+    ) -> Result<NodeRef, GenerationError> {
+        let refs = generator.nodes_by_type.get(&register.ty).ok_or_else(|| {
+            GenerationError::Construction(format!(
+                "no value available for register write '{}'",
+                register.name
+            ))
+        })?;
+        let feedback_refs: Vec<NodeRef> = refs
+            .iter()
+            .copied()
+            .filter(|candidate| generator.node_depends_on(*candidate, register.read_ref))
+            .collect();
+        let choices = if !feedback_refs.is_empty()
+            && (self.source.take_u64() & 1 == 0 || feedback_refs.len() == refs.len())
+        {
+            &feedback_refs
+        } else {
+            refs
+        };
+        Ok(choices[choose_count(self.source, choices.len())])
+    }
+
+    fn maybe_choose_load_enable_ref(
+        &mut self,
+        generator: &FunctionGenerator<'_>,
+    ) -> Option<NodeRef> {
+        if !self.options.allow_load_enable || self.source.take_u64() & 1 == 0 {
+            return None;
+        }
+        generator
+            .nodes_by_type
+            .get(&Type::Bits(1))
+            .map(|refs| refs[choose_count(self.source, refs.len())])
+    }
+
+    fn populate_output_metadata(
+        &self,
+        generator: &FunctionGenerator<'_>,
+        metadata: &mut BlockMetadata,
+        output_count: usize,
+    ) {
+        metadata.output_names = if output_count == 1 {
+            vec!["out".to_string()]
+        } else {
+            (0..output_count)
+                .map(|index| format!("out{index}"))
+                .collect()
+        };
+        let mut next_id = generator
+            .nodes
+            .iter()
+            .map(|node| node.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for name in &metadata.output_names {
+            metadata.output_port_ids.insert(name.clone(), next_id);
+            next_id = next_id.saturating_add(1);
+        }
+    }
 }
 
 struct PackageGenerator<'a, S> {
@@ -1499,6 +2135,46 @@ fn random_type<S: EntropySource>(source: &mut S, options: &RandomFnOptions, dept
     Type::Tuple(fields)
 }
 
+fn random_data_type<S: EntropySource>(
+    source: &mut S,
+    options: &RandomFnOptions,
+    depth: usize,
+) -> Type {
+    let mut data_options = options.clone();
+    data_options.allow_events = false;
+    random_type(source, &data_options, depth)
+}
+
+/// Chooses a block port/register type, falling back after bounded rejection
+/// sampling so pathological entropy cannot loop forever.
+fn random_block_interface_type<S: EntropySource>(
+    source: &mut S,
+    options: &RandomFnOptions,
+    allow_zero_width: bool,
+) -> Type {
+    const MAX_ATTEMPTS: usize = 16;
+    for _ in 0..MAX_ATTEMPTS {
+        let ty = random_data_type(source, options, 0);
+        if allow_zero_width || ty.bit_count() != 0 {
+            return ty;
+        }
+    }
+    Type::Bits(1)
+}
+
+fn type_is_block_data(ty: &Type) -> bool {
+    !ty.is_nil() && !type_contains_token(ty)
+}
+
+fn block_data_types(generator: &FunctionGenerator<'_>, allow_zero_width: bool) -> Vec<Type> {
+    generator
+        .nodes_by_type
+        .keys()
+        .filter(|ty| type_is_block_data(ty) && (allow_zero_width || ty.bit_count() != 0))
+        .cloned()
+        .collect()
+}
+
 fn type_leaf_count(ty: &Type) -> usize {
     match ty {
         Type::Token | Type::Bits(_) => 1,
@@ -1583,8 +2259,12 @@ impl<'a> FunctionGenerator<'a> {
     }
 
     fn add_param(&mut self, ty: Type) {
-        let id = ParamId::new(self.params.len() + 1);
         let name = format!("p{}", self.params.len());
+        self.add_named_param(name, ty);
+    }
+
+    fn add_named_param(&mut self, name: String, ty: Type) -> NodeRef {
+        let id = ParamId::new(self.params.len() + 1);
         let node_ref = self.add_node(
             ty.clone(),
             NodePayload::GetParam(id.clone()),
@@ -1592,6 +2272,7 @@ impl<'a> FunctionGenerator<'a> {
         );
         self.params.push(Param { name, ty, id });
         debug_assert_eq!(node_ref.index, self.params.len());
+        node_ref
     }
 
     fn add_node(&mut self, ty: Type, payload: NodePayload, name: Option<String>) -> NodeRef {
@@ -2493,6 +3174,20 @@ impl<'a> FunctionGenerator<'a> {
         &self.nodes[node_ref.index]
     }
 
+    fn node_depends_on(&self, start: NodeRef, target: NodeRef) -> bool {
+        let mut stack = vec![start];
+        let mut seen = HashSet::new();
+        while let Some(node_ref) = stack.pop() {
+            if node_ref == target {
+                return true;
+            }
+            if seen.insert(node_ref.index) {
+                stack.extend(operands(&self.nodes[node_ref.index].payload));
+            }
+        }
+        false
+    }
+
     fn token_refs(&self) -> Vec<NodeRef> {
         self.nodes_by_type
             .get(&Type::Token)
@@ -2849,6 +3544,19 @@ impl<'a> FunctionGenerator<'a> {
 }
 
 fn gather_stats(function: &Fn) -> GeneratedFnStats {
+    gather_stats_with_roots(function, |payload| is_observable_effect_root(payload))
+}
+
+fn gather_block_stats(function: &Fn) -> GeneratedFnStats {
+    gather_stats_with_roots(function, |payload| {
+        is_observable_effect_root(payload) || matches!(payload, NodePayload::RegisterWrite { .. })
+    })
+}
+
+fn gather_stats_with_roots(
+    function: &Fn,
+    is_extra_root: impl std::ops::Fn(&NodePayload) -> bool,
+) -> GeneratedFnStats {
     let mut live_indices = HashSet::new();
     let mut pending = vec![
         function
@@ -2860,7 +3568,7 @@ fn gather_stats(function: &Fn) -> GeneratedFnStats {
             .nodes
             .iter()
             .enumerate()
-            .filter(|(_, node)| is_observable_effect_root(&node.payload))
+            .filter(|(_, node)| is_extra_root(&node.payload))
             .map(|(index, _)| NodeRef { index }),
     );
     while let Some(node_ref) = pending.pop() {

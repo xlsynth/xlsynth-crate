@@ -114,6 +114,30 @@ Main failure modes surfaced:
 
 ______________________________________________________________________
 
+# Direct Random Block Roundtrip Fuzz Target
+
+This target generates block IR directly with `xlsynth_pir::ir_random`,
+including input/output ports, upfront registers, optional load-enables, and a
+mix of reset and non-reset registers when reset is available. It validates the
+generated package, parses its printed text, and checks that printing is stable.
+
+Target name: `fuzz_random_block_roundtrip`
+
+Essential property under test:
+
+- Direct block generation should emit structurally valid PIR blocks whose
+  metadata, register reads/writes, output ports, and parser/printer roundtrip
+  remain consistent.
+
+Main failure modes surfaced:
+
+- Register metadata and `register_read` / `register_write` nodes disagree.
+- Register write argument, reset, or load-enable operands have invalid types.
+- Output port metadata drifts from the block return value shape.
+- PIR block parser/printer roundtrip changes generated structure or metadata.
+
+______________________________________________________________________
+
 # `ext_nary_add` Eval vs Desugared Eval Fuzz Target
 
 This fuzz target generates a single-function PIR package whose return value is

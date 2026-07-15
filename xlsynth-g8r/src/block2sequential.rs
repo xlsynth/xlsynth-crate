@@ -597,6 +597,9 @@ fn collect_block_outputs(
     block: &ir::Fn,
     metadata: &BlockMetadata,
 ) -> Result<Vec<TransitionEndpoint>, String> {
+    if metadata.output_names.is_empty() {
+        return Ok(Vec::new());
+    }
     let ret_ref = block
         .ret_node_ref
         .ok_or_else(|| "block2sequential: block has no return node".to_string())?;
@@ -705,16 +708,15 @@ fn set_transition_return(
     endpoints: &[TransitionEndpoint],
     max_text_id: &mut usize,
 ) {
-    assert!(
-        !endpoints.is_empty(),
-        "parsed blocks must have at least one output endpoint"
-    );
     if endpoints.len() == 1 {
         transition.ret_ty = endpoints[0].ty.clone();
         transition.ret_node_ref = Some(endpoints[0].node_ref);
         return;
     }
 
+    // Keep a real return node even for a stateless block with no outputs.
+    // Gatify represents the empty tuple as one zero-width packed output, which
+    // split_transition_outputs removes to recover an empty transition interface.
     *max_text_id += 1;
     let ret_ty = Type::Tuple(
         endpoints
