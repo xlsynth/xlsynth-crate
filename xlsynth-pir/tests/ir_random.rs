@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use rand::RngCore;
 use rand_pcg::Pcg64Mcg;
 use xlsynth_pir::ir::{
-    Binop, ExtNaryAddArchitecture, FileTable, Fn, MemberType, NaryOp, NodePayload, NodeRef,
-    Package, PackageMember, Type, Unop,
+    Binop, BlockMetadata, ExtNaryAddArchitecture, FileTable, Fn, MemberType, NaryOp, NodePayload,
+    NodeRef, Package, PackageMember, Type, Unop,
 };
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
@@ -45,10 +45,6 @@ fn validate_generated_block_package(package: &Package) {
     assert_eq!(reparsed.to_string(), ir_text);
 }
 
-fn entropy_bytes(words: &[u64]) -> Vec<u8> {
-    words.iter().flat_map(|word| word.to_le_bytes()).collect()
-}
-
 fn node_depends_on(function: &Fn, start: NodeRef, target: NodeRef) -> bool {
     let mut pending = vec![start];
     let mut seen = HashSet::new();
@@ -71,6 +67,44 @@ fn block_output_types<'a>(function: &'a Fn, output_count: usize) -> Vec<&'a Type
         panic!("multi-output generated block should return a tuple");
     };
     fields.iter().map(|field| &**field).collect()
+}
+
+fn assert_generated_block_register_wiring(function: &Fn, metadata: &BlockMetadata) {
+    assert_eq!(
+        metadata.clock_port_name.is_some(),
+        !metadata.registers.is_empty()
+    );
+    for register in &metadata.registers {
+        let read_count = function
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.payload,
+                    NodePayload::RegisterRead { register: read_register }
+                        if read_register == &register.name
+                )
+            })
+            .count();
+        let writes: Vec<_> = function
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.payload {
+                NodePayload::RegisterWrite {
+                    arg,
+                    register: write_register,
+                    reset,
+                    ..
+                } if write_register == &register.name => Some((*arg, *reset)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(read_count, 1);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(function.get_node(writes[0].0).ty, register.ty);
+        assert_eq!(writes[0].1.is_some(), register.reset_value.is_some());
+    }
 }
 
 fn type_has_array(ty: &Type) -> bool {
@@ -316,178 +350,6 @@ fn depleted_entropy_constructs_a_minimal_deterministic_block() {
 }
 
 #[test]
-fn random_registered_block_generation_writes_every_register_with_reset_mix() {
-    let options = RandomBlockOptions {
-        min_input_ports: 0,
-        max_input_ports: 0,
-        min_registers: 2,
-        max_registers: 2,
-        min_output_ports: 1,
-        max_output_ports: 1,
-        allow_load_enable: false,
-        function_options: RandomFnOptions {
-            max_nodes: 10,
-            max_bit_width: 8,
-            ..RandomFnOptions::default()
-        },
-        ..RandomBlockOptions::default()
-    };
-    let entropy_words = [
-        1_u64, // Add a reset port.
-        0,     // Synchronous reset.
-        0,     // Active-high reset.
-        1,     // Reset r0.
-        0,     // Leave r1 unreset.
-        0,     // Make r0 bits-typed.
-        1,     // r0 width.
-        0,     // r0 reset value.
-        0,     // Make r1 bits-typed.
-        1,     // r1 width.
-    ];
-    let entropy_bytes = entropy_bytes(&entropy_words);
-    let mut entropy = DepletableBytes::new(&entropy_bytes);
-    let generated =
-        generate_block_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-
-    validate_generated_block_package(&generated.package);
-    let PackageMember::Block { func, metadata } = generated.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    assert_eq!(metadata.clock_port_name.as_deref(), Some("clk"));
-    assert!(metadata.reset.is_some());
-    assert_eq!(metadata.registers.len(), 2);
-    let reset_count = metadata
-        .registers
-        .iter()
-        .filter(|register| register.reset_value.is_some())
-        .count();
-    assert_eq!(reset_count, 1);
-
-    for register in &metadata.registers {
-        let read_count = func
-            .nodes
-            .iter()
-            .filter(|node| {
-                matches!(
-                    &node.payload,
-                    NodePayload::RegisterRead { register: read_register }
-                        if read_register == &register.name
-                )
-            })
-            .count();
-        let writes: Vec<_> = func
-            .nodes
-            .iter()
-            .filter_map(|node| match &node.payload {
-                NodePayload::RegisterWrite {
-                    arg,
-                    register: write_register,
-                    reset,
-                    ..
-                } if write_register == &register.name => Some((*arg, *reset)),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(read_count, 1);
-        assert_eq!(writes.len(), 1);
-        assert_eq!(func.get_node(writes[0].0).ty, register.ty);
-        assert_eq!(writes[0].1.is_some(), register.reset_value.is_some());
-    }
-}
-
-#[test]
-fn single_register_block_can_keep_an_unused_reset_port() {
-    let options = RandomBlockOptions {
-        min_input_ports: 0,
-        max_input_ports: 0,
-        min_registers: 1,
-        max_registers: 1,
-        min_output_ports: 1,
-        max_output_ports: 1,
-        allow_load_enable: false,
-        function_options: RandomFnOptions {
-            max_nodes: 4,
-            max_bit_width: 8,
-            ..RandomFnOptions::default()
-        },
-        ..RandomBlockOptions::default()
-    };
-    let entropy_words = [
-        1_u64, // Add a reset port.
-        0,     // Synchronous reset.
-        0,     // Active-high reset.
-        0,     // Leave the only register unreset.
-        0,     // Make the register bits-typed.
-        0,     // Register width.
-    ];
-    let entropy_bytes = entropy_bytes(&entropy_words);
-    let mut entropy = DepletableBytes::new(&entropy_bytes);
-    let generated =
-        generate_block_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-
-    validate_generated_block_package(&generated.package);
-    let PackageMember::Block { func, metadata } = generated.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    assert!(metadata.reset.is_some());
-    assert_eq!(metadata.registers.len(), 1);
-    assert!(metadata.registers[0].reset_value.is_none());
-    let write_reset = func
-        .nodes
-        .iter()
-        .find_map(|node| match &node.payload {
-            NodePayload::RegisterWrite { reset, .. } => Some(*reset),
-            _ => None,
-        })
-        .unwrap();
-    assert!(write_reset.is_none());
-}
-
-#[test]
-fn registered_block_generation_can_add_load_enable() {
-    let options = RandomBlockOptions {
-        min_input_ports: 0,
-        max_input_ports: 0,
-        min_registers: 1,
-        max_registers: 1,
-        min_output_ports: 1,
-        max_output_ports: 1,
-        allow_reset: false,
-        function_options: RandomFnOptions {
-            max_nodes: 4,
-            max_bit_width: 8,
-            ..RandomFnOptions::default()
-        },
-        ..RandomBlockOptions::default()
-    };
-    let entropy_words = [
-        0_u64, // Make the register bits-typed.
-        0,     // Register width bits[1].
-        0,     // Prefer the feedback candidate.
-        1,     // Add a load-enable.
-    ];
-    let entropy_bytes = entropy_bytes(&entropy_words);
-    let mut entropy = DepletableBytes::new(&entropy_bytes);
-    let generated =
-        generate_block_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-
-    validate_generated_block_package(&generated.package);
-    let PackageMember::Block { func, .. } = generated.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    let load_enable = func
-        .nodes
-        .iter()
-        .find_map(|node| match &node.payload {
-            NodePayload::RegisterWrite { load_enable, .. } => *load_enable,
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(func.get_node(load_enable).ty, Type::Bits(1));
-}
-
-#[test]
 fn generated_block_populates_multi_output_metadata() {
     let options = RandomBlockOptions {
         min_input_ports: 1,
@@ -502,109 +364,41 @@ fn generated_block_populates_multi_output_metadata() {
         },
         ..RandomBlockOptions::default()
     };
-    let mut entropy = DepletableBytes::new(&[]);
-    let generated =
-        generate_block_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-
-    validate_generated_block_package(&generated.package);
-    let PackageMember::Block { func, metadata } = generated.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    assert_eq!(
-        metadata.output_names,
-        vec!["out0".to_string(), "out1".to_string(), "out2".to_string()]
-    );
-    assert_eq!(metadata.output_port_ids.len(), 3);
-    assert_eq!(
-        metadata
-            .output_port_ids
-            .values()
-            .collect::<HashSet<_>>()
-            .len(),
-        3
-    );
-    let ret_ref = func.ret_node_ref.unwrap();
-    assert!(matches!(
-        &func.get_node(ret_ref).payload,
-        NodePayload::Tuple(outputs) if outputs.len() == 3
-    ));
-}
-
-#[test]
-fn registered_block_generation_supports_aggregate_registers() {
-    let options = RandomBlockOptions {
-        min_input_ports: 0,
-        max_input_ports: 0,
-        min_registers: 1,
-        max_registers: 1,
-        min_output_ports: 1,
-        max_output_ports: 1,
-        allow_load_enable: false,
-        function_options: RandomFnOptions {
-            max_nodes: 4,
-            max_bit_width: 8,
-            ..RandomFnOptions::default()
-        },
-        ..RandomBlockOptions::default()
-    };
-    let entropy_words = [
-        1_u64, // Add a reset port.
-        0,     // Synchronous reset.
-        0,     // Active-high reset.
-        1,     // Reset the register.
-        2,     // Make the register tuple-typed.
-        2,     // Give the tuple two fields.
-        0,     // Make field 0 bits-typed.
-        0,     // Field 0 width.
-        0,     // Make field 1 bits-typed.
-        0,     // Field 1 width.
-        0,     // Field 0 reset value.
-        0,     // Field 1 reset value.
-    ];
-    let entropy_bytes = entropy_bytes(&entropy_words);
-    let mut entropy = DepletableBytes::new(&entropy_bytes);
-    let generated =
-        generate_block_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-
-    validate_generated_block_package(&generated.package);
-    let PackageMember::Block { func, metadata } = generated.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    let register = &metadata.registers[0];
-    assert!(matches!(&register.ty, Type::Tuple(fields) if fields.len() == 2));
-    assert!(register.reset_value.is_some());
-    let write_arg = func
-        .nodes
-        .iter()
-        .find_map(|node| match &node.payload {
-            NodePayload::RegisterWrite { arg, .. } => Some(*arg),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(func.get_node(write_arg).ty, register.ty);
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x0d70_0003));
+    for _ in 0..128 {
+        let generated =
+            generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
+        let func = &generated.function;
+        let metadata = &generated.metadata;
+        assert_eq!(
+            metadata.output_names,
+            vec!["out0".to_string(), "out1".to_string(), "out2".to_string()]
+        );
+        assert_eq!(metadata.output_port_ids.len(), 3);
+        assert_eq!(
+            metadata
+                .output_port_ids
+                .values()
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        let ret_ref = func.ret_node_ref.unwrap();
+        assert!(matches!(
+            &func.get_node(ret_ref).payload,
+            NodePayload::Tuple(outputs) if outputs.len() == 3
+        ));
+    }
 }
 
 #[test]
 fn random_block_reset_timing_option_controls_generated_metadata() {
-    let cases: [(RandomBlockResetTiming, bool, &[u64]); 4] = [
-        (
-            RandomBlockResetTiming::Synchronous,
-            false,
-            &[1, 0, 1, 0, 0, 0],
-        ),
-        (
-            RandomBlockResetTiming::Asynchronous,
-            true,
-            &[1, 0, 1, 0, 0, 0],
-        ),
-        (
-            RandomBlockResetTiming::Either,
-            false,
-            &[1, 0, 0, 1, 0, 0, 0],
-        ),
-        (RandomBlockResetTiming::Either, true, &[1, 1, 0, 1, 0, 0, 0]),
+    let cases = [
+        (RandomBlockResetTiming::Synchronous, 0x51ac_0001),
+        (RandomBlockResetTiming::Asynchronous, 0x51ac_0002),
+        (RandomBlockResetTiming::Either, 0x51ac_0003),
     ];
-    for (reset_timing, expected_asynchronous, entropy_words) in cases {
+    for (reset_timing, seed) in cases {
         let options = RandomBlockOptions {
             min_input_ports: 0,
             max_input_ports: 0,
@@ -621,66 +415,83 @@ fn random_block_reset_timing_option_controls_generated_metadata() {
             },
             ..RandomBlockOptions::default()
         };
-        let entropy_bytes = entropy_bytes(entropy_words);
-        let mut entropy = DepletableBytes::new(&entropy_bytes);
-        let generated =
-            generate_block_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-
-        validate_generated_block_package(&generated.package);
-        let PackageMember::Block { metadata, .. } = generated.package.get_top_block().unwrap()
-        else {
-            unreachable!("generated package top should be a block");
-        };
-        assert_eq!(
-            metadata.reset.as_ref().unwrap().asynchronous,
-            expected_asynchronous
-        );
+        let mut entropy = RngEntropy::new(Pcg64Mcg::new(seed));
+        let mut saw_reset = false;
+        let mut saw_synchronous = false;
+        let mut saw_asynchronous = false;
+        for _ in 0..256 {
+            let generated =
+                generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
+            let Some(reset) = generated.metadata.reset.as_ref() else {
+                continue;
+            };
+            saw_reset = true;
+            saw_synchronous |= !reset.asynchronous;
+            saw_asynchronous |= reset.asynchronous;
+            match reset_timing {
+                RandomBlockResetTiming::Synchronous => assert!(!reset.asynchronous),
+                RandomBlockResetTiming::Asynchronous => assert!(reset.asynchronous),
+                RandomBlockResetTiming::Either => {}
+            }
+        }
+        assert!(saw_reset);
+        if reset_timing == RandomBlockResetTiming::Either {
+            assert!(saw_synchronous);
+            assert!(saw_asynchronous);
+        }
     }
 }
 
 #[test]
-fn block_generation_can_opt_into_zero_width_compound_interface_types() {
-    let options = RandomBlockOptions {
-        min_input_ports: 1,
-        max_input_ports: 1,
-        min_output_ports: 0,
-        max_output_ports: 0,
-        min_registers: 1,
-        max_registers: 1,
-        allow_zero_width_ports_and_registers: true,
-        allow_load_enable: false,
-        allow_reset: false,
-        function_options: RandomFnOptions {
-            max_params: 1,
-            max_nodes: 4,
-            ..RandomFnOptions::default()
-        },
-        ..RandomBlockOptions::default()
-    };
-    let entropy_words = [
-        1_u64, // Make the input array-typed.
-        2,     // Make its element tuple-typed.
-        0,     // Give the tuple no fields.
-        0,     // Give the array one element.
-        1,     // Make the register array-typed.
-        2,     // Make its element tuple-typed.
-        0,     // Give the tuple no fields.
-        0,     // Give the array one element.
-        0,     // Use the input as the register write argument.
-    ];
-    let entropy_bytes = entropy_bytes(&entropy_words);
-    let mut entropy = DepletableBytes::new(&entropy_bytes);
-    let generated =
-        generate_block_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-
-    validate_generated_block_package(&generated.package);
-    let PackageMember::Block { func, metadata } = generated.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    assert!(matches!(&func.params[0].ty, Type::Array(_)));
-    assert_eq!(func.params[0].ty.bit_count(), 0);
-    assert!(matches!(&metadata.registers[0].ty, Type::Array(_)));
-    assert_eq!(metadata.registers[0].ty.bit_count(), 0);
+fn random_block_zero_width_interface_option_controls_samples() {
+    let cases = [(false, 0x20f7_0001), (true, 0x20f7_0002)];
+    for (allow_zero_width, seed) in cases {
+        let options = RandomBlockOptions {
+            min_input_ports: 1,
+            max_input_ports: 1,
+            min_output_ports: 0,
+            max_output_ports: 1,
+            min_registers: 1,
+            max_registers: 1,
+            allow_zero_width_ports_and_registers: allow_zero_width,
+            allow_load_enable: false,
+            allow_reset: false,
+            function_options: RandomFnOptions {
+                max_params: 1,
+                max_nodes: 8,
+                ..RandomFnOptions::default()
+            },
+            ..RandomBlockOptions::default()
+        };
+        let mut entropy = RngEntropy::new(Pcg64Mcg::new(seed));
+        let mut saw_zero_width = false;
+        let mut saw_zero_width_compound = false;
+        for _ in 0..1_024 {
+            let generated =
+                generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(4)).unwrap();
+            let function = &generated.function;
+            let metadata = &generated.metadata;
+            let output_types = block_output_types(function, metadata.output_names.len());
+            for ty in function
+                .params
+                .iter()
+                .map(|param| &param.ty)
+                .chain(metadata.registers.iter().map(|register| &register.ty))
+                .chain(output_types.iter().copied())
+            {
+                if allow_zero_width {
+                    saw_zero_width |= ty.bit_count() == 0;
+                    saw_zero_width_compound |= ty.bit_count() == 0 && type_has_array(ty);
+                } else {
+                    assert_ne!(ty.bit_count(), 0);
+                }
+            }
+        }
+        if allow_zero_width {
+            assert!(saw_zero_width);
+            assert!(saw_zero_width_compound);
+        }
+    }
 }
 
 #[test]
@@ -695,6 +506,7 @@ fn probabilistic_default_block_generation_covers_shapes_state_and_types() {
     let mut saw_no_load_enable = false;
     let mut saw_reset_register = false;
     let mut saw_nonreset_register = false;
+    let mut saw_unused_reset_port = false;
     let mut saw_synchronous_reset = false;
     let mut saw_asynchronous_reset = false;
     let mut saw_min_inputs = false;
@@ -737,11 +549,24 @@ fn probabilistic_default_block_generation_covers_shapes_state_and_types() {
             .registers
             .iter()
             .any(|register| register.reset_value.is_none());
+        saw_unused_reset_port |= metadata.reset.is_some()
+            && metadata.registers.len() == 1
+            && metadata.registers[0].reset_value.is_none();
         if let Some(reset) = metadata.reset.as_ref() {
             saw_synchronous_reset |= !reset.asynchronous;
             saw_asynchronous_reset |= reset.asynchronous;
+            if metadata.registers.len() > 1 {
+                let reset_count = metadata
+                    .registers
+                    .iter()
+                    .filter(|register| register.reset_value.is_some())
+                    .count();
+                assert!(reset_count > 0);
+                assert!(reset_count < metadata.registers.len());
+            }
         }
 
+        assert_generated_block_register_wiring(function, metadata);
         let output_types = block_output_types(function, output_count);
         assert!(
             function
@@ -792,6 +617,9 @@ fn probabilistic_default_block_generation_covers_shapes_state_and_types() {
             };
             saw_load_enable |= load_enable.is_some();
             saw_no_load_enable |= load_enable.is_none();
+            if let Some(load_enable_ref) = load_enable {
+                assert_eq!(function.get_node(*load_enable_ref).ty, Type::Bits(1));
+            }
             let read_ref = register_reads[register.as_str()];
             if node_depends_on(function, *arg, read_ref) {
                 saw_feedback = true;
@@ -814,6 +642,7 @@ fn probabilistic_default_block_generation_covers_shapes_state_and_types() {
     assert!(saw_no_load_enable);
     assert!(saw_reset_register);
     assert!(saw_nonreset_register);
+    assert!(saw_unused_reset_port);
     assert!(saw_synchronous_reset);
     assert!(saw_asynchronous_reset);
     assert!(saw_min_inputs);

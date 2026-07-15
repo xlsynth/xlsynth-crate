@@ -2,6 +2,8 @@
 
 #![no_main]
 
+//! Differentially checks generated block IR against sequential G8R lowering.
+
 use std::collections::BTreeMap;
 
 use libfuzzer_sys::fuzz_target;

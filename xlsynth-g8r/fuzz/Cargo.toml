@@ -40,6 +40,12 @@ doc = false
 required-features = ["has-bitwuzla"]
 
 [[bin]]
+name = "fuzz_random_block_g8r_equiv"
+path = "fuzz_targets/fuzz_random_block_g8r_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_g8r_formal"
 path = "fuzz_targets/fuzz_g8r_formal.rs"
 test = false
