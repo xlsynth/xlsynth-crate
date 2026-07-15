@@ -12,7 +12,7 @@ use crate::aig::AigOperand;
 use crate::aig_sim::count_toggles;
 use crate::aig_sim::gate_sim::{self, Collect};
 use crate::aig_sim::gate_simd;
-use crate::liberty_model::PinDirection;
+use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::project_labeled_netlist_aig;
 use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
 use crate::netlist::parse::PortDirection;
@@ -105,10 +105,20 @@ pub fn load_labeled_netlist_aig(
     liberty_proto_path: &Path,
     options: &GvEvalOptions,
 ) -> Result<LabeledNetlistAig> {
+    let liberty = load_liberty_from_path(liberty_proto_path)?;
+    load_labeled_netlist_aig_with_liberty(netlist_path, &liberty, options)
+}
+
+/// Loads, validates, and projects one combinational netlist module using an
+/// already parsed Liberty model.
+pub fn load_labeled_netlist_aig_with_liberty(
+    netlist_path: &Path,
+    liberty: &Library,
+    options: &GvEvalOptions,
+) -> Result<LabeledNetlistAig> {
     let parsed = parse_netlist_from_path(netlist_path)?;
     let module = select_module(&parsed, options.module_name.as_deref())?;
-    let liberty = load_liberty_from_path(liberty_proto_path)?;
-    project_labeled_netlist_aig(module, &parsed.nets, &parsed.interner, &liberty)
+    project_labeled_netlist_aig(module, &parsed.nets, &parsed.interner, liberty)
         .map_err(|e| anyhow!(e))
 }
 

@@ -23,6 +23,24 @@ divergent visible outputs or committed register state on any simulated cycle;
 or generated block metadata that cannot be lowered by the supported
 synchronous block-to-G8R path.
 
+## `fuzz_random_block_gv_eval_combo_equiv`
+
+Generates bounded register-free block IR, lowers it to combinational G8R,
+emits packed-port Verilog, maps it through the Yosys executable named by
+`XLSYNTH_YOSYS_PATH` and ABC against the comma-separated Liberty files in
+`XLSYNTH_LIBERTY_FILES`, then loads the mapped netlist through `gv-eval`.
+The target is gated by the `external-yosys` feature because it requires
+that external toolchain and Liberty data at runtime. Input samples use a
+deterministic RNG seeded from the generated IR rather than coverage-guided
+bytes.
+
+The essential property is that combinational block IR evaluation and
+Liberty-backed `gv-eval` agree on every flattened output for each random input
+sample, including aggregate ports and zero-output blocks. Failures expose
+block-to-G8R flattening disagreements, RTL emission or Yosys/ABC mapping
+failures, unsupported mapped Liberty cell formulas, netlist input/output shape
+changes, or visible output divergence after technology mapping.
+
 ## `fuzz_gatify`
 
 Generates bounded gatify-supported PIR directly with

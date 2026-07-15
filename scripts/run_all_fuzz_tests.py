@@ -34,6 +34,10 @@ DEFAULT_FUZZ_RUN_ARGS: str = ""
 # solver timeouts.
 DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=60"
 DEFAULT_THREADS: int = 4
+DEFAULT_SKIPPED_FUZZ_TARGETS: set[str] = {
+    # Yosys is not always available, including in GitHub CI.
+    "fuzz_random_block_gv_eval_combo_equiv",
+}
 DONE_RUNS_RE = re.compile(r"^Done ([0-9]+) runs in ([0-9]+) second\(s\)$")
 
 
@@ -169,7 +173,24 @@ def main() -> int:
             text=True,
             stderr=subprocess.STDOUT,
         )
-        targets = [line.strip() for line in list_output.splitlines() if line.strip()]
+        listed_targets = [
+            line.strip() for line in list_output.splitlines() if line.strip()
+        ]
+        skipped_targets = [
+            target
+            for target in listed_targets
+            if target in DEFAULT_SKIPPED_FUZZ_TARGETS
+        ]
+        for target in skipped_targets:
+            print(
+                f"Skipping default-excluded fuzz target {target} in {fuzz_dir}",
+                file=sys.stderr,
+            )
+        targets = [
+            target
+            for target in listed_targets
+            if target not in DEFAULT_SKIPPED_FUZZ_TARGETS
+        ]
         if not targets:
             continue
         fuzz_targets.append((fuzz_dir, targets))
