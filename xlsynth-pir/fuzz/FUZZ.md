@@ -114,6 +114,64 @@ Main failure modes surfaced:
 
 ______________________________________________________________________
 
+# Direct Random Block Roundtrip Fuzz Target
+
+This target generates block IR directly with `xlsynth_pir::ir_random`,
+including input/output ports, upfront registers, optional load-enables, and a
+mix of reset and non-reset registers when reset is available. It validates the
+generated package, parses its printed text, and checks that printing is stable.
+
+Target name: `fuzz_random_block_roundtrip`
+
+Essential property under test:
+
+- Direct block generation should emit structurally valid PIR blocks whose
+  metadata, register reads/writes, output ports, and parser/printer roundtrip
+  remain consistent.
+
+Main failure modes surfaced:
+
+- Register metadata and `register_read` / `register_write` nodes disagree.
+- Register write argument, reset, or load-enable operands have invalid types.
+- Output port metadata drifts from the block return value shape.
+- PIR block parser/printer roundtrip changes generated structure or metadata.
+
+______________________________________________________________________
+
+# Random Block G8R Sequential Equivalence Fuzz Target
+
+This target directly generates random block IR, lowers supported synchronous
+blocks to sequential G8R, and compares cycle-by-cycle external outputs and
+register state against an independent block-level reference evaluation. The
+stimulus sequence and initial values are produced by a deterministic RNG seeded
+from the generated IR, rather than from coverage-guided bytes. Registers
+without reset values receive random initial state; reset-bearing registers
+start from their declared reset value. A reset input is asserted with 50%
+probability on the first cycle and 10% probability on later cycles. The target
+requests synchronous-only reset generation and treats any asynchronous reset as
+a generator-contract failure.
+
+Target name: `fuzz_random_block_g8r_equiv`
+
+Essential property under test:
+
+- Lowering a generated synchronous block to sequential G8R preserves each
+  cycle's visible outputs and committed register state across random input
+  sequences, including feedback, load-enables, mixed reset coverage, aggregate
+  ports/registers, and zero-output blocks with state.
+
+Main failure modes surfaced:
+
+- G8R lowering changes register feedback, load-enable, or reset semantics.
+- Flattening aggregate block ports or register values disagrees between PIR and
+  G8R.
+- Visible output values or committed register state diverge on any simulated
+  cycle.
+- Random generated block metadata cannot be lowered by the supported
+  synchronous block-to-G8R path.
+
+______________________________________________________________________
+
 # `ext_nary_add` Eval vs Desugared Eval Fuzz Target
 
 This fuzz target generates a single-function PIR package whose return value is

@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-from typing import Tuple
 import hashlib
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
-import requests
 import time
 from optparse import OptionParser
+from typing import Tuple
+
+import requests
 
 GITHUB_API_URL = "https://api.github.com/repos/xlsynth/xlsynth/releases"
 # TODO(cdleary): add releases that cover the intersections of architecture and OS
@@ -252,6 +255,72 @@ def ensure_versioned_dso_alias(output_dir: str, version: str, platform: str) -> 
     )
 
 
+def ensure_macos_arm64_dso_alias(output_dir: str) -> None:
+    """Creates the conventional macOS libxls.dylib alias for arm64 downloads."""
+    unversioned_filename = "libxls-arm64.dylib"
+    conventional_filename = "libxls.dylib"
+    unversioned_path = os.path.join(output_dir, unversioned_filename)
+    conventional_path = os.path.join(output_dir, conventional_filename)
+
+    if not os.path.exists(unversioned_path):
+        raise FileNotFoundError(
+            f"Cannot create macOS DSO alias; missing downloaded DSO: {unversioned_path}"
+        )
+
+    if os.path.lexists(conventional_path):
+        try:
+            if os.path.samefile(conventional_path, unversioned_path):
+                print(
+                    "macOS DSO compatibility alias already exists: "
+                    f"{conventional_filename}"
+                )
+                return
+        except FileNotFoundError:
+            pass
+
+        if os.path.islink(conventional_path):
+            os.remove(conventional_path)
+        else:
+            raise FileExistsError(
+                "Cannot create macOS DSO alias; "
+                f"{conventional_path} already exists and does not point to "
+                f"{unversioned_path}"
+            )
+
+    os.symlink(unversioned_filename, conventional_path)
+    print(
+        "Created macOS DSO compatibility alias: "
+        f"{conventional_filename} -> {unversioned_filename}"
+    )
+
+
+def fix_macos_arm64_dso_install_name(output_dir: str) -> None:
+    """Rewrites the downloaded arm64 dylib id to its absolute local path."""
+    dso_path = os.path.join(output_dir, "libxls-arm64.dylib")
+    if not os.path.exists(dso_path):
+        raise FileNotFoundError(
+            f"Cannot fix macOS install-name; missing downloaded DSO: {dso_path}"
+        )
+
+    if sys.platform != "darwin":
+        print(
+            "Skipping macOS install-name fix for libxls-arm64.dylib because "
+            f"this host is {sys.platform}, not darwin"
+        )
+        return
+
+    install_name_tool = shutil.which("install_name_tool")
+    if install_name_tool is None:
+        raise RuntimeError(
+            "Cannot fix macOS install-name for libxls-arm64.dylib: "
+            "install_name_tool was not found on PATH"
+        )
+
+    install_name = os.path.realpath(dso_path)
+    print(f"Fixing macOS DSO install-name: {install_name}")
+    subprocess.check_call([install_name_tool, "-id", install_name, dso_path])
+
+
 def main():
     parser = OptionParser()
     parser.add_option(
@@ -355,6 +424,9 @@ def main():
 
     if options.dso:
         ensure_versioned_dso_alias(output_dir, version, options.platform)
+        if options.platform == "arm64":
+            ensure_macos_arm64_dso_alias(output_dir)
+            fix_macos_arm64_dso_install_name(output_dir)
 
     # Download and extract dslx_stdlib.tar.gz
     stdlib_filename = "dslx_stdlib.tar.gz"

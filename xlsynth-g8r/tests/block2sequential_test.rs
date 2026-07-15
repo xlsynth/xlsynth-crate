@@ -3,6 +3,7 @@
 use xlsynth::IrBits;
 use xlsynth_g8r::aig_serdes::sequential2ir::sequential_gate_fn_to_pir_block_package;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
+use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::block_ir_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 
@@ -57,6 +58,43 @@ top block top(a: bits[1], b: bits[1], y: bits[1], z: bits[1]) {
         result.outputs,
         vec![IrBits::bool(true), IrBits::bool(false)]
     );
+}
+
+#[test]
+fn lowers_block_without_outputs_or_registers() {
+    let block_ir = r#"package empty
+
+top block top(a: bits[1]) {
+  a: bits[1] = input_port(name=a, id=1)
+  not.2: bits[1] = not(a, id=2)
+}
+"#;
+
+    let sequential = lower(block_ir);
+
+    assert!(sequential.registers.is_empty());
+    assert!(sequential.outputs.is_empty());
+    assert!(sequential.clock.is_none());
+    assert_eq!(
+        sequential
+            .transition
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a"]
+    );
+    assert!(sequential.transition.outputs.is_empty());
+
+    let initial_state = SequentialState::from_register_values(&sequential, vec![]).unwrap();
+    let trace = sequential::simulate(
+        &sequential,
+        &[vec![IrBits::bool(false)], vec![IrBits::bool(true)]],
+        initial_state,
+    )
+    .unwrap();
+    assert_eq!(trace.external_outputs(), &[vec![], vec![]]);
+    assert!(trace.final_state().values().is_empty());
 }
 
 #[test]

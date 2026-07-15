@@ -19,6 +19,7 @@ rand = "0.8"
 pretty_assertions = "1.4.1"
 # Local crates
 xlsynth-pir = { path = ".." }
+xlsynth-g8r = { path = "../../xlsynth-g8r" }
 xlsynth = { path = "../../xlsynth" }
 xlsynth-autocov = { path = "../../xlsynth-autocov" }
 xlsynth-prover = { path = "../../xlsynth-prover" }
@@ -46,6 +47,18 @@ doc = false
 [[bin]]
 name = "fuzz_block_roundtrip"
 path = "fuzz_targets/fuzz_block_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_random_block_roundtrip"
+path = "fuzz_targets/fuzz_random_block_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_random_block_g8r_equiv"
+path = "fuzz_targets/fuzz_random_block_g8r_equiv.rs"
 test = false
 doc = false
 
