@@ -350,6 +350,46 @@ fn depleted_entropy_constructs_a_minimal_deterministic_block() {
 }
 
 #[test]
+fn generated_zero_output_block_does_not_write_synthetic_return() {
+    let options = RandomBlockOptions {
+        max_input_ports: 0,
+        min_registers: 1,
+        max_registers: 1,
+        max_output_ports: 0,
+        allow_zero_width_ports_and_registers: true,
+        allow_load_enable: false,
+        allow_reset: false,
+        function_options: RandomFnOptions {
+            max_nodes: 3,
+            allow_arrays: false,
+            ..RandomFnOptions::default()
+        },
+        ..RandomBlockOptions::default()
+    };
+    // Select an empty-tuple register, then entropy that would select the
+    // same-typed synthetic zero-output return if it were a D-value candidate.
+    let entropy_bytes: Vec<u8> = [1_u64, 0, 1, 1]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+    let mut entropy = DepletableBytes::new(&entropy_bytes);
+    let generated = generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
+    let ret_ref = generated.function.ret_node_ref.unwrap();
+    let write_arg = generated
+        .function
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            NodePayload::RegisterWrite { arg, .. } => Some(*arg),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_ne!(write_arg, ret_ref);
+    validate_generated_block_package(&generated.into_top_package("zero_output_register_package"));
+}
+
+#[test]
 fn generated_block_populates_multi_output_metadata() {
     let options = RandomBlockOptions {
         min_input_ports: 1,

@@ -833,6 +833,11 @@ struct GeneratedRegisterState {
     reset_ref: Option<NodeRef>,
 }
 
+struct GeneratedRegisterWrite {
+    next_ref: NodeRef,
+    load_enable: Option<NodeRef>,
+}
+
 struct BlockGenerator<'a, S> {
     source: &'a mut S,
     options: &'a RandomBlockOptions,
@@ -885,17 +890,29 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
 
         let output_count = self.choose_output_count(&generator, register_count)?;
         let output_refs = self.choose_output_refs(&generator, output_count)?;
-        let ret_node_ref = self.materialize_block_return(&mut generator, &output_refs)?;
-
+        let mut register_writes = Vec::with_capacity(registers.len());
         for register in &registers {
             let next_ref = self.choose_register_next_ref(&generator, register)?;
             let load_enable = self.maybe_choose_load_enable_ref(&generator);
+            register_writes.push(GeneratedRegisterWrite {
+                next_ref,
+                load_enable,
+            });
+        }
+
+        // For zero or multiple outputs, the synthetic tuple return is omitted
+        // when the function is emitted as a block. Keep it out of the register
+        // D-value candidate set so register writes cannot reference that
+        // suppressed internal node.
+        let ret_node_ref = self.materialize_block_return(&mut generator, &output_refs)?;
+
+        for (register, write) in registers.iter().zip(register_writes) {
             generator.add_node(
                 Type::nil(),
                 NodePayload::RegisterWrite {
-                    arg: next_ref,
+                    arg: write.next_ref,
                     register: register.name.clone(),
-                    load_enable,
+                    load_enable: write.load_enable,
                     reset: register.reset_ref,
                 },
                 Some(format!("{}_d", register.name)),
