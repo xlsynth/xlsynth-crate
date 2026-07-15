@@ -74,7 +74,7 @@ impl YosysLibertyFileSet {
         Self::from_comma_separated_paths(&raw_paths)
     }
 
-    /// Validates source Liberty files and preserves their order for Yosys.
+    /// Validates and canonicalizes source Liberty files while preserving order.
     pub fn new<P: AsRef<Path>>(liberty_files: &[P]) -> Result<Self, String> {
         if liberty_files.is_empty() {
             return Err("Yosys Liberty file set cannot be empty".to_string());
@@ -89,7 +89,10 @@ impl YosysLibertyFileSet {
                     path.display()
                 ));
             }
-            paths.push(path.to_path_buf());
+            let canonical_path = path.canonicalize().map_err(|e| {
+                format!("canonicalize Yosys Liberty input '{}': {e}", path.display())
+            })?;
+            paths.push(canonical_path);
         }
         Ok(Self { paths })
     }
@@ -255,7 +258,26 @@ mod tests {
         std::fs::write(&second, "library (second) {}\n").unwrap();
 
         let set = YosysLibertyFileSet::new(&[&first, &second]).unwrap();
-        assert_eq!(set.paths(), &[first, second]);
+        assert_eq!(
+            set.paths(),
+            &[
+                first.canonicalize().unwrap(),
+                second.canonicalize().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn liberty_file_set_canonicalizes_relative_paths() {
+        let current_dir = std::env::current_dir().unwrap();
+        let source_dir = tempfile::tempdir_in(&current_dir).unwrap();
+        let absolute_path = source_dir.path().join("cells.lib");
+        std::fs::write(&absolute_path, "library (cells) {}\n").unwrap();
+        let relative_path = absolute_path.strip_prefix(&current_dir).unwrap();
+        assert!(!relative_path.is_absolute());
+
+        let set = YosysLibertyFileSet::new(&[relative_path]).unwrap();
+        assert_eq!(set.paths(), &[absolute_path.canonicalize().unwrap()]);
     }
 
     #[test]
@@ -305,7 +327,13 @@ mod tests {
         let raw_paths = format!("{}, {}", first.display(), second.display());
 
         let set = YosysLibertyFileSet::from_comma_separated_paths(&raw_paths).unwrap();
-        assert_eq!(set.paths(), &[first, second]);
+        assert_eq!(
+            set.paths(),
+            &[
+                first.canonicalize().unwrap(),
+                second.canonicalize().unwrap()
+            ]
+        );
     }
 
     #[test]
