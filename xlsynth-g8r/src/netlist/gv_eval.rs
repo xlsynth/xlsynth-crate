@@ -12,7 +12,6 @@ use crate::aig::{AigOperand, SequentialGateFn};
 use crate::aig_sim::count_toggles;
 use crate::aig_sim::gate_sim::{self, Collect};
 use crate::aig_sim::gate_simd;
-use crate::liberty::IndexedLibrary;
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::{
     project_labeled_netlist_aig, project_labeled_sequential_netlist_aig,
@@ -178,18 +177,6 @@ pub fn load_sequential_netlist_gate_fn(
 ) -> Result<SequentialGateFn> {
     Ok(
         load_labeled_sequential_netlist_aig(netlist_path, liberty_proto_path, options)?
-            .sequential_gate_fn,
-    )
-}
-
-/// Compatibility wrapper for callers that already own an indexed Liberty view.
-pub fn load_sequential_netlist_gate_fn_with_indexed_liberty(
-    netlist_path: &Path,
-    liberty: &IndexedLibrary,
-    options: &GvEvalOptions,
-) -> Result<SequentialGateFn> {
-    Ok(
-        load_labeled_sequential_netlist_aig_with_liberty(netlist_path, liberty.library(), options)?
             .sequential_gate_fn,
     )
 }

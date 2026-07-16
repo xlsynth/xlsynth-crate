@@ -827,8 +827,16 @@ pub fn project_labeled_sequential_netlist_aig(
         });
     }
 
-    let (used_as_input, driven) =
-        collect_sequential_bit_usage(&normalized, interner, liberty_lib, &sequential_specs)?;
+    let (used_as_input, driven) = collect_netlist_bit_usage(
+        &normalized,
+        interner,
+        liberty_lib,
+        |instance_index, pin_name| {
+            sequential_specs[instance_index]
+                .as_ref()
+                .is_some_and(|spec| spec.clock.pin_name == pin_name)
+        },
+    )?;
     check_undriven_bits(&used_as_input, &driven, &normalized, nets, interner)?;
 
     let module_output_bits = collect_module_output_bits(&normalized);
@@ -917,6 +925,8 @@ pub fn project_labeled_sequential_netlist_aig(
             }
         }
         if !processed_any && unprocessed.is_empty() && !pending_assigns.is_empty() {
+            // Clock-alias and dead wiring assigns do not affect visible
+            // outputs once the selected clock has been recorded as metadata.
             if pending_assigns
                 .iter()
                 .all(|pending_bit| !module_output_bits.contains(&pending_bit.target))
@@ -1655,12 +1665,17 @@ fn sequential_output_operand(
         })
 }
 
-fn collect_sequential_bit_usage(
+/// Collects net bits used as cell inputs and driven by ports, assigns, or
+/// cells.
+fn collect_netlist_bit_usage<F>(
     normalized: &NormalizedNetlistModule<'_>,
     interner: &StringInterner<StringBackend<SymbolU32>>,
     liberty_lib: &Library,
-    sequential_specs: &[Option<GvEvalSequentialCellSpec>],
-) -> Result<(HashSet<BitIndex>, HashSet<BitIndex>), String> {
+    mut should_skip_input_pin: F,
+) -> Result<(HashSet<BitIndex>, HashSet<BitIndex>), String>
+where
+    F: FnMut(usize, &str) -> bool,
+{
     let mut used_as_input = HashSet::new();
     let mut driven = HashSet::new();
     for port in &normalized.ports {
@@ -1682,15 +1697,14 @@ fn collect_sequential_bit_usage(
             .find(|cell| cell.name == type_name)
             .ok_or_else(|| format!("Cell '{}' not found in Liberty", type_name))?;
         let pin_directions = build_pin_direction_map(cell, liberty_lib);
-        let clock_pin = sequential_specs[instance_index]
-            .as_ref()
-            .map(|spec| spec.clock.pin_name.as_str());
         for connection in &inst.connections {
             let port_name = interner.resolve(connection.port).unwrap();
             let pin_dir = *pin_directions.get(port_name).unwrap_or(&0);
             if pin_dir == PinDirection::Output as i32 {
                 driven.extend(output_target_bits(connection)?);
-            } else if pin_dir == PinDirection::Input as i32 && clock_pin != Some(port_name) {
+            } else if pin_dir == PinDirection::Input as i32
+                && !should_skip_input_pin(instance_index, port_name)
+            {
                 used_as_input.extend(connection.bits.iter().filter_map(|source| match source {
                     BitSource::Bit(bit_idx) => Some(*bit_idx),
                     BitSource::Literal(_) | BitSource::Unknown => None,
@@ -1740,43 +1754,8 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     } else {
         Vec::new()
     };
-    let mut used_as_input = HashSet::new();
-    let mut driven = HashSet::new();
-    for port in &normalized.ports {
-        if port.direction == PortDirection::Input {
-            driven.extend(port.bits.iter().copied());
-        }
-    }
-    for assign in &normalized.assigns {
-        driven.extend(assign.lhs_bits.iter().copied());
-        for rhs in &assign.rhs_bits {
-            collect_expr_source_bits(rhs, &mut used_as_input);
-        }
-    }
-    for inst in &normalized.instances {
-        let type_name = interner.resolve(inst.type_name).unwrap();
-        let cell = liberty_lib
-            .cells
-            .iter()
-            .find(|c| c.name == type_name)
-            .ok_or_else(|| format!("Cell '{}' not found in liberty data", type_name))?;
-        let mut pin_directions = std::collections::HashMap::new();
-        for pin in &cell.pins {
-            pin_directions.insert(liberty_lib.resolve_string(&pin.name), pin.direction);
-        }
-        for connection in &inst.connections {
-            let port_name = interner.resolve(connection.port).unwrap();
-            let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
-            if pin_dir == 1 {
-                driven.extend(output_target_bits(connection)?);
-            } else if pin_dir == 2 {
-                used_as_input.extend(connection.bits.iter().filter_map(|source| match source {
-                    BitSource::Bit(bit_idx) => Some(*bit_idx),
-                    BitSource::Literal(_) | BitSource::Unknown => None,
-                }));
-            }
-        }
-    }
+    let (used_as_input, driven) =
+        collect_netlist_bit_usage(&normalized, interner, liberty_lib, |_, _| false)?;
     check_undriven_bits(&used_as_input, &driven, &normalized, nets, interner)?;
     let mut unprocessed: Vec<_> = normalized.instances.iter().collect();
     let mut processed_any = true;

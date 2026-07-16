@@ -5,9 +5,7 @@
 use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, parse_formula};
 use crate::liberty::indexed::IndexedLibrary;
 use crate::liberty_model::{Cell, Library, PinDirection};
-use crate::netlist::io::{
-    ParsedNetlist, load_liberty_from_path, parse_netlist_from_path, select_module,
-};
+use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedInstance, NormalizedNetlistModule,
 };
@@ -23,30 +21,18 @@ use xlsynth_pir::ir::{
 };
 
 pub fn convert_gv2block_paths(netlist_path: &Path, liberty_proto_path: &Path) -> Result<Package> {
+    let parsed = parse_netlist_from_path(netlist_path)?;
+    if parsed.modules.len() != 1 {
+        return Err(anyhow!(format!(
+            "expected exactly one module, got {}",
+            parsed.modules.len()
+        )));
+    }
+    let module = &parsed.modules[0];
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
     let lib_indexed = IndexedLibrary::new(liberty_lib);
-    convert_gv2block_with_indexed_liberty(netlist_path, &lib_indexed, None, None)
-}
-
-/// Converts one selected gate-level module using an already indexed Liberty
-/// model. A clock-port hint preserves an otherwise unobservable top-level
-/// clock when optimization has removed every sequential cell.
-pub fn convert_gv2block_with_indexed_liberty(
-    netlist_path: &Path,
-    lib_indexed: &IndexedLibrary,
-    module_name: Option<&str>,
-    clock_port_name_hint: Option<&str>,
-) -> Result<Package> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
-    let module = select_module(&parsed, module_name)?;
     let normalized = NormalizedNetlistModule::new(module, &parsed.nets, &parsed.interner)?;
-    build_package_from_normalized_netlist(
-        module,
-        &parsed,
-        lib_indexed,
-        &normalized,
-        clock_port_name_hint,
-    )
+    build_package_from_normalized_netlist(module, &parsed, &lib_indexed, &normalized)
 }
 
 pub fn convert_gv2block_paths_to_string(
@@ -638,7 +624,6 @@ fn build_package_from_normalized_netlist(
     parsed: &ParsedNetlist,
     lib_indexed: &IndexedLibrary,
     normalized: &NormalizedNetlistModule<'_>,
-    clock_port_name_hint: Option<&str>,
 ) -> Result<Package> {
     let wiring = WiringAssignResolver::new(normalized, parsed)?;
     let module_name =
@@ -678,14 +663,7 @@ fn build_package_from_normalized_netlist(
         });
     }
 
-    let (top_fn, top_meta) = build_top_block(
-        module,
-        parsed,
-        lib_indexed,
-        normalized,
-        &wiring,
-        clock_port_name_hint,
-    )?;
+    let (top_fn, top_meta) = build_top_block(module, parsed, lib_indexed, normalized, &wiring)?;
     pkg.members.push(PackageMember::Block {
         func: top_fn.clone(),
         metadata: top_meta,
@@ -787,9 +765,14 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         .pins_for_dir(&cell.name, PinDirection::Output)
         .unwrap_or_default();
 
-    let clock_pin = get_sequential_ff_clock_spec(cell, library)
-        .map_err(|error| anyhow!(error))?
-        .map(|spec| spec.pin_name);
+    let clock_spec = get_sequential_ff_clock_spec(cell, library).map_err(|error| anyhow!(error))?;
+    if clock_spec.as_ref().is_some_and(|spec| spec.is_negated) {
+        return Err(anyhow!(format!(
+            "cell '{}' uses a negative-edge clock; gv2block only supports positive-edge FFs",
+            cell.name
+        )));
+    }
+    let clock_pin = clock_spec.map(|spec| spec.pin_name);
 
     for pin in inputs.iter() {
         let pin_name = library.resolve_string(&pin.name);
@@ -1121,7 +1104,6 @@ fn build_top_block(
     lib_indexed: &IndexedLibrary,
     normalized: &NormalizedNetlistModule<'_>,
     wiring: &WiringAssignResolver,
-    clock_port_name_hint: Option<&str>,
 ) -> Result<(PirFn, BlockMetadata)> {
     let module_name_raw = parsed.interner.resolve(module.name).unwrap_or("top");
     let module_name = sanitize_to_xls_identifier(module_name_raw);
@@ -1138,7 +1120,6 @@ fn build_top_block(
     } = collect_clock_gate_passthroughs(normalized, parsed, lib_indexed, wiring)?;
 
     let mut selected_clock_bit: Option<BitIndex> = None;
-    let mut selected_clock_is_negated: Option<bool> = None;
     let mut selected_clock_port_name_raw: Option<String> = None;
 
     for inst in &normalized.instances {
@@ -1151,6 +1132,12 @@ fn build_top_block(
         else {
             continue;
         };
+        if clock_spec.is_negated {
+            return Err(anyhow!(format!(
+                "cell '{}' uses a negative-edge clock; gv2block only supports positive-edge FFs",
+                cell.name
+            )));
+        }
         let clock_sources = normalized_connection_for_port(inst, parsed, &clock_spec.pin_name)
             .ok_or_else(|| {
                 anyhow!(format!(
@@ -1194,15 +1181,6 @@ fn build_top_block(
             }
             _ => {}
         }
-        match selected_clock_is_negated {
-            None => selected_clock_is_negated = Some(clock_spec.is_negated),
-            Some(existing) if existing != clock_spec.is_negated => {
-                return Err(anyhow!(
-                    "mixed positive-edge and negative-edge FF cells are not supported"
-                ));
-            }
-            _ => {}
-        }
     }
 
     if let Some(clock_bit) = selected_clock_bit {
@@ -1214,38 +1192,6 @@ fn build_top_block(
             )));
         }
     }
-    if let Some(clock_port_name_hint) = clock_port_name_hint {
-        let hinted_port = normalized
-            .ports
-            .iter()
-            .find(|port| {
-                port.direction == crate::netlist::parse::PortDirection::Input
-                    && parsed.interner.resolve(port.name) == Some(clock_port_name_hint)
-            })
-            .ok_or_else(|| {
-                anyhow!(format!(
-                    "clock-port hint '{}' is not a top-level input port",
-                    clock_port_name_hint
-                ))
-            })?;
-        if hinted_port.bits.len() != 1 {
-            return Err(anyhow!(format!(
-                "clock-port hint '{}' has width {}; expected one bit",
-                clock_port_name_hint,
-                hinted_port.bits.len()
-            )));
-        }
-        if let Some(inferred_clock_name) = selected_clock_port_name_raw.as_deref()
-            && inferred_clock_name != clock_port_name_hint
-        {
-            return Err(anyhow!(format!(
-                "clock-port hint '{}' disagrees with inferred clock port '{}'",
-                clock_port_name_hint, inferred_clock_name
-            )));
-        }
-        selected_clock_port_name_raw = Some(clock_port_name_hint.to_string());
-    }
-
     for port in &normalized.ports {
         if port.direction != crate::netlist::parse::PortDirection::Input {
             continue;
