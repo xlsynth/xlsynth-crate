@@ -229,6 +229,7 @@ fuzz_target!(|data: &[u8]| {
         &context.liberty,
         &GvEvalOptions {
             module_name: Some(design.name.clone()),
+            ..GvEvalOptions::default()
         },
     )
     .unwrap_or_else(|error| {

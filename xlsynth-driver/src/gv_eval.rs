@@ -38,6 +38,7 @@ pub fn handle_gv_eval(matches: &ArgMatches) -> Result<(), String> {
         .expect("liberty_proto is required by clap");
     let options = GvEvalOptions {
         module_name: matches.get_one::<String>("module_name").cloned(),
+        ..GvEvalOptions::default()
     };
     let model = load_labeled_netlist_aig(
         Path::new(netlist_path),

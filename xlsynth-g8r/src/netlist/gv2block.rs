@@ -4,12 +4,15 @@
 
 use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, parse_formula};
 use crate::liberty::indexed::IndexedLibrary;
-use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
-use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
+use crate::liberty_model::{Cell, Library, PinDirection};
+use crate::netlist::io::{
+    ParsedNetlist, load_liberty_from_path, parse_netlist_from_path, select_module,
+};
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedInstance, NormalizedNetlistModule,
 };
 use crate::netlist::parse::NetlistModule;
+use crate::netlist::sequential_liberty::get_sequential_ff_clock_spec;
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -20,18 +23,30 @@ use xlsynth_pir::ir::{
 };
 
 pub fn convert_gv2block_paths(netlist_path: &Path, liberty_proto_path: &Path) -> Result<Package> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
-    if parsed.modules.len() != 1 {
-        return Err(anyhow!(format!(
-            "expected exactly one module, got {}",
-            parsed.modules.len()
-        )));
-    }
-    let module = &parsed.modules[0];
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
     let lib_indexed = IndexedLibrary::new(liberty_lib);
+    convert_gv2block_with_indexed_liberty(netlist_path, &lib_indexed, None, None)
+}
+
+/// Converts one selected gate-level module using an already indexed Liberty
+/// model. A clock-port hint preserves an otherwise unobservable top-level
+/// clock when optimization has removed every sequential cell.
+pub fn convert_gv2block_with_indexed_liberty(
+    netlist_path: &Path,
+    lib_indexed: &IndexedLibrary,
+    module_name: Option<&str>,
+    clock_port_name_hint: Option<&str>,
+) -> Result<Package> {
+    let parsed = parse_netlist_from_path(netlist_path)?;
+    let module = select_module(&parsed, module_name)?;
     let normalized = NormalizedNetlistModule::new(module, &parsed.nets, &parsed.interner)?;
-    build_package_from_normalized_netlist(module, &parsed, &lib_indexed, &normalized)
+    build_package_from_normalized_netlist(
+        module,
+        &parsed,
+        lib_indexed,
+        &normalized,
+        clock_port_name_hint,
+    )
 }
 
 pub fn convert_gv2block_paths_to_string(
@@ -623,6 +638,7 @@ fn build_package_from_normalized_netlist(
     parsed: &ParsedNetlist,
     lib_indexed: &IndexedLibrary,
     normalized: &NormalizedNetlistModule<'_>,
+    clock_port_name_hint: Option<&str>,
 ) -> Result<Package> {
     let wiring = WiringAssignResolver::new(normalized, parsed)?;
     let module_name =
@@ -662,7 +678,14 @@ fn build_package_from_normalized_netlist(
         });
     }
 
-    let (top_fn, top_meta) = build_top_block(module, parsed, lib_indexed, normalized, &wiring)?;
+    let (top_fn, top_meta) = build_top_block(
+        module,
+        parsed,
+        lib_indexed,
+        normalized,
+        &wiring,
+        clock_port_name_hint,
+    )?;
     pkg.members.push(PackageMember::Block {
         func: top_fn.clone(),
         metadata: top_meta,
@@ -764,32 +787,9 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         .pins_for_dir(&cell.name, PinDirection::Output)
         .unwrap_or_default();
 
-    let mut clock_pin_from_seq: Option<String> = None;
-    if let Some(seq) = cell.sequential.first() {
-        if !seq.clock_expr.is_empty() {
-            let (clk_pin_name, is_neg) = parse_simple_clock_expr(&seq.clock_expr)?;
-            if is_neg {
-                return Err(anyhow!(format!(
-                    "cell '{}' clock expression '{}' uses negation (unsupported)",
-                    cell.name, seq.clock_expr
-                )));
-            }
-            clock_pin_from_seq = Some(clk_pin_name);
-        }
-    }
-    let clock_pin_from_pin = inputs
-        .iter()
-        .find(|p| p.is_clocking_pin)
-        .map(|p| library.resolve_string(&p.name).to_string());
-    if let (Some(a), Some(b)) = (&clock_pin_from_seq, &clock_pin_from_pin) {
-        if a.as_str() != b.as_str() {
-            return Err(anyhow!(format!(
-                "cell '{}' clock pin mismatch: seq '{}' vs pin '{}'",
-                cell.name, a, b
-            )));
-        }
-    }
-    let clock_pin = clock_pin_from_seq.or(clock_pin_from_pin);
+    let clock_pin = get_sequential_ff_clock_spec(cell, library)
+        .map_err(|error| anyhow!(error))?
+        .map(|spec| spec.pin_name);
 
     for pin in inputs.iter() {
         let pin_name = library.resolve_string(&pin.name);
@@ -809,12 +809,6 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
     let mut reset_node_ref: Option<NodeRef> = None;
 
     if let Some(seq) = cell.sequential.first() {
-        if seq.kind != SequentialKind::Ff as i32 {
-            return Err(anyhow!(format!(
-                "cell '{}' uses unsupported sequential kind {:?}",
-                cell.name, seq.kind
-            )));
-        }
         let state_var = seq.state_var.clone();
         let reg_name = format!("{state_var}_reg");
         state_var_name = Some(state_var.clone());
@@ -871,43 +865,34 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
             registers[0].reset_value = Some(IrValue::make_ubits(1, reset_value).unwrap());
         }
 
-        if seq.clock_expr.is_empty() && clock_pin.is_none() {
+        if seq.next_state.is_empty() {
             return Err(anyhow!(format!(
-                "cell '{}' sequential entry missing clock expression",
+                "cell '{}' FF entry is missing next_state",
                 cell.name
             )));
         }
-        if !seq.clock_expr.is_empty() && clock_pin.is_none() {
-            return Err(anyhow!(format!(
-                "cell '{}' clock expression missing resolved clock pin",
-                cell.name
-            )));
-        }
-
-        if !seq.next_state.is_empty() {
-            let term = parse_formula(&seq.next_state).map_err(|e| anyhow!(e))?;
-            let next_ref = emit_term_as_pir(
-                &term,
-                &mut b,
-                &input_map,
-                &FormulaEmitContext {
-                    cell_name: &cell.name,
-                    original_formula: &seq.next_state,
-                    instance_name: None,
-                    port_map: None,
-                },
-            )?;
-            b.add_node(
-                NodePayload::RegisterWrite {
-                    arg: next_ref,
-                    register: reg_name.clone(),
-                    load_enable: None,
-                    reset: reset_node_ref,
-                },
-                Type::Tuple(vec![]),
-                Some(&format!("{}_d", state_var)),
-            );
-        }
+        let term = parse_formula(&seq.next_state).map_err(|e| anyhow!(e))?;
+        let next_ref = emit_term_as_pir(
+            &term,
+            &mut b,
+            &input_map,
+            &FormulaEmitContext {
+                cell_name: &cell.name,
+                original_formula: &seq.next_state,
+                instance_name: None,
+                port_map: None,
+            },
+        )?;
+        b.add_node(
+            NodePayload::RegisterWrite {
+                arg: next_ref,
+                register: reg_name.clone(),
+                load_enable: None,
+                reset: reset_node_ref,
+            },
+            Type::Tuple(vec![]),
+            Some(&format!("{}_d", state_var)),
+        );
     }
 
     let mut output_nodes: Vec<NodeRef> = Vec::new();
@@ -1136,6 +1121,7 @@ fn build_top_block(
     lib_indexed: &IndexedLibrary,
     normalized: &NormalizedNetlistModule<'_>,
     wiring: &WiringAssignResolver,
+    clock_port_name_hint: Option<&str>,
 ) -> Result<(PirFn, BlockMetadata)> {
     let module_name_raw = parsed.interner.resolve(module.name).unwrap_or("top");
     let module_name = sanitize_to_xls_identifier(module_name_raw);
@@ -1152,78 +1138,70 @@ fn build_top_block(
     } = collect_clock_gate_passthroughs(normalized, parsed, lib_indexed, wiring)?;
 
     let mut selected_clock_bit: Option<BitIndex> = None;
+    let mut selected_clock_is_negated: Option<bool> = None;
     let mut selected_clock_port_name_raw: Option<String> = None;
-    let mut dff_clock_pins = Vec::new();
 
     for inst in &normalized.instances {
         let cell_name = parsed.interner.resolve(inst.type_name).unwrap_or("");
         let cell = lib_indexed
             .get_cell(cell_name)
             .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty", cell_name)))?;
-        if let Some(seq) = cell.sequential.first() {
-            if seq.kind == SequentialKind::Ff as i32 {
-                for pin in &cell.pins {
-                    if pin.is_clocking_pin {
-                        dff_clock_pins
-                            .push(lib_indexed.library().resolve_string(&pin.name).to_string());
-                    }
-                }
-                if !seq.clock_expr.is_empty() {
-                    let (clk_pin, _neg) = parse_simple_clock_expr(&seq.clock_expr)?;
-                    dff_clock_pins.push(clk_pin);
-                }
+        let Some(clock_spec) = get_sequential_ff_clock_spec(cell, lib_indexed.library())
+            .map_err(|error| anyhow!(error))?
+        else {
+            continue;
+        };
+        let clock_sources = normalized_connection_for_port(inst, parsed, &clock_spec.pin_name)
+            .ok_or_else(|| {
+                anyhow!(format!(
+                    "clock pin '{}' on instance '{}' is unconnected",
+                    clock_spec.pin_name,
+                    parsed
+                        .interner
+                        .resolve(inst.instance_name)
+                        .unwrap_or("<unknown>")
+                ))
+            })?;
+        let raw_clock_bit = source_bit_only(
+            clock_sources,
+            &format!(
+                "clock pin '{}' on instance '{}'",
+                clock_spec.pin_name,
+                parsed
+                    .interner
+                    .resolve(inst.instance_name)
+                    .unwrap_or("<unknown>")
+            ),
+            wiring,
+            normalized,
+            parsed,
+        )?;
+        let clock_bit = resolve_clock_bit(
+            raw_clock_bit,
+            wiring,
+            &clock_gate_bit_aliases,
+            normalized,
+            parsed,
+        )?;
+        match selected_clock_bit {
+            None => selected_clock_bit = Some(clock_bit),
+            Some(existing) if existing != clock_bit => {
+                return Err(anyhow!(format!(
+                    "multiple clock nets detected: '{}' vs '{}'",
+                    render_clock_bit(existing, normalized, parsed),
+                    render_clock_bit(clock_bit, normalized, parsed)
+                )));
             }
+            _ => {}
         }
-    }
-
-    for inst in &normalized.instances {
-        let cell_name = parsed.interner.resolve(inst.type_name).unwrap_or("");
-        let cell = lib_indexed
-            .get_cell(cell_name)
-            .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty", cell_name)))?;
-        if cell
-            .sequential
-            .first()
-            .is_some_and(|s| s.kind == SequentialKind::Ff as i32)
-        {
-            for connection in &inst.connections {
-                let port = parsed.interner.resolve(connection.port).unwrap_or("");
-                if !dff_clock_pins.iter().any(|clock_pin| clock_pin == port) {
-                    continue;
-                }
-                let raw_clock_bit = source_bit_only(
-                    connection.bits.as_slice(),
-                    &format!(
-                        "clock pin '{}' on instance '{}'",
-                        port,
-                        parsed
-                            .interner
-                            .resolve(inst.instance_name)
-                            .unwrap_or("<unknown>")
-                    ),
-                    wiring,
-                    normalized,
-                    parsed,
-                )?;
-                let clock_bit = resolve_clock_bit(
-                    raw_clock_bit,
-                    wiring,
-                    &clock_gate_bit_aliases,
-                    normalized,
-                    parsed,
-                )?;
-                match selected_clock_bit {
-                    None => selected_clock_bit = Some(clock_bit),
-                    Some(existing) if existing != clock_bit => {
-                        return Err(anyhow!(format!(
-                            "multiple clock nets detected: '{}' vs '{}'",
-                            render_clock_bit(existing, normalized, parsed),
-                            render_clock_bit(clock_bit, normalized, parsed)
-                        )));
-                    }
-                    _ => {}
-                }
+        match selected_clock_is_negated {
+            None => selected_clock_is_negated = Some(clock_spec.is_negated),
+            Some(existing) if existing != clock_spec.is_negated => {
+                return Err(anyhow!(
+                    "mixed positive-edge and negative-edge FF cells are not supported"
+                ));
             }
+            _ => {}
         }
     }
 
@@ -1235,6 +1213,37 @@ fn build_top_block(
                 render_clock_bit(clock_bit, normalized, parsed)
             )));
         }
+    }
+    if let Some(clock_port_name_hint) = clock_port_name_hint {
+        let hinted_port = normalized
+            .ports
+            .iter()
+            .find(|port| {
+                port.direction == crate::netlist::parse::PortDirection::Input
+                    && parsed.interner.resolve(port.name) == Some(clock_port_name_hint)
+            })
+            .ok_or_else(|| {
+                anyhow!(format!(
+                    "clock-port hint '{}' is not a top-level input port",
+                    clock_port_name_hint
+                ))
+            })?;
+        if hinted_port.bits.len() != 1 {
+            return Err(anyhow!(format!(
+                "clock-port hint '{}' has width {}; expected one bit",
+                clock_port_name_hint,
+                hinted_port.bits.len()
+            )));
+        }
+        if let Some(inferred_clock_name) = selected_clock_port_name_raw.as_deref()
+            && inferred_clock_name != clock_port_name_hint
+        {
+            return Err(anyhow!(format!(
+                "clock-port hint '{}' disagrees with inferred clock port '{}'",
+                clock_port_name_hint, inferred_clock_name
+            )));
+        }
+        selected_clock_port_name_raw = Some(clock_port_name_hint.to_string());
     }
 
     for port in &normalized.ports {
@@ -1380,11 +1389,10 @@ fn build_top_block(
             .filter(|pin| pin.is_clocking_pin)
             .map(|pin| lib_indexed.library().resolve_string(&pin.name).to_string())
             .collect();
-        if let Some(seq) = cell.sequential.first() {
-            if !seq.clock_expr.is_empty() {
-                let (clk_pin, _neg) = parse_simple_clock_expr(&seq.clock_expr)?;
-                clock_pin_names.insert(clk_pin);
-            }
+        if let Some(clock_spec) = get_sequential_ff_clock_spec(cell, lib_indexed.library())
+            .map_err(|error| anyhow!(error))?
+        {
+            clock_pin_names.insert(clock_spec.pin_name);
         }
 
         for connection in &inst.connections {
@@ -1488,7 +1496,9 @@ fn build_top_block(
 
 fn build_return_node(b: &mut PirFnBuilder, outputs: &[NodeRef]) -> (Type, Option<NodeRef>) {
     if outputs.is_empty() {
-        return (Type::Tuple(vec![]), None);
+        let tuple_type = Type::Tuple(vec![]);
+        let tuple_node = b.add_node(NodePayload::Tuple(vec![]), tuple_type.clone(), None);
+        return (tuple_type, Some(tuple_node));
     }
     if outputs.len() == 1 {
         let ty = b.nodes[outputs[0].index].ty.clone();
@@ -1565,17 +1575,6 @@ fn parse_simple_reset_expr(expr: &str) -> Result<(String, bool)> {
         },
         _ => Err(anyhow!(format!(
             "reset expression '{}' is not a simple input or negated input",
-            expr
-        ))),
-    }
-}
-
-fn parse_simple_clock_expr(expr: &str) -> Result<(String, bool)> {
-    let term = parse_formula(expr).map_err(|e| anyhow!(e))?;
-    match term {
-        Term::Input(name) => Ok((name, false)),
-        _ => Err(anyhow!(format!(
-            "clock expression '{}' is not a simple input",
             expr
         ))),
     }

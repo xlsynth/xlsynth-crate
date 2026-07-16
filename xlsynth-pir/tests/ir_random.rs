@@ -483,6 +483,75 @@ fn random_block_reset_timing_option_controls_generated_metadata() {
 }
 
 #[test]
+fn random_block_required_register_resets_option_controls_samples() {
+    let options = RandomBlockOptions {
+        min_input_ports: 0,
+        max_input_ports: 3,
+        min_registers: 1,
+        max_registers: 3,
+        require_reset_on_all_registers: true,
+        reset_timing: RandomBlockResetTiming::Synchronous,
+        function_options: RandomFnOptions {
+            max_nodes: 32,
+            max_bit_width: 8,
+            ..RandomFnOptions::default()
+        },
+        ..RandomBlockOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x51ac_0004));
+    for _ in 0..256 {
+        let generated =
+            generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(8)).unwrap();
+        assert!(!generated.metadata.registers.is_empty());
+        assert!(
+            generated
+                .metadata
+                .reset
+                .as_ref()
+                .is_some_and(|reset| !reset.asynchronous)
+        );
+        assert!(
+            generated
+                .metadata
+                .registers
+                .iter()
+                .all(|register| register.reset_value.is_some())
+        );
+        assert!(
+            generated
+                .function
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.payload {
+                    NodePayload::RegisterWrite { reset, .. } => Some(reset),
+                    _ => None,
+                })
+                .all(Option::is_some)
+        );
+    }
+
+    let invalid_options = RandomBlockOptions {
+        max_registers: 1,
+        allow_reset: false,
+        require_reset_on_all_registers: true,
+        ..RandomBlockOptions::default()
+    };
+    let mut invalid_entropy = DepletableBytes::new(&[]);
+    let error = generate_block(
+        &mut invalid_entropy,
+        &invalid_options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .expect_err("requiring resets while disabling resets should be invalid");
+    assert_eq!(
+        error,
+        GenerationError::InvalidOptions(
+            "require_reset_on_all_registers requires allow_reset".to_string()
+        )
+    );
+}
+
+#[test]
 fn random_block_zero_width_interface_option_controls_samples() {
     let cases = [(false, 0x20f7_0001), (true, 0x20f7_0002)];
     for (allow_zero_width, seed) in cases {

@@ -626,6 +626,9 @@ pub struct RandomBlockOptions {
     /// Permits generated blocks with registers to add a reset port and use it
     /// on some register writes.
     pub allow_reset: bool,
+    /// Requires every generated register to use a generated reset port and
+    /// carry a reset value. Blocks without registers remain reset-free.
+    pub require_reset_on_all_registers: bool,
     /// Controls the timing kind when a reset port is generated.
     pub reset_timing: RandomBlockResetTiming,
 }
@@ -643,6 +646,7 @@ impl Default for RandomBlockOptions {
             allow_zero_width_ports_and_registers: false,
             allow_load_enable: true,
             allow_reset: true,
+            require_reset_on_all_registers: false,
             reset_timing: RandomBlockResetTiming::Either,
         }
     }
@@ -669,10 +673,25 @@ impl RandomBlockOptions {
                 self.min_registers, self.max_registers
             )));
         }
+        if self.require_reset_on_all_registers && !self.allow_reset && self.max_registers > 0 {
+            return Err(GenerationError::InvalidOptions(
+                "require_reset_on_all_registers requires allow_reset".to_string(),
+            ));
+        }
         if self.min_input_ports > self.function_options.max_params {
             return Err(GenerationError::InvalidOptions(format!(
                 "min_input_ports {} exceeds function_options.max_params {}",
                 self.min_input_ports, self.function_options.max_params
+            )));
+        }
+        if self.require_reset_on_all_registers
+            && self.min_registers > 0
+            && self.min_input_ports.saturating_add(1) > self.function_options.max_params
+        {
+            return Err(GenerationError::InvalidOptions(format!(
+                "minimum block shape needs {} parameters including reset but function_options.max_params is {}",
+                self.min_input_ports.saturating_add(1),
+                self.function_options.max_params
             )));
         }
 
@@ -680,9 +699,12 @@ impl RandomBlockOptions {
         let min_seed_node = usize::from(
             self.min_output_ports > 0 && self.min_input_ports == 0 && self.min_registers == 0,
         );
+        let min_reset_port_node =
+            usize::from(self.require_reset_on_all_registers && self.min_registers > 0);
         let required_nodes = self
             .min_input_ports
             .saturating_add(self.min_registers.saturating_mul(2))
+            .saturating_add(min_reset_port_node)
             .saturating_add(min_output_tuple_node)
             .saturating_add(min_seed_node);
         if required_nodes > self.function_options.max_nodes {
@@ -882,7 +904,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             &mut metadata,
             register_count,
             output_tuple_reserve,
-        );
+        )?;
         let registers =
             self.add_registers(&mut generator, &mut metadata, register_count, reset_ref);
 
@@ -933,20 +955,29 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
 
     fn choose_input_count(&mut self) -> Result<usize, GenerationError> {
         let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
+        let reset_port_reserve = usize::from(
+            self.options.require_reset_on_all_registers && self.options.min_registers > 0,
+        );
         let reserved_nodes = self
             .options
             .min_registers
             .saturating_mul(2)
+            .saturating_add(reset_port_reserve)
             .saturating_add(output_tuple_reserve);
         let max_by_nodes = self
             .options
             .function_options
             .max_nodes
             .saturating_sub(reserved_nodes);
+        let max_by_params = self
+            .options
+            .function_options
+            .max_params
+            .saturating_sub(reset_port_reserve);
         let max_input_count = self
             .options
             .max_input_ports
-            .min(self.options.function_options.max_params)
+            .min(max_by_params)
             .min(max_by_nodes);
         if max_input_count < self.options.min_input_ports {
             return Err(GenerationError::InvalidOptions(format!(
@@ -963,13 +994,19 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
 
     fn choose_register_count(&mut self, input_count: usize) -> Result<usize, GenerationError> {
         let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
-        let max_by_nodes = self
-            .options
-            .function_options
-            .max_nodes
-            .saturating_sub(input_count.saturating_add(output_tuple_reserve))
-            / 2;
-        let max_register_count = self.options.max_registers.min(max_by_nodes);
+        let reset_port_reserve = usize::from(self.options.require_reset_on_all_registers);
+        let max_by_nodes = self.options.function_options.max_nodes.saturating_sub(
+            input_count
+                .saturating_add(output_tuple_reserve)
+                .saturating_add(reset_port_reserve),
+        ) / 2;
+        let max_register_count = if self.options.require_reset_on_all_registers
+            && input_count >= self.options.function_options.max_params
+        {
+            0
+        } else {
+            self.options.max_registers.min(max_by_nodes)
+        };
         if max_register_count < self.options.min_registers {
             return Err(GenerationError::InvalidOptions(format!(
                 "minimum register count {} cannot fit with {} input nodes and max_nodes {}",
@@ -1003,9 +1040,13 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         metadata: &mut BlockMetadata,
         register_count: usize,
         output_tuple_reserve: usize,
-    ) -> Option<NodeRef> {
-        if register_count == 0 || !self.options.allow_reset || self.source.take_u64() & 1 == 0 {
-            return None;
+    ) -> Result<Option<NodeRef>, GenerationError> {
+        let reset_required = self.options.require_reset_on_all_registers && register_count > 0;
+        if register_count == 0
+            || !self.options.allow_reset
+            || (!reset_required && self.source.take_u64() & 1 == 0)
+        {
+            return Ok(None);
         }
         let used_nodes = generator.nodes.len().saturating_sub(1);
         let reserved_nodes = register_count
@@ -1015,7 +1056,12 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             || used_nodes.saturating_add(1).saturating_add(reserved_nodes)
                 > self.options.function_options.max_nodes
         {
-            return None;
+            if reset_required {
+                return Err(GenerationError::Construction(
+                    "required register reset port does not fit configured block limits".to_string(),
+                ));
+            }
+            return Ok(None);
         }
 
         let reset_ref = self.add_block_param(generator, metadata, "rst".to_string(), Type::Bits(1));
@@ -1029,7 +1075,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             asynchronous,
             active_low: self.source.take_u64() & 1 != 0,
         });
-        Some(reset_ref)
+        Ok(Some(reset_ref))
     }
 
     fn add_registers(
@@ -1087,6 +1133,9 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
     ) -> Vec<bool> {
         if reset_ref.is_none() {
             return vec![false; register_count];
+        }
+        if self.options.require_reset_on_all_registers {
+            return vec![true; register_count];
         }
         let mut enabled: Vec<bool> = (0..register_count)
             .map(|_| self.source.take_u64() & 1 != 0)
