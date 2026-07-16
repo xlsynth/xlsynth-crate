@@ -950,3 +950,249 @@ endmodule
     .expect("simulate outputless module");
     assert_eq!(trace.external_outputs(), &[Vec::<IrBits>::new()]);
 }
+
+#[test]
+fn labeled_netlist_aig_flattens_structural_hierarchy_and_keeps_boundaries() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
+}
+interned_strings: ["A", "Y"]
+"#;
+    let netlist = r#"
+module child (a, y);
+  input [1:0] a;
+  output [1:0] y;
+  BUF u_buf (.A(a[0]), .Y(y[0]));
+endmodule
+
+module top (a, y);
+  input [1:0] a;
+  output y;
+  wire [1:0] child_y;
+  child u_child (.a(a), .y(child_y));
+  BUF u_top (.A(child_y[0]), .Y(y));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions {
+            module_name: Some("top".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect("build hierarchical evaluation model");
+
+    assert_eq!(
+        model
+            .instances
+            .iter()
+            .map(|instance| instance.instance_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["u_child/u_buf", "u_top"]
+    );
+    assert_eq!(model.module_boundaries.len(), 1);
+    let boundary = &model.module_boundaries[0];
+    assert_eq!(boundary.instance_path, "u_child");
+    assert_eq!(boundary.module_name, "child");
+    assert_eq!(
+        boundary
+            .ports
+            .iter()
+            .map(|port| {
+                (
+                    port.name.as_str(),
+                    port.bits_lsb_to_msb
+                        .iter()
+                        .map(|bit| bit.bit_number)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![("a", vec![0, 1]), ("y", vec![0])]
+    );
+
+    let low = model
+        .evaluate_ir_value(&IrValue::parse_typed("(bits[2]:0)").unwrap())
+        .expect("evaluate low child input");
+    let high = model
+        .evaluate_ir_value(&IrValue::parse_typed("(bits[2]:1)").unwrap())
+        .expect("evaluate high child input");
+    assert_eq!(low.to_string(), "bits[1]:0");
+    assert_eq!(high.to_string(), "bits[1]:1");
+
+    let activity = model
+        .count_toggle_activity(&[
+            IrValue::parse_typed("(bits[2]:0)").unwrap(),
+            IrValue::parse_typed("(bits[2]:1)").unwrap(),
+            IrValue::parse_typed("(bits[2]:0)").unwrap(),
+        ])
+        .expect("count hierarchical toggle activity");
+    assert_eq!(activity.module_boundaries.len(), 1);
+    assert_eq!(activity.module_boundaries[0].instance_path, "u_child");
+    assert_eq!(
+        activity.module_boundaries[0].ports[1].bits_lsb_to_msb[0].toggle_count,
+        2
+    );
+}
+
+#[test]
+fn labeled_netlist_aig_flattens_nested_structural_hierarchy() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
+}
+interned_strings: ["A", "Y"]
+"#;
+    let netlist = r#"
+module leaf (a, y);
+  input a;
+  output y;
+  BUF u_buf (.A(a), .Y(y));
+endmodule
+
+module wrapper (a, y);
+  input a;
+  output y;
+  leaf u_leaf (.a(a), .y(y));
+endmodule
+
+module top (a, y);
+  input a;
+  output y;
+  wrapper u_wrapper (.a(a), .y(y));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions {
+            module_name: Some("top".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect("build nested hierarchical evaluation model");
+
+    assert_eq!(model.instances.len(), 1);
+    assert_eq!(model.instances[0].instance_name, "u_wrapper/u_leaf/u_buf");
+    assert_eq!(
+        model
+            .module_boundaries
+            .iter()
+            .map(|boundary| boundary.instance_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["u_wrapper", "u_wrapper/u_leaf"]
+    );
+    let output = model
+        .evaluate_ir_value(&IrValue::parse_typed("(bits[1]:1)").unwrap())
+        .expect("evaluate nested hierarchy");
+    assert_eq!(output.to_string(), "bits[1]:1");
+}
+
+#[test]
+fn labeled_sequential_netlist_aig_flattens_structural_hierarchy() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module child (clk, d, q);
+  input clk;
+  input d;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+
+module top (clk, d, q);
+  input clk;
+  input d;
+  output q;
+  child u_child (.clk(clk), .d(d), .q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions {
+            module_name: Some("top".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect("build hierarchical sequential evaluation model");
+
+    assert_eq!(model.instances.len(), 1);
+    assert_eq!(model.instances[0].instance_name, "u_child/state");
+    assert_eq!(model.module_boundaries.len(), 1);
+    let boundary = &model.module_boundaries[0];
+    assert_eq!(boundary.instance_path, "u_child");
+    assert_eq!(boundary.module_name, "child");
+    assert!(matches!(
+        boundary.ports[0].bits_lsb_to_msb[0].signal,
+        SequentialAigSignal::Clock
+    ));
+
+    let design = &model.sequential_gate_fn;
+    let trace = sequential::simulate(
+        design,
+        &[
+            vec![IrBits::make_ubits(1, 1).unwrap()],
+            vec![IrBits::make_ubits(1, 0).unwrap()],
+        ],
+        SequentialState::all_zeros(design),
+    )
+    .expect("simulate hierarchical DFF");
+    assert_eq!(
+        trace
+            .external_outputs()
+            .iter()
+            .map(|outputs| outputs[0].to_string())
+            .collect::<Vec<_>>(),
+        vec!["bits[1]:0", "bits[1]:1"]
+    );
+}
+
+#[test]
+fn labeled_netlist_aig_rejects_recursive_module_hierarchy() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let netlist_path = temp_dir.path().join("design.gv");
+    std::fs::write(
+        &netlist_path,
+        r#"
+module top (a, y);
+  input a;
+  output y;
+  top recurse (.a(a), .y(y));
+endmodule
+"#,
+    )
+    .expect("write recursive netlist");
+    let error = load_labeled_netlist_aig_with_liberty(
+        &netlist_path,
+        &Library::default(),
+        &GvEvalOptions::default(),
+    )
+    .expect_err("recursive hierarchy should be rejected");
+    assert!(format!("{error:#}").contains("recursive module instantiation"));
+}
