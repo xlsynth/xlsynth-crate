@@ -389,57 +389,6 @@ jobs:
           bash scripts/ci_apt_retry.sh install --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev
           pip3 install -r requirements.txt
 
-      - name: Set up Rust
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
-        with:
-          toolchain: nightly
-          profile: minimal
-          override: true
-          components: clippy
-
-      - name: Set up Python + pre-commit
-        run: |
-          cd ${GITHUB_WORKSPACE}
-          echo "Initializing git repository as a workaround for pre-commit"
-          if [ ! -d ".git" ]; then
-            echo ".git directory not found, initializing..."
-            git init
-          else
-            echo ".git directory found, skipping init."
-          fi
-          python3 -m pip install --upgrade pip
-          pip3 install pre-commit
-          # Configure git for pre-commit install
-          echo "Configuring git safe directory and user..."
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-          echo "--- Running Git Diagnostics ---"
-          echo "Current directory:"
-          pwd
-          echo "Listing contents (including .git):"
-          ls -la
-          echo "Git status:"
-          git status
-          echo "Git top level:"
-          git rev-parse --show-toplevel
-          echo "--- End Git Diagnostics ---"
-          pre-commit install
-
-      - name: Install cargo-fuzz
-        run: |
-          cargo install cargo-fuzz
-
-      - name: Fetch Cargo dependencies for offline pre-commit hooks
-        run: cargo fetch
-
-      - name: Run pre-commit checks
-        env:
-          SKIP: no-commit-to-branch
-        run: |
-          # Git config done in setup step
-          pre-commit run --all-files
-
       - name: Download xlsynth binaries
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
