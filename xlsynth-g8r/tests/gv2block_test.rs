@@ -42,6 +42,19 @@ cells: {
   }
 }
 cells: {
+  name: "DFFNEDGE"
+  pins: { name_string_id: 7 direction: INPUT }
+  pins: { name_string_id: 5 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 8 direction: OUTPUT function_string_id: 8 }
+  area: 1.0
+  sequential: {
+    state_var: "Q"
+    next_state: "D"
+    clock_expr: "!CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+cells: {
   name: "DFFQN"
   pins: { name_string_id: 7 direction: INPUT }
   pins: { name_string_id: 5 direction: INPUT is_clocking_pin: true }
@@ -186,6 +199,32 @@ top block top(clk: clock, d: bits[1], q: bits[1]) {
 }
 "#;
     assert_eq!(got, want);
+}
+
+#[test]
+fn test_gv2block_rejects_negative_edge_ff() {
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  wire d;
+  wire clk;
+  wire q;
+  DFFNEDGE u1 (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let error = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
+        .expect_err("negative-edge FFs should be rejected");
+    assert!(
+        format!("{error:#}").contains("gv2block only supports positive-edge FFs"),
+        "{error:#}"
+    );
 }
 
 #[test]

@@ -54,6 +54,13 @@ doc = false
 required-features = ["external-yosys"]
 
 [[bin]]
+name = "fuzz_random_block_gv_eval_sequential_equiv"
+path = "fuzz_targets/fuzz_random_block_gv_eval_sequential_equiv.rs"
+test = false
+doc = false
+required-features = ["external-yosys"]
+
+[[bin]]
 name = "fuzz_g8r_formal"
 path = "fuzz_targets/fuzz_g8r_formal.rs"
 test = false

@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+
+pub mod external_yosys;
+pub mod random_block;
+
 use std::time::Duration;
 
 use arbitrary::Arbitrary;

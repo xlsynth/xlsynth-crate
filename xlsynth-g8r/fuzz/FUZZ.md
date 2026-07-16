@@ -41,6 +41,31 @@ block-to-G8R flattening disagreements, RTL emission or Yosys/ABC mapping
 failures, unsupported mapped Liberty cell formulas, netlist input/output shape
 changes, or visible output divergence after technology mapping.
 
+## `fuzz_random_block_gv_eval_sequential_equiv`
+
+Generates bounded block IR with at least one register and a synchronous reset
+value on every register, lowers it to sequential G8R, emits packed-port
+Verilog, maps FFs and combinational logic through the Yosys executable named by
+`XLSYNTH_YOSYS_PATH` against the comma-separated Liberty files in
+`XLSYNTH_LIBERTY_FILES`, then projects the mapped netlist directly into the
+labeled sequential transition-AIG form used by `gv-eval`. The target is gated
+by the `external-yosys` feature because it
+requires that external toolchain and Liberty data at runtime. A deterministic
+RNG seeded from the generated IR supplies arbitrary initial block state and
+random non-reset inputs. Reset is asserted on cycle zero and deasserted for
+all later cycles; cycle-zero outputs are intentionally ignored because the
+mapped state elements need not correspond to the source registers.
+
+The essential property is that block IR evaluation and Liberty-backed
+sequential `gv-eval` agree on every visible flattened output after the reset
+edge, without matching mapped register names, count, or state layout. Failures
+expose block-to-G8R reset/load-enable/feedback errors, sequential RTL emission
+or Yosys `dfflibmap`/ABC mapping failures, unsupported Liberty FF metadata,
+aggregate port flattening disagreements, netlist interface shape changes, or
+visible output divergence on any post-reset simulated cycle. Zero-output
+samples still exercise the full lowering, mapping, loading, and simulation
+path for crash detection.
+
 ## `fuzz_gatify`
 
 Generates bounded gatify-supported PIR directly with

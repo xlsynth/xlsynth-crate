@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Functional evaluation of combinational Liberty-backed gate-level netlists.
+//! Functional evaluation of Liberty-backed gate-level netlists.
 
 use std::path::Path;
 
@@ -8,24 +8,32 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 use xlsynth::{IrBits, IrValue};
 
-use crate::aig::AigOperand;
+use crate::aig::{AigOperand, SequentialGateFn};
 use crate::aig_sim::count_toggles;
 use crate::aig_sim::gate_sim::{self, Collect};
 use crate::aig_sim::gate_simd;
 use crate::liberty_model::{Library, PinDirection};
-use crate::netlist::gatefn_from_netlist::project_labeled_netlist_aig;
+use crate::netlist::gatefn_from_netlist::{
+    project_labeled_netlist_aig, project_labeled_sequential_netlist_aig,
+};
 use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
 use crate::netlist::parse::PortDirection;
 use crate::netlist::power::{GvDynamicPowerOptions, GvDynamicPowerReport};
 
 pub use crate::netlist::gatefn_from_netlist::{
     InstanceAigBinding, InstancePinAigBinding, LabeledAigBit, LabeledNetlistAig,
-    ModulePortAigBinding, PinConnection,
+    LabeledSequentialAigBit, LabeledSequentialClock, LabeledSequentialNetlistAig,
+    ModulePortAigBinding, PinConnection, SequentialAigSignal, SequentialClockEdge,
+    SequentialInstanceAigBinding, SequentialInstancePinAigBinding, SequentialModulePortAigBinding,
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct GvEvalOptions {
     pub module_name: Option<String>,
+    /// Optional top-level clock name for sequential loading. This is needed
+    /// when synthesis has optimized away every state element and no FF clock
+    /// pin remains from which to infer the clock.
+    pub clock_port_name: Option<String>,
 }
 
 /// Input or output direction used in the source-labeled toggle report.
@@ -120,6 +128,57 @@ pub fn load_labeled_netlist_aig_with_liberty(
     let module = select_module(&parsed, options.module_name.as_deref())?;
     project_labeled_netlist_aig(module, &parsed.nets, &parsed.interner, liberty)
         .map_err(|e| anyhow!(e))
+}
+
+/// Loads one FF-only gate-level module as a labeled sequential transition AIG.
+///
+/// One simulation cycle represents one active edge of the selected clock.
+/// Positive-edge and negative-edge FFs are each supported, but a module may
+/// not mix them. Latches, multiple clocks, derived clocks, and asynchronous
+/// clear/preset cells are rejected.
+pub fn load_labeled_sequential_netlist_aig(
+    netlist_path: &Path,
+    liberty_proto_path: &Path,
+    options: &GvEvalOptions,
+) -> Result<LabeledSequentialNetlistAig> {
+    let liberty = load_liberty_from_path(liberty_proto_path)?;
+    load_labeled_sequential_netlist_aig_with_liberty(netlist_path, &liberty, options)
+}
+
+/// Loads one FF-only gate-level module using an already parsed Liberty model.
+///
+/// The returned model preserves mapped instance and pin labels while its
+/// sequential gate function can be evaluated with the sequential simulator.
+/// Register names are internal to
+/// the mapped netlist; callers comparing pre- and post-map behavior should
+/// compare visible outputs rather than trying to correlate state elements.
+pub fn load_labeled_sequential_netlist_aig_with_liberty(
+    netlist_path: &Path,
+    liberty: &Library,
+    options: &GvEvalOptions,
+) -> Result<LabeledSequentialNetlistAig> {
+    let parsed = parse_netlist_from_path(netlist_path)?;
+    let module = select_module(&parsed, options.module_name.as_deref())?;
+    project_labeled_sequential_netlist_aig(
+        module,
+        &parsed.nets,
+        &parsed.interner,
+        liberty,
+        options.clock_port_name.as_deref(),
+    )
+    .map_err(|error| anyhow!(error))
+}
+
+/// Loads one FF-only gate-level module as a sequential transition function.
+pub fn load_sequential_netlist_gate_fn(
+    netlist_path: &Path,
+    liberty_proto_path: &Path,
+    options: &GvEvalOptions,
+) -> Result<SequentialGateFn> {
+    Ok(
+        load_labeled_sequential_netlist_aig(netlist_path, liberty_proto_path, options)?
+            .sequential_gate_fn,
+    )
 }
 
 impl LabeledNetlistAig {

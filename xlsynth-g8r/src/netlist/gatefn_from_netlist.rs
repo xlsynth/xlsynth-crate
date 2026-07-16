@@ -3,6 +3,10 @@
 //! Project a parsed netlist and Liberty proto into a GateFn.
 
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
+use crate::aig::sequential_gate::{canonical_register_d_name, canonical_register_q_name};
+use crate::aig::{
+    ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
+};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::Term;
 use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
@@ -10,6 +14,9 @@ use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedConnection, NormalizedInstance, NormalizedNetlistModule,
 };
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
+use crate::netlist::sequential_liberty::{
+    GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec,
+};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use string_interner::symbol::SymbolU32;
@@ -62,6 +69,74 @@ pub enum PinConnection {
     Net { net_name: String, bit_number: u32 },
     Literal(bool),
     Unconnected,
+}
+
+/// Active edge observed by a labeled sequential netlist clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequentialClockEdge {
+    Rising,
+    Falling,
+}
+
+/// One top-level clock omitted from the transition function's data inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabeledSequentialClock {
+    pub port_name: String,
+    /// Unknown when a clock-port hint preserves an otherwise optimized-away
+    /// clock and no FF remains from which to infer polarity.
+    pub active_edge: Option<SequentialClockEdge>,
+}
+
+/// A sequential pin or port signal in the transition graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequentialAigSignal {
+    Operand(AigOperand),
+    Clock,
+}
+
+/// One named Verilog bit bound to a sequential transition signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabeledSequentialAigBit {
+    pub bit_number: u32,
+    pub signal: SequentialAigSignal,
+}
+
+/// One module-port bundle bound to sequential transition signals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequentialModulePortAigBinding {
+    pub name: String,
+    pub direction: PortDirection,
+    pub bits_lsb_to_msb: Vec<LabeledSequentialAigBit>,
+}
+
+/// One scalar standard-cell pin in a labeled sequential transition graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequentialInstancePinAigBinding {
+    pub pin_name: String,
+    pub direction: PinDirection,
+    pub signal: SequentialAigSignal,
+    pub connection: PinConnection,
+}
+
+/// One mapped standard-cell instance in a labeled sequential transition graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequentialInstanceAigBinding {
+    pub instance_name: String,
+    pub cell_type: String,
+    pub pins: Vec<SequentialInstancePinAigBinding>,
+    /// Index in [`SequentialGateFn::registers`] for an FF instance.
+    pub state_register_index: Option<usize>,
+}
+
+/// A stateful netlist projected into a transition AIG while preserving mapped
+/// module, instance, pin, and connection labels.
+#[derive(Debug, Clone)]
+pub struct LabeledSequentialNetlistAig {
+    pub module_name: String,
+    pub sequential_gate_fn: SequentialGateFn,
+    pub clock: Option<LabeledSequentialClock>,
+    pub module_ports: Vec<SequentialModulePortAigBinding>,
+    pub instances: Vec<SequentialInstanceAigBinding>,
 }
 
 fn substitute_state_vars_in_term(
@@ -630,6 +705,1016 @@ pub fn project_labeled_netlist_aig(
     })
 }
 
+#[derive(Debug, Clone)]
+struct SelectedSequentialClock {
+    bit: BitIndex,
+    port_name: String,
+    active_edge: Option<SequentialClockEdge>,
+}
+
+struct PendingSequentialInstance {
+    normalized_index: usize,
+    spec: GvEvalSequentialCellSpec,
+    register_name: String,
+    q: TransitionInputId,
+    state_operands: HashMap<String, AigOperand>,
+    output_operands: HashMap<String, AigOperand>,
+    d_operand: Option<AigOperand>,
+}
+
+/// Projects an FF-only Liberty-backed netlist into one labeled sequential AIG.
+///
+/// The transition function contains ordinary data inputs plus one synthetic Q
+/// input per mapped FF. The selected top-level clock remains metadata rather
+/// than a transition input, because one simulation step represents one active
+/// clock edge.
+pub fn project_labeled_sequential_netlist_aig(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    clock_port_name_hint: Option<&str>,
+) -> Result<LabeledSequentialNetlistAig, String> {
+    let normalized =
+        NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
+    let sequential_specs = collect_gv_eval_sequential_specs(&normalized, interner, liberty_lib)?;
+    validate_labeled_sequential_eval_module(
+        &normalized,
+        nets,
+        interner,
+        liberty_lib,
+        &sequential_specs,
+    )?;
+    let selected_clock = select_sequential_clock(
+        &normalized,
+        nets,
+        interner,
+        &sequential_specs,
+        clock_port_name_hint,
+    )?;
+
+    let used_cell_names: HashSet<String> = module
+        .instances
+        .iter()
+        .filter_map(|inst| interner.resolve(inst.type_name).map(str::to_string))
+        .collect();
+    let empty_dff_cells = HashSet::new();
+    let cell_formula_map = build_cell_formula_map(
+        liberty_lib,
+        /* collapse_sequential= */ false,
+        &used_cell_names,
+        &empty_dff_cells,
+        &empty_dff_cells,
+    )?;
+    let module_name = interner
+        .resolve(module.name)
+        .ok_or_else(|| "could not resolve module name".to_string())?
+        .to_string();
+    let mut gb = GateBuilder::new(module_name.clone(), GateBuilderOptions::no_opt());
+    let mut resolved = ResolvedBitValues::new(normalized.bit_count());
+    let external_inputs = collect_sequential_module_input_bits(
+        &normalized,
+        nets,
+        interner,
+        selected_clock.as_ref(),
+        &mut gb,
+        &mut resolved,
+    )?;
+
+    let mut pending_sequential = Vec::new();
+    for (normalized_index, spec) in sequential_specs.iter().enumerate() {
+        let Some(spec) = spec else {
+            continue;
+        };
+        let inst = &normalized.instances[normalized_index];
+        let instance_name = interner
+            .resolve(inst.instance_name)
+            .ok_or_else(|| "could not resolve instance name".to_string())?;
+        let type_name = interner
+            .resolve(inst.type_name)
+            .ok_or_else(|| "could not resolve cell type name".to_string())?;
+        let cell = liberty_lib
+            .cells
+            .iter()
+            .find(|cell| cell.name == type_name)
+            .ok_or_else(|| format!("Cell '{}' not found in Liberty", type_name))?;
+        let register_name = format!("{}__{}", instance_name, spec.state_var);
+        let q = TransitionInputId::new(external_inputs.len() + pending_sequential.len());
+        let q_bv = gb.add_input(canonical_register_q_name(&register_name), 1);
+        let q_operand = *q_bv.get_lsb(0);
+        let state_operands = build_sequential_state_operand_map(spec, q_operand, &mut gb);
+        let output_operands = seed_sequential_instance_outputs(
+            inst,
+            cell,
+            type_name,
+            instance_name,
+            interner,
+            nets,
+            &normalized,
+            &state_operands,
+            &mut gb,
+            &mut resolved,
+            liberty_lib,
+        )?;
+        pending_sequential.push(PendingSequentialInstance {
+            normalized_index,
+            spec: spec.clone(),
+            register_name,
+            q,
+            state_operands,
+            output_operands,
+            d_operand: None,
+        });
+    }
+
+    let (used_as_input, driven) = collect_netlist_bit_usage(
+        &normalized,
+        interner,
+        liberty_lib,
+        |instance_index, pin_name| {
+            sequential_specs[instance_index]
+                .as_ref()
+                .is_some_and(|spec| spec.clock.pin_name == pin_name)
+        },
+    )?;
+    check_undriven_bits(&used_as_input, &driven, &normalized, nets, interner)?;
+
+    let module_output_bits = collect_module_output_bits(&normalized);
+    let mut pending_assigns = build_pending_assign_bits(&normalized);
+    let mut labeled_instances = vec![None; normalized.instances.len()];
+    let mut unprocessed = normalized
+        .instances
+        .iter()
+        .enumerate()
+        .filter_map(|(index, inst)| sequential_specs[index].is_none().then_some(inst))
+        .collect::<Vec<_>>();
+    let mut processed_any = true;
+    while (!unprocessed.is_empty() || !pending_assigns.is_empty()) && processed_any {
+        processed_any = false;
+        let (next_pending_assigns, processed_assign) = process_pending_assign_bits(
+            pending_assigns,
+            &normalized,
+            &mut resolved,
+            nets,
+            interner,
+            &mut gb,
+        )?;
+        pending_assigns = next_pending_assigns;
+        processed_any |= processed_assign;
+
+        let mut index = 0;
+        while index < unprocessed.len() {
+            let inst = unprocessed[index];
+            let type_name = interner.resolve(inst.type_name).unwrap();
+            let instance_name = interner.resolve(inst.instance_name).unwrap();
+            let cell = liberty_lib
+                .cells
+                .iter()
+                .find(|cell| cell.name == type_name)
+                .ok_or_else(|| format!("Cell '{}' not found in Liberty", type_name))?;
+            let pin_directions = build_pin_direction_map(cell, liberty_lib);
+            let (input_map, missing_inputs, port_map) = build_instance_input_map(
+                inst,
+                &pin_directions,
+                interner,
+                nets,
+                &resolved,
+                &mut gb,
+                &normalized,
+            );
+            if !missing_inputs.is_empty() {
+                index += 1;
+                continue;
+            }
+            let processed = process_instance_outputs(
+                inst,
+                type_name,
+                instance_name,
+                &pin_directions,
+                interner,
+                nets,
+                &mut gb,
+                &mut resolved,
+                &normalized,
+                &empty_dff_cells,
+                &empty_dff_cells,
+                &cell_formula_map,
+                &input_map,
+                &port_map,
+            )?;
+            if processed.processed_any_output {
+                let binding = build_sequential_instance_aig_binding(
+                    inst,
+                    cell,
+                    liberty_lib,
+                    type_name,
+                    instance_name,
+                    interner,
+                    nets,
+                    &normalized,
+                    &input_map,
+                    &processed.output_operands,
+                    None,
+                    None,
+                )?;
+                labeled_instances[inst.raw_index.0] = Some(binding);
+                unprocessed.remove(index);
+                processed_any = true;
+            } else {
+                index += 1;
+            }
+        }
+        if !processed_any && unprocessed.is_empty() && !pending_assigns.is_empty() {
+            // Clock-alias and dead wiring assigns do not affect visible
+            // outputs once the selected clock has been recorded as metadata.
+            if pending_assigns
+                .iter()
+                .all(|pending_bit| !module_output_bits.contains(&pending_bit.target))
+            {
+                break;
+            }
+        }
+    }
+    let unresolved_output_assigns = pending_assigns
+        .iter()
+        .filter(|pending_bit| module_output_bits.contains(&pending_bit.target))
+        .count();
+    if !unprocessed.is_empty() || unresolved_output_assigns != 0 {
+        return Err(format!(
+            "Could not resolve sequential netlist combinational dependencies: {} instances and {} output-relevant continuous assign bits remain",
+            unprocessed.len(),
+            unresolved_output_assigns
+        ));
+    }
+
+    for (register_index, pending) in pending_sequential.iter_mut().enumerate() {
+        let inst = &normalized.instances[pending.normalized_index];
+        let type_name = interner.resolve(inst.type_name).unwrap();
+        let instance_name = interner.resolve(inst.instance_name).unwrap();
+        let cell = liberty_lib
+            .cells
+            .iter()
+            .find(|cell| cell.name == type_name)
+            .ok_or_else(|| format!("Cell '{}' not found in Liberty", type_name))?;
+        let pin_directions = build_pin_direction_map(cell, liberty_lib);
+        let (mut input_map, missing_inputs, port_map) = build_instance_input_map_skipping_pin(
+            inst,
+            &pin_directions,
+            interner,
+            nets,
+            &resolved,
+            &mut gb,
+            &normalized,
+            Some(pending.spec.clock.pin_name.as_str()),
+        );
+        if !missing_inputs.is_empty() {
+            return Err(format!(
+                "sequential cell '{}' instance '{}' has unresolved inputs: [{}]",
+                type_name,
+                instance_name,
+                missing_inputs.join(", ")
+            ));
+        }
+        input_map.extend(
+            pending
+                .state_operands
+                .iter()
+                .map(|(name, operand)| (name.clone(), *operand)),
+        );
+        let context = crate::liberty::cell_formula::EmitContext {
+            cell_name: type_name,
+            original_formula: pending.spec.next_state_text.as_str(),
+            instance_name: Some(instance_name),
+            port_map: Some(&port_map),
+        };
+        let d_operand = pending
+            .spec
+            .next_state
+            .emit_formula_term(&mut gb, &input_map, &context)
+            .map_err(|error| {
+                format!(
+                    "Failed to emit next_state for cell '{}' instance '{}': {}",
+                    type_name, instance_name, error
+                )
+            })?;
+        pending.d_operand = Some(d_operand);
+        let binding = build_sequential_instance_aig_binding(
+            inst,
+            cell,
+            liberty_lib,
+            type_name,
+            instance_name,
+            interner,
+            nets,
+            &normalized,
+            &input_map,
+            &pending.output_operands,
+            Some(pending.spec.clock.pin_name.as_str()),
+            Some(register_index),
+        )?;
+        labeled_instances[inst.raw_index.0] = Some(binding);
+    }
+
+    let module_ports = build_sequential_module_port_aig_bindings(
+        &normalized,
+        nets,
+        interner,
+        &resolved,
+        selected_clock.as_ref(),
+    )?;
+    let mut external_outputs = Vec::new();
+    for port in &normalized.ports {
+        if port.direction != PortDirection::Output {
+            continue;
+        }
+        let net_name = interner.resolve(port.name).unwrap();
+        let bv = resolved.materialize_output_or_false(port.bits.as_slice(), &mut gb);
+        let output_id = TransitionOutputId::new(external_outputs.len());
+        gb.add_output(net_name.to_string(), bv);
+        external_outputs.push(output_id);
+    }
+    let mut registers = Vec::with_capacity(pending_sequential.len());
+    for pending in pending_sequential {
+        let d_id = TransitionOutputId::new(external_outputs.len() + registers.len());
+        let d_operand = pending
+            .d_operand
+            .expect("every pending sequential instance has a D operand");
+        gb.add_output(
+            canonical_register_d_name(&pending.register_name),
+            AigBitVector::from_bit(d_operand),
+        );
+        registers.push(RegisterBinding {
+            name: pending.register_name,
+            q: pending.q,
+            d: d_id,
+            initial_value: None,
+        });
+    }
+    let added_synthetic_output = external_outputs.is_empty() && registers.is_empty();
+    if added_synthetic_output {
+        // GateBuilder needs an endpoint while it constructs an otherwise
+        // empty transition graph.
+        gb.add_output("__gv_eval_empty".to_string(), AigBitVector::zeros(0));
+    }
+    let mut transition = gb.build();
+    if added_synthetic_output {
+        transition.outputs.clear();
+    }
+    let instances = labeled_instances
+        .into_iter()
+        .enumerate()
+        .map(|(instance_index, binding)| {
+            binding.ok_or_else(|| {
+                format!(
+                    "internal error: no labeled sequential AIG binding was produced for instance index {}",
+                    instance_index
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let labeled_clock = selected_clock.map(|clock| LabeledSequentialClock {
+        port_name: clock.port_name,
+        active_edge: clock.active_edge,
+    });
+    let clock = labeled_clock.as_ref().map(|clock| ClockPort {
+        name: clock.port_name.clone(),
+    });
+    let sequential_gate_fn = SequentialGateFn::new(
+        module_name.clone(),
+        transition,
+        external_inputs,
+        external_outputs,
+        clock,
+        registers,
+    )
+    .map_err(|error| format!("invalid sequential netlist transition function: {}", error))?;
+    Ok(LabeledSequentialNetlistAig {
+        module_name,
+        sequential_gate_fn,
+        clock: labeled_clock,
+        module_ports,
+        instances,
+    })
+}
+
+fn collect_gv_eval_sequential_specs(
+    normalized: &NormalizedNetlistModule<'_>,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+) -> Result<Vec<Option<GvEvalSequentialCellSpec>>, String> {
+    normalized
+        .instances
+        .iter()
+        .map(|inst| {
+            let type_name = interner
+                .resolve(inst.type_name)
+                .ok_or_else(|| "could not resolve cell type name".to_string())?;
+            let instance_name = interner
+                .resolve(inst.instance_name)
+                .ok_or_else(|| "could not resolve instance name".to_string())?;
+            let cell = liberty_lib
+                .cells
+                .iter()
+                .find(|cell| cell.name == type_name)
+                .ok_or_else(|| {
+                    format!(
+                        "cell '{}' used by instance '{}' was not found in Liberty data",
+                        type_name, instance_name
+                    )
+                })?;
+            get_gv_eval_sequential_cell_spec(cell, liberty_lib)
+        })
+        .collect()
+}
+
+/// Validates the standard-cell subset used by labeled sequential gv-eval.
+fn validate_labeled_sequential_eval_module(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    sequential_specs: &[Option<GvEvalSequentialCellSpec>],
+) -> Result<(), String> {
+    let module_name = interner.resolve(normalized.raw.name).unwrap_or("<unknown>");
+    if normalized
+        .ports
+        .iter()
+        .any(|port| port.direction == PortDirection::Inout)
+    {
+        return Err(format!(
+            "module '{}' has an inout port; sequential gv-eval supports only input and output module ports",
+            module_name
+        ));
+    }
+    for (instance_index, inst) in normalized.instances.iter().enumerate() {
+        let type_name = interner.resolve(inst.type_name).unwrap_or("<unknown>");
+        let instance_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
+        let cell = liberty_lib
+            .cells
+            .iter()
+            .find(|cell| cell.name == type_name)
+            .ok_or_else(|| {
+                format!(
+                    "cell '{}' used by instance '{}' was not found in Liberty data",
+                    type_name, instance_name
+                )
+            })?;
+        let sequential_spec = sequential_specs[instance_index].as_ref();
+        let mut connected_pin_names = HashSet::new();
+        let mut connected_output_count = 0usize;
+        for connection in &inst.connections {
+            let pin_name = interner.resolve(connection.port).unwrap_or("<unknown>");
+            if !connected_pin_names.insert(pin_name.to_string()) {
+                return Err(format!(
+                    "cell '{}' instance '{}' connects pin '{}' more than once",
+                    type_name, instance_name, pin_name
+                ));
+            }
+            let pin = cell
+                .pins
+                .iter()
+                .find(|pin| liberty_lib.resolve_string(&pin.name) == pin_name)
+                .ok_or_else(|| {
+                    format!(
+                        "cell '{}' instance '{}' connects unknown Liberty pin '{}'",
+                        type_name, instance_name, pin_name
+                    )
+                })?;
+            let direction = checked_pin_direction(type_name, pin_name, pin.direction)?;
+            match direction {
+                PinDirection::Input => {
+                    if connection.bits.len() != 1 {
+                        return Err(format!(
+                            "cell '{}' instance '{}' input pin '{}' must have exactly one connected bit; got {} ({})",
+                            type_name,
+                            instance_name,
+                            pin_name,
+                            connection.bits.len(),
+                            normalized.render_sources(connection.bits.as_slice(), nets, interner)
+                        ));
+                    }
+                    if matches!(connection.bits[0], BitSource::Unknown) {
+                        return Err(format!(
+                            "cell '{}' instance '{}' input pin '{}' is connected to an unknown literal",
+                            type_name, instance_name, pin_name
+                        ));
+                    }
+                }
+                PinDirection::Output => {
+                    connected_output_count += 1;
+                    if connection.bits.len() > 1 {
+                        return Err(format!(
+                            "cell '{}' instance '{}' output pin '{}' must connect to at most one bit; got {} ({})",
+                            type_name,
+                            instance_name,
+                            pin_name,
+                            connection.bits.len(),
+                            normalized.render_sources(connection.bits.as_slice(), nets, interner)
+                        ));
+                    }
+                    if matches!(
+                        connection.bits.first(),
+                        Some(BitSource::Literal(_) | BitSource::Unknown)
+                    ) {
+                        return Err(format!(
+                            "cell '{}' instance '{}' output pin '{}' must drive a net bit or be unconnected",
+                            type_name, instance_name, pin_name
+                        ));
+                    }
+                    let function = liberty_lib.resolve_string(&pin.function);
+                    if function.is_empty() {
+                        let has_state_fallback = sequential_spec.is_some_and(|spec| {
+                            pin_name == spec.state_var
+                                || spec
+                                    .complementary_state_var
+                                    .as_deref()
+                                    .is_some_and(|name| pin_name == name)
+                        });
+                        if !has_state_fallback {
+                            return Err(format!(
+                                "cell '{}' instance '{}' output pin '{}' has no Liberty function",
+                                type_name, instance_name, pin_name
+                            ));
+                        }
+                    } else {
+                        crate::liberty::cell_formula::parse_formula(function).map_err(|error| {
+                            format!(
+                                r#"failed to parse Liberty function for cell '{}' instance '{}' output pin '{}' (function "{}"): {}"#,
+                                type_name, instance_name, pin_name, function, error
+                            )
+                        })?;
+                    }
+                }
+                PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+            }
+        }
+        if connected_output_count == 0 && sequential_spec.is_none() {
+            return Err(format!(
+                "cell '{}' instance '{}' has no explicitly connected output pins",
+                type_name, instance_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_pin_direction_map<'a>(cell: &'a Cell, liberty_lib: &'a Library) -> HashMap<&'a str, i32> {
+    cell.pins
+        .iter()
+        .map(|pin| (liberty_lib.resolve_string(&pin.name), pin.direction))
+        .collect()
+}
+
+fn select_sequential_clock(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    sequential_specs: &[Option<GvEvalSequentialCellSpec>],
+    clock_port_name_hint: Option<&str>,
+) -> Result<Option<SelectedSequentialClock>, String> {
+    let mut inferred_clock_bit = None;
+    let mut inferred_edge = None;
+    for (instance_index, spec) in sequential_specs.iter().enumerate() {
+        let Some(spec) = spec else {
+            continue;
+        };
+        let inst = &normalized.instances[instance_index];
+        let instance_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
+        let connection = inst
+            .connections
+            .iter()
+            .find(|connection| {
+                interner.resolve(connection.port) == Some(spec.clock.pin_name.as_str())
+            })
+            .ok_or_else(|| {
+                format!(
+                    "clock pin '{}' on instance '{}' is unconnected",
+                    spec.clock.pin_name, instance_name
+                )
+            })?;
+        let [source] = connection.bits.as_slice() else {
+            return Err(format!(
+                "clock pin '{}' on instance '{}' must connect exactly one bit",
+                spec.clock.pin_name, instance_name
+            ));
+        };
+        let clock_bit = resolve_simple_clock_source(*source, normalized, nets, interner)?;
+        match inferred_clock_bit {
+            None => inferred_clock_bit = Some(clock_bit),
+            Some(existing) if existing != clock_bit => {
+                return Err(format!(
+                    "multiple clock nets detected: '{}' vs '{}'",
+                    normalized.render_bit(existing, nets, interner),
+                    normalized.render_bit(clock_bit, nets, interner)
+                ));
+            }
+            _ => {}
+        }
+        let edge = if spec.clock.is_negated {
+            SequentialClockEdge::Falling
+        } else {
+            SequentialClockEdge::Rising
+        };
+        match inferred_edge {
+            None => inferred_edge = Some(edge),
+            Some(existing) if existing != edge => {
+                return Err(
+                    "mixed positive-edge and negative-edge FF cells are not supported".to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let inferred_port = inferred_clock_bit
+        .map(|clock_bit| top_input_clock_port(normalized, nets, interner, clock_bit))
+        .transpose()?;
+    if let Some(clock_port_name_hint) = clock_port_name_hint {
+        let hinted_port = normalized
+            .ports
+            .iter()
+            .find(|port| {
+                port.direction == PortDirection::Input
+                    && interner.resolve(port.name) == Some(clock_port_name_hint)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "clock-port hint '{}' is not a top-level input port",
+                    clock_port_name_hint
+                )
+            })?;
+        if hinted_port.bits.len() != 1 {
+            return Err(format!(
+                "clock-port hint '{}' has width {}; expected one bit",
+                clock_port_name_hint,
+                hinted_port.bits.len()
+            ));
+        }
+        if let Some((inferred_name, inferred_bit)) = inferred_port.as_ref() {
+            if inferred_name != clock_port_name_hint || *inferred_bit != hinted_port.bits[0] {
+                return Err(format!(
+                    "clock-port hint '{}' disagrees with inferred clock port '{}'",
+                    clock_port_name_hint, inferred_name
+                ));
+            }
+        }
+        return Ok(Some(SelectedSequentialClock {
+            bit: hinted_port.bits[0],
+            port_name: clock_port_name_hint.to_string(),
+            active_edge: inferred_edge,
+        }));
+    }
+    Ok(
+        inferred_port.map(|(port_name, bit)| SelectedSequentialClock {
+            bit,
+            port_name,
+            active_edge: inferred_edge,
+        }),
+    )
+}
+
+fn top_input_clock_port(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    clock_bit: BitIndex,
+) -> Result<(String, BitIndex), String> {
+    let port = normalized
+        .ports
+        .iter()
+        .find(|port| port.direction == PortDirection::Input && port.bits.contains(&clock_bit))
+        .ok_or_else(|| {
+            format!(
+                "derived clock '{}' is not a top-level input port",
+                normalized.render_bit(clock_bit, nets, interner)
+            )
+        })?;
+    let port_name = interner
+        .resolve(port.name)
+        .ok_or_else(|| "could not resolve clock port name".to_string())?;
+    if port.bits.len() != 1 {
+        return Err(format!(
+            "clock port '{}' has width {}; expected one bit",
+            port_name,
+            port.bits.len()
+        ));
+    }
+    Ok((port_name.to_string(), clock_bit))
+}
+
+fn resolve_simple_clock_source(
+    source: BitSource,
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<BitIndex, String> {
+    let mut current = source;
+    let mut seen = HashSet::new();
+    loop {
+        let bit_idx = match current {
+            BitSource::Bit(bit_idx) => bit_idx,
+            BitSource::Literal(_) => {
+                return Err("clock pin is driven by a literal".to_string());
+            }
+            BitSource::Unknown => {
+                return Err("clock pin is driven by an unknown literal".to_string());
+            }
+        };
+        if !seen.insert(bit_idx) {
+            return Err(format!(
+                "clock wiring contains a cycle at '{}'",
+                normalized.render_bit(bit_idx, nets, interner)
+            ));
+        }
+        let mut rhs = None;
+        for assign in &normalized.assigns {
+            for (lhs_bit, rhs_expr) in assign.lhs_bits.iter().copied().zip(&assign.rhs_bits) {
+                if lhs_bit != bit_idx {
+                    continue;
+                }
+                if rhs.replace(rhs_expr).is_some() {
+                    return Err(format!(
+                        "clock bit '{}' has multiple preserved wiring assigns",
+                        normalized.render_bit(bit_idx, nets, interner)
+                    ));
+                }
+            }
+        }
+        let Some(rhs) = rhs else {
+            return Ok(bit_idx);
+        };
+        match rhs {
+            BitExpr::Source(next) => current = *next,
+            BitExpr::Not(_) | BitExpr::And(_, _) | BitExpr::Or(_, _) | BitExpr::Xor(_, _) => {
+                return Err(format!(
+                    "derived clock '{}' contains combinational logic",
+                    normalized.render_bit(bit_idx, nets, interner)
+                ));
+            }
+        }
+    }
+}
+
+fn collect_sequential_module_input_bits(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    selected_clock: Option<&SelectedSequentialClock>,
+    gb: &mut GateBuilder,
+    resolved: &mut ResolvedBitValues,
+) -> Result<Vec<TransitionInputId>, String> {
+    let mut external_inputs = Vec::new();
+    for port in &normalized.ports {
+        if port.direction != PortDirection::Input {
+            continue;
+        }
+        if selected_clock.is_some_and(|clock| {
+            port.bits.len() == 1 && port.bits.first().copied() == Some(clock.bit)
+        }) {
+            continue;
+        }
+        let port_name = interner
+            .resolve(port.name)
+            .ok_or_else(|| "could not resolve module input port name".to_string())?;
+        let input_id = TransitionInputId::new(external_inputs.len());
+        let bv = gb.add_input(port_name.to_string(), port.bits.len());
+        for (bit_idx, bit) in port.bits.iter().copied().zip(bv.iter_lsb_to_msb()) {
+            resolved.write_bit(bit_idx, *bit, normalized, nets, interner)?;
+        }
+        external_inputs.push(input_id);
+    }
+    Ok(external_inputs)
+}
+
+fn build_sequential_module_port_aig_bindings(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    resolved: &ResolvedBitValues,
+    selected_clock: Option<&SelectedSequentialClock>,
+) -> Result<Vec<SequentialModulePortAigBinding>, String> {
+    normalized
+        .ports
+        .iter()
+        .map(|port| {
+            let name = interner
+                .resolve(port.name)
+                .ok_or_else(|| "could not resolve module port name".to_string())?
+                .to_string();
+            let bits_lsb_to_msb = port
+                .bits
+                .iter()
+                .map(|bit_idx| {
+                    let bit = normalized.bit(*bit_idx);
+                    let signal = if selected_clock
+                        .is_some_and(|clock| clock.bit == *bit_idx)
+                    {
+                        if port.direction != PortDirection::Input {
+                            return Err(format!(
+                                "selected clock '{}' is connected to a non-input module port",
+                                name
+                            ));
+                        }
+                        SequentialAigSignal::Clock
+                    } else {
+                        let operand = resolved.resolve_bit(*bit_idx).ok_or_else(|| {
+                            format!(
+                                "module port bit '{}' is unresolved after sequential AIG projection",
+                                normalized.render_bit(*bit_idx, nets, interner)
+                            )
+                        })?;
+                        SequentialAigSignal::Operand(operand)
+                    };
+                    Ok(LabeledSequentialAigBit {
+                        bit_number: bit.bit_number,
+                        signal,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(SequentialModulePortAigBinding {
+                name,
+                direction: port.direction.clone(),
+                bits_lsb_to_msb,
+            })
+        })
+        .collect()
+}
+
+fn build_sequential_state_operand_map(
+    spec: &GvEvalSequentialCellSpec,
+    q_operand: AigOperand,
+    gb: &mut GateBuilder,
+) -> HashMap<String, AigOperand> {
+    let mut state_operands = HashMap::new();
+    state_operands.insert(spec.state_var.clone(), q_operand);
+    if let Some(complementary_state_var) = &spec.complementary_state_var {
+        state_operands.insert(complementary_state_var.clone(), gb.add_not(q_operand));
+    }
+    state_operands
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_sequential_instance_outputs(
+    inst: &NormalizedInstance,
+    cell: &Cell,
+    type_name: &str,
+    instance_name: &str,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    nets: &[Net],
+    normalized: &NormalizedNetlistModule<'_>,
+    state_operands: &HashMap<String, AigOperand>,
+    gb: &mut GateBuilder,
+    resolved: &mut ResolvedBitValues,
+    liberty_lib: &Library,
+) -> Result<HashMap<String, AigOperand>, String> {
+    let pin_directions = build_pin_direction_map(cell, liberty_lib);
+    let mut output_operands = HashMap::new();
+    for connection in &inst.connections {
+        let pin_name = interner.resolve(connection.port).unwrap();
+        if *pin_directions.get(pin_name).unwrap_or(&0) != PinDirection::Output as i32 {
+            continue;
+        }
+        let pin = cell
+            .pins
+            .iter()
+            .find(|pin| liberty_lib.resolve_string(&pin.name) == pin_name)
+            .ok_or_else(|| {
+                format!(
+                    "cell '{}' instance '{}' connects unknown Liberty pin '{}'",
+                    type_name, instance_name, pin_name
+                )
+            })?;
+        let operand = sequential_output_operand(
+            cell,
+            pin,
+            type_name,
+            instance_name,
+            pin_name,
+            state_operands,
+            gb,
+            liberty_lib,
+        )?;
+        output_operands.insert(pin_name.to_string(), operand);
+        let output_bits = output_target_bits(connection)?;
+        resolved.write_bits(
+            output_bits.as_slice(),
+            &AigBitVector::from_bit(operand),
+            normalized,
+            nets,
+            interner,
+        )?;
+    }
+    Ok(output_operands)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sequential_output_operand(
+    cell: &Cell,
+    pin: &crate::liberty_model::Pin,
+    type_name: &str,
+    instance_name: &str,
+    pin_name: &str,
+    state_operands: &HashMap<String, AigOperand>,
+    gb: &mut GateBuilder,
+    liberty_lib: &Library,
+) -> Result<AigOperand, String> {
+    let function = liberty_lib.resolve_string(&pin.function);
+    if function.is_empty() {
+        if let Some(operand) = state_operands.get(pin_name) {
+            return Ok(*operand);
+        }
+        return Err(format!(
+            "cell '{}' instance '{}' output pin '{}' has no Liberty function",
+            type_name, instance_name, pin_name
+        ));
+    }
+    let term = crate::liberty::cell_formula::parse_formula(function).map_err(|error| {
+        format!(
+            r#"failed to parse Liberty function for cell '{}' instance '{}' output pin '{}' (function "{}"): {}"#,
+            type_name, instance_name, pin_name, function, error
+        )
+    })?;
+    let mut non_state_inputs = term
+        .inputs()
+        .into_iter()
+        .filter(|name| !state_operands.contains_key(name))
+        .collect::<Vec<_>>();
+    non_state_inputs.sort();
+    non_state_inputs.dedup();
+    if !non_state_inputs.is_empty() {
+        return Err(format!(
+            "sequential output function for cell '{}' instance '{}' pin '{}' references non-state inputs [{}]",
+            type_name,
+            instance_name,
+            pin_name,
+            non_state_inputs.join(", ")
+        ));
+    }
+    let context = crate::liberty::cell_formula::EmitContext {
+        cell_name: &cell.name,
+        original_formula: function,
+        instance_name: Some(instance_name),
+        port_map: None,
+    };
+    term.emit_formula_term(gb, state_operands, &context)
+        .map_err(|error| {
+            format!(
+                "Failed to emit sequential output function for cell '{}' instance '{}' pin '{}': {}",
+                type_name, instance_name, pin_name, error
+            )
+        })
+}
+
+/// Collects net bits used as cell inputs and driven by ports, assigns, or
+/// cells.
+fn collect_netlist_bit_usage<F>(
+    normalized: &NormalizedNetlistModule<'_>,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    mut should_skip_input_pin: F,
+) -> Result<(HashSet<BitIndex>, HashSet<BitIndex>), String>
+where
+    F: FnMut(usize, &str) -> bool,
+{
+    let mut used_as_input = HashSet::new();
+    let mut driven = HashSet::new();
+    for port in &normalized.ports {
+        if port.direction == PortDirection::Input {
+            driven.extend(port.bits.iter().copied());
+        }
+    }
+    for assign in &normalized.assigns {
+        driven.extend(assign.lhs_bits.iter().copied());
+        for rhs in &assign.rhs_bits {
+            collect_expr_source_bits(rhs, &mut used_as_input);
+        }
+    }
+    for (instance_index, inst) in normalized.instances.iter().enumerate() {
+        let type_name = interner.resolve(inst.type_name).unwrap();
+        let cell = liberty_lib
+            .cells
+            .iter()
+            .find(|cell| cell.name == type_name)
+            .ok_or_else(|| format!("Cell '{}' not found in Liberty", type_name))?;
+        let pin_directions = build_pin_direction_map(cell, liberty_lib);
+        for connection in &inst.connections {
+            let port_name = interner.resolve(connection.port).unwrap();
+            let pin_dir = *pin_directions.get(port_name).unwrap_or(&0);
+            if pin_dir == PinDirection::Output as i32 {
+                driven.extend(output_target_bits(connection)?);
+            } else if pin_dir == PinDirection::Input as i32
+                && !should_skip_input_pin(instance_index, port_name)
+            {
+                used_as_input.extend(connection.bits.iter().filter_map(|source| match source {
+                    BitSource::Bit(bit_idx) => Some(*bit_idx),
+                    BitSource::Literal(_) | BitSource::Unknown => None,
+                }));
+            }
+        }
+    }
+    Ok((used_as_input, driven))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn project_gatefn_from_netlist_and_liberty_internal(
     module: &NetlistModule,
@@ -669,43 +1754,8 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     } else {
         Vec::new()
     };
-    let mut used_as_input = HashSet::new();
-    let mut driven = HashSet::new();
-    for port in &normalized.ports {
-        if port.direction == PortDirection::Input {
-            driven.extend(port.bits.iter().copied());
-        }
-    }
-    for assign in &normalized.assigns {
-        driven.extend(assign.lhs_bits.iter().copied());
-        for rhs in &assign.rhs_bits {
-            collect_expr_source_bits(rhs, &mut used_as_input);
-        }
-    }
-    for inst in &normalized.instances {
-        let type_name = interner.resolve(inst.type_name).unwrap();
-        let cell = liberty_lib
-            .cells
-            .iter()
-            .find(|c| c.name == type_name)
-            .ok_or_else(|| format!("Cell '{}' not found in liberty data", type_name))?;
-        let mut pin_directions = std::collections::HashMap::new();
-        for pin in &cell.pins {
-            pin_directions.insert(liberty_lib.resolve_string(&pin.name), pin.direction);
-        }
-        for connection in &inst.connections {
-            let port_name = interner.resolve(connection.port).unwrap();
-            let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
-            if pin_dir == 1 {
-                driven.extend(output_target_bits(connection)?);
-            } else if pin_dir == 2 {
-                used_as_input.extend(connection.bits.iter().filter_map(|source| match source {
-                    BitSource::Bit(bit_idx) => Some(*bit_idx),
-                    BitSource::Literal(_) | BitSource::Unknown => None,
-                }));
-            }
-        }
-    }
+    let (used_as_input, driven) =
+        collect_netlist_bit_usage(&normalized, interner, liberty_lib, |_, _| false)?;
     check_undriven_bits(&used_as_input, &driven, &normalized, nets, interner)?;
     let mut unprocessed: Vec<_> = normalized.instances.iter().collect();
     let mut processed_any = true;
@@ -1184,6 +2234,64 @@ fn build_instance_aig_binding(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_sequential_instance_aig_binding(
+    inst: &NormalizedInstance,
+    cell: &Cell,
+    liberty_lib: &Library,
+    type_name: &str,
+    instance_name: &str,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    nets: &[Net],
+    normalized: &NormalizedNetlistModule<'_>,
+    input_operands: &HashMap<String, AigOperand>,
+    output_operands: &HashMap<String, AigOperand>,
+    clock_pin: Option<&str>,
+    state_register_index: Option<usize>,
+) -> Result<SequentialInstanceAigBinding, String> {
+    let mut pins = Vec::new();
+    for pin in &cell.pins {
+        let pin_name = liberty_lib.resolve_string(&pin.name);
+        let Some(connection) = inst
+            .connections
+            .iter()
+            .find(|connection| interner.resolve(connection.port) == Some(pin_name))
+        else {
+            continue;
+        };
+        let direction = checked_pin_direction(type_name, pin_name, pin.direction)?;
+        let signal = if clock_pin == Some(pin_name) {
+            SequentialAigSignal::Clock
+        } else {
+            let operand = match direction {
+                PinDirection::Input => input_operands.get(pin_name),
+                PinDirection::Output => output_operands.get(pin_name),
+                PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+            }
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "internal error: no sequential AIG signal was produced for cell '{}' instance '{}' pin '{}'",
+                    type_name, instance_name, pin_name
+                )
+            })?;
+            SequentialAigSignal::Operand(operand)
+        };
+        pins.push(SequentialInstancePinAigBinding {
+            pin_name: pin_name.to_string(),
+            direction,
+            signal,
+            connection: build_pin_connection(connection, normalized, nets, interner)?,
+        });
+    }
+    Ok(SequentialInstanceAigBinding {
+        instance_name: instance_name.to_string(),
+        cell_type: type_name.to_string(),
+        pins,
+        state_register_index,
+    })
+}
+
 fn build_pin_connection(
     connection: &NormalizedConnection,
     normalized: &NormalizedNetlistModule<'_>,
@@ -1248,6 +2356,33 @@ fn build_instance_input_map(
     Vec<String>,
     HashMap<String, String>,
 ) {
+    build_instance_input_map_skipping_pin(
+        inst,
+        pin_directions,
+        interner,
+        nets,
+        resolved,
+        gb,
+        normalized,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_instance_input_map_skipping_pin(
+    inst: &NormalizedInstance,
+    pin_directions: &HashMap<&str, i32>,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    nets: &[Net],
+    resolved: &ResolvedBitValues,
+    gb: &mut GateBuilder,
+    normalized: &NormalizedNetlistModule<'_>,
+    skipped_input_pin: Option<&str>,
+) -> (
+    HashMap<String, AigOperand>,
+    Vec<String>,
+    HashMap<String, String>,
+) {
     let mut input_map = HashMap::new();
     let mut missing_inputs = Vec::new();
     let mut port_map = HashMap::new();
@@ -1259,6 +2394,9 @@ fn build_instance_input_map(
             normalized.render_sources(connection.bits.as_slice(), nets, interner),
         );
         if pin_dir == 2 {
+            if skipped_input_pin == Some(port_name) {
+                continue;
+            }
             if connection.bits.is_empty() {
                 missing_inputs.push(format!("{} (<unconnected>)", port_name));
                 continue;

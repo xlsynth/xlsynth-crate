@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::{IrBits, IrValue};
+use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, parse_liberty_files_with_payload_options,
 };
 use xlsynth_g8r::liberty_model::{Library, PinDirection};
 use xlsynth_g8r::netlist::gv_eval::{
-    GvEvalOptions, GvToggleAggregate, PinConnection, TogglePinConnection, load_labeled_netlist_aig,
-    load_labeled_netlist_aig_with_liberty,
+    GvEvalOptions, GvToggleAggregate, PinConnection, SequentialAigSignal, SequentialClockEdge,
+    TogglePinConnection, load_labeled_netlist_aig, load_labeled_netlist_aig_with_liberty,
+    load_labeled_sequential_netlist_aig, load_sequential_netlist_gate_fn,
 };
 use xlsynth_g8r::netlist::parse::PortDirection;
 use xlsynth_g8r::netlist::power::{GV_POWER_SLEW_BUCKET_COUNT, GvDynamicPowerOptions};
@@ -543,4 +545,408 @@ endmodule
     let error = format!("{error:#}");
     assert!(error.contains("sequential cell 'DFF' instance 'state'"));
     assert!(error.contains("kind: ff"));
+}
+
+#[test]
+fn sequential_netlist_gate_fn_simulates_ff_state() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load labeled sequential evaluation model");
+    let design = &model.sequential_gate_fn;
+
+    assert_eq!(
+        design.clock.as_ref().map(|clock| clock.name.as_str()),
+        Some("clk")
+    );
+    assert_eq!(
+        model.clock.as_ref().and_then(|clock| clock.active_edge),
+        Some(SequentialClockEdge::Rising)
+    );
+    assert_eq!(
+        model.module_ports[1].bits_lsb_to_msb[0].signal,
+        SequentialAigSignal::Clock
+    );
+    assert_eq!(model.instances[0].state_register_index, Some(0));
+    assert_eq!(
+        model.instances[0].pins[1].signal,
+        SequentialAigSignal::Clock
+    );
+    assert_eq!(
+        model.instances[0].pins[1].connection,
+        PinConnection::Net {
+            net_name: "clk".to_string(),
+            bit_number: 0,
+        }
+    );
+    assert_eq!(design.registers.len(), 1);
+    assert_eq!(design.inputs.len(), 1);
+    assert_eq!(design.transition.inputs[design.inputs[0].index()].name, "d");
+    assert_eq!(design.outputs.len(), 1);
+    assert_eq!(
+        design.transition.outputs[design.outputs[0].index()].name,
+        "q"
+    );
+
+    let trace = sequential::simulate(
+        design,
+        &[
+            vec![IrBits::make_ubits(1, 1).unwrap()],
+            vec![IrBits::make_ubits(1, 0).unwrap()],
+            vec![IrBits::make_ubits(1, 0).unwrap()],
+        ],
+        SequentialState::all_zeros(design),
+    )
+    .expect("simulate DFF");
+    assert_eq!(
+        trace.external_outputs(),
+        &[
+            vec![IrBits::make_ubits(1, 0).unwrap()],
+            vec![IrBits::make_ubits(1, 1).unwrap()],
+            vec![IrBits::make_ubits(1, 0).unwrap()],
+        ]
+    );
+}
+
+#[test]
+fn sequential_netlist_gate_fn_supports_feedback_and_qn() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFFE"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 3 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 4 direction: OUTPUT function_string_id: 6 }
+  pins: { name_string_id: 5 direction: OUTPUT function_string_id: 7 }
+  sequential: {
+    state_var: "IQ"
+    complementary_state_var: "IQN"
+    next_state: "(!EN * IQ) + (EN * D)"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "EN", "CLK", "Q", "QN", "IQ", "IQN"]
+"#;
+    let netlist = r#"
+module top (d, en, clk, q, qn);
+  input d;
+  input en;
+  input clk;
+  output q;
+  output qn;
+  DFFE state (.D(d), .EN(en), .CLK(clk), .Q(q), .QN(qn));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let design =
+        load_sequential_netlist_gate_fn(&netlist_path, &liberty_path, &GvEvalOptions::default())
+            .expect("load feedback sequential evaluation model");
+
+    let trace = sequential::simulate(
+        &design,
+        &[
+            vec![
+                IrBits::make_ubits(1, 1).unwrap(),
+                IrBits::make_ubits(1, 1).unwrap(),
+            ],
+            vec![
+                IrBits::make_ubits(1, 0).unwrap(),
+                IrBits::make_ubits(1, 0).unwrap(),
+            ],
+            vec![
+                IrBits::make_ubits(1, 0).unwrap(),
+                IrBits::make_ubits(1, 1).unwrap(),
+            ],
+            vec![
+                IrBits::make_ubits(1, 0).unwrap(),
+                IrBits::make_ubits(1, 0).unwrap(),
+            ],
+        ],
+        SequentialState::all_zeros(&design),
+    )
+    .expect("simulate feedback DFF");
+    assert_eq!(
+        trace.external_outputs(),
+        &[
+            vec![
+                IrBits::make_ubits(1, 0).unwrap(),
+                IrBits::make_ubits(1, 1).unwrap(),
+            ],
+            vec![
+                IrBits::make_ubits(1, 1).unwrap(),
+                IrBits::make_ubits(1, 0).unwrap(),
+            ],
+            vec![
+                IrBits::make_ubits(1, 1).unwrap(),
+                IrBits::make_ubits(1, 0).unwrap(),
+            ],
+            vec![
+                IrBits::make_ubits(1, 0).unwrap(),
+                IrBits::make_ubits(1, 1).unwrap(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn labeled_sequential_netlist_aig_preserves_negative_edge_clock() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFFN"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "!CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFFN state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load negative-edge sequential model");
+    assert_eq!(
+        model.clock.as_ref().and_then(|clock| clock.active_edge),
+        Some(SequentialClockEdge::Falling)
+    );
+}
+
+#[test]
+fn sequential_netlist_gate_fn_accepts_a_clock_wiring_alias() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  wire clk_alias;
+  assign clk_alias = clk;
+  DFF state (.D(d), .CLK(clk_alias), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let design =
+        load_sequential_netlist_gate_fn(&netlist_path, &liberty_path, &GvEvalOptions::default())
+            .expect("load sequential model with clock alias");
+    assert_eq!(
+        design.clock.as_ref().map(|clock| clock.name.as_str()),
+        Some("clk")
+    );
+}
+
+#[test]
+fn sequential_netlist_gate_fn_rejects_mixed_clock_edges() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFFP"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+cells: {
+  name: "DFFN"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "!CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q0, q1);
+  input d;
+  input clk;
+  output q0;
+  output q1;
+  DFFP state0 (.D(d), .CLK(clk), .Q(q0));
+  DFFN state1 (.D(d), .CLK(clk), .Q(q1));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let error =
+        load_sequential_netlist_gate_fn(&netlist_path, &liberty_path, &GvEvalOptions::default())
+            .expect_err("mixed clock edges should be rejected");
+    assert!(format!("{error:#}").contains("mixed positive-edge and negative-edge"));
+}
+
+#[test]
+fn sequential_netlist_gate_fn_rejects_a_derived_clock() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "INV"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 3 }
+}
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 4 direction: INPUT }
+  pins: { name_string_id: 5 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 6 direction: OUTPUT function_string_id: 7 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["A", "Y", "!A", "D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  wire derived_clk;
+  INV clock_inv (.A(clk), .Y(derived_clk));
+  DFF state (.D(d), .CLK(derived_clk), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let error =
+        load_sequential_netlist_gate_fn(&netlist_path, &liberty_path, &GvEvalOptions::default())
+            .expect_err("derived clock should be rejected");
+    assert!(format!("{error:#}").contains("derived clock"));
+}
+
+#[test]
+fn sequential_netlist_gate_fn_rejects_async_reset_cells() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFFCLR"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 3 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 4 direction: OUTPUT function_string_id: 5 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    clear_expr: "RST"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "RST", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, rst, clk, q);
+  input d;
+  input rst;
+  input clk;
+  output q;
+  DFFCLR state (.D(d), .RST(rst), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let error =
+        load_sequential_netlist_gate_fn(&netlist_path, &liberty_path, &GvEvalOptions::default())
+            .expect_err("asynchronous reset should be rejected");
+    assert!(format!("{error:#}").contains("does not support asynchronous reset cell 'DFFCLR'"));
+}
+
+#[test]
+fn sequential_netlist_gate_fn_accepts_an_outputless_module() {
+    let liberty = "format_magic: 5496997758177923663\n";
+    let netlist = r#"
+module top (clk, a);
+  input clk;
+  input a;
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let design = load_sequential_netlist_gate_fn(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions {
+            clock_port_name: Some("clk".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect("load outputless sequential evaluation model");
+    assert_eq!(
+        design.clock.as_ref().map(|clock| clock.name.as_str()),
+        Some("clk")
+    );
+    assert_eq!(design.inputs.len(), 1);
+    assert_eq!(design.transition.inputs[design.inputs[0].index()].name, "a");
+    let trace = sequential::simulate(
+        &design,
+        &[vec![IrBits::make_ubits(1, 1).unwrap()]],
+        SequentialState::all_zeros(&design),
+    )
+    .expect("simulate outputless module");
+    assert_eq!(trace.external_outputs(), &[Vec::<IrBits>::new()]);
 }

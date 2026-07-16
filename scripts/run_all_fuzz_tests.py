@@ -37,6 +37,7 @@ DEFAULT_THREADS: int = 4
 DEFAULT_SKIPPED_FUZZ_TARGETS: set[str] = {
     # Yosys is not always available, including in GitHub CI.
     "fuzz_random_block_gv_eval_combo_equiv",
+    "fuzz_random_block_gv_eval_sequential_equiv",
 }
 DONE_RUNS_RE = re.compile(r"^Done ([0-9]+) runs in ([0-9]+) second\(s\)$")
 

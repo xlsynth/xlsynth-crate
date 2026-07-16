@@ -4,44 +4,31 @@
 
 //! Differentially checks combinational block IR against Yosys-mapped gv-eval.
 
-use std::sync::OnceLock;
-
 use libfuzzer_sys::fuzz_target;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use xlsynth::{IrBits, IrValue};
+use xlsynth::IrValue;
 use xlsynth_g8r::aig_serdes::emit_netlist::{
     NetlistPortStyle, emit_netlist_with_version_and_port_style,
 };
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
-use xlsynth_g8r::liberty::parser::{
-    LibertyPayloadOptions, parse_liberty_files_with_payload_options,
-};
-use xlsynth_g8r::liberty_model::Library;
 use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, load_labeled_netlist_aig_with_liberty,
 };
-use xlsynth_g8r::netlist::yosys::YosysEnvironment;
 use xlsynth_g8r::verilog_version::VerilogVersion;
-use xlsynth_pir::ir::{BlockMetadata, Fn, NodePayload, NodeRef, Type};
-use xlsynth_pir::ir_eval::{self, FnEvalResult};
+use xlsynth_g8r_fuzz::external_yosys::external_yosys_context;
+use xlsynth_g8r_fuzz::random_block::{
+    block_output_types, evaluate_block_outputs, flatten_value,
+};
+use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions, RandomOperation,
     StopPolicy, generate_block_package,
 };
-use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 
 const INPUT_SAMPLE_COUNT: usize = 16;
-
-struct ExternalYosysContext {
-    liberty: Library,
-    yosys: YosysEnvironment,
-}
-
-static EXTERNAL_YOSYS_CONTEXT: OnceLock<Result<ExternalYosysContext, String>> = OnceLock::new();
-static SKIP_REPORTED: OnceLock<()> = OnceLock::new();
 
 fn fuzz_block_options() -> RandomBlockOptions {
     let operations = OperationSet::new(
@@ -69,100 +56,6 @@ fn fuzz_block_options() -> RandomBlockOptions {
         },
         ..RandomBlockOptions::default()
     }
-}
-
-fn external_yosys_context() -> Option<&'static ExternalYosysContext> {
-    match EXTERNAL_YOSYS_CONTEXT.get_or_init(build_external_yosys_context) {
-        Ok(context) => Some(context),
-        Err(error) => {
-            if SKIP_REPORTED.set(()).is_ok() {
-                eprintln!("skipping external Yosys/Liberty fuzz target: {error}");
-            }
-            None
-        }
-    }
-}
-
-fn build_external_yosys_context() -> Result<ExternalYosysContext, String> {
-    let yosys = YosysEnvironment::from_env()?;
-    let liberty = parse_liberty_files_with_payload_options(
-        yosys.liberty_files().paths(),
-        LibertyPayloadOptions {
-            include_timing: false,
-            include_power: false,
-        },
-    )
-    .map_err(|e| format!("parse Liberty inputs: {e}"))?;
-    Ok(ExternalYosysContext { liberty, yosys })
-}
-
-fn block_output_refs(block: &Fn, metadata: &BlockMetadata) -> Vec<NodeRef> {
-    let ret_ref = block
-        .ret_node_ref
-        .expect("generated block should have a return node");
-    match metadata.output_names.len() {
-        0 => Vec::new(),
-        1 => vec![ret_ref],
-        _ => {
-            let NodePayload::Tuple(outputs) = &block.get_node(ret_ref).payload else {
-                panic!("generated multi-output block should return a tuple");
-            };
-            outputs.clone()
-        }
-    }
-}
-
-fn block_output_types<'a>(block: &'a Fn, metadata: &BlockMetadata) -> Vec<&'a Type> {
-    match metadata.output_names.len() {
-        0 => Vec::new(),
-        1 => vec![&block.ret_ty],
-        _ => {
-            let Type::Tuple(types) = &block.ret_ty else {
-                panic!("generated multi-output block should return a tuple type");
-            };
-            types.iter().map(|ty| &**ty).collect()
-        }
-    }
-}
-
-fn eval_ref(block: &Fn, node_ref: NodeRef, inputs: &[IrValue], ir_text: &str) -> IrValue {
-    let mut eval_fn = block.clone();
-    eval_fn.ret_ty = eval_fn.get_node(node_ref).ty.clone();
-    eval_fn.ret_node_ref = Some(node_ref);
-    match ir_eval::eval_fn(&eval_fn, inputs) {
-        FnEvalResult::Success(success) => success.value,
-        failure @ FnEvalResult::Failure(_) => {
-            panic!("block PIR evaluation failed:\nIR:\n{ir_text}\nresult={failure:?}")
-        }
-    }
-}
-
-fn evaluate_block_outputs(
-    block: &Fn,
-    metadata: &BlockMetadata,
-    inputs: &[IrValue],
-    ir_text: &str,
-) -> Vec<IrValue> {
-    let output_refs = block_output_refs(block, metadata);
-    if output_refs.is_empty() {
-        // Evaluate the explicit empty-tuple return even when the generated
-        // block has no visible outputs, so the PIR evaluator still participates.
-        let ret_ref = block
-            .ret_node_ref
-            .expect("generated block should have a return node");
-        let _ = eval_ref(block, ret_ref, inputs, ir_text);
-    }
-    output_refs
-        .into_iter()
-        .map(|output_ref| eval_ref(block, output_ref, inputs, ir_text))
-        .collect()
-}
-
-fn flatten_value(value: &IrValue, ty: &Type) -> IrBits {
-    let mut bits = Vec::with_capacity(ty.bit_count());
-    flatten_ir_value_to_lsb0_bits_for_type(value, ty, &mut bits)
-        .expect("generated value should match its PIR type");
-    IrBits::from_lsb_is_0(&bits)
 }
 
 fn generate_inputs(block: &Fn, rng: &mut StdRng) -> Vec<IrValue> {
@@ -229,6 +122,7 @@ fuzz_target!(|data: &[u8]| {
         &context.liberty,
         &GvEvalOptions {
             module_name: Some(design.name.clone()),
+            ..GvEvalOptions::default()
         },
     )
     .unwrap_or_else(|error| {

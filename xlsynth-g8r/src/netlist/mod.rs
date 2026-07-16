@@ -17,6 +17,7 @@ pub mod normalized;
 pub mod parse;
 pub mod power;
 pub mod report;
+pub(crate) mod sequential_liberty;
 pub mod sta;
 pub mod stages;
 pub mod stats;

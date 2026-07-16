@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! External Yosys helpers for combinational Liberty technology mapping.
+//! External Yosys helpers for Liberty technology mapping.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,6 +53,23 @@ impl YosysEnvironment {
         top_module: &str,
     ) -> Result<String, String> {
         synthesize_verilog_to_gv_with_yosys(
+            &self.yosys_path,
+            verilog,
+            top_module,
+            &self.liberty_files,
+        )
+    }
+
+    /// Maps one sequential Verilog module with this external Yosys setup.
+    ///
+    /// Internal Yosys FFs are mapped through dfflibmap before ABC maps the
+    /// remaining combinational logic.
+    pub fn synthesize_sequential_verilog_to_gv(
+        &self,
+        verilog: &str,
+        top_module: &str,
+    ) -> Result<String, String> {
+        synthesize_sequential_verilog_to_gv_with_yosys(
             &self.yosys_path,
             verilog,
             top_module,
@@ -155,6 +172,41 @@ fn synthesize_verilog_to_gv_with_yosys(
     top_module: &str,
     liberty_files: &YosysLibertyFileSet,
 ) -> Result<String, String> {
+    let yosys_program = render_combo_synthesis_program(top_module, liberty_files.paths());
+    run_yosys_synthesis_program(
+        yosys_path,
+        verilog,
+        top_module,
+        &yosys_program,
+        "combinational",
+    )
+}
+
+/// Maps one sequential Verilog module through Yosys, dfflibmap, and its
+/// default ABC executable.
+fn synthesize_sequential_verilog_to_gv_with_yosys(
+    yosys_path: &Path,
+    verilog: &str,
+    top_module: &str,
+    liberty_files: &YosysLibertyFileSet,
+) -> Result<String, String> {
+    let yosys_program = render_sequential_synthesis_program(top_module, liberty_files.paths());
+    run_yosys_synthesis_program(
+        yosys_path,
+        verilog,
+        top_module,
+        &yosys_program,
+        "sequential",
+    )
+}
+
+fn run_yosys_synthesis_program(
+    yosys_path: &Path,
+    verilog: &str,
+    top_module: &str,
+    yosys_program: &str,
+    mapping_kind: &str,
+) -> Result<String, String> {
     if !is_simple_yosys_identifier(top_module) {
         return Err(format!(
             "Yosys top module must be a simple identifier: '{top_module}'"
@@ -167,19 +219,18 @@ fn synthesize_verilog_to_gv_with_yosys(
     let output_path = temp_dir.path().join("mapped.gv");
     std::fs::write(&input_path, verilog)
         .map_err(|e| format!("write temporary Yosys input Verilog: {e}"))?;
-    let yosys_program = render_combo_synthesis_program(top_module, liberty_files.paths());
-    let invocation_context = format_yosys_invocation_context(yosys_path, &yosys_program);
+    let invocation_context = format_yosys_invocation_context(yosys_path, yosys_program);
 
     let output = Command::new(yosys_path)
         .current_dir(temp_dir.path())
         .arg("-Q")
         .arg("-p")
-        .arg(&yosys_program)
+        .arg(yosys_program)
         .output()
         .map_err(|e| format!("run Yosys: {e}\n{invocation_context}"))?;
     if !output.status.success() {
         return Err(format!(
-            "Yosys combinational technology mapping failed\n{invocation_context}\nstdout:\n{}\nstderr:\n{}",
+            "Yosys {mapping_kind} technology mapping failed\n{invocation_context}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
@@ -222,6 +273,34 @@ fn render_combo_synthesis_program(top_module: &str, liberty_paths: &[PathBuf]) -
          techmap\n\
          opt\n\
          abc {abc_liberty_arguments}\n\
+         clean -purge\n\
+         write_verilog -noattr mapped.gv\n"
+    )
+}
+
+fn render_sequential_synthesis_program(top_module: &str, liberty_paths: &[PathBuf]) -> String {
+    let read_liberty_commands = liberty_paths
+        .iter()
+        .map(|path| format!("read_liberty -lib {}", quote_yosys_path(path)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let liberty_arguments = liberty_paths
+        .iter()
+        .map(|path| format!("-liberty {}", quote_yosys_path(path)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{read_liberty_commands}\n\
+         read_verilog -sv dut.v\n\
+         hierarchy -check -top {top_module}\n\
+         proc\n\
+         flatten\n\
+         opt\n\
+         techmap\n\
+         opt\n\
+         dfflibmap {liberty_arguments}\n\
+         opt\n\
+         abc {liberty_arguments}\n\
          clean -purge\n\
          write_verilog -noattr mapped.gv\n"
     )
@@ -294,6 +373,29 @@ mod tests {
              flatten\n\
              opt\n\
              techmap\n\
+             opt\n\
+             abc -liberty \"first.lib\" -liberty \"second.lib\"\n\
+             clean -purge\n\
+             write_verilog -noattr mapped.gv\n"
+        );
+    }
+
+    #[test]
+    fn sequential_synthesis_program_maps_ffs_before_abc() {
+        let liberty_paths = vec![PathBuf::from("first.lib"), PathBuf::from("second.lib")];
+        let program = render_sequential_synthesis_program("top", &liberty_paths);
+        assert_eq!(
+            program,
+            "read_liberty -lib \"first.lib\"\n\
+             read_liberty -lib \"second.lib\"\n\
+             read_verilog -sv dut.v\n\
+             hierarchy -check -top top\n\
+             proc\n\
+             flatten\n\
+             opt\n\
+             techmap\n\
+             opt\n\
+             dfflibmap -liberty \"first.lib\" -liberty \"second.lib\"\n\
              opt\n\
              abc -liberty \"first.lib\" -liberty \"second.lib\"\n\
              clean -purge\n\
