@@ -79,9 +79,11 @@ jobs:
           protoc --version
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
           components: clippy
 
       - name: Enable Rust build cache
@@ -170,9 +172,11 @@ jobs:
           sudo apt-get install -y libc++-18-dev libc++abi-18-dev
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
 
       - name: Install Icarus Verilog reference simulator
         run: |
@@ -279,9 +283,11 @@ jobs:
           iverilog -V
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
           components: clippy
 
       - name: Enable sccache
@@ -379,9 +385,11 @@ jobs:
           pip3 install -r requirements.txt
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
           components: clippy
 
       - name: Set up Python + pre-commit
@@ -485,9 +493,11 @@ jobs:
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
           components: clippy
 
       - name: Enable sccache
@@ -620,9 +630,11 @@ jobs:
           pip install pre-commit
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
           components: clippy
 
       - name: Enable sccache
@@ -895,9 +907,11 @@ jobs:
           TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
       - name: Set up Rust nightly
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
           components: clippy
 
       - name: Enable sccache
@@ -1027,9 +1041,11 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
           components: clippy
 
       - name: Enable sccache
@@ -1102,9 +1118,11 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -1214,9 +1232,11 @@ jobs:
           protoc --version
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: nightly
+          profile: minimal
+          override: true
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
