@@ -132,7 +132,10 @@ fn handle_sequential_gv_eval(matches: &ArgMatches) -> Result<(), String> {
     .map_err(|error| format!("failed to build sequential evaluation model: {error:#}"))?;
     let design = &model.sequential_gate_fn;
     let inputs = read_external_inputs(matches, design)?;
-    if matches.get_one::<String>("toggle_output_json").is_some() && inputs.len() < 2 {
+    if matches.get_one::<String>("toggle_output_json").is_some()
+        && design.clock.is_none()
+        && inputs.len() < 2
+    {
         return Err(format!(
             "--toggle-output-json requires at least two --input-irvals cycles; got {}",
             inputs.len()

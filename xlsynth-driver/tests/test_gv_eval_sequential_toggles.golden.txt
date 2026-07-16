@@ -1,14 +1,17 @@
 {
   "module_name": "top",
   "cycle_count": 3,
-  "logic_transition_count": 2,
+  "input_settle_transition_count": 2,
+  "active_edge_transition_count": 3,
+  "logic_transition_count": 5,
+  "clock_transition_count": 6,
   "logic": {
     "gate_input_toggles": 0,
     "gate_output_toggles": 0
   },
   "interface": {
     "external_input_toggles": 2,
-    "external_output_toggles": 2
+    "external_output_toggles": 3
   },
   "registers": {
     "aggregate_input_toggles": 2,
@@ -27,25 +30,26 @@
       "node_id": 1,
       "node_kind": "input",
       "toggle_count": 2,
-      "toggle_rate": 1.0
+      "toggle_rate": 0.4
     },
     {
       "node_id": 2,
       "node_kind": "input",
-      "toggle_count": 2,
-      "toggle_rate": 1.0
+      "toggle_count": 3,
+      "toggle_rate": 0.6
     }
   ],
   "clock": {
     "port_name": "clk",
     "active_edge": "rising",
-    "active_edge_count": 3
+    "active_edge_count": 3,
+    "toggle_count": 6
   },
   "labeled_aggregate": {
-    "module_input_toggles": 2,
-    "module_output_toggles": 2,
-    "cell_input_pin_toggles": 2,
-    "cell_output_pin_toggles": 2
+    "module_input_toggles": 8,
+    "module_output_toggles": 3,
+    "cell_input_pin_toggles": 8,
+    "cell_output_pin_toggles": 3
   },
   "module_ports": [
     {
@@ -57,7 +61,7 @@
           "activity": {
             "kind": "sampled",
             "toggle_count": 2,
-            "toggle_rate": 1.0
+            "toggle_rate": 0.4
           }
         }
       ]
@@ -69,7 +73,8 @@
         {
           "bit_number": 0,
           "activity": {
-            "kind": "clock"
+            "kind": "clock",
+            "toggle_count": 6
           }
         }
       ]
@@ -82,8 +87,8 @@
           "bit_number": 0,
           "activity": {
             "kind": "sampled",
-            "toggle_count": 2,
-            "toggle_rate": 1.0
+            "toggle_count": 3,
+            "toggle_rate": 0.6
           }
         }
       ]
@@ -105,7 +110,7 @@
           "activity": {
             "kind": "sampled",
             "toggle_count": 2,
-            "toggle_rate": 1.0
+            "toggle_rate": 0.4
           }
         },
         {
@@ -117,7 +122,8 @@
             "bit_number": 0
           },
           "activity": {
-            "kind": "clock"
+            "kind": "clock",
+            "toggle_count": 6
           }
         },
         {
@@ -130,8 +136,8 @@
           },
           "activity": {
             "kind": "sampled",
-            "toggle_count": 2,
-            "toggle_rate": 1.0
+            "toggle_count": 3,
+            "toggle_rate": 0.6
           }
         }
       ]

@@ -14,7 +14,7 @@ use crate::aig_sim::gate_sim::{self, Collect};
 use crate::aig_sim::gate_simd;
 use crate::aig_sim::sequential::{
     self, SequentialState, SequentialToggleActivity, SequentialTrace,
-    count_all_transition_node_toggles, count_sequential_toggle_activity,
+    count_sequential_toggle_activity_with_all_node_counts,
 };
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::{
@@ -129,13 +129,13 @@ pub struct GvToggleActivity {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GvSequentialSignalToggleActivity {
-    /// Sample-to-sample transitions observed in the transition AIG.
+    /// Settled phase-to-phase transitions observed in the transition AIG.
     Sampled {
         toggle_count: usize,
         toggle_rate: f64,
     },
     /// A selected clock is metadata rather than a transition-AIG input.
-    Clock,
+    Clock { toggle_count: usize },
 }
 
 /// Transition activity for one sequential module-port bit.
@@ -177,6 +177,8 @@ pub struct GvSequentialClockActivity {
     pub active_edge: Option<SequentialClockEdge>,
     /// One active edge per simulated input record, not a full waveform count.
     pub active_edge_count: usize,
+    /// One inactive-to-active and one active-to-inactive transition per cycle.
+    pub toggle_count: usize,
 }
 
 /// Source-labeled toggle activity for one sequential gate-level trace.
@@ -189,7 +191,7 @@ pub struct GvSequentialToggleActivity {
     #[serde(flatten)]
     pub sequential: SequentialToggleActivity,
     pub clock: Option<GvSequentialClockActivity>,
-    /// Sampled labeled totals; selected clock entries are excluded.
+    /// Settled labeled totals, including synthetic selected-clock transitions.
     pub labeled_aggregate: GvToggleAggregate,
     pub module_ports: Vec<SequentialModulePortToggleActivity>,
     pub instances: Vec<SequentialInstanceToggleActivity>,
@@ -497,10 +499,13 @@ impl LabeledSequentialNetlistAig {
         &self,
         trace: &SequentialTrace,
     ) -> Result<GvSequentialToggleActivity, String> {
-        let sequential = count_sequential_toggle_activity(&self.sequential_gate_fn, trace)?;
-        let per_node_toggles = count_all_transition_node_toggles(&self.sequential_gate_fn, trace)?;
+        let counted =
+            count_sequential_toggle_activity_with_all_node_counts(&self.sequential_gate_fn, trace)?;
+        let sequential = counted.activity;
+        let per_node_toggles = counted.per_node_toggles;
         let transition_count = sequential.logic_transition_count;
         let cycle_count = sequential.cycle_count;
+        let clock_toggle_count = sequential.clock_transition_count;
 
         let module_ports = self
             .module_ports
@@ -517,6 +522,7 @@ impl LabeledSequentialNetlistAig {
                                 bit.signal,
                                 &per_node_toggles,
                                 transition_count,
+                                clock_toggle_count,
                             )?,
                         })
                     })
@@ -545,6 +551,7 @@ impl LabeledSequentialNetlistAig {
                                 pin.signal,
                                 &per_node_toggles,
                                 transition_count,
+                                clock_toggle_count,
                             )?,
                         })
                     })
@@ -579,6 +586,7 @@ impl LabeledSequentialNetlistAig {
             port_name: clock.port_name.clone(),
             active_edge: clock.active_edge,
             active_edge_count: cycle_count,
+            toggle_count: clock_toggle_count,
         });
 
         Ok(GvSequentialToggleActivity {
@@ -737,6 +745,7 @@ fn sequential_signal_toggle_activity(
     signal: SequentialAigSignal,
     per_node_toggles: &[usize],
     transition_count: usize,
+    clock_toggle_count: usize,
 ) -> Result<GvSequentialSignalToggleActivity, String> {
     match signal {
         SequentialAigSignal::Operand(operand) => {
@@ -747,14 +756,16 @@ fn sequential_signal_toggle_activity(
                 toggle_rate,
             })
         }
-        SequentialAigSignal::Clock => Ok(GvSequentialSignalToggleActivity::Clock),
+        SequentialAigSignal::Clock => Ok(GvSequentialSignalToggleActivity::Clock {
+            toggle_count: clock_toggle_count,
+        }),
     }
 }
 
-fn sampled_sequential_toggle_count(activity: &GvSequentialSignalToggleActivity) -> usize {
+fn sequential_signal_toggle_count(activity: &GvSequentialSignalToggleActivity) -> usize {
     match activity {
         GvSequentialSignalToggleActivity::Sampled { toggle_count, .. } => *toggle_count,
-        GvSequentialSignalToggleActivity::Clock => 0,
+        GvSequentialSignalToggleActivity::Clock { toggle_count } => *toggle_count,
     }
 }
 
@@ -766,7 +777,7 @@ fn sum_sequential_module_port_toggles(
         .iter()
         .filter(|port| port.direction == direction)
         .flat_map(|port| port.bits_lsb_to_msb.iter())
-        .map(|bit| sampled_sequential_toggle_count(&bit.activity))
+        .map(|bit| sequential_signal_toggle_count(&bit.activity))
         .sum()
 }
 
@@ -778,7 +789,7 @@ fn sum_sequential_instance_pin_toggles(
         .iter()
         .flat_map(|instance| instance.pins.iter())
         .filter(|pin| pin.direction == direction)
-        .map(|pin| sampled_sequential_toggle_count(&pin.activity))
+        .map(|pin| sequential_signal_toggle_count(&pin.activity))
         .sum()
 }
 

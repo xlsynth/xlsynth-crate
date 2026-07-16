@@ -6,10 +6,8 @@
 use serde::Serialize;
 use xlsynth::IrBits;
 
-use crate::aig::SequentialGateFn;
-use crate::aig_sim::count_toggles::{
-    NodeToggleStats, count_all_node_toggles_simd, count_toggle_activity,
-};
+use crate::aig::{AigBitVector, SequentialGateFn};
+use crate::aig_sim::count_toggles::{NodeToggleStats, count_toggle_activity_with_all_node_counts};
 use crate::aig_sim::gate_sim::{self, Collect};
 
 /// Register values in [`SequentialGateFn::registers`] order.
@@ -140,7 +138,7 @@ pub struct InterfaceToggleActivity {
 pub struct RegisterToggleActivity {
     pub name: String,
     pub width: usize,
-    /// D-pin changes between consecutive cycle evaluations.
+    /// Effective D changes across settled input and active-edge phases.
     pub input_toggles: usize,
     /// Actual Q changes across simulated clock edges.
     pub output_toggles: usize,
@@ -158,11 +156,28 @@ pub struct RegisterToggleActivities {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SequentialToggleActivity {
     pub cycle_count: usize,
+    /// Settled comparisons after changing external inputs while clock is
+    /// inactive. The first input record establishes the initial baseline.
+    pub input_settle_transition_count: usize,
+    /// Settled comparisons after each active clock edge commits register Q.
+    pub active_edge_transition_count: usize,
+    /// Total settled transition-AIG comparisons used for logic and node rates.
     pub logic_transition_count: usize,
+    /// Assumed inactive-to-active and active-to-inactive clock transitions.
+    pub clock_transition_count: usize,
     pub logic: LogicToggleActivity,
     pub interface: InterfaceToggleActivity,
     pub registers: RegisterToggleActivities,
     pub nodes: Vec<NodeToggleStats>,
+}
+
+/// Native activity plus transition-AIG counts for every node.
+///
+/// Labeled netlist reporting consumes the all-node counts so dead but
+/// explicitly connected standard-cell pins retain activity.
+pub(crate) struct SequentialToggleActivityWithAllNodeCounts {
+    pub activity: SequentialToggleActivity,
+    pub per_node_toggles: Vec<usize>,
 }
 
 /// Simulates one input record per cycle and commits register D after each
@@ -181,17 +196,7 @@ pub fn simulate(
     let mut transition_inputs_trace = Vec::with_capacity(external_inputs.len());
 
     for cycle_inputs in external_inputs {
-        let mut transition_inputs = vec![None; design.transition.inputs.len()];
-        for (value, input_id) in cycle_inputs.iter().zip(&design.inputs) {
-            transition_inputs[input_id.index()] = Some(value.clone());
-        }
-        for (value, register) in state.values.iter().zip(&design.registers) {
-            transition_inputs[register.q.index()] = Some(value.clone());
-        }
-        let transition_inputs = transition_inputs
-            .into_iter()
-            .map(|value| value.expect("validated G8R bindings cover every transition input"))
-            .collect::<Vec<_>>();
+        let transition_inputs = bind_transition_inputs(design, cycle_inputs, state.values())?;
         let result = gate_sim::eval(&design.transition, &transition_inputs, Collect::None);
         let visible_outputs = design
             .outputs
@@ -226,74 +231,197 @@ pub fn count_sequential_toggle_activity(
     design: &SequentialGateFn,
     trace: &SequentialTrace,
 ) -> Result<SequentialToggleActivity, String> {
-    if trace.transition_inputs.len() < 2 {
+    Ok(count_sequential_toggle_activity_with_all_node_counts(design, trace)?.activity)
+}
+
+/// Counts phase-based sequential activity and every transition-AIG node.
+pub(crate) fn count_sequential_toggle_activity_with_all_node_counts(
+    design: &SequentialGateFn,
+    trace: &SequentialTrace,
+) -> Result<SequentialToggleActivityWithAllNodeCounts, String> {
+    if trace.transition_inputs.is_empty() {
         return Err(format!(
-            "toggle stimulus must contain at least two cycles; got {}",
+            "toggle stimulus must contain at least one cycle; got {}",
             trace.transition_inputs.len()
         ));
     }
     validate_trace_shape(design, trace)?;
-    let logic_activity = count_toggle_activity(&design.transition, &trace.transition_inputs);
+    let phase_inputs = build_toggle_phase_transition_inputs(design, trace)?;
+    if phase_inputs.len() < 2 {
+        return Err(format!(
+            "toggle stimulus must contain at least two settled samples; got {}",
+            phase_inputs.len()
+        ));
+    }
+    let counted = count_toggle_activity_with_all_node_counts(&design.transition, &phase_inputs)?;
+    let per_node_toggles = counted.per_node_toggles;
+    let logic_activity = counted.activity;
     let entries = design
         .registers
         .iter()
-        .enumerate()
-        .map(|(register_index, register)| {
-            let register_inputs = trace
-                .register_inputs
-                .iter()
-                .map(|cycle| cycle[register_index].clone())
-                .collect::<Vec<_>>();
-            let input_toggles = count_adjacent_port_toggles(&register_inputs);
-            let output_toggles = trace
-                .register_outputs
-                .iter()
-                .zip(&trace.register_inputs)
-                .map(|(before, after)| {
-                    count_bit_differences(&before[register_index], &after[register_index])
-                })
-                .sum();
-            RegisterToggleActivity {
+        .map(|register| {
+            let input_toggles =
+                count_transition_output_toggles(design, register.d.index(), &per_node_toggles)?;
+            let output_toggles =
+                count_transition_input_toggles(design, register.q.index(), &per_node_toggles)?;
+            Ok(RegisterToggleActivity {
                 name: register.name.clone(),
                 width: design.transition.inputs[register.q.index()].get_bit_count(),
                 input_toggles,
                 output_toggles,
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let aggregate_input_toggles = entries.iter().map(|entry| entry.input_toggles).sum();
     let aggregate_output_toggles = entries.iter().map(|entry| entry.output_toggles).sum();
+    let external_output_toggles =
+        design
+            .outputs
+            .iter()
+            .try_fold(0usize, |total, output| -> Result<usize, String> {
+                Ok(total
+                    + count_transition_output_toggles(design, output.index(), &per_node_toggles)?)
+            })?;
+    let cycle_count = trace.transition_inputs.len();
+    let input_settle_transition_count = if design.clock.is_some() {
+        cycle_count - 1
+    } else {
+        logic_activity.transition_count
+    };
+    let active_edge_transition_count = if design.clock.is_some() {
+        cycle_count
+    } else {
+        0
+    };
+    let clock_transition_count = if design.clock.is_some() {
+        cycle_count.saturating_mul(2)
+    } else {
+        0
+    };
 
-    Ok(SequentialToggleActivity {
-        cycle_count: trace.transition_inputs.len(),
-        logic_transition_count: trace.transition_inputs.len() - 1,
-        logic: LogicToggleActivity {
-            gate_input_toggles: logic_activity.aggregate.gate_input_toggles,
-            gate_output_toggles: logic_activity.aggregate.gate_output_toggles,
+    Ok(SequentialToggleActivityWithAllNodeCounts {
+        activity: SequentialToggleActivity {
+            cycle_count,
+            input_settle_transition_count,
+            active_edge_transition_count,
+            logic_transition_count: logic_activity.transition_count,
+            clock_transition_count,
+            logic: LogicToggleActivity {
+                gate_input_toggles: logic_activity.aggregate.gate_input_toggles,
+                gate_output_toggles: logic_activity.aggregate.gate_output_toggles,
+            },
+            interface: InterfaceToggleActivity {
+                external_input_toggles: count_adjacent_samples(&trace.external_inputs),
+                external_output_toggles,
+            },
+            registers: RegisterToggleActivities {
+                aggregate_input_toggles,
+                aggregate_output_toggles,
+                entries,
+            },
+            nodes: logic_activity.nodes,
         },
-        interface: InterfaceToggleActivity {
-            external_input_toggles: count_adjacent_samples(&trace.external_inputs),
-            external_output_toggles: count_adjacent_samples(&trace.external_outputs),
-        },
-        registers: RegisterToggleActivities {
-            aggregate_input_toggles,
-            aggregate_output_toggles,
-            entries,
-        },
-        nodes: logic_activity.nodes,
+        per_node_toggles,
     })
 }
 
-/// Counts every transition-AIG node across one validated sequential trace.
+/// Builds settled transition-AIG inputs used only for toggle accounting.
 ///
-/// Labeled netlist reporting needs this broader view because an explicitly
-/// connected standard-cell pin can be outside the visible output cone.
-pub(crate) fn count_all_transition_node_toggles(
+/// Clocked traces alternate pre-edge and post-edge samples. The next pre-edge
+/// sample then accounts for input changes while the clock is inactive. Pure
+/// combinational traces retain their original ordered input samples.
+fn build_toggle_phase_transition_inputs(
     design: &SequentialGateFn,
     trace: &SequentialTrace,
-) -> Result<Vec<usize>, String> {
-    validate_trace_shape(design, trace)?;
-    count_all_node_toggles_simd(&design.transition, &trace.transition_inputs)
+) -> Result<Vec<Vec<IrBits>>, String> {
+    if design.clock.is_none() {
+        return Ok(trace.transition_inputs.clone());
+    }
+    let mut phase_inputs = Vec::with_capacity(trace.transition_inputs.len().saturating_mul(2));
+    for (cycle_index, pre_edge_inputs) in trace.transition_inputs.iter().enumerate() {
+        phase_inputs.push(pre_edge_inputs.clone());
+        phase_inputs.push(bind_transition_inputs(
+            design,
+            &trace.external_inputs[cycle_index],
+            &trace.register_inputs[cycle_index],
+        )?);
+    }
+    Ok(phase_inputs)
+}
+
+fn bind_transition_inputs(
+    design: &SequentialGateFn,
+    external_inputs: &[IrBits],
+    register_values: &[IrBits],
+) -> Result<Vec<IrBits>, String> {
+    if external_inputs.len() != design.inputs.len() {
+        return Err(format!(
+            "cannot bind {} external inputs to design expecting {}",
+            external_inputs.len(),
+            design.inputs.len()
+        ));
+    }
+    if register_values.len() != design.registers.len() {
+        return Err(format!(
+            "cannot bind {} register values to design expecting {}",
+            register_values.len(),
+            design.registers.len()
+        ));
+    }
+    let mut transition_inputs = vec![None; design.transition.inputs.len()];
+    for (value, input_id) in external_inputs.iter().zip(&design.inputs) {
+        transition_inputs[input_id.index()] = Some(value.clone());
+    }
+    for (value, register) in register_values.iter().zip(&design.registers) {
+        transition_inputs[register.q.index()] = Some(value.clone());
+    }
+    transition_inputs
+        .into_iter()
+        .map(|value| {
+            value.ok_or_else(|| {
+                "validated sequential bindings do not cover every transition input".to_string()
+            })
+        })
+        .collect()
+}
+
+fn count_transition_input_toggles(
+    design: &SequentialGateFn,
+    input_index: usize,
+    per_node_toggles: &[usize],
+) -> Result<usize, String> {
+    let input = design
+        .transition
+        .inputs
+        .get(input_index)
+        .ok_or_else(|| format!("transition input {} is out of range", input_index))?;
+    count_bit_vector_toggles(&input.bit_vector, per_node_toggles)
+}
+
+fn count_transition_output_toggles(
+    design: &SequentialGateFn,
+    output_index: usize,
+    per_node_toggles: &[usize],
+) -> Result<usize, String> {
+    let output = design
+        .transition
+        .outputs
+        .get(output_index)
+        .ok_or_else(|| format!("transition output {} is out of range", output_index))?;
+    count_bit_vector_toggles(&output.bit_vector, per_node_toggles)
+}
+
+fn count_bit_vector_toggles(
+    bits: &AigBitVector,
+    per_node_toggles: &[usize],
+) -> Result<usize, String> {
+    bits.iter_lsb_to_msb().try_fold(0usize, |total, operand| {
+        let toggle_count = per_node_toggles
+            .get(operand.node.id)
+            .copied()
+            .ok_or_else(|| format!("AIG operand node {} is out of range", operand.node.id))?;
+        Ok(total + toggle_count)
+    })
 }
 
 fn validate_external_inputs(
@@ -374,13 +502,6 @@ fn count_adjacent_samples(samples: &[Vec<IrBits>]) -> usize {
                 .map(|(before, after)| count_bit_differences(before, after))
                 .sum::<usize>()
         })
-        .sum()
-}
-
-fn count_adjacent_port_toggles(samples: &[IrBits]) -> usize {
-    samples
-        .windows(2)
-        .map(|pair| count_bit_differences(&pair[0], &pair[1]))
         .sum()
 }
 
@@ -521,13 +642,16 @@ mod tests {
         let activity = count_sequential_toggle_activity(&design, &trace).unwrap();
 
         assert_eq!(activity.cycle_count, 2);
-        assert_eq!(activity.logic_transition_count, 1);
+        assert_eq!(activity.input_settle_transition_count, 1);
+        assert_eq!(activity.active_edge_transition_count, 2);
+        assert_eq!(activity.logic_transition_count, 3);
+        assert_eq!(activity.clock_transition_count, 4);
         assert_eq!(activity.interface.external_input_toggles, 1);
         assert_eq!(activity.interface.external_output_toggles, 1);
-        assert_eq!(activity.registers.aggregate_input_toggles, 0);
+        assert_eq!(activity.registers.aggregate_input_toggles, 2);
         assert_eq!(activity.registers.aggregate_output_toggles, 1);
         assert_eq!(activity.registers.entries[0].name, "acc");
-        assert_eq!(activity.registers.entries[0].input_toggles, 0);
+        assert_eq!(activity.registers.entries[0].input_toggles, 2);
         assert_eq!(activity.registers.entries[0].output_toggles, 1);
     }
 }

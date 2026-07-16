@@ -347,6 +347,13 @@ Mapped register names are internal netlist names, so a state file and
 `--final-state-irvals` use those mapped names rather than source-IR register
 names.
 
+Sequential toggle counting keeps those pre-edge functional outputs, but counts
+settled phase transitions around each cycle: input changes while clock is
+inactive, the active edge and resulting Q/combinational settle, then the
+inactive clock edge. It intentionally counts no glitches. The first input
+record establishes the input baseline; a clocked one-cycle trace can still
+count its active-edge and clock transitions.
+
 ```shell
 xlsynth-driver gv-eval \
   --netlist /path/to/design.gv \
@@ -409,7 +416,8 @@ Flags:
 - `--toggle-output-json <PATH>`: with `--input-irvals`, write source-labeled
   toggle activity JSON. Sequential mode additionally reports native G8R
   logic, interface, register-D, and clocked register-Q categories. At least two
-  input samples or cycles are required.
+  combinational input samples are required; a clocked sequential trace may
+  contain one cycle.
 - `--power-output-json <PATH>`: with `--input-irvals`, write sample-driven
   dynamic-energy JSON. At least two input samples and Liberty
   `nominal_voltage` are required. This remains combinational-only.
@@ -421,10 +429,10 @@ Flags:
   pair. When present, the report includes average dynamic power.
 
 Sequential toggle reports preserve clock ports and pins as explicit
-`kind: "clock"` entries. They are excluded from sampled numeric toggle
-aggregates because the active-edge records do not describe a complete clock
-waveform. The report records active-edge count separately for later
-clock-aware power modeling.
+`kind: "clock"` entries with two assumed transitions per cycle: one
+inactive-to-active edge and one active-to-inactive edge. These clock
+transitions are included in labeled port and pin aggregates. The report also
+records active-edge count separately.
 
 Combinational power analysis is edge-based and intentionally excludes leakage
 and glitches. It computes internal energy from Liberty `internal_power` tables
@@ -2147,16 +2155,20 @@ clock is metadata and is not an input record field.
 - Optional:
   - `--final-state-irvals <PATH>` – write the final register state as one named
     record that can subsequently be passed to `--initial-state-file`.
-  - `--toggle-output-json <PATH>` – with at least two `--input-irvals` cycles,
-    write separate combinational-logic, external-interface, register-D, and
-    clocked register-Q toggle counts, plus output-reachable per-node activity.
+  - `--toggle-output-json <PATH>` – with `--input-irvals`, write separate
+    combinational-logic, external-interface, register-D, clock, and clocked
+    register-Q toggle counts, plus output-reachable per-node activity. A
+    clocked design may use one cycle; a clockless combinational design still
+    needs two samples.
 
 One input record represents one active clock cycle. External outputs are
 observed from the current state, then register D values are committed for the
-next cycle. Register-input toggles compare D between consecutive evaluations
-(`N - 1` intervals). Register-output toggles count actual Q changes across all
-simulated clock edges (`N` possible changes). Initialization itself is not a
-toggle from an unknown prior state.
+next cycle. Toggle accounting compares settled pre-edge and post-edge values:
+there are `N` active-edge settles and `N - 1` next-input settles for a clocked
+trace. Register-input toggles count effective D changes across those settled
+phases; register-output toggles count actual Q changes across all simulated
+clock edges. Clocked reports assume two clock transitions per cycle.
+Initialization itself is not a toggle from an unknown prior state.
 
 ```shell
 xlsynth-driver g8r-eval pipeline.g8r \

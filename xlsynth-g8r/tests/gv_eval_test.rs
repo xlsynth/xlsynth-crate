@@ -691,18 +691,21 @@ endmodule
         .expect("count labeled sequential activity");
 
     assert_eq!(activity.sequential.cycle_count, 3);
-    assert_eq!(activity.sequential.logic_transition_count, 2);
+    assert_eq!(activity.sequential.input_settle_transition_count, 2);
+    assert_eq!(activity.sequential.active_edge_transition_count, 3);
+    assert_eq!(activity.sequential.logic_transition_count, 5);
+    assert_eq!(activity.sequential.clock_transition_count, 6);
     assert_eq!(activity.sequential.interface.external_input_toggles, 2);
-    assert_eq!(activity.sequential.interface.external_output_toggles, 2);
+    assert_eq!(activity.sequential.interface.external_output_toggles, 3);
     assert_eq!(activity.sequential.registers.aggregate_input_toggles, 2);
     assert_eq!(activity.sequential.registers.aggregate_output_toggles, 3);
     assert_eq!(
         activity.labeled_aggregate,
         GvToggleAggregate {
-            module_input_toggles: 2,
-            module_output_toggles: 2,
-            cell_input_pin_toggles: 4,
-            cell_output_pin_toggles: 4,
+            module_input_toggles: 8,
+            module_output_toggles: 3,
+            cell_input_pin_toggles: 10,
+            cell_output_pin_toggles: 5,
         }
     );
     assert_eq!(
@@ -714,30 +717,30 @@ endmodule
     );
     assert_eq!(
         activity.module_ports[1].bits_lsb_to_msb[0].activity,
-        GvSequentialSignalToggleActivity::Clock
+        GvSequentialSignalToggleActivity::Clock { toggle_count: 6 }
     );
     assert_eq!(
         activity.instances[0].pins[1].activity,
-        GvSequentialSignalToggleActivity::Clock
+        GvSequentialSignalToggleActivity::Clock { toggle_count: 6 }
     );
     assert_eq!(
         activity.instances[0].pins[2].activity,
         GvSequentialSignalToggleActivity::Sampled {
-            toggle_count: 2,
-            toggle_rate: 1.0,
+            toggle_count: 3,
+            toggle_rate: 0.6,
         }
     );
     assert_eq!(
         activity.instances[1].pins[1].activity,
         GvSequentialSignalToggleActivity::Sampled {
             toggle_count: 2,
-            toggle_rate: 1.0,
+            toggle_rate: 0.4,
         }
     );
 }
 
 #[test]
-fn sequential_toggle_activity_rejects_a_one_cycle_trace() {
+fn sequential_toggle_activity_counts_a_one_cycle_trace() {
     let liberty = r#"
 format_magic: 5496997758177923663
 cells: {
@@ -775,10 +778,22 @@ endmodule
             SequentialState::all_zeros(&model.sequential_gate_fn),
         )
         .expect("simulate one cycle");
-    let error = model
+    assert_eq!(
+        trace.external_outputs(),
+        &[vec![IrBits::make_ubits(1, 0).unwrap()]]
+    );
+    let activity = model
         .count_toggle_activity(&trace)
-        .expect_err("one cycle should not have toggle activity");
-    assert!(error.contains("at least two cycles"), "{error}");
+        .expect("one clocked cycle has an active-edge settle");
+    assert_eq!(activity.sequential.cycle_count, 1);
+    assert_eq!(activity.sequential.input_settle_transition_count, 0);
+    assert_eq!(activity.sequential.active_edge_transition_count, 1);
+    assert_eq!(activity.sequential.logic_transition_count, 1);
+    assert_eq!(activity.sequential.clock_transition_count, 2);
+    assert_eq!(activity.sequential.interface.external_input_toggles, 0);
+    assert_eq!(activity.sequential.interface.external_output_toggles, 1);
+    assert_eq!(activity.sequential.registers.aggregate_input_toggles, 0);
+    assert_eq!(activity.sequential.registers.aggregate_output_toggles, 1);
 }
 
 #[test]

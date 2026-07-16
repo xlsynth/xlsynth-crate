@@ -327,7 +327,7 @@ endmodule
 }
 
 #[test]
-fn gv_eval_sequential_toggle_output_requires_two_cycles() {
+fn gv_eval_sequential_toggle_output_accepts_one_clocked_cycle() {
     let netlist = r#"
 module top (d, clk, q);
   input d;
@@ -352,14 +352,16 @@ endmodule
             toggle_json_path.to_str().unwrap(),
         ],
     );
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("requires at least two"),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!toggle_json_path.exists());
+    assert_success(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[1]:0\n");
+    let activity: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(toggle_json_path).expect("read one-cycle toggle JSON"),
+    )
+    .expect("parse one-cycle toggle JSON");
+    assert_eq!(activity["cycle_count"], 1);
+    assert_eq!(activity["logic_transition_count"], 1);
+    assert_eq!(activity["clock_transition_count"], 2);
+    assert_eq!(activity["clock"]["toggle_count"], 2);
 }
 
 #[test]

@@ -314,9 +314,22 @@ fuzz_target!(|data: &[u8]| {
             )
         });
     assert_eq!(toggle_activity.sequential.cycle_count, CYCLE_COUNT);
+    let expected_logic_transition_count = if mapped_design.clock.is_some() {
+        CYCLE_COUNT * 2 - 1
+    } else {
+        CYCLE_COUNT - 1
+    };
     assert_eq!(
         toggle_activity.sequential.logic_transition_count,
-        CYCLE_COUNT - 1
+        expected_logic_transition_count
+    );
+    assert_eq!(
+        toggle_activity.sequential.clock_transition_count,
+        if mapped_design.clock.is_some() {
+            CYCLE_COUNT * 2
+        } else {
+            0
+        }
     );
     assert_eq!(
         toggle_activity.module_ports.len(),
