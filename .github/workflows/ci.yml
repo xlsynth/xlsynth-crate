@@ -21,6 +21,9 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  # Avoid a latest-release API lookup in every sccache setup step. A transient
+  # GitHub API HTML response leaves SCCACHE_PATH unset and breaks its post hook.
+  SCCACHE_VERSION: "v0.16.0"
 
 jobs:
   # -----------------------------------------------------------
@@ -91,6 +94,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust (local-only)
         run: |
@@ -287,6 +292,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust
         run: |
@@ -495,6 +502,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust
         run: |
@@ -630,6 +639,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust
         run: |
@@ -901,6 +912,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust
         run: |
@@ -1033,6 +1046,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust
         run: |
@@ -1107,6 +1122,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust
         run: |
@@ -1219,6 +1236,8 @@ jobs:
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Configure sccache for Rust
         run: |
