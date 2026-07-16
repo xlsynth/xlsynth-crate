@@ -358,6 +358,11 @@ jobs:
       CI_APT_FALLBACK_ATTEMPT: 1
 
     steps:
+      - name: Install Git for checkout
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
+
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -838,6 +843,9 @@ jobs:
     container: almalinux:9
 
     steps:
+      - name: Install Git for checkout
+        run: dnf -y install git ca-certificates
+
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
