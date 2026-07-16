@@ -6365,7 +6365,7 @@ fn test_g8r_eval_requires_complete_initial_state_policy() {
 }
 
 #[test]
-fn test_g8r_eval_rejects_short_toggle_trace_before_emitting_output() {
+fn test_g8r_eval_accepts_one_clocked_toggle_cycle() {
     let design = make_pipeline_sequential_design();
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("pipeline.g8r");
@@ -6388,15 +6388,22 @@ fn test_g8r_eval_rejects_short_toggle_trace_before_emitting_output() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "unexpected stdout: {output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("requires at least two --input-irvals cycles; got 1"),
-        "{stderr}"
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!toggles_path.exists());
-    assert!(!final_state_path.exists());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[1]:0\n");
+    assert_eq!(
+        std::fs::read_to_string(final_state_path).unwrap(),
+        "{state: bits[1]:0}\n"
+    );
+    let activity: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(toggles_path).unwrap()).unwrap();
+    assert_eq!(activity["cycle_count"], 1);
+    assert_eq!(activity["logic_transition_count"], 1);
+    assert_eq!(activity["clock_transition_count"], 2);
 }
 
 #[test]

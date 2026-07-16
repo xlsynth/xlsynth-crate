@@ -1,0 +1,146 @@
+{
+  "module_name": "top",
+  "cycle_count": 3,
+  "input_settle_transition_count": 2,
+  "active_edge_transition_count": 3,
+  "logic_transition_count": 5,
+  "clock_transition_count": 6,
+  "logic": {
+    "gate_input_toggles": 0,
+    "gate_output_toggles": 0
+  },
+  "interface": {
+    "external_input_toggles": 2,
+    "external_output_toggles": 3
+  },
+  "registers": {
+    "aggregate_input_toggles": 2,
+    "aggregate_output_toggles": 3,
+    "entries": [
+      {
+        "name": "state__IQ",
+        "width": 1,
+        "input_toggles": 2,
+        "output_toggles": 3
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "node_id": 1,
+      "node_kind": "input",
+      "toggle_count": 2,
+      "toggle_rate": 0.4
+    },
+    {
+      "node_id": 2,
+      "node_kind": "input",
+      "toggle_count": 3,
+      "toggle_rate": 0.6
+    }
+  ],
+  "clock": {
+    "port_name": "clk",
+    "active_edge": "rising",
+    "active_edge_count": 3,
+    "toggle_count": 6
+  },
+  "labeled_aggregate": {
+    "module_input_toggles": 8,
+    "module_output_toggles": 3,
+    "cell_input_pin_toggles": 8,
+    "cell_output_pin_toggles": 3
+  },
+  "module_ports": [
+    {
+      "port_name": "d",
+      "direction": "input",
+      "bits_lsb_to_msb": [
+        {
+          "bit_number": 0,
+          "activity": {
+            "kind": "sampled",
+            "toggle_count": 2,
+            "toggle_rate": 0.4
+          }
+        }
+      ]
+    },
+    {
+      "port_name": "clk",
+      "direction": "input",
+      "bits_lsb_to_msb": [
+        {
+          "bit_number": 0,
+          "activity": {
+            "kind": "clock",
+            "toggle_count": 6
+          }
+        }
+      ]
+    },
+    {
+      "port_name": "q",
+      "direction": "output",
+      "bits_lsb_to_msb": [
+        {
+          "bit_number": 0,
+          "activity": {
+            "kind": "sampled",
+            "toggle_count": 3,
+            "toggle_rate": 0.6
+          }
+        }
+      ]
+    }
+  ],
+  "instances": [
+    {
+      "instance_name": "state",
+      "cell_type": "DFF",
+      "pins": [
+        {
+          "pin_name": "D",
+          "direction": "input",
+          "connection": {
+            "kind": "net",
+            "net_name": "d",
+            "bit_number": 0
+          },
+          "activity": {
+            "kind": "sampled",
+            "toggle_count": 2,
+            "toggle_rate": 0.4
+          }
+        },
+        {
+          "pin_name": "CLK",
+          "direction": "input",
+          "connection": {
+            "kind": "net",
+            "net_name": "clk",
+            "bit_number": 0
+          },
+          "activity": {
+            "kind": "clock",
+            "toggle_count": 6
+          }
+        },
+        {
+          "pin_name": "Q",
+          "direction": "output",
+          "connection": {
+            "kind": "net",
+            "net_name": "q",
+            "bit_number": 0
+          },
+          "activity": {
+            "kind": "sampled",
+            "toggle_count": 3,
+            "toggle_rate": 0.6
+          }
+        }
+      ]
+    }
+  ]
+}

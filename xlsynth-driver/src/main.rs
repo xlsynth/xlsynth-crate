@@ -131,6 +131,7 @@ mod prover;
 mod prover_config;
 mod report_cli_error;
 mod run_verilog_pipeline;
+mod sequential_eval_io;
 mod toolchain_config;
 mod tools;
 
@@ -2071,7 +2072,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("gv-eval")
-                .about("Evaluates a combinational Liberty-backed gate-level netlist")
+                .about("Evaluates a combinational or sequential Liberty-backed gate-level netlist")
                 .arg(
                     Arg::new("netlist")
                         .long("netlist")
@@ -2094,22 +2095,59 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("sequential")
+                        .long("sequential")
+                        .help("Evaluate the netlist as one active clock edge per input record")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("clock_port_name")
+                        .long("clock-port-name")
+                        .value_name("PORT")
+                        .help("Top-level clock port hint for sequential netlists whose FFs were optimized away")
+                        .requires("sequential")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("arg_tuple")
-                        .help("Tuple of typed IR values in module-input order")
+                        .help("Tuple of typed IR values in module-input order; sequential mode omits the clock")
                         .index(1),
                 )
                 .arg(
                     Arg::new("input_irvals")
                         .long("input-irvals")
                         .value_name("IRVALS_PATH")
-                        .help("Path to an .irvals file with one positional tuple or named argument set per line")
+                        .help("Path to an .irvals file with one positional tuple or named argument set per sample or cycle")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("initial_state_all_zeros")
+                        .long("initial-state-all-zeros")
+                        .help("Initialize every mapped sequential register to all zeros")
+                        .requires("sequential")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("initial_state_file")
+                        .long("initial-state-file")
+                        .value_name("IRVALS_PATH")
+                        .help("Initialize mapped registers from exactly one positional or named .irvals record")
+                        .requires("sequential")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("final_state_irvals")
+                        .long("final-state-irvals")
+                        .value_name("PATH")
+                        .help("Write final mapped register values as one named .irvals record")
+                        .requires("sequential")
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("toggle_output_json")
                         .long("toggle-output-json")
                         .value_name("PATH")
-                        .help("Write module-port and external standard-cell pin toggle activity JSON; requires --input-irvals")
+                        .help("Write labeled toggle activity JSON; sequential mode also includes logic, interface, and register activity")
                         .requires("input_irvals")
                         .action(ArgAction::Set),
                 )
@@ -2119,6 +2157,7 @@ fn main() {
                         .value_name("PATH")
                         .help("Write sample-driven dynamic-power JSON; requires --input-irvals")
                         .requires("input_irvals")
+                        .conflicts_with("sequential")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2151,6 +2190,11 @@ fn main() {
                     clap::ArgGroup::new("gv_eval_input")
                         .args(["arg_tuple", "input_irvals"])
                         .required(true)
+                        .multiple(false),
+                )
+                .group(
+                    clap::ArgGroup::new("gv_eval_initial_state")
+                        .args(["initial_state_all_zeros", "initial_state_file"])
                         .multiple(false),
                 ),
         )

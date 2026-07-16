@@ -49,12 +49,13 @@ Verilog, maps FFs and combinational logic through the Yosys executable named by
 `XLSYNTH_YOSYS_PATH` against the comma-separated Liberty files in
 `XLSYNTH_LIBERTY_FILES`, then projects the mapped netlist directly into the
 labeled sequential transition-AIG form used by `gv-eval`. The target is gated
-by the `external-yosys` feature because it
-requires that external toolchain and Liberty data at runtime. A deterministic
-RNG seeded from the generated IR supplies arbitrary initial block state and
-random non-reset inputs. Reset is asserted on cycle zero and deasserted for
-all later cycles; cycle-zero outputs are intentionally ignored because the
-mapped state elements need not correspond to the source registers.
+by the `external-yosys` feature because it requires that external toolchain
+and Liberty data at runtime. A deterministic RNG seeded from the generated IR
+supplies arbitrary initial block state and random non-reset inputs. Reset is
+asserted on cycle zero and deasserted for all later cycles; cycle-zero outputs
+are intentionally ignored because the mapped state elements need not
+correspond to the source registers. The mapped trace is also passed through
+the labeled sequential toggle report path.
 
 The essential property is that block IR evaluation and Liberty-backed
 sequential `gv-eval` agree on every visible flattened output after the reset
@@ -62,9 +63,10 @@ edge, without matching mapped register names, count, or state layout. Failures
 expose block-to-G8R reset/load-enable/feedback errors, sequential RTL emission
 or Yosys `dfflibmap`/ABC mapping failures, unsupported Liberty FF metadata,
 aggregate port flattening disagreements, netlist interface shape changes, or
-visible output divergence on any post-reset simulated cycle. Zero-output
-samples still exercise the full lowering, mapping, loading, and simulation
-path for crash detection.
+visible output divergence on any post-reset simulated cycle. It also surfaces
+crashes or shape inconsistencies in sequential labeled toggle accounting.
+Zero-output samples still exercise the full lowering, mapping, loading,
+simulation, and toggle-report path for crash detection.
 
 ## `fuzz_gatify`
 

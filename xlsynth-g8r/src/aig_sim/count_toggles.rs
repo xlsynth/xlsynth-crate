@@ -97,6 +97,16 @@ pub struct ToggleActivityStats {
     pub nodes: Vec<NodeToggleStats>,
 }
 
+/// Output-reachable activity plus counts for every AIG node.
+///
+/// Labeled netlist reporting needs all-node counts for explicitly connected
+/// dead pins, while native aggregate statistics retain their output-reachable
+/// semantics.
+pub(crate) struct ToggleActivityWithAllNodeCounts {
+    pub activity: ToggleActivityStats,
+    pub per_node_toggles: Vec<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LiveNodeToggleCounts {
     live_nodes: Vec<bool>,
@@ -435,14 +445,58 @@ pub fn count_toggle_activity(
 ) -> ToggleActivityStats {
     let live_node_toggles =
         count_live_node_toggles_simd(gate_fn, batch_inputs).unwrap_or_else(|e| panic!("{e}"));
+    build_toggle_activity_stats(
+        gate_fn,
+        batch_inputs,
+        &live_node_toggles.live_nodes,
+        &live_node_toggles.per_node_toggles,
+    )
+}
+
+/// Counts native output-reachable activity and every node in one SIMD pass.
+pub(crate) fn count_toggle_activity_with_all_node_counts(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> Result<ToggleActivityWithAllNodeCounts, String> {
+    if batch_inputs.len() < 2 {
+        return Err(format!(
+            "toggle stimulus must contain at least two samples; got {}",
+            batch_inputs.len()
+        ));
+    }
+    let per_node_toggles = count_all_node_toggles_simd(gate_fn, batch_inputs)?;
+    let live_nodes = collect_output_reachable_nodes(gate_fn);
+    let mut live_node_toggles = per_node_toggles.clone();
+    for (toggle_count, is_live) in live_node_toggles.iter_mut().zip(&live_nodes) {
+        if !is_live {
+            *toggle_count = 0;
+        }
+    }
+    Ok(ToggleActivityWithAllNodeCounts {
+        activity: build_toggle_activity_stats(
+            gate_fn,
+            batch_inputs,
+            &live_nodes,
+            &live_node_toggles,
+        ),
+        per_node_toggles,
+    })
+}
+
+fn build_toggle_activity_stats(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+    live_nodes: &[bool],
+    per_node_toggles: &[usize],
+) -> ToggleActivityStats {
     let transition_count = batch_inputs.len() - 1;
     let nodes = gate_fn
         .gates
         .iter()
         .enumerate()
-        .filter(|(node_index, _)| live_node_toggles.live_nodes[*node_index])
+        .filter(|(node_index, _)| live_nodes[*node_index])
         .map(|(node_id, node)| {
-            let toggle_count = live_node_toggles.per_node_toggles[node_id];
+            let toggle_count = per_node_toggles[node_id];
             NodeToggleStats {
                 node_id,
                 node_kind: node_kind(node),
@@ -454,11 +508,7 @@ pub fn count_toggle_activity(
     ToggleActivityStats {
         sample_count: batch_inputs.len(),
         transition_count,
-        aggregate: aggregate_toggle_stats(
-            gate_fn,
-            batch_inputs,
-            &live_node_toggles.per_node_toggles,
-        ),
+        aggregate: aggregate_toggle_stats(gate_fn, batch_inputs, per_node_toggles),
         nodes,
     }
 }

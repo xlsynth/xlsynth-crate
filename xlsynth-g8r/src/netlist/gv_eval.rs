@@ -12,6 +12,10 @@ use crate::aig::{AigOperand, SequentialGateFn};
 use crate::aig_sim::count_toggles;
 use crate::aig_sim::gate_sim::{self, Collect};
 use crate::aig_sim::gate_simd;
+use crate::aig_sim::sequential::{
+    self, SequentialState, SequentialToggleActivity, SequentialTrace,
+    count_sequential_toggle_activity_with_all_node_counts,
+};
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::{
     project_labeled_netlist_aig_with_boundaries,
@@ -119,6 +123,90 @@ pub struct GvToggleActivity {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub module_boundaries: Vec<ModuleBoundaryToggleActivity>,
     pub instances: Vec<InstanceToggleActivity>,
+}
+
+/// Activity kind for one labeled signal in a sequential transition graph.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GvSequentialSignalToggleActivity {
+    /// Settled phase-to-phase transitions observed in the transition AIG.
+    Sampled {
+        toggle_count: usize,
+        toggle_rate: f64,
+    },
+    /// A selected clock is metadata rather than a transition-AIG input.
+    Clock { toggle_count: usize },
+}
+
+/// Transition activity for one sequential module-port bit.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SequentialModulePortBitToggleActivity {
+    pub bit_number: u32,
+    pub activity: GvSequentialSignalToggleActivity,
+}
+
+/// Transition activity for one sequential module port.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SequentialModulePortToggleActivity {
+    pub port_name: String,
+    pub direction: ToggleDirection,
+    pub bits_lsb_to_msb: Vec<SequentialModulePortBitToggleActivity>,
+}
+
+/// Transition activity at one flattened child-module boundary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SequentialModuleBoundaryToggleActivity {
+    pub instance_path: String,
+    pub module_name: String,
+    pub ports: Vec<SequentialModulePortToggleActivity>,
+}
+
+/// Transition activity for one sequential standard-cell pin.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SequentialInstancePinToggleActivity {
+    pub pin_name: String,
+    pub direction: ToggleDirection,
+    pub connection: TogglePinConnection,
+    pub activity: GvSequentialSignalToggleActivity,
+}
+
+/// Transition activity for one sequential standard-cell instance.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SequentialInstanceToggleActivity {
+    pub instance_name: String,
+    pub cell_type: String,
+    pub pins: Vec<SequentialInstancePinToggleActivity>,
+}
+
+/// Active-edge metadata for the clock omitted from transition-AIG inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GvSequentialClockActivity {
+    pub port_name: String,
+    pub active_edge: Option<SequentialClockEdge>,
+    /// One active edge per simulated input record, not a full waveform count.
+    pub active_edge_count: usize,
+    /// One inactive-to-active and one active-to-inactive transition per cycle.
+    pub toggle_count: usize,
+}
+
+/// Source-labeled toggle activity for one sequential gate-level trace.
+///
+/// The flattened sequential fields preserve the native g8r-eval categories,
+/// while module_ports and instances preserve mapped netlist labels.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GvSequentialToggleActivity {
+    pub module_name: String,
+    #[serde(flatten)]
+    pub sequential: SequentialToggleActivity,
+    pub clock: Option<GvSequentialClockActivity>,
+    /// Settled labeled totals, including synthetic selected-clock transitions.
+    pub labeled_aggregate: GvToggleAggregate,
+    pub module_ports: Vec<SequentialModulePortToggleActivity>,
+    /// Boundary activity is informative and excluded from labeled aggregate
+    /// totals.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub module_boundaries: Vec<SequentialModuleBoundaryToggleActivity>,
+    pub instances: Vec<SequentialInstanceToggleActivity>,
 }
 
 /// Loads, validates, and projects one combinational netlist module.
@@ -398,6 +486,212 @@ impl LabeledNetlistAig {
     }
 }
 
+impl LabeledSequentialNetlistAig {
+    /// Simulates ordered typed external-input tuples over active clock edges.
+    pub fn simulate_ir_values(
+        &self,
+        args: &[IrValue],
+        initial_state: SequentialState,
+    ) -> Result<SequentialTrace, String> {
+        let external_inputs = self.lower_ir_values(args)?;
+        self.simulate_bits(&external_inputs, initial_state)
+    }
+
+    /// Simulates ordered lowered external inputs over active clock edges.
+    pub fn simulate_bits(
+        &self,
+        external_inputs: &[Vec<IrBits>],
+        initial_state: SequentialState,
+    ) -> Result<SequentialTrace, String> {
+        sequential::simulate(&self.sequential_gate_fn, external_inputs, initial_state)
+    }
+
+    /// Counts native sequential and source-labeled mapped-netlist activity.
+    pub fn count_toggle_activity(
+        &self,
+        trace: &SequentialTrace,
+    ) -> Result<GvSequentialToggleActivity, String> {
+        let counted =
+            count_sequential_toggle_activity_with_all_node_counts(&self.sequential_gate_fn, trace)?;
+        let sequential = counted.activity;
+        let per_node_toggles = counted.per_node_toggles;
+        let transition_count = sequential.logic_transition_count;
+        let cycle_count = sequential.cycle_count;
+        let clock_toggle_count = sequential.clock_transition_count;
+
+        let module_ports = self
+            .module_ports
+            .iter()
+            .map(|port| {
+                sequential_module_port_toggle_activity(
+                    port,
+                    &per_node_toggles,
+                    transition_count,
+                    clock_toggle_count,
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let module_boundaries = self
+            .module_boundaries
+            .iter()
+            .map(|boundary| {
+                let ports = boundary
+                    .ports
+                    .iter()
+                    .map(|port| {
+                        sequential_module_port_toggle_activity(
+                            port,
+                            &per_node_toggles,
+                            transition_count,
+                            clock_toggle_count,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(SequentialModuleBoundaryToggleActivity {
+                    instance_path: boundary.instance_path.clone(),
+                    module_name: boundary.module_name.clone(),
+                    ports,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let instances = self
+            .instances
+            .iter()
+            .map(|instance| {
+                let pins = instance
+                    .pins
+                    .iter()
+                    .map(|pin| {
+                        Ok(SequentialInstancePinToggleActivity {
+                            pin_name: pin.pin_name.clone(),
+                            direction: cell_pin_direction(pin.direction)?,
+                            connection: toggle_pin_connection(&pin.connection),
+                            activity: sequential_signal_toggle_activity(
+                                pin.signal,
+                                &per_node_toggles,
+                                transition_count,
+                                clock_toggle_count,
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(SequentialInstanceToggleActivity {
+                    instance_name: instance.instance_name.clone(),
+                    cell_type: instance.cell_type.clone(),
+                    pins,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let labeled_aggregate = GvToggleAggregate {
+            module_input_toggles: sum_sequential_module_port_toggles(
+                &module_ports,
+                ToggleDirection::Input,
+            ),
+            module_output_toggles: sum_sequential_module_port_toggles(
+                &module_ports,
+                ToggleDirection::Output,
+            ),
+            cell_input_pin_toggles: sum_sequential_instance_pin_toggles(
+                &instances,
+                ToggleDirection::Input,
+            ),
+            cell_output_pin_toggles: sum_sequential_instance_pin_toggles(
+                &instances,
+                ToggleDirection::Output,
+            ),
+        };
+        let clock = self.clock.as_ref().map(|clock| GvSequentialClockActivity {
+            port_name: clock.port_name.clone(),
+            active_edge: clock.active_edge,
+            active_edge_count: cycle_count,
+            toggle_count: clock_toggle_count,
+        });
+
+        Ok(GvSequentialToggleActivity {
+            module_name: self.module_name.clone(),
+            sequential,
+            clock,
+            labeled_aggregate,
+            module_ports,
+            module_boundaries,
+            instances,
+        })
+    }
+
+    fn lower_ir_values(&self, args: &[IrValue]) -> Result<Vec<Vec<IrBits>>, String> {
+        args.iter()
+            .enumerate()
+            .map(|(cycle_index, sample)| {
+                self.lower_arg_tuple(sample)
+                    .map_err(|error| format!("input cycle {}: {}", cycle_index + 1, error))
+            })
+            .collect()
+    }
+
+    fn lower_arg_tuple(&self, args: &IrValue) -> Result<Vec<IrBits>, String> {
+        let elements = args
+            .get_elements()
+            .map_err(|error| format!("argument value is not a tuple: {error}"))?;
+        let inputs = elements
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value.to_bits().map_err(|error| {
+                    let input_name = self
+                        .sequential_gate_fn
+                        .inputs
+                        .get(index)
+                        .map(|input_id| {
+                            self.sequential_gate_fn.transition.inputs[input_id.index()]
+                                .name
+                                .as_str()
+                        })
+                        .unwrap_or("<extra>");
+                    format!(
+                        "argument {} for input '{}' is not bits-typed: {}",
+                        index, input_name, error
+                    )
+                })
+            })
+            .collect::<Result<Vec<IrBits>, String>>()?;
+        self.validate_input_bits(&inputs)?;
+        Ok(inputs)
+    }
+
+    fn validate_input_bits(&self, inputs: &[IrBits]) -> Result<(), String> {
+        let design = &self.sequential_gate_fn;
+        if inputs.len() != design.inputs.len() {
+            let input_names = design
+                .inputs
+                .iter()
+                .map(|input_id| design.transition.inputs[input_id.index()].name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "module '{}' expects {} external input values [{}], got {}",
+                self.module_name,
+                design.inputs.len(),
+                input_names,
+                inputs.len()
+            ));
+        }
+        for (index, (input, input_id)) in inputs.iter().zip(&design.inputs).enumerate() {
+            let expected = &design.transition.inputs[input_id.index()];
+            let actual_width = input.get_bit_count();
+            let expected_width = expected.get_bit_count();
+            if actual_width != expected_width {
+                return Err(format!(
+                    "argument {} for input '{}' has width {}, expected {}",
+                    index, expected.name, actual_width, expected_width
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn module_port_direction(direction: &PortDirection) -> Result<ToggleDirection, String> {
     match direction {
         PortDirection::Input => Ok(ToggleDirection::Input),
@@ -466,6 +760,88 @@ fn operand_toggle_stats(
         .copied()
         .ok_or_else(|| format!("AIG operand node {} is out of range", operand.node.id))?;
     Ok((toggle_count, toggle_count as f64 / transition_count as f64))
+}
+
+fn sequential_signal_toggle_activity(
+    signal: SequentialAigSignal,
+    per_node_toggles: &[usize],
+    transition_count: usize,
+    clock_toggle_count: usize,
+) -> Result<GvSequentialSignalToggleActivity, String> {
+    match signal {
+        SequentialAigSignal::Operand(operand) => {
+            let (toggle_count, toggle_rate) =
+                operand_toggle_stats(operand, per_node_toggles, transition_count)?;
+            Ok(GvSequentialSignalToggleActivity::Sampled {
+                toggle_count,
+                toggle_rate,
+            })
+        }
+        SequentialAigSignal::Clock => Ok(GvSequentialSignalToggleActivity::Clock {
+            toggle_count: clock_toggle_count,
+        }),
+    }
+}
+
+/// Builds one source-labeled sequential module-port activity report.
+fn sequential_module_port_toggle_activity(
+    port: &SequentialModulePortAigBinding,
+    per_node_toggles: &[usize],
+    transition_count: usize,
+    clock_toggle_count: usize,
+) -> Result<SequentialModulePortToggleActivity, String> {
+    let direction = module_port_direction(&port.direction)?;
+    let bits_lsb_to_msb = port
+        .bits_lsb_to_msb
+        .iter()
+        .map(|bit| {
+            Ok(SequentialModulePortBitToggleActivity {
+                bit_number: bit.bit_number,
+                activity: sequential_signal_toggle_activity(
+                    bit.signal,
+                    per_node_toggles,
+                    transition_count,
+                    clock_toggle_count,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(SequentialModulePortToggleActivity {
+        port_name: port.name.clone(),
+        direction,
+        bits_lsb_to_msb,
+    })
+}
+
+fn sequential_signal_toggle_count(activity: &GvSequentialSignalToggleActivity) -> usize {
+    match activity {
+        GvSequentialSignalToggleActivity::Sampled { toggle_count, .. } => *toggle_count,
+        GvSequentialSignalToggleActivity::Clock { toggle_count } => *toggle_count,
+    }
+}
+
+fn sum_sequential_module_port_toggles(
+    ports: &[SequentialModulePortToggleActivity],
+    direction: ToggleDirection,
+) -> usize {
+    ports
+        .iter()
+        .filter(|port| port.direction == direction)
+        .flat_map(|port| port.bits_lsb_to_msb.iter())
+        .map(|bit| sequential_signal_toggle_count(&bit.activity))
+        .sum()
+}
+
+fn sum_sequential_instance_pin_toggles(
+    instances: &[SequentialInstanceToggleActivity],
+    direction: ToggleDirection,
+) -> usize {
+    instances
+        .iter()
+        .flat_map(|instance| instance.pins.iter())
+        .filter(|pin| pin.direction == direction)
+        .map(|pin| sequential_signal_toggle_count(&pin.activity))
+        .sum()
 }
 
 fn sum_module_port_toggles(

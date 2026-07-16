@@ -306,6 +306,36 @@ fuzz_target!(|data: &[u8]| {
             "random block sequential gv-eval simulation failed:\nIR:\n{block_ir}\nGV:\n{mapped_gv}\n{error}"
         )
     });
+    let toggle_activity = mapped_model
+        .count_toggle_activity(&trace)
+        .unwrap_or_else(|error| {
+            panic!(
+                "random block sequential gv-eval toggle counting failed:\nIR:\n{block_ir}\nGV:\n{mapped_gv}\n{error}"
+            )
+        });
+    assert_eq!(toggle_activity.sequential.cycle_count, CYCLE_COUNT);
+    let expected_logic_transition_count = if mapped_design.clock.is_some() {
+        CYCLE_COUNT * 2 - 1
+    } else {
+        CYCLE_COUNT - 1
+    };
+    assert_eq!(
+        toggle_activity.sequential.logic_transition_count,
+        expected_logic_transition_count
+    );
+    assert_eq!(
+        toggle_activity.sequential.clock_transition_count,
+        if mapped_design.clock.is_some() {
+            CYCLE_COUNT * 2
+        } else {
+            0
+        }
+    );
+    assert_eq!(
+        toggle_activity.module_ports.len(),
+        mapped_model.module_ports.len()
+    );
+    assert_eq!(toggle_activity.instances.len(), mapped_model.instances.len());
     for cycle in 1..CYCLE_COUNT {
         assert_eq!(
             trace.external_outputs()[cycle],
