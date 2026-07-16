@@ -708,6 +708,7 @@ jobs:
         uses: actions/checkout@ee0669bd1cc54295c223e0bb666b733df41de1c5 # v2
 
       - name: Download xlsynth binaries
+        id: rocky8-bootstrap
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -801,7 +802,7 @@ jobs:
           cargo build --features with-bitwuzla-system --workspace --exclude sample-usage -vv
 
       - name: Report disk usage after cargo build (rocky8)
-        if: ${{ always() }}
+        if: ${{ always() && steps.rocky8-bootstrap.outcome == 'success' }}
         run: |
           python3 scripts/report_disk_usage.py \
             --label "rocky8: after cargo build" \
@@ -818,7 +819,7 @@ jobs:
           cargo test --features with-bitwuzla-system --workspace --exclude sample-usage
 
       - name: Report disk usage after cargo test (rocky8)
-        if: ${{ always() }}
+        if: ${{ always() && steps.rocky8-bootstrap.outcome == 'success' }}
         run: |
           python3 scripts/report_disk_usage.py \
             --label "rocky8: after cargo test" \
