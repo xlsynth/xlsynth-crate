@@ -1042,6 +1042,143 @@ endmodule
 }
 
 #[test]
+fn labeled_netlist_aig_sizes_hierarchical_port_connections_directionally() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
+}
+interned_strings: ["A", "Y"]
+"#;
+    let netlist = r#"
+module copy1 (a, y);
+  input a;
+  output y;
+  BUF u_buf (.A(a), .Y(y));
+endmodule
+
+module copy2 (a, y);
+  input [1:0] a;
+  output [1:0] y;
+  BUF u_buf0 (.A(a[0]), .Y(y[0]));
+  BUF u_buf1 (.A(a[1]), .Y(y[1]));
+endmodule
+
+module top (scalar, wide, input_pad, input_trunc, output_pad, output_trunc);
+  input scalar;
+  input [1:0] wide;
+  output [1:0] input_pad;
+  output input_trunc;
+  output [1:0] output_pad;
+  output output_trunc;
+
+  copy2 u_input_pad (.a(wide[1]), .y(input_pad));
+  copy1 u_input_trunc (.a({wide[1], scalar}), .y(input_trunc));
+  copy1 u_output_pad (.a(scalar), .y({output_pad[1], output_pad[0]}));
+  copy2 u_output_trunc (.a(wide), .y(output_trunc));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions {
+            module_name: Some("top".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect("build hierarchy with width-mismatched ports");
+
+    let outputs = model
+        .evaluate_bits(&[
+            IrBits::make_ubits(1, 1).unwrap(),
+            IrBits::make_ubits(2, 0b10).unwrap(),
+        ])
+        .expect("evaluate directionally sized ports");
+    assert_eq!(
+        outputs,
+        vec![
+            IrBits::make_ubits(2, 0b01).unwrap(),
+            IrBits::make_ubits(1, 1).unwrap(),
+            IrBits::make_ubits(2, 0b01).unwrap(),
+            IrBits::make_ubits(1, 0).unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn labeled_netlist_aig_reports_unknown_child_ports_in_source_order() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let netlist_path = temp_dir.path().join("design.gv");
+    std::fs::write(
+        &netlist_path,
+        r#"
+module child (a, y);
+  input a;
+  output y;
+endmodule
+
+module top (a, y);
+  input a;
+  output y;
+  child u_child (.zeta(a), .alpha(a), .a(a), .y(y));
+endmodule
+"#,
+    )
+    .expect("write netlist");
+    let error = load_labeled_netlist_aig_with_liberty(
+        &netlist_path,
+        &Library::default(),
+        &GvEvalOptions {
+            module_name: Some("top".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect_err("unknown child ports should be rejected");
+    assert_eq!(
+        format!("{error:#}"),
+        "module instance 'u_child' of 'child' connects unknown port 'zeta'"
+    );
+}
+
+#[test]
+fn labeled_netlist_aig_rejects_unconnected_child_inout_ports() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let netlist_path = temp_dir.path().join("design.gv");
+    std::fs::write(
+        &netlist_path,
+        r#"
+module child (io, y);
+  inout io;
+  output y;
+  assign y = 1'b0;
+endmodule
+
+module top (y);
+  output y;
+  child u_child (.io(), .y(y));
+endmodule
+"#,
+    )
+    .expect("write netlist");
+    let error = load_labeled_netlist_aig_with_liberty(
+        &netlist_path,
+        &Library::default(),
+        &GvEvalOptions {
+            module_name: Some("top".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect_err("unconnected child inout ports should be rejected");
+    assert_eq!(
+        format!("{error:#}"),
+        "module instance 'u_child' of 'child' has inout port 'io'; hierarchical gv-eval supports only input and output module ports"
+    );
+}
+
+#[test]
 fn labeled_netlist_aig_flattens_nested_structural_hierarchy() {
     let liberty = r#"
 format_magic: 5496997758177923663

@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+use xlsynth::IrBits;
 
+use crate::netlist::bit_ref::{self, NetBit, NetBitRef};
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
@@ -308,7 +310,7 @@ impl HierarchyElaborator<'_> {
                 ));
             }
         }
-        for connected_port in connections_by_port.keys() {
+        for (connected_port, _) in &instance.connections {
             if !child_module
                 .ports
                 .iter()
@@ -325,13 +327,6 @@ impl HierarchyElaborator<'_> {
 
         let span = synthetic_instance_span(instance);
         for port in &child_module.ports {
-            let Some(parent_connection) = connections_by_port.get(&port.name) else {
-                continue;
-            };
-            let parent_connection = remap_net_ref(parent_connection, parent_net_map)?;
-            if matches!(parent_connection, NetRef::Unconnected) {
-                continue;
-            }
             if port.direction == PortDirection::Inout {
                 return Err(anyhow!(
                     "module instance '{}' of '{}' has inout port '{}'; hierarchical gv-eval supports only input and output module ports",
@@ -339,6 +334,13 @@ impl HierarchyElaborator<'_> {
                     child_module_name,
                     resolve_symbol(&self.parsed.interner, port.name, "port name")?
                 ));
+            }
+            let Some(parent_connection) = connections_by_port.get(&port.name) else {
+                continue;
+            };
+            let parent_connection = remap_net_ref(parent_connection, parent_net_map)?;
+            if matches!(parent_connection, NetRef::Unconnected) {
+                continue;
             }
             let child_net = child_module
                 .find_net_index(port.name, &self.parsed.nets)
@@ -351,7 +353,11 @@ impl HierarchyElaborator<'_> {
                     )
                 })?;
             let child_connection = NetRef::Simple(remap_net_index(child_net, child_net_map)?);
-            if net_ref_is_aliasable(&parent_connection) {
+            let parent_width =
+                bit_ref::net_ref_width_bits(&parent_connection, &self.nets, &self.interner)?;
+            let child_width =
+                bit_ref::net_ref_width_bits(&child_connection, &self.nets, &self.interner)?;
+            if net_ref_is_aliasable(&parent_connection) && parent_width == child_width {
                 self.assigns.push(NetlistAssign {
                     kind: NetlistAssignKind::Tran,
                     lhs: child_connection,
@@ -359,12 +365,9 @@ impl HierarchyElaborator<'_> {
                     span,
                 });
             } else if port.direction == PortDirection::Input {
-                self.assigns.push(NetlistAssign {
-                    kind: NetlistAssignKind::Continuous,
-                    lhs: child_connection,
-                    rhs: AssignExpr::Leaf(parent_connection),
-                    span,
-                });
+                self.push_sized_port_assigns(&child_connection, &parent_connection, span)?;
+            } else if net_ref_is_aliasable(&parent_connection) {
+                self.push_sized_port_assigns(&parent_connection, &child_connection, span)?;
             } else {
                 return Err(anyhow!(
                     "module instance '{}' output port '{}' must connect to nets or be unconnected",
@@ -372,6 +375,28 @@ impl HierarchyElaborator<'_> {
                     resolve_symbol(&self.parsed.interner, port.name, "port name")?
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Emits one-bit continuous assigns with Verilog port truncation/extension.
+    fn push_sized_port_assigns(
+        &mut self,
+        target: &NetRef,
+        source: &NetRef,
+        span: Span,
+    ) -> Result<()> {
+        let target_bits = bit_ref::net_ref_lsb_targets(target, &self.nets, &self.interner)?;
+        let mut source_bits = bit_ref::net_ref_lsb_bit_refs(source, &self.nets, &self.interner)?;
+        source_bits.truncate(target_bits.len());
+        source_bits.resize(target_bits.len(), NetBitRef::Literal(false));
+        for (target_bit, source_bit) in target_bits.into_iter().zip(source_bits) {
+            self.assigns.push(NetlistAssign {
+                kind: NetlistAssignKind::Continuous,
+                lhs: net_bit_to_net_ref(target_bit),
+                rhs: AssignExpr::Leaf(net_bit_ref_to_net_ref(source_bit)),
+                span,
+            });
         }
         Ok(())
     }
@@ -474,6 +499,20 @@ fn net_ref_is_aliasable(net_ref: &NetRef) -> bool {
         NetRef::Simple(_) | NetRef::BitSelect(_, _) | NetRef::PartSelect(_, _, _) => true,
         NetRef::Concat(parts) => parts.iter().all(net_ref_is_aliasable),
         NetRef::Literal(_) | NetRef::UnknownLiteral(_) | NetRef::Unconnected => false,
+    }
+}
+
+fn net_bit_to_net_ref(bit: NetBit) -> NetRef {
+    NetRef::BitSelect(bit.net, bit.bit_number)
+}
+
+fn net_bit_ref_to_net_ref(bit_ref: NetBitRef) -> NetRef {
+    match bit_ref {
+        NetBitRef::Net(bit) => net_bit_to_net_ref(bit),
+        NetBitRef::Literal(value) => {
+            NetRef::Literal(IrBits::make_ubits(1, u64::from(value)).expect("one-bit literal"))
+        }
+        NetBitRef::Unknown => NetRef::UnknownLiteral(1),
     }
 }
 
