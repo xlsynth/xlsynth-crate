@@ -14,8 +14,10 @@ use crate::aig_sim::gate_sim::{self, Collect};
 use crate::aig_sim::gate_simd;
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::{
-    project_labeled_netlist_aig, project_labeled_sequential_netlist_aig,
+    project_labeled_netlist_aig_with_boundaries,
+    project_labeled_sequential_netlist_aig_with_boundaries,
 };
+use crate::netlist::hierarchy::elaborate_hierarchy;
 use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
 use crate::netlist::parse::PortDirection;
 use crate::netlist::power::{GvDynamicPowerOptions, GvDynamicPowerReport};
@@ -23,8 +25,9 @@ use crate::netlist::power::{GvDynamicPowerOptions, GvDynamicPowerReport};
 pub use crate::netlist::gatefn_from_netlist::{
     InstanceAigBinding, InstancePinAigBinding, LabeledAigBit, LabeledNetlistAig,
     LabeledSequentialAigBit, LabeledSequentialClock, LabeledSequentialNetlistAig,
-    ModulePortAigBinding, PinConnection, SequentialAigSignal, SequentialClockEdge,
-    SequentialInstanceAigBinding, SequentialInstancePinAigBinding, SequentialModulePortAigBinding,
+    ModuleBoundaryAigBinding, ModulePortAigBinding, PinConnection, SequentialAigSignal,
+    SequentialClockEdge, SequentialInstanceAigBinding, SequentialInstancePinAigBinding,
+    SequentialModuleBoundaryAigBinding, SequentialModulePortAigBinding,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -69,6 +72,14 @@ pub struct ModulePortToggleActivity {
     pub bits_lsb_to_msb: Vec<ModulePortBitToggleActivity>,
 }
 
+/// Transition activity at one flattened child-module boundary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModuleBoundaryToggleActivity {
+    pub instance_path: String,
+    pub module_name: String,
+    pub ports: Vec<ModulePortToggleActivity>,
+}
+
 /// Source-level connection serialized for a standard-cell pin report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -104,6 +115,9 @@ pub struct GvToggleActivity {
     pub transition_count: usize,
     pub aggregate: GvToggleAggregate,
     pub module_ports: Vec<ModulePortToggleActivity>,
+    /// Boundary activity is informative and excluded from aggregate totals.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub module_boundaries: Vec<ModuleBoundaryToggleActivity>,
     pub instances: Vec<InstanceToggleActivity>,
 }
 
@@ -126,8 +140,15 @@ pub fn load_labeled_netlist_aig_with_liberty(
 ) -> Result<LabeledNetlistAig> {
     let parsed = parse_netlist_from_path(netlist_path)?;
     let module = select_module(&parsed, options.module_name.as_deref())?;
-    project_labeled_netlist_aig(module, &parsed.nets, &parsed.interner, liberty)
-        .map_err(|e| anyhow!(e))
+    let elaborated = elaborate_hierarchy(&parsed, module)?;
+    project_labeled_netlist_aig_with_boundaries(
+        &elaborated.module,
+        &elaborated.nets,
+        &elaborated.interner,
+        liberty,
+        &elaborated.module_boundaries,
+    )
+    .map_err(|e| anyhow!(e))
 }
 
 /// Loads one FF-only gate-level module as a labeled sequential transition AIG.
@@ -159,12 +180,14 @@ pub fn load_labeled_sequential_netlist_aig_with_liberty(
 ) -> Result<LabeledSequentialNetlistAig> {
     let parsed = parse_netlist_from_path(netlist_path)?;
     let module = select_module(&parsed, options.module_name.as_deref())?;
-    project_labeled_sequential_netlist_aig(
-        module,
-        &parsed.nets,
-        &parsed.interner,
+    let elaborated = elaborate_hierarchy(&parsed, module)?;
+    project_labeled_sequential_netlist_aig_with_boundaries(
+        &elaborated.module,
+        &elaborated.nets,
+        &elaborated.interner,
         liberty,
         options.clock_port_name.as_deref(),
+        &elaborated.module_boundaries,
     )
     .map_err(|error| anyhow!(error))
 }
@@ -241,28 +264,26 @@ impl LabeledNetlistAig {
         let module_ports = self
             .module_ports
             .iter()
-            .map(|port| {
-                let direction = module_port_direction(&port.direction)?;
-                let bits_lsb_to_msb = port
-                    .bits_lsb_to_msb
+            .map(|port| module_port_toggle_activity(port, &per_node_toggles, transition_count))
+            .collect::<Result<Vec<ModulePortToggleActivity>, String>>()?;
+        let module_boundaries = self
+            .module_boundaries
+            .iter()
+            .map(|boundary| {
+                let ports = boundary
+                    .ports
                     .iter()
-                    .map(|bit| {
-                        let (toggle_count, toggle_rate) =
-                            operand_toggle_stats(bit.operand, &per_node_toggles, transition_count)?;
-                        Ok(ModulePortBitToggleActivity {
-                            bit_number: bit.bit_number,
-                            toggle_count,
-                            toggle_rate,
-                        })
+                    .map(|port| {
+                        module_port_toggle_activity(port, &per_node_toggles, transition_count)
                     })
-                    .collect::<Result<Vec<ModulePortBitToggleActivity>, String>>()?;
-                Ok(ModulePortToggleActivity {
-                    port_name: port.name.clone(),
-                    direction,
-                    bits_lsb_to_msb,
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(ModuleBoundaryToggleActivity {
+                    instance_path: boundary.instance_path.clone(),
+                    module_name: boundary.module_name.clone(),
+                    ports,
                 })
             })
-            .collect::<Result<Vec<ModulePortToggleActivity>, String>>()?;
+            .collect::<Result<Vec<_>, String>>()?;
 
         let instances = self
             .instances
@@ -304,6 +325,7 @@ impl LabeledNetlistAig {
             transition_count,
             aggregate,
             module_ports,
+            module_boundaries,
             instances,
         })
     }
@@ -382,6 +404,32 @@ fn module_port_direction(direction: &PortDirection) -> Result<ToggleDirection, S
         PortDirection::Output => Ok(ToggleDirection::Output),
         PortDirection::Inout => Err("inout module ports cannot be counted by gv-eval".to_string()),
     }
+}
+
+fn module_port_toggle_activity(
+    port: &ModulePortAigBinding,
+    per_node_toggles: &[usize],
+    transition_count: usize,
+) -> Result<ModulePortToggleActivity, String> {
+    let direction = module_port_direction(&port.direction)?;
+    let bits_lsb_to_msb = port
+        .bits_lsb_to_msb
+        .iter()
+        .map(|bit| {
+            let (toggle_count, toggle_rate) =
+                operand_toggle_stats(bit.operand, per_node_toggles, transition_count)?;
+            Ok(ModulePortBitToggleActivity {
+                bit_number: bit.bit_number,
+                toggle_count,
+                toggle_rate,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(ModulePortToggleActivity {
+        port_name: port.name.clone(),
+        direction,
+        bits_lsb_to_msb,
+    })
 }
 
 fn cell_pin_direction(direction: PinDirection) -> Result<ToggleDirection, String> {

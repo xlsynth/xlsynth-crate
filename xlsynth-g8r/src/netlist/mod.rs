@@ -11,6 +11,7 @@ pub mod gv2aig;
 pub mod gv2block;
 pub mod gv2ir;
 pub mod gv_eval;
+pub mod hierarchy;
 pub mod integrity;
 pub mod io;
 pub mod normalized;

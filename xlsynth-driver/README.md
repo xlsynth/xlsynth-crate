@@ -306,6 +306,15 @@ evaluates either one typed input tuple or an ordered `.irvals` stimulus file.
 Inputs are supplied in module-header order. A module with one output prints a
 bits value; multiple outputs print a tuple in module-header order.
 
+Structural helper-module hierarchy is elaborated recursively before projection:
+parsed submodules are flattened into the selected top module, while instances
+whose types are not parsed modules remain Liberty-backed leaf cells. Leaf
+instance labels use slash-separated paths such as `u_stage/u_inv`. Toggle JSON
+also includes `module_boundaries` entries for flattened child-module ports;
+those boundary counts are informative and are not added to the top-level
+aggregate, because one electrical signal may cross several module boundaries.
+Recursive hierarchy and child `inout` ports are rejected.
+
 An `.irvals` input file is a homogeneous sequence using one of two forms. The
 positional form contains one typed value per line:
 

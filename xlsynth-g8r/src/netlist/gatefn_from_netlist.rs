@@ -10,6 +10,7 @@ use crate::aig::{
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::Term;
 use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
+use crate::netlist::hierarchy::ElaboratedModuleBoundary;
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedConnection, NormalizedInstance, NormalizedNetlistModule,
 };
@@ -28,6 +29,7 @@ pub struct LabeledNetlistAig {
     pub module_name: String,
     pub gate_fn: GateFn,
     pub module_ports: Vec<ModulePortAigBinding>,
+    pub module_boundaries: Vec<ModuleBoundaryAigBinding>,
     pub instances: Vec<InstanceAigBinding>,
 }
 
@@ -37,6 +39,14 @@ pub struct ModulePortAigBinding {
     pub name: String,
     pub direction: PortDirection,
     pub bits_lsb_to_msb: Vec<LabeledAigBit>,
+}
+
+/// One flattened child-module boundary bound to global AIG operands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleBoundaryAigBinding {
+    pub instance_path: String,
+    pub module_name: String,
+    pub ports: Vec<ModulePortAigBinding>,
 }
 
 /// One named Verilog bit bound to an AIG operand.
@@ -136,7 +146,16 @@ pub struct LabeledSequentialNetlistAig {
     pub sequential_gate_fn: SequentialGateFn,
     pub clock: Option<LabeledSequentialClock>,
     pub module_ports: Vec<SequentialModulePortAigBinding>,
+    pub module_boundaries: Vec<SequentialModuleBoundaryAigBinding>,
     pub instances: Vec<SequentialInstanceAigBinding>,
+}
+
+/// One flattened child-module boundary bound to sequential transition signals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequentialModuleBoundaryAigBinding {
+    pub instance_path: String,
+    pub module_name: String,
+    pub ports: Vec<SequentialModulePortAigBinding>,
 }
 
 fn substitute_state_vars_in_term(
@@ -648,6 +667,7 @@ enum ProjectionMode {
 struct GateFnProjection {
     gate_fn: GateFn,
     module_ports: Vec<ModulePortAigBinding>,
+    module_boundaries: Vec<ModuleBoundaryAigBinding>,
     instances: Vec<InstanceAigBinding>,
 }
 
@@ -668,6 +688,7 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
         dff_cells_identity,
         dff_cells_inverted,
         options,
+        &[],
         ProjectionMode::GateFnOnly,
     )
     .map(|projection| projection.gate_fn)
@@ -680,6 +701,17 @@ pub fn project_labeled_netlist_aig(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     liberty_lib: &Library,
 ) -> Result<LabeledNetlistAig, String> {
+    project_labeled_netlist_aig_with_boundaries(module, nets, interner, liberty_lib, &[])
+}
+
+/// Projects a combinational flat netlist plus retained hierarchy boundaries.
+pub fn project_labeled_netlist_aig_with_boundaries(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    module_boundaries: &[ElaboratedModuleBoundary],
+) -> Result<LabeledNetlistAig, String> {
     let empty_dff_cells = HashSet::new();
     let projection = project_gatefn_from_netlist_and_liberty_internal(
         module,
@@ -691,6 +723,7 @@ pub fn project_labeled_netlist_aig(
         &GateFnProjectOptions {
             collapse_sequential: false,
         },
+        module_boundaries,
         ProjectionMode::LabeledEval,
     )?;
     let module_name = interner
@@ -701,6 +734,7 @@ pub fn project_labeled_netlist_aig(
         module_name,
         gate_fn: projection.gate_fn,
         module_ports: projection.module_ports,
+        module_boundaries: projection.module_boundaries,
         instances: projection.instances,
     })
 }
@@ -734,6 +768,25 @@ pub fn project_labeled_sequential_netlist_aig(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     liberty_lib: &Library,
     clock_port_name_hint: Option<&str>,
+) -> Result<LabeledSequentialNetlistAig, String> {
+    project_labeled_sequential_netlist_aig_with_boundaries(
+        module,
+        nets,
+        interner,
+        liberty_lib,
+        clock_port_name_hint,
+        &[],
+    )
+}
+
+/// Projects an FF-only flat netlist plus retained hierarchy boundaries.
+pub fn project_labeled_sequential_netlist_aig_with_boundaries(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    clock_port_name_hint: Option<&str>,
+    module_boundaries: &[ElaboratedModuleBoundary],
 ) -> Result<LabeledSequentialNetlistAig, String> {
     let normalized =
         NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
@@ -1022,6 +1075,13 @@ pub fn project_labeled_sequential_netlist_aig(
         &resolved,
         selected_clock.as_ref(),
     )?;
+    let module_boundaries = build_sequential_module_boundary_aig_bindings(
+        &normalized,
+        module_boundaries,
+        interner,
+        &resolved,
+        selected_clock.as_ref(),
+    )?;
     let mut external_outputs = Vec::new();
     for port in &normalized.ports {
         if port.direction != PortDirection::Output {
@@ -1093,6 +1153,7 @@ pub fn project_labeled_sequential_netlist_aig(
         sequential_gate_fn,
         clock: labeled_clock,
         module_ports,
+        module_boundaries,
         instances,
     })
 }
@@ -1724,6 +1785,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     dff_cells_identity: &HashSet<String>,
     dff_cells_inverted: &HashSet<String>,
     options: &GateFnProjectOptions,
+    module_boundaries: &[ElaboratedModuleBoundary],
     projection_mode: ProjectionMode,
 ) -> Result<GateFnProjection, String> {
     let normalized =
@@ -1949,6 +2011,11 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     } else {
         Vec::new()
     };
+    let module_boundaries = if projection_mode == ProjectionMode::LabeledEval {
+        build_module_boundary_aig_bindings(&normalized, module_boundaries, interner, &resolved)?
+    } else {
+        Vec::new()
+    };
     for port in &normalized.ports {
         if port.direction == PortDirection::Output {
             let net_name = interner.resolve(port.name).unwrap();
@@ -1994,6 +2061,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     Ok(GateFnProjection {
         gate_fn,
         module_ports,
+        module_boundaries,
         instances,
     })
 }
@@ -2179,6 +2247,113 @@ fn build_module_port_aig_bindings(
                 name,
                 direction: port.direction.clone(),
                 bits_lsb_to_msb,
+            })
+        })
+        .collect()
+}
+
+fn build_module_boundary_aig_bindings(
+    normalized: &NormalizedNetlistModule<'_>,
+    boundaries: &[ElaboratedModuleBoundary],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    resolved: &ResolvedBitValues,
+) -> Result<Vec<ModuleBoundaryAigBinding>, String> {
+    boundaries
+        .iter()
+        .map(|boundary| {
+            let ports = boundary
+                .ports
+                .iter()
+                .map(|port| {
+                    let name = interner
+                        .resolve(port.name)
+                        .ok_or_else(|| "could not resolve module boundary port name".to_string())?
+                        .to_string();
+                    let mut bits_lsb_to_msb = Vec::new();
+                    for raw_bit_idx in normalized.net_bits(port.net) {
+                        let canonical_bit_idx = normalized.canonical_bit(*raw_bit_idx);
+                        let Some(operand) = resolved.resolve_bit(canonical_bit_idx) else {
+                            // Child output bundles may contain intentionally
+                            // unused undriven bits. They have no signal to
+                            // report, so keep only resolved boundary bits.
+                            continue;
+                        };
+                        bits_lsb_to_msb.push(LabeledAigBit {
+                            bit_number: normalized.bit(*raw_bit_idx).bit_number,
+                            operand,
+                        });
+                    }
+                    Ok(ModulePortAigBinding {
+                        name,
+                        direction: port.direction.clone(),
+                        bits_lsb_to_msb,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(ModuleBoundaryAigBinding {
+                instance_path: boundary.instance_path.clone(),
+                module_name: boundary.module_name.clone(),
+                ports,
+            })
+        })
+        .collect()
+}
+
+fn build_sequential_module_boundary_aig_bindings(
+    normalized: &NormalizedNetlistModule<'_>,
+    boundaries: &[ElaboratedModuleBoundary],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    resolved: &ResolvedBitValues,
+    selected_clock: Option<&SelectedSequentialClock>,
+) -> Result<Vec<SequentialModuleBoundaryAigBinding>, String> {
+    boundaries
+        .iter()
+        .map(|boundary| {
+            let ports = boundary
+                .ports
+                .iter()
+                .map(|port| {
+                    let name = interner
+                        .resolve(port.name)
+                        .ok_or_else(|| "could not resolve module boundary port name".to_string())?
+                        .to_string();
+                    let mut bits_lsb_to_msb = Vec::new();
+                    for raw_bit_idx in normalized.net_bits(port.net) {
+                        let canonical_bit_idx = normalized.canonical_bit(*raw_bit_idx);
+                        let signal = if selected_clock
+                            .is_some_and(|clock| clock.bit == canonical_bit_idx)
+                        {
+                            if port.direction != PortDirection::Input {
+                                return Err(format!(
+                                    "selected clock crosses non-input module boundary port '{}'",
+                                    name
+                                ));
+                            }
+                            SequentialAigSignal::Clock
+                        } else {
+                            let Some(operand) = resolved.resolve_bit(canonical_bit_idx) else {
+                                // Child output bundles may contain
+                                // intentionally unused undriven bits.
+                                continue;
+                            };
+                            SequentialAigSignal::Operand(operand)
+                        };
+                        bits_lsb_to_msb.push(LabeledSequentialAigBit {
+                            bit_number: normalized.bit(*raw_bit_idx).bit_number,
+                            signal,
+                        });
+                    }
+                    Ok(SequentialModulePortAigBinding {
+                        name,
+                        direction: port.direction.clone(),
+                        bits_lsb_to_msb,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(SequentialModuleBoundaryAigBinding {
+                instance_path: boundary.instance_path.clone(),
+                module_name: boundary.module_name.clone(),
+                ports,
             })
         })
         .collect()
