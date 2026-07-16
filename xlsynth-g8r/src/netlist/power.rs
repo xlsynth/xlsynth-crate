@@ -9,13 +9,17 @@ use xlsynth::IrBits;
 
 use crate::aig::{AigNode, AigOperand, GateFn};
 use crate::aig_sim::gate_simd;
-use crate::aig_sim::sequential::{SequentialPowerPhase, SequentialTrace, build_power_phase_inputs};
+use crate::aig_sim::sequential::{
+    SequentialSettledPhase, SequentialTrace, build_clocked_phase_inputs,
+};
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::lut::{
     RawLutQuery, RawLutQueryDiagnostics, evaluate_power_lut, evaluate_timing_lut_raw,
     power_lut_input_transition_range, timing_lut_input_transition_range,
 };
-use crate::liberty_model::{Library, Pin, PinDirection, PowerTransition, StringId, TimingTable};
+use crate::liberty_model::{
+    Cell, Library, Pin, PinDirection, PowerTransition, StringId, TimingTable,
+};
 use crate::liberty_proto::TimingTableKind;
 use crate::netlist::gatefn_from_netlist::{
     LabeledNetlistAig, LabeledSequentialNetlistAig, PinConnection, SequentialAigSignal,
@@ -224,9 +228,12 @@ enum ResolvedSource {
 struct InstanceTopology {
     cell: usize,
     liberty_pins: Vec<usize>,
+    pin_index_by_name: HashMap<String, usize>,
     pin_sources: Vec<ResolvedSource>,
     output_signals: Vec<Option<SignalId>>,
     is_sequential: bool,
+    has_when_conditions: bool,
+    state_aliases: Vec<StateAlias>,
 }
 
 #[derive(Debug)]
@@ -269,6 +276,7 @@ struct ObservedActivity {
 struct SampleState {
     signal_values: Vec<bool>,
     pin_values: Vec<Vec<bool>>,
+    state_alias_values: Vec<Vec<bool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +306,14 @@ struct PowerInstance {
     cell_type: String,
     pins: Vec<PowerPin>,
     is_sequential: bool,
+    state_signal: Option<PowerSignal>,
+}
+
+#[derive(Clone, Debug)]
+struct StateAlias {
+    name: String,
+    signal: PowerSignal,
+    complemented: bool,
 }
 
 #[derive(Debug)]
@@ -353,6 +369,7 @@ fn combinational_power_view(model: &LabeledNetlistAig) -> PowerModelView<'_> {
                     })
                     .collect(),
                 is_sequential: false,
+                state_signal: None,
             })
             .collect(),
     }
@@ -365,8 +382,32 @@ fn sequential_power_signal(signal: SequentialAigSignal) -> PowerSignal {
     }
 }
 
-fn sequential_power_view(model: &LabeledSequentialNetlistAig) -> PowerModelView<'_> {
-    PowerModelView {
+fn sequential_power_view(
+    model: &LabeledSequentialNetlistAig,
+) -> Result<PowerModelView<'_>, String> {
+    let instances = model
+        .instances
+        .iter()
+        .map(|instance| {
+            Ok(PowerInstance {
+                instance_name: instance.instance_name.clone(),
+                cell_type: instance.cell_type.clone(),
+                pins: instance
+                    .pins
+                    .iter()
+                    .map(|pin| PowerPin {
+                        pin_name: pin.pin_name.clone(),
+                        direction: pin.direction,
+                        signal: sequential_power_signal(pin.signal),
+                        connection: pin.connection.clone(),
+                    })
+                    .collect(),
+                is_sequential: instance.state_register_index.is_some(),
+                state_signal: sequential_state_signal(model, instance)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(PowerModelView {
         module_name: &model.module_name,
         gate_fn: &model.sequential_gate_fn.transition,
         module_ports: model
@@ -385,26 +426,48 @@ fn sequential_power_view(model: &LabeledSequentialNetlistAig) -> PowerModelView<
                     .collect(),
             })
             .collect(),
-        instances: model
-            .instances
-            .iter()
-            .map(|instance| PowerInstance {
-                instance_name: instance.instance_name.clone(),
-                cell_type: instance.cell_type.clone(),
-                pins: instance
-                    .pins
-                    .iter()
-                    .map(|pin| PowerPin {
-                        pin_name: pin.pin_name.clone(),
-                        direction: pin.direction,
-                        signal: sequential_power_signal(pin.signal),
-                        connection: pin.connection.clone(),
-                    })
-                    .collect(),
-                is_sequential: instance.state_register_index.is_some(),
-            })
-            .collect(),
+        instances,
+    })
+}
+
+/// Returns the mapped logical Q signal for one projected FF instance.
+fn sequential_state_signal(
+    model: &LabeledSequentialNetlistAig,
+    instance: &crate::netlist::gatefn_from_netlist::SequentialInstanceAigBinding,
+) -> Result<Option<PowerSignal>, String> {
+    let Some(register_index) = instance.state_register_index else {
+        return Ok(None);
+    };
+    let register = model
+        .sequential_gate_fn
+        .registers
+        .get(register_index)
+        .ok_or_else(|| {
+            format!(
+                "instance '{}' references missing state register {}",
+                instance.instance_name, register_index
+            )
+        })?;
+    let q_input = model
+        .sequential_gate_fn
+        .transition
+        .inputs
+        .get(register.q.index())
+        .ok_or_else(|| {
+            format!(
+                "instance '{}' register Q input {} is out of range",
+                instance.instance_name,
+                register.q.index()
+            )
+        })?;
+    if q_input.get_bit_count() != 1 {
+        return Err(format!(
+            "instance '{}' state register has width {}; expected scalar mapped FF state",
+            instance.instance_name,
+            q_input.get_bit_count()
+        ));
     }
+    Ok(Some(PowerSignal::Operand(*q_input.bit_vector.get_lsb(0))))
 }
 
 /// Estimates dynamic energy from consecutive ordered input samples.
@@ -539,7 +602,7 @@ pub fn analyze_sequential_dynamic_power(
         // away. No sequential arc remains whose polarity could depend on it.
         None => true,
     };
-    let phase_inputs = build_power_phase_inputs(&model.sequential_gate_fn, trace)?;
+    let phase_inputs = build_clocked_phase_inputs(&model.sequential_gate_fn, trace)?;
     let batch_inputs = phase_inputs
         .iter()
         .map(|phase| phase.transition_inputs.clone())
@@ -547,7 +610,7 @@ pub fn analyze_sequential_dynamic_power(
     let clock_values = phase_inputs
         .iter()
         .map(|phase| {
-            Some(if phase.phase == SequentialPowerPhase::PostActiveEdge {
+            Some(if phase.phase == SequentialSettledPhase::PostActiveEdge {
                 active_clock_level
             } else {
                 !active_clock_level
@@ -556,18 +619,16 @@ pub fn analyze_sequential_dynamic_power(
         .collect::<Vec<_>>();
     let transition_kinds = phase_inputs
         .windows(2)
-        .enumerate()
-        .map(|(index, pair)| match pair[1].phase {
-            SequentialPowerPhase::PreEdge => PowerTransitionKind::InputSettle,
-            SequentialPowerPhase::PostActiveEdge => PowerTransitionKind::ActiveClockEdge {
-                clock_rise: !clock_values[index].expect("sequential power clocks are present")
-                    && clock_values[index + 1].expect("sequential power clocks are present"),
+        .map(|pair| match pair[1].phase {
+            SequentialSettledPhase::PreEdge => PowerTransitionKind::InputSettle,
+            SequentialSettledPhase::PostActiveEdge => PowerTransitionKind::ActiveClockEdge {
+                clock_rise: active_clock_level,
             },
-            SequentialPowerPhase::PostInactiveEdge => PowerTransitionKind::InactiveClockEdge,
+            SequentialSettledPhase::PostInactiveEdge => PowerTransitionKind::InactiveClockEdge,
         })
         .collect::<Vec<_>>();
 
-    let power_model = sequential_power_view(model);
+    let power_model = sequential_power_view(model)?;
     let mut topology = build_topology(&power_model, library, options.module_output_load)?;
     let mut activity = observe_ordered_activity(
         &power_model,
@@ -918,12 +979,32 @@ fn build_topology(
                 }
             }
         }
+        let pin_index_by_name = instance
+            .pins
+            .iter()
+            .enumerate()
+            .map(|(index, pin)| (pin.pin_name.clone(), index))
+            .collect();
+        let has_when_conditions = liberty_pins.iter().any(|liberty_pin_index| {
+            let pin = &library.cells[cell].pins[*liberty_pin_index];
+            pin.timing_arcs
+                .iter()
+                .any(|arc| !library.resolve_string(&arc.when).is_empty())
+                || pin
+                    .internal_power
+                    .iter()
+                    .any(|group| !library.resolve_string(&group.when).is_empty())
+        });
+        let state_aliases = state_aliases_for_instance(instance, &library.cells[cell])?;
         instances.push(InstanceTopology {
             cell,
             liberty_pins,
+            pin_index_by_name,
             pin_sources: vec![ResolvedSource::Literal; instance.pins.len()],
             output_signals,
             is_sequential: instance.is_sequential,
+            has_when_conditions,
+            state_aliases,
         });
     }
 
@@ -987,6 +1068,45 @@ fn build_topology(
         instances,
         instance_order,
     })
+}
+
+/// Builds Liberty state-variable aliases backed by the mapped register Q.
+fn state_aliases_for_instance(
+    instance: &PowerInstance,
+    cell: &Cell,
+) -> Result<Vec<StateAlias>, String> {
+    let Some(signal) = instance.state_signal else {
+        return Ok(Vec::new());
+    };
+    let [sequential] = cell.sequential.as_slice() else {
+        return Err(format!(
+            "instance '{}' has mapped state but Liberty cell '{}' does not have exactly one sequential entry",
+            instance.instance_name, instance.cell_type
+        ));
+    };
+    if sequential.state_var.is_empty() {
+        return Err(format!(
+            "instance '{}' has mapped state but Liberty cell '{}' has no state_var",
+            instance.instance_name, instance.cell_type
+        ));
+    }
+    let mut aliases = vec![StateAlias {
+        name: sequential.state_var.clone(),
+        signal,
+        complemented: false,
+    }];
+    if let Some(name) = sequential
+        .complementary_state_var
+        .as_ref()
+        .filter(|name| !name.is_empty())
+    {
+        aliases.push(StateAlias {
+            name: name.clone(),
+            signal,
+            complemented: true,
+        });
+    }
+    Ok(aliases)
 }
 
 fn add_signal(
@@ -1272,9 +1392,24 @@ fn sample_state(
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let state_alias_values = topology
+        .instances
+        .iter()
+        .map(|instance| {
+            instance
+                .state_aliases
+                .iter()
+                .map(|alias| {
+                    signal_value(alias.signal)
+                        .map(|value| if alias.complemented { !value } else { value })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(SampleState {
         signal_values,
         pin_values,
+        state_alias_values,
     })
 }
 
@@ -1306,17 +1441,30 @@ fn observe_transition(
     }
     for (instance_index, instance) in model.instances.iter().enumerate() {
         let topology_instance = &topology.instances[instance_index];
-        let cell = &library.cells[topology_instance.cell];
-        let pin_index_by_name: HashMap<_, _> = instance
-            .pins
-            .iter()
-            .enumerate()
-            .map(|(index, pin)| (pin.pin_name.as_str(), index))
-            .collect();
         let previous_values = &previous.pin_values[instance_index];
         let current_values = &current.pin_values[instance_index];
-        let previous_map = pin_value_map(instance, previous_values);
-        let current_map = pin_value_map(instance, current_values);
+        if previous_values == current_values {
+            continue;
+        }
+        let cell = &library.cells[topology_instance.cell];
+        let previous_state_alias_values = &previous.state_alias_values[instance_index];
+        let current_state_alias_values = &current.state_alias_values[instance_index];
+        let previous_map = topology_instance.has_when_conditions.then(|| {
+            pin_value_map(
+                instance,
+                topology_instance,
+                previous_values,
+                previous_state_alias_values,
+            )
+        });
+        let current_map = topology_instance.has_when_conditions.then(|| {
+            pin_value_map(
+                instance,
+                topology_instance,
+                current_values,
+                current_state_alias_values,
+            )
+        });
         for (output_pin_index, output_signal) in
             topology_instance.output_signals.iter().copied().enumerate()
         {
@@ -1343,7 +1491,9 @@ fn observe_transition(
                     continue;
                 }
                 let related_name = library.resolve_string(&arc.related_pin);
-                let Some(&related_pin_index) = pin_index_by_name.get(related_name) else {
+                let Some(&related_pin_index) =
+                    topology_instance.pin_index_by_name.get(related_name)
+                else {
                     return Err(format!(
                         "instance '{}' output '{}' timing arc names unknown related pin '{}'",
                         instance.instance_name,
@@ -1362,8 +1512,8 @@ fn observe_transition(
                     || !when_is_true(
                         library,
                         arc.when,
-                        &previous_map,
-                        &current_map,
+                        previous_map.as_ref(),
+                        current_map.as_ref(),
                         condition_cache,
                         &mut result.diagnostics,
                     )?
@@ -1420,8 +1570,8 @@ fn observe_transition(
                 if !when_is_true(
                     library,
                     group.when,
-                    &previous_map,
-                    &current_map,
+                    previous_map.as_ref(),
+                    current_map.as_ref(),
                     condition_cache,
                     &mut result.diagnostics,
                 )? {
@@ -1435,7 +1585,11 @@ fn observe_transition(
                         .iter()
                         .map(|related| {
                             let name = library.resolve_string(related);
-                            pin_index_by_name.get(name).copied().ok_or_else(|| {
+                            topology_instance
+                                .pin_index_by_name
+                                .get(name)
+                                .copied()
+                                .ok_or_else(|| {
                                 format!(
                                     "instance '{}' internal_power on '{}' names unknown related pin '{}'",
                                     instance.instance_name,
@@ -1482,20 +1636,33 @@ fn observe_transition(
     Ok(())
 }
 
-fn pin_value_map(instance: &PowerInstance, values: &[bool]) -> HashMap<String, bool> {
-    instance
+fn pin_value_map(
+    instance: &PowerInstance,
+    topology_instance: &InstanceTopology,
+    values: &[bool],
+    state_alias_values: &[bool],
+) -> HashMap<String, bool> {
+    let mut result: HashMap<_, _> = instance
         .pins
         .iter()
         .zip(values)
         .map(|(pin, value)| (pin.pin_name.clone(), *value))
-        .collect()
+        .collect();
+    result.extend(
+        topology_instance
+            .state_aliases
+            .iter()
+            .zip(state_alias_values)
+            .map(|(alias, value)| (alias.name.clone(), *value)),
+    );
+    result
 }
 
 fn when_is_true(
     library: &Library,
     when: StringId,
-    previous_values: &HashMap<String, bool>,
-    current_values: &HashMap<String, bool>,
+    previous_values: Option<&HashMap<String, bool>>,
+    current_values: Option<&HashMap<String, bool>>,
     cache: &mut HashMap<String, Term>,
     diagnostics: &mut GvDynamicPowerDiagnostics,
 ) -> Result<bool, String> {
@@ -1503,6 +1670,12 @@ fn when_is_true(
     if expression.is_empty() {
         return Ok(true);
     }
+    let previous_values = previous_values.ok_or_else(|| {
+        format!("internal error: no previous pin values for Liberty when '{expression}'")
+    })?;
+    let current_values = current_values.ok_or_else(|| {
+        format!("internal error: no current pin values for Liberty when '{expression}'")
+    })?;
     if !cache.contains_key(expression) {
         let parsed = parse_formula(expression)
             .map_err(|error| format!("failed to parse Liberty when '{expression}': {error}"))?;

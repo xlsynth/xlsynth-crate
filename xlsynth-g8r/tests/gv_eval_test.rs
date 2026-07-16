@@ -719,6 +719,214 @@ endmodule
 }
 
 #[test]
+fn sequential_dynamic_power_accepts_clock_hint_without_registers() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+units: {
+  time_unit: "ns"
+  capacitance_unit: "pf"
+  voltage_unit: "V"
+}
+nominal_voltage: 1.0
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
+  pins: {
+    name_string_id: 2
+    direction: OUTPUT
+    function_string_id: 1
+    timing_arcs: {
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_POSITIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: {
+        kind: TIMING_TABLE_KIND_RISE_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+      tables: {
+        kind: TIMING_TABLE_KIND_FALL_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+    }
+  }
+}
+lut_shapes: {}
+interned_strings: ["A", "Y"]
+"#;
+    let netlist = r#"
+module top (clk, a, y);
+  input clk;
+  input a;
+  output y;
+  BUF out_buf (.A(a), .Y(y));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions {
+            clock_port_name: Some("clk".to_string()),
+            ..GvEvalOptions::default()
+        },
+    )
+    .expect("load clock-hinted combinational model");
+    assert!(model.sequential_gate_fn.registers.is_empty());
+    assert_eq!(
+        model.clock.as_ref().and_then(|clock| clock.active_edge),
+        None
+    );
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
+        .expect("reload clock-hinted power library");
+    let trace = model
+        .simulate_ir_values(
+            &[
+                IrValue::parse_typed("(bits[1]:0)").unwrap(),
+                IrValue::parse_typed("(bits[1]:1)").unwrap(),
+            ],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate clock-hinted combinational trace");
+    let report = model
+        .analyze_dynamic_power(
+            &library,
+            &trace,
+            GvSequentialDynamicPowerOptions {
+                primary_input_transition: 1.0,
+                clock_transition: 2.0,
+                module_output_load: 0.0,
+                cycle_time: Some(5.0),
+            },
+        )
+        .expect("analyze clock-hinted combinational power");
+
+    assert_eq!(report.active_edge, None);
+    assert_eq!(report.clock_port_name, "clk");
+    assert_eq!(report.cycle_count, 2);
+    assert_eq!(report.phase_transition_count, 5);
+    assert_eq!(report.clock_transition_count, 4);
+    assert_eq!(report.primary_input_switching_energy, 0.5);
+    assert_eq!(report.clock_switching_energy, 0.0);
+    assert_eq!(report.total_dynamic_energy, 0.5);
+    assert_eq!(report.instances.len(), 1);
+}
+
+#[test]
+fn sequential_dynamic_power_resolves_state_aliases_in_when_conditions() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+units: {
+  time_unit: "ns"
+  capacitance_unit: "pf"
+  voltage_unit: "V"
+}
+nominal_voltage: 1.0
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: {
+    name_string_id: 2
+    direction: INPUT
+    is_clocking_pin: true
+    internal_power: {
+      when_string_id: 4
+      tables: {
+        transition: POWER_TRANSITION_RISE
+        shape_id: 1
+        values: 1.0
+      }
+      tables: {
+        transition: POWER_TRANSITION_FALL
+        shape_id: 1
+        values: 1.0
+      }
+    }
+  }
+  pins: {
+    name_string_id: 3
+    direction: OUTPUT
+    function_string_id: 4
+    timing_arcs: {
+      related_pin_string_id: 2
+      timing_type: TIMING_TYPE_RISING_EDGE
+      when_string_id: 5
+      tables: {
+        kind: TIMING_TABLE_KIND_RISE_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+      tables: {
+        kind: TIMING_TABLE_KIND_FALL_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+    }
+  }
+  sequential: {
+    state_var: "IQ"
+    complementary_state_var: "IQN"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+lut_shapes: {}
+interned_strings: ["D", "CLK", "Q", "IQ", "IQN"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load state-conditioned sequential power model");
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
+        .expect("reload state-conditioned power library");
+    let trace = model
+        .simulate_ir_values(
+            &[
+                IrValue::parse_typed("(bits[1]:1)").unwrap(),
+                IrValue::parse_typed("(bits[1]:0)").unwrap(),
+            ],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate state-conditioned sequential power trace");
+    let report = model
+        .analyze_dynamic_power(
+            &library,
+            &trace,
+            GvSequentialDynamicPowerOptions {
+                primary_input_transition: 1.0,
+                clock_transition: 1.0,
+                module_output_load: 0.0,
+                cycle_time: None,
+            },
+        )
+        .expect("analyze state-conditioned sequential power");
+
+    assert_eq!(report.cell_internal_energy, 2.0);
+    assert_eq!(report.diagnostics.unattributed_output_transition_count, 1);
+    assert_eq!(
+        report.instances[0].outputs[0]
+            .slew_histogram
+            .rise
+            .iter()
+            .sum::<f64>(),
+        1.0
+    );
+}
+
+#[test]
 fn sequential_cells_are_rejected_before_projection() {
     let liberty = r#"
 format_magic: 5496997758177923663

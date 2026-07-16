@@ -5,7 +5,8 @@ use std::{io::Write, path::Path};
 use clap::ArgMatches;
 use xlsynth::{IrValue, parse_ir_values_file};
 use xlsynth_g8r::netlist::gv_eval::{
-    GvEvalOptions, load_labeled_netlist_aig, load_labeled_sequential_netlist_aig,
+    GvEvalOptions, load_labeled_netlist_aig_with_liberty,
+    load_labeled_sequential_netlist_aig_with_liberty,
 };
 use xlsynth_g8r::netlist::io::load_liberty_from_path;
 use xlsynth_g8r::netlist::power::{GvDynamicPowerOptions, GvSequentialDynamicPowerOptions};
@@ -83,13 +84,11 @@ fn handle_combinational_gv_eval(matches: &ArgMatches) -> Result<(), String> {
     let liberty_proto_path = matches
         .get_one::<String>("liberty_proto")
         .expect("liberty_proto is required by clap");
+    let library = load_liberty_from_path(Path::new(liberty_proto_path))
+        .map_err(|error| format!("failed to load Liberty model: {error:#}"))?;
     let options = gv_eval_options(matches);
-    let model = load_labeled_netlist_aig(
-        Path::new(netlist_path),
-        Path::new(liberty_proto_path),
-        &options,
-    )
-    .map_err(|e| format!("failed to build evaluation model: {e:#}"))?;
+    let model = load_labeled_netlist_aig_with_liberty(Path::new(netlist_path), &library, &options)
+        .map_err(|e| format!("failed to build evaluation model: {e:#}"))?;
 
     let samples = if let Some(arg_tuple) = matches.get_one::<String>("arg_tuple") {
         vec![
@@ -126,8 +125,6 @@ fn handle_combinational_gv_eval(matches: &ArgMatches) -> Result<(), String> {
         write_toggle_activity_json(toggle_output_json, &activity)?;
     }
     if let Some(power_output_json) = matches.get_one::<String>("power_output_json") {
-        let library = load_liberty_from_path(Path::new(liberty_proto_path))
-            .map_err(|e| format!("failed to reload Liberty power model: {e:#}"))?;
         let power_options = dynamic_power_options(matches);
         let report = model.analyze_dynamic_power(&library, &samples, power_options)?;
         write_power_json(power_output_json, &report)?;
@@ -142,9 +139,11 @@ fn handle_sequential_gv_eval(matches: &ArgMatches) -> Result<(), String> {
     let liberty_proto_path = matches
         .get_one::<String>("liberty_proto")
         .expect("liberty_proto is required by clap");
-    let model = load_labeled_sequential_netlist_aig(
+    let library = load_liberty_from_path(Path::new(liberty_proto_path))
+        .map_err(|error| format!("failed to load Liberty model: {error:#}"))?;
+    let model = load_labeled_sequential_netlist_aig_with_liberty(
         Path::new(netlist_path),
-        Path::new(liberty_proto_path),
+        &library,
         &gv_eval_options(matches),
     )
     .map_err(|error| format!("failed to build sequential evaluation model: {error:#}"))?;
@@ -187,8 +186,6 @@ fn handle_sequential_gv_eval(matches: &ArgMatches) -> Result<(), String> {
         write_toggle_activity_json(path, &activity)?;
     }
     if let Some(path) = matches.get_one::<String>("power_output_json") {
-        let library = load_liberty_from_path(Path::new(liberty_proto_path))
-            .map_err(|e| format!("failed to reload Liberty power model: {e:#}"))?;
         let report = model.analyze_dynamic_power(
             &library,
             &trace,
