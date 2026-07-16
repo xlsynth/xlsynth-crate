@@ -912,6 +912,15 @@ fn project_gatefn_from_netlist_and_liberty_internal(
             gb.add_output(net_name.to_string(), bv);
         }
     }
+    let has_visible_outputs = normalized
+        .ports
+        .iter()
+        .any(|port| port.direction == PortDirection::Output);
+    if projection_mode == ProjectionMode::LabeledEval && !has_visible_outputs {
+        // GateBuilder requires an endpoint while it constructs the graph, but
+        // an outputless gv-eval module has no visible values to expose.
+        gb.add_output("__gv_eval_empty".to_string(), AigBitVector::zeros(0));
+    }
     let instances = if projection_mode == ProjectionMode::LabeledEval {
         labeled_instances
             .into_iter()
@@ -928,8 +937,12 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     } else {
         Vec::new()
     };
+    let mut gate_fn = gb.build();
+    if projection_mode == ProjectionMode::LabeledEval && !has_visible_outputs {
+        gate_fn.outputs.clear();
+    }
     Ok(GateFnProjection {
-        gate_fn: gb.build(),
+        gate_fn,
         module_ports,
         instances,
     })
@@ -953,17 +966,6 @@ fn validate_labeled_eval_module(
             module_name
         ));
     }
-    if !normalized
-        .ports
-        .iter()
-        .any(|port| port.direction == PortDirection::Output)
-    {
-        return Err(format!(
-            "module '{}' has no output ports to evaluate",
-            module_name
-        ));
-    }
-
     for inst in &normalized.instances {
         let type_name = interner.resolve(inst.type_name).unwrap_or("<unknown>");
         let instance_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");

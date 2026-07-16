@@ -22,3 +22,4 @@ pub mod stages;
 pub mod stats;
 pub mod techmap;
 pub mod utils;
+pub mod yosys;

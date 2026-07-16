@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::{IrBits, IrValue};
-use xlsynth_g8r::liberty_model::PinDirection;
+use xlsynth_g8r::liberty::parser::{
+    LibertyPayloadOptions, parse_liberty_files_with_payload_options,
+};
+use xlsynth_g8r::liberty_model::{Library, PinDirection};
 use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, GvToggleAggregate, PinConnection, TogglePinConnection, load_labeled_netlist_aig,
+    load_labeled_netlist_aig_with_liberty,
 };
 use xlsynth_g8r::netlist::parse::PortDirection;
 use xlsynth_g8r::netlist::power::{GV_POWER_SLEW_BUCKET_COUNT, GvDynamicPowerOptions};
@@ -18,6 +22,79 @@ fn write_fixture(
     std::fs::write(&netlist_path, netlist).expect("write netlist");
     std::fs::write(&liberty_path, liberty).expect("write liberty");
     (temp_dir, netlist_path, liberty_path)
+}
+
+#[test]
+fn labeled_netlist_aig_accepts_an_in_memory_liberty_model() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let netlist_path = temp_dir.path().join("design.gv");
+    let liberty_path = temp_dir.path().join("cells.lib");
+    std::fs::write(
+        &netlist_path,
+        r#"
+module top (a, y);
+  input a;
+  output y;
+  INV u_inv (.A(a), .Y(y));
+endmodule
+"#,
+    )
+    .expect("write netlist");
+    std::fs::write(
+        &liberty_path,
+        r#"
+library (test) {
+  cell (INV) {
+    area: 1;
+    pin (A) { direction: input; }
+    pin (Y) { direction: output; function: "!A"; }
+  }
+}
+"#,
+    )
+    .expect("write liberty");
+    let liberty = parse_liberty_files_with_payload_options(
+        &[&liberty_path],
+        LibertyPayloadOptions {
+            include_timing: false,
+            include_power: false,
+        },
+    )
+    .expect("parse liberty");
+    let model =
+        load_labeled_netlist_aig_with_liberty(&netlist_path, &liberty, &GvEvalOptions::default())
+            .expect("build labeled evaluation model");
+
+    let output = model
+        .evaluate_bits(&[IrBits::make_ubits(1, 1).unwrap()])
+        .expect("evaluate inverter");
+    assert_eq!(output, vec![IrBits::make_ubits(1, 0).unwrap()]);
+}
+
+#[test]
+fn labeled_netlist_aig_accepts_a_module_without_outputs() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let netlist_path = temp_dir.path().join("design.gv");
+    std::fs::write(
+        &netlist_path,
+        r#"
+module top (a);
+  input a;
+endmodule
+"#,
+    )
+    .expect("write netlist");
+    let model = load_labeled_netlist_aig_with_liberty(
+        &netlist_path,
+        &Library::default(),
+        &GvEvalOptions::default(),
+    )
+    .expect("build outputless evaluation model");
+
+    let outputs = model
+        .evaluate_bits(&[IrBits::make_ubits(1, 1).unwrap()])
+        .expect("evaluate outputless module");
+    assert!(outputs.is_empty());
 }
 
 #[test]
