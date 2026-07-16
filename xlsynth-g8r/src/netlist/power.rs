@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sample-driven dynamic-power estimation for labeled combinational netlists.
+//! Sample-driven dynamic-power estimation for labeled gate-level netlists.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
 use xlsynth::IrBits;
 
-use crate::aig::{AigNode, AigOperand};
+use crate::aig::{AigNode, AigOperand, GateFn};
 use crate::aig_sim::gate_simd;
+use crate::aig_sim::sequential::{SequentialPowerPhase, SequentialTrace, build_power_phase_inputs};
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::lut::{
     RawLutQuery, RawLutQueryDiagnostics, evaluate_power_lut, evaluate_timing_lut_raw,
@@ -16,7 +17,10 @@ use crate::liberty::lut::{
 };
 use crate::liberty_model::{Library, Pin, PinDirection, PowerTransition, StringId, TimingTable};
 use crate::liberty_proto::TimingTableKind;
-use crate::netlist::gatefn_from_netlist::{LabeledNetlistAig, PinConnection};
+use crate::netlist::gatefn_from_netlist::{
+    LabeledNetlistAig, LabeledSequentialNetlistAig, PinConnection, SequentialAigSignal,
+    SequentialClockEdge,
+};
 use crate::netlist::parse::PortDirection;
 
 /// The fixed number of logarithmic slew buckets used by dynamic-power analysis.
@@ -34,6 +38,26 @@ impl Default for GvDynamicPowerOptions {
     fn default() -> Self {
         Self {
             primary_input_transition: 0.01,
+            module_output_load: 0.0,
+            cycle_time: None,
+        }
+    }
+}
+
+/// Numeric assumptions for sequential sample-driven dynamic-power analysis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GvSequentialDynamicPowerOptions {
+    pub primary_input_transition: f64,
+    pub clock_transition: f64,
+    pub module_output_load: f64,
+    pub cycle_time: Option<f64>,
+}
+
+impl Default for GvSequentialDynamicPowerOptions {
+    fn default() -> Self {
+        Self {
+            primary_input_transition: 0.01,
+            clock_transition: 0.01,
             module_output_load: 0.0,
             cycle_time: None,
         }
@@ -125,6 +149,40 @@ pub struct GvDynamicPowerReport {
     pub diagnostics: GvDynamicPowerDiagnostics,
 }
 
+/// Sequential dynamic energy over settled input, clock, and state phases.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GvSequentialDynamicPowerReport {
+    pub module_name: String,
+    pub clock_port_name: String,
+    pub active_edge: Option<SequentialClockEdge>,
+    pub cycle_count: usize,
+    pub phase_transition_count: usize,
+    pub input_settle_transition_count: usize,
+    pub active_edge_transition_count: usize,
+    pub inactive_edge_transition_count: usize,
+    pub clock_transition_count: usize,
+    pub nominal_voltage: f64,
+    pub primary_input_transition: f64,
+    pub clock_transition: f64,
+    pub module_output_load: f64,
+    pub cycle_time: Option<f64>,
+    pub time_unit: String,
+    pub capacitance_unit: String,
+    pub voltage_unit: String,
+    pub energy_unit: String,
+    pub power_unit: Option<String>,
+    pub slew_buckets: Vec<GvSlewBucket>,
+    pub primary_input_switching_energy: f64,
+    pub clock_switching_energy: f64,
+    pub cell_internal_energy: f64,
+    pub cell_output_switching_energy: f64,
+    pub total_dynamic_energy: f64,
+    pub average_energy_per_cycle: f64,
+    pub average_dynamic_power: Option<f64>,
+    pub instances: Vec<GvInstancePowerReport>,
+    pub diagnostics: GvDynamicPowerDiagnostics,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct EdgeValue<T> {
     rise: T,
@@ -137,12 +195,19 @@ struct SignalId(usize);
 #[derive(Clone, Copy, Debug)]
 enum SignalOwner {
     ModuleInput,
+    Clock,
     CellOutput { instance: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PowerSignal {
+    Operand(AigOperand),
+    Clock,
 }
 
 #[derive(Clone, Debug)]
 struct Signal {
-    operand: AigOperand,
+    source: PowerSignal,
     owner: SignalOwner,
     load: EdgeValue<f64>,
     edges: EdgeValue<usize>,
@@ -161,6 +226,7 @@ struct InstanceTopology {
     liberty_pins: Vec<usize>,
     pin_sources: Vec<ResolvedSource>,
     output_signals: Vec<Option<SignalId>>,
+    is_sequential: bool,
 }
 
 #[derive(Debug)]
@@ -205,6 +271,142 @@ struct SampleState {
     pin_values: Vec<Vec<bool>>,
 }
 
+#[derive(Clone, Debug)]
+struct PowerPortBit {
+    bit_number: u32,
+    signal: PowerSignal,
+}
+
+#[derive(Clone, Debug)]
+struct PowerPort {
+    name: String,
+    direction: PortDirection,
+    bits_lsb_to_msb: Vec<PowerPortBit>,
+}
+
+#[derive(Clone, Debug)]
+struct PowerPin {
+    pin_name: String,
+    direction: PinDirection,
+    signal: PowerSignal,
+    connection: PinConnection,
+}
+
+#[derive(Clone, Debug)]
+struct PowerInstance {
+    instance_name: String,
+    cell_type: String,
+    pins: Vec<PowerPin>,
+    is_sequential: bool,
+}
+
+#[derive(Debug)]
+struct PowerModelView<'a> {
+    module_name: &'a str,
+    gate_fn: &'a GateFn,
+    module_ports: Vec<PowerPort>,
+    instances: Vec<PowerInstance>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PowerTransitionKind {
+    Combinational,
+    InputSettle,
+    ActiveClockEdge { clock_rise: bool },
+    InactiveClockEdge,
+}
+
+fn combinational_power_view(model: &LabeledNetlistAig) -> PowerModelView<'_> {
+    PowerModelView {
+        module_name: &model.module_name,
+        gate_fn: &model.gate_fn,
+        module_ports: model
+            .module_ports
+            .iter()
+            .map(|port| PowerPort {
+                name: port.name.clone(),
+                direction: port.direction.clone(),
+                bits_lsb_to_msb: port
+                    .bits_lsb_to_msb
+                    .iter()
+                    .map(|bit| PowerPortBit {
+                        bit_number: bit.bit_number,
+                        signal: PowerSignal::Operand(bit.operand),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        instances: model
+            .instances
+            .iter()
+            .map(|instance| PowerInstance {
+                instance_name: instance.instance_name.clone(),
+                cell_type: instance.cell_type.clone(),
+                pins: instance
+                    .pins
+                    .iter()
+                    .map(|pin| PowerPin {
+                        pin_name: pin.pin_name.clone(),
+                        direction: pin.direction,
+                        signal: PowerSignal::Operand(pin.operand),
+                        connection: pin.connection.clone(),
+                    })
+                    .collect(),
+                is_sequential: false,
+            })
+            .collect(),
+    }
+}
+
+fn sequential_power_signal(signal: SequentialAigSignal) -> PowerSignal {
+    match signal {
+        SequentialAigSignal::Operand(operand) => PowerSignal::Operand(operand),
+        SequentialAigSignal::Clock => PowerSignal::Clock,
+    }
+}
+
+fn sequential_power_view(model: &LabeledSequentialNetlistAig) -> PowerModelView<'_> {
+    PowerModelView {
+        module_name: &model.module_name,
+        gate_fn: &model.sequential_gate_fn.transition,
+        module_ports: model
+            .module_ports
+            .iter()
+            .map(|port| PowerPort {
+                name: port.name.clone(),
+                direction: port.direction.clone(),
+                bits_lsb_to_msb: port
+                    .bits_lsb_to_msb
+                    .iter()
+                    .map(|bit| PowerPortBit {
+                        bit_number: bit.bit_number,
+                        signal: sequential_power_signal(bit.signal),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        instances: model
+            .instances
+            .iter()
+            .map(|instance| PowerInstance {
+                instance_name: instance.instance_name.clone(),
+                cell_type: instance.cell_type.clone(),
+                pins: instance
+                    .pins
+                    .iter()
+                    .map(|pin| PowerPin {
+                        pin_name: pin.pin_name.clone(),
+                        direction: pin.direction,
+                        signal: sequential_power_signal(pin.signal),
+                        connection: pin.connection.clone(),
+                    })
+                    .collect(),
+                is_sequential: instance.state_register_index.is_some(),
+            })
+            .collect(),
+    }
+}
+
 /// Estimates dynamic energy from consecutive ordered input samples.
 pub fn analyze_dynamic_power_bits(
     model: &LabeledNetlistAig,
@@ -216,35 +418,36 @@ pub fn analyze_dynamic_power_bits(
     if batch_inputs.len() < 2 {
         return Err("dynamic-power analysis requires at least two ordered samples".to_string());
     }
-    let nominal_voltage = library.nominal_voltage.ok_or_else(|| {
-        "Liberty proto has no nominal_voltage; switching energy requires a voltage".to_string()
-    })?;
-    if !nominal_voltage.is_finite() || nominal_voltage <= 0.0 {
-        return Err(format!(
-            "Liberty nominal_voltage must be finite and positive; got {nominal_voltage}"
-        ));
-    }
+    let nominal_voltage = nominal_voltage(library)?;
 
-    let mut topology = build_topology(model, library, options.module_output_load)?;
-    let mut activity = observe_activity(model, library, batch_inputs, &mut topology)?;
-    let buckets = build_slew_buckets(library, options.primary_input_transition)?;
-    seed_primary_input_histograms(&mut topology, &buckets, options.primary_input_transition);
+    let power_model = combinational_power_view(model);
+    let mut topology = build_topology(&power_model, library, options.module_output_load)?;
+    let mut activity = observe_activity(&power_model, library, batch_inputs, &mut topology)?;
+    let buckets = build_slew_buckets(library, &[options.primary_input_transition])?;
+    seed_root_histograms(
+        &mut topology,
+        &buckets,
+        options.primary_input_transition,
+        options.primary_input_transition,
+    );
     let mut lut_diagnostics = RawLutQueryDiagnostics::default();
     propagate_slew_histograms(
-        model,
+        &power_model,
         library,
         &mut topology,
         &activity,
         &buckets,
         options.primary_input_transition,
+        options.primary_input_transition,
         &mut lut_diagnostics,
     )?;
     let (instance_internal, pin_internal) = calculate_internal_energy(
-        model,
+        &power_model,
         library,
         &topology,
         &activity,
         &buckets,
+        options.primary_input_transition,
         options.primary_input_transition,
         &mut lut_diagnostics,
     )?;
@@ -254,11 +457,12 @@ pub fn analyze_dynamic_power_bits(
     let voltage_squared = nominal_voltage * nominal_voltage;
     let mut primary_input_switching_energy = 0.0;
     let mut cell_output_switching_energy = 0.0;
-    let mut instance_switching = vec![0.0; model.instances.len()];
+    let mut instance_switching = vec![0.0; power_model.instances.len()];
     for signal in &topology.signals {
         let energy = switching_energy(signal, voltage_squared);
         match signal.owner {
             SignalOwner::ModuleInput => primary_input_switching_energy += energy,
+            SignalOwner::Clock => unreachable!("combinational power view has no clock signal"),
             SignalOwner::CellOutput { instance } => {
                 cell_output_switching_energy += energy;
                 instance_switching[instance] += energy;
@@ -274,7 +478,305 @@ pub fn analyze_dynamic_power_bits(
         .cycle_time
         .map(|cycle_time| total_dynamic_energy / (transition_count as f64 * cycle_time));
 
-    let instances = model
+    let instances = build_instance_reports(
+        &power_model,
+        library,
+        &topology,
+        &instance_internal,
+        &pin_internal,
+        &instance_switching,
+        voltage_squared,
+    );
+    let (time_unit, capacitance_unit, voltage_unit, energy_unit, power_unit) =
+        report_units(library, options.cycle_time);
+    Ok(GvDynamicPowerReport {
+        module_name: power_model.module_name.to_string(),
+        sample_count: batch_inputs.len(),
+        transition_count,
+        nominal_voltage,
+        primary_input_transition: options.primary_input_transition,
+        module_output_load: options.module_output_load,
+        cycle_time: options.cycle_time,
+        time_unit,
+        capacitance_unit,
+        voltage_unit,
+        energy_unit,
+        power_unit,
+        slew_buckets: buckets,
+        primary_input_switching_energy,
+        cell_internal_energy,
+        cell_output_switching_energy,
+        total_dynamic_energy,
+        average_energy_per_transition,
+        average_dynamic_power,
+        instances,
+        diagnostics: activity.diagnostics,
+    })
+}
+
+/// Estimates sequential dynamic energy from one settled trace.
+///
+/// The trace is expanded into inactive-input, active-edge, and inactive-edge
+/// phases. Functional output sampling remains the responsibility of the
+/// sequential evaluator; this routine only uses the extra phases for no-glitch
+/// power accounting.
+pub fn analyze_sequential_dynamic_power(
+    model: &LabeledSequentialNetlistAig,
+    library: &Library,
+    trace: &SequentialTrace,
+    options: GvSequentialDynamicPowerOptions,
+) -> Result<GvSequentialDynamicPowerReport, String> {
+    validate_sequential_options(options)?;
+    let nominal_voltage = nominal_voltage(library)?;
+    let clock = model
+        .clock
+        .as_ref()
+        .ok_or_else(|| "sequential dynamic-power analysis requires a selected clock".to_string())?;
+    let active_clock_level = match clock.active_edge {
+        Some(SequentialClockEdge::Rising) => true,
+        Some(SequentialClockEdge::Falling) => false,
+        // A clock hint can preserve a clock after every FF was optimized
+        // away. No sequential arc remains whose polarity could depend on it.
+        None => true,
+    };
+    let phase_inputs = build_power_phase_inputs(&model.sequential_gate_fn, trace)?;
+    let batch_inputs = phase_inputs
+        .iter()
+        .map(|phase| phase.transition_inputs.clone())
+        .collect::<Vec<_>>();
+    let clock_values = phase_inputs
+        .iter()
+        .map(|phase| {
+            Some(if phase.phase == SequentialPowerPhase::PostActiveEdge {
+                active_clock_level
+            } else {
+                !active_clock_level
+            })
+        })
+        .collect::<Vec<_>>();
+    let transition_kinds = phase_inputs
+        .windows(2)
+        .enumerate()
+        .map(|(index, pair)| match pair[1].phase {
+            SequentialPowerPhase::PreEdge => PowerTransitionKind::InputSettle,
+            SequentialPowerPhase::PostActiveEdge => PowerTransitionKind::ActiveClockEdge {
+                clock_rise: !clock_values[index].expect("sequential power clocks are present")
+                    && clock_values[index + 1].expect("sequential power clocks are present"),
+            },
+            SequentialPowerPhase::PostInactiveEdge => PowerTransitionKind::InactiveClockEdge,
+        })
+        .collect::<Vec<_>>();
+
+    let power_model = sequential_power_view(model);
+    let mut topology = build_topology(&power_model, library, options.module_output_load)?;
+    let mut activity = observe_ordered_activity(
+        &power_model,
+        library,
+        &batch_inputs,
+        &clock_values,
+        &transition_kinds,
+        &mut topology,
+    )?;
+    let buckets = build_slew_buckets(
+        library,
+        &[options.primary_input_transition, options.clock_transition],
+    )?;
+    seed_root_histograms(
+        &mut topology,
+        &buckets,
+        options.primary_input_transition,
+        options.clock_transition,
+    );
+    let mut lut_diagnostics = RawLutQueryDiagnostics::default();
+    propagate_slew_histograms(
+        &power_model,
+        library,
+        &mut topology,
+        &activity,
+        &buckets,
+        options.primary_input_transition,
+        options.clock_transition,
+        &mut lut_diagnostics,
+    )?;
+    let (instance_internal, pin_internal) = calculate_internal_energy(
+        &power_model,
+        library,
+        &topology,
+        &activity,
+        &buckets,
+        options.primary_input_transition,
+        options.clock_transition,
+        &mut lut_diagnostics,
+    )?;
+    activity.diagnostics.lut_below_min_clamp_count = lut_diagnostics.below_min_clamp_count;
+    activity.diagnostics.lut_above_max_clamp_count = lut_diagnostics.above_max_clamp_count;
+
+    let voltage_squared = nominal_voltage * nominal_voltage;
+    let mut primary_input_switching_energy = 0.0;
+    let mut clock_switching_energy = 0.0;
+    let mut cell_output_switching_energy = 0.0;
+    let mut instance_switching = vec![0.0; power_model.instances.len()];
+    for signal in &topology.signals {
+        let energy = switching_energy(signal, voltage_squared);
+        match signal.owner {
+            SignalOwner::ModuleInput => primary_input_switching_energy += energy,
+            SignalOwner::Clock => clock_switching_energy += energy,
+            SignalOwner::CellOutput { instance } => {
+                cell_output_switching_energy += energy;
+                instance_switching[instance] += energy;
+            }
+        }
+    }
+    let cell_internal_energy: f64 = instance_internal.iter().sum();
+    let total_dynamic_energy = primary_input_switching_energy
+        + clock_switching_energy
+        + cell_output_switching_energy
+        + cell_internal_energy;
+    let cycle_count = phase_inputs.len() / 3;
+    let phase_transition_count = phase_inputs.len() - 1;
+    let instances = build_instance_reports(
+        &power_model,
+        library,
+        &topology,
+        &instance_internal,
+        &pin_internal,
+        &instance_switching,
+        voltage_squared,
+    );
+    let (time_unit, capacitance_unit, voltage_unit, energy_unit, power_unit) =
+        report_units(library, options.cycle_time);
+    Ok(GvSequentialDynamicPowerReport {
+        module_name: power_model.module_name.to_string(),
+        clock_port_name: clock.port_name.clone(),
+        active_edge: clock.active_edge,
+        cycle_count,
+        phase_transition_count,
+        input_settle_transition_count: cycle_count - 1,
+        active_edge_transition_count: cycle_count,
+        inactive_edge_transition_count: cycle_count,
+        clock_transition_count: cycle_count.saturating_mul(2),
+        nominal_voltage,
+        primary_input_transition: options.primary_input_transition,
+        clock_transition: options.clock_transition,
+        module_output_load: options.module_output_load,
+        cycle_time: options.cycle_time,
+        time_unit,
+        capacitance_unit,
+        voltage_unit,
+        energy_unit,
+        power_unit,
+        slew_buckets: buckets,
+        primary_input_switching_energy,
+        clock_switching_energy,
+        cell_internal_energy,
+        cell_output_switching_energy,
+        total_dynamic_energy,
+        average_energy_per_cycle: total_dynamic_energy / cycle_count as f64,
+        average_dynamic_power: options
+            .cycle_time
+            .map(|cycle_time| total_dynamic_energy / (cycle_count as f64 * cycle_time)),
+        instances,
+        diagnostics: activity.diagnostics,
+    })
+}
+
+fn validate_options(options: GvDynamicPowerOptions) -> Result<(), String> {
+    validate_common_options(
+        options.primary_input_transition,
+        options.module_output_load,
+        options.cycle_time,
+    )
+}
+
+fn validate_sequential_options(options: GvSequentialDynamicPowerOptions) -> Result<(), String> {
+    validate_common_options(
+        options.primary_input_transition,
+        options.module_output_load,
+        options.cycle_time,
+    )?;
+    if !options.clock_transition.is_finite() || options.clock_transition <= 0.0 {
+        return Err(format!(
+            "clock_transition must be finite and positive; got {}",
+            options.clock_transition
+        ));
+    }
+    Ok(())
+}
+
+fn validate_common_options(
+    primary_input_transition: f64,
+    module_output_load: f64,
+    cycle_time: Option<f64>,
+) -> Result<(), String> {
+    if !primary_input_transition.is_finite() || primary_input_transition <= 0.0 {
+        return Err(format!(
+            "primary_input_transition must be finite and positive; got {}",
+            primary_input_transition
+        ));
+    }
+    if !module_output_load.is_finite() || module_output_load < 0.0 {
+        return Err(format!(
+            "module_output_load must be finite and non-negative; got {}",
+            module_output_load
+        ));
+    }
+    if let Some(cycle_time) = cycle_time
+        && (!cycle_time.is_finite() || cycle_time <= 0.0)
+    {
+        return Err(format!(
+            "cycle_time must be finite and positive; got {cycle_time}"
+        ));
+    }
+    Ok(())
+}
+
+fn nominal_voltage(library: &Library) -> Result<f64, String> {
+    let nominal_voltage = library.nominal_voltage.ok_or_else(|| {
+        "Liberty proto has no nominal_voltage; switching energy requires a voltage".to_string()
+    })?;
+    if !nominal_voltage.is_finite() || nominal_voltage <= 0.0 {
+        return Err(format!(
+            "Liberty nominal_voltage must be finite and positive; got {nominal_voltage}"
+        ));
+    }
+    Ok(nominal_voltage)
+}
+
+fn report_units(
+    library: &Library,
+    cycle_time: Option<f64>,
+) -> (String, String, String, String, Option<String>) {
+    let units = library.units.as_ref();
+    let time_unit = units
+        .map(|value| value.time_unit.clone())
+        .unwrap_or_default();
+    let capacitance_unit = units
+        .map(|value| value.capacitance_unit.clone())
+        .unwrap_or_default();
+    let voltage_unit = units
+        .map(|value| value.voltage_unit.clone())
+        .unwrap_or_default();
+    let energy_unit = format!("{}^2*{}", voltage_unit, capacitance_unit);
+    let power_unit = cycle_time.map(|_| format!("{energy_unit}/{time_unit}"));
+    (
+        time_unit,
+        capacitance_unit,
+        voltage_unit,
+        energy_unit,
+        power_unit,
+    )
+}
+
+fn build_instance_reports(
+    model: &PowerModelView<'_>,
+    library: &Library,
+    topology: &PowerTopology,
+    instance_internal: &[f64],
+    pin_internal: &[Vec<f64>],
+    instance_switching: &[f64],
+    voltage_squared: f64,
+) -> Vec<GvInstancePowerReport> {
+    model
         .instances
         .iter()
         .enumerate()
@@ -324,72 +826,11 @@ pub fn analyze_dynamic_power_bits(
                 outputs,
             }
         })
-        .collect();
-
-    let units = library.units.as_ref();
-    let time_unit = units
-        .map(|value| value.time_unit.clone())
-        .unwrap_or_default();
-    let capacitance_unit = units
-        .map(|value| value.capacitance_unit.clone())
-        .unwrap_or_default();
-    let voltage_unit = units
-        .map(|value| value.voltage_unit.clone())
-        .unwrap_or_default();
-    let energy_unit = format!("{}^2*{}", voltage_unit, capacitance_unit);
-    let power_unit = options
-        .cycle_time
-        .map(|_| format!("{energy_unit}/{time_unit}"));
-    Ok(GvDynamicPowerReport {
-        module_name: model.module_name.clone(),
-        sample_count: batch_inputs.len(),
-        transition_count,
-        nominal_voltage,
-        primary_input_transition: options.primary_input_transition,
-        module_output_load: options.module_output_load,
-        cycle_time: options.cycle_time,
-        time_unit,
-        capacitance_unit,
-        voltage_unit,
-        energy_unit,
-        power_unit,
-        slew_buckets: buckets,
-        primary_input_switching_energy,
-        cell_internal_energy,
-        cell_output_switching_energy,
-        total_dynamic_energy,
-        average_energy_per_transition,
-        average_dynamic_power,
-        instances,
-        diagnostics: activity.diagnostics,
-    })
-}
-
-fn validate_options(options: GvDynamicPowerOptions) -> Result<(), String> {
-    if !options.primary_input_transition.is_finite() || options.primary_input_transition <= 0.0 {
-        return Err(format!(
-            "primary_input_transition must be finite and positive; got {}",
-            options.primary_input_transition
-        ));
-    }
-    if !options.module_output_load.is_finite() || options.module_output_load < 0.0 {
-        return Err(format!(
-            "module_output_load must be finite and non-negative; got {}",
-            options.module_output_load
-        ));
-    }
-    if let Some(cycle_time) = options.cycle_time
-        && (!cycle_time.is_finite() || cycle_time <= 0.0)
-    {
-        return Err(format!(
-            "cycle_time must be finite and positive; got {cycle_time}"
-        ));
-    }
-    Ok(())
+        .collect()
 }
 
 fn build_topology(
-    model: &LabeledNetlistAig,
+    model: &PowerModelView<'_>,
     library: &Library,
     module_output_load: f64,
 ) -> Result<PowerTopology, String> {
@@ -402,6 +843,7 @@ fn build_topology(
     let mut signals = Vec::new();
     let mut net_drivers = HashMap::new();
     let mut operand_sources: HashMap<AigOperand, Vec<SignalId>> = HashMap::new();
+    let mut clock_signal = None;
     for port in &model.module_ports {
         if port.direction != PortDirection::Input {
             continue;
@@ -410,8 +852,13 @@ fn build_topology(
             let signal_id = add_signal(
                 &mut signals,
                 &mut operand_sources,
-                bit.operand,
-                SignalOwner::ModuleInput,
+                &mut clock_signal,
+                bit.signal,
+                if matches!(bit.signal, PowerSignal::Clock) {
+                    SignalOwner::Clock
+                } else {
+                    SignalOwner::ModuleInput
+                },
             );
             insert_net_driver(
                 &mut net_drivers,
@@ -451,7 +898,8 @@ fn build_topology(
                 let signal_id = add_signal(
                     &mut signals,
                     &mut operand_sources,
-                    pin.operand,
+                    &mut clock_signal,
+                    pin.signal,
                     SignalOwner::CellOutput {
                         instance: instance_index,
                     },
@@ -475,6 +923,7 @@ fn build_topology(
             liberty_pins,
             pin_sources: vec![ResolvedSource::Literal; instance.pins.len()],
             output_signals,
+            is_sequential: instance.is_sequential,
         });
     }
 
@@ -488,9 +937,10 @@ fn build_topology(
             let source = resolve_source(
                 model,
                 &pin.connection,
-                pin.operand,
+                pin.signal,
                 &net_drivers,
                 &operand_sources,
+                clock_signal,
                 &format!(
                     "instance '{}' pin '{}'",
                     instance.instance_name, pin.pin_name
@@ -520,9 +970,10 @@ fn build_topology(
             if let ResolvedSource::Signal(signal_id) = resolve_source(
                 model,
                 &connection,
-                bit.operand,
+                bit.signal,
                 &net_drivers,
                 &operand_sources,
+                clock_signal,
                 &format!("module output '{}[{}]'", port.name, bit.bit_number),
             )? {
                 signals[signal_id.0].load.rise += module_output_load;
@@ -541,18 +992,29 @@ fn build_topology(
 fn add_signal(
     signals: &mut Vec<Signal>,
     operand_sources: &mut HashMap<AigOperand, Vec<SignalId>>,
-    operand: AigOperand,
+    clock_signal: &mut Option<SignalId>,
+    source: PowerSignal,
     owner: SignalOwner,
 ) -> SignalId {
+    if matches!(source, PowerSignal::Clock)
+        && let Some(signal_id) = clock_signal
+    {
+        return *signal_id;
+    }
     let signal_id = SignalId(signals.len());
     signals.push(Signal {
-        operand,
+        source,
         owner,
         load: EdgeValue::default(),
         edges: EdgeValue::default(),
         histogram: EdgeValue::default(),
     });
-    operand_sources.entry(operand).or_default().push(signal_id);
+    match source {
+        PowerSignal::Operand(operand) => {
+            operand_sources.entry(operand).or_default().push(signal_id);
+        }
+        PowerSignal::Clock => *clock_signal = Some(signal_id),
+    }
     signal_id
 }
 
@@ -571,11 +1033,12 @@ fn insert_net_driver(
 }
 
 fn resolve_source(
-    model: &LabeledNetlistAig,
+    model: &PowerModelView<'_>,
     connection: &PinConnection,
-    operand: AigOperand,
+    signal: PowerSignal,
     net_drivers: &HashMap<(String, u32), SignalId>,
     operand_sources: &HashMap<AigOperand, Vec<SignalId>>,
+    clock_signal: Option<SignalId>,
     context: &str,
 ) -> Result<ResolvedSource, String> {
     if matches!(
@@ -592,22 +1055,29 @@ fn resolve_source(
     {
         return Ok(ResolvedSource::Signal(*signal_id));
     }
-    match operand_sources
-        .get(&operand)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-    {
-        [signal_id] => Ok(ResolvedSource::Signal(*signal_id)),
-        [] => match model.gate_fn.get(operand.node) {
-            AigNode::Literal { .. } => Ok(ResolvedSource::Literal),
-            _ => Err(format!(
-                "{context}: no physical or AIG-equivalent signal driver was found"
-            )),
-        },
-        candidates => Err(format!(
-            "{context}: assign-alias fallback is ambiguous among {} equivalent drivers",
-            candidates.len()
-        )),
+    match signal {
+        PowerSignal::Clock => clock_signal
+            .map(ResolvedSource::Signal)
+            .ok_or_else(|| format!("{context}: selected clock has no physical driver")),
+        PowerSignal::Operand(operand) => {
+            match operand_sources
+                .get(&operand)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                [signal_id] => Ok(ResolvedSource::Signal(*signal_id)),
+                [] => match model.gate_fn.get(operand.node) {
+                    AigNode::Literal { .. } => Ok(ResolvedSource::Literal),
+                    _ => Err(format!(
+                        "{context}: no physical or AIG-equivalent signal driver was found"
+                    )),
+                },
+                candidates => Err(format!(
+                    "{context}: assign-alias fallback is ambiguous among {} equivalent drivers",
+                    candidates.len()
+                )),
+            }
+        }
     }
 }
 
@@ -641,17 +1111,25 @@ fn topological_instance_order(
     let mut outgoing = vec![BTreeSet::new(); instances.len()];
     let mut indegree = vec![0usize; instances.len()];
     for (consumer, instance) in instances.iter().enumerate() {
-        let dependencies: BTreeSet<_> = instance
-            .pin_sources
-            .iter()
-            .filter_map(|source| match source {
-                ResolvedSource::Signal(signal_id) => match signals[signal_id.0].owner {
-                    SignalOwner::CellOutput { instance } if instance != consumer => Some(instance),
-                    _ => None,
-                },
-                ResolvedSource::Literal => None,
-            })
-            .collect();
+        // FF outputs are timing roots driven by the selected clock, so their
+        // D-side fanin must not create a combinational dependency cycle.
+        let dependencies: BTreeSet<_> = if instance.is_sequential {
+            BTreeSet::new()
+        } else {
+            instance
+                .pin_sources
+                .iter()
+                .filter_map(|source| match source {
+                    ResolvedSource::Signal(signal_id) => match signals[signal_id.0].owner {
+                        SignalOwner::CellOutput { instance } if instance != consumer => {
+                            Some(instance)
+                        }
+                        _ => None,
+                    },
+                    ResolvedSource::Literal => None,
+                })
+                .collect()
+        };
         indegree[consumer] = dependencies.len();
         for dependency in dependencies {
             outgoing[dependency].insert(consumer);
@@ -679,11 +1157,45 @@ fn topological_instance_order(
 }
 
 fn observe_activity(
-    model: &LabeledNetlistAig,
+    model: &PowerModelView<'_>,
     library: &Library,
     batch_inputs: &[Vec<IrBits>],
     topology: &mut PowerTopology,
 ) -> Result<ObservedActivity, String> {
+    let clock_values = vec![None; batch_inputs.len()];
+    let transition_kinds = vec![PowerTransitionKind::Combinational; batch_inputs.len() - 1];
+    observe_ordered_activity(
+        model,
+        library,
+        batch_inputs,
+        &clock_values,
+        &transition_kinds,
+        topology,
+    )
+}
+
+fn observe_ordered_activity(
+    model: &PowerModelView<'_>,
+    library: &Library,
+    batch_inputs: &[Vec<IrBits>],
+    clock_values: &[Option<bool>],
+    transition_kinds: &[PowerTransitionKind],
+    topology: &mut PowerTopology,
+) -> Result<ObservedActivity, String> {
+    if clock_values.len() != batch_inputs.len() {
+        return Err(format!(
+            "power sample clock-value count {} does not match sample count {}",
+            clock_values.len(),
+            batch_inputs.len()
+        ));
+    }
+    if transition_kinds.len() != batch_inputs.len().saturating_sub(1) {
+        return Err(format!(
+            "power transition-kind count {} does not match sample count {}",
+            transition_kinds.len(),
+            batch_inputs.len()
+        ));
+    }
     let mut result = ObservedActivity::default();
     let mut condition_cache = HashMap::new();
     let mut previous = None;
@@ -704,7 +1216,8 @@ fn observe_activity(
             &mut nodes,
         );
         for lane in 0..chunk_len {
-            let current = sample_state(model, topology, &nodes, lane)?;
+            let sample_index = chunk_start + lane;
+            let current = sample_state(model, topology, &nodes, lane, clock_values[sample_index])?;
             if let Some(previous) = previous.as_ref() {
                 observe_transition(
                     model,
@@ -712,6 +1225,7 @@ fn observe_activity(
                     topology,
                     previous,
                     &current,
+                    transition_kinds[sample_index - 1],
                     &mut condition_cache,
                     &mut result,
                 )?;
@@ -723,10 +1237,11 @@ fn observe_activity(
 }
 
 fn sample_state(
-    model: &LabeledNetlistAig,
+    model: &PowerModelView<'_>,
     topology: &PowerTopology,
     nodes: &[gate_simd::Vec256],
     lane: usize,
+    clock_value: Option<bool>,
 ) -> Result<SampleState, String> {
     let operand_value = |operand: AigOperand| {
         nodes
@@ -735,10 +1250,16 @@ fn sample_state(
             .map(|value| value.apply_neg(operand.negated).get_lane(lane))
             .ok_or_else(|| format!("AIG node {} is out of range", operand.node.id))
     };
+    let signal_value = |signal: PowerSignal| match signal {
+        PowerSignal::Operand(operand) => operand_value(operand),
+        PowerSignal::Clock => {
+            clock_value.ok_or_else(|| "power sample omitted selected clock value".to_string())
+        }
+    };
     let signal_values = topology
         .signals
         .iter()
-        .map(|signal| operand_value(signal.operand))
+        .map(|signal| signal_value(signal.source))
         .collect::<Result<Vec<_>, _>>()?;
     let pin_values = model
         .instances
@@ -747,7 +1268,7 @@ fn sample_state(
             instance
                 .pins
                 .iter()
-                .map(|pin| operand_value(pin.operand))
+                .map(|pin| signal_value(pin.signal))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -759,11 +1280,12 @@ fn sample_state(
 
 #[allow(clippy::too_many_arguments)]
 fn observe_transition(
-    model: &LabeledNetlistAig,
+    model: &PowerModelView<'_>,
     library: &Library,
     topology: &mut PowerTopology,
     previous: &SampleState,
     current: &SampleState,
+    transition_kind: PowerTransitionKind,
     condition_cache: &mut HashMap<String, Term>,
     result: &mut ObservedActivity,
 ) -> Result<(), String> {
@@ -808,8 +1330,15 @@ fn observe_transition(
             let output_pin = &cell.pins[topology_instance.liberty_pins[output_pin_index]];
             let mut candidates = Vec::new();
             for (arc_index, arc) in output_pin.timing_arcs.iter().enumerate() {
-                if !timing_type_allows_output(arc.timing_type_str(library), output_rise)
-                    || transition_table(arc.tables.as_slice(), output_rise).is_none()
+                let timing_type = arc.timing_type_str(library);
+                let is_sequential_edge_arc =
+                    instance.is_sequential && is_sequential_edge_timing_type(timing_type);
+                if !timing_type_allows_output(
+                    timing_type,
+                    output_rise,
+                    transition_kind,
+                    instance.is_sequential,
+                ) || transition_table(arc.tables.as_slice(), output_rise).is_none()
                 {
                     continue;
                 }
@@ -824,11 +1353,12 @@ fn observe_transition(
                 };
                 let source_rise = current_values[related_pin_index];
                 if previous_values[related_pin_index] == source_rise
-                    || !timing_sense_matches(
-                        arc.timing_sense_str(library),
-                        source_rise,
-                        output_rise,
-                    )
+                    || (!is_sequential_edge_arc
+                        && !timing_sense_matches(
+                            arc.timing_sense_str(library),
+                            source_rise,
+                            output_rise,
+                        ))
                     || !when_is_true(
                         library,
                         arc.when,
@@ -845,6 +1375,11 @@ fn observe_transition(
                 else {
                     continue;
                 };
+                if is_sequential_edge_arc
+                    && !matches!(topology.signals[source.0].owner, SignalOwner::Clock)
+                {
+                    continue;
+                }
                 candidates.push(TimingCauseKey {
                     output: output_signal,
                     source,
@@ -947,10 +1482,7 @@ fn observe_transition(
     Ok(())
 }
 
-fn pin_value_map(
-    instance: &crate::netlist::gatefn_from_netlist::InstanceAigBinding,
-    values: &[bool],
-) -> HashMap<String, bool> {
+fn pin_value_map(instance: &PowerInstance, values: &[bool]) -> HashMap<String, bool> {
     instance
         .pins
         .iter()
@@ -992,7 +1524,28 @@ fn when_is_true(
     Ok(previous)
 }
 
-fn timing_type_allows_output(timing_type: &str, output_rise: bool) -> bool {
+fn is_sequential_edge_timing_type(timing_type: &str) -> bool {
+    matches!(timing_type, "rising_edge" | "falling_edge")
+}
+
+fn timing_type_allows_output(
+    timing_type: &str,
+    output_rise: bool,
+    transition_kind: PowerTransitionKind,
+    is_sequential_instance: bool,
+) -> bool {
+    if is_sequential_instance {
+        return match transition_kind {
+            PowerTransitionKind::ActiveClockEdge { clock_rise } => match timing_type {
+                "rising_edge" => clock_rise,
+                "falling_edge" => !clock_rise,
+                _ => false,
+            },
+            PowerTransitionKind::Combinational
+            | PowerTransitionKind::InputSettle
+            | PowerTransitionKind::InactiveClockEdge => false,
+        };
+    }
     match timing_type {
         "" | "combinational" => true,
         "combinational_rise" => output_rise,
@@ -1021,10 +1574,16 @@ fn transition_table(tables: &[TimingTable], rise: bool) -> Option<&TimingTable> 
 
 fn build_slew_buckets(
     library: &Library,
-    primary_input_transition: f64,
+    seed_transitions: &[f64],
 ) -> Result<Vec<GvSlewBucket>, String> {
-    let mut minimum = primary_input_transition;
-    let mut maximum = primary_input_transition;
+    let Some((&first_transition, remaining_transitions)) = seed_transitions.split_first() else {
+        return Err("dynamic-power slew buckets require at least one seed transition".to_string());
+    };
+    let mut minimum = first_transition;
+    let mut maximum = first_transition;
+    for transition in remaining_transitions {
+        include_slew_range(&mut minimum, &mut maximum, *transition, *transition);
+    }
     for cell in &library.cells {
         for pin in &cell.pins {
             for arc in &pin.timing_arcs {
@@ -1060,7 +1619,7 @@ fn build_slew_buckets(
         maximum *= 2.0;
     }
     if minimum <= 0.0 {
-        minimum = (primary_input_transition.min(maximum) / 1024.0).max(f64::MIN_POSITIVE);
+        minimum = (first_transition.min(maximum) / 1024.0).max(f64::MIN_POSITIVE);
     }
     let ratio = (maximum / minimum).powf(1.0 / GV_POWER_SLEW_BUCKET_COUNT as f64);
     let mut lower = minimum;
@@ -1091,33 +1650,68 @@ fn include_slew_range(minimum: &mut f64, maximum: &mut f64, lower: f64, upper: f
     }
 }
 
-fn seed_primary_input_histograms(
+fn seed_root_histograms(
     topology: &mut PowerTopology,
     buckets: &[GvSlewBucket],
     primary_input_transition: f64,
+    clock_transition: f64,
 ) {
-    let bucket = slew_bucket_index(buckets, primary_input_transition);
+    let primary_input_bucket = slew_bucket_index(buckets, primary_input_transition);
+    let clock_bucket = slew_bucket_index(buckets, clock_transition);
     for signal in &mut topology.signals {
         signal.histogram.rise = vec![0.0; buckets.len()];
         signal.histogram.fall = vec![0.0; buckets.len()];
-        if matches!(signal.owner, SignalOwner::ModuleInput) {
+        let bucket = match signal.owner {
+            SignalOwner::ModuleInput => Some(primary_input_bucket),
+            SignalOwner::Clock => Some(clock_bucket),
+            SignalOwner::CellOutput { .. } => None,
+        };
+        if let Some(bucket) = bucket {
             signal.histogram.rise[bucket] = signal.edges.rise as f64;
             signal.histogram.fall[bucket] = signal.edges.fall as f64;
         }
     }
 }
 
+fn signal_source_transition(
+    owner: SignalOwner,
+    primary_input_transition: f64,
+    clock_transition: f64,
+) -> f64 {
+    match owner {
+        SignalOwner::Clock => clock_transition,
+        SignalOwner::ModuleInput | SignalOwner::CellOutput { .. } => primary_input_transition,
+    }
+}
+
+fn output_fallback_transition(
+    model: &PowerModelView<'_>,
+    topology: &PowerTopology,
+    output: SignalId,
+    primary_input_transition: f64,
+    clock_transition: f64,
+) -> f64 {
+    match topology.signals[output.0].owner {
+        SignalOwner::CellOutput { instance } if model.instances[instance].is_sequential => {
+            clock_transition
+        }
+        SignalOwner::ModuleInput | SignalOwner::Clock | SignalOwner::CellOutput { .. } => {
+            primary_input_transition
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn propagate_slew_histograms(
-    model: &LabeledNetlistAig,
+    model: &PowerModelView<'_>,
     library: &Library,
     topology: &mut PowerTopology,
     activity: &ObservedActivity,
     buckets: &[GvSlewBucket],
     primary_input_transition: f64,
+    clock_transition: f64,
     diagnostics: &mut RawLutQueryDiagnostics,
 ) -> Result<(), String> {
-    let fallback_bucket = slew_bucket_index(buckets, primary_input_transition);
     let causes_by_output: BTreeMap<SignalId, Vec<_>> =
         activity
             .timing_causes
@@ -1160,6 +1754,14 @@ fn propagate_slew_histograms(
                             )
                         })?;
                     if source_total == 0.0 {
+                        let fallback_bucket = slew_bucket_index(
+                            buckets,
+                            signal_source_transition(
+                                topology.signals[cause.source.0].owner,
+                                primary_input_transition,
+                                clock_transition,
+                            ),
+                        );
                         add_histogram_mass(
                             &mut topology.signals[output_id.0],
                             cause.output_rise,
@@ -1210,6 +1812,16 @@ fn propagate_slew_histograms(
                     .copied()
                     .unwrap_or(0);
                 if missing != 0 {
+                    let fallback_bucket = slew_bucket_index(
+                        buckets,
+                        output_fallback_transition(
+                            model,
+                            topology,
+                            output_id,
+                            primary_input_transition,
+                            clock_transition,
+                        ),
+                    );
                     add_histogram_mass(
                         &mut topology.signals[output_id.0],
                         output_rise,
@@ -1222,6 +1834,16 @@ fn propagate_slew_histograms(
                 } else {
                     topology.signals[output_id.0].edges.fall
                 } as f64;
+                let fallback_bucket = slew_bucket_index(
+                    buckets,
+                    output_fallback_transition(
+                        model,
+                        topology,
+                        output_id,
+                        primary_input_transition,
+                        clock_transition,
+                    ),
+                );
                 let histogram = if output_rise {
                     &mut topology.signals[output_id.0].histogram.rise
                 } else {
@@ -1247,12 +1869,13 @@ fn add_histogram_mass(signal: &mut Signal, rise: bool, bucket: usize, mass: f64)
 
 #[allow(clippy::too_many_arguments)]
 fn calculate_internal_energy(
-    model: &LabeledNetlistAig,
+    model: &PowerModelView<'_>,
     library: &Library,
     topology: &PowerTopology,
     activity: &ObservedActivity,
     buckets: &[GvSlewBucket],
     primary_input_transition: f64,
+    clock_transition: f64,
     diagnostics: &mut RawLutQueryDiagnostics,
 ) -> Result<(Vec<f64>, Vec<Vec<f64>>), String> {
     let mut instance_energy = vec![0.0; model.instances.len()];
@@ -1320,11 +1943,16 @@ fn calculate_internal_energy(
         let table = tables[0];
         let mut average_energy = 0.0;
         if histogram_total == 0.0 {
+            let fallback_transition = signal_source_transition(
+                topology.signals[event.source.0].owner,
+                primary_input_transition,
+                clock_transition,
+            );
             average_energy = evaluate_power_lut(
                 library,
                 table,
                 RawLutQuery {
-                    input_transition: primary_input_transition,
+                    input_transition: fallback_transition,
                     output_load: owner_load,
                 },
                 diagnostics,
@@ -1379,7 +2007,7 @@ mod tests {
 
     #[test]
     fn slew_grid_has_fixed_log_buckets_with_arithmetic_midpoints() {
-        let buckets = build_slew_buckets(&Library::default(), 4.0).unwrap();
+        let buckets = build_slew_buckets(&Library::default(), &[4.0]).unwrap();
         assert_eq!(buckets.len(), GV_POWER_SLEW_BUCKET_COUNT);
         assert_eq!(buckets.first().unwrap().lower, 2.0);
         assert_eq!(buckets.last().unwrap().upper, 8.0);

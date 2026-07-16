@@ -13,7 +13,9 @@ use xlsynth_g8r::netlist::gv_eval::{
     load_sequential_netlist_gate_fn,
 };
 use xlsynth_g8r::netlist::parse::PortDirection;
-use xlsynth_g8r::netlist::power::{GV_POWER_SLEW_BUCKET_COUNT, GvDynamicPowerOptions};
+use xlsynth_g8r::netlist::power::{
+    GV_POWER_SLEW_BUCKET_COUNT, GvDynamicPowerOptions, GvSequentialDynamicPowerOptions,
+};
 
 fn write_fixture(
     netlist: &str,
@@ -511,6 +513,208 @@ endmodule
     assert_eq!(
         output_rise.instances[0].pin_internal_energy[0].internal_energy,
         10.0
+    );
+}
+
+#[test]
+fn sequential_dynamic_power_counts_clock_q_and_feedback_safe_slew() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+units: {
+  time_unit: "ns"
+  capacitance_unit: "pf"
+  voltage_unit: "V"
+}
+nominal_voltage: 1.0
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
+  pins: {
+    name_string_id: 2
+    direction: INPUT
+    is_clocking_pin: true
+    capacitance: 2.0
+    internal_power: {
+      tables: {
+        transition: POWER_TRANSITION_RISE
+        shape_id: 1
+        values: 3.0
+      }
+      tables: {
+        transition: POWER_TRANSITION_FALL
+        shape_id: 1
+        values: 4.0
+      }
+    }
+  }
+  pins: {
+    name_string_id: 3
+    direction: OUTPUT
+    function_string_id: 4
+    timing_arcs: {
+      related_pin_string_id: 2
+      timing_type: TIMING_TYPE_RISING_EDGE
+      tables: {
+        kind: TIMING_TABLE_KIND_RISE_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+      tables: {
+        kind: TIMING_TABLE_KIND_FALL_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+    }
+  }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 5 direction: INPUT capacitance: 1.0 }
+  pins: {
+    name_string_id: 6
+    direction: OUTPUT
+    function_string_id: 5
+    timing_arcs: {
+      related_pin_string_id: 5
+      timing_sense: TIMING_SENSE_POSITIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: {
+        kind: TIMING_TABLE_KIND_RISE_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+      tables: {
+        kind: TIMING_TABLE_KIND_FALL_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+    }
+  }
+}
+lut_shapes: {}
+interned_strings: ["D", "CLK", "Q", "IQ", "A", "Y"]
+"#;
+    let netlist = r#"
+module top (d, clk, q, y);
+  input d;
+  input clk;
+  output q;
+  output y;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+  BUF out_buf (.A(q), .Y(y));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load sequential power model");
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
+        .expect("reload sequential power library");
+    let trace = model
+        .simulate_ir_values(
+            &[
+                IrValue::parse_typed("(bits[1]:1)").unwrap(),
+                IrValue::parse_typed("(bits[1]:0)").unwrap(),
+            ],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate sequential power trace");
+    let options = GvSequentialDynamicPowerOptions {
+        primary_input_transition: 1.0,
+        clock_transition: 2.0,
+        module_output_load: 0.0,
+        cycle_time: Some(5.0),
+    };
+    let report = model
+        .analyze_dynamic_power(&library, &trace, options)
+        .expect("analyze sequential dynamic power");
+
+    assert_eq!(report.cycle_count, 2);
+    assert_eq!(report.phase_transition_count, 5);
+    assert_eq!(report.input_settle_transition_count, 1);
+    assert_eq!(report.active_edge_transition_count, 2);
+    assert_eq!(report.inactive_edge_transition_count, 2);
+    assert_eq!(report.clock_transition_count, 4);
+    assert_eq!(report.primary_input_switching_energy, 0.5);
+    assert_eq!(report.clock_switching_energy, 4.0);
+    assert_eq!(report.cell_output_switching_energy, 1.0);
+    assert_eq!(report.cell_internal_energy, 14.0);
+    assert_eq!(report.total_dynamic_energy, 19.5);
+    assert_eq!(report.average_energy_per_cycle, 9.75);
+    assert_eq!(report.average_dynamic_power, Some(1.95));
+    assert_eq!(report.instances[0].outputs[0].rise_count, 1);
+    assert_eq!(report.instances[0].outputs[0].fall_count, 1);
+    assert_eq!(
+        report.instances[0].outputs[0]
+            .slew_histogram
+            .rise
+            .iter()
+            .sum::<f64>(),
+        1.0
+    );
+    assert_eq!(
+        report.instances[1].outputs[0]
+            .slew_histogram
+            .fall
+            .iter()
+            .sum::<f64>(),
+        1.0
+    );
+
+    let stable_trace = model
+        .simulate_ir_values(
+            &[IrValue::parse_typed("(bits[1]:0)").unwrap()],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate stable-Q trace");
+    let stable_report = model
+        .analyze_dynamic_power(&library, &stable_trace, options)
+        .expect("analyze stable-Q sequential dynamic power");
+    assert_eq!(stable_report.cycle_count, 1);
+    assert_eq!(stable_report.clock_transition_count, 2);
+    assert_eq!(stable_report.primary_input_switching_energy, 0.0);
+    assert_eq!(stable_report.clock_switching_energy, 2.0);
+    assert_eq!(stable_report.cell_output_switching_energy, 0.0);
+    assert_eq!(stable_report.cell_internal_energy, 7.0);
+    assert_eq!(stable_report.total_dynamic_energy, 9.0);
+
+    let falling_liberty = liberty
+        .replace("TIMING_TYPE_RISING_EDGE", "TIMING_TYPE_FALLING_EDGE")
+        .replace(r#"clock_expr: "CLK""#, r#"clock_expr: "!CLK""#);
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, &falling_liberty);
+    let falling_model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load falling-edge sequential power model");
+    let falling_library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
+        .expect("reload falling-edge power library");
+    let falling_trace = falling_model
+        .simulate_ir_values(
+            &[IrValue::parse_typed("(bits[1]:1)").unwrap()],
+            SequentialState::all_zeros(&falling_model.sequential_gate_fn),
+        )
+        .expect("simulate falling-edge trace");
+    let falling_report = falling_model
+        .analyze_dynamic_power(&falling_library, &falling_trace, options)
+        .expect("analyze falling-edge sequential dynamic power");
+    assert_eq!(falling_report.clock_transition_count, 2);
+    assert_eq!(falling_report.cell_output_switching_energy, 0.5);
+    assert_eq!(
+        falling_report
+            .diagnostics
+            .unattributed_output_transition_count,
+        0
     );
 }
 

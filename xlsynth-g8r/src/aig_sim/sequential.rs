@@ -180,6 +180,24 @@ pub(crate) struct SequentialToggleActivityWithAllNodeCounts {
     pub per_node_toggles: Vec<usize>,
 }
 
+/// Settled phase represented by one sequential power sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SequentialPowerPhase {
+    /// Clock is inactive and current-cycle external inputs are settled.
+    PreEdge,
+    /// Clock is active and the newly committed Q values are settled.
+    PostActiveEdge,
+    /// Clock has returned inactive without changing data or Q values.
+    PostInactiveEdge,
+}
+
+/// One transition-AIG input vector and its settled sequential power phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SequentialPowerPhaseInput {
+    pub transition_inputs: Vec<IrBits>,
+    pub phase: SequentialPowerPhase,
+}
+
 /// Simulates one input record per cycle and commits register D after each
 /// cycle.
 pub fn simulate(
@@ -345,6 +363,46 @@ fn build_toggle_phase_transition_inputs(
             &trace.external_inputs[cycle_index],
             &trace.register_inputs[cycle_index],
         )?);
+    }
+    Ok(phase_inputs)
+}
+
+/// Builds the full no-glitch phase sequence used by sequential power.
+///
+/// Each cycle contributes inactive/pre-edge, active/post-edge, and
+/// inactive/post-edge samples. The first pre-edge sample establishes the
+/// external-input baseline, so an N-cycle clocked trace has `3 * N - 1`
+/// observed phase transitions.
+pub(crate) fn build_power_phase_inputs(
+    design: &SequentialGateFn,
+    trace: &SequentialTrace,
+) -> Result<Vec<SequentialPowerPhaseInput>, String> {
+    if design.clock.is_none() {
+        return Err("sequential power analysis requires a selected clock".to_string());
+    }
+    if trace.transition_inputs.is_empty() {
+        return Err("sequential power analysis requires at least one cycle".to_string());
+    }
+    validate_trace_shape(design, trace)?;
+    let mut phase_inputs = Vec::with_capacity(trace.transition_inputs.len().saturating_mul(3));
+    for (cycle_index, pre_edge_inputs) in trace.transition_inputs.iter().enumerate() {
+        phase_inputs.push(SequentialPowerPhaseInput {
+            transition_inputs: pre_edge_inputs.clone(),
+            phase: SequentialPowerPhase::PreEdge,
+        });
+        let post_edge_inputs = bind_transition_inputs(
+            design,
+            &trace.external_inputs[cycle_index],
+            &trace.register_inputs[cycle_index],
+        )?;
+        phase_inputs.push(SequentialPowerPhaseInput {
+            transition_inputs: post_edge_inputs.clone(),
+            phase: SequentialPowerPhase::PostActiveEdge,
+        });
+        phase_inputs.push(SequentialPowerPhaseInput {
+            transition_inputs: post_edge_inputs,
+            phase: SequentialPowerPhase::PostInactiveEdge,
+        });
     }
     Ok(phase_inputs)
 }

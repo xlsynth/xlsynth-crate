@@ -398,6 +398,23 @@ xlsynth-driver gv-eval \
   --cycle-time 1.0
 ```
 
+Sequential dynamic-power analysis uses the same cycle records as sequential
+evaluation. Each cycle contributes an inactive input settle, one active clock
+edge with Q/combinational settle, and one inactive clock edge:
+
+```shell
+xlsynth-driver gv-eval \
+  --sequential \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.textproto \
+  --input-irvals /path/to/cycles.irvals \
+  --initial-state-all-zeros \
+  --power-output-json /path/to/sequential-power.json \
+  --primary-input-transition 0.01 \
+  --clock-transition 0.01 \
+  --cycle-time 1.0
+```
+
 Flags:
 
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
@@ -419,14 +436,18 @@ Flags:
   combinational input samples are required; a clocked sequential trace may
   contain one cycle.
 - `--power-output-json <PATH>`: with `--input-irvals`, write sample-driven
-  dynamic-energy JSON. At least two input samples and Liberty
-  `nominal_voltage` are required. This remains combinational-only.
+  dynamic-energy JSON. Combinational mode requires at least two input samples;
+  clocked sequential mode may use one cycle. Liberty `nominal_voltage` is
+  required.
 - `--primary-input-transition <TIME>`: input rise/fall transition time used by
   power analysis. Defaults to `0.01` in the Liberty time unit.
+- `--clock-transition <TIME>`: sequential clock rise/fall transition time.
+  Defaults to `--primary-input-transition`.
 - `--module-output-load <CAPACITANCE>`: external load added to every design
   output bit. Defaults to `0` in the Liberty capacitance unit.
-- `--cycle-time <TIME>`: optional time represented by each adjacent sample
-  pair. When present, the report includes average dynamic power.
+- `--cycle-time <TIME>`: optional time represented by each adjacent
+  combinational sample pair or each sequential cycle. When present, the report
+  includes average dynamic power.
 
 Sequential toggle reports preserve clock ports and pins as explicit
 `kind: "clock"` entries with two assumed transitions per cycle: one
@@ -434,13 +455,13 @@ inactive-to-active edge and one active-to-inactive edge. These clock
 transitions are included in labeled port and pin aggregates. The report also
 records active-edge count separately.
 
-Combinational power analysis is edge-based and intentionally excludes leakage
-and glitches. It computes internal energy from Liberty `internal_power` tables
-and switching energy as `0.5 * C * V^2` for each observed rise and fall. Net
-capacitance is the sum of connected cell-input capacitances plus the requested
-design-output load. Internal-power table values already have the Liberty
-energy scale (`voltage_unit^2 * capacitance_unit`), so `nominal_voltage` is
-applied only to the explicit capacitive-switching term.
+Power analysis is edge-based and intentionally excludes leakage and glitches.
+It computes internal energy from Liberty `internal_power` tables and switching
+energy as `0.5 * C * V^2` for each observed rise and fall. Net capacitance is
+the sum of connected cell-input capacitances plus the requested design-output
+load. Internal-power table values already have the Liberty energy scale
+(`voltage_unit^2 * capacitance_unit`), so `nominal_voltage` is applied only to
+the explicit capacitive-switching term.
 
 Rise and fall slews are propagated separately as weighted histograms. The
 analyzer creates 32 logarithmically spaced buckets over the transition range
@@ -451,6 +472,12 @@ still has total weight one. Liberty `when` expressions use the stable pin
 values from the earlier sample in each adjacent sample pair. Consequently, an
 `.irvals` record should represent one stable cycle boundary rather than an
 intra-cycle event trace.
+
+Sequential power treats FF Q outputs as clock-driven timing roots, so ordinary
+Q-to-D feedback does not form a combinational power-topology cycle. It uses
+Liberty `rising_edge` or `falling_edge` clock-to-Q arcs for Q slew, includes
+clock-pin capacitance and clock-pin `internal_power`, and reports average power
+as total energy divided by `cycle_count * cycle_time`.
 
 The toggle JSON has this structure:
 
@@ -500,10 +527,11 @@ ordering. Connections use `kind: "net"`, `kind: "literal"`, or
 `kind: "unconnected"`. Internal Liberty nodes and AIG implementation nodes are
 not included.
 
-The initial implementation supports combinational cells with scalar external
-pins. It rejects sequential cells, module `inout` ports, unconnected input
-pins, non-scalar standard-cell pin connections, and unresolved combinational
-cycles. It does not collapse or simulate sequential state.
+Combinational mode supports combinational cells with scalar external pins.
+Sequential mode supports one FF-only clock domain and rejects latches,
+asynchronous clear/preset cells, mixed clock edges, and derived clocks. Both
+modes reject module `inout` ports, unconnected input pins, non-scalar
+standard-cell pin connections, and unresolved combinational cycles.
 
 ### `aig-tech-map`: AIGER to structural gate netlist
 

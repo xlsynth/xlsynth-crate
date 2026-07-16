@@ -2155,9 +2155,8 @@ fn main() {
                     Arg::new("power_output_json")
                         .long("power-output-json")
                         .value_name("PATH")
-                        .help("Write sample-driven dynamic-power JSON; requires --input-irvals")
+                        .help("Write sample-driven dynamic-power JSON; sequential mode uses settled clock phases")
                         .requires("input_irvals")
-                        .conflicts_with("sequential")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2167,6 +2166,15 @@ fn main() {
                         .default_value("0.01")
                         .value_parser(clap::value_parser!(f64))
                         .help("Input rise/fall transition time used for primary inputs")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("clock_transition")
+                        .long("clock-transition")
+                        .value_name("TIME")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Sequential clock rise/fall transition time; defaults to --primary-input-transition")
+                        .requires("sequential")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2183,7 +2191,7 @@ fn main() {
                         .long("cycle-time")
                         .value_name("TIME")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Optional time per sample transition, enabling average-power reporting")
+                        .help("Optional time per combinational sample transition or sequential cycle")
                         .action(ArgAction::Set),
                 )
                 .group(

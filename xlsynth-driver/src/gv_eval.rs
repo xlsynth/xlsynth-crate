@@ -8,7 +8,7 @@ use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, load_labeled_netlist_aig, load_labeled_sequential_netlist_aig,
 };
 use xlsynth_g8r::netlist::io::load_liberty_from_path;
-use xlsynth_g8r::netlist::power::{GvDynamicPowerOptions, GvDynamicPowerReport};
+use xlsynth_g8r::netlist::power::{GvDynamicPowerOptions, GvSequentialDynamicPowerOptions};
 
 use crate::sequential_eval_io::{
     output_value, read_external_inputs, resolve_initial_state, write_final_state,
@@ -23,13 +23,42 @@ fn write_toggle_activity_json<T: serde::Serialize>(path: &str, activity: &T) -> 
     writeln!(writer).map_err(|e| format!("failed to finalize --toggle-output-json {}: {}", path, e))
 }
 
-fn write_power_json(path: &str, report: &GvDynamicPowerReport) -> Result<(), String> {
+fn write_power_json<T: serde::Serialize>(path: &str, report: &T) -> Result<(), String> {
     let file = std::fs::File::create(path)
         .map_err(|e| format!("failed to create --power-output-json {}: {}", path, e))?;
     let mut writer = std::io::BufWriter::new(file);
     serde_json::to_writer_pretty(&mut writer, report)
         .map_err(|e| format!("failed to write --power-output-json {}: {}", path, e))?;
     writeln!(writer).map_err(|e| format!("failed to finalize --power-output-json {}: {}", path, e))
+}
+
+fn dynamic_power_options(matches: &ArgMatches) -> GvDynamicPowerOptions {
+    GvDynamicPowerOptions {
+        primary_input_transition: *matches
+            .get_one::<f64>("primary_input_transition")
+            .expect("primary_input_transition has a default"),
+        module_output_load: *matches
+            .get_one::<f64>("module_output_load")
+            .expect("module_output_load has a default"),
+        cycle_time: matches.get_one::<f64>("cycle_time").copied(),
+    }
+}
+
+fn sequential_dynamic_power_options(matches: &ArgMatches) -> GvSequentialDynamicPowerOptions {
+    let primary_input_transition = *matches
+        .get_one::<f64>("primary_input_transition")
+        .expect("primary_input_transition has a default");
+    GvSequentialDynamicPowerOptions {
+        primary_input_transition,
+        clock_transition: matches
+            .get_one::<f64>("clock_transition")
+            .copied()
+            .unwrap_or(primary_input_transition),
+        module_output_load: *matches
+            .get_one::<f64>("module_output_load")
+            .expect("module_output_load has a default"),
+        cycle_time: matches.get_one::<f64>("cycle_time").copied(),
+    }
 }
 
 pub fn handle_gv_eval(matches: &ArgMatches) -> Result<(), String> {
@@ -99,15 +128,7 @@ fn handle_combinational_gv_eval(matches: &ArgMatches) -> Result<(), String> {
     if let Some(power_output_json) = matches.get_one::<String>("power_output_json") {
         let library = load_liberty_from_path(Path::new(liberty_proto_path))
             .map_err(|e| format!("failed to reload Liberty power model: {e:#}"))?;
-        let power_options = GvDynamicPowerOptions {
-            primary_input_transition: *matches
-                .get_one::<f64>("primary_input_transition")
-                .expect("primary_input_transition has a default"),
-            module_output_load: *matches
-                .get_one::<f64>("module_output_load")
-                .expect("module_output_load has a default"),
-            cycle_time: matches.get_one::<f64>("cycle_time").copied(),
-        };
+        let power_options = dynamic_power_options(matches);
         let report = model.analyze_dynamic_power(&library, &samples, power_options)?;
         write_power_json(power_output_json, &report)?;
     }
@@ -115,9 +136,6 @@ fn handle_combinational_gv_eval(matches: &ArgMatches) -> Result<(), String> {
 }
 
 fn handle_sequential_gv_eval(matches: &ArgMatches) -> Result<(), String> {
-    if matches.get_one::<String>("power_output_json").is_some() {
-        return Err("--power-output-json is not supported with --sequential yet".to_string());
-    }
     let netlist_path = matches
         .get_one::<String>("netlist")
         .expect("netlist is required by clap");
@@ -132,6 +150,9 @@ fn handle_sequential_gv_eval(matches: &ArgMatches) -> Result<(), String> {
     .map_err(|error| format!("failed to build sequential evaluation model: {error:#}"))?;
     let design = &model.sequential_gate_fn;
     let inputs = read_external_inputs(matches, design)?;
+    if matches.get_one::<String>("power_output_json").is_some() && design.clock.is_none() {
+        return Err("--power-output-json requires a selected clock in sequential mode".to_string());
+    }
     if matches.get_one::<String>("toggle_output_json").is_some()
         && design.clock.is_none()
         && inputs.len() < 2
@@ -164,6 +185,16 @@ fn handle_sequential_gv_eval(matches: &ArgMatches) -> Result<(), String> {
     if let Some(path) = matches.get_one::<String>("toggle_output_json") {
         let activity = model.count_toggle_activity(&trace)?;
         write_toggle_activity_json(path, &activity)?;
+    }
+    if let Some(path) = matches.get_one::<String>("power_output_json") {
+        let library = load_liberty_from_path(Path::new(liberty_proto_path))
+            .map_err(|e| format!("failed to reload Liberty power model: {e:#}"))?;
+        let report = model.analyze_dynamic_power(
+            &library,
+            &trace,
+            sequential_dynamic_power_options(matches),
+        )?;
+        write_power_json(path, &report)?;
     }
     Ok(())
 }

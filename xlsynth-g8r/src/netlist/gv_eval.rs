@@ -24,7 +24,10 @@ use crate::netlist::gatefn_from_netlist::{
 use crate::netlist::hierarchy::elaborate_hierarchy;
 use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
 use crate::netlist::parse::PortDirection;
-use crate::netlist::power::{GvDynamicPowerOptions, GvDynamicPowerReport};
+use crate::netlist::power::{
+    GvDynamicPowerOptions, GvDynamicPowerReport, GvSequentialDynamicPowerOptions,
+    GvSequentialDynamicPowerReport,
+};
 
 pub use crate::netlist::gatefn_from_netlist::{
     InstanceAigBinding, InstancePinAigBinding, LabeledAigBit, LabeledNetlistAig,
@@ -504,6 +507,16 @@ impl LabeledSequentialNetlistAig {
         initial_state: SequentialState,
     ) -> Result<SequentialTrace, String> {
         sequential::simulate(&self.sequential_gate_fn, external_inputs, initial_state)
+    }
+
+    /// Estimates sequential dynamic energy from one settled trace.
+    pub fn analyze_dynamic_power(
+        &self,
+        library: &crate::liberty_model::Library,
+        trace: &SequentialTrace,
+        options: GvSequentialDynamicPowerOptions,
+    ) -> Result<GvSequentialDynamicPowerReport, String> {
+        crate::netlist::power::analyze_sequential_dynamic_power(self, library, trace, options)
     }
 
     /// Counts native sequential and source-labeled mapped-netlist activity.
