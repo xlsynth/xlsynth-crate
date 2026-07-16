@@ -719,6 +719,115 @@ endmodule
 }
 
 #[test]
+fn sequential_dynamic_power_charges_output_owned_groups_only_on_output_transition() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+units: {
+  time_unit: "ns"
+  capacitance_unit: "pf"
+  voltage_unit: "V"
+}
+nominal_voltage: 1.0
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: {
+    name_string_id: 2
+    direction: INPUT
+    is_clocking_pin: true
+  }
+  pins: {
+    name_string_id: 3
+    direction: OUTPUT
+    function_string_id: 4
+    timing_arcs: {
+      related_pin_string_id: 2
+      timing_type: TIMING_TYPE_RISING_EDGE
+      tables: {
+        kind: TIMING_TABLE_KIND_RISE_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+      tables: {
+        kind: TIMING_TABLE_KIND_FALL_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+    }
+    internal_power: {
+      related_pin_string_ids: 2
+      tables: {
+        transition: POWER_TRANSITION_RISE
+        shape_id: 1
+        values: 10.0
+      }
+      tables: {
+        transition: POWER_TRANSITION_FALL
+        shape_id: 1
+        values: 20.0
+      }
+    }
+  }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+lut_shapes: {}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load output-owned internal-power model");
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
+        .expect("reload output-owned internal-power library");
+    let options = GvSequentialDynamicPowerOptions {
+        primary_input_transition: 1.0,
+        clock_transition: 2.0,
+        module_output_load: 0.0,
+        cycle_time: None,
+    };
+
+    let stable_trace = model
+        .simulate_ir_values(
+            &[IrValue::parse_typed("(bits[1]:0)").unwrap()],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate stable-Q trace");
+    let stable_report = model
+        .analyze_dynamic_power(&library, &stable_trace, options)
+        .expect("analyze stable-Q output-owned power");
+    assert_eq!(stable_report.clock_transition_count, 2);
+    assert_eq!(stable_report.cell_internal_energy, 0.0);
+
+    let rising_trace = model
+        .simulate_ir_values(
+            &[IrValue::parse_typed("(bits[1]:1)").unwrap()],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate rising-Q trace");
+    let rising_report = model
+        .analyze_dynamic_power(&library, &rising_trace, options)
+        .expect("analyze rising-Q output-owned power");
+    assert_eq!(rising_report.clock_transition_count, 2);
+    assert_eq!(rising_report.cell_internal_energy, 10.0);
+}
+
+#[test]
 fn sequential_dynamic_power_accepts_clock_hint_without_registers() {
     let liberty = r#"
 format_magic: 5496997758177923663

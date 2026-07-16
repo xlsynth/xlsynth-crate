@@ -1565,6 +1565,12 @@ fn observe_transition(
                     (previous_values[owner_pin_index] != current_values[owner_pin_index])
                         .then_some(current_values[owner_pin_index])
                 });
+            // Output-owned internal-power groups describe the owner's output
+            // transition. A related input or clock transition alone must not
+            // charge them while that output is stable.
+            if pin.direction == PinDirection::Output as i32 && owner_output_rise.is_none() {
+                continue;
+            }
             let mut candidates = Vec::new();
             for (group_index, group) in pin.internal_power.iter().enumerate() {
                 if !when_is_true(
