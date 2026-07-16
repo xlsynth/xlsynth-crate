@@ -82,7 +82,8 @@ pub enum PinConnection {
 }
 
 /// Active edge observed by a labeled sequential netlist clock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SequentialClockEdge {
     Rising,
     Falling,

@@ -7,9 +7,10 @@ use xlsynth_g8r::liberty::parser::{
 };
 use xlsynth_g8r::liberty_model::{Library, PinDirection};
 use xlsynth_g8r::netlist::gv_eval::{
-    GvEvalOptions, GvToggleAggregate, PinConnection, SequentialAigSignal, SequentialClockEdge,
-    TogglePinConnection, load_labeled_netlist_aig, load_labeled_netlist_aig_with_liberty,
-    load_labeled_sequential_netlist_aig, load_sequential_netlist_gate_fn,
+    GvEvalOptions, GvSequentialSignalToggleActivity, GvToggleAggregate, PinConnection,
+    SequentialAigSignal, SequentialClockEdge, TogglePinConnection, load_labeled_netlist_aig,
+    load_labeled_netlist_aig_with_liberty, load_labeled_sequential_netlist_aig,
+    load_sequential_netlist_gate_fn,
 };
 use xlsynth_g8r::netlist::parse::PortDirection;
 use xlsynth_g8r::netlist::power::{GV_POWER_SLEW_BUCKET_COUNT, GvDynamicPowerOptions};
@@ -633,6 +634,151 @@ endmodule
             vec![IrBits::make_ubits(1, 0).unwrap()],
         ]
     );
+}
+
+#[test]
+fn sequential_toggle_activity_keeps_g8r_boundaries_and_labeled_dead_pins() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
+}
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 3 direction: INPUT }
+  pins: { name_string_id: 4 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 5 direction: OUTPUT function_string_id: 6 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["A", "Y", "D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  wire dead;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+  BUF dead_buf (.A(d), .Y(dead));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load labeled sequential evaluation model");
+    let trace = model
+        .simulate_ir_values(
+            &[
+                IrValue::parse_typed("(bits[1]:1)").unwrap(),
+                IrValue::parse_typed("(bits[1]:0)").unwrap(),
+                IrValue::parse_typed("(bits[1]:1)").unwrap(),
+            ],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate labeled sequential model");
+    let activity = model
+        .count_toggle_activity(&trace)
+        .expect("count labeled sequential activity");
+
+    assert_eq!(activity.sequential.cycle_count, 3);
+    assert_eq!(activity.sequential.logic_transition_count, 2);
+    assert_eq!(activity.sequential.interface.external_input_toggles, 2);
+    assert_eq!(activity.sequential.interface.external_output_toggles, 2);
+    assert_eq!(activity.sequential.registers.aggregate_input_toggles, 2);
+    assert_eq!(activity.sequential.registers.aggregate_output_toggles, 3);
+    assert_eq!(
+        activity.labeled_aggregate,
+        GvToggleAggregate {
+            module_input_toggles: 2,
+            module_output_toggles: 2,
+            cell_input_pin_toggles: 4,
+            cell_output_pin_toggles: 4,
+        }
+    );
+    assert_eq!(
+        activity
+            .clock
+            .as_ref()
+            .map(|clock| (clock.port_name.as_str(), clock.active_edge_count)),
+        Some(("clk", 3))
+    );
+    assert_eq!(
+        activity.module_ports[1].bits_lsb_to_msb[0].activity,
+        GvSequentialSignalToggleActivity::Clock
+    );
+    assert_eq!(
+        activity.instances[0].pins[1].activity,
+        GvSequentialSignalToggleActivity::Clock
+    );
+    assert_eq!(
+        activity.instances[0].pins[2].activity,
+        GvSequentialSignalToggleActivity::Sampled {
+            toggle_count: 2,
+            toggle_rate: 1.0,
+        }
+    );
+    assert_eq!(
+        activity.instances[1].pins[1].activity,
+        GvSequentialSignalToggleActivity::Sampled {
+            toggle_count: 2,
+            toggle_rate: 1.0,
+        }
+    );
+}
+
+#[test]
+fn sequential_toggle_activity_rejects_a_one_cycle_trace() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .expect("load labeled sequential evaluation model");
+    let trace = model
+        .simulate_ir_values(
+            &[IrValue::parse_typed("(bits[1]:1)").unwrap()],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .expect("simulate one cycle");
+    let error = model
+        .count_toggle_activity(&trace)
+        .expect_err("one cycle should not have toggle activity");
+    assert!(error.contains("at least two cycles"), "{error}");
 }
 
 #[test]

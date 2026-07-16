@@ -22,6 +22,23 @@ cells: {
 interned_strings: ["A", "B", "Y", "A & B", "!A"]
 "#;
 
+const SEQUENTIAL_LIBERTY: &str = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+
 fn write_fixture(netlist: &str, liberty: &str) -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     std::fs::write(temp_dir.path().join("design.gv"), netlist).expect("write netlist");
@@ -210,6 +227,127 @@ endmodule
         &[
             "--input-irvals",
             irvals_path.to_str().unwrap(),
+            "--toggle-output-json",
+            toggle_json_path.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires at least two"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!toggle_json_path.exists());
+}
+
+#[test]
+fn gv_eval_sequential_named_inputs_final_state_and_toggles() {
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let temp_dir = write_fixture(netlist, SEQUENTIAL_LIBERTY);
+    let irvals_path = temp_dir.path().join("cycles.irvals");
+    let final_state_path = temp_dir.path().join("final-state.irvals");
+    let toggle_json_path = temp_dir.path().join("toggles.json");
+    std::fs::write(
+        &irvals_path,
+        r#"{d: bits[1]:1}
+{d: bits[1]:0}
+{d: bits[1]:1}
+"#,
+    )
+    .expect("write input cycles");
+
+    let output = run_gv_eval(
+        &temp_dir,
+        &[
+            "--sequential",
+            "--input-irvals",
+            irvals_path.to_str().unwrap(),
+            "--initial-state-all-zeros",
+            "--final-state-irvals",
+            final_state_path.to_str().unwrap(),
+            "--toggle-output-json",
+            toggle_json_path.to_str().unwrap(),
+        ],
+    );
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\nbits[1]:0\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(final_state_path).unwrap(),
+        "{state__IQ: bits[1]:1}\n"
+    );
+    compare_golden_text(
+        &std::fs::read_to_string(toggle_json_path).expect("read sequential toggle JSON"),
+        "tests/test_gv_eval_sequential_toggles.golden.txt",
+    );
+}
+
+#[test]
+fn gv_eval_sequential_accepts_file_state_and_requires_state_for_registers() {
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let temp_dir = write_fixture(netlist, SEQUENTIAL_LIBERTY);
+    let state_path = temp_dir.path().join("state.irvals");
+    std::fs::write(&state_path, "{state__IQ: bits[1]:1}\n").expect("write state");
+
+    let output = run_gv_eval(
+        &temp_dir,
+        &[
+            "--sequential",
+            "--initial-state-file",
+            state_path.to_str().unwrap(),
+            "(bits[1]:0)",
+        ],
+    );
+    assert_success(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[1]:1\n");
+
+    let missing_state = run_gv_eval(&temp_dir, &["--sequential", "(bits[1]:0)"]);
+    assert!(!missing_state.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_state.stderr)
+            .contains("requires exactly one of --initial-state-all-zeros or --initial-state-file")
+    );
+}
+
+#[test]
+fn gv_eval_sequential_toggle_output_requires_two_cycles() {
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let temp_dir = write_fixture(netlist, SEQUENTIAL_LIBERTY);
+    let irvals_path = temp_dir.path().join("one-cycle.irvals");
+    let toggle_json_path = temp_dir.path().join("toggles.json");
+    std::fs::write(&irvals_path, "(bits[1]:0)\n").expect("write one cycle");
+
+    let output = run_gv_eval(
+        &temp_dir,
+        &[
+            "--sequential",
+            "--input-irvals",
+            irvals_path.to_str().unwrap(),
+            "--initial-state-all-zeros",
             "--toggle-output-json",
             toggle_json_path.to_str().unwrap(),
         ],

@@ -299,12 +299,16 @@ When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally 
 
 `gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
 
-### `gv-eval`: evaluate a combinational gate-level netlist
+### `gv-eval`: evaluate a gate-level netlist
 
-Projects a Liberty-backed standard-cell netlist into one labeled AIG and
+Projects a Liberty-backed standard-cell netlist into a labeled AIG and
 evaluates either one typed input tuple or an ordered `.irvals` stimulus file.
-Inputs are supplied in module-header order. A module with one output prints a
-bits value; multiple outputs print a tuple in module-header order.
+By default the netlist is combinational. With `--sequential`, one input
+record represents one active clock edge and evaluation uses the labeled
+sequential transition AIG. Inputs are supplied in module-header order; in
+sequential mode the selected clock is metadata and is omitted from input
+records. A module with one output prints a bits value; multiple outputs print
+a tuple in module-header order.
 
 Structural helper-module hierarchy is elaborated recursively before projection:
 parsed submodules are flattened into the selected top module, while instances
@@ -331,9 +335,17 @@ The named form contains one named argument set per line:
 ```
 
 Named entries are bound by name, so their textual order is immaterial. Every
-record must contain each module input name exactly once; missing, unknown, and
-duplicate names are rejected. Positional and named records cannot be mixed in
-one file.
+record must contain each effective input name exactly once; in sequential mode
+that excludes the selected clock. Missing, unknown, and duplicate names are
+rejected. Positional and named records cannot be mixed in one file.
+
+Sequential mode follows `g8r-eval` cycle semantics. External outputs are
+observed from the current mapped register state, then effective D values are
+committed for the next active edge. A mapped design with registers requires
+exactly one of `--initial-state-all-zeros` or `--initial-state-file`.
+Mapped register names are internal netlist names, so a state file and
+`--final-state-irvals` use those mapped names rather than source-IR register
+names.
 
 ```shell
 xlsynth-driver gv-eval \
@@ -352,7 +364,21 @@ xlsynth-driver gv-eval \
   --toggle-output-json /path/to/activity.json
 ```
 
-The same ordered stimulus can drive dynamic-power analysis:
+Sequential evaluation uses the same toggle flag and adds native G8R
+logic/interface/register categories plus labeled mapped ports and pins:
+
+```shell
+xlsynth-driver gv-eval \
+  --sequential \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.textproto \
+  --input-irvals /path/to/cycles.irvals \
+  --initial-state-all-zeros \
+  --final-state-irvals /path/to/final-state.irvals \
+  --toggle-output-json /path/to/sequential-activity.json
+```
+
+The same ordered combinational stimulus can drive dynamic-power analysis:
 
 ```shell
 xlsynth-driver gv-eval \
@@ -371,11 +397,22 @@ Flags:
 - `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when the netlist contains multiple modules.
 - Exactly one positional typed argument tuple or `--input-irvals <PATH>` is required.
+- `--sequential`: evaluate one active clock edge per input record using the
+  labeled sequential transition graph.
+- `--clock-port-name <PORT>`: optional sequential-only top-level clock hint
+  for a mapped netlist whose FFs were optimized away.
+- `--initial-state-all-zeros`: initialize every mapped register to zero.
+- `--initial-state-file <IRVALS_PATH>`: initialize mapped registers from one
+  positional tuple or named state record.
+- `--final-state-irvals <PATH>`: in sequential mode, write final mapped
+  register state as one named record.
 - `--toggle-output-json <PATH>`: with `--input-irvals`, write source-labeled
-  toggle activity JSON. At least two input samples are required.
+  toggle activity JSON. Sequential mode additionally reports native G8R
+  logic, interface, register-D, and clocked register-Q categories. At least two
+  input samples or cycles are required.
 - `--power-output-json <PATH>`: with `--input-irvals`, write sample-driven
   dynamic-energy JSON. At least two input samples and Liberty
-  `nominal_voltage` are required.
+  `nominal_voltage` are required. This remains combinational-only.
 - `--primary-input-transition <TIME>`: input rise/fall transition time used by
   power analysis. Defaults to `0.01` in the Liberty time unit.
 - `--module-output-load <CAPACITANCE>`: external load added to every design
@@ -383,13 +420,19 @@ Flags:
 - `--cycle-time <TIME>`: optional time represented by each adjacent sample
   pair. When present, the report includes average dynamic power.
 
-Power analysis is edge-based and intentionally excludes leakage and glitches.
-It computes internal energy from Liberty `internal_power` tables and switching
-energy as `0.5 * C * V^2` for each observed rise and fall. Net capacitance is
-the sum of connected cell-input capacitances plus the requested design-output
-load. Internal-power table values already have the Liberty energy scale
-(`voltage_unit^2 * capacitance_unit`), so `nominal_voltage` is applied only to
-the explicit capacitive-switching term.
+Sequential toggle reports preserve clock ports and pins as explicit
+`kind: "clock"` entries. They are excluded from sampled numeric toggle
+aggregates because the active-edge records do not describe a complete clock
+waveform. The report records active-edge count separately for later
+clock-aware power modeling.
+
+Combinational power analysis is edge-based and intentionally excludes leakage
+and glitches. It computes internal energy from Liberty `internal_power` tables
+and switching energy as `0.5 * C * V^2` for each observed rise and fall. Net
+capacitance is the sum of connected cell-input capacitances plus the requested
+design-output load. Internal-power table values already have the Liberty
+energy scale (`voltage_unit^2 * capacitance_unit`), so `nominal_voltage` is
+applied only to the explicit capacitive-switching term.
 
 Rise and fall slews are propagated separately as weighted histograms. The
 analyzer creates 32 logarithmically spaced buckets over the transition range

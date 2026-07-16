@@ -7,7 +7,9 @@ use serde::Serialize;
 use xlsynth::IrBits;
 
 use crate::aig::SequentialGateFn;
-use crate::aig_sim::count_toggles::{NodeToggleStats, count_toggle_activity};
+use crate::aig_sim::count_toggles::{
+    NodeToggleStats, count_all_node_toggles_simd, count_toggle_activity,
+};
 use crate::aig_sim::gate_sim::{self, Collect};
 
 /// Register values in [`SequentialGateFn::registers`] order.
@@ -280,6 +282,18 @@ pub fn count_sequential_toggle_activity(
         },
         nodes: logic_activity.nodes,
     })
+}
+
+/// Counts every transition-AIG node across one validated sequential trace.
+///
+/// Labeled netlist reporting needs this broader view because an explicitly
+/// connected standard-cell pin can be outside the visible output cone.
+pub(crate) fn count_all_transition_node_toggles(
+    design: &SequentialGateFn,
+    trace: &SequentialTrace,
+) -> Result<Vec<usize>, String> {
+    validate_trace_shape(design, trace)?;
+    count_all_node_toggles_simd(&design.transition, &trace.transition_inputs)
 }
 
 fn validate_external_inputs(
