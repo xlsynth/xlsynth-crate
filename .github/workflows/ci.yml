@@ -44,7 +44,7 @@ jobs:
 
       - name: Cache xlsynth tools and DSO (lint)
         id: cache-xlsynth-tools-lint
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: xlsynth_tools
           key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-lint.outputs.tag }}-ubuntu2004-with-dso
@@ -219,7 +219,7 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Cache xlsynth tools (ubuntu matrix)
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: xlsynth_tools
           key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-matrix.outputs.tag }}-ubuntu2004
@@ -367,7 +367,7 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Cache xlsynth tools (ubuntu 20.04)
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: xlsynth_tools
           key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-2004.outputs.tag }}-ubuntu2004
@@ -551,7 +551,7 @@ jobs:
 
       - name: Cache xlsynth tools and DSO (macOS)
         id: cache-xlsynth-tools-macos
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: xlsynth_tools
           key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-macos.outputs.tag }}-arm64-with-dso
