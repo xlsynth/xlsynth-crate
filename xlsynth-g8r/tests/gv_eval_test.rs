@@ -1469,6 +1469,20 @@ endmodule
             .collect::<Vec<_>>(),
         vec!["bits[1]:0", "bits[1]:1"]
     );
+
+    let activity = model
+        .count_toggle_activity(&trace)
+        .expect("count hierarchical sequential toggle activity");
+    assert_eq!(activity.module_boundaries.len(), 1);
+    let boundary_activity = &activity.module_boundaries[0];
+    assert_eq!(boundary_activity.instance_path, "u_child");
+    assert_eq!(boundary_activity.module_name, "child");
+    assert_eq!(boundary_activity.ports, activity.module_ports);
+    let activity_json = serde_json::to_value(&activity).expect("serialize toggle activity");
+    assert_eq!(
+        activity_json["module_boundaries"][0]["instance_path"].as_str(),
+        Some("u_child")
+    );
 }
 
 #[test]

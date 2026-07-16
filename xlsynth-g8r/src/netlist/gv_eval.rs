@@ -153,6 +153,14 @@ pub struct SequentialModulePortToggleActivity {
     pub bits_lsb_to_msb: Vec<SequentialModulePortBitToggleActivity>,
 }
 
+/// Transition activity at one flattened child-module boundary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SequentialModuleBoundaryToggleActivity {
+    pub instance_path: String,
+    pub module_name: String,
+    pub ports: Vec<SequentialModulePortToggleActivity>,
+}
+
 /// Transition activity for one sequential standard-cell pin.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SequentialInstancePinToggleActivity {
@@ -194,6 +202,10 @@ pub struct GvSequentialToggleActivity {
     /// Settled labeled totals, including synthetic selected-clock transitions.
     pub labeled_aggregate: GvToggleAggregate,
     pub module_ports: Vec<SequentialModulePortToggleActivity>,
+    /// Boundary activity is informative and excluded from labeled aggregate
+    /// totals.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub module_boundaries: Vec<SequentialModuleBoundaryToggleActivity>,
     pub instances: Vec<SequentialInstanceToggleActivity>,
 }
 
@@ -511,26 +523,34 @@ impl LabeledSequentialNetlistAig {
             .module_ports
             .iter()
             .map(|port| {
-                let direction = module_port_direction(&port.direction)?;
-                let bits_lsb_to_msb = port
-                    .bits_lsb_to_msb
+                sequential_module_port_toggle_activity(
+                    port,
+                    &per_node_toggles,
+                    transition_count,
+                    clock_toggle_count,
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let module_boundaries = self
+            .module_boundaries
+            .iter()
+            .map(|boundary| {
+                let ports = boundary
+                    .ports
                     .iter()
-                    .map(|bit| {
-                        Ok(SequentialModulePortBitToggleActivity {
-                            bit_number: bit.bit_number,
-                            activity: sequential_signal_toggle_activity(
-                                bit.signal,
-                                &per_node_toggles,
-                                transition_count,
-                                clock_toggle_count,
-                            )?,
-                        })
+                    .map(|port| {
+                        sequential_module_port_toggle_activity(
+                            port,
+                            &per_node_toggles,
+                            transition_count,
+                            clock_toggle_count,
+                        )
                     })
                     .collect::<Result<Vec<_>, String>>()?;
-                Ok(SequentialModulePortToggleActivity {
-                    port_name: port.name.clone(),
-                    direction,
-                    bits_lsb_to_msb,
+                Ok(SequentialModuleBoundaryToggleActivity {
+                    instance_path: boundary.instance_path.clone(),
+                    module_name: boundary.module_name.clone(),
+                    ports,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -595,6 +615,7 @@ impl LabeledSequentialNetlistAig {
             clock,
             labeled_aggregate,
             module_ports,
+            module_boundaries,
             instances,
         })
     }
@@ -760,6 +781,36 @@ fn sequential_signal_toggle_activity(
             toggle_count: clock_toggle_count,
         }),
     }
+}
+
+/// Builds one source-labeled sequential module-port activity report.
+fn sequential_module_port_toggle_activity(
+    port: &SequentialModulePortAigBinding,
+    per_node_toggles: &[usize],
+    transition_count: usize,
+    clock_toggle_count: usize,
+) -> Result<SequentialModulePortToggleActivity, String> {
+    let direction = module_port_direction(&port.direction)?;
+    let bits_lsb_to_msb = port
+        .bits_lsb_to_msb
+        .iter()
+        .map(|bit| {
+            Ok(SequentialModulePortBitToggleActivity {
+                bit_number: bit.bit_number,
+                activity: sequential_signal_toggle_activity(
+                    bit.signal,
+                    per_node_toggles,
+                    transition_count,
+                    clock_toggle_count,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(SequentialModulePortToggleActivity {
+        port_name: port.name.clone(),
+        direction,
+        bits_lsb_to_msb,
+    })
 }
 
 fn sequential_signal_toggle_count(activity: &GvSequentialSignalToggleActivity) -> usize {
