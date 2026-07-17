@@ -180,6 +180,24 @@ pub(crate) struct SequentialToggleActivityWithAllNodeCounts {
     pub per_node_toggles: Vec<usize>,
 }
 
+/// Settled phase represented by one clocked sequential sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SequentialSettledPhase {
+    /// Clock is inactive and current-cycle external inputs are settled.
+    PreEdge,
+    /// Clock is active and the newly committed Q values are settled.
+    PostActiveEdge,
+    /// Clock has returned inactive without changing data or Q values.
+    PostInactiveEdge,
+}
+
+/// One transition-AIG input vector and its settled clocked phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SequentialSettledPhaseInput {
+    pub transition_inputs: Vec<IrBits>,
+    pub phase: SequentialSettledPhase,
+}
+
 /// Simulates one input record per cycle and commits register D after each
 /// cycle.
 pub fn simulate(
@@ -337,14 +355,49 @@ fn build_toggle_phase_transition_inputs(
     if design.clock.is_none() {
         return Ok(trace.transition_inputs.clone());
     }
-    let mut phase_inputs = Vec::with_capacity(trace.transition_inputs.len().saturating_mul(2));
+    Ok(build_clocked_phase_inputs(design, trace)?
+        .into_iter()
+        .filter(|sample| sample.phase != SequentialSettledPhase::PostInactiveEdge)
+        .map(|sample| sample.transition_inputs)
+        .collect())
+}
+
+/// Builds the full no-glitch phase sequence shared by clocked analyses.
+///
+/// Each cycle contributes inactive/pre-edge, active/post-edge, and
+/// inactive/post-edge samples. The first pre-edge sample establishes the
+/// external-input baseline, so an N-cycle clocked trace has `3 * N - 1`
+/// observed phase transitions.
+pub(crate) fn build_clocked_phase_inputs(
+    design: &SequentialGateFn,
+    trace: &SequentialTrace,
+) -> Result<Vec<SequentialSettledPhaseInput>, String> {
+    if design.clock.is_none() {
+        return Err("clocked phase construction requires a selected clock".to_string());
+    }
+    if trace.transition_inputs.is_empty() {
+        return Err("clocked phase construction requires at least one cycle".to_string());
+    }
+    validate_trace_shape(design, trace)?;
+    let mut phase_inputs = Vec::with_capacity(trace.transition_inputs.len().saturating_mul(3));
     for (cycle_index, pre_edge_inputs) in trace.transition_inputs.iter().enumerate() {
-        phase_inputs.push(pre_edge_inputs.clone());
-        phase_inputs.push(bind_transition_inputs(
+        phase_inputs.push(SequentialSettledPhaseInput {
+            transition_inputs: pre_edge_inputs.clone(),
+            phase: SequentialSettledPhase::PreEdge,
+        });
+        let post_edge_inputs = bind_transition_inputs(
             design,
             &trace.external_inputs[cycle_index],
             &trace.register_inputs[cycle_index],
-        )?);
+        )?;
+        phase_inputs.push(SequentialSettledPhaseInput {
+            transition_inputs: post_edge_inputs.clone(),
+            phase: SequentialSettledPhase::PostActiveEdge,
+        });
+        phase_inputs.push(SequentialSettledPhaseInput {
+            transition_inputs: post_edge_inputs,
+            phase: SequentialSettledPhase::PostInactiveEdge,
+        });
     }
     Ok(phase_inputs)
 }
@@ -620,6 +673,53 @@ mod tests {
             vec![vec![bits(1, 0)], vec![bits(1, 0)]]
         );
         assert_eq!(trace.final_state.values(), &[bits(1, 0)]);
+    }
+
+    #[test]
+    fn clocked_phase_inputs_are_shared_by_toggle_and_power_accounting() {
+        let design = accumulator_design(Some(bits(1, 1)));
+        let trace = simulate(
+            &design,
+            &[vec![bits(1, 1)], vec![bits(1, 0)]],
+            SequentialState::from_g8r_initial_values(&design).unwrap(),
+        )
+        .unwrap();
+
+        let phases = build_clocked_phase_inputs(&design, &trace).unwrap();
+        assert_eq!(
+            phases.iter().map(|sample| sample.phase).collect::<Vec<_>>(),
+            vec![
+                SequentialSettledPhase::PreEdge,
+                SequentialSettledPhase::PostActiveEdge,
+                SequentialSettledPhase::PostInactiveEdge,
+                SequentialSettledPhase::PreEdge,
+                SequentialSettledPhase::PostActiveEdge,
+                SequentialSettledPhase::PostInactiveEdge,
+            ]
+        );
+        assert_eq!(
+            phases
+                .iter()
+                .map(|sample| sample.transition_inputs.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![bits(1, 1), bits(1, 1)],
+                vec![bits(1, 1), bits(1, 0)],
+                vec![bits(1, 1), bits(1, 0)],
+                vec![bits(1, 0), bits(1, 0)],
+                vec![bits(1, 0), bits(1, 0)],
+                vec![bits(1, 0), bits(1, 0)],
+            ]
+        );
+        assert_eq!(
+            build_toggle_phase_transition_inputs(&design, &trace).unwrap(),
+            vec![
+                vec![bits(1, 1), bits(1, 1)],
+                vec![bits(1, 1), bits(1, 0)],
+                vec![bits(1, 0), bits(1, 0)],
+                vec![bits(1, 0), bits(1, 0)],
+            ]
+        );
     }
 
     #[test]

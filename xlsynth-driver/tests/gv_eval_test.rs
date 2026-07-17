@@ -39,6 +39,61 @@ cells: {
 interned_strings: ["D", "CLK", "Q", "IQ"]
 "#;
 
+const SEQUENTIAL_POWER_LIBERTY: &str = r#"
+format_magic: 5496997758177923663
+units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
+nominal_voltage: 1.0
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
+  pins: {
+    name_string_id: 2
+    direction: INPUT
+    is_clocking_pin: true
+    capacitance: 2.0
+    internal_power: {
+      tables: {
+        transition: POWER_TRANSITION_RISE
+        shape_id: 1
+        values: 3.0
+      }
+      tables: {
+        transition: POWER_TRANSITION_FALL
+        shape_id: 1
+        values: 4.0
+      }
+    }
+  }
+  pins: {
+    name_string_id: 3
+    direction: OUTPUT
+    function_string_id: 4
+    timing_arcs: {
+      related_pin_string_id: 2
+      timing_type: TIMING_TYPE_RISING_EDGE
+      tables: {
+        kind: TIMING_TABLE_KIND_RISE_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+      tables: {
+        kind: TIMING_TABLE_KIND_FALL_TRANSITION
+        shape_id: 1
+        values: 1.0
+      }
+    }
+  }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+lut_shapes: {}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+
 fn write_fixture(netlist: &str, liberty: &str) -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     std::fs::write(temp_dir.path().join("design.gv"), netlist).expect("write netlist");
@@ -362,6 +417,64 @@ endmodule
     assert_eq!(activity["logic_transition_count"], 1);
     assert_eq!(activity["clock_transition_count"], 2);
     assert_eq!(activity["clock"]["toggle_count"], 2);
+}
+
+#[test]
+fn gv_eval_sequential_writes_dynamic_power_json() {
+    let netlist = r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule
+"#;
+    let temp_dir = write_fixture(netlist, SEQUENTIAL_POWER_LIBERTY);
+    let irvals_path = temp_dir.path().join("cycles.irvals");
+    let power_json_path = temp_dir.path().join("power.json");
+    std::fs::write(
+        &irvals_path,
+        r#"{d: bits[1]:1}
+{d: bits[1]:0}
+"#,
+    )
+    .expect("write sequential power cycles");
+
+    let output = run_gv_eval(
+        &temp_dir,
+        &[
+            "--sequential",
+            "--input-irvals",
+            irvals_path.to_str().unwrap(),
+            "--initial-state-all-zeros",
+            "--power-output-json",
+            power_json_path.to_str().unwrap(),
+            "--clock-transition",
+            "2",
+            "--module-output-load",
+            "1",
+            "--cycle-time",
+            "5",
+        ],
+    );
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\n"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(power_json_path).expect("read power JSON"))
+            .expect("parse power JSON");
+    assert_eq!(report["cycle_count"], 2);
+    assert_eq!(report["phase_transition_count"], 5);
+    assert_eq!(report["clock_transition_count"], 4);
+    assert_eq!(report["clock_transition"], 2.0);
+    assert_eq!(report["primary_input_switching_energy"], 0.5);
+    assert_eq!(report["clock_switching_energy"], 4.0);
+    assert_eq!(report["cell_output_switching_energy"], 1.0);
+    assert_eq!(report["cell_internal_energy"], 14.0);
+    assert_eq!(report["total_dynamic_energy"], 19.5);
+    assert_eq!(report["average_dynamic_power"], 1.95);
 }
 
 #[test]
