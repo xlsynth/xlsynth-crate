@@ -2292,7 +2292,7 @@ fn main() {
                     Arg::new("max_cuts_per_node")
                         .long("max-cuts-per-node")
                         .value_name("N")
-                        .default_value("64")
+                        .default_value("16")
                         .value_parser(clap::value_parser!(usize))
                         .help("Maximum retained structural cuts per AIG node")
                         .action(ArgAction::Set),
@@ -2319,6 +2319,24 @@ fn main() {
                         .value_name("NAME=TIME")
                         .help("Primary-output required time; may be repeated")
                         .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary-input-transition")
+                        .value_name("TIME")
+                        .default_value("0.01")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Input rise/fall transition for final STA and constrained matching")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module-output-load")
+                        .value_name("CAPACITANCE")
+                        .default_value("0")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Output load for final STA and constrained matching")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(

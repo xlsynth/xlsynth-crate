@@ -41,36 +41,54 @@ eligible first-pass cell must:
 - have at most the configured cut size in function inputs
 - use every declared input pin in the function
 
-For every eligible output, the mapper evaluates a compact truth table and
-indexes deterministic input-pin permutations plus per-input polarity
-transforms. The first implementation intentionally skips multi-output,
-sequential, clock-gating, and partially used input cells.
+For every eligible output, the mapper evaluates a compact truth table. Like
+ABC NF's root-library preparation, it retains one minimum-area root cell per
+native Boolean function before indexing deterministic input-pin permutations
+plus per-input polarity transforms. In NF mode it also suppresses redundant
+pin permutations with the same transformed truth and leaf-polarity mask, like
+ABC's default `fPinPerm=0` matching database. Drive-strength selection is
+intentionally left to a later sizing pass. The first implementation skips
+multi-output, sequential, clock-gating, and partially used input cells.
 
 ### Cut Matching
 
-Each AIG node gets bounded k-feasible cuts, with `k=6` by default because a
-cut truth table fits in a `u64`. Cut truth tables include complemented AIG
-edges. For a choice class, the matcher considers cuts from every class member
-and adjusts each member's truth table into canonical polarity before Liberty
-lookup.
+Each AIG node gets bounded priority cuts, with `k=6` and 16 retained cuts per
+node by default. Cut truth tables include complemented AIG edges and minimize
+away unused support variables after composition. Sibling cuts are
+phase-adjusted and propagated through parents during enumeration, so a choice
+alternative can create mapping opportunities above the choice node, as in ABC
+NF.
 
 ### Cover Selection
 
-The selector keeps a bounded non-dominated area/delay frontier per canonical
-choice state and polarity. Cell area comes from Liberty. The current delay
-estimate is conservative and scalar: for each input pin, it uses the maximum
-characterized `cell_rise` / `cell_fall` table value on matching
-combinational arcs.
+The selector follows ABC NF's shape:
+
+- one delay-first pass establishes the achievable endpoint target
+- three area-flow passes propagate required times backward and blend global
+  mapping reference counts
+- two exact-area passes dereference and rereference trial cones so shared logic
+  is charged only when it becomes newly live
+
+For an unconstrained run, the inner search uses one unit of delay per cell
+input, matching the generated-genlib objective used by ABC's normal `&nf`
+flow. Required-time propagation, area flow, and exact-area recovery stay in
+that unit-delay domain. If the controller supplies any endpoint timing
+constraint, the search instead uses compact scalar Liberty arc delays and
+re-evaluates each selected live cover with the same rise/fall, slew,
+capacitive-load, conditional-arc, and timing-table semantics used by
+`gv-stats`, so the explicit constraints remain meaningful.
+
+In either mode, the finished selected cover is re-evaluated with the shared
+`gv-stats` timing semantics. The final reported delay is recomputed again from
+the emitted netlist with the same STA path when all selected cells have
+complete timing.
 
 The outside controller may supply flattened primary-input arrival times and
-primary-output required times. If a required time is present, cells with
-incomplete input timing are excluded and the mapper chooses the least-area
-retained solution meeting the required time. Without required times, it
-chooses least area with deterministic timing and identity tie-breaks.
-
-The scalar delay model is deliberately an initial selection model. Full
-load/slew-aware STA, exact shared-area recovery, buffering, and sizing are
-later refinements that do not require changing the final-only handoff.
+primary-output required times. Without an explicit required time, the first
+delay pass establishes a global target. If the compact NF root library cannot
+meet an explicit endpoint requirement, mapping reports that failure rather
+than silently changing the target. Buffer-tree insertion and drive-strength
+sizing remain separate later refinements.
 
 ### Output Contract
 

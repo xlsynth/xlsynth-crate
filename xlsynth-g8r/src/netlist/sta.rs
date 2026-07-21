@@ -399,6 +399,36 @@ struct EdgeLoadCapacitance {
     fall: f64,
 }
 
+/// Rise/fall capacitive load used by combinational timing queries outside the
+/// parsed-netlist STA engine.
+///
+/// Technology mapping needs the same NLDM lookup semantics as gv-stats before
+/// it has emitted a concrete netlist. Keeping this small public-crate wrapper
+/// avoids exposing the STA engine's internal endpoint representation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CombinationalOutputLoad {
+    pub rise: f64,
+    pub fall: f64,
+}
+
+impl From<CombinationalOutputLoad> for EdgeLoadCapacitance {
+    fn from(value: CombinationalOutputLoad) -> Self {
+        Self {
+            rise: value.rise,
+            fall: value.fall,
+        }
+    }
+}
+
+impl From<EdgeLoadCapacitance> for CombinationalOutputLoad {
+    fn from(value: EdgeLoadCapacitance) -> Self {
+        Self {
+            rise: value.rise,
+            fall: value.fall,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct NetEndpoint {
     inst_idx: usize,
@@ -1468,6 +1498,17 @@ fn effective_input_capacitance_by_edge(pin: &Pin, context: &str) -> Result<EdgeL
     Ok(capacitance)
 }
 
+/// Returns the rise/fall sink capacitance used by gv-stats for one input pin.
+///
+/// The technology mapper uses this when estimating the load of a selected
+/// cover before a parsed netlist exists.
+pub(crate) fn effective_input_capacitance_for_mapping(
+    pin: &Pin,
+    context: &str,
+) -> Result<CombinationalOutputLoad> {
+    Ok(effective_input_capacitance_by_edge(pin, context)?.into())
+}
+
 #[cfg(test)]
 fn effective_input_capacitance(pin: &Pin) -> f64 {
     // `max_capacitance` is a design-rule limit, not nominal pin capacitance.
@@ -1885,6 +1926,116 @@ pub fn validate_output_pin_for_basic_sta(
         }
     }
     Ok(())
+}
+
+/// Evaluates one combinational cell output with the same rise/fall NLDM
+/// semantics used by gv-stats.
+///
+/// This is intentionally lower-level than parsed-netlist STA: the caller
+/// supplies already-computed timing for each connected functional input and an
+/// estimated output load. It lets technology mapping score a cut/cell match
+/// before the final netlist exists while sharing the table interpolation,
+/// timing-sense, when-predicate, and conservative-envelope behavior of STA.
+pub(crate) fn evaluate_combinational_cell_output_timing(
+    library: &crate::liberty_model::Library,
+    cell_name: &str,
+    output_pin: &Pin,
+    input_timings: &[(&str, SignalTiming)],
+    output_load: CombinationalOutputLoad,
+    known_pin_values: &HashMap<String, bool>,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+) -> Result<SignalTiming> {
+    let output_pin_name = library.resolve_string(&output_pin.name);
+    if output_pin.direction != PinDirection::Output as i32 {
+        return Err(anyhow!(
+            "cell '{}' pin '{}' is not an output pin",
+            cell_name,
+            output_pin_name
+        ));
+    }
+    if let Some(unsupported_arc) = output_pin
+        .timing_arcs
+        .iter()
+        .find(|arc| !StaTimingType::from_raw(arc.timing_type_str(library)).is_combinational())
+    {
+        return Err(anyhow!(
+            "cell '{}' output pin '{}' has unsupported timing type '{}'",
+            cell_name,
+            output_pin_name,
+            unsupported_arc.timing_type_str(library)
+        ));
+    }
+    let combinational_arcs: Vec<&TimingArc> = output_pin
+        .timing_arcs
+        .iter()
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(library)).is_combinational())
+        .collect();
+    if combinational_arcs.is_empty() {
+        if constant_output_function_value(library, cell_name, output_pin)?.is_some() {
+            return Ok(SignalTiming {
+                rise: EdgeTiming {
+                    arrival: 0.0,
+                    transition: 0.0,
+                },
+                fall: EdgeTiming {
+                    arrival: 0.0,
+                    transition: 0.0,
+                },
+            });
+        }
+        return Err(anyhow!(
+            "cell '{}' output pin '{}' has no usable combinational timing arcs",
+            cell_name,
+            output_pin_name
+        ));
+    }
+
+    let mut accumulated: Option<SignalTimingSet> = None;
+    for arc in combinational_arcs {
+        let related_text = library.resolve_string(&arc.related_pin);
+        let context = format!(
+            "cell '{}' output pin '{}' timing arc related_pin '{}'",
+            cell_name, output_pin_name, related_text
+        );
+        if !arc_when_may_apply(library, arc, known_pin_values, context.as_str())? {
+            continue;
+        }
+        for related_pin_name in split_related_pin_names(related_text) {
+            let Some((_, input_timing)) = input_timings
+                .iter()
+                .find(|(pin_name, _)| *pin_name == related_pin_name)
+            else {
+                continue;
+            };
+            let candidate = evaluate_arc_set(
+                library,
+                arc,
+                &SignalTimingSet::from_single(*input_timing),
+                output_load.into(),
+                timing_query_diagnostic_counts,
+                context.as_str(),
+            )?;
+            accumulated = Some(match accumulated {
+                Some(previous) => previous.merge(&candidate),
+                None => candidate,
+            });
+        }
+    }
+    let Some(mut output) = accumulated else {
+        return Err(anyhow!(
+            "cell '{}' output pin '{}' produced no timing candidates",
+            cell_name,
+            output_pin_name
+        ));
+    };
+    collapse_signal_timing_set_to_envelope(&mut output);
+    output.as_report_signal_timing().ok_or_else(|| {
+        anyhow!(
+            "cell '{}' output pin '{}' produced an incomplete rise/fall timing result",
+            cell_name,
+            output_pin_name
+        )
+    })
 }
 
 /// Classifies continuous assigns into live-STA-supported bit sources and
