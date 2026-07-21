@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Small bounded truth-table helpers used by the final technology mapper.
+
+use crate::aig::AigRef;
+
+/// Largest cut size supported by the compact u64 truth-table encoding.
+pub(super) const MAX_TRUTH_TABLE_INPUTS: usize = 6;
+
+/// Returns the mask covering every assignment bit for input_count inputs.
+pub(super) fn truth_mask(input_count: usize) -> u64 {
+    debug_assert!(input_count <= MAX_TRUTH_TABLE_INPUTS);
+    let assignment_count = 1usize << input_count;
+    if assignment_count == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << assignment_count) - 1
+    }
+}
+
+/// Returns the truth table of variable variable_index.
+pub(super) fn variable_truth(input_count: usize, variable_index: usize) -> u64 {
+    debug_assert!(input_count <= MAX_TRUTH_TABLE_INPUTS);
+    debug_assert!(variable_index < input_count);
+    let assignment_count = 1usize << input_count;
+    let mut truth = 0u64;
+    for assignment in 0..assignment_count {
+        if ((assignment >> variable_index) & 1) != 0 {
+            truth |= 1u64 << assignment;
+        }
+    }
+    truth
+}
+
+/// Complements a truth table while keeping unused high bits clear.
+pub(super) fn complement_truth(truth: u64, input_count: usize) -> u64 {
+    (!truth) & truth_mask(input_count)
+}
+
+/// Re-expresses a truth table over a sorted superset of leaves.
+pub(super) fn remap_truth(truth: u64, old_leaves: &[AigRef], new_leaves: &[AigRef]) -> u64 {
+    debug_assert!(old_leaves.len() <= new_leaves.len());
+    debug_assert!(new_leaves.len() <= MAX_TRUTH_TABLE_INPUTS);
+    let old_positions: Vec<usize> = old_leaves
+        .iter()
+        .map(|leaf| {
+            new_leaves
+                .binary_search(leaf)
+                .expect("old cut leaf should be present in merged cut")
+        })
+        .collect();
+    let mut remapped = 0u64;
+    for new_assignment in 0..(1usize << new_leaves.len()) {
+        let mut old_assignment = 0usize;
+        for (old_index, new_index) in old_positions.iter().enumerate() {
+            if ((new_assignment >> new_index) & 1) != 0 {
+                old_assignment |= 1usize << old_index;
+            }
+        }
+        if ((truth >> old_assignment) & 1) != 0 {
+            remapped |= 1u64 << new_assignment;
+        }
+    }
+    remapped
+}
+
+/// Applies pin permutation and per-input polarity to a cell truth table.
+///
+/// input_negated[input_index] records whether that cell pin sees the
+/// complement of its selected cut leaf.
+pub(super) fn transform_truth(truth: u64, input_to_leaf: &[usize], input_negated: &[bool]) -> u64 {
+    debug_assert!(input_to_leaf.len() <= MAX_TRUTH_TABLE_INPUTS);
+    debug_assert_eq!(input_to_leaf.len(), input_negated.len());
+    let input_count = input_to_leaf.len();
+    let mut permuted = 0u64;
+    for leaf_assignment in 0..(1usize << input_count) {
+        let mut input_assignment = 0usize;
+        for (input_index, leaf_index) in input_to_leaf.iter().enumerate() {
+            let leaf_value = ((leaf_assignment >> leaf_index) & 1) != 0;
+            if leaf_value ^ input_negated[input_index] {
+                input_assignment |= 1usize << input_index;
+            }
+        }
+        if ((truth >> input_assignment) & 1) != 0 {
+            permuted |= 1u64 << leaf_assignment;
+        }
+    }
+    permuted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variable_truth_uses_lsb_first_assignments() {
+        assert_eq!(variable_truth(1, 0), 0b10);
+        assert_eq!(variable_truth(2, 0), 0b1010);
+        assert_eq!(variable_truth(2, 1), 0b1100);
+    }
+
+    #[test]
+    fn permutation_swaps_variable_roles() {
+        let a_and_not_b = variable_truth(2, 0) & complement_truth(variable_truth(2, 1), 2);
+        let swapped = transform_truth(a_and_not_b, &[1, 0], &[false, false]);
+        let b_and_not_a = variable_truth(2, 1) & complement_truth(variable_truth(2, 0), 2);
+        assert_eq!(swapped, b_and_not_a);
+    }
+
+    #[test]
+    fn transform_applies_input_polarity() {
+        let and = variable_truth(2, 0) & variable_truth(2, 1);
+        let a_and_not_b = transform_truth(and, &[0, 1], &[false, true]);
+        assert_eq!(a_and_not_b, 0b0010);
+    }
+}

@@ -30,6 +30,19 @@ pub fn load_aiger_binary_from_path(
 /// Parses the provided binary-AIGER bytes and yields a `GateFn` built with the
 /// supplied `GateBuilderOptions`.
 pub fn load_aiger_binary(src: &[u8], opts: GateBuilderOptions) -> Result<LoadAigerResult, String> {
+    let (result, _) = load_aiger_binary_with_comment_tail(src, opts)?;
+    Ok(result)
+}
+
+/// Parses binary AIGER while retaining the bytes after the comment marker.
+///
+/// ABC stores its binary extension stream immediately after the AIGER comment
+/// marker. The ordinary loader deliberately ignores that stream, while
+/// choice-aware loaders use the returned tail to recover structural choices.
+pub(crate) fn load_aiger_binary_with_comment_tail<'a>(
+    src: &'a [u8],
+    opts: GateBuilderOptions,
+) -> Result<(LoadAigerResult, Option<&'a [u8]>), String> {
     let (header_line, mut cursor) = read_ascii_line(src, 0)?;
     let header_tokens: Vec<&str> = header_line.split_whitespace().collect();
     if header_tokens.len() != 6 {
@@ -119,9 +132,10 @@ pub fn load_aiger_binary(src: &[u8], opts: GateBuilderOptions) -> Result<LoadAig
     }
 
     let remaining = &src[cursor..];
-    if !remaining.is_empty() {
-        let tail = std::str::from_utf8(remaining)
-            .map_err(|e| format!("invalid UTF-8 in symbol/comment tail: {}", e))?;
+    let (symbol_bytes, comment_tail) = split_symbol_bytes_and_comment_tail(remaining);
+    if !symbol_bytes.is_empty() {
+        let tail = std::str::from_utf8(symbol_bytes)
+            .map_err(|e| format!("invalid UTF-8 in symbol table: {}", e))?;
         apply_symbol_table(
             tail,
             &mut gb,
@@ -135,10 +149,27 @@ pub fn load_aiger_binary(src: &[u8], opts: GateBuilderOptions) -> Result<LoadAig
 
     let gate_fn = finish_loaded_gate_builder(gb);
 
-    Ok(LoadAigerResult {
-        gate_fn,
-        var_to_operand,
-    })
+    Ok((
+        LoadAigerResult {
+            gate_fn,
+            var_to_operand,
+        },
+        comment_tail,
+    ))
+}
+
+/// Splits ASCII symbol records from the optional AIGER comment section.
+///
+/// A comment marker is a c at the beginning of a line. ABC may place binary
+/// extension bytes directly after this marker, so only the prefix before it
+/// is safe to decode as UTF-8.
+fn split_symbol_bytes_and_comment_tail(remaining: &[u8]) -> (&[u8], Option<&[u8]>) {
+    for (idx, byte) in remaining.iter().enumerate() {
+        if *byte == b'c' && (idx == 0 || remaining[idx - 1] == b'\n') {
+            return (&remaining[..idx], Some(&remaining[idx + 1..]));
+        }
+    }
+    (remaining, None)
 }
 
 fn read_ascii_line(src: &[u8], start: usize) -> Result<(String, usize), String> {
