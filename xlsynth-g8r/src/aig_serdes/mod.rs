@@ -9,6 +9,7 @@ pub mod emit_netlist;
 pub mod g8r;
 pub mod gate2ir;
 pub mod gate_parser;
+pub mod load_abc_choice_aiger;
 pub mod load_aiger;
 pub mod load_aiger_auto;
 pub mod load_aiger_binary;

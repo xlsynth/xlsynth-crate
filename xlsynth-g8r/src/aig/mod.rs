@@ -3,6 +3,7 @@
 pub mod aig_hasher;
 pub mod aig_simplify;
 pub mod bulk_replace;
+pub mod choice_aig;
 pub mod cut_db_rewrite;
 pub mod dce;
 pub mod dynamic_depth;
@@ -22,6 +23,7 @@ pub(crate) mod structural_hash_cons;
 pub mod table;
 pub mod topo;
 
+pub use crate::aig::choice_aig::ChoiceAig;
 pub use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 pub use crate::aig::sequential_gate::{
     ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
