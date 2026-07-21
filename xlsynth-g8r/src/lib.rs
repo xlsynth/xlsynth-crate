@@ -47,6 +47,7 @@ pub mod prove_gate_fn_equiv_common;
 pub mod prove_gate_fn_equiv_sat;
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
 pub mod prove_gate_fn_equiv_z3;
+pub mod techmap;
 pub mod test_utils;
 pub mod transforms;
 pub mod use_count;

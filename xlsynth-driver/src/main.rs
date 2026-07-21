@@ -45,6 +45,7 @@ mod aig_stats;
 mod aig_tech_map;
 mod blif2g8r;
 mod block2fn;
+mod choice_aig_tech_map;
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
@@ -2249,6 +2250,78 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("choice-aig-tech-map")
+                .about("Maps a final ABC choice-AIG into a Liberty cell netlist")
+                .arg(
+                    clap::Arg::new("aig_input_file")
+                        .help("Input AIGER file; binary ABC q-AIGER choices are preserved")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Timing-enabled Liberty proto (.proto, .textproto, or either with .gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("netlist_out")
+                        .long("netlist_out")
+                        .help("Path to write mapped netlist text (use '-' for stdout)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Override mapped module name")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_cut_size")
+                        .long("max-cut-size")
+                        .value_name("N")
+                        .default_value("6")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum truth-table cut size; supported range is 1 through 6")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_cuts_per_node")
+                        .long("max-cuts-per-node")
+                        .value_name("N")
+                        .default_value("64")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum retained structural cuts per AIG node")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_frontier_size")
+                        .long("max-frontier-size")
+                        .value_name("N")
+                        .default_value("16")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum retained area/delay points per choice state")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("primary_input_arrival")
+                        .long("primary-input-arrival")
+                        .value_name("NAME=TIME")
+                        .help("Primary-input arrival time; may be repeated")
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("primary_output_required")
+                        .long("primary-output-required")
+                        .value_name("NAME=TIME")
+                        .help("Primary-output required time; may be repeated")
+                        .action(ArgAction::Append),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv-sta")
                 .about("Runs basic combinational max-arrival STA on a gate-level netlist")
                 .arg(
@@ -3988,6 +4061,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("aig-tech-map", subm)) => {
             aig_tech_map::handle_aig_tech_map(subm);
+        }
+        Some(("choice-aig-tech-map", subm)) => {
+            if let Err(error) = choice_aig_tech_map::handle_choice_aig_tech_map(subm) {
+                eprintln!("choice-aig-tech-map error: {error:#}");
+                std::process::exit(1);
+            }
         }
         Some(("gv-sta", subm)) => {
             gv_sta::handle_gv_sta(subm);

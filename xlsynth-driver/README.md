@@ -560,6 +560,42 @@ Key flags:
   `max-speed` prefers the highest available VT class and then the highest
   available drive strength.
 
+### `choice-aig-tech-map`: final choice-AIG to Liberty cell netlist
+
+Runs the clean-sheet final technology mapper. The command accepts ordinary
+AIGER or ABC binary AIGER with q-extension structural choices, indexes
+single-output combinational Liberty cells by their Boolean functions, matches
+bounded AIG cuts against those functions, and emits the selected final
+gate-level netlist. It does not serialize a mapping back into ABC or run
+inside an ABC optimization loop.
+
+```shell
+xlsynth-driver choice-aig-tech-map final_choices.aig \
+  --liberty_proto /path/to/timing-enabled.liberty.proto \
+  --netlist_out final.mapped.gv
+```
+
+Key flags:
+
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally
+  gzip-compressed. Required.
+- `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout.
+  Required.
+- `--module_name <MODULE>`: optional override for emitted module name.
+- `--max-cut-size <N>`: maximum truth-table cut size, from `1` through `6`
+  (default: `6`).
+- `--max-cuts-per-node <N>`: maximum retained structural cuts per AIG node
+  (default: `64`).
+- `--max-frontier-size <N>`: maximum retained non-dominated area/delay points
+  per choice state (default: `16`).
+- `--primary-input-arrival <NAME=TIME>`: optional scalar primary-input arrival
+  time; may be repeated.
+- `--primary-output-required <NAME=TIME>`: optional scalar primary-output
+  required time; may be repeated.
+
+Timing constraint names use flattened scalar port names: one-bit ports retain
+their original name, while bit `i` of a wider port is named `<port>_<i>`.
+
 ### `gv-sta`: gate-level max-arrival STA
 
 Runs basic combinational max-arrival STA over a parsed gate-level netlist using Liberty timing arcs/tables.
