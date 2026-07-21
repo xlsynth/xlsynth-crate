@@ -565,9 +565,16 @@ Key flags:
 Runs the clean-sheet final technology mapper. The command accepts ordinary
 AIGER or ABC binary AIGER with q-extension structural choices, indexes
 single-output combinational Liberty cells by their Boolean functions, matches
-bounded AIG cuts against those functions, and emits the selected final
+bounded choice-propagating AIG cuts against those functions, runs NF-style
+delay, area-flow, and exact-area recovery rounds, and emits the selected final
 gate-level netlist. It does not serialize a mapping back into ABC or run
 inside an ABC optimization loop.
+
+Without explicit endpoint constraints, cover selection uses the same
+unit-delay objective as ABC's normal `&nf` flow and then reports the selected
+netlist with full Liberty STA. Supplying any primary-input arrival or
+primary-output required time switches cover selection to Liberty-scaled timing
+so those constraints are enforced during mapping.
 
 ```shell
 xlsynth-driver choice-aig-tech-map final_choices.aig \
@@ -585,13 +592,17 @@ Key flags:
 - `--max-cut-size <N>`: maximum truth-table cut size, from `1` through `6`
   (default: `6`).
 - `--max-cuts-per-node <N>`: maximum retained structural cuts per AIG node
-  (default: `64`).
+  (default: `16`).
 - `--max-frontier-size <N>`: maximum retained non-dominated area/delay points
-  per choice state (default: `16`).
+  per cut/state signature before NF-style rounds (default: `16`).
 - `--primary-input-arrival <NAME=TIME>`: optional scalar primary-input arrival
   time; may be repeated.
 - `--primary-output-required <NAME=TIME>`: optional scalar primary-output
   required time; may be repeated.
+- `--primary-input-transition <TIME>`: rise/fall transition used for primary
+  inputs during final STA and constrained matching (default: `0.01`).
+- `--module-output-load <CAPACITANCE>`: external load added to each module
+  output bit during final STA and constrained matching (default: `0`).
 
 Timing constraint names use flattened scalar port names: one-bit ports retain
 their original name, while bit `i` of a wider port is named `<port>_<i>`.

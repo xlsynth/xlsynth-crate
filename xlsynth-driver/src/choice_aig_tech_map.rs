@@ -52,6 +52,12 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         max_frontier_size: *matches
             .get_one::<usize>("max_frontier_size")
             .expect("max_frontier_size has a default"),
+        primary_input_transition: *matches
+            .get_one::<f64>("primary_input_transition")
+            .expect("primary_input_transition has a default"),
+        module_output_load: *matches
+            .get_one::<f64>("module_output_load")
+            .expect("module_output_load has a default"),
     };
     let mapped = map_choice_aig_to_netlist(&choice_aig, &library, &constraints, &options)
         .context("final choice-AIG technology mapping failed")?;
