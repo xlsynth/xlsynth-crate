@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-sys"
-version = "0.61.0"
+version = "0.62.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust (Native Library)"
