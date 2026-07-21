@@ -64,6 +64,49 @@ pub(super) fn remap_truth(truth: u64, old_leaves: &[AigRef], new_leaves: &[AigRe
     remapped
 }
 
+/// Removes leaves that the truth table does not actually depend on.
+///
+/// ABC NF minimizes the support after composing each cut truth table. Doing
+/// the same here is important both for cut priority and for matching a
+/// smaller-arity Liberty root when a merged structural cut collapses.
+pub(super) fn minimize_support(truth: u64, leaves: &[AigRef]) -> (u64, Vec<AigRef>) {
+    debug_assert!(leaves.len() <= MAX_TRUTH_TABLE_INPUTS);
+    let input_count = leaves.len();
+    let mut kept_indices = Vec::new();
+    for input_index in 0..input_count {
+        let input_bit = 1usize << input_index;
+        let depends_on_input = (0..(1usize << input_count))
+            .filter(|assignment| assignment & input_bit == 0)
+            .any(|assignment| {
+                ((truth >> assignment) & 1) != ((truth >> (assignment | input_bit)) & 1)
+            });
+        if depends_on_input {
+            kept_indices.push(input_index);
+        }
+    }
+    if kept_indices.len() == input_count {
+        return (truth & truth_mask(input_count), leaves.to_vec());
+    }
+
+    let minimized_leaves = kept_indices
+        .iter()
+        .map(|input_index| leaves[*input_index])
+        .collect::<Vec<_>>();
+    let mut minimized_truth = 0u64;
+    for new_assignment in 0..(1usize << kept_indices.len()) {
+        let mut old_assignment = 0usize;
+        for (new_index, old_index) in kept_indices.iter().copied().enumerate() {
+            if ((new_assignment >> new_index) & 1) != 0 {
+                old_assignment |= 1usize << old_index;
+            }
+        }
+        if ((truth >> old_assignment) & 1) != 0 {
+            minimized_truth |= 1u64 << new_assignment;
+        }
+    }
+    (minimized_truth, minimized_leaves)
+}
+
 /// Applies pin permutation and per-input polarity to a cell truth table.
 ///
 /// input_negated[input_index] records whether that cell pin sees the
@@ -112,5 +155,16 @@ mod tests {
         let and = variable_truth(2, 0) & variable_truth(2, 1);
         let a_and_not_b = transform_truth(and, &[0, 1], &[false, true]);
         assert_eq!(a_and_not_b, 0b0010);
+    }
+
+    #[test]
+    fn minimize_support_removes_unused_inputs() {
+        let leaves = vec![AigRef { id: 3 }, AigRef { id: 7 }];
+        let truth = variable_truth(2, 1);
+
+        let (minimized_truth, minimized_leaves) = minimize_support(truth, leaves.as_slice());
+
+        assert_eq!(minimized_leaves, vec![AigRef { id: 7 }]);
+        assert_eq!(minimized_truth, variable_truth(1, 0));
     }
 }

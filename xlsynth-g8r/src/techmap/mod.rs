@@ -6,9 +6,9 @@
 //! This module intentionally does not build on the older structural NAND/INV
 //! lowering under netlist::techmap. It consumes the final choice-rich AIG once,
 //! matches bounded Boolean cuts against arbitrary combinational Liberty
-//! functions, selects a bounded area/delay Pareto cover, and emits a final
-//! parsed gate-level netlist. There is no mapping serialization or ABC-loop
-//! feedback protocol in this API.
+//! functions, runs NF-style delay/area-flow/exact-area cover rounds, and emits
+//! a final parsed gate-level netlist. There is no mapping serialization or
+//! ABC-loop feedback protocol in this API.
 
 mod cover;
 mod cuts;
@@ -19,6 +19,8 @@ mod truth;
 use crate::aig::{ChoiceAig, GateFn};
 use crate::liberty_model::Library;
 use crate::netlist::parse::{Net, NetlistModule};
+use crate::netlist::report::build_sta_report;
+use crate::netlist::sta::StaOptions;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use string_interner::symbol::SymbolU32;
@@ -34,12 +36,6 @@ pub struct TechMapTimingConstraints {
     pub primary_output_required: BTreeMap<String, f64>,
 }
 
-impl TechMapTimingConstraints {
-    pub(super) fn has_endpoint_requirements(&self) -> bool {
-        !self.primary_output_required.is_empty()
-    }
-}
-
 /// Search bounds and final-netlist naming options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TechMapOptions {
@@ -50,8 +46,15 @@ pub struct TechMapOptions {
     /// Maximum structural cuts retained per AIG node, including its trivial
     /// cut.
     pub max_cuts_per_node: usize,
-    /// Maximum non-dominated area/delay points retained per canonical state.
+    /// Maximum non-dominated Liberty variants retained for one cut/state
+    /// signature before NF-style mapping rounds begin.
     pub max_frontier_size: usize,
+    /// Transition seeded at each primary input for final STA and constrained
+    /// mapping, in Liberty time units.
+    pub primary_input_transition: f64,
+    /// Extra capacitive load applied to each module output for final STA and
+    /// constrained mapping.
+    pub module_output_load: f64,
 }
 
 impl Default for TechMapOptions {
@@ -59,8 +62,10 @@ impl Default for TechMapOptions {
         Self {
             module_name: None,
             max_cut_size: 6,
-            max_cuts_per_node: 64,
+            max_cuts_per_node: 16,
             max_frontier_size: 16,
+            primary_input_transition: 0.01,
+            module_output_load: 0.0,
         }
     }
 }
@@ -98,27 +103,43 @@ pub fn map_choice_aig_to_netlist(
     options: &TechMapOptions,
 ) -> Result<MappedNetlist> {
     let analysis = cuts::analyze_choices(choice_aig)?;
-    let cuts_by_node = cuts::enumerate_cuts(
-        choice_aig.graph(),
+    let cell_index = liberty_index::LibertyCellIndex::build_nf(library, options.max_cut_size)?;
+    let cuts_by_node = cuts::enumerate_choice_cuts(
+        choice_aig,
+        &analysis,
+        &cell_index,
         options.max_cut_size,
         options.max_cuts_per_node,
     )?;
-    let cell_index = liberty_index::LibertyCellIndex::build(library, options.max_cut_size)?;
     let plan = cover::build_cover_plan(
         choice_aig,
         &analysis,
         cuts_by_node.as_slice(),
         &cell_index,
+        library,
         options,
         constraints,
     )?;
     let emitted = emit::emit_cover(choice_aig, &plan, &cell_index, options)?;
-    let worst_estimated_output_arrival = plan
-        .output_arrivals
-        .iter()
-        .copied()
-        .reduce(f64::max)
-        .unwrap_or(0.0);
+    let worst_estimated_output_arrival = if emitted.timing_complete {
+        build_sta_report(
+            &emitted.module,
+            emitted.nets.as_slice(),
+            &emitted.interner,
+            library,
+            StaOptions {
+                primary_input_transition: options.primary_input_transition,
+                module_output_load: options.module_output_load,
+            },
+        )?
+        .delay
+    } else {
+        plan.output_arrivals
+            .iter()
+            .copied()
+            .reduce(f64::max)
+            .unwrap_or(0.0)
+    };
     let stats = TechMapStats {
         choice_class_count: analysis.classes.len(),
         choice_link_count: choice_aig.sibling_link_count(),
@@ -324,6 +345,46 @@ mod tests {
                     timed_output_pin(&mut builder, "Y", "A * B", &["A", "B"], 1.0),
                 ],
                 area: 2.0,
+                ..Default::default()
+            },
+        ];
+        builder.finish()
+    }
+
+    fn make_three_input_and_graph() -> GateFn {
+        let mut builder =
+            GateBuilder::new("three_input_and".to_string(), GateBuilderOptions::no_opt());
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let c: AigOperand = builder.add_input("c".to_string(), 1).try_into().unwrap();
+        let ab = builder.add_and_binary(a, b);
+        let abc = builder.add_and_binary(ab.into(), c);
+        builder.add_output("o".to_string(), abc.into());
+        builder.build()
+    }
+
+    fn make_unit_vs_liberty_timing_library() -> Library {
+        let mut builder = LibraryBuilder::new();
+        builder.cells = vec![
+            Cell {
+                name: "and2".to_string(),
+                pins: vec![
+                    pin(&mut builder, PinDirection::Input, "A", ""),
+                    pin(&mut builder, PinDirection::Input, "B", ""),
+                    timed_output_pin(&mut builder, "Y", "A * B", &["A", "B"], 1.0),
+                ],
+                area: 1.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "and3_slow".to_string(),
+                pins: vec![
+                    pin(&mut builder, PinDirection::Input, "A", ""),
+                    pin(&mut builder, PinDirection::Input, "B", ""),
+                    pin(&mut builder, PinDirection::Input, "C", ""),
+                    timed_output_pin(&mut builder, "Y", "A * B * C", &["A", "B", "C"], 100.0),
+                ],
+                area: 1.5,
                 ..Default::default()
             },
         ];
@@ -547,9 +608,46 @@ mod tests {
     }
 
     #[test]
-    fn required_time_selects_a_faster_larger_cell() {
+    fn nf_root_library_reports_unmet_required_time() {
         let graph = make_and_graph();
         let library = make_timed_and_library();
+        let mut relaxed_constraints = TechMapTimingConstraints::default();
+        relaxed_constraints
+            .primary_output_required
+            .insert("o".to_string(), 10.0);
+        let relaxed = map_gatefn_to_netlist(
+            graph.clone(),
+            &library,
+            &relaxed_constraints,
+            &TechMapOptions::default(),
+        )
+        .unwrap();
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_output_required
+            .insert("o".to_string(), 2.0);
+        let constrained =
+            map_gatefn_to_netlist(graph, &library, &constraints, &TechMapOptions::default());
+
+        assert_eq!(
+            relaxed
+                .interner
+                .resolve(relaxed.module.instances[0].type_name)
+                .unwrap(),
+            "slow_small"
+        );
+        assert!(
+            constrained
+                .unwrap_err()
+                .to_string()
+                .contains("no cover meets required time 2")
+        );
+    }
+
+    #[test]
+    fn unconstrained_search_uses_nf_unit_delay() {
+        let graph = make_three_input_and_graph();
+        let library = make_unit_vs_liberty_timing_library();
         let unconstrained = map_gatefn_to_netlist(
             graph.clone(),
             &library,
@@ -560,25 +658,26 @@ mod tests {
         let mut constraints = TechMapTimingConstraints::default();
         constraints
             .primary_output_required
-            .insert("o".to_string(), 2.0);
+            .insert("o".to_string(), 5.0);
         let constrained =
             map_gatefn_to_netlist(graph, &library, &constraints, &TechMapOptions::default())
                 .unwrap();
 
+        assert_eq!(unconstrained.module.instances.len(), 1);
         assert_eq!(
             unconstrained
                 .interner
                 .resolve(unconstrained.module.instances[0].type_name)
                 .unwrap(),
-            "slow_small"
+            "and3_slow"
         );
-        assert_eq!(
+        assert_eq!(constrained.module.instances.len(), 2);
+        assert!(
             constrained
-                .interner
-                .resolve(constrained.module.instances[0].type_name)
-                .unwrap(),
-            "fast_large"
+                .module
+                .instances
+                .iter()
+                .all(|instance| constrained.interner.resolve(instance.type_name) == Some("and2"))
         );
-        assert_eq!(constrained.stats.worst_estimated_output_arrival, 1.0);
     }
 }

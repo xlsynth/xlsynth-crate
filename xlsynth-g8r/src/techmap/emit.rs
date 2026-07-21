@@ -21,6 +21,8 @@ pub(super) struct EmittedNetlist {
     pub nets: Vec<Net>,
     pub interner: StringInterner<StringBackend<SymbolU32>>,
     pub area: f64,
+    /// Whether every emitted cell has enough Liberty timing for gv-stats STA.
+    pub timing_complete: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -237,6 +239,7 @@ struct NetlistBuilder {
     instance_counter: usize,
     internal_net_counter: usize,
     area: f64,
+    timing_complete: bool,
 }
 
 impl NetlistBuilder {
@@ -257,6 +260,7 @@ impl NetlistBuilder {
             instance_counter: 0,
             internal_net_counter: 0,
             area: 0.0,
+            timing_complete: true,
         }
     }
 
@@ -353,6 +357,7 @@ impl NetlistBuilder {
             inst_colno: 1,
         });
         self.area += binding.area;
+        self.timing_complete &= binding.has_complete_timing();
         Ok(())
     }
 
@@ -370,6 +375,7 @@ impl NetlistBuilder {
             nets: self.nets,
             interner: self.interner,
             area: self.area,
+            timing_complete: self.timing_complete,
         }
     }
 }

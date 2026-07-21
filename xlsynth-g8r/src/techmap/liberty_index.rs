@@ -5,15 +5,23 @@
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, Pin, PinDirection};
 use crate::liberty_proto::TimingTableKind;
+use crate::netlist::sta::{
+    CombinationalOutputLoad, effective_input_capacitance_for_mapping,
+    validate_output_pin_for_basic_sta,
+};
 use crate::techmap::truth::{transform_truth, variable_truth};
 use anyhow::{Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+const NF_ROOT_VARIANTS_PER_FUNCTION: usize = 1;
 
 /// One concrete cell/output/pin-permutation match.
 #[derive(Clone, Debug)]
 pub(super) struct CellBinding {
     pub cell_name: String,
+    pub cell_index: usize,
     pub output_pin_name: String,
+    pub output_pin_index: usize,
     pub input_pin_names: Vec<String>,
     /// For each cell input pin, the cut-leaf variable connected to it.
     pub input_to_leaf: Vec<usize>,
@@ -21,13 +29,17 @@ pub(super) struct CellBinding {
     pub input_negated: Vec<bool>,
     /// Conservative scalar delay estimate for each cell input pin.
     pub input_delays: Vec<Option<f64>>,
+    /// Rise/fall sink capacitance for each cell input pin.
+    pub input_capacitances: Vec<CombinationalOutputLoad>,
+    /// Whether gv-stats-style rise/fall timing can evaluate this binding.
+    pub timing_complete: bool,
     pub area: f64,
 }
 
 impl CellBinding {
-    /// Returns whether every connected input has a usable timing estimate.
+    /// Returns whether gv-stats can evaluate this output's timing arcs.
     pub fn has_complete_timing(&self) -> bool {
-        self.input_delays.iter().all(Option::is_some)
+        self.timing_complete
     }
 
     /// Returns a deterministic identity used for tie-breaking.
@@ -39,6 +51,21 @@ impl CellBinding {
             self.input_to_leaf.as_slice(),
             self.input_negated.as_slice(),
         )
+    }
+
+    /// Returns the indexed Liberty output pin for timing evaluation.
+    pub fn output_pin<'a>(&self, library: &'a Library) -> &'a Pin {
+        &library.cells[self.cell_index].pins[self.output_pin_index]
+    }
+
+    /// Returns the largest scalar fallback delay across this cell's inputs.
+    pub fn worst_nominal_delay(&self) -> f64 {
+        self.input_delays
+            .iter()
+            .copied()
+            .flatten()
+            .reduce(f64::max)
+            .unwrap_or(0.0)
     }
 }
 
@@ -58,14 +85,60 @@ pub(super) struct LibertyCellIndex {
 
 impl LibertyCellIndex {
     /// Builds a function index without relying on standard-cell family names.
+    #[cfg(test)]
     pub fn build(library: &Library, max_arity: usize) -> Result<Self> {
+        Self::build_with_root_limit(library, max_arity, None)
+    }
+
+    /// Builds the compact root-cell library used by NF-style mapping. ABC NF
+    /// keeps one area-root per native function. Drive-strength selection is a
+    /// separate sizing problem rather than part of structural cut mapping.
+    pub fn build_nf(library: &Library, max_arity: usize) -> Result<Self> {
+        Self::build_with_root_limit(library, max_arity, Some(NF_ROOT_VARIANTS_PER_FUNCTION))
+    }
+
+    fn build_with_root_limit(
+        library: &Library,
+        max_arity: usize,
+        root_limit: Option<usize>,
+    ) -> Result<Self> {
         let mut by_truth: BTreeMap<(usize, u64), Vec<CellBinding>> = BTreeMap::new();
         let mut stats = LibertyIndexStats::default();
-        for cell in &library.cells {
-            let Some(indexed) = index_cell(library, cell, max_arity)? else {
+        let mut indexed_cells = Vec::new();
+        let mut nf_roots: BTreeMap<(usize, u64), Vec<Vec<(u64, CellBinding)>>> = BTreeMap::new();
+        for (cell_index, cell) in library.cells.iter().enumerate() {
+            let Some(indexed) = index_cell(library, cell_index, cell, max_arity)? else {
                 stats.skipped_cells += 1;
                 continue;
             };
+            if let Some(root_limit) = root_limit {
+                // index_cell emits identity/no-input-negation first, so its
+                // first truth is the cell's native declared-pin function.
+                let native_key = (indexed[0].1.input_pin_names.len(), indexed[0].0);
+                let roots = nf_roots.entry(native_key).or_default();
+                if roots
+                    .iter()
+                    .any(|existing| root_binding_dominates(&existing[0].1, &indexed[0].1))
+                {
+                    continue;
+                }
+                roots.retain(|existing| !root_binding_dominates(&indexed[0].1, &existing[0].1));
+                roots.push(indexed);
+                roots.sort_by(|lhs, rhs| root_binding_order(&lhs[0].1, &rhs[0].1));
+                roots.truncate(root_limit);
+            } else {
+                indexed_cells.push(indexed);
+            }
+        }
+        if root_limit.is_some() {
+            indexed_cells.extend(
+                nf_roots
+                    .into_values()
+                    .flatten()
+                    .map(deduplicate_nf_configurations),
+            );
+        }
+        for indexed in indexed_cells {
             stats.indexed_cell_outputs += 1;
             for (truth, binding) in indexed {
                 by_truth
@@ -116,6 +189,7 @@ impl LibertyCellIndex {
 
 fn index_cell(
     library: &Library,
+    cell_index: usize,
     cell: &Cell,
     max_arity: usize,
 ) -> Result<Option<Vec<(u64, CellBinding)>>> {
@@ -128,23 +202,32 @@ fn index_cell(
         return Ok(None);
     }
 
-    let input_pins: Vec<&Pin> = cell
+    let input_pin_indices: Vec<usize> = cell
         .pins
         .iter()
-        .filter(|pin| pin.direction == PinDirection::Input as i32)
+        .enumerate()
+        .filter(|(_, pin)| pin.direction == PinDirection::Input as i32)
+        .map(|(pin_index, _)| pin_index)
+        .collect();
+    let input_pins: Vec<&Pin> = input_pin_indices
+        .iter()
+        .map(|pin_index| &cell.pins[*pin_index])
         .collect();
     if input_pins.iter().any(|pin| pin.is_clocking_pin) || input_pins.len() > max_arity {
         return Ok(None);
     }
-    let output_pins: Vec<&Pin> = cell
+    let output_pin_indices: Vec<usize> = cell
         .pins
         .iter()
-        .filter(|pin| pin.direction == PinDirection::Output as i32)
+        .enumerate()
+        .filter(|(_, pin)| pin.direction == PinDirection::Output as i32)
+        .map(|(pin_index, _)| pin_index)
         .collect();
-    if output_pins.len() != 1 {
+    if output_pin_indices.len() != 1 {
         return Ok(None);
     }
-    let output_pin = output_pins[0];
+    let output_pin_index = output_pin_indices[0];
+    let output_pin = &cell.pins[output_pin_index];
     let formula_text = library.resolve_string(&output_pin.function);
     if formula_text.is_empty() {
         return Ok(None);
@@ -170,6 +253,27 @@ fn index_cell(
         .iter()
         .map(|input_name| estimated_input_delay(library, output_pin, input_name.as_str()))
         .collect();
+    let input_capacitances: Vec<CombinationalOutputLoad> = input_pin_indices
+        .iter()
+        .map(|pin_index| {
+            effective_input_capacitance_for_mapping(
+                &cell.pins[*pin_index],
+                format!(
+                    "technology-map load pin '{}.{}'",
+                    cell.name,
+                    library.resolve_string(&cell.pins[*pin_index].name)
+                )
+                .as_str(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let timing_complete = validate_output_pin_for_basic_sta(
+        library,
+        cell.name.as_str(),
+        output_pin,
+        input_pin_names.as_slice(),
+    )
+    .is_ok();
     let mut indexed = Vec::new();
     for input_to_leaf in permutations(input_pin_names.len()) {
         for input_negated in polarity_vectors(input_pin_names.len()) {
@@ -177,11 +281,15 @@ fn index_cell(
                 transform_truth(truth, input_to_leaf.as_slice(), input_negated.as_slice()),
                 CellBinding {
                     cell_name: cell.name.clone(),
+                    cell_index,
                     output_pin_name: output_pin_name.clone(),
+                    output_pin_index,
                     input_pin_names: input_pin_names.clone(),
                     input_to_leaf: input_to_leaf.clone(),
                     input_negated,
                     input_delays: input_delays.clone(),
+                    input_capacitances: input_capacitances.clone(),
+                    timing_complete,
                     area: cell.area,
                 },
             ));
@@ -234,31 +342,104 @@ fn estimated_input_delay(library: &Library, output_pin: &Pin, input_pin_name: &s
 }
 
 fn permutations(size: usize) -> Vec<Vec<usize>> {
+    if size == 0 {
+        return vec![Vec::new()];
+    }
     let mut values: Vec<usize> = (0..size).collect();
     let mut result = Vec::new();
-    collect_permutations(0, values.as_mut_slice(), &mut result);
+    let schedule = abc_permutation_schedule(size);
+    for swap_index in schedule {
+        result.push(values.clone());
+        if size > 1 {
+            values.swap(swap_index, swap_index + 1);
+        }
+    }
     result
 }
 
 fn polarity_vectors(size: usize) -> Vec<Vec<bool>> {
-    (0..(1usize << size))
-        .map(|mask| (0..size).map(|index| ((mask >> index) & 1) != 0).collect())
-        .collect()
+    if size == 0 {
+        return vec![Vec::new()];
+    }
+    let mut values = vec![false; size];
+    let mut result = Vec::new();
+    for flip_index in abc_gray_code_schedule(size) {
+        result.push(values.clone());
+        values[flip_index] = !values[flip_index];
+    }
+    result
 }
 
-fn collect_permutations(start: usize, values: &mut [usize], result: &mut Vec<Vec<usize>>) {
-    if start == values.len() {
-        result.push(values.to_vec());
-        return;
+/// Returns ABC's adjacent-swap schedule for visiting every pin permutation.
+fn abc_permutation_schedule(size: usize) -> Vec<usize> {
+    if size == 1 {
+        return vec![0];
     }
-    for index in start..values.len() {
-        values.swap(start, index);
-        collect_permutations(start + 1, values, result);
-        values.swap(start, index);
+    if size == 2 {
+        return vec![0, 0];
     }
+    let prior = abc_permutation_schedule(size - 1);
+    let group_count = factorial(size) / size / 2;
+    let mut schedule = Vec::with_capacity(factorial(size));
+    for group in 0..group_count {
+        for index in (1..size).rev() {
+            schedule.push(index - 1);
+        }
+        schedule.push(prior[2 * group] + 1);
+        for index in 0..(size - 1) {
+            schedule.push(index);
+        }
+        schedule.push(prior[2 * group + 1]);
+    }
+    schedule
+}
+
+/// Returns ABC's bit-flip schedule for visiting every polarity vector.
+fn abc_gray_code_schedule(size: usize) -> Vec<usize> {
+    let mut schedule = Vec::with_capacity(1usize << size);
+    for bit in 0..size {
+        schedule.push(bit);
+        for index in 1..(1usize << bit) {
+            schedule.push(schedule[index - 1]);
+        }
+    }
+    schedule.push(size - 1);
+    schedule
+}
+
+fn factorial(value: usize) -> usize {
+    (1..=value).product()
+}
+
+/// Matches ABC NF's default `fPinPerm=0` behavior: for one root cell and one
+/// transformed truth, keep the first configuration for each leaf-polarity
+/// mask instead of retaining equivalent pin permutations.
+fn deduplicate_nf_configurations(indexed: Vec<(u64, CellBinding)>) -> Vec<(u64, CellBinding)> {
+    let mut seen = BTreeSet::new();
+    let mut deduplicated = Vec::new();
+    for (truth, binding) in indexed {
+        let mut leaf_negated = vec![false; binding.input_to_leaf.len()];
+        for (input_index, leaf_index) in binding.input_to_leaf.iter().copied().enumerate() {
+            leaf_negated[leaf_index] = binding.input_negated[input_index];
+        }
+        if seen.insert((truth, leaf_negated)) {
+            deduplicated.push((truth, binding));
+        }
+    }
+    deduplicated
 }
 
 fn binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Ordering {
+    lhs.area
+        .total_cmp(&rhs.area)
+        .then_with(|| lhs.stable_key().cmp(&rhs.stable_key()))
+}
+
+fn root_binding_dominates(lhs: &CellBinding, rhs: &CellBinding) -> bool {
+    lhs.area <= rhs.area && (lhs.area < rhs.area || lhs.stable_key() <= rhs.stable_key())
+}
+
+fn root_binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Ordering {
     lhs.area
         .total_cmp(&rhs.area)
         .then_with(|| lhs.stable_key().cmp(&rhs.stable_key()))
@@ -334,5 +515,23 @@ mod tests {
 
         assert_eq!(index.stats.indexed_cell_outputs, 1);
         assert_eq!(index.best_inverter().unwrap().cell_name, "good");
+    }
+
+    #[test]
+    fn permutation_generator_is_complete() {
+        let generated = permutations(4);
+        let unique = generated.iter().cloned().collect::<BTreeSet<_>>();
+
+        assert_eq!(generated.len(), 24);
+        assert_eq!(unique.len(), 24);
+    }
+
+    #[test]
+    fn polarity_generator_is_complete() {
+        let generated = polarity_vectors(4);
+        let unique = generated.iter().cloned().collect::<BTreeSet<_>>();
+
+        assert_eq!(generated.len(), 16);
+        assert_eq!(unique.len(), 16);
     }
 }
