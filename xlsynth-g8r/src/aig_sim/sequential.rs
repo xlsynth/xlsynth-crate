@@ -8,7 +8,7 @@ use xlsynth::IrBits;
 
 use crate::aig::{AigBitVector, SequentialGateFn};
 use crate::aig_sim::count_toggles::{NodeToggleStats, count_toggle_activity_with_all_node_counts};
-use crate::aig_sim::gate_sim::{self, Collect};
+use crate::aig_sim::gate_sim;
 
 /// Register values in [`SequentialGateFn::registers`] order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,19 +212,20 @@ pub fn simulate(
     let mut register_outputs = Vec::with_capacity(external_inputs.len());
     let mut register_inputs = Vec::with_capacity(external_inputs.len());
     let mut transition_inputs_trace = Vec::with_capacity(external_inputs.len());
+    let mut transition_sim = gate_sim::PreparedGateSim::new(&design.transition);
 
     for cycle_inputs in external_inputs {
         let transition_inputs = bind_transition_inputs(design, cycle_inputs, state.values())?;
-        let result = gate_sim::eval(&design.transition, &transition_inputs, Collect::None);
+        let transition_outputs = transition_sim.eval_outputs(&transition_inputs);
         let visible_outputs = design
             .outputs
             .iter()
-            .map(|id| result.outputs[id.index()].clone())
+            .map(|id| transition_outputs[id.index()].clone())
             .collect::<Vec<_>>();
         let next_register_values = design
             .registers
             .iter()
-            .map(|register| result.outputs[register.d.index()].clone())
+            .map(|register| transition_outputs[register.d.index()].clone())
             .collect::<Vec<_>>();
 
         transition_inputs_trace.push(transition_inputs);
