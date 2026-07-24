@@ -118,6 +118,13 @@ impl StructuralHashCons {
         );
     }
 
+    /// Returns the cached AIG depth for an already-registered operand.
+    pub(crate) fn depth(&self, operand: AigOperand) -> usize {
+        self.ref_data[operand.node.id]
+            .expect("hash-cons operand must have been registered")
+            .depth
+    }
+
     pub(crate) fn find_and(&self, lhs: AigOperand, rhs: AigOperand) -> Option<AigRef> {
         let key = self.and_key(lhs, rhs);
         let expression_id = self.key_to_expression_id.get(&key)?;
