@@ -3114,6 +3114,27 @@ top fn f(x: bits[8] id=1, en: bits[1] id=2) -> bits[8] {
     }
 
     #[test]
+    fn selected_negate_is_left_for_arrival_aware_gatification() {
+        let original = parse_test_fn(
+            r#"package sample
+
+top fn f(x: bits[8] id=1, en: bits[1] id=2, y: bits[8] id=3) -> bits[8] {
+  negated: bits[8] = neg(x, id=4)
+  selected: bits[8] = sel(en, cases=[x, negated], id=5)
+  ret out: bits[8] = add(y, selected, id=6)
+}"#,
+        );
+        let optimized = prep_nary_add_only(&original);
+        let optimized_text = optimized.to_string();
+        assert!(
+            optimized_text.contains("= neg(x,")
+                && optimized_text.contains("= sel(en,")
+                && optimized_text.contains("ret out: bits[8] = ext_nary_add(y, selected"),
+            "selected negation should remain a select for gatification; got:\n{optimized_text}"
+        );
+    }
+
+    #[test]
     fn nary_add_rewrite_grows_add_sub_tree_to_fixed_point() {
         let ir_text = r#"package sample
 

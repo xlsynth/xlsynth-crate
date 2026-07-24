@@ -4541,8 +4541,11 @@ pub fn gatify_node_as_fn(
             hash: options.hash,
         },
     );
-    let track_use_counts =
-        options.enable_rewrite_nary_add && matches!(node.payload, ir::NodePayload::Sel { .. });
+    let track_use_counts = options.enable_rewrite_nary_add
+        && matches!(
+            node.payload,
+            ir::NodePayload::Sel { .. } | ir::NodePayload::ExtNaryAdd { .. }
+        );
     let mut env = GateEnv::new(f, track_use_counts);
 
     // Precompute a map from parameter id to its NodeRef in f.nodes. This is used
@@ -4623,6 +4626,7 @@ mod tests {
     use crate::check_equivalence;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions, ReductionKind};
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
+    use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
     use crate::ir2gate_utils::{AdderMapping, Direction, gatify_barrel_shifter};
     use xlsynth::{IrBits, IrValue};
     use xlsynth_pir::ir;
@@ -6621,6 +6625,205 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
         )
         .unwrap()
         .gate_fn
+    }
+
+    fn gatify_selected_negate(ir_text: &str, enable_arrival_aware_lowering: bool) -> GateFn {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let prepared = prep_for_gatify(
+            ir_fn,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        super::gatify_prepared_fn(
+            &prepared,
+            GatifyOptions {
+                enable_rewrite_nary_add: enable_arrival_aware_lowering,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn
+    }
+
+    #[test]
+    fn test_selected_negate_arrival_aware_lowering_is_exhaustively_equivalent() {
+        for width in 1..=4 {
+            for swapped_cases in [false, true] {
+                for outer_sub in [false, true] {
+                    let cases = if swapped_cases {
+                        "negated, x"
+                    } else {
+                        "x, negated"
+                    };
+                    let operation = if outer_sub { "sub" } else { "add" };
+                    let ir_text = format!(
+                        r#"package sample
+
+top fn f(x: bits[{width}] id=1, en: bits[1] id=2, y: bits[{width}] id=3) -> bits[{width}] {{
+  negated: bits[{width}] = neg(x, id=4)
+  selected: bits[{width}] = sel(en, cases=[{cases}], id=5)
+  ret out: bits[{width}] = {operation}(y, selected, id=6)
+}}
+"#
+                    );
+                    let gate_fn = gatify_selected_negate(&ir_text, true);
+                    let mask = (1u64 << width) - 1;
+                    for x in 0u64..=mask {
+                        for en in 0u64..2 {
+                            for y in 0u64..=mask {
+                                let negate = if swapped_cases { 1 - en } else { en } != 0;
+                                let selected = if negate { x.wrapping_neg() & mask } else { x };
+                                let expected = if outer_sub {
+                                    y.wrapping_sub(selected) & mask
+                                } else {
+                                    y.wrapping_add(selected) & mask
+                                };
+                                let got = gate_sim::eval(
+                                    &gate_fn,
+                                    &[
+                                        IrBits::make_ubits(width, x).unwrap(),
+                                        IrBits::make_ubits(1, en).unwrap(),
+                                        IrBits::make_ubits(width, y).unwrap(),
+                                    ],
+                                    gate_sim::Collect::None,
+                                )
+                                .outputs[0]
+                                    .clone();
+                                assert_eq!(
+                                    got,
+                                    IrBits::make_ubits(width, expected).unwrap(),
+                                    "width={width} swapped={swapped_cases} sub={outer_sub} x={x} en={en} y={y}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_selected_negate_keeps_mux_when_other_addend_is_late() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2, y: bits[16] id=3, amount: bits[4] id=4) -> bits[16] {
+  negated: bits[16] = neg(x, id=5)
+  selected: bits[16] = sel(en, cases=[x, negated], id=6)
+  shifted: bits[16] = shrl(y, amount, id=7)
+  ret out: bits[16] = add(shifted, selected, id=8)
+}
+"#;
+        let guarded = gatify_selected_negate(ir_text, true);
+        let muxed = gatify_selected_negate(ir_text, false);
+        let guarded_stats = get_summary_stats(&guarded);
+        let muxed_stats = get_summary_stats(&muxed);
+        assert_eq!(guarded_stats.live_nodes, muxed_stats.live_nodes);
+        assert_eq!(guarded_stats.deepest_path, muxed_stats.deepest_path);
+    }
+
+    #[test]
+    fn test_selected_negate_fuses_multiple_selected_terms() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1, px: bits[1] id=2, y: bits[8] id=3, py: bits[1] id=4) -> bits[8] {
+  nx: bits[8] = neg(x, id=5)
+  sx: bits[8] = sel(px, cases=[x, nx], id=6)
+  ny: bits[8] = neg(y, id=7)
+  sy: bits[8] = sel(py, cases=[y, ny], id=8)
+  ret out: bits[8] = add(sx, sy, id=9)
+}
+"#;
+        let fused = gatify_selected_negate(ir_text, true);
+        let muxed = gatify_selected_negate(ir_text, false);
+        let fused_stats = get_summary_stats(&fused);
+        let muxed_stats = get_summary_stats(&muxed);
+        assert!(
+            fused_stats.deepest_path < muxed_stats.deepest_path,
+            "jointly selected negations should reduce adder depth: fused={fused_stats:?} muxed={muxed_stats:?}"
+        );
+        for x in 0u64..16 {
+            for y in 0u64..16 {
+                for px in 0u64..2 {
+                    for py in 0u64..2 {
+                        let sx = if px == 0 { x } else { x.wrapping_neg() & 0xff };
+                        let sy = if py == 0 { y } else { y.wrapping_neg() & 0xff };
+                        let got = gate_sim::eval(
+                            &fused,
+                            &[
+                                IrBits::make_ubits(8, x).unwrap(),
+                                IrBits::make_ubits(1, px).unwrap(),
+                                IrBits::make_ubits(8, y).unwrap(),
+                                IrBits::make_ubits(1, py).unwrap(),
+                            ],
+                            gate_sim::Collect::None,
+                        )
+                        .outputs[0]
+                            .clone();
+                        assert_eq!(got, IrBits::make_ubits(8, (sx + sy) & 0xff).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_selected_negate_handles_safe_signed_widening() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[4] id=1, en: bits[1] id=2, y: bits[6] id=3) -> bits[6] {
+  zero: bits[1] = literal(value=0, id=4)
+  base: bits[5] = concat(zero, x, id=5)
+  negated: bits[5] = neg(base, id=6)
+  selected: bits[5] = sel(en, cases=[base, negated], id=7)
+  extended: bits[6] = sign_ext(selected, new_bit_count=6, id=8)
+  ret out: bits[6] = add(y, extended, id=9)
+}
+"#;
+        let gate_fn = gatify_selected_negate(ir_text, true);
+        for x in 0u64..16 {
+            for en in 0u64..2 {
+                for y in 0u64..64 {
+                    let selected = if en == 0 { x } else { x.wrapping_neg() & 0x3f };
+                    let expected = (y + selected) & 0x3f;
+                    let got = gate_sim::eval(
+                        &gate_fn,
+                        &[
+                            IrBits::make_ubits(4, x).unwrap(),
+                            IrBits::make_ubits(1, en).unwrap(),
+                            IrBits::make_ubits(6, y).unwrap(),
+                        ],
+                        gate_sim::Collect::None,
+                    )
+                    .outputs[0]
+                        .clone();
+                    assert_eq!(got, IrBits::make_ubits(6, expected).unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_selected_negate_keeps_shared_negation() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1, en: bits[1] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  negated: bits[8] = neg(x, id=4)
+  selected: bits[8] = sel(en, cases=[x, negated], id=5)
+  sum: bits[8] = add(y, selected, id=6)
+  ret out: (bits[8], bits[8]) = tuple(sum, negated, id=7)
+}
+"#;
+        let guarded = gatify_selected_negate(ir_text, true);
+        let muxed = gatify_selected_negate(ir_text, false);
+        let guarded_stats = get_summary_stats(&guarded);
+        let muxed_stats = get_summary_stats(&muxed);
+        assert_eq!(guarded_stats.live_nodes, muxed_stats.live_nodes);
+        assert_eq!(guarded_stats.deepest_path, muxed_stats.deepest_path);
     }
 
     #[test]
