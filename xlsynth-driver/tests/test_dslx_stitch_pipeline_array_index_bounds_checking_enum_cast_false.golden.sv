@@ -17,7 +17,7 @@ module foo_cycle0(
   assign concat_22 = {literal_20, sel};
   assign literal_23 = 3'h1;
   assign add_25 = concat_22 + literal_23;
-  assign array_index_28 = arr_unflattened[add_25];
+  assign array_index_28 = arr_unflattened[add_25[1:0]];
   assign out = array_index_28;
 endmodule
 

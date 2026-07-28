@@ -20,7 +20,7 @@ module __enum_index__main(
   assign p0_concat_31_comb = {p0_literal_29_comb, sel};
   assign p0_literal_32_comb = 3'h1;
   assign p0_add_34_comb = p0_concat_31_comb + p0_literal_32_comb;
-  assign p0_array_index_37_comb = arr_unflattened[p0_add_34_comb];
+  assign p0_array_index_37_comb = arr_unflattened[p0_add_34_comb[1:0]];
   assign out = p0_array_index_37_comb;
 endmodule
 

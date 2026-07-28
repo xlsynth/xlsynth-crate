@@ -245,6 +245,11 @@ pub struct CDslxEnumDef {
 }
 
 #[repr(C)]
+pub struct CDslxSumDef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CDslxTypeAlias {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -1453,6 +1458,10 @@ unsafe extern "C" {
         module: *const CDslxModule,
         i: i64,
     ) -> *mut CDslxEnumDef;
+    pub fn xls_dslx_module_get_type_definition_as_sum_def(
+        module: *const CDslxModule,
+        i: i64,
+    ) -> *mut CDslxSumDef;
     pub fn xls_dslx_module_get_type_definition_as_type_alias(
         module: *const CDslxModule,
         i: i64,
@@ -1474,6 +1483,8 @@ unsafe extern "C" {
     pub fn xls_dslx_module_member_get_enum_def(
         member: *const CDslxModuleMember,
     ) -> *mut CDslxEnumDef;
+    pub fn xls_dslx_module_member_get_sum_def(member: *const CDslxModuleMember)
+    -> *mut CDslxSumDef;
     pub fn xls_dslx_module_member_get_function(
         member: *const CDslxModuleMember,
     ) -> *mut CDslxFunction;
@@ -1490,6 +1501,8 @@ unsafe extern "C" {
     pub fn xls_dslx_module_member_from_enum_def(
         enum_def: *mut CDslxEnumDef,
     ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_sum_def(sum_def: *mut CDslxSumDef)
+    -> *mut CDslxModuleMember;
     pub fn xls_dslx_module_member_from_type_alias(
         type_alias: *mut CDslxTypeAlias,
     ) -> *mut CDslxModuleMember;
@@ -1511,6 +1524,10 @@ unsafe extern "C" {
     pub fn xls_dslx_type_info_get_type_enum_def(
         type_info: *mut CDslxTypeInfo,
         node: *mut CDslxEnumDef,
+    ) -> *mut CDslxType;
+    pub fn xls_dslx_type_info_get_type_sum_def(
+        type_info: *mut CDslxTypeInfo,
+        node: *mut CDslxSumDef,
     ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_struct_member(
         type_info: *mut CDslxTypeInfo,
@@ -1745,6 +1762,16 @@ unsafe extern "C" {
 
     pub fn xls_dslx_enum_member_get_value(member: *const CDslxEnumMember) -> *mut CDslxExpr;
 
+    // -- SumDef
+
+    pub fn xls_dslx_sum_def_get_identifier(
+        sum_def: *const CDslxSumDef,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_sum_def_is_parametric(sum_def: *const CDslxSumDef) -> bool;
+
+    pub fn xls_dslx_sum_def_get_variant_count(sum_def: *const CDslxSumDef) -> i64;
+
     pub fn xls_dslx_expr_get_owner_module(expr: *mut CDslxExpr) -> *mut CDslxModule;
 
     // --
@@ -1837,6 +1864,7 @@ unsafe extern "C" {
         struct_def: *const CDslxStructDef,
     ) -> *mut std::os::raw::c_char;
     pub fn xls_dslx_enum_def_to_string(enum_def: *const CDslxEnumDef) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_sum_def_to_string(sum_def: *const CDslxSumDef) -> *mut std::os::raw::c_char;
     pub fn xls_dslx_type_alias_to_string(
         type_alias: *const CDslxTypeAlias,
     ) -> *mut std::os::raw::c_char;
