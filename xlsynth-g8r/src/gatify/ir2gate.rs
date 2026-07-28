@@ -173,35 +173,30 @@ fn maybe_warn_shift_amount_truncatable(
 
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
-    use_counts: Option<Vec<usize>>,
+    use_counts: Vec<usize>,
 }
 
 impl GateEnv {
-    fn new(f: &ir::Fn, track_use_counts: bool) -> Self {
-        let use_counts = if track_use_counts {
-            let mut use_counts = vec![0usize; f.nodes.len()];
-            for node in &f.nodes {
-                for operand in ir_utils::operands(&node.payload) {
-                    use_counts[operand.index] += 1;
-                }
+    /// Creates a lowering environment with use counts for prepared IR nodes.
+    fn new(f: &ir::Fn) -> Self {
+        let mut use_counts = vec![0usize; f.nodes.len()];
+        for node in &f.nodes {
+            for operand in ir_utils::operands(&node.payload) {
+                use_counts[operand.index] += 1;
             }
-            if let Some(ret) = f.ret_node_ref {
-                use_counts[ret.index] += 1;
-            }
-            Some(use_counts)
-        } else {
-            None
-        };
+        }
+        if let Some(ret) = f.ret_node_ref {
+            use_counts[ret.index] += 1;
+        }
         Self {
             ir_to_g8: HashMap::new(),
             use_counts,
         }
     }
 
+    /// Returns whether a prepared IR node has exactly one consumer.
     pub(super) fn has_single_use(&self, ir_node_ref: ir::NodeRef) -> bool {
-        self.use_counts
-            .as_ref()
-            .is_some_and(|use_counts| use_counts[ir_node_ref.index] == 1)
+        self.use_counts[ir_node_ref.index] == 1
     }
 
     fn contains(&self, ir_node_ref: ir::NodeRef) -> bool {
@@ -3557,6 +3552,7 @@ fn gatify_node(
                 *arch,
                 output_width,
                 options.adder_mapping,
+                options.enable_rewrite_nary_add,
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
@@ -4401,7 +4397,7 @@ fn gatify_lower_prepared_fn(
             hash: options.hash,
         },
     );
-    let mut env = GateEnv::new(f, options.enable_rewrite_nary_add);
+    let mut env = GateEnv::new(f);
     let provenance_by_node = if options.track_pir_node_ids {
         orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original))
     } else {
@@ -4541,12 +4537,7 @@ pub fn gatify_node_as_fn(
             hash: options.hash,
         },
     );
-    let track_use_counts = options.enable_rewrite_nary_add
-        && matches!(
-            node.payload,
-            ir::NodePayload::Sel { .. } | ir::NodePayload::ExtNaryAdd { .. }
-        );
-    let mut env = GateEnv::new(f, track_use_counts);
+    let mut env = GateEnv::new(f);
 
     // Precompute a map from parameter id to its NodeRef in f.nodes. This is used
     // when lowering GetParam nodes.
@@ -6648,6 +6639,39 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
         )
         .unwrap()
         .gate_fn
+    }
+
+    #[test]
+    fn test_gate_env_unconditionally_tracks_operand_and_return_uses() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1) -> bits[8] {
+  doubled: bits[8] = add(x, x, id=2)
+  ret out: bits[8] = add(doubled, x, id=3)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let env = super::GateEnv::new(ir_fn);
+        let node_ref_with_text_id = |text_id| ir::NodeRef {
+            index: ir_fn
+                .nodes
+                .iter()
+                .position(|node| node.text_id == text_id)
+                .expect("test node should exist"),
+        };
+        let x = node_ref_with_text_id(1);
+        let doubled = node_ref_with_text_id(2);
+        let out = node_ref_with_text_id(3);
+
+        assert_eq!(env.use_counts.len(), ir_fn.nodes.len());
+        assert_eq!(env.use_counts[x.index], 3);
+        assert!(!env.has_single_use(x));
+        assert_eq!(env.use_counts[doubled.index], 1);
+        assert!(env.has_single_use(doubled));
+        assert_eq!(env.use_counts[out.index], 1);
+        assert!(env.has_single_use(out));
     }
 
     #[test]

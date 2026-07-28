@@ -856,6 +856,7 @@ pub(super) fn gatify_ext_nary_add(
     arch: Option<ir::ExtNaryAddArchitecture>,
     output_width: usize,
     default_adder_mapping: AdderMapping,
+    enable_rewrite_nary_add: bool,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
     if output_width == 0 {
@@ -866,10 +867,14 @@ pub(super) fn gatify_ext_nary_add(
     }
 
     let false_bit = g8_builder.get_false();
-    let selected_negates: Vec<Option<SelectedNegateMatch>> = terms
-        .iter()
-        .map(|term| match_selected_negate_term(f, env, term, output_width, false_bit))
-        .collect();
+    let selected_negates: Vec<Option<SelectedNegateMatch>> = if enable_rewrite_nary_add {
+        terms
+            .iter()
+            .map(|term| match_selected_negate_term(f, env, term, output_width, false_bit))
+            .collect()
+    } else {
+        vec![None; terms.len()]
+    };
     let selected_negate_count = selected_negates.iter().flatten().count();
     let selected_depth = selected_negates
         .iter()
