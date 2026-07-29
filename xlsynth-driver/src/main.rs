@@ -1746,6 +1746,14 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
+                    clap::Arg::new("transition_aiger_out")
+                        .long("transition-aiger-out")
+                        .value_name("PATH")
+                        .help("Path to write the combinational transition as AIGER, including for registered designs; use .aag for ASCII or .aig for binary")
+                        .conflicts_with("aiger_out")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
                     clap::Arg::new("stats_out")
                         .long("stats-out")
                         .value_name("PATH")
@@ -2271,6 +2279,22 @@ fn main() {
                         .long("netlist_out")
                         .help("Path to write mapped netlist text (use '-' for stdout)")
                         .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("sequential_design")
+                        .long("sequential-design")
+                        .value_name("PATH")
+                        .help("Native .g8r or .g8rbin design providing register and clock metadata for the transition AIG")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("clock_period")
+                        .long("clock-period")
+                        .value_name("TIME")
+                        .help("Finite, positive clock period in Liberty time units; requires --sequential-design")
+                        .requires("sequential_design")
+                        .value_parser(choice_aig_tech_map::parse_positive_finite_clock_period)
                         .action(ArgAction::Set),
                 )
                 .arg(

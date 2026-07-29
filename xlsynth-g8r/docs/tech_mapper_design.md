@@ -193,6 +193,50 @@ deterministic:
 - output ports are driven structurally through selected cells, buffers, or
   paired inverters when they are not constant
 
+### Sequential Transition Mapping
+
+A synchronous design is represented by `SequentialGateFn`: an ordinary
+combinational transition `GateFn`, one clock, external interface bindings,
+and register bindings. Each register's current `Q` value is a transition
+input and its effective next-state `D` value is a transition output.
+Synchronous reset and load-enable behavior are already included in the
+next-state logic.
+
+ABC optimizes only that combinational transition graph. The controller keeps
+the original `.g8r` or `.g8rbin` sequential metadata and exports the
+transition using `ir2g8r --transition-aiger-out`. ABC's final binary AIGER
+retains structural choices as usual. No sequential AIGER extension, latch
+encoding, or retiming is required.
+
+`map_sequential_choice_aig_to_netlist` validates that the optimized graph
+preserves every scalar transition input and output. It then maps the
+transition logic using the same choice-aware Liberty mapper and reconnects
+each state boundary to a real Liberty flip-flop. Register `Q` and `D` remain
+internal wires; the final module exposes only the original external
+interface and clock.
+
+Flip-flop eligibility follows Liberty `ff` metadata, clock expressions,
+state-variable output functions, next-state functions, `dont_use`, and
+deterministic cell area ordering. Complemented-output flip-flops are
+eligible when the corresponding next-state polarity can preserve the
+logical register. Cell-name suffixes and assumed drive-strength conventions
+do not determine eligibility.
+
+Register clock-to-output launch arrivals and setup-constrained next-state
+endpoints seed the NF mapper. Final timing and area are recomputed from the
+complete sequential netlist using the same register-boundary STA as
+`gv-stats`, with controller-provided primary-input arrivals applied to their
+corresponding scalar port bits. The final physical cover must satisfy both
+the clock period and each primary-output required time. Statistics distinguish
+flip-flop area, primary-input capture, register-to-register timing,
+register-to-output timing, and optional clock slack.
+
+The initial supported subset is one positive-edge clock and synchronous
+flip-flops. Latches, negative-edge cells, asynchronous clear or preset,
+explicit power-up state, and mapped-netlist buffering or resizing are
+rejected rather than silently approximated. Register-aware buffering and
+sizing are deliberately separate follow-up work.
+
 ## Structural Baseline
 
 The older `netlist::techmap` path remains as a separate baseline. It maps

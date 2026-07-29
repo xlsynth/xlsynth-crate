@@ -569,6 +569,22 @@ bounded choice-propagating AIG cuts against those functions, runs NF-style
 delay, area-flow, and exact-area recovery rounds, and emits the final
 gate-level netlist rather than serializing a mapping back into ABC.
 
+For a registered design, pass `--sequential-design` with the `.g8r` or
+`.g8rbin` metadata produced by `ir2g8r`. The choice AIG must represent that
+design's combinational transition after ABC optimization: its inputs include
+both external data inputs and register `Q` values, and its outputs include
+both external outputs and register `D` values. The mapper validates these
+transition boundaries and uses Liberty sequential metadata to instantiate
+positive-edge flip-flops in the final netlist. The clock and register wires
+are reconstructed from the native design rather than treated as AIG inputs or
+external ports. A positive `--clock-period` optionally supplies
+register-capture timing in the Liberty library's time units. External input
+arrivals, output requirements, and register setup are checked against the
+finished netlist's Liberty timing; an infeasible clock period is rejected.
+Initial support is restricted to a single clock and positive-edge
+flip-flops; synchronous enables and resets must already be represented in
+the transition logic.
+
 By default, unconstrained mapping uses one Liberty-timed `nf-liberty` cover:
 six-input structural cuts, up to 16 cuts per node, four area-flow rounds,
 and two exact-area rounds. Cell areas retain their full Liberty precision.
@@ -589,12 +605,33 @@ xlsynth-driver choice-aig-tech-map final_choices.aig \
   --netlist_out final.mapped.gv
 ```
 
+Registered transition example:
+
+```shell
+xlsynth-driver ir2g8r pipeline.ir --top pipe \
+  --bin-out pipeline.g8rbin \
+  --transition-aiger-out pipeline.transition.aig > pipeline.g8r
+
+# Optimize pipeline.transition.aig with ABC and preserve structural choices.
+xlsynth-driver choice-aig-tech-map pipeline.transition.choices.aig \
+  --sequential-design pipeline.g8rbin \
+  --clock-period 100 \
+  --liberty_proto /path/to/timing-enabled.liberty.proto \
+  --netlist_out pipeline.mapped.gv
+```
+
 Key flags:
 
 - `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally
   gzip-compressed. Required.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout.
   Required.
+- `--sequential-design <PATH>`: optional native `.g8r` or `.g8rbin` design
+  providing the clock, external interface, and register bindings for an
+  optimized transition AIG. Without this flag, the existing combinational
+  mapping behavior is unchanged.
+- `--clock-period <TIME>`: optional finite, strictly positive clock period in
+  Liberty time units; requires `--sequential-design`.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--max-cut-size <N>`: maximum truth-table cut size, from `1` through `6`
   (default: `6`).
@@ -805,6 +842,14 @@ combinational transition logic is lowered into the stored transition function.
   - `--aiger-out <PATH>` – write a clockless, register-free result as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
+    - registered designs are rejected; use `--transition-aiger-out` instead
+  - `--transition-aiger-out <PATH>` – atomically write the combinational
+    transition of either a registered or register-free design as AIGER:
+    - use a `.aag` suffix for ASCII AIGER (`aag`)
+    - use a `.aig` suffix for binary AIGER (`aig`)
+    - combine with `--bin-out` to retain the native clock, interface, and
+      register metadata needed for subsequent sequential technology mapping
+    - cannot be combined with `--aiger-out`
   - `--stats-out <PATH>` – write a JSON summary of structural statistics for a selected function. Sequential block statistics are not yet exposed by this command.
   - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
 - For selected functions, the same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--reassociation`, `--toggle-sample-count`, ...).
@@ -843,6 +888,7 @@ Block example:
 ```shell
 xlsynth-driver ir2g8r pipeline.ir --top pipe \
   --bin-out pipeline.g8rbin \
+  --transition-aiger-out pipeline.transition.aig \
   --netlist-out pipeline.ugv > pipeline.g8r
 ```
 

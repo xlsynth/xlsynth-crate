@@ -4612,6 +4612,7 @@ fn test_ir2g8r_emits_all_outputs() {
     let ir2g8r_output = std::process::Command::new(command_path)
         .arg("ir2g8r")
         .arg(ir_path.to_str().unwrap())
+        .arg("--enable-formal-array-alias-analysis=false")
         .arg("--fold=true")
         .arg("--hash=true")
         .arg("--fraig=true")
@@ -4723,6 +4724,183 @@ block pipe(clk: clock, data: bits[1], le: bits[1], out: bits[1]) {
 }
 
 #[test]
+fn test_ir2g8r_exports_registered_transition_aiger_and_binary_design() {
+    let ir = r#"package registered_transition
+
+top block pipe(clk: clock, data: bits[2], le: bits[1], out: bits[2]) {
+  reg state(bits[2])
+  data: bits[2] = input_port(name=data, id=1)
+  le: bits[1] = input_port(name=le, id=2)
+  state_q: bits[2] = register_read(register=state, id=3)
+  state_d: () = register_write(data, register=state, load_enable=le, id=4)
+  out: () = output_port(state_q, name=out, id=5)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("registered_transition.ir");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    for (extension, expected_header) in [("aag", b"aag ".as_slice()), ("aig", b"aig ".as_slice())] {
+        let aiger_path = temp_dir
+            .path()
+            .join(format!("registered_transition.{extension}"));
+        let bin_path = temp_dir
+            .path()
+            .join(format!("registered_transition_{extension}.g8rbin"));
+        std::fs::write(&aiger_path, b"stale AIGER output")
+            .expect("create existing transition output for atomic replacement");
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("ir2g8r")
+            .arg(&ir_path)
+            .arg("--transition-aiger-out")
+            .arg(&aiger_path)
+            .arg("--bin-out")
+            .arg(&bin_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "registered {extension} transition export failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let design = parse_g8r(&String::from_utf8(output.stdout).unwrap()).unwrap();
+        assert_eq!(design.name, "pipe");
+        assert_eq!(design.clock.as_ref().unwrap().name, "clk");
+        assert_eq!(design.registers.len(), 1);
+        assert_eq!(design.registers[0].name, "state");
+
+        let binary_design =
+            xlsynth_g8r::aig_serdes::g8r::load_sequential_gate_fn_from_path(&bin_path)
+                .expect("load exported native binary design");
+        assert_eq!(binary_design.name, design.name);
+        assert_eq!(binary_design.clock, design.clock);
+        assert_eq!(binary_design.inputs, design.inputs);
+        assert_eq!(binary_design.outputs, design.outputs);
+        assert_eq!(binary_design.registers, design.registers);
+
+        let aiger_bytes = std::fs::read(&aiger_path).expect("read transition AIGER");
+        assert!(
+            aiger_bytes.starts_with(expected_header),
+            "{extension} transition has the wrong AIGER header"
+        );
+        let transition = xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path(
+            &aiger_path,
+            GateBuilderOptions::no_opt(),
+        )
+        .expect("load exported transition AIGER")
+        .gate_fn;
+
+        let expected_inputs = design
+            .transition
+            .inputs
+            .iter()
+            .flat_map(|input| {
+                let bit_count = input.get_bit_count();
+                (0..bit_count).map(move |bit| {
+                    if bit_count == 1 {
+                        input.name.clone()
+                    } else {
+                        format!("{}_{}", input.name, bit)
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected_outputs = design
+            .transition
+            .outputs
+            .iter()
+            .flat_map(|output| {
+                let bit_count = output.get_bit_count();
+                (0..bit_count).map(move |bit| {
+                    if bit_count == 1 {
+                        output.name.clone()
+                    } else {
+                        format!("{}_{}", output.name, bit)
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transition
+                .inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>(),
+            expected_inputs
+        );
+        assert_eq!(
+            transition
+                .outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>(),
+            expected_outputs
+        );
+        assert!(
+            transition.inputs.iter().all(|input| input.name != "clk"),
+            "the clock must remain metadata, not a transition AIG input"
+        );
+        assert!(
+            std::fs::read_dir(temp_dir.path())
+                .expect("read transition export directory")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".xlsynth-aiger-")),
+            "atomic transition export left a temporary AIGER artifact"
+        );
+    }
+}
+
+#[test]
+fn test_ir2g8r_rejects_conflicting_registered_aiger_exports_without_artifacts() {
+    let ir = r#"package registered_transition
+
+top block pipe(clk: clock, data: bits[1], out: bits[1]) {
+  reg state(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  state_q: bits[1] = register_read(register=state, id=2)
+  state_d: () = register_write(data, register=state, id=3)
+  out: () = output_port(state_q, name=out, id=4)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("registered_transition.ir");
+    let aiger_path = temp_dir.path().join("registered.aag");
+    let transition_path = temp_dir.path().join("registered_transition.aag");
+    let bin_path = temp_dir.path().join("registered.g8rbin");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("ir2g8r")
+        .arg(&ir_path)
+        .arg("--aiger-out")
+        .arg(&aiger_path)
+        .arg("--transition-aiger-out")
+        .arg(&transition_path)
+        .arg("--bin-out")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--aiger-out")
+            && stderr.contains("--transition-aiger-out")
+            && stderr.contains("cannot be used with"),
+        "unexpected error for conflicting AIGER exports: {stderr}"
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!aiger_path.exists());
+    assert!(!transition_path.exists());
+    assert!(!bin_path.exists());
+}
+
+#[test]
 fn test_ir2g8r_requires_top_when_package_has_function_and_block_without_declared_top() {
     let ir = r#"package ambiguous_member
 
@@ -4784,7 +4962,47 @@ top block pipe(clk: clock, data: bits[1], out: bits[1]) {
         String::from_utf8_lossy(&output.stderr)
             .contains("--aiger-out requires a clockless, register-free design")
     );
+    assert!(output.stdout.is_empty());
     assert!(!aiger_path.exists());
+}
+
+#[test]
+fn test_ir2g8r_rejected_registered_aiger_preserves_existing_output() {
+    let ir = r#"package selected_block
+
+top block pipe(clk: clock, data: bits[1], out: bits[1]) {
+  reg state(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  state_q: bits[1] = register_read(register=state, id=2)
+  state_d: () = register_write(data, register=state, id=3)
+  out: () = output_port(state_q, name=out, id=4)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("registered.ir");
+    let aiger_path = temp_dir.path().join("registered.aag");
+    let previous_output = b"existing AIGER output must not be truncated";
+    std::fs::write(&ir_path, ir).unwrap();
+    std::fs::write(&aiger_path, previous_output).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("ir2g8r")
+        .arg(&ir_path)
+        .arg("--aiger-out")
+        .arg(&aiger_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--aiger-out requires a clockless, register-free design")
+    );
+    assert_eq!(
+        std::fs::read(&aiger_path).expect("read preserved AIGER output"),
+        previous_output
+    );
 }
 
 #[test]

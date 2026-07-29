@@ -37,9 +37,9 @@
 //!    loads for each net.
 //! 2. Build a combinational dependency graph between instances and compute the
 //!    edge-specific capacitive load on each net.
-//! 3. Seed primary inputs with zero arrival and the configured source
-//!    transition; reject undriven non-input nets that feed logic or module
-//!    outputs.
+//! 3. Seed primary inputs with their configured arrival (zero by default) and
+//!    the configured source transition; reject undriven non-input nets that
+//!    feed logic or module outputs.
 //! 4. Visit instances in topological order. For each output timing arc:
 //!    - choose the relevant input edge candidates from the arc sense
 //!      (`positive_unate`, `negative_unate`, or `non_unate`);
@@ -59,12 +59,12 @@ use crate::liberty::Library;
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
-use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
+use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule, NormalizedPort};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -326,6 +326,8 @@ impl std::ops::AddAssign for TimingQueryDiagnosticCounts {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaReport {
     pub net_timing: Vec<Option<SignalTiming>>,
+    /// Exact rise/fall timing for each flattened primary-output bit.
+    pub output_bit_timings: BTreeMap<String, SignalTiming>,
     pub worst_output_arrival: f64,
     pub worst_output_breakdown: Option<RegisterPathDelayBreakdown>,
     pub worst_register_input_arrival: f64,
@@ -339,6 +341,16 @@ pub struct StaReport {
 impl StaReport {
     pub fn timing_for_net(&self, net: NetIndex) -> Option<SignalTiming> {
         self.net_timing.get(net.0).copied().flatten()
+    }
+
+    /// Returns exact timing keyed by scalar or flattened packed-output name.
+    pub fn flattened_output_bit_timings(&self) -> &BTreeMap<String, SignalTiming> {
+        &self.output_bit_timings
+    }
+
+    /// Returns exact timing for one scalar or flattened packed-output bit.
+    pub fn timing_for_output_bit(&self, name: &str) -> Option<SignalTiming> {
+        self.output_bit_timings.get(name).copied()
     }
 }
 
@@ -480,6 +492,26 @@ pub fn analyze_combinational_max_arrival(
     analyze_combinational_max_arrival_proto(module, nets, interner, library, options)
 }
 
+/// Analyzes a combinational netlist using flattened primary-input arrivals.
+pub(crate) fn analyze_combinational_max_arrival_with_primary_input_arrivals(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: StaOptions,
+    primary_input_arrivals: &BTreeMap<String, f64>,
+) -> Result<StaReport> {
+    analyze_max_arrival_proto_with_mode(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        StaAnalysisMode::CombinationalOnly,
+        primary_input_arrivals,
+    )
+}
+
 /// Analyzes combinational segments launched by primary inputs and/or selected
 /// sequential instances, treating sequential inputs as capture boundaries.
 pub fn analyze_register_boundary_max_arrival(
@@ -490,6 +522,29 @@ pub fn analyze_register_boundary_max_arrival(
     options: StaOptions,
     launch_primary_inputs: bool,
     launch_register_instances: &[usize],
+) -> Result<StaReport> {
+    analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        launch_primary_inputs,
+        launch_register_instances,
+        &BTreeMap::new(),
+    )
+}
+
+/// Analyzes register-bounded paths with flattened primary-input arrivals.
+pub fn analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: StaOptions,
+    launch_primary_inputs: bool,
+    launch_register_instances: &[usize],
+    primary_input_arrivals: &BTreeMap<String, f64>,
 ) -> Result<StaReport> {
     let launch_register_instances: HashSet<usize> =
         launch_register_instances.iter().copied().collect();
@@ -503,6 +558,7 @@ pub fn analyze_register_boundary_max_arrival(
             launch_primary_inputs,
             launch_register_instances: &launch_register_instances,
         },
+        primary_input_arrivals,
     )
 }
 
@@ -570,7 +626,34 @@ fn analyze_combinational_max_arrival_proto(
         library,
         options,
         StaAnalysisMode::CombinationalOnly,
+        &BTreeMap::new(),
     )
+}
+
+/// Renders a declared module-port bit in the flattened timing-endpoint ABI.
+fn flattened_port_bit_name(
+    port_name: &str,
+    port: &NormalizedPort,
+    bit_offset: usize,
+) -> Result<String> {
+    if port.bits.len() == 1 {
+        return Ok(port_name.to_string());
+    }
+    let (msb, lsb) = port.width.ok_or_else(|| {
+        anyhow!("multi-bit module port '{port_name}' has no declared packed range")
+    })?;
+    let bit_offset = u32::try_from(bit_offset).map_err(|_| {
+        anyhow!("module port '{port_name}' bit offset {bit_offset} exceeds its packed range")
+    })?;
+    let bit_number = if msb >= lsb {
+        lsb.checked_add(bit_offset)
+    } else {
+        lsb.checked_sub(bit_offset)
+    }
+    .ok_or_else(|| {
+        anyhow!("module port '{port_name}' bit offset {bit_offset} exceeds its packed range")
+    })?;
+    Ok(format!("{port_name}_{bit_number}"))
 }
 
 fn analyze_max_arrival_proto_with_mode(
@@ -580,6 +663,7 @@ fn analyze_max_arrival_proto_with_mode(
     library: &crate::liberty_model::Library,
     options: StaOptions,
     analysis_mode: StaAnalysisMode<'_>,
+    primary_input_arrivals: &BTreeMap<String, f64>,
 ) -> Result<StaReport> {
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
@@ -821,19 +905,33 @@ fn analyze_max_arrival_proto_with_mode(
     }
 
     let mut module_output_bits: Vec<usize> = Vec::new();
+    let mut module_output_bit_names: Vec<(usize, String)> = Vec::new();
     let mut has_module_output = vec![false; bit_count];
     let mut is_module_input = vec![false; bit_count];
+    let mut primary_input_bits = BTreeMap::new();
     for port in &normalized.ports {
         let port_name = resolve_symbol(interner, port.name, "port name")
             .unwrap_or_else(|_| "<unknown>".to_string());
         match port.direction {
             PortDirection::Input => {
-                for bit_idx in &port.bits {
+                for (bit_offset, bit_idx) in port.bits.iter().enumerate() {
                     is_module_input[*bit_idx] = true;
+                    if !primary_input_arrivals.is_empty() {
+                        let name = flattened_port_bit_name(&port_name, port, bit_offset)?;
+                        if primary_input_bits.insert(name.clone(), *bit_idx).is_some() {
+                            return Err(anyhow!(
+                                "module has duplicate flattened primary input '{name}'"
+                            ));
+                        }
+                    }
                 }
             }
             PortDirection::Output => {
-                for bit_idx in &port.bits {
+                for (bit_offset, bit_idx) in port.bits.iter().enumerate() {
+                    module_output_bit_names.push((
+                        *bit_idx,
+                        flattened_port_bit_name(&port_name, port, bit_offset)?,
+                    ));
                     if !has_module_output[*bit_idx] {
                         has_module_output[*bit_idx] = true;
                         module_output_bits.push(*bit_idx);
@@ -847,6 +945,22 @@ fn analyze_max_arrival_proto_with_mode(
                 ));
             }
         }
+    }
+    let mut primary_input_arrivals_by_bit = HashMap::with_capacity(primary_input_arrivals.len());
+    for (name, arrival) in primary_input_arrivals {
+        let bit_idx = primary_input_bits
+            .get(name)
+            .copied()
+            .ok_or_else(|| anyhow!("timing constraint names unknown primary input '{name}'"))?;
+        if !arrival.is_finite() || *arrival < 0.0 {
+            return Err(anyhow!(
+                "primary input arrival for '{name}' must be non-negative and finite; got {arrival}"
+            ));
+        }
+        primary_input_arrivals_by_bit
+            .entry(bit_idx)
+            .and_modify(|previous: &mut f64| *previous = previous.max(*arrival))
+            .or_insert(*arrival);
     }
     module_output_bits.sort_unstable();
     let mut has_resolved_module_output = vec![false; bit_count];
@@ -977,7 +1091,27 @@ fn analyze_max_arrival_proto_with_mode(
             ResolvedTimingSource::Bit(_) => {}
         }
         if is_module_input[bit_idx] && analysis_mode.launches_primary_inputs() {
-            bit_timing_sets[bit_idx] = Some(source_timing_set.clone());
+            let timing_set = match primary_input_arrivals_by_bit.get(&bit_idx).copied() {
+                Some(arrival) if arrival != 0.0 => {
+                    let timing = SignalTiming {
+                        rise: EdgeTiming {
+                            arrival,
+                            transition: options.primary_input_transition,
+                        },
+                        fall: EdgeTiming {
+                            arrival,
+                            transition: options.primary_input_transition,
+                        },
+                    };
+                    if analysis_mode.uses_register_boundaries() {
+                        SignalTimingSet::from_primary_input_launch(timing)
+                    } else {
+                        SignalTimingSet::from_single(timing)
+                    }
+                }
+                _ => source_timing_set.clone(),
+            };
+            bit_timing_sets[bit_idx] = Some(timing_set);
             continue;
         }
         if (!bit_loads[bit_idx].is_empty() || has_resolved_module_output[bit_idx])
@@ -1363,6 +1497,35 @@ fn analyze_max_arrival_proto_with_mode(
         }
     }
 
+    let mut output_bit_timings = BTreeMap::new();
+    for (bit_idx, output_name) in module_output_bit_names {
+        let timing_source = resolved_timing_sources[bit_idx];
+        if analysis_mode.uses_register_boundaries()
+            && matches!(
+                timing_source,
+                ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown
+            )
+        {
+            continue;
+        }
+        let Some(timing) = timing_set_for_resolved_source(
+            timing_source,
+            bit_timing_sets.as_slice(),
+            &literal_source_timing_set,
+        )
+        .and_then(SignalTimingSet::as_report_signal_timing) else {
+            continue;
+        };
+        if output_bit_timings
+            .insert(output_name.clone(), timing)
+            .is_some()
+        {
+            return Err(anyhow!(
+                "module has duplicate flattened primary output '{output_name}'"
+            ));
+        }
+    }
+
     let mut register_input_timings: Vec<Option<RegisterCaptureTimingCandidate>> =
         vec![None; instance_count];
     let mut worst_register_input: Option<RegisterCaptureTimingCandidate> = None;
@@ -1463,6 +1626,7 @@ fn analyze_max_arrival_proto_with_mode(
 
     Ok(StaReport {
         net_timing,
+        output_bit_timings,
         worst_output_arrival: worst_output
             .map(|timing| timing.timing.arrival)
             .unwrap_or(0.0),
@@ -3676,6 +3840,297 @@ mod tests {
 
     fn scalar_inv_library() -> crate::liberty_model::Library {
         scalar_inv_builder().finish()
+    }
+
+    #[test]
+    fn named_primary_input_arrivals_shift_scalar_output_edges_exactly() {
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  INV u0 (.A(a), .Y(y));
+endmodule
+"#,
+        );
+        let report = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+            true,
+            &[],
+            &BTreeMap::from([("a".to_string(), 5.0)]),
+        )
+        .expect("analyze nonzero scalar primary-input arrival");
+
+        let output = report
+            .timing_for_output_bit("y")
+            .expect("exact scalar output timing");
+        assert_close(output.rise.arrival, 7.0);
+        assert_close(output.fall.arrival, 8.0);
+        assert_close(report.worst_output_arrival, 8.0);
+        assert_eq!(report.flattened_output_bit_timings().len(), 1);
+        assert_eq!(report.flattened_output_bit_timings()["y"], output);
+        assert_eq!(report.timing_for_output_bit("y_0"), None);
+    }
+
+    #[test]
+    fn named_primary_input_arrivals_preserve_individual_packed_output_bits() {
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y);
+  input [1:0] a;
+  output [1:0] y;
+  wire [1:0] a;
+  wire [1:0] y;
+  INV u0 (.A(a[0]), .Y(y[0]));
+  INV u1 (.A(a[1]), .Y(y[1]));
+endmodule
+"#,
+        );
+        let report = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+            true,
+            &[],
+            &BTreeMap::from([("a_0".to_string(), 5.0), ("a_1".to_string(), 1.0)]),
+        )
+        .expect("analyze independent packed-bit primary-input arrivals");
+
+        let low = report
+            .timing_for_output_bit("y_0")
+            .expect("exact low output-bit timing");
+        let high = report
+            .timing_for_output_bit("y_1")
+            .expect("exact high output-bit timing");
+        assert_close(low.rise.arrival, 7.0);
+        assert_close(low.fall.arrival, 8.0);
+        assert_close(high.rise.arrival, 3.0);
+        assert_close(high.fall.arrival, 4.0);
+        assert_eq!(
+            report
+                .flattened_output_bit_timings()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["y_0", "y_1"]
+        );
+        assert_close(
+            report
+                .timing_for_net(find_net_index(&nets, &interner, "y"))
+                .expect("legacy aggregate packed-output timing")
+                .fall
+                .arrival,
+            8.0,
+        );
+    }
+
+    #[test]
+    fn named_primary_input_arrivals_use_declared_packed_bit_numbers() {
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y);
+  input [3:2] a;
+  output [3:2] y;
+  wire [3:2] a;
+  wire [3:2] y;
+  INV u2 (.A(a[2]), .Y(y[2]));
+  INV u3 (.A(a[3]), .Y(y[3]));
+endmodule
+"#,
+        );
+        let report = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+            true,
+            &[],
+            &BTreeMap::from([("a_2".to_string(), 5.0), ("a_3".to_string(), 1.0)]),
+        )
+        .expect("use declared packed indices for timing endpoint names");
+
+        assert_close(
+            report
+                .timing_for_output_bit("y_2")
+                .expect("declared output bit 2")
+                .fall
+                .arrival,
+            8.0,
+        );
+        assert_close(
+            report
+                .timing_for_output_bit("y_3")
+                .expect("declared output bit 3")
+                .fall
+                .arrival,
+            4.0,
+        );
+        assert_eq!(report.timing_for_output_bit("y_0"), None);
+    }
+
+    #[test]
+    fn exact_output_bit_timing_preserves_distinct_aliased_output_names() {
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y, z);
+  input a;
+  output y;
+  output z;
+  wire a;
+  wire y;
+  wire z;
+  INV u0 (.A(a), .Y(y));
+  assign z = y;
+endmodule
+"#,
+        );
+        let report = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+            true,
+            &[],
+            &BTreeMap::from([("a".to_string(), 5.0)]),
+        )
+        .expect("retain the identity of each aliased output endpoint");
+
+        assert_eq!(
+            report.timing_for_output_bit("y"),
+            report.timing_for_output_bit("z")
+        );
+        assert_eq!(report.flattened_output_bit_timings().len(), 2);
+        assert_close(
+            report
+                .timing_for_output_bit("z")
+                .expect("aliased output timing")
+                .fall
+                .arrival,
+            8.0,
+        );
+    }
+
+    #[test]
+    fn named_primary_input_arrivals_reject_unknown_negative_and_nonfinite_values() {
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  INV u0 (.A(a), .Y(y));
+endmodule
+"#,
+        );
+        for (arrivals, expected) in [
+            (
+                BTreeMap::from([("missing".to_string(), 0.0)]),
+                "unknown primary input",
+            ),
+            (
+                BTreeMap::from([("a".to_string(), -1.0)]),
+                "non-negative and finite",
+            ),
+            (
+                BTreeMap::from([("a".to_string(), f64::NAN)]),
+                "non-negative and finite",
+            ),
+            (
+                BTreeMap::from([("a".to_string(), f64::INFINITY)]),
+                "non-negative and finite",
+            ),
+            (
+                BTreeMap::from([("a".to_string(), f64::NEG_INFINITY)]),
+                "non-negative and finite",
+            ),
+        ] {
+            let error = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+                &module,
+                &nets,
+                &interner,
+                &scalar_inv_library(),
+                StaOptions::default(),
+                true,
+                &[],
+                &arrivals,
+            )
+            .expect_err("reject invalid named primary-input arrival");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?}, got {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_named_primary_input_arrivals_preserve_legacy_sta_reports() {
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y);
+  input [1:0] a;
+  output [1:0] y;
+  wire [1:0] a;
+  wire [1:0] y;
+  INV u0 (.A(a[0]), .Y(y[0]));
+  INV u1 (.A(a[1]), .Y(y[1]));
+endmodule
+"#,
+        );
+        let library = scalar_inv_library();
+        let empty_arrivals = BTreeMap::new();
+        let combinational = analyze_combinational_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("legacy combinational STA");
+        let named_combinational = analyze_combinational_max_arrival_with_primary_input_arrivals(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &empty_arrivals,
+        )
+        .expect("empty-arrival combinational STA");
+        assert_eq!(combinational, named_combinational);
+
+        let register_boundary = analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            true,
+            &[],
+        )
+        .expect("legacy register-boundary STA");
+        let named_register_boundary =
+            analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                StaOptions::default(),
+                true,
+                &[],
+                &empty_arrivals,
+            )
+            .expect("empty-arrival register-boundary STA");
+        assert_eq!(register_boundary, named_register_boundary);
     }
 
     #[test]

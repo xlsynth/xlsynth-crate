@@ -15,7 +15,10 @@ mod cuts;
 mod emit;
 mod liberty_index;
 mod nf;
+mod sequential;
 mod truth;
+
+pub use sequential::{SequentialTechMapConstraints, map_sequential_choice_aig_to_netlist};
 
 /// Timing-oriented covers may safely use a stricter tree than the caller's cap.
 const BALANCED_TIMING_MAX_FANOUT: usize = 8;
@@ -143,6 +146,20 @@ pub struct TechMapStats {
     pub selected_instance_count: usize,
     pub selected_area: f64,
     pub worst_estimated_output_arrival: f64,
+    /// Number of physically instantiated Liberty flip-flops.
+    pub sequential_instance_count: usize,
+    /// Exact area contributed by physically instantiated flip-flops.
+    pub sequential_area: f64,
+    /// Exact maximum primary-input-to-register capture arrival.
+    pub worst_input_to_register_arrival: Option<f64>,
+    /// Exact maximum clock-to-Q, logic, and setup register-path arrival.
+    pub worst_register_to_register_arrival: Option<f64>,
+    /// Exact maximum register-launch-to-primary-output arrival.
+    pub worst_register_to_output_arrival: Option<f64>,
+    /// Requested clock period for register-capture timing, if any.
+    pub clock_period: Option<f64>,
+    /// Minimum setup slack over all input and register capture endpoints.
+    pub worst_register_slack: Option<f64>,
     pub buffer_stats: Option<BufferStats>,
     pub resize_stats: Option<ResizeStats>,
 }
@@ -175,6 +192,44 @@ pub fn map_choice_aig_to_netlist(
     assert_supported_timing_model(options);
     let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
     map_choice_aig_to_netlist_with_prepared(choice_aig, &prepared, constraints, options)
+}
+
+/// Maps a transition cover with NF-native register endpoint constraints.
+///
+/// Explicit combinational constraints retain their existing characterized
+/// cover-selection path. Sequential mapping uses this narrower entry point so
+/// register launch and capture constraints can seed the compact NF engine
+/// without changing the established combinational mapping behavior.
+pub(super) fn map_choice_aig_to_netlist_with_nf_constraints(
+    choice_aig: &ChoiceAig,
+    library: &Library,
+    constraints: &TechMapTimingConstraints,
+    options: &TechMapOptions,
+) -> Result<MappedNetlist> {
+    assert_supported_timing_model(options);
+    if options.timing_model != TechMapTimingModel::NfLiberty {
+        return map_choice_aig_to_netlist(choice_aig, library, constraints, options);
+    }
+
+    let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
+    let analysis = cuts::analyze_choices(choice_aig)?;
+    let cover = nf::build_cover_plan(
+        choice_aig,
+        &analysis,
+        library,
+        &prepared.cell_index,
+        options,
+        constraints,
+    )?;
+    finish_prepared_choice_cover(
+        choice_aig,
+        &prepared,
+        &analysis,
+        cover.plan,
+        cover.enumerated_cut_count,
+        cover.representative_output_load,
+        options,
+    )
 }
 
 /// Maps one choice-rich AIG using Liberty state prepared for repeated runs.
@@ -398,6 +453,13 @@ fn finish_prepared_choice_cover(
         selected_instance_count: emitted.module.instances.len(),
         selected_area: optimized_area.unwrap_or(emitted.area),
         worst_estimated_output_arrival,
+        sequential_instance_count: 0,
+        sequential_area: 0.0,
+        worst_input_to_register_arrival: None,
+        worst_register_to_register_arrival: None,
+        worst_register_to_output_arrival: None,
+        clock_period: None,
+        worst_register_slack: None,
         buffer_stats,
         resize_stats,
     };

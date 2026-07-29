@@ -7,7 +7,10 @@ pub use crate::netlist::io::{resolve_symbol, select_module};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::{
     RegisterPathDelayBreakdown, StaOptions, StaReport, TimingQueryDiagnosticCounts,
-    analyze_combinational_max_arrival, analyze_register_boundary_max_arrival,
+    analyze_combinational_max_arrival,
+    analyze_combinational_max_arrival_with_primary_input_arrivals,
+    analyze_register_boundary_max_arrival,
+    analyze_register_boundary_max_arrival_with_primary_input_arrivals,
 };
 use crate::netlist::stages::{StagePartitionStatus, analyze_register_stages};
 use anyhow::{Result, anyhow};
@@ -168,8 +171,38 @@ pub fn build_sta_report(
     library: &Library,
     options: StaOptions,
 ) -> Result<NetlistStaReport> {
+    build_sta_report_with_primary_input_arrivals(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        &BTreeMap::new(),
+    )
+}
+
+/// Builds combinational timing using flattened primary-input launch arrivals.
+fn build_sta_report_with_primary_input_arrivals(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: StaOptions,
+    primary_input_arrivals: &BTreeMap<String, f64>,
+) -> Result<NetlistStaReport> {
     let module_name = resolve_symbol(interner, module.name, "module name")?;
-    let report = analyze_combinational_max_arrival(module, nets, interner, library, options)?;
+    let report = if primary_input_arrivals.is_empty() {
+        analyze_combinational_max_arrival(module, nets, interner, library, options)?
+    } else {
+        analyze_combinational_max_arrival_with_primary_input_arrivals(
+            module,
+            nets,
+            interner,
+            library,
+            options,
+            primary_input_arrivals,
+        )?
+    };
     let outputs = output_timing_rows(module, nets, interner, &report, true)?;
 
     let time_unit = library
@@ -251,11 +284,37 @@ pub fn build_netlist_report(
     library: &Library,
     options: StaOptions,
 ) -> Result<NetlistReport> {
+    build_netlist_report_with_primary_input_arrivals(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        &BTreeMap::new(),
+    )
+}
+
+/// Builds mapped area and timing using flattened primary-input arrivals.
+pub fn build_netlist_report_with_primary_input_arrivals(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: StaOptions,
+    primary_input_arrivals: &BTreeMap<String, f64>,
+) -> Result<NetlistReport> {
     let metadata = library;
     let area = build_area_report(module, interner, metadata)?;
     let stages = analyze_register_stages(module, nets, interner, metadata)?;
     if stages.register_indices.is_empty() {
-        let sta = build_sta_report(module, nets, interner, library, options)?;
+        let sta = build_sta_report_with_primary_input_arrivals(
+            module,
+            nets,
+            interner,
+            library,
+            options,
+            primary_input_arrivals,
+        )?;
         return Ok(NetlistReport {
             module: area.module,
             time_unit: sta.time_unit,
@@ -281,8 +340,16 @@ pub fn build_netlist_report(
         });
     }
 
-    let input_launch =
-        analyze_register_boundary_max_arrival(module, nets, interner, library, options, true, &[])?;
+    let input_launch = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        true,
+        &[],
+        primary_input_arrivals,
+    )?;
     let register_launch = analyze_register_boundary_max_arrival(
         module,
         nets,
@@ -376,15 +443,22 @@ pub fn build_netlist_report(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_area_report, build_netlist_report, select_module};
+    use super::{
+        build_area_report, build_netlist_report, build_netlist_report_with_primary_input_arrivals,
+        select_module,
+    };
     use crate::liberty_model::{
         Cell, Library, LibraryBuilder, Pin, PinDirection, Sequential, SequentialKind, TimingArc,
         TimingTable,
     };
     use crate::netlist::io::ParsedNetlist;
     use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
-    use crate::netlist::sta::{RegisterPathDelayBreakdown, StaOptions};
+    use crate::netlist::sta::{
+        RegisterPathDelayBreakdown, StaOptions,
+        analyze_register_boundary_max_arrival_with_primary_input_arrivals,
+    };
     use crate::netlist::stages::StagePartitionStatus;
+    use std::collections::BTreeMap;
 
     fn parse_netlist(src: &'static str) -> ParsedNetlist {
         let scanner = TokenScanner::from_str(src);
@@ -675,6 +749,201 @@ endmodule
         assert_eq!(report.cell_count, 2);
         assert_eq!(report.cell_levels, 2);
         assert_eq!(report.outputs[0].worst_arrival, 3.0);
+    }
+
+    #[test]
+    fn build_netlist_report_applies_primary_input_arrivals_to_combinational_outputs() {
+        let parsed = parse_netlist(
+            r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  wire a;
+  wire b;
+  wire y;
+  wire n0;
+  NAND2 u0 (.A(a), .B(b), .Y(n0));
+  INV u1 (.A(n0), .Y(y));
+endmodule
+"#,
+        );
+        let module = select_module(&parsed, None).expect("select only module");
+        let library = inv_nand_library();
+        let report = build_netlist_report_with_primary_input_arrivals(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+            &BTreeMap::from([("a".to_string(), 5.0), ("b".to_string(), 1.0)]),
+        )
+        .expect("build combinational report with independent input arrivals");
+
+        assert_eq!(report.max_delay, Some(8.0));
+        assert_eq!(report.outputs[0].worst_arrival, 8.0);
+        assert_eq!(report.cell_area, 3.0);
+        assert_eq!(report.cell_levels, 2);
+    }
+
+    #[test]
+    fn empty_named_primary_input_arrivals_preserve_legacy_netlist_report() {
+        let parsed = parse_netlist(
+            r#"
+module top (a, clk, y);
+  input a;
+  input clk;
+  output y;
+  wire a;
+  wire clk;
+  wire y;
+  wire d;
+  wire q;
+  INV in_logic (.A(a), .Y(d));
+  DFF r0 (.D(d), .CLK(clk), .Q(q));
+  INV out_logic (.A(q), .Y(y));
+endmodule
+"#,
+        );
+        let module = select_module(&parsed, None).expect("select only module");
+        let library = inv_nand_library();
+        let legacy = build_netlist_report(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("build legacy zero-arrival report");
+        let named = build_netlist_report_with_primary_input_arrivals(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+            &BTreeMap::new(),
+        )
+        .expect("build explicit zero-arrival report");
+
+        assert_eq!(named, legacy);
+    }
+
+    #[test]
+    fn build_netlist_report_seeds_exact_input_capture_without_shifting_register_launches() {
+        let parsed = parse_netlist(
+            r#"
+module top (a, clk, y);
+  input a;
+  input clk;
+  output y;
+  wire a;
+  wire clk;
+  wire y;
+  wire d0;
+  wire q0;
+  wire d1;
+  wire q1;
+  INV in_logic (.A(a), .Y(d0));
+  DFF r0 (.D(d0), .CLK(clk), .Q(q0));
+  INV stage_logic (.A(q0), .Y(d1));
+  DFF r1 (.D(d1), .CLK(clk), .Q(q1));
+  INV out_logic (.A(q1), .Y(y));
+endmodule
+"#,
+        );
+        let module = select_module(&parsed, None).expect("select only module");
+        let library = inv_nand_library();
+        let baseline = build_netlist_report(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("build baseline registered report");
+        let report = build_netlist_report_with_primary_input_arrivals(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+            &BTreeMap::from([("a".to_string(), 5.0)]),
+        )
+        .expect("build registered report with exact input launch arrival");
+
+        assert_eq!(baseline.max_input_to_register_delay, Some(1.25));
+        assert_eq!(report.max_input_to_register_delay, Some(6.25));
+        assert_eq!(
+            report.max_input_to_register_delay_breakdown,
+            baseline.max_input_to_register_delay_breakdown
+        );
+        assert_eq!(
+            report.max_register_to_register_delay,
+            baseline.max_register_to_register_delay
+        );
+        assert_eq!(report.max_register_to_register_delay, Some(1.75));
+        assert_eq!(
+            report.max_register_to_output_delay,
+            baseline.max_register_to_output_delay
+        );
+        assert_eq!(report.max_register_to_output_delay, Some(1.5));
+        assert_eq!(report.stages, baseline.stages);
+    }
+
+    #[test]
+    fn flattened_output_bit_timing_separates_input_and_register_launches() {
+        let parsed = parse_netlist(
+            r#"
+module top (a, clk, y);
+  input a;
+  input clk;
+  output [1:0] y;
+  wire a;
+  wire clk;
+  wire [1:0] y;
+  INV in_logic (.A(a), .Y(y[0]));
+  DFF r0 (.D(a), .CLK(clk), .Q(y[1]));
+endmodule
+"#,
+        );
+        let module = select_module(&parsed, None).expect("select only module");
+        let library = inv_nand_library();
+        let arrivals = BTreeMap::from([("a".to_string(), 5.0)]);
+        let input_launch = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+            true,
+            &[],
+            &arrivals,
+        )
+        .expect("analyze packed output bits reachable from primary inputs");
+        let register_launch = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+            false,
+            &[1],
+            &arrivals,
+        )
+        .expect("analyze packed output bits reachable from register launches");
+
+        let input_output = input_launch
+            .timing_for_output_bit("y_0")
+            .expect("primary-input-launched output bit");
+        assert_eq!(input_output.rise.arrival, 6.0);
+        assert_eq!(input_output.fall.arrival, 6.0);
+        assert_eq!(input_launch.timing_for_output_bit("y_1"), None);
+        let register_output = register_launch
+            .timing_for_output_bit("y_1")
+            .expect("register-launched output bit");
+        assert_eq!(register_output.rise.arrival, 0.5);
+        assert_eq!(register_output.fall.arrival, 0.5);
+        assert_eq!(register_launch.timing_for_output_bit("y_0"), None);
     }
 
     #[test]
