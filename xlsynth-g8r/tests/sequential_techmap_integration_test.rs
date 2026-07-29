@@ -238,17 +238,21 @@ fn flattened_choice_transition(design: &SequentialGateFn) -> ChoiceAig {
 }
 
 /// Checks mapping, restored bus ports, exact STA, and cycle-accurate behavior.
-fn assert_multibit_mapping(complemented_output: bool) {
+fn assert_multibit_mapping(complemented_output: bool, enable_buffering: bool) {
     let design = multibit_synchronous_design();
     let library = sequential_library(complemented_output);
     let choices = flattened_choice_transition(&design);
+    let options = TechMapOptions {
+        buffer_options: enable_buffering.then(BufferOptions::default),
+        ..TechMapOptions::default()
+    };
 
     let mapped = map_sequential_choice_aig_to_netlist(
         &design,
         &choices,
         &library,
         &SequentialTechMapConstraints::default(),
-        &TechMapOptions::default(),
+        &options,
     )
     .expect("map physical flip-flops and multi-bit transition");
 
@@ -298,6 +302,24 @@ fn assert_multibit_mapping(complemented_output: bool) {
     assert_eq!(physical_flip_flops, 3);
     assert_eq!(mapped.stats.sequential_instance_count, 3);
     assert_eq!(mapped.stats.sequential_area, 12.0);
+    if enable_buffering {
+        let buffer_stats = mapped
+            .stats
+            .buffer_stats
+            .as_ref()
+            .expect("registered mapping must run requested buffer insertion");
+        assert_eq!(buffer_stats.buffers_inserted, 0);
+        assert_eq!(
+            buffer_stats.max_fanout_after,
+            buffer_stats.max_fanout_before
+        );
+        assert_eq!(buffer_stats.max_load_after, buffer_stats.max_load_before);
+        assert_eq!(
+            buffer_stats.final_worst_delay,
+            buffer_stats.initial_worst_delay
+        );
+        assert!(mapped.stats.resize_stats.is_none());
+    }
 
     let report = build_netlist_report(
         &mapped.module,
@@ -362,12 +384,12 @@ fn assert_multibit_mapping(complemented_output: bool) {
 
 #[test]
 fn sequential_mapping_preserves_multibit_buses_and_cycle_behavior() {
-    assert_multibit_mapping(false);
+    assert_multibit_mapping(false, false);
 }
 
 #[test]
 fn complemented_output_flip_flops_preserve_multibit_cycle_behavior() {
-    assert_multibit_mapping(true);
+    assert_multibit_mapping(true, false);
 }
 
 #[test]
@@ -393,20 +415,8 @@ fn sequential_mapping_rejects_unrepresentable_explicit_initial_state() {
 }
 
 #[test]
-fn sequential_mapping_rejects_combinational_only_buffer_insertion() {
-    let design = multibit_synchronous_design();
-    let error = map_sequential_choice_aig_to_netlist(
-        &design,
-        &flattened_choice_transition(&design),
-        &sequential_library(false),
-        &SequentialTechMapConstraints::default(),
-        &TechMapOptions {
-            buffer_options: Some(BufferOptions::default()),
-            ..TechMapOptions::default()
-        },
-    )
-    .expect_err("register-unaware buffer insertion must be rejected");
-    assert!(error.to_string().contains("buffer"));
+fn sequential_mapping_accepts_register_aware_buffer_insertion() {
+    assert_multibit_mapping(false, true);
 }
 
 #[test]

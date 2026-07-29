@@ -145,20 +145,26 @@ than silently changing the target.
 
 ### Buffer Insertion
 
-`netlist::buffer` classifies true noninverting buffers from Liberty Boolean
-functions rather than relying on cell names. It counts each real scalar input
-pin, accumulates separate rise and fall sink capacitance, and partitions
-overloaded nets into deterministic, balanced buffer trees. Selection favors
-the smallest buffer that retains characterized output-capacitance headroom,
-avoiding the steep-delay edge of an NLDM table; it falls back to the smallest
-legal buffer when that headroom is unavailable. The subsequent sizing pass
-can select a stronger equivalent variant.
+`netlist::timing_buffer` is the shared production inserter for both
+combinational and registered mapped modules. It normalizes the finished
+netlist into per-bit Liberty connectivity, classifies true noninverting
+buffers by their Boolean functions, and accumulates real rise and fall sink
+capacitances. An initial full Liberty STA ranks overloaded roots and fanout
+sinks by downstream timing criticality. The inserter keeps critical sinks
+near the original driver, selects actual buffer strengths using ABC-style
+electrical effort and characterized slew/load timing, and checks bounded
+batches of proposed trees against independently recomputed worst-path
+timing.
 
-Primary-input buffering is optional, and clock and inout nets are protected.
-When a high-fanout net is also a primary output, insertion moves its original
-driver to a fresh internal net so the public output name remains unchanged.
-Unachievable per-stage load constraints are reported without repeatedly
-inserting non-improving tree levels.
+For registered modules, register Q pins are timing launches, register D pins
+are capture endpoints, and clock pins are never buffered. User clock periods
+and external output requirements remain hard constraints. Primary-input
+buffering is optional, and packed port bits, public primary-output names,
+and zero-area constant assignments retain their original spelling.
+
+The retired capacitance-balanced `netlist::buffer::insert_buffers` entry point
+panics if called. Its algorithm is retained only for explicitly named test
+characterization and cannot run in a production build.
 
 ### Cell Resizing and Area Recovery
 
@@ -180,6 +186,11 @@ buffer-then-resize pipeline. It verifies both initial and final results using
 independent full parsed-netlist area and timing analysis. Both passes are
 disabled by default for NF mapping and can be explicitly enabled or bounded
 individually.
+
+Timing-driven buffering can also be enabled for registered mapping using the
+existing `buffer_options`. Sequential cell upsizing and post-buffering area
+recovery are separate follow-up work; requesting `resize_options` for a
+registered design remains an explicit error.
 
 ### Output Contract
 

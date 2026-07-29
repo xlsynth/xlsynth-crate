@@ -645,8 +645,12 @@ Key flags:
   cover, or NF cover with representative per-pin Liberty delays (default:
   `nf-liberty`). Selecting `nf-unit` panics because structural unit-delay
   mapping is disabled.
-- `--buffer <true|false>`: enable balanced post-mapping buffer insertion
-  (default: `false`).
+- `--buffer <true|false>`: enable post-mapping buffer insertion (default:
+  `false`). Both combinational and registered designs use exact Liberty
+  timing, downstream criticality, characterized pin loads, and timing-checked
+  buffer acceptance. Registered designs also preserve register setup after
+  the physical flip-flops are restored. The legacy capacitance-balanced
+  inserter is disabled and panics if called.
 - `--max-fanout <N>`: maximum directly driven sinks at each buffer-tree level
   (default: `12`). Balanced mapping may select a stricter timing-oriented tree
   within this bound.
@@ -655,7 +659,8 @@ Key flags:
 - `--buffer-primary-inputs`: also buffer high-fanout data primary inputs;
   clock pins are never buffered.
 - `--resize <true|false>`: enable exact-timing critical-path upsizing followed
-  by timing-protected area recovery (default: `false`).
+  by timing-protected area recovery (default: `false`; currently supported for
+  combinational designs only).
 - `--resize-iterations <N>`: maximum accepted critical-path upsizing moves
   (default: `16`).
 - `--resize-area-iterations <N>`: maximum accepted timing-protected downsizing
@@ -677,10 +682,12 @@ their original name, while bit `i` of a wider port is named `<port>_<i>`.
 ### `gv-optimize`: buffer and resize an existing mapped netlist
 
 Optimizes a combinational gate-level netlist without repeating AIG mapping.
-The command inserts deterministic, capacitance-balanced trees of real Liberty
-buffer cells, performs incremental full-NLDM critical-path sizing, and
-downsizes cells only when the achieved worst output delay is preserved. It
-independently recomputes final area and timing with the `gv-stats` engines.
+The command inserts deterministic, criticality-aware trees of real Liberty
+buffer cells and validates their effect with complete Liberty timing. It
+then performs incremental full-NLDM critical-path sizing and downsizes cells
+only when the achieved worst output delay is preserved. It independently
+recomputes final area and timing with the `gv-stats` engines. The legacy
+capacitance-balanced inserter is disabled and panics if called.
 
 ```shell
 xlsynth-driver gv-optimize \

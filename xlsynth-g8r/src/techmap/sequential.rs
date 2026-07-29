@@ -21,6 +21,7 @@ use crate::netlist::sta::{
     StaOptions, analyze_register_boundary_max_arrival,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
 };
+use crate::netlist::timing_buffer::{BufferTimingConstraints, insert_timing_aware_buffers};
 use crate::netlist::utils::scalar_constant_output_assignments;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -68,9 +69,9 @@ pub fn map_sequential_choice_aig_to_netlist(
     design
         .validate()
         .map_err(|error| anyhow!("invalid sequential design '{}': {error}", design.name))?;
-    if options.buffer_options.is_some() || options.resize_options.is_some() {
+    if options.resize_options.is_some() {
         bail!(
-            "sequential technology mapping does not support buffer_options or resize_options; the current post-mapping optimizer is combinational-only"
+            "sequential technology mapping does not support resize_options; the current cell resizer is combinational-only"
         );
     }
     validate_constraints(design, constraints)?;
@@ -80,6 +81,10 @@ pub fn map_sequential_choice_aig_to_netlist(
     if effective_options.module_name.is_none() {
         effective_options.module_name = Some(design.name.clone());
     }
+    // State Q/D ports are only a flattened interchange while mapping the
+    // transition. Buffer the restored physical FF netlist, not those exposed
+    // combinational pseudo-inputs and pseudo-outputs.
+    effective_options.buffer_options = None;
     let sta_options = StaOptions {
         primary_input_transition: options.primary_input_transition,
         module_output_load: options.module_output_load,
@@ -93,6 +98,13 @@ pub fn map_sequential_choice_aig_to_netlist(
         let mut mapped = map_transition(choice_aig, library, &timing, &effective_options)?;
         reinstate_sequential_boundary(&mut mapped, design, None)?;
         finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
+        apply_requested_sequential_buffering(
+            &mut mapped,
+            library,
+            constraints,
+            options,
+            sta_options,
+        )?;
         return Ok(mapped);
     }
 
@@ -117,7 +129,16 @@ pub fn map_sequential_choice_aig_to_netlist(
             sta_options,
             &flip_flop,
         ) {
-            Ok(mapped) => return Ok(mapped),
+            Ok(mut mapped) => {
+                apply_requested_sequential_buffering(
+                    &mut mapped,
+                    library,
+                    constraints,
+                    options,
+                    sta_options,
+                )?;
+                return Ok(mapped);
+            }
             Err(error) => {
                 if failures.len() < 4 {
                     failures.push(format!("{}: {error:#}", flip_flop.cell_name));
@@ -129,6 +150,38 @@ pub fn map_sequential_choice_aig_to_netlist(
         "no usable positive-edge synchronous flip-flop produced a valid sequential mapping: {}",
         failures.join("; ")
     )
+}
+
+/// Buffers restored register boundaries and independently verifies final STA.
+fn apply_requested_sequential_buffering(
+    mapped: &mut MappedNetlist,
+    library: &Library,
+    constraints: &SequentialTechMapConstraints,
+    options: &TechMapOptions,
+    sta_options: StaOptions,
+) -> Result<()> {
+    let Some(buffer_options) = options.buffer_options.as_ref() else {
+        return Ok(());
+    };
+    let timing_constraints = BufferTimingConstraints {
+        primary_input_arrivals: constraints.primary_input_arrivals.clone(),
+        primary_output_required: constraints.primary_output_required.clone(),
+        clock_period: constraints.clock_period,
+    };
+    let buffer_stats = insert_timing_aware_buffers(
+        &mut mapped.module,
+        &mut mapped.nets,
+        &mut mapped.interner,
+        library,
+        buffer_options,
+        sta_options,
+        &timing_constraints,
+    )
+    .context("inserting register-aware, timing-driven buffers")?;
+    finalize_sequential_mapping(mapped, library, constraints, sta_options)
+        .context("verifying buffered sequential mapping")?;
+    mapped.stats.buffer_stats = Some(buffer_stats);
+    Ok(())
 }
 
 /// Validates non-negative, finite timing against actual external endpoints.
@@ -1883,29 +1936,42 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_rejects_register_unaware_buffering_and_resizing() {
+    fn accepts_register_aware_post_mapping_buffering() {
         let design = test_design();
         let choices = ChoiceAig::without_choices(design.transition.clone());
-        for options in [
-            TechMapOptions {
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &test_library(),
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
                 buffer_options: Some(BufferOptions::default()),
                 ..TechMapOptions::default()
             },
-            TechMapOptions {
+        )
+        .expect("register-aware buffering must run after physical FF restoration");
+
+        assert_eq!(mapped.stats.sequential_instance_count, 2);
+        assert!(mapped.stats.buffer_stats.is_some());
+        assert!(mapped.stats.resize_stats.is_none());
+    }
+
+    #[test]
+    fn explicitly_rejects_register_unaware_resizing() {
+        let design = test_design();
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let error = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &test_library(),
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
                 resize_options: Some(ResizeOptions::default()),
                 ..TechMapOptions::default()
             },
-        ] {
-            let error = map_sequential_choice_aig_to_netlist(
-                &design,
-                &choices,
-                &test_library(),
-                &SequentialTechMapConstraints::default(),
-                &options,
-            )
-            .expect_err("combinational-only optimization must not run on a sequential module");
-            assert!(error.to_string().contains("combinational-only"));
-        }
+        )
+        .expect_err("combinational-only resizing must not run on a sequential module");
+        assert!(error.to_string().contains("combinational-only"));
     }
 
     #[test]

@@ -310,6 +310,37 @@ fn choice_aig_tech_map_loads_native_binary_sequential_design() {
 }
 
 #[test]
+fn choice_aig_tech_map_accepts_register_aware_buffering() {
+    let fixture = make_fixture("g8rbin");
+    let design_path = fixture
+        .sequential_design_path
+        .to_str()
+        .expect("UTF-8 temporary native design path");
+    let output = run_choice_mapping(
+        &fixture,
+        &[
+            "--sequential-design",
+            design_path,
+            "--clock-period",
+            "10",
+            "--buffer",
+            "true",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "register-aware buffered mapping failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostics.contains("registers=1"));
+    assert!(diagnostics.contains("buffers="));
+    assert!(fixture.netlist_path.is_file());
+}
+
+#[test]
 fn choice_aig_tech_map_remains_combinational_without_sequential_design() {
     let fixture = make_fixture("g8r");
     let output = run_choice_mapping(&fixture, &[]);
