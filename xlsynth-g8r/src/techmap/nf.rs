@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const NF_AREA_FLOW_ROUNDS: usize = 4;
 const NF_EXACT_AREA_ROUNDS: usize = 2;
 const NF_EPSILON: f64 = 0.001;
+const NF_TIMING_EPSILON: f64 = 1e-9;
 const NF_UNIT_DELAY: f64 = 1.0;
 
 /// The selected NF cover together with its independently enumerated cuts.
@@ -119,6 +120,80 @@ struct NfPhaseMatches {
 struct NfOutput {
     name: String,
     state: NfState,
+    required: Option<f64>,
+}
+
+/// Validates flattened primary-input constraints without taxing plain NF.
+fn validate_primary_input_arrivals(
+    graph: &GateFn,
+    constraints: &TechMapTimingConstraints,
+) -> Result<Option<Vec<f64>>> {
+    if constraints.primary_input_arrivals.is_empty() {
+        return Ok(None);
+    }
+
+    let mut input_nodes_by_name = BTreeMap::new();
+    for input in &graph.inputs {
+        let bit_count = input.get_bit_count();
+        for (bit_index, operand) in input.bit_vector.iter_lsb_to_msb().enumerate() {
+            if operand.negated {
+                return Err(anyhow!(
+                    "technology mapping does not support negated input-port bindings"
+                ));
+            }
+            let name = scalar_bit_name(input.name.as_str(), bit_index, bit_count);
+            if !matches!(
+                graph.gates.get(operand.node.id),
+                Some(AigNode::Input { .. })
+            ) {
+                return Err(anyhow!(
+                    "primary input '{}' does not bind to AIG input node {}",
+                    name,
+                    operand.node.id
+                ));
+            }
+            if input_nodes_by_name
+                .insert(name.clone(), operand.node.id)
+                .is_some()
+            {
+                return Err(anyhow!("technology mapping has duplicate input '{}'", name));
+            }
+        }
+    }
+
+    let mut arrivals = vec![0.0; graph.gates.len()];
+    for (name, arrival) in &constraints.primary_input_arrivals {
+        let Some(node_id) = input_nodes_by_name.get(name).copied() else {
+            return Err(anyhow!(
+                "timing constraint names unknown primary input '{}'",
+                name
+            ));
+        };
+        if !arrival.is_finite() || *arrival < 0.0 {
+            return Err(anyhow!(
+                "timing constraint for primary input '{}' must be non-negative and finite; got {}",
+                name,
+                arrival
+            ));
+        }
+        arrivals[node_id] = *arrival;
+    }
+    Ok(Some(arrivals))
+}
+
+/// Reports an infeasible named output using the existing cover diagnostic.
+fn validate_output_required(output: &NfOutput, arrival: f64) -> Result<()> {
+    if let Some(required) = output.required
+        && (!arrival.is_finite() || arrival > required + NF_TIMING_EPSILON)
+    {
+        return Err(anyhow!(
+            "no cover meets required time {} for output '{}'; fastest estimated arrival is {}",
+            required,
+            output.name,
+            arrival
+        ));
+    }
+    Ok(())
 }
 
 /// A bounded frontier implementing `Nf_SetAddCut`'s insertion semantics.
@@ -519,6 +594,7 @@ struct NfMapper<'a> {
     choice_aig: &'a ChoiceAig,
     cell_index: &'a LibertyCellIndex,
     pin_delays: Option<RepresentativePinDelayTable>,
+    input_arrivals: Option<Vec<f64>>,
     cuts_by_node: Vec<Vec<Cut>>,
     candidates: Vec<[Vec<NfCandidate>; 2]>,
     matches: Vec<[NfPhaseMatches; 2]>,
@@ -529,6 +605,7 @@ struct NfMapper<'a> {
     flow_refs: Vec<[f64; 2]>,
     outputs: Vec<NfOutput>,
     inverter: Option<CellBindingId>,
+    has_endpoint_constraints: bool,
     target_delay: f64,
     matched_candidate_count: usize,
     enumerated_cut_count: usize,
@@ -544,13 +621,6 @@ impl<'a> NfMapper<'a> {
         options: &TechMapOptions,
         constraints: &TechMapTimingConstraints,
     ) -> Result<Self> {
-        if !constraints.primary_input_arrivals.is_empty()
-            || !constraints.primary_output_required.is_empty()
-        {
-            return Err(anyhow!(
-                "the native NF engine does not accept external endpoint timing constraints"
-            ));
-        }
         if options.max_frontier_size == 0 {
             return Err(anyhow!("max_frontier_size must be at least 1"));
         }
@@ -567,12 +637,57 @@ impl<'a> NfMapper<'a> {
             ));
         }
 
-        let pin_delays = (options.timing_model == TechMapTimingModel::NfLiberty)
+        let graph = choice_aig.graph();
+        let has_endpoint_constraints = !constraints.primary_input_arrivals.is_empty()
+            || !constraints.primary_output_required.is_empty();
+        let input_arrivals = validate_primary_input_arrivals(graph, constraints)?;
+
+        let mut outputs = Vec::new();
+        let mut output_names = BTreeSet::new();
+        for output in &graph.outputs {
+            let bit_count = output.get_bit_count();
+            for (bit_index, operand) in output.bit_vector.iter_lsb_to_msb().enumerate() {
+                let name = scalar_bit_name(output.name.as_str(), bit_index, bit_count);
+                if !output_names.insert(name.clone()) {
+                    return Err(anyhow!(
+                        "technology mapping has duplicate output '{}'",
+                        name
+                    ));
+                }
+                outputs.push(NfOutput {
+                    required: constraints.primary_output_required.get(&name).copied(),
+                    name,
+                    state: NfState {
+                        node_id: operand.node.id,
+                        polarity: operand.negated,
+                    },
+                });
+            }
+        }
+        for (name, required) in &constraints.primary_output_required {
+            if !output_names.contains(name) {
+                return Err(anyhow!(
+                    "timing constraint names unknown primary output '{}'",
+                    name
+                ));
+            }
+            if !required.is_finite() || *required < 0.0 {
+                return Err(anyhow!(
+                    "timing constraint for primary output '{}' must be non-negative and finite; got {}",
+                    name,
+                    required
+                ));
+            }
+        }
+
+        // Endpoint constraints are expressed in Liberty time units even when
+        // the unconstrained cover objective is ABC's unit-delay NF model.
+        let pin_delays = (options.timing_model == TechMapTimingModel::NfLiberty
+            || has_endpoint_constraints)
             .then(|| {
                 cell_index.representative_pin_delays(library, options.primary_input_transition)
             })
             .transpose()?;
-        let graph = choice_aig.graph();
         let structural_refs = initial_flow_references(graph);
         let cuts_by_node = enumerate_nf_cuts(
             choice_aig,
@@ -624,28 +739,6 @@ impl<'a> NfMapper<'a> {
             }
         }
 
-        let mut outputs = Vec::new();
-        let mut output_names = BTreeSet::new();
-        for output in &graph.outputs {
-            let bit_count = output.get_bit_count();
-            for (bit_index, operand) in output.bit_vector.iter_lsb_to_msb().enumerate() {
-                let name = scalar_bit_name(output.name.as_str(), bit_index, bit_count);
-                if !output_names.insert(name.clone()) {
-                    return Err(anyhow!(
-                        "technology mapping has duplicate output '{}'",
-                        name
-                    ));
-                }
-                outputs.push(NfOutput {
-                    name,
-                    state: NfState {
-                        node_id: operand.node.id,
-                        polarity: operand.negated,
-                    },
-                });
-            }
-        }
-
         let inverter = cell_index
             .matches(1, complement_truth(variable_truth(1, 0), 1))
             .iter()
@@ -655,11 +748,21 @@ impl<'a> NfMapper<'a> {
             .into_iter()
             .map(|references| [references, references])
             .collect();
+        let mut requireds = vec![[f64::INFINITY; 2]; node_count];
+        if has_endpoint_constraints {
+            for output in &outputs {
+                if let Some(required) = output.required {
+                    let slot = &mut requireds[output.state.node_id][output.state.polarity_index()];
+                    *slot = slot.min(required);
+                }
+            }
+        }
 
         Ok(Self {
             choice_aig,
             cell_index,
             pin_delays,
+            input_arrivals,
             cuts_by_node,
             candidates,
             matches: (0..node_count)
@@ -667,11 +770,12 @@ impl<'a> NfMapper<'a> {
                 .collect(),
             selected: (0..node_count).map(|_| [None, None]).collect(),
             best: (0..node_count).map(|_| [None, None]).collect(),
-            requireds: vec![[f64::INFINITY; 2]; node_count],
+            requireds,
             map_refs: vec![[0; 2]; node_count],
             flow_refs,
             outputs,
             inverter,
+            has_endpoint_constraints,
             target_delay: 0.0,
             matched_candidate_count,
             enumerated_cut_count,
@@ -689,6 +793,13 @@ impl<'a> NfMapper<'a> {
             self.recover_exact_area(round)?;
         }
         self.fix_primary_output_drivers()?;
+        if self.has_endpoint_constraints {
+            // Exact recovery visits roots before their shared children. Bring
+            // every selected arrival up to date after the last recovery and
+            // any complemented-output cleanup before checking endpoints.
+            self.reset_exact_matches(NF_EXACT_AREA_ROUNDS)?;
+            self.validate_output_requirements()?;
+        }
         self.materialize()
     }
 
@@ -821,7 +932,13 @@ impl<'a> NfMapper<'a> {
             }
         };
         Some(NfMatch {
-            arrival: 0.0,
+            arrival: match source {
+                SourceKind::Input(node) => self
+                    .input_arrivals
+                    .as_ref()
+                    .map_or(0.0, |arrivals| arrivals[node.id]),
+                SourceKind::Literal(_) => 0.0,
+            },
             flow: 0.0,
             choice: NfChoice::Source(source),
         })
@@ -945,6 +1062,9 @@ impl<'a> NfMapper<'a> {
                 .delay
                 .as_ref()
                 .ok_or_else(|| anyhow!("output '{}' has no NF delay match", output.name))?;
+            if self.has_endpoint_constraints {
+                validate_output_required(output, selected.arrival)?;
+            }
             fastest = fastest.max(selected.arrival);
         }
         self.target_delay = self.target_delay.max(fastest);
@@ -957,8 +1077,8 @@ impl<'a> NfMapper<'a> {
         for output in &self.outputs {
             let state = output.state;
             self.map_refs[state.node_id][state.polarity_index()] += 1;
-            self.requireds[state.node_id][state.polarity_index()] =
-                self.requireds[state.node_id][state.polarity_index()].min(self.target_delay);
+            let required = &mut self.requireds[state.node_id][state.polarity_index()];
+            *required = required.min(output.required.unwrap_or(self.target_delay));
         }
 
         for node_id in (0..self.choice_aig.graph().gates.len()).rev() {
@@ -1093,8 +1213,8 @@ impl<'a> NfMapper<'a> {
         self.requireds.fill([f64::INFINITY; 2]);
         for output in &self.outputs {
             let state = output.state;
-            self.requireds[state.node_id][state.polarity_index()] =
-                self.requireds[state.node_id][state.polarity_index()].min(self.target_delay);
+            let required = &mut self.requireds[state.node_id][state.polarity_index()];
+            *required = required.min(output.required.unwrap_or(self.target_delay));
         }
 
         for node_id in (0..self.choice_aig.graph().gates.len()).rev() {
@@ -1219,8 +1339,15 @@ impl<'a> NfMapper<'a> {
 
     /// Computes one selected cell's current arrival from chosen child matches.
     fn choice_arrival(&self, choice: &NfChoice) -> Result<f64> {
-        let NfChoice::Cell { binding, inputs } = choice else {
-            return Ok(0.0);
+        let (binding, inputs) = match choice {
+            NfChoice::Source(SourceKind::Input(node)) => {
+                return Ok(self
+                    .input_arrivals
+                    .as_ref()
+                    .map_or(0.0, |arrivals| arrivals[node.id]));
+            }
+            NfChoice::Source(SourceKind::Literal(_)) => return Ok(0.0),
+            NfChoice::Cell { binding, inputs } => (binding, inputs),
         };
         let mut arrival: f64 = 0.0;
         for (input_index, child) in inputs.iter().enumerate() {
@@ -1348,9 +1475,14 @@ impl<'a> NfMapper<'a> {
             else {
                 continue;
             };
+            let required = if self.has_endpoint_constraints {
+                self.requireds[state.node_id][state.polarity_index()]
+            } else {
+                self.target_delay
+            };
             if self.is_same_node_inverter(state.node_id, &current)
                 || self.is_same_node_inverter(state.node_id, &opposite_match)
-                || opposite_match.arrival + inverter_delay > self.target_delay
+                || opposite_match.arrival + inverter_delay > required
             {
                 continue;
             }
@@ -1366,6 +1498,20 @@ impl<'a> NfMapper<'a> {
             );
             self.best[state.node_id][state.polarity_index()] = Some(replacement.clone());
             self.selected[state.node_id][state.polarity_index()] = Some(replacement);
+        }
+        Ok(())
+    }
+
+    /// Checks each explicitly constrained endpoint after final arrival repair.
+    fn validate_output_requirements(&self) -> Result<()> {
+        for output in &self.outputs {
+            let selected = self.best[output.state.node_id][output.state.polarity_index()]
+                .as_ref()
+                .or_else(|| {
+                    self.selected[output.state.node_id][output.state.polarity_index()].as_ref()
+                })
+                .ok_or_else(|| anyhow!("output '{}' lost its selected NF match", output.name))?;
+            validate_output_required(output, selected.arrival)?;
         }
         Ok(())
     }
@@ -1481,7 +1627,129 @@ impl NfMaterializer<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aig::{GateBuilder, GateBuilderOptions};
+    use crate::aig::{AigBitVector, GateBuilder, GateBuilderOptions};
+    use crate::liberty_model::{Cell, LibraryBuilder, Pin, PinDirection};
+    use crate::liberty_proto::TimingTableKind;
+
+    /// Builds small, scalar-timed cells for direct NF endpoint tests.
+    fn timed_library(specifications: &[(&str, &[&str], &str, f64, f64)]) -> Library {
+        let mut builder = LibraryBuilder::new();
+        let mut cells = Vec::with_capacity(specifications.len());
+        for &(name, inputs, function, area, delay) in specifications {
+            let mut pins = Vec::with_capacity(inputs.len() + 1);
+            for input in inputs {
+                pins.push(Pin {
+                    direction: PinDirection::Input as i32,
+                    name: builder.intern_string(input).unwrap(),
+                    capacitance: Some(0.1),
+                    ..Pin::default()
+                });
+            }
+
+            let mut timing_arcs = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let table = builder
+                    .add_timing_table_f64(
+                        TimingTableKind::CellRise,
+                        0,
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![delay],
+                        vec![],
+                        "",
+                    )
+                    .unwrap();
+                let timing_sense = if function == "!A" {
+                    "negative_unate"
+                } else {
+                    "positive_unate"
+                };
+                timing_arcs.push(
+                    builder
+                        .add_timing_arc(input, timing_sense, "combinational", "", vec![table])
+                        .unwrap(),
+                );
+            }
+            pins.push(Pin {
+                direction: PinDirection::Output as i32,
+                name: builder.intern_string("Y").unwrap(),
+                function: builder.intern_string(function).unwrap(),
+                max_capacitance: Some(10.0),
+                timing_arcs,
+                ..Pin::default()
+            });
+            cells.push(Cell {
+                name: name.to_string(),
+                pins,
+                area,
+                ..Cell::default()
+            });
+        }
+        builder.cells = cells;
+        builder.finish()
+    }
+
+    /// Builds one ordinary two-input AND with selectable output polarities.
+    fn two_input_and(outputs: &[(&str, bool)]) -> ChoiceAig {
+        let mut builder =
+            GateBuilder::new("endpoint_and".to_string(), GateBuilderOptions::no_opt());
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let root = builder.add_and_binary(a, b);
+        for &(name, complemented) in outputs {
+            let operand = if complemented { root.negate() } else { root };
+            builder.add_output(name.to_string(), operand.into());
+        }
+        ChoiceAig::without_choices(builder.build())
+    }
+
+    /// Builds a two-level AND that also has a shallow three-input cut.
+    fn three_input_and() -> ChoiceAig {
+        let mut builder = GateBuilder::new(
+            "endpoint_three_input_and".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let c: AigOperand = builder.add_input("c".to_string(), 1).try_into().unwrap();
+        let first = builder.add_and_binary(a, b);
+        let root = builder.add_and_binary(first, c);
+        builder.add_output("o".to_string(), root.into());
+        ChoiceAig::without_choices(builder.build())
+    }
+
+    /// Calls the compact NF engine directly, independent of public dispatch.
+    fn endpoint_cover(
+        choice_aig: &ChoiceAig,
+        library: &Library,
+        constraints: &TechMapTimingConstraints,
+        options: &TechMapOptions,
+    ) -> Result<NfCover> {
+        let analysis = crate::techmap::cuts::analyze_choices(choice_aig)?;
+        let cell_index = LibertyCellIndex::build_nf(library, options.max_cut_size)?;
+        build_cover_plan(
+            choice_aig,
+            &analysis,
+            library,
+            &cell_index,
+            options,
+            constraints,
+        )
+    }
+
+    /// Returns materialized cell names in their deterministic cover order.
+    fn selected_cell_names(cover: &NfCover) -> Vec<&str> {
+        cover
+            .plan
+            .solutions
+            .iter()
+            .filter_map(|solution| match &solution.choice {
+                SolutionChoice::Source(_) => None,
+                SolutionChoice::Cell { binding, .. } => Some(binding.cell_name.as_str()),
+            })
+            .collect()
+    }
 
     /// Constructs one structural cut without depending on Liberty timing.
     fn structural_cut(leaves: &[usize], useful: bool, flow: f64, delay: f64) -> Cut {
@@ -1555,5 +1823,468 @@ mod tests {
         assert_eq!(references[control.node.id], 1.0);
         assert_eq!(references[data.node.id], 1.0);
         assert_eq!(references[root.node.id], 1.0);
+    }
+
+    #[test]
+    fn unconstrained_nf_unit_preserves_the_shallow_unit_delay_cover() {
+        let graph = three_input_and();
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 1.0),
+            ("AND3", &["A", "B", "C"], "A * B * C", 1.5, 100.0),
+        ]);
+        let options = TechMapOptions {
+            timing_model: TechMapTimingModel::NfUnit,
+            ..TechMapOptions::default()
+        };
+        let constraints = TechMapTimingConstraints::default();
+        let analysis = crate::techmap::cuts::analyze_choices(&graph).unwrap();
+        let cell_index = LibertyCellIndex::build_nf(&library, options.max_cut_size).unwrap();
+        let mapper = NfMapper::new(
+            &graph,
+            &analysis,
+            &library,
+            &cell_index,
+            &options,
+            &constraints,
+        )
+        .unwrap();
+
+        assert!(!mapper.has_endpoint_constraints);
+        assert!(mapper.input_arrivals.is_none());
+        assert!(mapper.pin_delays.is_none());
+
+        let cover = endpoint_cover(&graph, &library, &constraints, &options).unwrap();
+        assert_eq!(selected_cell_names(&cover), ["AND3"]);
+        assert_eq!(cover.plan.output_arrivals, [1.0]);
+        assert_eq!(cover.representative_output_load, None);
+    }
+
+    #[test]
+    fn constrained_nf_unit_uses_liberty_pin_delays_and_input_arrivals() {
+        let graph = three_input_and();
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 1.0),
+            ("AND3", &["A", "B", "C"], "A * B * C", 1.5, 100.0),
+        ]);
+        let options = TechMapOptions {
+            timing_model: TechMapTimingModel::NfUnit,
+            ..TechMapOptions::default()
+        };
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 3.0);
+        constraints
+            .primary_output_required
+            .insert("o".to_string(), 5.0);
+
+        let cover = endpoint_cover(&graph, &library, &constraints, &options).unwrap();
+
+        assert_eq!(selected_cell_names(&cover), ["AND2", "AND2"]);
+        assert_eq!(cover.plan.output_arrivals, [5.0]);
+        assert_eq!(cover.representative_output_load, Some(0.2));
+    }
+
+    #[test]
+    fn constrained_nf_liberty_preserves_representative_timing() {
+        let graph = three_input_and();
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 1.0),
+            ("AND3", &["A", "B", "C"], "A * B * C", 1.5, 100.0),
+        ]);
+        let options = TechMapOptions {
+            timing_model: TechMapTimingModel::NfLiberty,
+            ..TechMapOptions::default()
+        };
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 3.0);
+        constraints
+            .primary_output_required
+            .insert("o".to_string(), 5.0);
+
+        let cover = endpoint_cover(&graph, &library, &constraints, &options).unwrap();
+
+        assert_eq!(selected_cell_names(&cover), ["AND2", "AND2"]);
+        assert_eq!(cover.plan.output_arrivals, [5.0]);
+        assert_eq!(cover.representative_output_load, Some(0.2));
+    }
+
+    #[test]
+    fn input_arrivals_without_required_times_seed_unconstrained_outputs() {
+        let graph = two_input_and(&[("o", false)]);
+        let library = timed_library(&[("AND2", &["A", "B"], "A * B", 1.0, 2.0)]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 3.0);
+
+        let cover =
+            endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default()).unwrap();
+
+        assert_eq!(selected_cell_names(&cover), ["AND2"]);
+        assert_eq!(cover.plan.output_arrivals, [5.0]);
+    }
+
+    #[test]
+    fn constrained_nf_root_reports_the_existing_infeasibility_diagnostic() {
+        let graph = two_input_and(&[("o", false)]);
+        let library = timed_library(&[
+            ("SLOW_AND2", &["A", "B"], "A * B", 1.0, 5.0),
+            ("FAST_AND2", &["A", "B"], "A * B", 2.0, 1.0),
+        ]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_output_required
+            .insert("o".to_string(), 2.0);
+
+        let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+            .err()
+            .expect("the retained NF root cannot meet the required time");
+
+        assert_eq!(
+            error.to_string(),
+            "no cover meets required time 2 for output 'o'; fastest estimated arrival is 5"
+        );
+    }
+
+    #[test]
+    fn relaxed_required_time_preserves_the_cheapest_nf_root() {
+        let graph = two_input_and(&[("o", false)]);
+        let library = timed_library(&[
+            ("SLOW_AND2", &["A", "B"], "A * B", 1.0, 5.0),
+            ("FAST_AND2", &["A", "B"], "A * B", 2.0, 1.0),
+        ]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_output_required
+            .insert("o".to_string(), 10.0);
+
+        let cover =
+            endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default()).unwrap();
+
+        assert_eq!(selected_cell_names(&cover), ["SLOW_AND2"]);
+        assert_eq!(cover.plan.output_arrivals, [5.0]);
+    }
+
+    #[test]
+    fn input_arrivals_and_required_times_follow_both_output_polarities() {
+        let graph = two_input_and(&[("positive", false), ("negative", true)]);
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 2.0),
+            ("INV", &["A"], "!A", 0.25, 0.5),
+        ]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 3.0);
+        constraints
+            .primary_output_required
+            .insert("positive".to_string(), 5.0);
+        constraints
+            .primary_output_required
+            .insert("negative".to_string(), 5.5);
+
+        let cover =
+            endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default()).unwrap();
+
+        assert_eq!(selected_cell_names(&cover), ["AND2", "INV"]);
+        assert_eq!(cover.plan.output_arrivals, [5.0, 5.5]);
+    }
+
+    #[test]
+    fn complemented_output_reports_its_actual_inverter_arrival() {
+        let graph = two_input_and(&[("negative", true)]);
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 2.0),
+            ("INV", &["A"], "!A", 0.25, 0.5),
+        ]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 3.0);
+        constraints
+            .primary_output_required
+            .insert("negative".to_string(), 5.25);
+
+        let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+            .err()
+            .expect("the explicit output inverter must meet the required time");
+
+        assert_eq!(
+            error.to_string(),
+            "no cover meets required time 5.25 for output 'negative'; fastest estimated arrival is 5.5"
+        );
+    }
+
+    #[test]
+    fn shared_outputs_use_the_tightest_constraint_and_leave_others_unbounded() {
+        let graph = two_input_and(&[
+            ("relaxed", false),
+            ("tight", false),
+            ("negative", true),
+            ("unconstrained", false),
+        ]);
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 2.0),
+            ("INV", &["A"], "!A", 0.25, 0.5),
+        ]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 3.0);
+        constraints
+            .primary_output_required
+            .insert("relaxed".to_string(), 10.0);
+        constraints
+            .primary_output_required
+            .insert("tight".to_string(), 5.0);
+        constraints
+            .primary_output_required
+            .insert("negative".to_string(), 5.5);
+
+        let cover =
+            endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default()).unwrap();
+
+        assert_eq!(selected_cell_names(&cover), ["AND2", "INV"]);
+        assert_eq!(cover.plan.output_arrivals, [5.0, 5.0, 5.5, 5.0]);
+    }
+
+    #[test]
+    fn required_times_survive_every_flow_and_exact_area_round() {
+        let graph = two_input_and(&[
+            ("relaxed", false),
+            ("tight", false),
+            ("negative", true),
+            ("unconstrained", false),
+        ]);
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 2.0),
+            ("INV", &["A"], "!A", 0.25, 0.5),
+        ]);
+        let options = TechMapOptions::default();
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 3.0);
+        constraints
+            .primary_output_required
+            .insert("relaxed".to_string(), 10.0);
+        constraints
+            .primary_output_required
+            .insert("tight".to_string(), 5.0);
+        constraints
+            .primary_output_required
+            .insert("negative".to_string(), 5.5);
+
+        let analysis = crate::techmap::cuts::analyze_choices(&graph).unwrap();
+        let cell_index = LibertyCellIndex::build_nf(&library, options.max_cut_size).unwrap();
+        let mut mapper = NfMapper::new(
+            &graph,
+            &analysis,
+            &library,
+            &cell_index,
+            &options,
+            &constraints,
+        )
+        .unwrap();
+        let root = graph.graph().outputs[0].bit_vector.get_lsb(0).node.id;
+
+        assert_eq!(mapper.requireds[root], [5.0, 5.5]);
+        for round in 0..NF_AREA_FLOW_ROUNDS {
+            mapper.compute_round_matches(round).unwrap();
+            mapper.set_mapping_references(round).unwrap();
+            assert_eq!(mapper.requireds[root], [5.0, 5.5]);
+        }
+        for round in 0..NF_EXACT_AREA_ROUNDS {
+            mapper.recover_exact_area(round).unwrap();
+            assert_eq!(mapper.requireds[root], [5.0, 5.5]);
+        }
+        mapper.fix_primary_output_drivers().unwrap();
+        mapper.reset_exact_matches(NF_EXACT_AREA_ROUNDS).unwrap();
+        mapper.validate_output_requirements().unwrap();
+
+        let cover = mapper.materialize().unwrap();
+        assert_eq!(cover.plan.output_arrivals, [5.0, 5.0, 5.5, 5.0]);
+    }
+
+    #[test]
+    fn endpoint_constraints_use_flattened_scalar_bus_names() {
+        let mut builder = GateBuilder::new(
+            "flattened_endpoint_bus".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let data = builder.add_input("data".to_string(), 2);
+        let enable: AigOperand = builder
+            .add_input("enable".to_string(), 1)
+            .try_into()
+            .unwrap();
+        let first = builder.add_and_binary(*data.get_lsb(0), enable);
+        let second = builder.add_and_binary(*data.get_lsb(1), enable);
+        builder.add_output(
+            "result".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[first, second.negate()]),
+        );
+        let graph = ChoiceAig::without_choices(builder.build());
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 1.0),
+            ("INV", &["A"], "!A", 0.25, 1.0),
+        ]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("data_0".to_string(), 2.0);
+        constraints
+            .primary_input_arrivals
+            .insert("data_1".to_string(), 4.0);
+        constraints
+            .primary_output_required
+            .insert("result_0".to_string(), 3.0);
+        constraints
+            .primary_output_required
+            .insert("result_1".to_string(), 6.0);
+
+        let cover =
+            endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default()).unwrap();
+
+        assert_eq!(cover.plan.output_arrivals, [3.0, 6.0]);
+    }
+
+    #[test]
+    fn unknown_primary_input_constraints_are_reported_deterministically() {
+        let graph = two_input_and(&[("o", false)]);
+        let library = timed_library(&[("AND2", &["A", "B"], "A * B", 1.0, 1.0)]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("z_missing".to_string(), 1.0);
+        constraints
+            .primary_input_arrivals
+            .insert("a_missing".to_string(), 1.0);
+
+        let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+            .err()
+            .expect("unknown flattened input constraints should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "timing constraint names unknown primary input 'a_missing'"
+        );
+    }
+
+    #[test]
+    fn unknown_primary_output_constraints_are_reported_deterministically() {
+        let graph = two_input_and(&[("o", false)]);
+        let library = timed_library(&[("AND2", &["A", "B"], "A * B", 1.0, 1.0)]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_output_required
+            .insert("z_missing".to_string(), 1.0);
+        constraints
+            .primary_output_required
+            .insert("a_missing".to_string(), 1.0);
+
+        let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+            .err()
+            .expect("unknown flattened output constraints should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "timing constraint names unknown primary output 'a_missing'"
+        );
+    }
+
+    #[test]
+    fn nonfinite_and_negative_primary_input_arrivals_are_rejected() {
+        let graph = two_input_and(&[("o", false)]);
+        let library = timed_library(&[("AND2", &["A", "B"], "A * B", 1.0, 1.0)]);
+
+        for arrival in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let mut constraints = TechMapTimingConstraints::default();
+            constraints
+                .primary_input_arrivals
+                .insert("a".to_string(), arrival);
+
+            let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+                .err()
+                .expect("invalid input-arrival constraints should fail");
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "timing constraint for primary input 'a' must be non-negative and finite; got {arrival}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn nonfinite_and_negative_primary_output_required_times_are_rejected() {
+        let graph = two_input_and(&[("o", false)]);
+        let library = timed_library(&[("AND2", &["A", "B"], "A * B", 1.0, 1.0)]);
+
+        for required in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let mut constraints = TechMapTimingConstraints::default();
+            constraints
+                .primary_output_required
+                .insert("o".to_string(), required);
+
+            let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+                .err()
+                .expect("invalid output required-time constraints should fail");
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "timing constraint for primary output 'o' must be non-negative and finite; got {required}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn constrained_mapping_rejects_negated_primary_input_bindings() {
+        let original = two_input_and(&[("o", false)]);
+        let mut graph = original.graph().clone();
+        let input = *graph.inputs[0].bit_vector.get_lsb(0);
+        graph.inputs[0].bit_vector.set_lsb(0, input.negate());
+        let graph = ChoiceAig::without_choices(graph);
+        let library = timed_library(&[("AND2", &["A", "B"], "A * B", 1.0, 1.0)]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 0.0);
+
+        let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+            .err()
+            .expect("negated primary-input port bindings should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "technology mapping does not support negated input-port bindings"
+        );
+    }
+
+    #[test]
+    fn constrained_mapping_rejects_duplicate_flattened_input_names() {
+        let original = two_input_and(&[("o", false)]);
+        let mut graph = original.graph().clone();
+        graph.inputs.push(graph.inputs[0].clone());
+        let graph = ChoiceAig::without_choices(graph);
+        let library = timed_library(&[("AND2", &["A", "B"], "A * B", 1.0, 1.0)]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 0.0);
+
+        let error = endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default())
+            .err()
+            .expect("duplicate flattened primary-input names should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "technology mapping has duplicate input 'a'"
+        );
     }
 }

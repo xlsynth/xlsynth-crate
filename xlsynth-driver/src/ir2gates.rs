@@ -7,7 +7,8 @@ use clap::ArgMatches;
 use crate::toolchain_config::ToolchainConfig;
 use std::fs::File;
 use std::io::Write;
-use xlsynth_g8r::aig::SequentialGateFn;
+use std::path::Path;
+use xlsynth_g8r::aig::{GateFn, SequentialGateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_serdes::emit_netlist;
@@ -157,6 +158,55 @@ fn lower_ir2g8r_design(
     }
 }
 
+/// Encodes a combinational graph using the AIGER format selected by its path.
+fn encode_aiger_for_path(gate_fn: &GateFn, output_path: &Path) -> Result<Vec<u8>, String> {
+    let is_binary_aig = output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("aig"))
+        .unwrap_or(false);
+
+    if is_binary_aig {
+        emit_aiger_binary(gate_fn, true)
+            .map_err(|error| format!("Failed to emit binary AIGER: {error}"))
+    } else {
+        emit_aiger(gate_fn, true)
+            .map(String::into_bytes)
+            .map_err(|error| format!("Failed to emit ASCII AIGER: {error}"))
+    }
+}
+
+/// Atomically replaces an AIGER output only after its complete bytes are ready.
+fn write_aiger_atomically(output_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary_file = tempfile::Builder::new()
+        .prefix(".xlsynth-aiger-")
+        .tempfile_in(parent)
+        .map_err(|error| {
+            format!(
+                "failed to create a temporary AIGER file in '{}': {error}",
+                parent.display()
+            )
+        })?;
+    temporary_file
+        .write_all(bytes)
+        .map_err(|error| format!("failed to write temporary AIGER output: {error}"))?;
+    temporary_file
+        .flush()
+        .map_err(|error| format!("failed to flush temporary AIGER output: {error}"))?;
+    temporary_file.persist(output_path).map_err(|error| {
+        format!(
+            "failed to persist AIGER output '{}': {}",
+            output_path.display(),
+            error.error
+        )
+    })?;
+    Ok(())
+}
+
 pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
     let ir_top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
@@ -222,6 +272,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let ir_top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
     let bin_out = matches.get_one::<String>("bin_out");
     let aiger_out = matches.get_one::<String>("aiger_out");
+    let transition_aiger_out = matches.get_one::<String>("transition_aiger_out");
     let stats_out = matches.get_one::<String>("stats_out");
     let netlist_out = matches.get_one::<String>("netlist_out");
     let input_path = std::path::Path::new(input_file);
@@ -233,12 +284,25 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         std::process::exit(1);
     });
     let design = lowering.design();
-    let aiger_gate_fn = aiger_out.map(|_| {
-        design.clone().try_into_gate_fn().unwrap_or_else(|err| {
+    // Encode every requested AIGER artifact before exposing stdout or creating
+    // another output. In particular, --aiger-out must continue to reject a
+    // registered design rather than silently exporting only its transition.
+    let aiger_bytes = aiger_out.map(|path| {
+        let gate_fn = design.clone().try_into_gate_fn().unwrap_or_else(|error| {
             eprintln!(
                 "Failed to emit AIGER: --aiger-out requires a clockless, register-free design: {}",
-                err
+                error
             );
+            std::process::exit(1);
+        });
+        encode_aiger_for_path(&gate_fn, Path::new(path)).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        })
+    });
+    let transition_aiger_bytes = transition_aiger_out.map(|path| {
+        encode_aiger_for_path(&design.transition, Path::new(path)).unwrap_or_else(|error| {
+            eprintln!("{error}");
             std::process::exit(1);
         })
     });
@@ -258,35 +322,22 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         let mut f = File::create(bin_path).expect("Failed to create bin_out file");
         f.write_all(&bin).expect("Failed to write bin_out file");
     }
-    // If --aiger-out is given, write the GateFn as ASCII AIGER ("aag").
-    if let (Some(aiger_path), Some(gate_fn)) = (aiger_out, aiger_gate_fn.as_ref()) {
-        let is_binary_aig = std::path::Path::new(aiger_path)
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.eq_ignore_ascii_case("aig"))
-            .unwrap_or(false);
-        if is_binary_aig {
-            let bytes = match emit_aiger_binary(gate_fn, true) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    eprintln!("Failed to emit binary AIGER: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let mut f = File::create(aiger_path).expect("Failed to create aiger_out file");
-            f.write_all(&bytes).expect("Failed to write aiger_out file");
-        } else {
-            let aiger = match emit_aiger(gate_fn, true) {
-                Ok(aiger) => aiger,
-                Err(e) => {
-                    eprintln!("Failed to emit ASCII AIGER: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let mut f = File::create(aiger_path).expect("Failed to create aiger_out file");
-            f.write_all(aiger.as_bytes())
-                .expect("Failed to write aiger_out file");
-        }
+    // --aiger-out represents a complete, strictly combinational design.
+    if let (Some(aiger_path), Some(bytes)) = (aiger_out, aiger_bytes.as_deref()) {
+        write_aiger_atomically(Path::new(aiger_path), bytes).unwrap_or_else(|error| {
+            eprintln!("Failed to write --aiger-out: {error}");
+            std::process::exit(1);
+        });
+    }
+    // --transition-aiger-out represents just the combinational transition,
+    // whose register boundary metadata is retained by --bin-out or stdout.
+    if let (Some(aiger_path), Some(bytes)) =
+        (transition_aiger_out, transition_aiger_bytes.as_deref())
+    {
+        write_aiger_atomically(Path::new(aiger_path), bytes).unwrap_or_else(|error| {
+            eprintln!("Failed to write --transition-aiger-out: {error}");
+            std::process::exit(1);
+        });
     }
     // If --stats-out is given, write the stats as JSON
     if let (Some(stats_path), Some(stats)) = (stats_out, stats) {
