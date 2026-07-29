@@ -2496,7 +2496,7 @@ fn main() {
                         .value_name("BOOL")
                         .default_value("false")
                         .value_parser(clap::value_parser!(bool))
-                        .help("Insert Liberty-aware balanced buffer trees after mapping")
+                        .help("Insert exact-Liberty, criticality-aware buffer trees after mapping")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2649,7 +2649,7 @@ fn main() {
                         .value_name("BOOL")
                         .default_value("true")
                         .value_parser(clap::value_parser!(bool))
-                        .help("Insert capacitance-balanced Liberty buffer trees")
+                        .help("Insert exact-Liberty, criticality-aware buffer trees")
                         .action(ArgAction::Set),
                 )
                 .arg(

@@ -1,22 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Deterministic Liberty-aware buffering for scalar mapped netlists.
+//! Shared Liberty-buffer options and disabled legacy buffering.
 
-use crate::liberty_model::{Library, PinDirection};
+use crate::liberty_model::Library;
+#[cfg(test)]
+use crate::liberty_model::PinDirection;
+#[cfg(test)]
 use crate::netlist::cell_catalog::{CatalogCell, CellCatalog};
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistInstance, NetlistModule, PortDirection};
+use crate::netlist::parse::{Net, NetlistModule};
+#[cfg(test)]
+use crate::netlist::parse::{NetIndex, NetRef, NetlistInstance, PortDirection};
+#[cfg(test)]
 use crate::netlist::sta::{CombinationalOutputLoad, effective_input_capacitance_for_mapping};
+#[cfg(test)]
 use crate::netlist::utils::scalar_constant_output_assignments;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::anyhow;
 use serde::Serialize;
+#[cfg(test)]
 use std::collections::HashMap;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
 /// Keeps inserted buffers away from the steep end of their timing tables.
+#[cfg(test)]
 const MAX_BUFFER_OUTPUT_LOAD_FRACTION: f64 = 0.35;
 
-/// Electrical and fanout bounds for balanced mapped-netlist buffering.
+/// Electrical and fanout bounds for timing-aware mapped-netlist buffering.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BufferOptions {
     /// Largest number of directly connected input pins at a tree level.
@@ -51,8 +62,17 @@ pub struct BufferStats {
     pub max_load_before: f64,
     pub max_load_after: f64,
     pub unresolved_overloaded_nets: usize,
+    /// Complete combinational or register-aware delay before buffering.
+    pub initial_worst_delay: Option<f64>,
+    /// Independently recomputed worst-path delay after accepted buffering.
+    pub final_worst_delay: Option<f64>,
+    /// Number of complete Liberty STA evaluations used to accept buffer edits.
+    pub timing_evaluations: usize,
+    /// Candidate batches rejected because their exact timing did not improve.
+    pub rejected_timing_batches: usize,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SinkTarget {
     InstancePin {
@@ -64,12 +84,14 @@ enum SinkTarget {
     },
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct BufferSink {
     target: SinkTarget,
     load: CombinationalOutputLoad,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 struct NetFanout {
     sinks: Vec<BufferSink>,
@@ -78,14 +100,28 @@ struct NetFanout {
     protected_clock: bool,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct SinkGroup {
     sinks: Vec<BufferSink>,
     load: CombinationalOutputLoad,
 }
 
-/// Replaces overloaded scalar nets with capacitance-balanced buffer trees.
+/// Rejects the retired capacitance-only buffer-insertion entry point.
+#[track_caller]
 pub fn insert_buffers(
+    _module: &mut NetlistModule,
+    _nets: &mut Vec<Net>,
+    _interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    _library: &Library,
+    _options: &BufferOptions,
+) -> Result<BufferStats> {
+    panic!("capacitance-balanced buffer insertion is disabled; use insert_timing_aware_buffers");
+}
+
+/// Preserves the retired algorithm strictly for focused test characterization.
+#[cfg(test)]
+fn insert_capacitance_balanced_buffers_for_characterization(
     module: &mut NetlistModule,
     nets: &mut Vec<Net>,
     interner: &mut StringInterner<StringBackend<SymbolU32>>,
@@ -245,6 +281,7 @@ pub fn insert_buffers(
 }
 
 /// Validates buffer-tree bounds before inspecting or changing the netlist.
+#[cfg(test)]
 fn validate_options(options: &BufferOptions) -> Result<()> {
     if options.max_fanout < 2 {
         return Err(anyhow!("buffer max_fanout must be at least 2"));
@@ -264,6 +301,7 @@ fn validate_options(options: &BufferOptions) -> Result<()> {
 }
 
 /// Collects exact scalar sink pins and module-output loads for each net.
+#[cfg(test)]
 fn collect_net_fanouts(
     module: &NetlistModule,
     nets: &[Net],
@@ -369,6 +407,7 @@ fn collect_net_fanouts(
 }
 
 /// Uses an explicit target, the existing driver limit, or a real buffer limit.
+#[cfg(test)]
 fn root_load_limit(
     fanout: &NetFanout,
     module: &NetlistModule,
@@ -410,6 +449,7 @@ fn root_load_limit(
 }
 
 /// Partitions sinks deterministically by both count and rise/fall capacitance.
+#[cfg(test)]
 fn partition_sinks(
     mut sinks: Vec<BufferSink>,
     max_fanout: usize,
@@ -450,6 +490,7 @@ fn partition_sinks(
 }
 
 /// Keeps equal-load sink grouping independent of map or Liberty ordering.
+#[cfg(test)]
 fn sink_target_order(lhs: SinkTarget, rhs: SinkTarget) -> std::cmp::Ordering {
     match (lhs, rhs) {
         (
@@ -475,6 +516,7 @@ fn sink_target_order(lhs: SinkTarget, rhs: SinkTarget) -> std::cmp::Ordering {
 }
 
 /// Picks the smallest buffer with usable timing headroom for the actual load.
+#[cfg(test)]
 fn choose_buffer(catalog: &CellCatalog, load: CombinationalOutputLoad) -> Result<&CatalogCell> {
     if let Some(buffer) = catalog.buffers().find(|buffer| {
         buffer
@@ -503,6 +545,7 @@ fn choose_buffer(catalog: &CellCatalog, load: CombinationalOutputLoad) -> Result
 }
 
 /// Returns whether a direct net exceeds count or characterized load bounds.
+#[cfg(test)]
 fn is_overloaded(sinks: &[BufferSink], max_fanout: usize, target_load: Option<f64>) -> bool {
     sinks.len() > max_fanout
         || target_load.is_some_and(|limit| {
@@ -512,6 +555,7 @@ fn is_overloaded(sinks: &[BufferSink], max_fanout: usize, target_load: Option<f6
 }
 
 /// Sums the separate rise and fall capacitances of sink pins.
+#[cfg(test)]
 fn sink_load(sinks: &[BufferSink]) -> CombinationalOutputLoad {
     sinks
         .iter()
@@ -523,10 +567,12 @@ fn sink_load(sinks: &[BufferSink]) -> CombinationalOutputLoad {
 }
 
 /// Returns a conservative scalar for rise/fall electrical comparisons.
+#[cfg(test)]
 fn max_load(load: CombinationalOutputLoad) -> f64 {
     load.rise.max(load.fall)
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct FreshNames {
     wire: usize,
@@ -534,6 +580,7 @@ struct FreshNames {
 }
 
 /// Adds a deterministic internal scalar wire to the selected module.
+#[cfg(test)]
 fn fresh_wire(
     module: &mut NetlistModule,
     nets: &mut Vec<Net>,
@@ -558,6 +605,7 @@ fn fresh_wire(
 }
 
 /// Appends one real Liberty buffer and returns its mutable input endpoint.
+#[cfg(test)]
 fn append_buffer_instance(
     module: &mut NetlistModule,
     interner: &mut StringInterner<StringBackend<SymbolU32>>,
@@ -610,12 +658,40 @@ fn append_buffer_instance(
 
 #[cfg(test)]
 mod tests {
-    use super::{BufferOptions, choose_buffer, insert_buffers};
+    use super::{
+        BufferOptions, choose_buffer, insert_buffers,
+        insert_capacitance_balanced_buffers_for_characterization,
+    };
     use crate::netlist::cell_catalog::CellCatalog;
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library};
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::report::build_sta_report;
     use crate::netlist::sta::{CombinationalOutputLoad, StaOptions};
+
+    #[test]
+    #[should_panic(
+        expected = "capacitance-balanced buffer insertion is disabled; use insert_timing_aware_buffers"
+    )]
+    fn legacy_capacitance_balanced_inserter_panics() {
+        let library = sizing_library();
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, y);
+  input a;
+  output y;
+  BUF driver (.A(a), .Y(y));
+endmodule
+"#,
+        );
+
+        let _ = insert_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+        );
+    }
 
     #[test]
     fn selects_a_buffer_with_characterized_output_load_headroom() {
@@ -654,7 +730,7 @@ endmodule
 "#;
         let library = sizing_library();
         let (mut module, mut nets, mut interner) = parse_module(source);
-        let stats = insert_buffers(
+        let stats = insert_capacitance_balanced_buffers_for_characterization(
             &mut module,
             &mut nets,
             &mut interner,
@@ -688,7 +764,7 @@ endmodule
 "#;
         let library = sizing_library();
         let (mut module, mut nets, mut interner) = parse_module(source);
-        insert_buffers(
+        insert_capacitance_balanced_buffers_for_characterization(
             &mut module,
             &mut nets,
             &mut interner,
@@ -725,7 +801,14 @@ endmodule
         };
         let render = || {
             let (mut module, mut nets, mut interner) = parse_module(source);
-            insert_buffers(&mut module, &mut nets, &mut interner, &library, &options).unwrap();
+            insert_capacitance_balanced_buffers_for_characterization(
+                &mut module,
+                &mut nets,
+                &mut interner,
+                &library,
+                &options,
+            )
+            .unwrap();
             emit_module_as_netlist_text(&module, &nets, &interner).unwrap()
         };
         assert_eq!(render(), render());
@@ -744,7 +827,7 @@ endmodule
 "#;
         let library = sizing_library();
         let (mut module, mut nets, mut interner) = parse_module(source);
-        let stats = insert_buffers(
+        let stats = insert_capacitance_balanced_buffers_for_characterization(
             &mut module,
             &mut nets,
             &mut interner,
@@ -778,7 +861,7 @@ endmodule
 "#;
         let library = sizing_library();
         let (mut module, mut nets, mut interner) = parse_module(source);
-        let stats = insert_buffers(
+        let stats = insert_capacitance_balanced_buffers_for_characterization(
             &mut module,
             &mut nets,
             &mut interner,

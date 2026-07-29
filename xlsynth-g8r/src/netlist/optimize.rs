@@ -3,11 +3,12 @@
 //! Exact-Liberty buffering and sizing for mapped combinational netlists.
 
 use crate::liberty_model::Library;
-use crate::netlist::buffer::{BufferOptions, BufferStats, insert_buffers};
+use crate::netlist::buffer::{BufferOptions, BufferStats};
 use crate::netlist::parse::{Net, NetlistModule};
 use crate::netlist::report::{build_area_report, build_sta_report};
 use crate::netlist::resize::{ResizeOptions, ResizeStats, resize_netlist};
 use crate::netlist::sta::StaOptions;
+use crate::netlist::timing_buffer::{BufferTimingConstraints, insert_timing_aware_buffers};
 use anyhow::Result;
 use serde::Serialize;
 use string_interner::symbol::SymbolU32;
@@ -18,7 +19,7 @@ use string_interner::{StringInterner, backend::StringBackend};
 pub struct NetlistOptimizationOptions {
     /// Exact timing assumptions used before, during, and after optimization.
     pub sta_options: StaOptions,
-    /// Balanced Liberty-buffer insertion; `None` disables buffering.
+    /// Exact-Liberty, criticality-aware buffering; `None` disables buffering.
     pub buffer_options: Option<BufferOptions>,
     /// Critical-path cell sizing and area recovery; `None` disables sizing.
     pub resize_options: Option<ResizeOptions>,
@@ -66,12 +67,14 @@ pub fn optimize_mapped_netlist(
     let buffer_stats = if let Some(configured) = &options.buffer_options {
         let mut buffer_options = configured.clone();
         buffer_options.module_output_load = options.sta_options.module_output_load;
-        Some(insert_buffers(
+        Some(insert_timing_aware_buffers(
             module,
             nets,
             interner,
             library,
             &buffer_options,
+            options.sta_options,
+            &BufferTimingConstraints::default(),
         )?)
     } else {
         None
@@ -145,8 +148,21 @@ endmodule
         )
         .unwrap();
 
-        assert!(stats.buffer_stats.unwrap().buffers_inserted > 0);
-        assert!(stats.resize_stats.unwrap().upsizes > 0);
+        let buffer_stats = stats
+            .buffer_stats
+            .expect("timing-aware buffering should report complete diagnostics");
+        assert!(buffer_stats.buffers_inserted > 0);
+        assert!(buffer_stats.timing_evaluations >= 2);
+        assert!(buffer_stats.initial_worst_delay.is_some_and(f64::is_finite));
+        let resize_stats = stats
+            .resize_stats
+            .expect("buffering should be followed by incremental sizing");
+        assert!(
+            buffer_stats
+                .final_worst_delay
+                .is_some_and(|delay| (delay - resize_stats.initial_delay).abs() < 1e-9)
+        );
+        assert!(resize_stats.upsizes > 0);
         assert!(stats.final_delay < stats.initial_delay);
     }
 

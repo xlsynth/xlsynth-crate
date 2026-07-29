@@ -27,5 +27,6 @@ pub mod sta;
 pub mod stages;
 pub mod stats;
 pub mod techmap;
+pub mod timing_buffer;
 pub mod utils;
 pub mod yosys;
