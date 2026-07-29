@@ -6,14 +6,17 @@ use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, Pin, PinDirection};
 use crate::liberty_proto::TimingTableKind;
 use crate::netlist::sta::{
-    CombinationalOutputLoad, effective_input_capacitance_for_mapping,
+    CombinationalOutputLoad, EdgeTiming, SignalTiming, TimingQueryDiagnosticCounts,
+    effective_input_capacitance_for_mapping, evaluate_combinational_cell_output_timing,
     validate_output_pin_for_basic_sta,
 };
-use crate::techmap::truth::{transform_truth, variable_truth};
+use crate::techmap::truth::{MAX_TRUTH_TABLE_INPUTS, transform_truth, variable_truth};
 use anyhow::{Result, anyhow};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const NF_ROOT_VARIANTS_PER_FUNCTION: usize = 1;
+const REPRESENTATIVE_OUTPUT_FANOUT: f64 = 2.0;
 
 /// One concrete cell/output/pin-permutation match.
 #[derive(Clone, Debug)]
@@ -34,6 +37,32 @@ pub(super) struct CellBinding {
     /// Whether gv-stats-style rise/fall timing can evaluate this binding.
     pub timing_complete: bool,
     pub area: f64,
+}
+
+/// Stable arena handle for one concrete Liberty binding.
+///
+/// The index owns binding payloads once and mapping stores this compact handle
+/// while exploring candidates. This avoids repeatedly cloning pin-name and
+/// timing vectors in the mapper's hot path.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(super) struct CellBindingId(usize);
+
+/// Fixed, gv-stats-interpolated input-pin delays for the NF root library.
+pub(super) struct RepresentativePinDelayTable {
+    output_load: f64,
+    pin_delays: Vec<SmallVec<[f64; MAX_TRUTH_TABLE_INPUTS]>>,
+}
+
+impl RepresentativePinDelayTable {
+    /// Returns the representative fanout load shared by the indexed cells.
+    pub(super) fn output_load(&self) -> f64 {
+        self.output_load
+    }
+
+    /// Returns the characterized delay for one concrete cell input pin.
+    pub(super) fn pin_delay(&self, binding: CellBindingId, input_index: usize) -> f64 {
+        self.pin_delays[binding.0][input_index]
+    }
 }
 
 impl CellBinding {
@@ -79,7 +108,11 @@ pub(super) struct LibertyIndexStats {
 
 /// Exact truth-table index over eligible single-output combinational cells.
 pub(super) struct LibertyCellIndex {
-    by_truth: BTreeMap<(usize, u64), Vec<CellBinding>>,
+    bindings: Vec<CellBinding>,
+    by_truth: BTreeMap<(usize, u64), Vec<CellBindingId>>,
+    /// Dense rank of each stable key, used by mapper tie-breaks without
+    /// repeatedly comparing cell/pin-name strings in the inner loop.
+    stable_key_ranks: Vec<usize>,
     pub stats: LibertyIndexStats,
 }
 
@@ -102,32 +135,32 @@ impl LibertyCellIndex {
         max_arity: usize,
         root_limit: Option<usize>,
     ) -> Result<Self> {
-        let mut by_truth: BTreeMap<(usize, u64), Vec<CellBinding>> = BTreeMap::new();
+        let mut bindings_by_truth: BTreeMap<(usize, u64), Vec<CellBinding>> = BTreeMap::new();
         let mut stats = LibertyIndexStats::default();
         let mut indexed_cells = Vec::new();
-        let mut nf_roots: BTreeMap<(usize, u64), Vec<Vec<(u64, CellBinding)>>> = BTreeMap::new();
+        let mut nf_roots: BTreeMap<(usize, u64), Vec<(u64, CellBinding)>> = BTreeMap::new();
         for (cell_index, cell) in library.cells.iter().enumerate() {
-            let Some(indexed) = index_cell(library, cell_index, cell, max_arity)? else {
+            let Some((native_truth, native_binding)) =
+                index_native_cell(library, cell_index, cell, max_arity)?
+            else {
                 stats.skipped_cells += 1;
                 continue;
             };
             if let Some(root_limit) = root_limit {
-                // index_cell emits identity/no-input-negation first, so its
-                // first truth is the cell's native declared-pin function.
-                let native_key = (indexed[0].1.input_pin_names.len(), indexed[0].0);
+                let native_key = (native_binding.input_pin_names.len(), native_truth);
                 let roots = nf_roots.entry(native_key).or_default();
                 if roots
                     .iter()
-                    .any(|existing| root_binding_dominates(&existing[0].1, &indexed[0].1))
+                    .any(|(_, existing)| root_binding_dominates(existing, &native_binding))
                 {
                     continue;
                 }
-                roots.retain(|existing| !root_binding_dominates(&indexed[0].1, &existing[0].1));
-                roots.push(indexed);
-                roots.sort_by(|lhs, rhs| root_binding_order(&lhs[0].1, &rhs[0].1));
+                roots.retain(|(_, existing)| !root_binding_dominates(&native_binding, existing));
+                roots.push((native_truth, native_binding));
+                roots.sort_by(|lhs, rhs| root_binding_order(&lhs.1, &rhs.1));
                 roots.truncate(root_limit);
             } else {
-                indexed_cells.push(indexed);
+                indexed_cells.push(expand_native_cell(native_truth, &native_binding));
             }
         }
         if root_limit.is_some() {
@@ -135,64 +168,223 @@ impl LibertyCellIndex {
                 nf_roots
                     .into_values()
                     .flatten()
+                    .map(|(truth, binding)| expand_native_cell(truth, &binding))
                     .map(deduplicate_nf_configurations),
             );
         }
         for indexed in indexed_cells {
             stats.indexed_cell_outputs += 1;
             for (truth, binding) in indexed {
-                by_truth
+                bindings_by_truth
                     .entry((binding.input_pin_names.len(), truth))
                     .or_default()
                     .push(binding);
                 stats.indexed_bindings += 1;
             }
         }
-        for bindings in by_truth.values_mut() {
+        for bindings in bindings_by_truth.values_mut() {
             bindings.sort_by(binding_order);
         }
-        if by_truth.is_empty() {
+        if bindings_by_truth.is_empty() {
             return Err(anyhow!(
                 "Liberty library has no eligible single-output combinational cells with parseable functions"
             ));
         }
-        Ok(Self { by_truth, stats })
+        let mut bindings = Vec::with_capacity(stats.indexed_bindings);
+        let mut by_truth = BTreeMap::new();
+        for (key, key_bindings) in bindings_by_truth {
+            let mut ids = Vec::with_capacity(key_bindings.len());
+            for binding in key_bindings {
+                let id = CellBindingId(bindings.len());
+                bindings.push(binding);
+                ids.push(id);
+            }
+            by_truth.insert(key, ids);
+        }
+        let stable_key_ranks = build_stable_key_ranks(bindings.as_slice());
+        Ok(Self {
+            bindings,
+            by_truth,
+            stable_key_ranks,
+            stats,
+        })
     }
 
-    /// Returns every deterministic cell binding for one cut truth table.
-    pub fn matches(&self, arity: usize, truth: u64) -> &[CellBinding] {
+    /// Returns every deterministic binding handle for one cut truth table.
+    pub fn matches(&self, arity: usize, truth: u64) -> &[CellBindingId] {
         self.by_truth
             .get(&(arity, truth))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
+    /// Resolves one compact binding handle to its immutable payload.
+    pub fn binding(&self, id: CellBindingId) -> &CellBinding {
+        &self.bindings[id.0]
+    }
+
+    /// Samples each native cell once at a representative slew and fanout load.
+    pub(super) fn representative_pin_delays(
+        &self,
+        library: &Library,
+        input_transition: f64,
+    ) -> Result<RepresentativePinDelayTable> {
+        if !input_transition.is_finite() || input_transition < 0.0 {
+            return Err(anyhow!(
+                "representative input transition must be non-negative and finite; got {}",
+                input_transition
+            ));
+        }
+
+        let mut visited_cells = vec![false; library.cells.len()];
+        let mut input_loads = Vec::new();
+        for binding in &self.bindings {
+            if std::mem::replace(&mut visited_cells[binding.cell_index], true) {
+                continue;
+            }
+            for capacitance in &binding.input_capacitances {
+                let load = capacitance.rise.max(capacitance.fall);
+                if load.is_finite() && load > 0.0 {
+                    input_loads.push(load);
+                }
+            }
+        }
+        input_loads.sort_by(f64::total_cmp);
+        let median_input_load = match input_loads.len() {
+            0 => 0.0,
+            count if count % 2 == 1 => input_loads[count / 2],
+            count => (input_loads[count / 2 - 1] + input_loads[count / 2]) / 2.0,
+        };
+        let output_load = REPRESENTATIVE_OUTPUT_FANOUT * median_input_load;
+        let representative_load = CombinationalOutputLoad {
+            rise: output_load,
+            fall: output_load,
+        };
+        let input_timing = SignalTiming {
+            rise: EdgeTiming {
+                arrival: 0.0,
+                transition: input_transition,
+            },
+            fall: EdgeTiming {
+                arrival: 0.0,
+                transition: input_transition,
+            },
+        };
+        let known_pin_values = HashMap::new();
+        let mut diagnostics = TimingQueryDiagnosticCounts::default();
+        let mut native_pin_delays: Vec<Option<SmallVec<[f64; MAX_TRUTH_TABLE_INPUTS]>>> =
+            vec![None; library.cells.len()];
+        let mut pin_delays = Vec::with_capacity(self.bindings.len());
+
+        for binding in &self.bindings {
+            if native_pin_delays[binding.cell_index].is_none() {
+                let mut delays = SmallVec::with_capacity(binding.input_pin_names.len());
+                for (input_index, input_name) in binding.input_pin_names.iter().enumerate() {
+                    let delay = if binding.has_complete_timing() {
+                        let output_timing = evaluate_combinational_cell_output_timing(
+                            library,
+                            binding.cell_name.as_str(),
+                            binding.output_pin(library),
+                            &[(input_name.as_str(), input_timing)],
+                            representative_load,
+                            &known_pin_values,
+                            &mut diagnostics,
+                        )?;
+                        output_timing.rise.arrival.max(output_timing.fall.arrival)
+                    } else {
+                        binding.input_delays[input_index]
+                            .filter(|delay| delay.is_finite() && *delay >= 0.0)
+                            .unwrap_or(1.0)
+                    };
+                    if !delay.is_finite() || delay < 0.0 {
+                        return Err(anyhow!(
+                            "cell '{}', input '{}', has invalid representative pin delay {}",
+                            binding.cell_name,
+                            input_name,
+                            delay
+                        ));
+                    }
+                    delays.push(delay);
+                }
+                native_pin_delays[binding.cell_index] = Some(delays);
+            }
+            pin_delays.push(
+                native_pin_delays[binding.cell_index]
+                    .as_ref()
+                    .expect("representative pin delays were just initialized")
+                    .clone(),
+            );
+        }
+
+        Ok(RepresentativePinDelayTable {
+            output_load,
+            pin_delays,
+        })
+    }
+
+    /// Compares deterministic binding identities using precomputed ranks.
+    ///
+    /// Equal stable keys intentionally share one rank so this is exactly the
+    /// same ordering relation as comparing CellBinding::stable_key directly.
+    pub fn stable_key_order(&self, lhs: CellBindingId, rhs: CellBindingId) -> std::cmp::Ordering {
+        self.stable_key_ranks[lhs.0].cmp(&self.stable_key_ranks[rhs.0])
+    }
+
+    /// Returns whether every eligible binding supports full gv-stats timing.
+    ///
+    /// When true, any cover emitted from this index can rely on the final
+    /// parsed-netlist STA pass instead of first retiming the selected cover.
+    pub fn all_bindings_have_complete_timing(&self) -> bool {
+        self.bindings.iter().all(CellBinding::has_complete_timing)
+    }
+
     /// Returns the cheapest unary identity cell, if the library has one.
     pub fn best_buffer(&self) -> Option<&CellBinding> {
         self.matches(1, variable_truth(1, 0))
             .iter()
-            .find(|binding| !binding.input_negated[0])
+            .copied()
+            .find(|id| !self.binding(*id).input_negated[0])
+            .map(|id| self.binding(id))
     }
 
     /// Returns the cheapest unary inverter cell, if the library has one.
     pub fn best_inverter(&self) -> Option<&CellBinding> {
         self.matches(1, 0b01)
             .iter()
-            .find(|binding| !binding.input_negated[0])
-    }
-
-    /// Returns the cheapest zero-input constant driver, if available.
-    pub fn best_constant(&self, value: bool) -> Option<&CellBinding> {
-        self.matches(0, u64::from(value)).first()
+            .copied()
+            .find(|id| !self.binding(*id).input_negated[0])
+            .map(|id| self.binding(id))
     }
 }
 
-fn index_cell(
+/// Builds one dense rank per distinct stable binding identity.
+fn build_stable_key_ranks(bindings: &[CellBinding]) -> Vec<usize> {
+    let mut ordered_ids: Vec<usize> = (0..bindings.len()).collect();
+    ordered_ids.sort_by(|lhs, rhs| {
+        bindings[*lhs]
+            .stable_key()
+            .cmp(&bindings[*rhs].stable_key())
+    });
+    let mut ranks = vec![0; bindings.len()];
+    let mut rank = 0usize;
+    for (position, binding_id) in ordered_ids.iter().copied().enumerate() {
+        if position > 0
+            && bindings[ordered_ids[position - 1]].stable_key() != bindings[binding_id].stable_key()
+        {
+            rank += 1;
+        }
+        ranks[binding_id] = rank;
+    }
+    ranks
+}
+
+/// Extracts a cell once before deciding whether its root is worth expanding.
+fn index_native_cell(
     library: &Library,
     cell_index: usize,
     cell: &Cell,
     max_arity: usize,
-) -> Result<Option<Vec<(u64, CellBinding)>>> {
+) -> Result<Option<(u64, CellBinding)>> {
     if cell.dont_use == Some(true)
         || !cell.sequential.is_empty()
         || cell.clock_gate.is_some()
@@ -274,28 +466,41 @@ fn index_cell(
         input_pin_names.as_slice(),
     )
     .is_ok();
+    let input_count = input_pin_names.len();
+    Ok(Some((
+        truth,
+        CellBinding {
+            cell_name: cell.name.clone(),
+            cell_index,
+            output_pin_name,
+            output_pin_index,
+            input_pin_names,
+            input_to_leaf: (0..input_count).collect(),
+            input_negated: vec![false; input_count],
+            input_delays,
+            input_capacitances,
+            timing_complete,
+            area: cell.area,
+        },
+    )))
+}
+
+/// Expands only a retained native root into deterministic Boolean bindings.
+fn expand_native_cell(truth: u64, native: &CellBinding) -> Vec<(u64, CellBinding)> {
     let mut indexed = Vec::new();
-    for input_to_leaf in permutations(input_pin_names.len()) {
-        for input_negated in polarity_vectors(input_pin_names.len()) {
+    for input_to_leaf in permutations(native.input_pin_names.len()) {
+        for input_negated in polarity_vectors(native.input_pin_names.len()) {
             indexed.push((
                 transform_truth(truth, input_to_leaf.as_slice(), input_negated.as_slice()),
                 CellBinding {
-                    cell_name: cell.name.clone(),
-                    cell_index,
-                    output_pin_name: output_pin_name.clone(),
-                    output_pin_index,
-                    input_pin_names: input_pin_names.clone(),
                     input_to_leaf: input_to_leaf.clone(),
                     input_negated,
-                    input_delays: input_delays.clone(),
-                    input_capacitances: input_capacitances.clone(),
-                    timing_complete,
-                    area: cell.area,
+                    ..native.clone()
                 },
             ));
         }
     }
-    Ok(Some(indexed))
+    indexed
 }
 
 fn formula_truth(term: &Term, input_pin_names: &[String]) -> Result<u64> {
@@ -436,7 +641,8 @@ fn binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Ordering {
 }
 
 fn root_binding_dominates(lhs: &CellBinding, rhs: &CellBinding) -> bool {
-    lhs.area <= rhs.area && (lhs.area < rhs.area || lhs.stable_key() <= rhs.stable_key())
+    lhs.area < rhs.area
+        || (lhs.area.total_cmp(&rhs.area).is_eq() && lhs.stable_key() <= rhs.stable_key())
 }
 
 fn root_binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Ordering {
@@ -448,7 +654,8 @@ fn root_binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Orderin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_model::{Cell, LibraryBuilder, Pin};
+    use crate::liberty_model::{Cell, LibraryBuilder, LuTableTemplate, Pin, TimingArc};
+    use crate::liberty_proto::TimingTableKind;
 
     fn pin(
         builder: &mut LibraryBuilder,
@@ -462,6 +669,40 @@ mod tests {
             function: builder.intern_string(function).unwrap(),
             ..Default::default()
         }
+    }
+
+    /// Builds a complete two-dimensional Liberty arc for pin-delay sampling.
+    fn representative_timing_arc(
+        builder: &mut LibraryBuilder,
+        related_pin: &str,
+        rise_delays: [f64; 4],
+        fall_delays: [f64; 4],
+    ) -> TimingArc {
+        let tables = [
+            (TimingTableKind::CellRise, rise_delays),
+            (TimingTableKind::CellFall, fall_delays),
+            (TimingTableKind::RiseTransition, [0.1; 4]),
+            (TimingTableKind::FallTransition, [0.1; 4]),
+        ]
+        .into_iter()
+        .map(|(kind, values)| {
+            builder
+                .add_timing_table_f64(
+                    kind,
+                    1,
+                    vec![],
+                    vec![],
+                    vec![],
+                    values.to_vec(),
+                    vec![2, 2],
+                    "",
+                )
+                .expect("representative timing table should be valid")
+        })
+        .collect();
+        builder
+            .add_timing_arc(related_pin, "positive_unate", "combinational", "", tables)
+            .expect("representative timing arc should be valid")
     }
 
     #[test]
@@ -482,7 +723,10 @@ mod tests {
         let index = LibertyCellIndex::build(&library, 6).unwrap();
 
         assert_eq!(index.matches(2, 0b1000).len(), 2);
-        assert_eq!(index.matches(2, 0b1000)[0].cell_name, "mystery_gate");
+        assert_eq!(
+            index.binding(index.matches(2, 0b1000)[0]).cell_name,
+            "mystery_gate"
+        );
     }
 
     #[test]
@@ -515,6 +759,105 @@ mod tests {
 
         assert_eq!(index.stats.indexed_cell_outputs, 1);
         assert_eq!(index.best_inverter().unwrap().cell_name, "good");
+    }
+
+    #[test]
+    fn nf_root_ties_ignore_characterized_liberty_delay() {
+        let mut builder = LibraryBuilder::new();
+        let mut cells = Vec::new();
+        for (name, delay) in [("A_SLOW", 9.0), ("Z_FAST", 1.0)] {
+            let mut output = pin(&mut builder, PinDirection::Output, "Y", "A * B");
+            for input in ["A", "B"] {
+                let table = builder
+                    .add_timing_table_f64(
+                        TimingTableKind::CellRise,
+                        0,
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![delay],
+                        vec![],
+                        "",
+                    )
+                    .unwrap();
+                output.timing_arcs.push(
+                    builder
+                        .add_timing_arc(input, "", "combinational", "", vec![table])
+                        .unwrap(),
+                );
+            }
+            cells.push(Cell {
+                name: name.to_string(),
+                pins: vec![
+                    pin(&mut builder, PinDirection::Input, "A", ""),
+                    pin(&mut builder, PinDirection::Input, "B", ""),
+                    output,
+                ],
+                area: 1.0,
+                ..Default::default()
+            });
+        }
+        builder.cells = cells;
+        let library = builder.finish();
+
+        let index = LibertyCellIndex::build_nf(&library, 6).unwrap();
+
+        assert_eq!(index.stats.indexed_cell_outputs, 1);
+        assert_eq!(
+            index.binding(index.matches(2, 0b1000)[0]).cell_name,
+            "A_SLOW"
+        );
+    }
+
+    #[test]
+    fn representative_pin_delays_interpolate_each_input_at_median_fanout() {
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "representative_2d".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.1, 0.3],
+            index_2: vec![1.0, 3.0],
+            ..Default::default()
+        }];
+        let mut input_a = pin(&mut builder, PinDirection::Input, "A", "");
+        input_a.capacitance = Some(0.5);
+        let mut input_b = pin(&mut builder, PinDirection::Input, "B", "");
+        input_b.capacitance = Some(1.5);
+        let mut output = pin(&mut builder, PinDirection::Output, "Y", "A * B");
+        output.timing_arcs = vec![
+            representative_timing_arc(
+                &mut builder,
+                "A",
+                [10.0, 20.0, 30.0, 40.0],
+                [5.0, 7.0, 9.0, 11.0],
+            ),
+            representative_timing_arc(
+                &mut builder,
+                "B",
+                [2.0, 4.0, 6.0, 8.0],
+                [12.0, 14.0, 16.0, 18.0],
+            ),
+        ];
+        builder.cells = vec![Cell {
+            name: "AND2".to_string(),
+            pins: vec![input_a, input_b, output],
+            area: 1.0,
+            ..Default::default()
+        }];
+        let library = builder.finish();
+        let index = LibertyCellIndex::build_nf(&library, 6)
+            .expect("the characterized AND2 should be indexed");
+
+        let delays = index
+            .representative_pin_delays(&library, 0.2)
+            .expect("representative Liberty table interpolation should succeed");
+        let binding = index.matches(2, 0b1000)[0];
+
+        assert!((delays.output_load() - 2.0).abs() < 1e-12);
+        assert!((delays.pin_delay(binding, 0) - 25.0).abs() < 1e-12);
+        assert!((delays.pin_delay(binding, 1) - 15.0).abs() < 1e-12);
     }
 
     #[test]

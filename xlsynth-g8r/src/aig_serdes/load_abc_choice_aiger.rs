@@ -227,6 +227,7 @@ fn is_length_prefixed_abc_extension(tag: u8) -> bool {
             | b'j'
             | b'k'
             | b'm'
+            | b'n'
             | b'o'
             | b'p'
             | b'r'
@@ -351,6 +352,39 @@ mod tests {
         let choice_aig = load_abc_choice_aiger_binary(bytes).unwrap();
 
         assert_eq!(choice_aig.sibling_link_count(), 0);
+    }
+
+    #[test]
+    fn accepts_abc_model_name_extension_without_choices() {
+        let mut bytes = b"aig 3 2 0 1 1\n6\n\x02\x02cn".to_vec();
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(b"top\0");
+
+        let choice_aig = load_abc_choice_aiger_binary(&bytes).unwrap();
+
+        assert_eq!(choice_aig.sibling_link_count(), 0);
+        assert_eq!(choice_aig.graph().outputs.len(), 1);
+    }
+
+    #[test]
+    fn loads_q_after_abc_model_name_extension() {
+        let mut bytes = b"aig 4 2 0 1 2\n6\n".to_vec();
+        bytes.extend_from_slice(&[2, 2, 4, 2]);
+        bytes.extend_from_slice(b"cn");
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(b"top\0");
+        bytes.push(b'q');
+        bytes.extend_from_slice(&12u32.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+
+        let choice_aig = load_abc_choice_aiger_binary(&bytes).unwrap();
+
+        assert_eq!(
+            choice_aig.next_sibling(AigRef { id: 4 }),
+            Some(AigRef { id: 3 })
+        );
     }
 
     #[test]

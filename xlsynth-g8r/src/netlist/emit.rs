@@ -488,4 +488,32 @@ endmodule
             "netlist emission requires a net reference for tran terminals"
         );
     }
+
+    #[test]
+    fn emitter_round_trips_scalar_constant_output_assignments() {
+        let source = r#"
+module top(zero, one);
+  output zero, one;
+  assign zero = 1'b0;
+  assign one = 1'b1;
+endmodule
+"#;
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let lookup = move |line: u32| lines.get((line - 1) as usize).cloned();
+        let scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(source.as_bytes()),
+            Box::new(lookup),
+        );
+        let mut parser = NetlistParser::new(scanner);
+        let mut modules = parser.parse_file().expect("constant outputs should parse");
+        let module = modules.pop().expect("one module expected");
+
+        let emitted = emit_module_as_netlist_text(&module, &parser.nets, &parser.interner)
+            .expect("constant output assignments should emit");
+
+        assert_eq!(
+            emitted,
+            "module top(zero, one);\n  output zero;\n  output one;\n  assign zero = 1'b0;\n  assign one = 1'b1;\nendmodule\n"
+        );
+    }
 }

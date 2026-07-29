@@ -3,9 +3,13 @@
 //! Small bounded truth-table helpers used by the final technology mapper.
 
 use crate::aig::AigRef;
+use smallvec::SmallVec;
 
 /// Largest cut size supported by the compact u64 truth-table encoding.
 pub(super) const MAX_TRUTH_TABLE_INPUTS: usize = 6;
+
+/// Inline storage for every bounded cut-leaf list used by the mapper.
+pub(super) type CutLeaves = SmallVec<[AigRef; MAX_TRUTH_TABLE_INPUTS]>;
 
 /// Returns the mask covering every assignment bit for input_count inputs.
 pub(super) fn truth_mask(input_count: usize) -> u64 {
@@ -41,7 +45,7 @@ pub(super) fn complement_truth(truth: u64, input_count: usize) -> u64 {
 pub(super) fn remap_truth(truth: u64, old_leaves: &[AigRef], new_leaves: &[AigRef]) -> u64 {
     debug_assert!(old_leaves.len() <= new_leaves.len());
     debug_assert!(new_leaves.len() <= MAX_TRUTH_TABLE_INPUTS);
-    let old_positions: Vec<usize> = old_leaves
+    let old_positions: SmallVec<[usize; MAX_TRUTH_TABLE_INPUTS]> = old_leaves
         .iter()
         .map(|leaf| {
             new_leaves
@@ -69,10 +73,10 @@ pub(super) fn remap_truth(truth: u64, old_leaves: &[AigRef], new_leaves: &[AigRe
 /// ABC NF minimizes the support after composing each cut truth table. Doing
 /// the same here is important both for cut priority and for matching a
 /// smaller-arity Liberty root when a merged structural cut collapses.
-pub(super) fn minimize_support(truth: u64, leaves: &[AigRef]) -> (u64, Vec<AigRef>) {
+pub(super) fn minimize_support(truth: u64, leaves: &[AigRef]) -> (u64, CutLeaves) {
     debug_assert!(leaves.len() <= MAX_TRUTH_TABLE_INPUTS);
     let input_count = leaves.len();
-    let mut kept_indices = Vec::new();
+    let mut kept_indices: SmallVec<[usize; MAX_TRUTH_TABLE_INPUTS]> = SmallVec::new();
     for input_index in 0..input_count {
         let input_bit = 1usize << input_index;
         let depends_on_input = (0..(1usize << input_count))
@@ -85,13 +89,16 @@ pub(super) fn minimize_support(truth: u64, leaves: &[AigRef]) -> (u64, Vec<AigRe
         }
     }
     if kept_indices.len() == input_count {
-        return (truth & truth_mask(input_count), leaves.to_vec());
+        return (
+            truth & truth_mask(input_count),
+            CutLeaves::from_slice(leaves),
+        );
     }
 
     let minimized_leaves = kept_indices
         .iter()
         .map(|input_index| leaves[*input_index])
-        .collect::<Vec<_>>();
+        .collect::<CutLeaves>();
     let mut minimized_truth = 0u64;
     for new_assignment in 0..(1usize << kept_indices.len()) {
         let mut old_assignment = 0usize;
@@ -164,7 +171,7 @@ mod tests {
 
         let (minimized_truth, minimized_leaves) = minimize_support(truth, leaves.as_slice());
 
-        assert_eq!(minimized_leaves, vec![AigRef { id: 7 }]);
+        assert_eq!(minimized_leaves, CutLeaves::from_slice(&[AigRef { id: 7 }]));
         assert_eq!(minimized_truth, variable_truth(1, 0));
     }
 }
