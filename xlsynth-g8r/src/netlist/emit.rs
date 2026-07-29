@@ -3,7 +3,7 @@
 //! Helpers for rendering parsed gate-level netlist structures as text.
 
 use crate::netlist::parse::{AssignExpr, Net, NetIndex, NetRef, NetlistModule, PortDirection};
-use crate::netlist::utils::scalar_constant_output_assignments;
+use crate::netlist::utils::validate_constant_output_assignments;
 use anyhow::{Result, anyhow};
 use std::fmt::Write as FmtWrite;
 use string_interner::symbol::SymbolU32;
@@ -116,9 +116,9 @@ pub fn emit_module_as_netlist_text(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<String> {
-    scalar_constant_output_assignments(module, nets).map_err(|error| {
+    validate_constant_output_assignments(module, nets).map_err(|error| {
         anyhow!(
-            "netlist emission does not support preserved continuous assigns other than scalar output tie-offs: {error}"
+            "netlist emission does not support preserved continuous assigns other than scalar or packed output tie-offs: {error}"
         )
     })?;
     let module_name = render_identifier(&resolve_symbol(interner, module.name, "module name")?);
@@ -340,6 +340,37 @@ endmodule
         assert_eq!(
             emitted,
             "module top(zero, one);\n  output zero;\n  output one;\n  assign zero = 1'b0;\n  assign one = 1'b1;\nendmodule\n"
+        );
+    }
+
+    #[test]
+    fn emitter_round_trips_packed_constant_output_assignments() {
+        let source = r#"
+module top(value);
+  output [3:0] value;
+  assign value[0] = 1'b0;
+  assign value[1] = 1'b1;
+  assign value[2] = 1'b0;
+  assign value[3] = 1'b1;
+endmodule
+"#;
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let lookup = move |line: u32| lines.get((line - 1) as usize).cloned();
+        let scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(source.as_bytes()),
+            Box::new(lookup),
+        );
+        let mut parser = NetlistParser::new(scanner);
+        let mut modules = parser
+            .parse_file()
+            .expect("packed constant outputs should parse");
+        let module = modules.pop().expect("one module expected");
+
+        let emitted = emit_module_as_netlist_text(&module, &parser.nets, &parser.interner)
+            .expect("packed constant output assignments should emit");
+        assert_eq!(
+            emitted,
+            "module top(value);\n  output [3:0] value;\n  assign value[0] = 1'b0;\n  assign value[1] = 1'b1;\n  assign value[2] = 1'b0;\n  assign value[3] = 1'b1;\nendmodule\n"
         );
     }
 }

@@ -159,7 +159,10 @@ fn lower_ir2g8r_design(
 }
 
 /// Encodes a combinational graph using the AIGER format selected by its path.
-fn encode_aiger_for_path(gate_fn: &GateFn, output_path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_aiger_for_path(
+    gate_fn: &GateFn,
+    output_path: &Path,
+) -> Result<Vec<u8>, String> {
     let is_binary_aig = output_path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -177,7 +180,7 @@ fn encode_aiger_for_path(gate_fn: &GateFn, output_path: &Path) -> Result<Vec<u8>
 }
 
 /// Atomically replaces an AIGER output only after its complete bytes are ready.
-fn write_aiger_atomically(output_path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_aiger_atomically(output_path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

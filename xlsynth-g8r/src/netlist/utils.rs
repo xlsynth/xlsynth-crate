@@ -10,6 +10,94 @@ use std::collections::{BTreeMap, HashSet};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
+/// Validates literal tie-offs to scalar outputs or individual packed bits.
+pub(crate) fn validate_constant_output_assignments(
+    module: &NetlistModule,
+    nets: &[Net],
+) -> Result<()> {
+    let mut output_nets = HashSet::new();
+    for port in &module.ports {
+        if port.direction != PortDirection::Output {
+            continue;
+        }
+        let net = module
+            .find_net_index(port.name, nets)
+            .ok_or_else(|| anyhow!("constant-output assignment refers to an unknown port net"))?;
+        output_nets.insert(net.0);
+    }
+
+    let mut assigned_bits = HashSet::new();
+    for assign in &module.assigns {
+        if assign.kind != NetlistAssignKind::Continuous {
+            return Err(anyhow!(
+                "mapped-netlist emission only supports continuous output tie-offs"
+            ));
+        }
+        let AssignExpr::Leaf(NetRef::Literal(value)) = &assign.rhs else {
+            return Err(anyhow!(
+                "mapped-netlist emission only supports constant output assignments"
+            ));
+        };
+
+        match &assign.lhs {
+            NetRef::Simple(index) => {
+                if !output_nets.contains(&index.0) {
+                    return Err(anyhow!(
+                        "mapped-netlist emission only supports assignments directly to module outputs"
+                    ));
+                }
+                let net = nets
+                    .get(index.0)
+                    .ok_or_else(|| anyhow!("constant output net index is out of bounds"))?;
+                let width = net.width_bits();
+                if value.get_bit_count() != width {
+                    return Err(anyhow!(
+                        "constant output assignment width {} does not match output width {}",
+                        value.get_bit_count(),
+                        width
+                    ));
+                }
+                for bit in 0..width {
+                    if !assigned_bits.insert((index.0, bit)) {
+                        return Err(anyhow!(
+                            "mapped-netlist emission found multiple assignments to one output bit"
+                        ));
+                    }
+                }
+            }
+            NetRef::BitSelect(index, bit) => {
+                if !output_nets.contains(&index.0) {
+                    return Err(anyhow!(
+                        "mapped-netlist emission only supports assignments directly to module outputs"
+                    ));
+                }
+                let net = nets
+                    .get(index.0)
+                    .ok_or_else(|| anyhow!("constant output net index is out of bounds"))?;
+                let offset = net.bit_offset(*bit).ok_or_else(|| {
+                    anyhow!("constant output bit {bit} is outside its declared packed width")
+                })?;
+                if value.get_bit_count() != 1 {
+                    return Err(anyhow!(
+                        "a constant packed-output bit requires a one-bit tie-off"
+                    ));
+                }
+                if !assigned_bits.insert((index.0, offset)) {
+                    return Err(anyhow!(
+                        "mapped-netlist emission found multiple assignments to one output bit"
+                    ));
+                }
+            }
+            _ => {
+                return Err(anyhow!(
+                    "mapped-netlist emission requires scalar or packed output assignment destinations"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validates scalar constant assignments that directly drive module outputs.
 pub(crate) fn scalar_constant_output_assignments(
     module: &NetlistModule,

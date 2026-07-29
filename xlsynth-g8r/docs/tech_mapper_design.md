@@ -208,6 +208,23 @@ transition using `ir2g8r --transition-aiger-out`. ABC's final binary AIGER
 retains structural choices as usual. No sequential AIGER extension, latch
 encoding, or retiming is required.
 
+Register cleanup can be inserted after ABC has optimized an ordinary
+transition but before its final choice-generation pass. The reusable
+`cleanup_sequential_transition` API first validates and repacks the optimized
+scalar AIGER boundary against the original native transition. It then removes
+unobservable register bits, propagates initialization-compatible constant
+state, and merges equal or complemented next-state bits to a fixed point.
+Both the transition AIG and native register bindings are rebuilt together.
+`PreserveCycleZero` retains explicit initialization and the simulator's
+all-zero startup; `UninitializedDontCare` additionally optimizes state bits
+without an explicitly specified initial value. The cleaned ordinary
+transition can then return to ABC for final choice generation, avoiding any
+need to modify or discard structural-choice sibling links.
+
+When register removal exposes constant external bus bits, sequential boundary
+restoration preserves them as zero-area continuous assignments to those packed
+bits. It does not insert a Liberty buffer or inverter for each constant output.
+
 `map_sequential_choice_aig_to_netlist` validates that the optimized graph
 preserves every scalar transition input and output. It then maps the
 transition logic using the same choice-aware Liberty mapper and reconnects

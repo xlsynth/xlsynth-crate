@@ -904,6 +904,50 @@ block clock port; the native representation does not include an alternate
 clock-edge selector. Combinational consumers accept only designs with no clock
 and no registers, converting those designs to `GateFn` after loading.
 
+### `g8r-cleanup-registers`: simplify sequential transition state
+
+Removes individually dead, constant, and equivalent register bits from a native
+`.g8r` or `.g8rbin` design. Cleanup follows the externally observable outputs
+backwards through next-state transitions, propagates constant state, merges
+equal or complementary next-state bits, and repeats to a fixed point. External
+port names, widths, and ordering are preserved; surviving packed registers and
+their explicit initial values are compacted consistently. Constant packed
+output bits remain zero-area Verilog tie-offs rather than becoming synthetic
+buffer or inverter instances.
+
+An optional ordinary optimized transition AIGER lets ABC expose redundant
+next-state logic before cleanup. Its scalar input and output names must match
+the original transition. Run this command after ordinary ABC optimization and
+before the final structural-choice generation, then supply the cleaned native
+metadata to `choice-aig-tech-map`.
+
+- `<G8R_INPUT_FILE>` – native `.g8r` or `.g8rbin` design. Required.
+- `--optimized-transition <PATH>` – optional ordinary ASCII or binary AIGER
+  transition optimized outside the native design.
+- `--initialization-policy <preserve-cycle-zero|uninitialized-dont-care>` –
+  choose cycle-zero-preserving cleanup or treat absent register initialization
+  as hardware don't-care. Default `preserve-cycle-zero`; explicitly initialized
+  register bits are respected in both modes.
+- `--quiet=<BOOL>` – suppress cleaned text `.g8r` on stdout. Default `false`.
+- `--bin-out <PATH>` – write consistently updated native `.g8rbin` metadata.
+- `--transition-aiger-out <PATH>` – write the cleaned transition; `.aag`
+  selects ASCII AIGER and `.aig` selects binary AIGER.
+- `--stats-out <PATH>` – write deterministic register-bit, AIG-node, and
+  fixed-point-iteration statistics as JSON.
+
+```shell
+xlsynth-driver g8r-cleanup-registers pipeline.g8rbin \
+  --optimized-transition pipeline.before_choices.aig \
+  --initialization-policy uninitialized-dont-care \
+  --quiet=true \
+  --bin-out pipeline.cleaned.g8rbin \
+  --transition-aiger-out pipeline.cleaned.aig \
+  --stats-out pipeline.register_cleanup.json
+```
+
+Generate the final ABC choices from `pipeline.cleaned.aig` and map them with
+`--sequential-design pipeline.cleaned.g8rbin`.
+
 ### `g8r-optimize`: run post-gatification optimizations
 
 Runs the same post-gatification optimization sequence used for function inputs

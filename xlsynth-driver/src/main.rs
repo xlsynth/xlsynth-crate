@@ -68,6 +68,7 @@ mod g8r2blif;
 mod g8r2ir_block;
 mod g8r2ir_fn;
 mod g8r2v;
+mod g8r_cleanup_registers;
 mod g8r_cli;
 mod g8r_equiv;
 mod g8r_eval;
@@ -1767,6 +1768,54 @@ fn main() {
                         .help("Path to write the gate-level netlist (human-readable)")
                         .action(clap::ArgAction::Set),
                 )
+        )
+        .subcommand(
+            clap::Command::new("g8r-cleanup-registers")
+                .about("Removes dead, constant, and equivalent register bits from a native sequential AIG")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("Input native sequential .g8r or .g8rbin design")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("optimized_transition")
+                        .long("optimized-transition")
+                        .value_name("PATH")
+                        .help("Optional optimized ordinary transition AIGER; its scalar interface must match the native design")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("initialization_policy")
+                        .long("initialization-policy")
+                        .value_name("POLICY")
+                        .default_value("preserve-cycle-zero")
+                        .value_parser(["preserve-cycle-zero", "uninitialized-dont-care"])
+                        .help("Preserve all-zero cycle-zero behavior or optimize explicitly uninitialized hardware state")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg("quiet", "Do not emit cleaned text g8r to stdout")
+                .arg(
+                    clap::Arg::new("bin_out")
+                        .long("bin-out")
+                        .value_name("PATH")
+                        .help("Path to write cleaned native sequential .g8rbin metadata")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("transition_aiger_out")
+                        .long("transition-aiger-out")
+                        .value_name("PATH")
+                        .help("Path to write the cleaned ordinary transition; use .aag for ASCII or .aig for binary")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("stats_out")
+                        .long("stats-out")
+                        .value_name("PATH")
+                        .help("Path to write deterministic register and AIG cleanup statistics as JSON")
+                        .action(clap::ArgAction::Set),
+                ),
         )
         .subcommand(
             clap::Command::new("g8r-optimize")
@@ -4268,6 +4317,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir2g8r", subm)) => {
             ir2gates::handle_ir2g8r(subm, &config);
+        }
+        Some(("g8r-cleanup-registers", subm)) => {
+            if let Err(error) = g8r_cleanup_registers::handle_g8r_cleanup_registers(subm) {
+                eprintln!("g8r-cleanup-registers error: {error:#}");
+                std::process::exit(1);
+            }
         }
         Some(("g8r-optimize", subm)) => {
             if let Err(error) = g8r_optimize::handle_g8r_optimize(subm) {
