@@ -33,6 +33,93 @@ struct ExtNaryAddUnitCorrection {
     is_decrement: bool,
 }
 
+#[derive(Clone, Debug)]
+struct SelectedUnitDeltaMatch {
+    base_bits: AigBitVector,
+    changed_bits: AigBitVector,
+    is_decrement: bool,
+    invert_selector: bool,
+    adder_mapping: AdderMapping,
+}
+
+#[derive(Clone, Debug)]
+struct SelectedNegateMatch {
+    base_bits: AigBitVector,
+    selected_bits: AigBitVector,
+    control: AigOperand,
+    invert_control: bool,
+}
+
+/// Returns the minimum selector-arrival margin for a selected unit update.
+fn selected_unit_delta_arrival_margin(output_width: usize) -> usize {
+    2.max(xlsynth_pir::math::ceil_log2(output_width))
+}
+
+/// Returns the maximum cached AIG depth of a bit vector.
+fn max_aig_depth(gb: &GateBuilder, bits: &AigBitVector) -> Option<usize> {
+    bits.iter_lsb_to_msb().map(|bit| gb.aig_depth(*bit)).max()?
+}
+
+/// Matches a safely fusable `sel(p, [x, -x])` arithmetic term.
+fn match_selected_negate_term(
+    f: &ir::Fn,
+    env: &GateEnv,
+    term: &ir::ExtNaryAddTerm,
+    output_width: usize,
+    false_bit: AigOperand,
+) -> Option<SelectedNegateMatch> {
+    if !env.has_single_use(term.operand) {
+        return None;
+    }
+    let ir::NodePayload::Sel {
+        selector,
+        cases,
+        default: None,
+    } = &f.get_node(term.operand).payload
+    else {
+        return None;
+    };
+    if cases.len() != 2 {
+        return None;
+    }
+    let selector_bits = env.get_bit_vector(*selector).ok()?;
+    if selector_bits.get_bit_count() != 1 {
+        return None;
+    }
+
+    for (neg_index, base_index) in [(1usize, 0usize), (0, 1)] {
+        let neg_node = cases[neg_index];
+        if !env.has_single_use(neg_node) {
+            continue;
+        }
+        let ir::NodePayload::Unop(ir::Unop::Neg, neg_arg) = f.get_node(neg_node).payload else {
+            continue;
+        };
+        if neg_arg != cases[base_index] {
+            continue;
+        }
+        let base_bits = env.get_bit_vector(cases[base_index]).ok()?;
+        let base_width = base_bits.get_bit_count();
+        if base_width == 0
+            || base_width > output_width
+            || (base_width < output_width && (!term.signed || *base_bits.get_msb(0) != false_bit))
+        {
+            continue;
+        }
+        let selected_bits = env.get_bit_vector(term.operand).ok()?;
+        if selected_bits.get_bit_count() != base_width {
+            continue;
+        }
+        return Some(SelectedNegateMatch {
+            base_bits,
+            selected_bits,
+            control: *selector_bits.get_lsb(0),
+            invert_control: neg_index == 0,
+        });
+    }
+    None
+}
+
 /// Resizes a literal term to the `ExtNaryAdd` output width.
 fn resize_literal_bits_for_ext_nary_add(
     bits: &xlsynth::IrBits,
@@ -90,6 +177,228 @@ fn is_one(bits: &xlsynth::IrBits) -> bool {
         }
     }
     true
+}
+
+/// Returns whether two lowered bit vectors contain the same AIG operands.
+fn aig_bits_equal(lhs: &AigBitVector, rhs: &AigBitVector) -> bool {
+    lhs.get_bit_count() == rhs.get_bit_count()
+        && lhs
+            .iter_lsb_to_msb()
+            .zip(rhs.iter_lsb_to_msb())
+            .all(|(lhs_bit, rhs_bit)| lhs_bit == rhs_bit)
+}
+
+/// Resizes a dynamic arithmetic term without creating or tagging AIG nodes.
+fn resize_dynamic_term_for_match(
+    bits: &AigBitVector,
+    output_width: usize,
+    signed: bool,
+) -> AigBitVector {
+    match bits.get_bit_count().cmp(&output_width) {
+        std::cmp::Ordering::Less if signed && bits.get_bit_count() != 0 => {
+            let sign = *bits.get_msb(0);
+            let extension =
+                AigBitVector::from_lsb_is_index_0(&vec![sign; output_width - bits.get_bit_count()]);
+            AigBitVector::concat(extension, bits.clone())
+        }
+        std::cmp::Ordering::Less => gatify_zext_or_truncate(output_width, bits),
+        std::cmp::Ordering::Equal => bits.clone(),
+        std::cmp::Ordering::Greater => bits.get_lsb_slice(0, output_width),
+    }
+}
+
+/// Matches the prepared or unprepared spelling of a width-preserving unit
+/// delta.
+fn match_unit_delta_from_base_bits(
+    f: &ir::Fn,
+    env: &GateEnv,
+    changed: ir::NodeRef,
+    base_bits: &AigBitVector,
+    output_width: usize,
+) -> Option<bool> {
+    let (dynamic_operand, dynamic_signed, dynamic_negated, literal_contribution) =
+        match &f.get_node(changed).payload {
+            ir::NodePayload::Binop(ir::Binop::Add, lhs, rhs) => {
+                let (dynamic_operand, literal_bits) = normalize_add_literal_rhs(f, *lhs, *rhs)?;
+                (dynamic_operand, false, false, literal_bits)
+            }
+            ir::NodePayload::Binop(ir::Binop::Sub, lhs, rhs) => {
+                let literal_bits = literal_bits_if_bits_node(f, *rhs)?;
+                (*lhs, false, false, literal_bits.negate())
+            }
+            ir::NodePayload::ExtNaryAdd { terms, .. } if terms.len() == 2 => {
+                let mut dynamic_term = None;
+                let mut literal_sum = xlsynth::IrBits::zero(output_width);
+                for term in terms {
+                    if let Some(literal_bits) = literal_bits_if_bits_node(f, term.operand) {
+                        accumulate_ext_nary_add_literal(
+                            &mut literal_sum,
+                            &literal_bits,
+                            output_width,
+                            term.signed,
+                            term.negated,
+                        );
+                    } else if dynamic_term.replace(*term).is_some() {
+                        return None;
+                    }
+                }
+                let dynamic_term = dynamic_term?;
+                (
+                    dynamic_term.operand,
+                    dynamic_term.signed,
+                    dynamic_term.negated,
+                    literal_sum,
+                )
+            }
+            _ => return None,
+        };
+    if dynamic_negated {
+        return None;
+    }
+
+    let dynamic_bits = env.get_bit_vector(dynamic_operand).ok()?;
+    let resized_dynamic_bits =
+        resize_dynamic_term_for_match(&dynamic_bits, output_width, dynamic_signed);
+    if !aig_bits_equal(&resized_dynamic_bits, base_bits) {
+        return None;
+    }
+
+    if literal_contribution.equals_u64_value(1) {
+        Some(false)
+    } else if literal_contribution.negate().equals_u64_value(1) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Finds `sel(p, cases=[x, x +/- 1])`, accounting for prep-induced resize
+/// aliases.
+fn match_selected_unit_delta(
+    f: &ir::Fn,
+    env: &GateEnv,
+    cases: &[ir::NodeRef],
+    output_width: usize,
+    default_adder_mapping: AdderMapping,
+) -> Option<SelectedUnitDeltaMatch> {
+    if cases.len() != 2 || output_width == 0 {
+        return None;
+    }
+    for (changed_index, base_index) in [(1usize, 0usize), (0, 1)] {
+        let changed = cases[changed_index];
+        if !env.has_single_use(changed) {
+            continue;
+        }
+        if !matches!(
+            &f.get_node(changed).payload,
+            ir::NodePayload::Binop(ir::Binop::Add | ir::Binop::Sub, _, _)
+                | ir::NodePayload::ExtNaryAdd { .. }
+        ) {
+            continue;
+        }
+        let base_bits = env.get_bit_vector(cases[base_index]).ok()?;
+        if base_bits.get_bit_count() != output_width {
+            continue;
+        }
+        let Some(is_decrement) =
+            match_unit_delta_from_base_bits(f, env, changed, &base_bits, output_width)
+        else {
+            continue;
+        };
+        let changed_bits = env.get_bit_vector(changed).ok()?;
+        if changed_bits.get_bit_count() != output_width {
+            continue;
+        }
+        let adder_mapping = match &f.get_node(changed).payload {
+            ir::NodePayload::ExtNaryAdd {
+                arch: Some(arch), ..
+            } => AdderMapping::from(*arch),
+            _ => default_adder_mapping,
+        };
+        return Some(SelectedUnitDeltaMatch {
+            base_bits,
+            changed_bits,
+            is_decrement,
+            invert_selector: changed_index == 0,
+            adder_mapping,
+        });
+    }
+    None
+}
+
+/// Lowers an early selected unit update by injecting the predicate as carry-in.
+pub(super) fn try_gatify_selected_unit_delta(
+    f: &ir::Fn,
+    env: &GateEnv,
+    selector: ir::NodeRef,
+    cases: &[ir::NodeRef],
+    output_width: usize,
+    adder_mapping: AdderMapping,
+    gb: &mut GateBuilder,
+) -> Option<AigBitVector> {
+    let selector_bits = env.get_bit_vector(selector).ok()?;
+    if selector_bits.get_bit_count() != 1 {
+        return None;
+    }
+    let matched = match_selected_unit_delta(f, env, cases, output_width, adder_mapping)?;
+    if matches!(matched.adder_mapping, AdderMapping::RippleCarry) {
+        log::debug!(
+            "selected-unit lowering: selector={} width={} adder={} choice=mux",
+            f.get_node(selector).text_id,
+            output_width,
+            matched.adder_mapping
+        );
+        return None;
+    }
+    let selector_bit = *selector_bits.get_lsb(0);
+    let selector_depth = gb.aig_depth(selector_bit)?;
+    let changed_depth = matched
+        .changed_bits
+        .iter_lsb_to_msb()
+        .map(|bit| gb.aig_depth(*bit))
+        .max()??;
+
+    // The carry-in must be early enough to propagate through the selected
+    // update; require at least the prefix depth or the two-level mux cost.
+    let margin = selected_unit_delta_arrival_margin(output_width);
+    if selector_depth.saturating_add(margin) >= changed_depth {
+        log::debug!(
+            "selected-unit lowering: selector={} width={} selector_depth={} changed_depth={} margin={} choice=mux",
+            f.get_node(selector).text_id,
+            output_width,
+            selector_depth,
+            changed_depth,
+            margin
+        );
+        return None;
+    }
+    log::debug!(
+        "selected-unit lowering: selector={} width={} selector_depth={} changed_depth={} margin={} choice=carry-in",
+        f.get_node(selector).text_id,
+        output_width,
+        selector_depth,
+        changed_depth,
+        margin
+    );
+
+    let control = if matched.invert_selector {
+        gb.add_not(selector_bit)
+    } else {
+        selector_bit
+    };
+    let base_bits = if matched.is_decrement {
+        gb.add_not_vec(&matched.base_bits)
+    } else {
+        matched.base_bits
+    };
+    let zeros = AigBitVector::zeros(output_width);
+    let (_, sum) =
+        gatify_add_with_mapping(matched.adder_mapping, &base_bits, &zeros, control, None, gb);
+    if matched.is_decrement {
+        Some(gb.add_not_vec(&sum))
+    } else {
+        Some(sum)
+    }
 }
 
 fn normalize_add_literal_rhs(
@@ -273,6 +582,24 @@ fn gatify_add_literal_to_dynamic_sum(
         gb,
     );
     sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_unit_delta_arrival_margin;
+
+    #[test]
+    fn selected_unit_delta_arrival_margin_scales_with_output_width() {
+        assert_eq!(selected_unit_delta_arrival_margin(0), 2);
+        assert_eq!(selected_unit_delta_arrival_margin(1), 2);
+        assert_eq!(selected_unit_delta_arrival_margin(4), 2);
+        assert_eq!(selected_unit_delta_arrival_margin(7), 3);
+        assert_eq!(selected_unit_delta_arrival_margin(8), 3);
+        assert_eq!(selected_unit_delta_arrival_margin(9), 4);
+        assert_eq!(selected_unit_delta_arrival_margin(12), 4);
+        assert_eq!(selected_unit_delta_arrival_margin(25), 5);
+        assert_eq!(selected_unit_delta_arrival_margin(54), 6);
+    }
 }
 
 fn classify_ext_nary_add_term_dimensions(
@@ -538,6 +865,7 @@ pub(super) fn gatify_ext_nary_add(
     arch: Option<ir::ExtNaryAddArchitecture>,
     output_width: usize,
     default_adder_mapping: AdderMapping,
+    enable_rewrite_nary_add: bool,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
     if output_width == 0 {
@@ -547,11 +875,57 @@ pub(super) fn gatify_ext_nary_add(
         return AigBitVector::zeros(output_width);
     }
 
+    let false_bit = g8_builder.get_false();
+    let selected_negates: Vec<Option<SelectedNegateMatch>> = if enable_rewrite_nary_add {
+        terms
+            .iter()
+            .map(|term| match_selected_negate_term(f, env, term, output_width, false_bit))
+            .collect()
+    } else {
+        vec![None; terms.len()]
+    };
+    let selected_negate_count = selected_negates.iter().flatten().count();
+    let selected_depth = selected_negates
+        .iter()
+        .flatten()
+        .filter_map(|matched| max_aig_depth(g8_builder, &matched.selected_bits))
+        .max();
+    let other_depth = terms
+        .iter()
+        .zip(&selected_negates)
+        .filter(|(term, matched)| {
+            matched.is_none() && literal_bits_if_bits_node(f, term.operand).is_none()
+        })
+        .filter_map(|(term, _)| env.get_bit_vector(term.operand).ok())
+        .filter_map(|bits| max_aig_depth(g8_builder, &bits))
+        .max();
+    let fuse_selected_negates = match selected_negate_count {
+        0 => false,
+        1 => selected_depth.is_some_and(|selected_depth| {
+            other_depth.unwrap_or(0).saturating_add(2) < selected_depth
+        }),
+        _ => true,
+    };
+    if selected_negate_count != 0 {
+        log::debug!(
+            "selected-negate lowering: adder={} width={} matches={} selected_depth={:?} other_depth={:?} choice={}",
+            text_id,
+            output_width,
+            selected_negate_count,
+            selected_depth,
+            other_depth,
+            if fuse_selected_negates {
+                "carry-in"
+            } else {
+                "mux"
+            }
+        );
+    }
+
     let mut literal_sum = xlsynth::IrBits::zero(output_width);
     let mut lowered_terms: Vec<AigBitVector> = Vec::with_capacity(terms.len());
     let mut carry_in: Option<AigOperand> = None;
-    let false_bit = g8_builder.get_false();
-    for term in terms {
+    for (term, selected_negate) in terms.iter().zip(selected_negates) {
         if let Some(literal_bits) = literal_bits_if_bits_node(f, term.operand) {
             accumulate_ext_nary_add_literal(
                 &mut literal_sum,
@@ -563,9 +937,35 @@ pub(super) fn gatify_ext_nary_add(
             continue;
         }
 
-        let bits = env
-            .get_bit_vector(term.operand)
-            .expect("ext_nary_add operand should be present");
+        let (bits, selected_correction) =
+            if fuse_selected_negates && let Some(matched) = selected_negate {
+                let control = if matched.invert_control {
+                    g8_builder.add_not(matched.control)
+                } else {
+                    matched.control
+                };
+                let conditional_complement = AigBitVector::from_lsb_is_index_0(
+                    &matched
+                        .base_bits
+                        .iter_lsb_to_msb()
+                        .map(|bit| g8_builder.add_xor_binary(*bit, control))
+                        .collect::<Vec<_>>(),
+                );
+                (
+                    conditional_complement,
+                    Some(ExtNaryAddUnitCorrection {
+                        control,
+                        weight_shift: 0,
+                        is_decrement: term.negated,
+                    }),
+                )
+            } else {
+                (
+                    env.get_bit_vector(term.operand)
+                        .expect("ext_nary_add operand should be present"),
+                    None,
+                )
+            };
         let resized = if term.signed {
             gatify_sext_or_truncate(g8_builder, text_id, output_width, &bits)
         } else {
@@ -590,14 +990,30 @@ pub(super) fn gatify_ext_nary_add(
                     &mut literal_sum,
                 );
             }
-            continue;
+        } else {
+            if term.negated {
+                lowered_terms.push(g8_builder.add_not_vec(&resized));
+                increment_literal_sum_by_one(&mut literal_sum);
+            } else {
+                lowered_terms.push(resized);
+            }
         }
 
-        if term.negated {
-            lowered_terms.push(g8_builder.add_not_vec(&resized));
-            increment_literal_sum_by_one(&mut literal_sum);
-        } else {
-            lowered_terms.push(resized);
+        if let Some(unit_correction) = selected_correction
+            && !try_fuse_ext_nary_add_unit_correction_into_carry_in(
+                g8_builder,
+                unit_correction,
+                &mut literal_sum,
+                &mut carry_in,
+            )
+        {
+            push_ext_nary_add_unit_correction_as_dense_term(
+                g8_builder,
+                output_width,
+                unit_correction,
+                &mut lowered_terms,
+                &mut literal_sum,
+            );
         }
     }
 

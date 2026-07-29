@@ -164,6 +164,14 @@ impl GateBuilder {
         }
     }
 
+    /// Returns the cached AIG depth for `operand` when structural hashing is
+    /// enabled.
+    pub fn aig_depth(&self, operand: AigOperand) -> Option<usize> {
+        self.hash_cons
+            .as_ref()
+            .map(|hash_cons| hash_cons.depth(operand))
+    }
+
     pub fn get_false(&self) -> AigOperand {
         AigOperand {
             node: AigRef { id: 0 },
@@ -1391,5 +1399,27 @@ mod tests {
         let first = builder.add_and_binary(a0, b0);
         let second = builder.add_and_binary(duplicate_b0, duplicate_a0);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_cached_aig_depth_tracks_complemented_edges_and_ands() {
+        let mut builder = GateBuilder::new("cached_depth".to_string(), GateBuilderOptions::opt());
+        let input = builder.add_input("input".to_string(), 3);
+        let a = *input.get_lsb(0);
+        let b = *input.get_lsb(1);
+        let c = *input.get_lsb(2);
+
+        assert_eq!(builder.aig_depth(a), Some(0));
+        let ab = builder.add_and_binary(a, b);
+        assert_eq!(builder.aig_depth(ab), Some(1));
+        let not_ab = builder.add_not(ab);
+        assert_eq!(builder.aig_depth(not_ab), Some(1));
+        let abc = builder.add_and_binary(not_ab, c);
+        assert_eq!(builder.aig_depth(abc), Some(2));
+
+        let mut no_hash =
+            GateBuilder::new("uncached_depth".to_string(), GateBuilderOptions::no_opt());
+        let input = no_hash.add_input("input".to_string(), 1);
+        assert_eq!(no_hash.aig_depth(*input.get_lsb(0)), None);
     }
 }

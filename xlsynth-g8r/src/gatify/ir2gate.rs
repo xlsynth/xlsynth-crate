@@ -6,7 +6,9 @@
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::gatify::ir2gate_arithmetic::{gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop};
+use crate::gatify::ir2gate_arithmetic::{
+    gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, try_gatify_selected_unit_delta,
+};
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
 use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use std::collections::HashMap;
@@ -171,13 +173,30 @@ fn maybe_warn_shift_amount_truncatable(
 
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
+    use_counts: Vec<usize>,
 }
 
 impl GateEnv {
-    fn new() -> Self {
+    /// Creates a lowering environment with use counts for prepared IR nodes.
+    fn new(f: &ir::Fn) -> Self {
+        let mut use_counts = vec![0usize; f.nodes.len()];
+        for node in &f.nodes {
+            for operand in ir_utils::operands(&node.payload) {
+                use_counts[operand.index] += 1;
+            }
+        }
+        if let Some(ret) = f.ret_node_ref {
+            use_counts[ret.index] += 1;
+        }
         Self {
             ir_to_g8: HashMap::new(),
+            use_counts,
         }
+    }
+
+    /// Returns whether a prepared IR node has exactly one consumer.
+    pub(super) fn has_single_use(&self, ir_node_ref: ir::NodeRef) -> bool {
+        self.use_counts[ir_node_ref.index] == 1
     }
 
     fn contains(&self, ir_node_ref: ir::NodeRef) -> bool {
@@ -3197,6 +3216,19 @@ fn gatify_node(
                     suffix
                 );
             }
+            let early_unit_delta = if options.enable_rewrite_nary_add && default.is_none() {
+                try_gatify_selected_unit_delta(
+                    f,
+                    env,
+                    *selector,
+                    cases,
+                    node.ty.bit_count(),
+                    options.adder_mapping,
+                    g8_builder,
+                )
+            } else {
+                None
+            };
             let selector_bits = env
                 .get_bit_vector(*selector)
                 .expect("selector should be present");
@@ -3207,7 +3239,8 @@ fn gatify_node(
             let default_bits =
                 default.map(|d| env.get_bit_vector(d).expect("default should be present"));
 
-            let gates = gatify_sel(g8_builder, &selector_bits, &cases, default_bits);
+            let gates = early_unit_delta
+                .unwrap_or_else(|| gatify_sel(g8_builder, &selector_bits, &cases, default_bits));
 
             // Tag the result bits
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
@@ -3519,6 +3552,7 @@ fn gatify_node(
                 *arch,
                 output_width,
                 options.adder_mapping,
+                options.enable_rewrite_nary_add,
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
@@ -4363,7 +4397,7 @@ fn gatify_lower_prepared_fn(
             hash: options.hash,
         },
     );
-    let mut env = GateEnv::new();
+    let mut env = GateEnv::new(f);
     let provenance_by_node = if options.track_pir_node_ids {
         orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original))
     } else {
@@ -4503,7 +4537,7 @@ pub fn gatify_node_as_fn(
             hash: options.hash,
         },
     );
-    let mut env = GateEnv::new();
+    let mut env = GateEnv::new(f);
 
     // Precompute a map from parameter id to its NodeRef in f.nodes. This is used
     // when lowering GetParam nodes.
@@ -4583,6 +4617,7 @@ mod tests {
     use crate::check_equivalence;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions, ReductionKind};
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
+    use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
     use crate::ir2gate_utils::{AdderMapping, Direction, gatify_barrel_shifter};
     use xlsynth::{IrBits, IrValue};
     use xlsynth_pir::ir;
@@ -6561,6 +6596,582 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
         gatify(&ir_fn, GatifyOptions::all_opts_disabled())
             .unwrap()
             .gate_fn
+    }
+
+    fn gatify_selected_unit_delta(
+        ir_text: &str,
+        enable_arrival_aware_lowering: bool,
+        hash: bool,
+    ) -> GateFn {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        super::gatify_prepared_fn(
+            ir_fn,
+            GatifyOptions {
+                hash,
+                enable_rewrite_nary_add: enable_arrival_aware_lowering,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn
+    }
+
+    fn gatify_selected_negate(ir_text: &str, enable_arrival_aware_lowering: bool) -> GateFn {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let prepared = prep_for_gatify(
+            ir_fn,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        super::gatify_prepared_fn(
+            &prepared,
+            GatifyOptions {
+                enable_rewrite_nary_add: enable_arrival_aware_lowering,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn
+    }
+
+    #[test]
+    fn test_gate_env_unconditionally_tracks_operand_and_return_uses() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1) -> bits[8] {
+  doubled: bits[8] = add(x, x, id=2)
+  ret out: bits[8] = add(doubled, x, id=3)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let env = super::GateEnv::new(ir_fn);
+        let node_ref_with_text_id = |text_id| ir::NodeRef {
+            index: ir_fn
+                .nodes
+                .iter()
+                .position(|node| node.text_id == text_id)
+                .expect("test node should exist"),
+        };
+        let x = node_ref_with_text_id(1);
+        let doubled = node_ref_with_text_id(2);
+        let out = node_ref_with_text_id(3);
+
+        assert_eq!(env.use_counts.len(), ir_fn.nodes.len());
+        assert_eq!(env.use_counts[x.index], 3);
+        assert!(!env.has_single_use(x));
+        assert_eq!(env.use_counts[doubled.index], 1);
+        assert!(env.has_single_use(doubled));
+        assert_eq!(env.use_counts[out.index], 1);
+        assert!(env.has_single_use(out));
+    }
+
+    #[test]
+    fn test_selected_negate_arrival_aware_lowering_is_exhaustively_equivalent() {
+        for width in 1..=4 {
+            for swapped_cases in [false, true] {
+                for outer_sub in [false, true] {
+                    let cases = if swapped_cases {
+                        "negated, x"
+                    } else {
+                        "x, negated"
+                    };
+                    let operation = if outer_sub { "sub" } else { "add" };
+                    let ir_text = format!(
+                        r#"package sample
+
+top fn f(x: bits[{width}] id=1, en: bits[1] id=2, y: bits[{width}] id=3) -> bits[{width}] {{
+  negated: bits[{width}] = neg(x, id=4)
+  selected: bits[{width}] = sel(en, cases=[{cases}], id=5)
+  ret out: bits[{width}] = {operation}(y, selected, id=6)
+}}
+"#
+                    );
+                    let gate_fn = gatify_selected_negate(&ir_text, true);
+                    let mask = (1u64 << width) - 1;
+                    for x in 0u64..=mask {
+                        for en in 0u64..2 {
+                            for y in 0u64..=mask {
+                                let negate = if swapped_cases { 1 - en } else { en } != 0;
+                                let selected = if negate { x.wrapping_neg() & mask } else { x };
+                                let expected = if outer_sub {
+                                    y.wrapping_sub(selected) & mask
+                                } else {
+                                    y.wrapping_add(selected) & mask
+                                };
+                                let got = gate_sim::eval(
+                                    &gate_fn,
+                                    &[
+                                        IrBits::make_ubits(width, x).unwrap(),
+                                        IrBits::make_ubits(1, en).unwrap(),
+                                        IrBits::make_ubits(width, y).unwrap(),
+                                    ],
+                                    gate_sim::Collect::None,
+                                )
+                                .outputs[0]
+                                    .clone();
+                                assert_eq!(
+                                    got,
+                                    IrBits::make_ubits(width, expected).unwrap(),
+                                    "width={width} swapped={swapped_cases} sub={outer_sub} x={x} en={en} y={y}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_selected_negate_keeps_mux_when_other_addend_is_late() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2, y: bits[16] id=3, amount: bits[4] id=4) -> bits[16] {
+  negated: bits[16] = neg(x, id=5)
+  selected: bits[16] = sel(en, cases=[x, negated], id=6)
+  shifted: bits[16] = shrl(y, amount, id=7)
+  ret out: bits[16] = add(shifted, selected, id=8)
+}
+"#;
+        let guarded = gatify_selected_negate(ir_text, true);
+        let muxed = gatify_selected_negate(ir_text, false);
+        let guarded_stats = get_summary_stats(&guarded);
+        let muxed_stats = get_summary_stats(&muxed);
+        assert_eq!(guarded_stats.live_nodes, muxed_stats.live_nodes);
+        assert_eq!(guarded_stats.deepest_path, muxed_stats.deepest_path);
+    }
+
+    #[test]
+    fn test_selected_negate_fuses_multiple_selected_terms() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1, px: bits[1] id=2, y: bits[8] id=3, py: bits[1] id=4) -> bits[8] {
+  nx: bits[8] = neg(x, id=5)
+  sx: bits[8] = sel(px, cases=[x, nx], id=6)
+  ny: bits[8] = neg(y, id=7)
+  sy: bits[8] = sel(py, cases=[y, ny], id=8)
+  ret out: bits[8] = add(sx, sy, id=9)
+}
+"#;
+        let fused = gatify_selected_negate(ir_text, true);
+        let muxed = gatify_selected_negate(ir_text, false);
+        let fused_stats = get_summary_stats(&fused);
+        let muxed_stats = get_summary_stats(&muxed);
+        assert!(
+            fused_stats.deepest_path < muxed_stats.deepest_path,
+            "jointly selected negations should reduce adder depth: fused={fused_stats:?} muxed={muxed_stats:?}"
+        );
+        for x in 0u64..16 {
+            for y in 0u64..16 {
+                for px in 0u64..2 {
+                    for py in 0u64..2 {
+                        let sx = if px == 0 { x } else { x.wrapping_neg() & 0xff };
+                        let sy = if py == 0 { y } else { y.wrapping_neg() & 0xff };
+                        let got = gate_sim::eval(
+                            &fused,
+                            &[
+                                IrBits::make_ubits(8, x).unwrap(),
+                                IrBits::make_ubits(1, px).unwrap(),
+                                IrBits::make_ubits(8, y).unwrap(),
+                                IrBits::make_ubits(1, py).unwrap(),
+                            ],
+                            gate_sim::Collect::None,
+                        )
+                        .outputs[0]
+                            .clone();
+                        assert_eq!(got, IrBits::make_ubits(8, (sx + sy) & 0xff).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_selected_negate_handles_safe_signed_widening() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[4] id=1, en: bits[1] id=2, y: bits[6] id=3) -> bits[6] {
+  zero: bits[1] = literal(value=0, id=4)
+  base: bits[5] = concat(zero, x, id=5)
+  negated: bits[5] = neg(base, id=6)
+  selected: bits[5] = sel(en, cases=[base, negated], id=7)
+  extended: bits[6] = sign_ext(selected, new_bit_count=6, id=8)
+  ret out: bits[6] = add(y, extended, id=9)
+}
+"#;
+        let gate_fn = gatify_selected_negate(ir_text, true);
+        for x in 0u64..16 {
+            for en in 0u64..2 {
+                for y in 0u64..64 {
+                    let selected = if en == 0 { x } else { x.wrapping_neg() & 0x3f };
+                    let expected = (y + selected) & 0x3f;
+                    let got = gate_sim::eval(
+                        &gate_fn,
+                        &[
+                            IrBits::make_ubits(4, x).unwrap(),
+                            IrBits::make_ubits(1, en).unwrap(),
+                            IrBits::make_ubits(6, y).unwrap(),
+                        ],
+                        gate_sim::Collect::None,
+                    )
+                    .outputs[0]
+                        .clone();
+                    assert_eq!(got, IrBits::make_ubits(6, expected).unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_selected_negate_keeps_shared_negation() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1, en: bits[1] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  negated: bits[8] = neg(x, id=4)
+  selected: bits[8] = sel(en, cases=[x, negated], id=5)
+  sum: bits[8] = add(y, selected, id=6)
+  ret out: (bits[8], bits[8]) = tuple(sum, negated, id=7)
+}
+"#;
+        let guarded = gatify_selected_negate(ir_text, true);
+        let muxed = gatify_selected_negate(ir_text, false);
+        let guarded_stats = get_summary_stats(&guarded);
+        let muxed_stats = get_summary_stats(&muxed);
+        assert_eq!(guarded_stats.live_nodes, muxed_stats.live_nodes);
+        assert_eq!(guarded_stats.deepest_path, muxed_stats.deepest_path);
+    }
+
+    #[test]
+    fn test_selected_unit_delta_arrival_aware_lowering_is_exhaustively_equivalent() {
+        for width in 1..=5 {
+            for (literal, is_decrement) in [(1u64, false), ((1u64 << width) - 1, true)] {
+                for swapped_cases in [false, true] {
+                    let cases = if swapped_cases {
+                        "changed, x"
+                    } else {
+                        "x, changed"
+                    };
+                    let ir_text = format!(
+                        r#"package sample
+
+top fn f(x: bits[{width}] id=1, en: bits[1] id=2) -> bits[{width}] {{
+  unit: bits[{width}] = literal(value={literal}, id=3)
+  changed: bits[{width}] = ext_nary_add(x, unit, signed=[false, false], negated=[false, false], id=4)
+  ret out: bits[{width}] = sel(en, cases=[{cases}], id=5)
+}}
+"#
+                    );
+                    let gate_fn = gatify_selected_unit_delta(&ir_text, true, true);
+                    let mask = (1u64 << width) - 1;
+                    for x in 0u64..=mask {
+                        for en in 0u64..2 {
+                            let active = if swapped_cases { 1 - en } else { en };
+                            let expected = if is_decrement {
+                                x.wrapping_sub(active) & mask
+                            } else {
+                                x.wrapping_add(active) & mask
+                            };
+                            let got = gate_sim::eval(
+                                &gate_fn,
+                                &[
+                                    IrBits::make_ubits(width, x).unwrap(),
+                                    IrBits::make_ubits(1, en).unwrap(),
+                                ],
+                                gate_sim::Collect::None,
+                            )
+                            .outputs[0]
+                                .clone();
+                            assert_eq!(
+                                got,
+                                IrBits::make_ubits(width, expected).unwrap(),
+                                "width={width} decrement={is_decrement} swapped={swapped_cases} x={x} en={en}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_selected_unit_delta_fuses_early_control_and_preserves_late_mux() {
+        let early_ir = r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2) -> bits[16] {
+  one: bits[16] = literal(value=1, id=3)
+  changed: bits[16] = ext_nary_add(x, one, signed=[false, false], negated=[false, false], id=4)
+  ret out: bits[16] = sel(en, cases=[x, changed], id=5)
+}
+"#;
+        let early_fused = gatify_selected_unit_delta(early_ir, true, true);
+        let early_muxed = gatify_selected_unit_delta(early_ir, false, true);
+        let early_fused_stats = get_summary_stats(&early_fused);
+        let early_muxed_stats = get_summary_stats(&early_muxed);
+        assert!(
+            early_fused_stats.live_nodes < early_muxed_stats.live_nodes,
+            "early control should fuse: fused={early_fused_stats:?} muxed={early_muxed_stats:?}"
+        );
+
+        let late_ir = r#"package sample
+
+top fn f(x: bits[16] id=1, a: bits[16] id=2, b: bits[16] id=3) -> bits[16] {
+  sum: bits[16] = add(a, b, id=4)
+  en: bits[1] = bit_slice(sum, start=15, width=1, id=5)
+  one: bits[16] = literal(value=1, id=6)
+  changed: bits[16] = ext_nary_add(x, one, signed=[false, false], negated=[false, false], id=7)
+  ret out: bits[16] = sel(en, cases=[x, changed], id=8)
+}
+"#;
+        let late_guarded = gatify_selected_unit_delta(late_ir, true, true);
+        let late_muxed = gatify_selected_unit_delta(late_ir, false, true);
+        let late_guarded_stats = get_summary_stats(&late_guarded);
+        let late_muxed_stats = get_summary_stats(&late_muxed);
+        assert_eq!(
+            late_guarded_stats.live_nodes, late_muxed_stats.live_nodes,
+            "late control should preserve the speculative mux"
+        );
+        assert_eq!(
+            late_guarded_stats.deepest_path, late_muxed_stats.deepest_path,
+            "late control should preserve mux depth"
+        );
+    }
+
+    #[test]
+    fn test_selected_unit_delta_preserves_mux_for_ripple_carry() {
+        for (arch, adder_mapping) in [
+            (", arch=ripple_carry", AdderMapping::KoggeStone),
+            ("", AdderMapping::RippleCarry),
+        ] {
+            let ir_text = format!(
+                r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[6] id=2) -> bits[16] {{
+  e0: bits[1] = bit_slice(en, start=0, width=1, id=3)
+  e1: bits[1] = bit_slice(en, start=1, width=1, id=4)
+  e2: bits[1] = bit_slice(en, start=2, width=1, id=5)
+  e3: bits[1] = bit_slice(en, start=3, width=1, id=6)
+  e4: bits[1] = bit_slice(en, start=4, width=1, id=7)
+  e5: bits[1] = bit_slice(en, start=5, width=1, id=8)
+  p1: bits[1] = and(e0, e1, id=9)
+  p2: bits[1] = and(p1, e2, id=10)
+  p3: bits[1] = and(p2, e3, id=11)
+  p4: bits[1] = and(p3, e4, id=12)
+  selector: bits[1] = and(p4, e5, id=13)
+  one: bits[16] = literal(value=1, id=14)
+  changed: bits[16] = ext_nary_add(x, one, signed=[false, false], negated=[false, false]{arch}, id=15)
+  ret out: bits[16] = sel(selector, cases=[x, changed], id=16)
+}}
+"#
+            );
+
+            let lower = |enable_rewrite_nary_add| {
+                let mut parser = ir_parser::Parser::new(&ir_text);
+                let ir_package = parser.parse_and_validate_package().unwrap();
+                let ir_fn = ir_package.get_top_fn().unwrap();
+                super::gatify_prepared_fn(
+                    ir_fn,
+                    GatifyOptions {
+                        adder_mapping,
+                        enable_rewrite_nary_add,
+                        ..GatifyOptions::all_opts_disabled()
+                    },
+                )
+                .unwrap()
+                .gate_fn
+            };
+
+            let guarded_stats = get_summary_stats(&lower(true));
+            let muxed_stats = get_summary_stats(&lower(false));
+            assert_eq!(
+                guarded_stats.live_nodes, muxed_stats.live_nodes,
+                "ripple-carry selected updates should preserve mux area: arch={arch:?} mapping={adder_mapping:?}"
+            );
+            assert_eq!(
+                guarded_stats.deepest_path, muxed_stats.deepest_path,
+                "ripple-carry selected updates should preserve mux depth: arch={arch:?} mapping={adder_mapping:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_selected_unit_delta_matches_zero_extended_base_and_wide_decrement() {
+        let zero_extended_ir = r#"package sample
+
+top fn f(x: bits[15] id=1, en: bits[1] id=2) -> bits[16] {
+  zero: bits[1] = literal(value=0, id=3)
+  base: bits[16] = concat(zero, x, id=4)
+  one: bits[16] = literal(value=1, id=5)
+  changed: bits[16] = ext_nary_add(x, one, signed=[false, false], negated=[false, false], id=6)
+  ret out: bits[16] = sel(en, cases=[base, changed], id=7)
+}
+"#;
+        let fused = gatify_selected_unit_delta(zero_extended_ir, true, true);
+        let muxed = gatify_selected_unit_delta(zero_extended_ir, false, true);
+        assert!(get_summary_stats(&fused).live_nodes < get_summary_stats(&muxed).live_nodes);
+
+        let wide_decrement_ir = r#"package sample
+
+top fn f(x: bits[128] id=1, en: bits[1] id=2) -> bits[128] {
+  minus_one: bits[128] = literal(value=0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, id=3)
+  changed: bits[128] = ext_nary_add(x, minus_one, signed=[false, false], negated=[false, false], id=4)
+  ret out: bits[128] = sel(en, cases=[x, changed], id=5)
+}
+"#;
+        let fused = gatify_selected_unit_delta(wide_decrement_ir, true, true);
+        let muxed = gatify_selected_unit_delta(wide_decrement_ir, false, true);
+        assert!(get_summary_stats(&fused).live_nodes < get_summary_stats(&muxed).live_nodes);
+
+        let no_hash = gatify_selected_unit_delta(wide_decrement_ir, true, false);
+        let no_hash_stats = get_summary_stats(&no_hash);
+        assert!(no_hash_stats.live_nodes > 0);
+    }
+
+    #[test]
+    fn test_selected_unit_delta_matches_add_sub_spellings_and_keeps_shared_update() {
+        for changed_definition in [
+            "changed: bits[16] = add(x, one, id=4)",
+            "changed: bits[16] = add(one, x, id=4)",
+            "changed: bits[16] = sub(x, one, id=4)",
+        ] {
+            let ir_text = format!(
+                r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2) -> bits[16] {{
+  one: bits[16] = literal(value=1, id=3)
+  {changed_definition}
+  ret out: bits[16] = sel(en, cases=[x, changed], id=5)
+}}
+"#
+            );
+            let fused = gatify_selected_unit_delta(&ir_text, true, true);
+            let muxed = gatify_selected_unit_delta(&ir_text, false, true);
+            assert!(
+                get_summary_stats(&fused).live_nodes < get_summary_stats(&muxed).live_nodes,
+                "expected early update to fuse for `{changed_definition}`"
+            );
+        }
+
+        let shared_ir = r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2) -> (bits[16], bits[16]) {
+  one: bits[16] = literal(value=1, id=3)
+  changed: bits[16] = add(x, one, id=4)
+  selected: bits[16] = sel(en, cases=[x, changed], id=5)
+  ret out: (bits[16], bits[16]) = tuple(selected, changed, id=6)
+}
+"#;
+        let guarded = gatify_selected_unit_delta(shared_ir, true, true);
+        let muxed = gatify_selected_unit_delta(shared_ir, false, true);
+        let guarded_stats = get_summary_stats(&guarded);
+        let muxed_stats = get_summary_stats(&muxed);
+        assert_eq!(guarded_stats.live_nodes, muxed_stats.live_nodes);
+        assert_eq!(guarded_stats.deepest_path, muxed_stats.deepest_path);
+    }
+
+    #[test]
+    fn test_selected_unit_delta_composes_with_prep_and_preserves_explicit_arch() {
+        let unprepared_ir = r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2) -> bits[16] {
+  one: bits[16] = literal(value=1, id=3)
+  changed: bits[16] = add(x, one, id=4)
+  ret out: bits[16] = sel(en, cases=[x, changed], id=5)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(unprepared_ir);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let fused = gatify(
+            ir_fn,
+            GatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn;
+        let muxed = gatify(ir_fn, GatifyOptions::all_opts_disabled())
+            .unwrap()
+            .gate_fn;
+        assert!(get_summary_stats(&fused).live_nodes < get_summary_stats(&muxed).live_nodes);
+
+        let explicit_arch_ir = r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2) -> bits[16] {
+  one: bits[16] = literal(value=1, id=3)
+  changed: bits[16] = ext_nary_add(x, one, signed=[false, false], negated=[false, false], arch=ripple_carry, id=4)
+  ret out: bits[16] = sel(en, cases=[x, changed], id=5)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(explicit_arch_ir);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let explicit_ripple = super::gatify_prepared_fn(
+            ir_fn,
+            GatifyOptions {
+                adder_mapping: AdderMapping::KoggeStone,
+                enable_rewrite_nary_add: true,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn;
+        let implicit_ripple_ir = explicit_arch_ir.replace(", arch=ripple_carry", "");
+        let mut parser = ir_parser::Parser::new(&implicit_ripple_ir);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let implicit_ripple = super::gatify_prepared_fn(
+            ir_fn,
+            GatifyOptions {
+                adder_mapping: AdderMapping::RippleCarry,
+                enable_rewrite_nary_add: true,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn;
+        let explicit_stats = get_summary_stats(&explicit_ripple);
+        let implicit_stats = get_summary_stats(&implicit_ripple);
+        assert_eq!(explicit_stats.live_nodes, implicit_stats.live_nodes);
+        assert_eq!(explicit_stats.deepest_path, implicit_stats.deepest_path);
+    }
+
+    #[test]
+    fn test_selected_unit_delta_matches_signed_resize_and_literal_contribution() {
+        let signed_resize_ir = r#"package sample
+
+top fn f(x: bits[15] id=1, en: bits[1] id=2) -> bits[16] {
+  sign: bits[1] = bit_slice(x, start=14, width=1, id=3)
+  base: bits[16] = concat(sign, x, id=4)
+  one: bits[16] = literal(value=1, id=5)
+  changed: bits[16] = ext_nary_add(x, one, signed=[true, false], negated=[false, false], id=6)
+  ret out: bits[16] = sel(en, cases=[base, changed], id=7)
+}
+"#;
+        let fused = gatify_selected_unit_delta(signed_resize_ir, true, true);
+        let muxed = gatify_selected_unit_delta(signed_resize_ir, false, true);
+        assert!(get_summary_stats(&fused).live_nodes < get_summary_stats(&muxed).live_nodes);
+
+        let signed_literal_ir = r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[1] id=2) -> bits[16] {
+  minus_one: bits[1] = literal(value=1, id=3)
+  changed: bits[16] = ext_nary_add(x, minus_one, signed=[false, true], negated=[false, false], id=4)
+  ret out: bits[16] = sel(en, cases=[x, changed], id=5)
+}
+"#;
+        let fused = gatify_selected_unit_delta(signed_literal_ir, true, true);
+        let muxed = gatify_selected_unit_delta(signed_literal_ir, false, true);
+        assert!(get_summary_stats(&fused).live_nodes < get_summary_stats(&muxed).live_nodes);
     }
 
     #[test]
