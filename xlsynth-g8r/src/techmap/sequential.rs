@@ -10,7 +10,8 @@ use crate::aig::{ChoiceAig, GateFn, SequentialGateFn};
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, PinDirection};
 use crate::netlist::parse::{
-    AssignExpr, Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
+    AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
+    NetlistModule, NetlistPort, PortDirection, Pos, Span,
 };
 use crate::netlist::report::build_netlist_report_with_primary_input_arrivals;
 use crate::netlist::sequential_liberty::{
@@ -19,7 +20,6 @@ use crate::netlist::sequential_liberty::{
 use crate::netlist::sta::{
     StaOptions, analyze_register_boundary_max_arrival,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
-    validate_output_pin_for_basic_sta,
 };
 use crate::netlist::utils::scalar_constant_output_assignments;
 use anyhow::{Context, Result, anyhow, bail};
@@ -57,16 +57,6 @@ struct FlipFlopBinding {
     setup: f64,
 }
 
-/// A characterized one-input cell that can drive one packed constant bit.
-#[derive(Clone, Debug)]
-struct ConstantDriverBinding {
-    cell_name: String,
-    input_pin: String,
-    output_pin: String,
-    input_inverted: bool,
-    area: f64,
-}
-
 /// Maps a one-clock transition function and reinstates physical flip-flops.
 pub fn map_sequential_choice_aig_to_netlist(
     design: &SequentialGateFn,
@@ -101,7 +91,7 @@ pub fn map_sequential_choice_aig_to_netlist(
             primary_output_required: constraints.primary_output_required.clone(),
         };
         let mut mapped = map_transition(choice_aig, library, &timing, &effective_options)?;
-        reinstate_sequential_boundary(&mut mapped, design, library, None)?;
+        reinstate_sequential_boundary(&mut mapped, design, None)?;
         finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
         return Ok(mapped);
     }
@@ -352,7 +342,7 @@ fn map_with_flip_flop(
 
     let mut mapped = map_transition(&adjusted, library, &timing, options)
         .with_context(|| format!("mapping transition for flip-flop '{}'", flip_flop.cell_name))?;
-    reinstate_sequential_boundary(&mut mapped, design, library, Some(flip_flop))?;
+    reinstate_sequential_boundary(&mut mapped, design, Some(flip_flop))?;
     finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
     Ok(mapped)
 }
@@ -727,92 +717,17 @@ fn characterize_flip_flop(
     Ok((clock_to_output, setup))
 }
 
-/// Produces an ordinary one-bit standard-cell constant connection.
+/// Produces an ordinary one-bit sequential constant connection.
 fn literal_net_ref(value: bool) -> Result<NetRef> {
     IrBits::make_ubits(1, u64::from(value))
         .map(NetRef::Literal)
-        .map_err(|error| anyhow!("could not construct one-bit flip-flop tie-off: {error}"))
-}
-
-/// Finds a complete Liberty identity or inverter for packed constant outputs.
-fn select_constant_driver(library: &Library) -> Result<ConstantDriverBinding> {
-    let mut bindings = Vec::new();
-    for cell in &library.cells {
-        if !cell.sequential.is_empty()
-            || cell.clock_gate.is_some()
-            || cell.dont_use == Some(true)
-            || !cell.area.is_finite()
-            || cell.area < 0.0
-        {
-            continue;
-        }
-        let inputs = cell
-            .pins
-            .iter()
-            .filter(|pin| pin.direction == PinDirection::Input as i32)
-            .collect::<Vec<_>>();
-        if inputs.len() != 1 || inputs[0].is_clocking_pin {
-            continue;
-        }
-        let input_name = library.resolve_string(&inputs[0].name);
-        for output in cell
-            .pins
-            .iter()
-            .filter(|pin| pin.direction == PinDirection::Output as i32)
-        {
-            let formula = library.resolve_string(&output.function);
-            let Ok(term) = parse_formula(formula) else {
-                continue;
-            };
-            if term.inputs().iter().any(|name| name != input_name) {
-                continue;
-            }
-            let mut values = HashMap::new();
-            values.insert(input_name.to_string(), false);
-            let Some(at_zero) = term.evaluate_partial(&values) else {
-                continue;
-            };
-            values.insert(input_name.to_string(), true);
-            let Some(at_one) = term.evaluate_partial(&values) else {
-                continue;
-            };
-            if at_zero == at_one
-                || validate_output_pin_for_basic_sta(
-                    library,
-                    &cell.name,
-                    output,
-                    &[input_name.to_string()],
-                )
-                .is_err()
-            {
-                continue;
-            }
-            bindings.push(ConstantDriverBinding {
-                cell_name: cell.name.clone(),
-                input_pin: input_name.to_string(),
-                output_pin: library.resolve_string(&output.name).to_string(),
-                input_inverted: at_zero,
-                area: cell.area,
-            });
-        }
-    }
-    bindings.sort_by(|lhs, rhs| {
-        lhs.area
-            .total_cmp(&rhs.area)
-            .then_with(|| lhs.input_inverted.cmp(&rhs.input_inverted))
-            .then_with(|| lhs.cell_name.cmp(&rhs.cell_name))
-            .then_with(|| lhs.output_pin.cmp(&rhs.output_pin))
-    });
-    bindings.into_iter().next().ok_or_else(|| {
-        anyhow!("a packed constant output requires a characterized Liberty buffer or inverter")
-    })
+        .map_err(|error| anyhow!("could not construct one-bit sequential tie-off: {error}"))
 }
 
 /// Replaces exposed transition-state ports with internal FF-connected wires.
 fn reinstate_sequential_boundary(
     mapped: &mut MappedNetlist,
     design: &SequentialGateFn,
-    library: &Library,
     binding: Option<&FlipFlopBinding>,
 ) -> Result<()> {
     let mut port_nets = BTreeMap::new();
@@ -935,13 +850,13 @@ fn reinstate_sequential_boundary(
                     .get(&net.0)
                     .cloned()
                     .ok_or_else(|| anyhow!("packed constant output '{name}' has no bit binding"))?;
-                packed_output_constants.push((name, packed_ref, value, net.0));
+                packed_output_constants.push((packed_ref, value, net.0));
             }
         }
     }
     let packed_constant_nets = packed_output_constants
         .iter()
-        .map(|(_, _, _, index)| *index)
+        .map(|(_, _, index)| *index)
         .collect::<BTreeSet<_>>();
     mapped.module.assigns.retain(|assign| {
         !matches!(
@@ -955,46 +870,35 @@ fn reinstate_sequential_boundary(
         remap_external_assign_expr(&mut assign.rhs, &external_bit_refs)?;
     }
 
-    let mut used_instance_names = mapped
-        .module
-        .instances
-        .iter()
-        .map(|instance| {
-            mapped
-                .interner
-                .resolve(instance.instance_name)
-                .ok_or_else(|| anyhow!("could not resolve mapped instance name"))
-                .map(str::to_string)
-        })
-        .collect::<Result<BTreeSet<_>>>()?;
-
-    if !packed_output_constants.is_empty() {
-        let driver = select_constant_driver(library)?;
-        for (name, output, value, _) in packed_output_constants {
-            let instance_name =
-                unique_instance_name(&format!("u_const_{name}"), &mut used_instance_names);
-            let input = literal_net_ref(value ^ driver.input_inverted)?;
-            let mut connections = vec![
-                (mapped.interner.get_or_intern(&driver.input_pin), input),
-                (mapped.interner.get_or_intern(&driver.output_pin), output),
-            ];
-            connections.sort_by(|(lhs, _), (rhs, _)| {
-                mapped
-                    .interner
-                    .resolve(*lhs)
-                    .cmp(&mapped.interner.resolve(*rhs))
-            });
-            mapped.module.instances.push(NetlistInstance {
-                type_name: mapped.interner.get_or_intern(&driver.cell_name),
-                instance_name: mapped.interner.get_or_intern(&instance_name),
-                connections,
-                inst_lineno: 1,
-                inst_colno: 1,
-            });
-        }
+    for (output, value, _) in packed_output_constants {
+        let position = Pos {
+            lineno: 1,
+            colno: 1,
+        };
+        mapped.module.assigns.push(NetlistAssign {
+            kind: NetlistAssignKind::Continuous,
+            lhs: output,
+            rhs: AssignExpr::Leaf(literal_net_ref(value)?),
+            span: Span {
+                start: position,
+                limit: position,
+            },
+        });
     }
 
     if let Some(flip_flop) = binding {
+        let mut used_instance_names = mapped
+            .module
+            .instances
+            .iter()
+            .map(|instance| {
+                mapped
+                    .interner
+                    .resolve(instance.instance_name)
+                    .ok_or_else(|| anyhow!("could not resolve mapped instance name"))
+                    .map(str::to_string)
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
         let clock_net = clock_net.ok_or_else(|| {
             anyhow!("a registered sequential design must expose its positive-edge clock")
         })?;
@@ -2072,7 +1976,18 @@ mod tests {
         emit_module_as_netlist_text(&mapped.module, &mapped.nets, &mapped.interner)
             .expect("packed constant output must be serializable as a standard-cell netlist");
         assert_eq!(mapped.stats.sequential_instance_count, 2);
-        assert!(mapped.module.assigns.is_empty());
+        assert_eq!(
+            mapped.stats.selected_instance_count,
+            mapped.module.instances.len()
+        );
+        assert_eq!(mapped.module.assigns.len(), 1);
+        let assignment = &mapped.module.assigns[0];
+        assert_eq!(assignment.kind, NetlistAssignKind::Continuous);
+        assert!(matches!(assignment.lhs, NetRef::BitSelect(_, 1)));
+        assert!(matches!(
+            &assignment.rhs,
+            AssignExpr::Leaf(NetRef::Literal(bits)) if bits.is_zero()
+        ));
 
         let projected = project_labeled_sequential_netlist_aig(
             &mapped.module,
@@ -2097,6 +2012,52 @@ mod tests {
         )
         .expect("simulate physical constant-output netlist");
         assert_eq!(actual.external_outputs(), original.external_outputs());
+    }
+
+    #[test]
+    fn maps_state_free_packed_constants_as_zero_area_assignments() {
+        let mut builder = GateBuilder::new(
+            "constant_no_state__transition".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let _data = builder.add_input("data".to_string(), 1);
+        let zero = builder.get_false();
+        let one = builder.get_true();
+        builder.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[zero, one, zero, one]),
+        );
+        let design = SequentialGateFn::new(
+            "constant_no_state".to_string(),
+            builder.build(),
+            vec![TransitionInputId::new(0)],
+            vec![TransitionOutputId::new(0)],
+            Some(ClockPort {
+                name: "clk".to_string(),
+            }),
+            vec![],
+        )
+        .expect("construct state-free packed constant design");
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &test_library(),
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions::default(),
+        )
+        .expect("map cleaned packed constants without synthetic cells");
+
+        assert_eq!(mapped.stats.selected_instance_count, 0);
+        assert_eq!(mapped.stats.sequential_instance_count, 0);
+        assert_eq!(mapped.stats.selected_area, 0.0);
+        assert_eq!(mapped.module.assigns.len(), 4);
+        let emitted = emit_module_as_netlist_text(&mapped.module, &mapped.nets, &mapped.interner)
+            .expect("emit zero-area packed constant outputs");
+        assert_eq!(
+            emitted,
+            "module constant_no_state(data, clk, out);\n  input data;\n  input clk;\n  output [3:0] out;\n  assign out[0] = 1'b0;\n  assign out[1] = 1'b1;\n  assign out[2] = 1'b0;\n  assign out[3] = 1'b1;\nendmodule\n"
+        );
     }
 
     #[test]
