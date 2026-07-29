@@ -2,7 +2,8 @@
 
 //! Helpers for rendering parsed gate-level netlist structures as text.
 
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule, PortDirection};
+use crate::netlist::parse::{AssignExpr, Net, NetIndex, NetRef, NetlistModule, PortDirection};
+use crate::netlist::utils::scalar_constant_output_assignments;
 use anyhow::{Result, anyhow};
 use std::fmt::Write as FmtWrite;
 use string_interner::symbol::SymbolU32;
@@ -115,11 +116,11 @@ pub fn emit_module_as_netlist_text(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<String> {
-    if !module.assigns.is_empty() {
-        return Err(anyhow!(
-            "netlist emission does not support preserved continuous assigns"
-        ));
-    }
+    scalar_constant_output_assignments(module, nets).map_err(|error| {
+        anyhow!(
+            "netlist emission does not support preserved continuous assigns other than scalar output tie-offs: {error}"
+        )
+    })?;
     let module_name = render_identifier(&resolve_symbol(interner, module.name, "module name")?);
     let mut out = String::new();
 
@@ -171,6 +172,21 @@ pub fn emit_module_as_netlist_text(
         })?;
         let wire_name = render_identifier(&resolve_symbol(interner, net.name, "wire name")?);
         writeln!(&mut out, "  wire {}{};", width_suffix(net.width), wire_name).unwrap();
+    }
+
+    for assign in &module.assigns {
+        let AssignExpr::Leaf(rhs) = &assign.rhs else {
+            return Err(anyhow!(
+                "netlist emission requires scalar literal output assignments"
+            ));
+        };
+        writeln!(
+            &mut out,
+            "  assign {} = {};",
+            render_netref(nets, interner, &assign.lhs)?,
+            render_netref(nets, interner, rhs)?,
+        )
+        .unwrap();
     }
 
     for inst in &module.instances {
@@ -296,6 +312,34 @@ endmodule
         assert!(
             err.to_string()
                 .contains("does not support preserved continuous assigns")
+        );
+    }
+
+    #[test]
+    fn emitter_round_trips_scalar_constant_output_assignments() {
+        let source = r#"
+module top(zero, one);
+  output zero, one;
+  assign zero = 1'b0;
+  assign one = 1'b1;
+endmodule
+"#;
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let lookup = move |line: u32| lines.get((line - 1) as usize).cloned();
+        let scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(source.as_bytes()),
+            Box::new(lookup),
+        );
+        let mut parser = NetlistParser::new(scanner);
+        let mut modules = parser.parse_file().expect("constant outputs should parse");
+        let module = modules.pop().expect("one module expected");
+
+        let emitted = emit_module_as_netlist_text(&module, &parser.nets, &parser.interner)
+            .expect("constant output assignments should emit");
+
+        assert_eq!(
+            emitted,
+            "module top(zero, one);\n  output zero;\n  output one;\n  assign zero = 1'b0;\n  assign one = 1'b1;\nendmodule\n"
         );
     }
 }

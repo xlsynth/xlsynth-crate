@@ -83,6 +83,7 @@ mod gv_area;
 mod gv_dump_cone;
 mod gv_eval;
 mod gv_instance_csv;
+mod gv_optimize;
 mod gv_read_stats;
 mod gv_sta;
 mod gv_stats;
@@ -2303,7 +2304,84 @@ fn main() {
                         .value_name("N")
                         .default_value("16")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum retained area/delay points per choice state")
+                        .help("Maximum frontier size for explicitly selected experimental mapping modes")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("timing_model")
+                        .long("timing-model")
+                        .value_name("MODEL")
+                        .default_value("nf-liberty")
+                        .value_parser(["balanced", "buffered-liberty", "nf-liberty", "nf-unit"])
+                        .help("Structural mapping objective: balanced exact area/delay, bounded Liberty timing, or NF with representative Liberty pin delays; nf-unit is disabled and panics")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer")
+                        .long("buffer")
+                        .value_name("BOOL")
+                        .default_value("false")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Insert Liberty-aware balanced buffer trees after mapping")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_fanout")
+                        .long("max-fanout")
+                        .value_name("N")
+                        .default_value("12")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum directly driven sinks per buffer-tree level")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer_target_load")
+                        .long("buffer-target-load")
+                        .value_name("CAPACITANCE")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Optional per-stage load bound; defaults to the Liberty driver limit")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer_primary_inputs")
+                        .long("buffer-primary-inputs")
+                        .help("Allow inserted buffer trees on data primary inputs")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("resize")
+                        .long("resize")
+                        .value_name("BOOL")
+                        .default_value("false")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Run exact-Liberty critical-path sizing and timing-protected area recovery")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_iterations")
+                        .long("resize-iterations")
+                        .value_name("N")
+                        .default_value("16")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum accepted critical-path upsizing moves")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_area_iterations")
+                        .long("resize-area-iterations")
+                        .value_name("N")
+                        .default_value("32")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum timing-preserving cell-downsizing moves")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_max_evaluations")
+                        .long("resize-max-evaluations")
+                        .value_name("N")
+                        .default_value("64")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum exact incremental timing trials in one resize iteration")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2336,6 +2414,134 @@ fn main() {
                         .default_value("0")
                         .value_parser(clap::value_parser!(f64))
                         .help("Output load for final STA and constrained matching")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("gv-optimize")
+                .about("Buffers and resizes a mapped combinational Liberty cell netlist")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .value_name("PATH")
+                        .help("Input mapped gate-level netlist")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .value_name("PATH")
+                        .help("Timing-enabled Liberty proto")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("netlist_out")
+                        .long("netlist_out")
+                        .value_name("PATH")
+                        .help("Optimized mapped netlist output; use '-' for stdout")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Mapped module to select from the input netlist")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary-input-transition")
+                        .value_name("TIME")
+                        .default_value("0.01")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Primary-input transition for exact Liberty STA")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module-output-load")
+                        .value_name("CAPACITANCE")
+                        .default_value("0")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("External capacitive load on each module output")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer")
+                        .long("buffer")
+                        .value_name("BOOL")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Insert capacitance-balanced Liberty buffer trees")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_fanout")
+                        .long("max-fanout")
+                        .value_name("N")
+                        .default_value("12")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum directly driven sinks per buffer-tree level")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer_target_load")
+                        .long("buffer-target-load")
+                        .value_name("CAPACITANCE")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Optional per-stage capacitive load bound")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer_primary_inputs")
+                        .long("buffer-primary-inputs")
+                        .help("Allow buffer insertion on data primary inputs")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("resize")
+                        .long("resize")
+                        .value_name("BOOL")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Run incremental exact-Liberty cell sizing and area recovery")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_iterations")
+                        .long("resize-iterations")
+                        .value_name("N")
+                        .default_value("16")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum accepted critical-path upsizing moves")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_area_iterations")
+                        .long("resize-area-iterations")
+                        .value_name("N")
+                        .default_value("32")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum timing-preserving area-recovery moves")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_max_evaluations")
+                        .long("resize-max-evaluations")
+                        .value_name("N")
+                        .default_value("64")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum exact timing trials per resize iteration")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("json_out")
+                        .long("json-out")
+                        .value_name("PATH")
+                        .help("Write machine-readable before/after optimization statistics")
                         .action(ArgAction::Set),
                 ),
         )
@@ -4083,6 +4289,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("choice-aig-tech-map", subm)) => {
             if let Err(error) = choice_aig_tech_map::handle_choice_aig_tech_map(subm) {
                 eprintln!("choice-aig-tech-map error: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        Some(("gv-optimize", subm)) => {
+            if let Err(error) = gv_optimize::handle_gv_optimize(subm) {
+                eprintln!("gv-optimize error: {error:#}");
                 std::process::exit(1);
             }
         }

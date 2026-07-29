@@ -5,9 +5,13 @@ use clap::ArgMatches;
 use std::collections::BTreeMap;
 use std::path::Path;
 use xlsynth_g8r::aig_serdes::load_abc_choice_aiger::load_abc_choice_aiger_auto_from_path;
+use xlsynth_g8r::netlist::buffer::BufferOptions;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::load_liberty_with_timing_data_from_path;
-use xlsynth_g8r::techmap::{TechMapOptions, TechMapTimingConstraints, map_choice_aig_to_netlist};
+use xlsynth_g8r::netlist::resize::ResizeOptions;
+use xlsynth_g8r::techmap::{
+    TechMapOptions, TechMapTimingConstraints, TechMapTimingModel, map_choice_aig_to_netlist,
+};
 
 /// Runs the clean-sheet, final-only choice-AIG technology mapper.
 pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
@@ -58,6 +62,47 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         module_output_load: *matches
             .get_one::<f64>("module_output_load")
             .expect("module_output_load has a default"),
+        timing_model: match matches
+            .get_one::<String>("timing_model")
+            .expect("timing_model has a default")
+            .as_str()
+        {
+            "balanced" => TechMapTimingModel::Balanced,
+            "nf-unit" => TechMapTimingModel::NfUnit,
+            "nf-liberty" => TechMapTimingModel::NfLiberty,
+            "buffered-liberty" => TechMapTimingModel::BufferedLiberty,
+            value => return Err(anyhow!("unsupported mapping timing model '{value}'")),
+        },
+        buffer_options: matches
+            .get_one::<bool>("buffer")
+            .copied()
+            .expect("buffer has a default")
+            .then(|| BufferOptions {
+                max_fanout: *matches
+                    .get_one::<usize>("max_fanout")
+                    .expect("max_fanout has a default"),
+                target_load: matches.get_one::<f64>("buffer_target_load").copied(),
+                module_output_load: *matches
+                    .get_one::<f64>("module_output_load")
+                    .expect("module_output_load has a default"),
+                buffer_primary_inputs: matches.get_flag("buffer_primary_inputs"),
+            }),
+        resize_options: matches
+            .get_one::<bool>("resize")
+            .copied()
+            .expect("resize has a default")
+            .then(|| ResizeOptions {
+                max_iterations: *matches
+                    .get_one::<usize>("resize_iterations")
+                    .expect("resize_iterations has a default"),
+                max_area_iterations: *matches
+                    .get_one::<usize>("resize_area_iterations")
+                    .expect("resize_area_iterations has a default"),
+                max_evaluations_per_iteration: *matches
+                    .get_one::<usize>("resize_max_evaluations")
+                    .expect("resize_max_evaluations has a default"),
+                ..ResizeOptions::default()
+            }),
     };
     let mapped = map_choice_aig_to_netlist(&choice_aig, &library, &constraints, &options)
         .context("final choice-AIG technology mapping failed")?;
@@ -70,13 +115,45 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         std::fs::write(netlist_out, text)
             .with_context(|| format!("failed to write mapped netlist '{}'", netlist_out))?;
     }
+    let representative_timing = match (
+        mapped.stats.representative_input_transition,
+        mapped.stats.representative_output_load,
+    ) {
+        (Some(transition), Some(load)) => {
+            format!(", representative-slew={transition}, representative-load={load}")
+        }
+        _ => String::new(),
+    };
     eprintln!(
-        "choice-aig-tech-map: {} instances, area={}, choices={}, cuts={}, candidates={}",
+        "choice-aig-tech-map: {} instances, area={}, delay={}, choices={}, cuts={}, candidates={}, buffers={}, upsizes={}, downsizes={}, timing-model={}{}",
         mapped.stats.selected_instance_count,
         mapped.stats.selected_area,
+        mapped.stats.worst_estimated_output_arrival,
         mapped.stats.choice_link_count,
         mapped.stats.enumerated_cut_count,
         mapped.stats.matched_candidate_count,
+        mapped
+            .stats
+            .buffer_stats
+            .as_ref()
+            .map_or(0, |stats| stats.buffers_inserted),
+        mapped
+            .stats
+            .resize_stats
+            .as_ref()
+            .map_or(0, |stats| stats.upsizes),
+        mapped
+            .stats
+            .resize_stats
+            .as_ref()
+            .map_or(0, |stats| stats.downsizes),
+        match mapped.stats.selected_timing_model {
+            TechMapTimingModel::Balanced => "balanced",
+            TechMapTimingModel::NfUnit => "nf-unit",
+            TechMapTimingModel::NfLiberty => "nf-liberty",
+            TechMapTimingModel::BufferedLiberty => "buffered-liberty",
+        },
+        representative_timing,
     );
     Ok(())
 }

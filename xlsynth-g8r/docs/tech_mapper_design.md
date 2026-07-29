@@ -11,9 +11,11 @@ optimization:
 
 ```text
 final ABC q-AIGER + Liberty proto + endpoint timing constraints
-    -> choice-aware cut matching
-    -> selected Liberty-cell cover
-    -> parsed gate-level netlist
+    -> NF-priority choice-aware structural cuts
+    -> unit-delay or representative-pin-delay Liberty-cell matching
+    -> four area-flow mapping rounds
+    -> two exact-area recovery rounds
+    -> parsed gate-level netlist and exact Liberty STA
 ```
 
 It is not an ABC-loop protocol. The mapper does not serialize a selected cover
@@ -26,9 +28,12 @@ choices. The loader preserves otherwise-dead choice cones and records ABC's
 backwards sibling links in `ChoiceAig`. Ordinary ASCII or binary AIGER is
 also accepted and is represented as a no-choice graph.
 
-The mapper closes sibling links into complete deterministic choice classes.
-Because ABC choices may be equivalent up to complement, it computes each AIG
-node's all-zero phase and normalizes members to a canonical class polarity.
+The loader can close sibling links into complete deterministic choice classes
+for diagnostics. Mapping itself deliberately keeps one state per concrete AIG
+node and polarity, like ABC NF: a sibling contributes phase-adjusted cuts to
+the later node, but referenced sibling roots are not merged into one shared
+mapping state. Because ABC choices may be equivalent up to complement, the
+mapper computes each AIG node's all-zero phase when it imports sibling cuts.
 
 ### Liberty Index
 
@@ -42,9 +47,15 @@ eligible first-pass cell must:
 - use every declared input pin in the function
 
 For every eligible output, the mapper evaluates a compact truth table. Like
-ABC NF's root-library preparation, it retains one minimum-area root cell per
-native Boolean function before indexing deterministic input-pin permutations
-plus per-input polarity transforms. In NF mode it also suppresses redundant
+ABC NF's root-library preparation, it selects one minimum-area root cell per
+native Boolean function before expanding deterministic input-pin permutations
+and per-input polarity transforms. This avoids expanding and then discarding
+every drive-strength variant. Unlike ABC's intermediate GENLIB conversion,
+the root index retains the full-precision Liberty area rather than rounding
+it to two decimal places. With ABC's generated unit-delay arcs, equally
+priced roots are selected by deterministic cell identity; characterized
+Liberty arc delays do not influence root or cut selection. In NF mode the
+index also suppresses redundant
 pin permutations with the same transformed truth and leaf-polarity mask, like
 ABC's default `fPinPerm=0` matching database. Drive-strength selection is
 intentionally left to a later sizing pass. The first implementation skips
@@ -53,11 +64,19 @@ multi-output, sequential, clock-gating, and partially used input cells.
 ### Cut Matching
 
 Each AIG node gets bounded priority cuts, with `k=6` and 16 retained cuts per
-node by default. Cut truth tables include complemented AIG edges and minimize
-away unused support variables after composition. Sibling cuts are
-phase-adjusted and propagated through parents during enumeration, so a choice
-alternative can create mapping opportunities above the choice node, as in ABC
-NF.
+node by default. Structural cut priority follows `giaNf.c`: useful function,
+structural area flow within the NF epsilon, unit-delay depth, and leaf count.
+The frontier applies ABC's early support-containment check, removes strict
+supersets on insertion, and reserves a unit-cut slot when preparing fanins.
+Cut flow uses structural leaf costs rather than Liberty areas or timing.
+
+Cut truth tables include complemented AIG edges and minimize away unused
+support variables after composition. Sibling cuts are phase-adjusted and
+propagated through parents during enumeration, so a choice alternative can
+create mapping opportunities above the choice node, as in ABC NF. Initial
+flow references follow ABC's structural fanout counting, including its
+multiplexer/XOR fanout discount. Later rounds blend in selected-cover
+reference counts.
 
 ### Cover Selection
 
@@ -69,14 +88,49 @@ The selector follows ABC NF's shape:
 - two exact-area passes dereference and rereference trial cones so shared logic
   is charged only when it becomes newly live
 
-For an unconstrained run, the inner search uses one unit of delay per cell
-input, matching the generated-genlib objective used by ABC's normal `&nf`
-flow. Required-time propagation, area flow, and exact-area recovery stay in
-that unit-delay domain. If the controller supplies any endpoint timing
-constraint, the search instead uses compact scalar Liberty arc delays and
-re-evaluates each selected live cover with the same rise/fall, slew,
-capacitive-load, conditional-arc, and timing-table semantics used by
-`gv-stats`, so the explicit constraints remain meaningful.
+After exact-area recovery, an NF-like primary-output driver cleanup reorients
+multiply referenced plain-inverter closures when possible: the direct root
+implementation drives the shared internal phase, and the inverter stays on the
+output-only phase. This avoids making an output polarity choice add a heavily
+loaded inverter to an otherwise shared cone.
+
+The default `NfLiberty` implementation is a separate single-objective engine in
+`techmap::nf`. It visits retained cuts and native cell bindings directly,
+keeps one fastest and one lowest-area-flow match per concrete object and
+polarity, and selects an area child only when it meets the current required
+time. Its explicit inverter closure follows NF's direct-phase behavior and
+charges inverter area without dividing it by the root's flow references.
+
+It uses the same 16-cut default frontier and the same flow and exact-area
+rounds as ABC NF. Each native cell input receives a fixed representative
+Liberty delay. Each rise/fall arc is
+interpolated using the same NLDM evaluator as final `gv-stats` at the
+configured primary-input slew and an output load equal to twice the median
+indexed input-pin capacitance. The larger of the interpolated rise and fall
+delays becomes the input-pin delay. Both forward arrivals and backward
+required times, including explicit inverter closures and exact-area
+recovery, use that same pin-specific delay. Incomplete synthetic Liberty
+libraries retain their scalar delay estimates as a fallback.
+
+Selecting `NfUnit` through a public mapper entry point panics. The unit-delay
+objective remains available only for private characterization inside the
+explicit experimental `Balanced` portfolio.
+
+The exact-area rounds recursively dereference the old cone and reference each
+trial cone, charging a shared cell only when its reference count changes
+between zero and one. Required times and output phase cleanup are propagated
+through the actual selected mapping.
+
+The earlier `BufferedLiberty` and two-cover `Balanced` strategies remain
+available as explicitly selected experimental modes. They are not evaluated
+or selected by the default NF mapper. Native buffer insertion and resizing
+are likewise independent, opt-in netlist passes rather than part of the
+default mapping objective.
+
+If the controller supplies an endpoint timing constraint, mapping instead runs
+one scalar-Liberty search and re-evaluates the selected live cover with the
+same rise/fall, slew, capacitive-load, conditional-arc, and timing-table
+semantics used by `gv-stats`, so the explicit constraints remain meaningful.
 
 In either mode, the finished selected cover is re-evaluated with the shared
 `gv-stats` timing semantics. The final reported delay is recomputed again from
@@ -87,8 +141,45 @@ The outside controller may supply flattened primary-input arrival times and
 primary-output required times. Without an explicit required time, the first
 delay pass establishes a global target. If the compact NF root library cannot
 meet an explicit endpoint requirement, mapping reports that failure rather
-than silently changing the target. Buffer-tree insertion and drive-strength
-sizing remain separate later refinements.
+than silently changing the target.
+
+### Buffer Insertion
+
+`netlist::buffer` classifies true noninverting buffers from Liberty Boolean
+functions rather than relying on cell names. It counts each real scalar input
+pin, accumulates separate rise and fall sink capacitance, and partitions
+overloaded nets into deterministic, balanced buffer trees. Selection favors
+the smallest buffer that retains characterized output-capacitance headroom,
+avoiding the steep-delay edge of an NLDM table; it falls back to the smallest
+legal buffer when that headroom is unavailable. The subsequent sizing pass
+can select a stronger equivalent variant.
+
+Primary-input buffering is optional, and clock and inout nets are protected.
+When a high-fanout net is also a primary output, insertion moves its original
+driver to a fresh internal net so the public output name remains unchanged.
+Unachievable per-stage load constraints are reported without repeatedly
+inserting non-improving tree levels.
+
+### Cell Resizing and Area Recovery
+
+`netlist::resize` groups combinational cells by exact Boolean function,
+identical input-pin names, and identical output-pin names. A substitution is
+therefore structurally and logically safe without name- or suffix-based drive
+strength assumptions.
+
+The resizer builds the scalar timing graph once. Each candidate updates both
+the replacement cell and the rise/fall input capacitances seen by its upstream
+drivers, propagates exact `gv-stats` Liberty timing through the affected
+downstream cone, and rolls back every rejected trial. It first accepts
+bounded, beneficial substitutions on the worst output paths. After buffer
+insertion and upsizing have established the achievable delay, it downsizes
+noncritical cells only when a trial preserves that delay.
+
+`netlist::optimize::optimize_mapped_netlist` exposes the complete reusable
+buffer-then-resize pipeline. It verifies both initial and final results using
+independent full parsed-netlist area and timing analysis. Both passes are
+disabled by default for NF mapping and can be explicitly enabled or bounded
+individually.
 
 ### Output Contract
 
@@ -98,8 +189,9 @@ deterministic:
 
 - generated instance and net names are stable
 - cell connections are sorted by pin name
+- constant output bits are emitted as zero-area scalar Verilog assignments
 - output ports are driven structurally through selected cells, buffers, or
-  paired inverters
+  paired inverters when they are not constant
 
 ## Structural Baseline
 

@@ -4,7 +4,8 @@
 
 use crate::aig::ChoiceAig;
 use crate::netlist::parse::{
-    Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
+    AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
+    NetlistModule, NetlistPort, PortDirection, Pos, Span,
 };
 use crate::techmap::cover::{CoverPlan, SolutionChoice, SolutionId, SourceKind};
 use crate::techmap::liberty_index::{CellBinding, LibertyCellIndex};
@@ -193,16 +194,7 @@ impl CoverEmitter<'_> {
     ) -> Result<()> {
         match signal {
             Signal::Net(net) if net == output_net => Ok(()),
-            Signal::Literal(value) => {
-                let binding = self.cell_index.best_constant(value).ok_or_else(|| {
-                    anyhow!(
-                        "output '{}' is constant {} but Liberty has no matching zero-input constant driver",
-                        output_name,
-                        u8::from(value)
-                    )
-                })?;
-                self.builder.add_cell(binding.clone(), &[], output_net)
-            }
+            Signal::Literal(value) => self.builder.add_constant_output(output_net, value),
             Signal::Net(net) => {
                 if let Some(buffer) = self.cell_index.best_buffer() {
                     return self
@@ -234,6 +226,7 @@ struct NetlistBuilder {
     wire_net_indices: Vec<NetIndex>,
     wire_net_set: HashSet<NetIndex>,
     ports: Vec<NetlistPort>,
+    assigns: Vec<NetlistAssign>,
     instances: Vec<NetlistInstance>,
     used_net_names: HashSet<String>,
     instance_counter: usize,
@@ -255,6 +248,7 @@ impl NetlistBuilder {
             wire_net_indices: Vec::new(),
             wire_net_set: HashSet::new(),
             ports: Vec::new(),
+            assigns: Vec::new(),
             instances: Vec::new(),
             used_net_names: HashSet::new(),
             instance_counter: 0,
@@ -309,6 +303,26 @@ impl NetlistBuilder {
             self.wire_net_indices.push(net);
         }
         net
+    }
+
+    /// Preserves a constant output as a zero-area Verilog tie-off.
+    fn add_constant_output(&mut self, net: NetIndex, value: bool) -> Result<()> {
+        let bits = IrBits::make_ubits(1, u64::from(value))
+            .map_err(|error| anyhow!("could not construct a one-bit output tie-off: {error}"))?;
+        let position = Pos {
+            lineno: 1,
+            colno: 1,
+        };
+        self.assigns.push(NetlistAssign {
+            kind: NetlistAssignKind::Continuous,
+            lhs: NetRef::Simple(net),
+            rhs: AssignExpr::Leaf(NetRef::Literal(bits)),
+            span: Span {
+                start: position,
+                limit: position,
+            },
+        });
+        Ok(())
     }
 
     fn add_cell(
@@ -367,7 +381,7 @@ impl NetlistBuilder {
             net_index_range: 0..self.nets.len(),
             ports: self.ports,
             wires: self.wire_net_indices,
-            assigns: Vec::new(),
+            assigns: self.assigns,
             instances: self.instances,
         };
         EmittedNetlist {

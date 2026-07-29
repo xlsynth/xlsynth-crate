@@ -566,15 +566,22 @@ Runs the clean-sheet final technology mapper. The command accepts ordinary
 AIGER or ABC binary AIGER with q-extension structural choices, indexes
 single-output combinational Liberty cells by their Boolean functions, matches
 bounded choice-propagating AIG cuts against those functions, runs NF-style
-delay, area-flow, and exact-area recovery rounds, and emits the selected final
-gate-level netlist. It does not serialize a mapping back into ABC or run
-inside an ABC optimization loop.
+delay, area-flow, and exact-area recovery rounds, and emits the final
+gate-level netlist rather than serializing a mapping back into ABC.
 
-Without explicit endpoint constraints, cover selection uses the same
-unit-delay objective as ABC's normal `&nf` flow and then reports the selected
-netlist with full Liberty STA. Supplying any primary-input arrival or
-primary-output required time switches cover selection to Liberty-scaled timing
-so those constraints are enforced during mapping.
+By default, unconstrained mapping uses one Liberty-timed `nf-liberty` cover:
+six-input structural cuts, up to 16 cuts per node, four area-flow rounds,
+and two exact-area rounds. Cell areas retain their full Liberty precision.
+Cover selection uses per-input-pin Liberty delays interpolated with the same
+timing engine as `gv-stats` at `--primary-input-transition` and a
+representative fanout-of-two load derived from the median indexed input-pin
+capacitance. The final mapped result is scored with exact Liberty timing.
+The `nf-unit` option is deliberately disabled and panics if explicitly
+selected. Buffer insertion and resizing are disabled unless explicitly
+requested. The earlier `balanced` and `buffered-liberty` objectives remain
+available as explicit experimental options. Explicit endpoint constraints use
+the separate Liberty-timed mapping path. Constant outputs are emitted as
+zero-area Verilog tie-offs.
 
 ```shell
 xlsynth-driver choice-aig-tech-map final_choices.aig \
@@ -593,8 +600,31 @@ Key flags:
   (default: `6`).
 - `--max-cuts-per-node <N>`: maximum retained structural cuts per AIG node
   (default: `16`).
-- `--max-frontier-size <N>`: maximum retained non-dominated area/delay points
-  per cut/state signature before NF-style rounds (default: `16`).
+- `--max-frontier-size <N>`: compatibility bound for the explicitly selected
+  experimental timing models (default: `16`); the default NF mapper retains
+  one delay and one area-flow match per object phase.
+- `--timing-model <balanced|buffered-liberty|nf-liberty|nf-unit>`: explicit
+  experimental exact area/delay portfolio, explicit buffer-aware Liberty
+  cover, or NF cover with representative per-pin Liberty delays (default:
+  `nf-liberty`). Selecting `nf-unit` panics because structural unit-delay
+  mapping is disabled.
+- `--buffer <true|false>`: enable balanced post-mapping buffer insertion
+  (default: `false`).
+- `--max-fanout <N>`: maximum directly driven sinks at each buffer-tree level
+  (default: `12`). Balanced mapping may select a stricter timing-oriented tree
+  within this bound.
+- `--buffer-target-load <CAPACITANCE>`: optional explicit buffer-stage load
+  bound; by default, use the Liberty output's characterized maximum load.
+- `--buffer-primary-inputs`: also buffer high-fanout data primary inputs;
+  clock pins are never buffered.
+- `--resize <true|false>`: enable exact-timing critical-path upsizing followed
+  by timing-protected area recovery (default: `false`).
+- `--resize-iterations <N>`: maximum accepted critical-path upsizing moves
+  (default: `16`).
+- `--resize-area-iterations <N>`: maximum accepted timing-protected downsizing
+  moves (default: `32`).
+- `--resize-max-evaluations <N>`: maximum incremental timing trials per sizing
+  iteration (default: `64`).
 - `--primary-input-arrival <NAME=TIME>`: optional scalar primary-input arrival
   time; may be repeated.
 - `--primary-output-required <NAME=TIME>`: optional scalar primary-output
@@ -606,6 +636,45 @@ Key flags:
 
 Timing constraint names use flattened scalar port names: one-bit ports retain
 their original name, while bit `i` of a wider port is named `<port>_<i>`.
+
+### `gv-optimize`: buffer and resize an existing mapped netlist
+
+Optimizes a combinational gate-level netlist without repeating AIG mapping.
+The command inserts deterministic, capacitance-balanced trees of real Liberty
+buffer cells, performs incremental full-NLDM critical-path sizing, and
+downsizes cells only when the achieved worst output delay is preserved. It
+independently recomputes final area and timing with the `gv-stats` engines.
+
+```shell
+xlsynth-driver gv-optimize \
+  --netlist mapped.gv \
+  --liberty_proto /path/to/timing-enabled.liberty.proto \
+  --netlist_out optimized.gv \
+  --primary-input-transition 0.01 \
+  --module-output-load 2.308 \
+  --json-out optimization.json
+```
+
+Key flags:
+
+- `--netlist <PATH>`: mapped combinational input netlist. Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto. Required.
+- `--netlist_out <PATH>`: optimized netlist; use `-` for stdout. Required.
+- `--module_name <MODULE>`: optional input-module selection.
+- `--primary-input-transition <TIME>`: source transition (default: `0.01`).
+- `--module-output-load <CAPACITANCE>`: external output load (default: `0`).
+- `--buffer <true|false>`: enable buffer insertion (default: `true`).
+- `--max-fanout <N>`: maximum sinks per buffer-tree level (default: `12`).
+- `--buffer-target-load <CAPACITANCE>`: optional explicit stage load bound.
+- `--buffer-primary-inputs`: permit buffering data primary inputs.
+- `--resize <true|false>`: enable critical-path sizing and area recovery
+  (default: `true`).
+- `--resize-iterations <N>`: maximum upsizing moves (default: `16`).
+- `--resize-area-iterations <N>`: maximum area-recovery moves (default: `32`).
+- `--resize-max-evaluations <N>`: exact timing trials per iteration
+  (default: `64`).
+- `--json-out <PATH>`: write complete before/after area, delay, buffering, and
+  resizing statistics.
 
 ### `gv-sta`: gate-level max-arrival STA
 

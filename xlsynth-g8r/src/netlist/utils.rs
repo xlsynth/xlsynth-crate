@@ -2,9 +2,66 @@
 
 //! Utility routines for netlist analysis and reporting.
 
-use crate::netlist::parse::NetlistModule;
+use crate::netlist::parse::{
+    AssignExpr, Net, NetRef, NetlistAssignKind, NetlistModule, PortDirection,
+};
+use anyhow::{Result, anyhow};
+use std::collections::{BTreeMap, HashSet};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+/// Validates scalar constant assignments that directly drive module outputs.
+pub(crate) fn scalar_constant_output_assignments(
+    module: &NetlistModule,
+    nets: &[Net],
+) -> Result<BTreeMap<usize, bool>> {
+    let mut output_nets = HashSet::new();
+    for port in &module.ports {
+        if port.direction != PortDirection::Output {
+            continue;
+        }
+        let net = module
+            .find_net_index(port.name, nets)
+            .ok_or_else(|| anyhow!("constant-output assignment refers to an unknown port net"))?;
+        output_nets.insert(net.0);
+    }
+
+    let mut assignments = BTreeMap::new();
+    for assign in &module.assigns {
+        if assign.kind != NetlistAssignKind::Continuous {
+            return Err(anyhow!(
+                "mapped-netlist optimization only supports continuous output tie-offs"
+            ));
+        }
+        let NetRef::Simple(net) = &assign.lhs else {
+            return Err(anyhow!(
+                "mapped-netlist optimization requires scalar output assignment destinations"
+            ));
+        };
+        if !output_nets.contains(&net.0) {
+            return Err(anyhow!(
+                "mapped-netlist optimization only supports assignments directly to module outputs"
+            ));
+        }
+        let AssignExpr::Leaf(NetRef::Literal(bits)) = &assign.rhs else {
+            return Err(anyhow!(
+                "mapped-netlist optimization only supports constant output assignments"
+            ));
+        };
+        if bits.get_bit_count() != 1 {
+            return Err(anyhow!(
+                "mapped-netlist optimization requires one-bit output tie-offs"
+            ));
+        }
+        let value = bits.get_bit(0).map_err(|error| anyhow!("{error}"))?;
+        if assignments.insert(net.0, value).is_some() {
+            return Err(anyhow!(
+                "mapped-netlist optimization found multiple assignments to one output"
+            ));
+        }
+    }
+    Ok(assignments)
+}
 
 /// Returns a Vec of (instance_name, cell_type) for all instances in the
 /// modules, using the interner for resolution.

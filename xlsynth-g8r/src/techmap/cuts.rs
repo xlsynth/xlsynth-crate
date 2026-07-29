@@ -5,42 +5,16 @@
 use crate::aig::{AigNode, AigOperand, AigRef, ChoiceAig, GateFn};
 use crate::techmap::liberty_index::LibertyCellIndex;
 use crate::techmap::truth::{
-    MAX_TRUTH_TABLE_INPUTS, complement_truth, minimize_support, remap_truth, variable_truth,
+    CutLeaves, MAX_TRUTH_TABLE_INPUTS, complement_truth, minimize_support, remap_truth,
+    variable_truth,
 };
 use anyhow::{Result, anyhow};
-use std::collections::BTreeMap;
 
-/// One equivalence class formed by ABC structural-choice sibling links.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ChoiceClass {
-    pub canonical: AigRef,
-    pub members: Vec<AigRef>,
-}
-
-/// Choice classes plus the all-zero phase used to normalize complemented
-/// choices.
+/// Choice metadata needed by NF-style sibling-cut propagation.
 #[derive(Clone, Debug)]
 pub(super) struct ChoiceAnalysis {
-    pub classes: Vec<ChoiceClass>,
-    pub class_by_node: Vec<usize>,
+    pub choice_class_count: usize,
     pub phase_by_node: Vec<bool>,
-}
-
-impl ChoiceAnalysis {
-    /// Returns the class and canonical-relative polarity for one AIG operand.
-    pub fn state_for_operand(&self, operand: AigOperand) -> (usize, bool) {
-        let class_id = self.class_by_node[operand.node.id];
-        let canonical = self.classes[class_id].canonical;
-        let polarity = operand.negated
-            ^ self.phase_by_node[operand.node.id]
-            ^ self.phase_by_node[canonical.id];
-        (class_id, polarity)
-    }
-
-    /// Returns the class and canonical-relative polarity for a positive node.
-    pub fn state_for_positive_node(&self, node: AigRef) -> (usize, bool) {
-        self.state_for_operand(node.into())
-    }
 }
 
 /// One cut, with truth expressed over leaves in their sorted order.
@@ -50,34 +24,22 @@ impl ChoiceAnalysis {
 /// small, mapping-relevant cut set before expensive Liberty matching starts.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Cut {
-    pub leaves: Vec<AigRef>,
+    pub leaves: CutLeaves,
     pub truth: u64,
     pub useful: bool,
     pub flow: f64,
-    pub delay: usize,
+    pub delay: f64,
 }
 
-/// Builds deterministic choice classes and computes each node's all-zero phase.
+/// Counts deterministic choice classes and computes each node's all-zero phase.
 pub(super) fn analyze_choices(choice_aig: &ChoiceAig) -> Result<ChoiceAnalysis> {
     let graph = choice_aig.graph();
     validate_topological(graph)?;
-    let raw_classes = choice_aig.choice_classes();
-    let mut classes = Vec::with_capacity(raw_classes.len());
-    let mut class_by_node = vec![usize::MAX; graph.gates.len()];
-    for (class_id, members) in raw_classes.into_iter().enumerate() {
-        let canonical = members[0];
-        for member in &members {
-            class_by_node[member.id] = class_id;
-        }
-        classes.push(ChoiceClass { canonical, members });
-    }
-    if class_by_node.iter().any(|class_id| *class_id == usize::MAX) {
-        return Err(anyhow!("choice analysis did not classify every AIG node"));
-    }
     let phase_by_node = compute_zero_phase(graph);
     Ok(ChoiceAnalysis {
-        classes,
-        class_by_node,
+        // One strictly backwards sibling link joins two components of the
+        // acyclic sibling forest; no materialized choice classes are needed.
+        choice_class_count: graph.gates.len() - choice_aig.sibling_link_count(),
         phase_by_node,
     })
 }
@@ -138,7 +100,9 @@ fn enumerate_cuts_impl(
     let mut cuts_by_node: Vec<Vec<Cut>> = vec![Vec::new(); graph.gates.len()];
     for (node_id, node) in graph.gates.iter().enumerate() {
         let node_ref = AigRef { id: node_id };
-        let mut generated = Vec::new();
+        let reserve_trivial = matches!(node, AigNode::Input { .. } | AigNode::And2 { .. });
+        let limit = max_cuts_per_node.saturating_sub(usize::from(reserve_trivial));
+        let mut generated = CutFrontier::new(limit);
         if let Some(sibling) = sibling_links
             .and_then(|links| links.get(node_id))
             .copied()
@@ -159,7 +123,7 @@ fn enumerate_cuts_impl(
                     fanout_estimates.as_slice(),
                     cell_index,
                 );
-                generated.push(cut);
+                generated.insert(cut);
             }
         }
 
@@ -171,17 +135,25 @@ fn enumerate_cuts_impl(
                 }
             }
             AigNode::Literal { value, .. } => {
-                generated.push(Cut {
-                    leaves: Vec::new(),
+                generated.insert(Cut {
+                    leaves: CutLeaves::new(),
                     truth: u64::from(*value),
                     useful: true,
                     flow: 0.0,
-                    delay: 0,
+                    delay: 0.0,
                 });
             }
             AigNode::And2 { a, b, .. } => {
                 for lhs in &cuts_by_node[a.node.id] {
                     for rhs in &cuts_by_node[b.node.id] {
+                        if lhs.leaves.len() + rhs.leaves.len() > max_cut_size
+                            && (leaf_signature(lhs.leaves.as_slice())
+                                | leaf_signature(rhs.leaves.as_slice()))
+                            .count_ones() as usize
+                                > max_cut_size
+                        {
+                            continue;
+                        }
                         let leaves = merge_leaves(lhs.leaves.as_slice(), rhs.leaves.as_slice());
                         if leaves.len() > max_cut_size {
                             continue;
@@ -203,7 +175,7 @@ fn enumerate_cuts_impl(
                             truth,
                             useful: false,
                             flow: 0.0,
-                            delay: 0,
+                            delay: 0.0,
                         };
                         refresh_cut_priority(
                             &mut cut,
@@ -212,15 +184,13 @@ fn enumerate_cuts_impl(
                             fanout_estimates.as_slice(),
                             cell_index,
                         );
-                        generated.push(cut);
+                        generated.insert(cut);
                     }
                 }
             }
         }
 
-        let reserve_trivial = matches!(node, AigNode::Input { .. } | AigNode::And2 { .. });
-        let limit = max_cuts_per_node.saturating_sub(usize::from(reserve_trivial));
-        let mut cuts = deduplicate_and_trim(generated, limit);
+        let mut cuts = generated.into_cuts();
         if reserve_trivial {
             cuts.push(trivial_cut(node_ref));
         }
@@ -276,11 +246,11 @@ fn operand_phase(operand: AigOperand, phases: &[bool]) -> bool {
 
 fn trivial_cut(node: AigRef) -> Cut {
     Cut {
-        leaves: vec![node],
+        leaves: CutLeaves::from_slice(&[node]),
         truth: variable_truth(1, 0),
         useful: false,
         flow: 0.0,
-        delay: 0,
+        delay: 0.0,
     }
 }
 
@@ -291,10 +261,11 @@ fn propagatable_cuts(cuts: &[Cut], root: AigRef) -> impl Iterator<Item = &Cut> {
 }
 
 fn is_trivial_cut_for_node(cut: &Cut, root: AigRef) -> bool {
-    cut.leaves == [root] && cut.truth == variable_truth(1, 0)
+    cut.leaves.as_slice() == [root] && cut.truth == variable_truth(1, 0)
 }
 
-fn structural_fanout_estimates(graph: &GateFn) -> Vec<usize> {
+/// Computes NF's initial per-object area-flow reference approximation.
+pub(super) fn structural_fanout_estimates(graph: &GateFn) -> Vec<usize> {
     let mut fanouts = vec![0usize; graph.gates.len()];
     for node in &graph.gates {
         let AigNode::And2 { a, b, .. } = node else {
@@ -318,21 +289,37 @@ fn refresh_cut_priority(
     fanout_estimates: &[usize],
     cell_index: Option<&LibertyCellIndex>,
 ) {
-    cut.useful = cell_index.is_none_or(|index| {
-        !index.matches(cut.leaves.len(), cut.truth).is_empty()
-            || !index
-                .matches(
-                    cut.leaves.len(),
-                    complement_truth(cut.truth, cut.leaves.len()),
-                )
-                .is_empty()
+    let best_cell = cell_index.and_then(|index| {
+        index
+            .matches(cut.leaves.len(), cut.truth)
+            .iter()
+            .chain(index.matches(
+                cut.leaves.len(),
+                complement_truth(cut.truth, cut.leaves.len()),
+            ))
+            .map(|binding| index.binding(*binding))
+            .min_by(|lhs, rhs| {
+                lhs.area
+                    .total_cmp(&rhs.area)
+                    .then_with(|| {
+                        lhs.worst_nominal_delay()
+                            .total_cmp(&rhs.worst_nominal_delay())
+                    })
+                    .then_with(|| lhs.stable_key().cmp(&rhs.stable_key()))
+            })
     });
-    let mut flow = if cut.leaves.len() < 2 {
-        0.0
-    } else {
-        cut.leaves.len() as f64
-    };
-    let mut delay = 0usize;
+    cut.useful = cell_index.is_none() || best_cell.is_some();
+    let mut flow = best_cell.map_or_else(
+        || {
+            if cut.leaves.len() < 2 {
+                0.0
+            } else {
+                cut.leaves.len() as f64
+            }
+        },
+        |cell| cell.area,
+    );
+    let mut delay = 0.0_f64;
     for leaf in &cut.leaves {
         let leaf_best = cuts_by_node.get(leaf.id).and_then(|cuts| {
             cuts.iter()
@@ -345,11 +332,14 @@ fn refresh_cut_priority(
     }
     let root_flow_refs = 2.0 * fanout_estimates[root.id].max(1) as f64;
     cut.flow = flow / root_flow_refs;
-    cut.delay = delay + usize::from(cut.leaves.len() > 1);
+    let gate_delay = best_cell
+        .map(|cell| cell.worst_nominal_delay().max(f64::EPSILON))
+        .unwrap_or(f64::from(cut.leaves.len() > 1));
+    cut.delay = delay + gate_delay;
 }
 
-fn merge_leaves(lhs: &[AigRef], rhs: &[AigRef]) -> Vec<AigRef> {
-    let mut merged = Vec::with_capacity(lhs.len() + rhs.len());
+fn merge_leaves(lhs: &[AigRef], rhs: &[AigRef]) -> CutLeaves {
+    let mut merged = CutLeaves::with_capacity(lhs.len() + rhs.len());
     let (mut lhs_index, mut rhs_index) = (0usize, 0usize);
     while lhs_index < lhs.len() && rhs_index < rhs.len() {
         match lhs[lhs_index].cmp(&rhs[rhs_index]) {
@@ -373,38 +363,79 @@ fn merge_leaves(lhs: &[AigRef], rhs: &[AigRef]) -> Vec<AigRef> {
     merged
 }
 
-fn deduplicate_and_trim(cuts: Vec<Cut>, limit: usize) -> Vec<Cut> {
-    let mut by_leaves: BTreeMap<Vec<AigRef>, Cut> = BTreeMap::new();
-    for cut in cuts {
-        match by_leaves.get(&cut.leaves) {
-            Some(existing) if cut_priority_order(existing, &cut).is_le() => {}
-            _ => {
-                by_leaves.insert(cut.leaves.clone(), cut);
+/// Bounded sorted cut frontier that rejects duplicate and dominated cuts early.
+struct CutFrontier {
+    cuts: Vec<Cut>,
+    limit: usize,
+}
+
+impl CutFrontier {
+    /// Reserves only the cuts that can survive this node's configured budget.
+    fn new(limit: usize) -> Self {
+        Self {
+            cuts: Vec::with_capacity(limit),
+            limit,
+        }
+    }
+
+    /// Inserts a useful structural candidate without materializing a full
+    /// product.
+    fn insert(&mut self, cut: Cut) {
+        if self.limit == 0 {
+            return;
+        }
+        if let Some(position) = self
+            .cuts
+            .iter()
+            .position(|existing| existing.leaves == cut.leaves)
+        {
+            if !cut_priority_order(&cut, &self.cuts[position]).is_lt() {
+                return;
             }
+            self.cuts.remove(position);
         }
-    }
-    let mut deduplicated: Vec<Cut> = by_leaves.into_values().collect();
-    deduplicated.sort_by(cut_priority_order);
-    let mut retained = Vec::new();
-    for cut in deduplicated {
-        if retained.iter().any(|existing: &Cut| {
+        if self.cuts.iter().any(|existing| {
             leaves_are_subset(existing.leaves.as_slice(), cut.leaves.as_slice())
+                && !cut_priority_order(&cut, existing).is_lt()
         }) {
-            continue;
+            return;
         }
-        retained.push(cut);
-        if retained.len() == limit {
-            break;
+        self.cuts.retain(|existing| {
+            !(leaves_are_subset(cut.leaves.as_slice(), existing.leaves.as_slice())
+                && !cut_priority_order(existing, &cut).is_lt())
+        });
+        let position = self
+            .cuts
+            .partition_point(|existing| !cut_priority_order(existing, &cut).is_gt());
+        self.cuts.insert(position, cut);
+        if self.cuts.len() > self.limit {
+            self.cuts.pop();
         }
     }
-    retained
+
+    /// Returns whether any nontrivial cut has survived the frontier.
+    fn is_empty(&self) -> bool {
+        self.cuts.is_empty()
+    }
+
+    /// Transfers the already-sorted retained cuts without a second sort.
+    fn into_cuts(self) -> Vec<Cut> {
+        self.cuts
+    }
+}
+
+/// Computes a safe 64-bit lower bound on the merged cut's leaf count.
+fn leaf_signature(leaves: &[AigRef]) -> u64 {
+    leaves.iter().fold(0_u64, |signature, leaf| {
+        signature | (1_u64 << (leaf.id & 63))
+    })
 }
 
 fn cut_priority_order(lhs: &Cut, rhs: &Cut) -> std::cmp::Ordering {
     rhs.useful
         .cmp(&lhs.useful)
         .then_with(|| lhs.flow.total_cmp(&rhs.flow))
-        .then_with(|| lhs.delay.cmp(&rhs.delay))
+        .then_with(|| lhs.delay.total_cmp(&rhs.delay))
         .then_with(|| lhs.leaves.len().cmp(&rhs.leaves.len()))
         .then_with(|| lhs.leaves.cmp(&rhs.leaves))
         .then_with(|| lhs.truth.cmp(&rhs.truth))
@@ -443,14 +474,14 @@ mod tests {
         let cuts = enumerate_cuts(&graph, 2, 8).unwrap();
         let root_cut = cuts[root.node.id]
             .iter()
-            .find(|cut| cut.leaves == vec![a.node, b.node])
+            .find(|cut| cut.leaves == CutLeaves::from_slice(&[a.node, b.node]))
             .unwrap();
 
         assert_eq!(root_cut.truth, 0b0010);
     }
 
     #[test]
-    fn choice_analysis_normalizes_relative_phase() {
+    fn choice_analysis_computes_sibling_relative_phase() {
         let mut builder = GateBuilder::new("choices".to_string(), GateBuilderOptions::no_opt());
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
         let not_a = builder.add_and_binary(a.negate(), a.negate());
@@ -461,11 +492,9 @@ mod tests {
         let choice_aig = ChoiceAig::new(graph, siblings).unwrap();
 
         let analysis = analyze_choices(&choice_aig).unwrap();
-        let (_, a_polarity) = analysis.state_for_positive_node(a.node);
-        let (_, not_a_polarity) = analysis.state_for_positive_node(not_a.node);
 
-        assert!(!a_polarity);
-        assert!(not_a_polarity);
+        assert!(!analysis.phase_by_node[a.node.id]);
+        assert!(analysis.phase_by_node[not_a.node.id]);
     }
 
     #[test]
@@ -499,7 +528,7 @@ mod tests {
         assert!(
             cuts[parent.node.id]
                 .iter()
-                .any(|cut| cut.leaves == vec![a.node, c.node])
+                .any(|cut| cut.leaves == CutLeaves::from_slice(&[a.node, c.node]))
         );
     }
 }
