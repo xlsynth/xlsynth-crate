@@ -341,6 +341,15 @@ pub(super) fn try_gatify_selected_unit_delta(
         return None;
     }
     let matched = match_selected_unit_delta(f, env, cases, output_width, adder_mapping)?;
+    if matches!(matched.adder_mapping, AdderMapping::RippleCarry) {
+        log::debug!(
+            "selected-unit lowering: selector={} width={} adder={} choice=mux",
+            f.get_node(selector).text_id,
+            output_width,
+            matched.adder_mapping
+        );
+        return None;
+    }
     let selector_bit = *selector_bits.get_lsb(0);
     let selector_depth = gb.aig_depth(selector_bit)?;
     let changed_depth = matched

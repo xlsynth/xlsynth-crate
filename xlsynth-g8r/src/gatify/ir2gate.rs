@@ -6946,6 +6946,63 @@ top fn f(x: bits[16] id=1, a: bits[16] id=2, b: bits[16] id=3) -> bits[16] {
     }
 
     #[test]
+    fn test_selected_unit_delta_preserves_mux_for_ripple_carry() {
+        for (arch, adder_mapping) in [
+            (", arch=ripple_carry", AdderMapping::KoggeStone),
+            ("", AdderMapping::RippleCarry),
+        ] {
+            let ir_text = format!(
+                r#"package sample
+
+top fn f(x: bits[16] id=1, en: bits[6] id=2) -> bits[16] {{
+  e0: bits[1] = bit_slice(en, start=0, width=1, id=3)
+  e1: bits[1] = bit_slice(en, start=1, width=1, id=4)
+  e2: bits[1] = bit_slice(en, start=2, width=1, id=5)
+  e3: bits[1] = bit_slice(en, start=3, width=1, id=6)
+  e4: bits[1] = bit_slice(en, start=4, width=1, id=7)
+  e5: bits[1] = bit_slice(en, start=5, width=1, id=8)
+  p1: bits[1] = and(e0, e1, id=9)
+  p2: bits[1] = and(p1, e2, id=10)
+  p3: bits[1] = and(p2, e3, id=11)
+  p4: bits[1] = and(p3, e4, id=12)
+  selector: bits[1] = and(p4, e5, id=13)
+  one: bits[16] = literal(value=1, id=14)
+  changed: bits[16] = ext_nary_add(x, one, signed=[false, false], negated=[false, false]{arch}, id=15)
+  ret out: bits[16] = sel(selector, cases=[x, changed], id=16)
+}}
+"#
+            );
+
+            let lower = |enable_rewrite_nary_add| {
+                let mut parser = ir_parser::Parser::new(&ir_text);
+                let ir_package = parser.parse_and_validate_package().unwrap();
+                let ir_fn = ir_package.get_top_fn().unwrap();
+                super::gatify_prepared_fn(
+                    ir_fn,
+                    GatifyOptions {
+                        adder_mapping,
+                        enable_rewrite_nary_add,
+                        ..GatifyOptions::all_opts_disabled()
+                    },
+                )
+                .unwrap()
+                .gate_fn
+            };
+
+            let guarded_stats = get_summary_stats(&lower(true));
+            let muxed_stats = get_summary_stats(&lower(false));
+            assert_eq!(
+                guarded_stats.live_nodes, muxed_stats.live_nodes,
+                "ripple-carry selected updates should preserve mux area: arch={arch:?} mapping={adder_mapping:?}"
+            );
+            assert_eq!(
+                guarded_stats.deepest_path, muxed_stats.deepest_path,
+                "ripple-carry selected updates should preserve mux depth: arch={arch:?} mapping={adder_mapping:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_selected_unit_delta_matches_zero_extended_base_and_wide_decrement() {
         let zero_extended_ir = r#"package sample
 
