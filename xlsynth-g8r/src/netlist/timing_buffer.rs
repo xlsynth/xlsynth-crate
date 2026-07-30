@@ -1366,7 +1366,7 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         BufferTimingConstraints, TimingSinkGroup, insert_timing_aware_buffers, select_timing_buffer,
     };
@@ -1396,7 +1396,7 @@ mod tests {
     }
 
     /// Creates a real, load-sensitive FF beside functionally indexed buffers.
-    fn registered_timing_library() -> Library {
+    pub(crate) fn registered_timing_library() -> Library {
         let mut builder = LibraryBuilder::from_library(sizing_library());
         builder.lu_table_templates.push(LuTableTemplate {
             kind: "lu_table_template".to_string().into(),
@@ -1472,7 +1472,7 @@ mod tests {
     }
 
     /// Returns an eight-capture pipeline with a genuinely overloaded FF Q.
-    fn high_fanout_register_source() -> &'static str {
+    pub(crate) fn high_fanout_register_source() -> &'static str {
         r#"
 module top(clk, a, out);
   input clk;

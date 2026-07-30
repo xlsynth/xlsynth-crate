@@ -658,15 +658,24 @@ Key flags:
   bound; by default, use the Liberty output's characterized maximum load.
 - `--buffer-primary-inputs`: also buffer high-fanout data primary inputs;
   clock pins are never buffered.
-- `--resize <true|false>`: enable exact-timing critical-path upsizing followed
-  by timing-protected area recovery (default: `false`; currently supported for
-  combinational designs only).
-- `--resize-iterations <N>`: maximum accepted critical-path upsizing moves
+- `--resize <true|false>`: enable exact-timing cell sizing, Boolean-safe
+  combinational input-pin swapping, and timing-protected area recovery
+  (default: `false`). For registered designs, resize functionally equivalent
+  combinational gates, inserted buffers, and positive-edge flip-flops after
+  register restoration and optional buffer insertion; independently preserve
+  setup requirements and external timing constraints while tracking clock-pin
+  load.
+- `--resize-rounds <N>`: maximum alternating timing-optimization and
+  area-recovery rounds (default: `3`); stop early at a local fixed point.
+- `--resize-iterations <N>`: maximum adaptive, batched critical-path sizing
+  iterations per optimization round; one iteration can accept several
+  independent resizing or pin-swapping moves
   (default: `16`).
 - `--resize-area-iterations <N>`: maximum accepted timing-protected downsizing
   moves (default: `32`).
-- `--resize-max-evaluations <N>`: maximum incremental timing trials per sizing
-  iteration (default: `64`).
+- `--resize-max-evaluations <N>`: maximum exact drive-strength timing trials
+  per sizing iteration (default: `64`); pin swaps receive an additional
+  bounded, quarter-sized trial budget.
 - `--primary-input-arrival <NAME=TIME>`: optional scalar primary-input arrival
   time; may be repeated.
 - `--primary-output-required <NAME=TIME>`: optional scalar primary-output
@@ -711,12 +720,17 @@ Key flags:
 - `--max-fanout <N>`: maximum sinks per buffer-tree level (default: `12`).
 - `--buffer-target-load <CAPACITANCE>`: optional explicit stage load bound.
 - `--buffer-primary-inputs`: permit buffering data primary inputs.
-- `--resize <true|false>`: enable critical-path sizing and area recovery
-  (default: `true`).
-- `--resize-iterations <N>`: maximum upsizing moves (default: `16`).
+- `--resize <true|false>`: enable exact-Liberty critical-path sizing,
+  Boolean-safe combinational input-pin swapping, and timing-protected area
+  recovery (default: `true`).
+- `--resize-rounds <N>`: maximum alternating timing-optimization and
+  area-recovery rounds (default: `3`).
+- `--resize-iterations <N>`: maximum adaptive, batched critical-path sizing
+  iterations per optimization round (default: `16`).
 - `--resize-area-iterations <N>`: maximum area-recovery moves (default: `32`).
-- `--resize-max-evaluations <N>`: exact timing trials per iteration
-  (default: `64`).
+- `--resize-max-evaluations <N>`: maximum exact drive-strength timing trials
+  per iteration (default: `64`); pin swaps receive an additional bounded,
+  quarter-sized trial budget.
 - `--json-out <PATH>`: write complete before/after area, delay, buffering, and
   resizing statistics.
 

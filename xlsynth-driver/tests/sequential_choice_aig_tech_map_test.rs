@@ -341,6 +341,73 @@ fn choice_aig_tech_map_accepts_register_aware_buffering() {
 }
 
 #[test]
+fn choice_aig_tech_map_accepts_register_aware_resizing() {
+    let fixture = make_fixture("g8rbin");
+    let design_path = fixture
+        .sequential_design_path
+        .to_str()
+        .expect("UTF-8 temporary native design path");
+    let output = run_choice_mapping(
+        &fixture,
+        &[
+            "--sequential-design",
+            design_path,
+            "--clock-period",
+            "10",
+            "--resize",
+            "true",
+            "--resize-rounds",
+            "2",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "register-aware resized mapping failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostics.contains("registers=1"));
+    assert!(diagnostics.contains("upsizes="));
+    assert!(fixture.netlist_path.is_file());
+}
+
+#[test]
+fn choice_aig_tech_map_accepts_registered_buffering_and_resizing() {
+    let fixture = make_fixture("g8rbin");
+    let design_path = fixture
+        .sequential_design_path
+        .to_str()
+        .expect("UTF-8 temporary native design path");
+    let output = run_choice_mapping(
+        &fixture,
+        &[
+            "--sequential-design",
+            design_path,
+            "--clock-period",
+            "10",
+            "--buffer",
+            "true",
+            "--resize",
+            "true",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "register-aware buffered and resized mapping failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostics.contains("registers=1"));
+    assert!(diagnostics.contains("buffers="));
+    assert!(diagnostics.contains("upsizes="));
+    assert!(fixture.netlist_path.is_file());
+}
+
+#[test]
 fn choice_aig_tech_map_remains_combinational_without_sequential_design() {
     let fixture = make_fixture("g8r");
     let output = run_choice_mapping(&fixture, &[]);

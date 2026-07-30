@@ -1,26 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Incremental Liberty-aware sizing for scalar combinational mapped netlists.
+//! Shared Liberty-aware resizing options and the combinational sizing API.
 
-use crate::liberty_model::{Library, PinDirection};
-use crate::netlist::cell_catalog::{CatalogCell, CellCatalog};
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule, PortDirection};
-use crate::netlist::report::build_area_report;
-use crate::netlist::sta::{
-    CombinationalOutputLoad, EdgeTiming, SignalTiming, StaOptions, TimingQueryDiagnosticCounts,
-    effective_input_capacitance_for_mapping, evaluate_combinational_cell_output_timing,
-};
-use crate::netlist::utils::scalar_constant_output_assignments;
+use crate::liberty_model::Library;
+use crate::netlist::parse::{Net, NetlistModule};
+use crate::netlist::sta::StaOptions;
+use crate::netlist::timing_buffer::BufferTimingConstraints;
+use crate::netlist::timing_resize::resize_timing_aware_netlist;
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+#[cfg(test)]
+use crate::liberty_model::PinDirection;
+#[cfg(test)]
+use crate::netlist::parse::{NetIndex, NetRef, PortDirection};
+#[cfg(test)]
+use crate::netlist::sta::{
+    CombinationalOutputLoad, EdgeTiming, SignalTiming, TimingQueryDiagnosticCounts,
+    effective_input_capacitance_for_mapping, evaluate_combinational_cell_output_timing,
+};
+#[cfg(test)]
+use crate::netlist::utils::scalar_constant_output_assignments;
+#[cfg(test)]
+use std::collections::{BTreeSet, HashMap};
 
 /// Bounded critical-path upsizing and timing-protected area-recovery options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResizeOptions {
     pub sta_options: StaOptions,
+    /// Maximum alternating timing-optimization and area-recovery rounds.
+    pub max_outer_iterations: usize,
     pub max_iterations: usize,
     pub max_area_iterations: usize,
     pub max_candidate_paths: usize,
@@ -34,11 +45,12 @@ impl Default for ResizeOptions {
     fn default() -> Self {
         Self {
             sta_options: StaOptions::default(),
+            max_outer_iterations: 3,
             max_iterations: 16,
             max_area_iterations: 32,
-            max_candidate_paths: 8,
+            max_candidate_paths: 32,
             max_evaluations_per_iteration: 64,
-            max_cell_candidates_per_instance: 4,
+            max_cell_candidates_per_instance: 8,
             improvement_epsilon: 1e-9,
             area_epsilon: 1e-12,
         }
@@ -57,6 +69,17 @@ pub struct ResizeStep {
     pub area_after: f64,
 }
 
+/// One accepted Boolean-safe exchange of characterized cell input pins.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PinSwapStep {
+    pub instance: String,
+    pub cell: String,
+    pub first_pin: String,
+    pub second_pin: String,
+    pub delay_before: f64,
+    pub delay_after: f64,
+}
+
 /// Machine-readable results of buffered-netlist upsizing and downsizing.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ResizeStats {
@@ -64,20 +87,37 @@ pub struct ResizeStats {
     pub final_delay: f64,
     pub initial_area: f64,
     pub final_area: f64,
+    /// Completed alternating timing and timing-protected recovery rounds.
+    pub outer_iterations: usize,
     pub evaluations: usize,
+    /// Exact incremental trials spent evaluating Boolean-safe pin exchanges.
+    pub pin_swap_evaluations: usize,
     pub failed_evaluations: usize,
     pub recomputed_instances: usize,
     pub upsizes: usize,
     pub downsizes: usize,
+    /// Accepted drive-strength increases of physical flip-flops.
+    pub register_upsizes: usize,
+    /// Accepted timing-preserving drive-strength decreases of flip-flops.
+    pub register_downsizes: usize,
+    /// Accepted zero-area exchanges of combinational Liberty input pins.
+    pub pin_swaps: usize,
+    /// Aggregate clock-pin capacitance before register-aware sizing.
+    pub initial_clock_load: Option<f64>,
+    /// Aggregate clock-pin capacitance after register-aware sizing.
+    pub final_clock_load: Option<f64>,
     pub replacements: Vec<ResizeStep>,
+    pub pin_swap_steps: Vec<PinSwapStep>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct InstanceInput {
     name: String,
     net: Option<NetIndex>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct InstanceTiming {
     cell_index: usize,
@@ -87,45 +127,28 @@ struct InstanceTiming {
     known_pin_values: HashMap<String, bool>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct TimingScore {
     endpoint_delays: Vec<f64>,
 }
 
+#[cfg(test)]
 impl TimingScore {
-    /// Uses all ordered outputs to avoid moving delay between tied endpoints.
-    fn improvement_over(&self, previous: &Self, epsilon: f64) -> Option<f64> {
-        for (candidate, current) in self.endpoint_delays.iter().zip(&previous.endpoint_delays) {
-            let delta = current - candidate;
-            if delta.abs() > epsilon {
-                return (delta > 0.0).then_some(delta);
-            }
-        }
-        None
-    }
-
     /// Returns the largest actual combinational output arrival.
     fn worst_delay(&self) -> f64 {
         self.endpoint_delays.first().copied().unwrap_or(0.0)
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct TrialResult {
     score: TimingScore,
     recomputed_instances: usize,
 }
 
-#[derive(Clone, Debug)]
-struct ResizeMove {
-    instance_index: usize,
-    cell_index: usize,
-    score: TimingScore,
-    ranking: f64,
-    area: f64,
-}
-
-/// Sizes a buffered scalar netlist for delay, then recovers noncritical area.
+/// Sizes a combinational netlist with the shared exact-Liberty timing engine.
 pub fn resize_netlist(
     module: &mut NetlistModule,
     nets: &[Net],
@@ -133,266 +156,20 @@ pub fn resize_netlist(
     library: &Library,
     options: &ResizeOptions,
 ) -> Result<ResizeStats> {
-    validate_options(options)?;
-    let catalog = CellCatalog::new(library)?;
-    let initial_area = build_area_report(module, interner, library)?.area;
-    let mut timing =
-        IncrementalCombinationalSta::new(module, nets, interner, library, options.sta_options)?;
-    let mut score = timing.score();
-    let mut stats = ResizeStats {
-        initial_delay: score.worst_delay(),
-        final_delay: score.worst_delay(),
-        initial_area,
-        final_area: initial_area,
-        ..ResizeStats::default()
-    };
-    let mut area = initial_area;
-
-    for _ in 0..options.max_iterations {
-        let mut best: Option<ResizeMove> = None;
-        let mut round_evaluations = 0;
-        let critical = timing.critical_instances(options.max_candidate_paths);
-        'instances: for instance_index in critical {
-            let Some(current) = catalog.by_name(timing.cell_name(instance_index)) else {
-                continue;
-            };
-            let mut alternatives = catalog
-                .family(current)
-                .filter(|candidate| candidate.name != current.name)
-                .filter(|candidate| candidate.area + options.area_epsilon >= current.area)
-                .take(options.max_cell_candidates_per_instance);
-            for candidate in &mut alternatives {
-                if round_evaluations == options.max_evaluations_per_iteration {
-                    break 'instances;
-                }
-                round_evaluations += 1;
-                stats.evaluations += 1;
-                let evaluation = match timing.evaluate_cell_substitution(
-                    instance_index,
-                    candidate.cell_index,
-                    false,
-                ) {
-                    Ok(evaluation) => evaluation,
-                    Err(error) => {
-                        stats.failed_evaluations += 1;
-                        log::debug!("rejecting resize trial '{}': {error:#}", candidate.name);
-                        continue;
-                    }
-                };
-                stats.recomputed_instances += evaluation.recomputed_instances;
-                let Some(improvement) = evaluation
-                    .score
-                    .improvement_over(&score, options.improvement_epsilon)
-                else {
-                    continue;
-                };
-                let area_cost = (candidate.area - current.area).max(options.area_epsilon);
-                let ranking = improvement / area_cost;
-                let trial_area = area - current.area + candidate.area;
-                let is_better = best.as_ref().is_none_or(|existing| {
-                    ranking > existing.ranking + options.improvement_epsilon
-                        || ((ranking - existing.ranking).abs() <= options.improvement_epsilon
-                            && (
-                                evaluation.score.worst_delay(),
-                                instance_index,
-                                &candidate.name,
-                            ) < (
-                                existing.score.worst_delay(),
-                                existing.instance_index,
-                                &library.cells[existing.cell_index].name,
-                            ))
-                });
-                if is_better {
-                    best = Some(ResizeMove {
-                        instance_index,
-                        cell_index: candidate.cell_index,
-                        score: evaluation.score,
-                        ranking,
-                        area: trial_area,
-                    });
-                }
-            }
-        }
-        let Some(best) = best else {
-            break;
-        };
-        commit_move(
-            module,
-            interner,
-            library,
-            &mut timing,
-            &mut stats,
-            &mut score,
-            &mut area,
-            best,
-            true,
-        )?;
-    }
-
-    let delay_limit = score.worst_delay();
-    for _ in 0..options.max_area_iterations {
-        let candidates = area_recovery_instances(&timing, &catalog, options);
-        let mut best: Option<ResizeMove> = None;
-        let mut round_evaluations = 0;
-        'instances: for instance_index in candidates {
-            let Some(current) = catalog.by_name(timing.cell_name(instance_index)) else {
-                continue;
-            };
-            let mut alternatives: Vec<&CatalogCell> = catalog
-                .family(current)
-                .filter(|candidate| candidate.area + options.area_epsilon < current.area)
-                .collect();
-            alternatives.sort_by(|lhs, rhs| {
-                lhs.area
-                    .total_cmp(&rhs.area)
-                    .then_with(|| lhs.name.cmp(&rhs.name))
-            });
-            for candidate in alternatives
-                .into_iter()
-                .take(options.max_cell_candidates_per_instance)
-            {
-                if round_evaluations == options.max_evaluations_per_iteration {
-                    break 'instances;
-                }
-                round_evaluations += 1;
-                stats.evaluations += 1;
-                let evaluation = match timing.evaluate_cell_substitution(
-                    instance_index,
-                    candidate.cell_index,
-                    false,
-                ) {
-                    Ok(evaluation) => evaluation,
-                    Err(error) => {
-                        stats.failed_evaluations += 1;
-                        log::debug!(
-                            "rejecting area-recovery trial '{}': {error:#}",
-                            candidate.name
-                        );
-                        continue;
-                    }
-                };
-                stats.recomputed_instances += evaluation.recomputed_instances;
-                if evaluation.score.worst_delay() > delay_limit + options.improvement_epsilon {
-                    continue;
-                }
-                let trial_area = area - current.area + candidate.area;
-                let is_better = best.as_ref().is_none_or(|existing| {
-                    trial_area + options.area_epsilon < existing.area
-                        || ((trial_area - existing.area).abs() <= options.area_epsilon
-                            && (
-                                evaluation.score.worst_delay(),
-                                instance_index,
-                                &candidate.name,
-                            ) < (
-                                existing.score.worst_delay(),
-                                existing.instance_index,
-                                &library.cells[existing.cell_index].name,
-                            ))
-                });
-                if is_better {
-                    best = Some(ResizeMove {
-                        instance_index,
-                        cell_index: candidate.cell_index,
-                        score: evaluation.score,
-                        ranking: current.area - candidate.area,
-                        area: trial_area,
-                    });
-                }
-            }
-        }
-        let Some(best) = best else {
-            break;
-        };
-        commit_move(
-            module,
-            interner,
-            library,
-            &mut timing,
-            &mut stats,
-            &mut score,
-            &mut area,
-            best,
-            false,
-        )?;
-    }
-
-    stats.final_delay = score.worst_delay();
-    stats.final_area = build_area_report(module, interner, library)?.area;
-    Ok(stats)
-}
-
-/// Commits a validated move to both the netlist and incremental timing state.
-#[allow(clippy::too_many_arguments)]
-fn commit_move(
-    module: &mut NetlistModule,
-    interner: &mut StringInterner<StringBackend<SymbolU32>>,
-    library: &Library,
-    timing: &mut IncrementalCombinationalSta<'_>,
-    stats: &mut ResizeStats,
-    score: &mut TimingScore,
-    area: &mut f64,
-    selected: ResizeMove,
-    upsize: bool,
-) -> Result<()> {
-    let instance = &mut module.instances[selected.instance_index];
-    let instance_name = interner
-        .resolve(instance.instance_name)
-        .ok_or_else(|| anyhow!("cannot resolve resized instance name"))?
-        .to_string();
-    let old_cell = timing.cell_name(selected.instance_index).to_string();
-    let new_cell = library.cells[selected.cell_index].name.clone();
-    let before_delay = score.worst_delay();
-    let before_area = *area;
-    let committed =
-        timing.evaluate_cell_substitution(selected.instance_index, selected.cell_index, true)?;
-    stats.recomputed_instances += committed.recomputed_instances;
-    instance.type_name = interner.get_or_intern(new_cell.as_str());
-    *score = committed.score;
-    *area = selected.area;
-    stats.replacements.push(ResizeStep {
-        instance: instance_name,
-        old_cell,
-        new_cell,
-        delay_before: before_delay,
-        delay_after: score.worst_delay(),
-        area_before: before_area,
-        area_after: *area,
-    });
-    if upsize {
-        stats.upsizes += 1;
-    } else {
-        stats.downsizes += 1;
-    }
-    Ok(())
-}
-
-/// Visits the largest recoverable cells before less useful area trials.
-fn area_recovery_instances(
-    timing: &IncrementalCombinationalSta<'_>,
-    catalog: &CellCatalog,
-    options: &ResizeOptions,
-) -> Vec<usize> {
-    let mut instances = Vec::new();
-    for index in 0..timing.instances.len() {
-        let Some(current) = catalog.by_name(timing.cell_name(index)) else {
-            continue;
-        };
-        let saving = catalog
-            .family(current)
-            .filter(|candidate| candidate.area + options.area_epsilon < current.area)
-            .map(|candidate| current.area - candidate.area)
-            .fold(0.0_f64, f64::max);
-        if saving > options.area_epsilon {
-            instances.push((index, saving));
-        }
-    }
-    instances.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1).then_with(|| lhs.0.cmp(&rhs.0)));
-    instances.into_iter().map(|(index, _)| index).collect()
+    resize_timing_aware_netlist(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        &BufferTimingConstraints::default(),
+    )
 }
 
 /// Rejects budgets and timing assumptions that could produce invalid trials.
-fn validate_options(options: &ResizeOptions) -> Result<()> {
-    if options.max_candidate_paths == 0
+pub(crate) fn validate_options(options: &ResizeOptions) -> Result<()> {
+    if options.max_outer_iterations == 0
+        || options.max_candidate_paths == 0
         || options.max_evaluations_per_iteration == 0
         || options.max_cell_candidates_per_instance == 0
     {
@@ -421,6 +198,7 @@ fn validate_options(options: &ResizeOptions) -> Result<()> {
 }
 
 /// Reusable exact-NLDM timing graph for same-pin combinational substitutions.
+#[cfg(test)]
 struct IncrementalCombinationalSta<'a> {
     library: &'a Library,
     instances: Vec<InstanceTiming>,
@@ -433,6 +211,7 @@ struct IncrementalCombinationalSta<'a> {
     diagnostic_counts: TimingQueryDiagnosticCounts,
 }
 
+#[cfg(test)]
 impl<'a> IncrementalCombinationalSta<'a> {
     /// Builds connectivity once and performs the initial full timing pass.
     fn new(
@@ -679,56 +458,6 @@ impl<'a> IncrementalCombinationalSta<'a> {
         TimingScore { endpoint_delays }
     }
 
-    /// Traces the highest-arrival output cones in deterministic priority order.
-    fn critical_instances(&self, max_paths: usize) -> Vec<usize> {
-        let mut endpoints: Vec<(NetIndex, f64)> = self
-            .outputs
-            .iter()
-            .copied()
-            .filter_map(|net| {
-                self.net_timing[net.0]
-                    .map(|timing| (net, timing.rise.arrival.max(timing.fall.arrival)))
-            })
-            .collect();
-        endpoints.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1).then_with(|| lhs.0.0.cmp(&rhs.0.0)));
-        let mut ranks: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
-        for (path_index, (mut net, _)) in endpoints.into_iter().take(max_paths).enumerate() {
-            let mut depth = 0;
-            while let Some(instance_index) = self.drivers[net.0] {
-                ranks
-                    .entry(instance_index)
-                    .and_modify(|rank| rank.0 += 1)
-                    .or_insert((1, path_index));
-                let next = self.instances[instance_index]
-                    .inputs
-                    .iter()
-                    .filter_map(|input| {
-                        let net = input.net?;
-                        let timing = self.net_timing[net.0]?;
-                        Some((net, timing.rise.arrival.max(timing.fall.arrival)))
-                    })
-                    .max_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1).then_with(|| rhs.0.0.cmp(&lhs.0.0)));
-                let Some((next_net, _)) = next else {
-                    break;
-                };
-                net = next_net;
-                depth += 1;
-                if depth > self.instances.len() {
-                    break;
-                }
-            }
-        }
-        let mut result: Vec<(usize, (usize, usize))> = ranks.into_iter().collect();
-        result.sort_by(|lhs, rhs| {
-            rhs.1
-                .0
-                .cmp(&lhs.1.0)
-                .then_with(|| lhs.1.1.cmp(&rhs.1.1))
-                .then_with(|| lhs.0.cmp(&rhs.0))
-        });
-        result.into_iter().map(|(instance, _)| instance).collect()
-    }
-
     /// Evaluates or commits one replacement while updating only its dirty cone.
     fn evaluate_cell_substitution(
         &mut self,
@@ -916,6 +645,8 @@ endmodule
 
         assert_eq!(stats.upsizes, 1);
         assert_eq!(stats.downsizes, 0);
+        assert_eq!(stats.initial_clock_load, None);
+        assert_eq!(stats.final_clock_load, None);
         assert!(stats.final_delay < stats.initial_delay);
         assert_eq!(
             interner.resolve(module.instances[0].type_name),

@@ -168,18 +168,42 @@ characterization and cannot run in a production build.
 
 ### Cell Resizing and Area Recovery
 
-`netlist::resize` groups combinational cells by exact Boolean function,
-identical input-pin names, and identical output-pin names. A substitution is
+`netlist::resize` exposes the combinational entry point to the shared
+`netlist::timing_resize` engine. It groups combinational cells by exact
+Boolean function, identical input-pin names, and identical output-pin names;
+physical flip-flops additionally require identical clock, data/control
+interface, state transition, and state-output polarity. Substitutions are
 therefore structurally and logically safe without name- or suffix-based drive
 strength assumptions.
 
-The resizer builds the scalar timing graph once. Each candidate updates both
-the replacement cell and the rise/fall input capacitances seen by its upstream
-drivers, propagates exact `gv-stats` Liberty timing through the affected
-downstream cone, and rolls back every rejected trial. It first accepts
-bounded, beneficial substitutions on the worst output paths. After buffer
-insertion and upsizing have established the achievable delay, it downsizes
-noncritical cells only when a trial preserves that delay.
+The resizer builds a normalized per-bit timing graph once. Each rise and fall
+transition retains the Liberty input pin, transition, slew, load, and setup arc
+that actually determine its arrival. An initially one-percent near-critical
+window traces the exact winning paths and all other characterized input arcs
+with sufficient slack. It also considers otherwise noncritical gates and
+registers whose input capacitance loads a critical driver. The window expands
+adaptively when no improving move is available. Candidates are ranked first by
+independently meaningful endpoint delay, and non-overlapping changes are
+applied in deterministic batches rather than limiting each sizing iteration to
+a single replacement.
+
+Cell substitution and input-pin exchange are moves in the same incremental
+optimizer. The Liberty catalog derives legal combinational input swaps by
+checking the complete cell truth table; a pin exchange is never inferred from
+cell or pin naming. Each trial updates both rise and fall input capacitances,
+propagates exact `gv-stats` Liberty timing through the affected upstream and
+downstream cones, and restores all timing, predecessor, known-pin, setup, and
+clock-load state when rejected. The best complete solution includes both cell
+types and physical pin connections. Equivalent cell alternatives are ordered
+using their timing at the actual observed slew and load; fair evaluation
+scheduling considers zero-area pin exchanges and larger, equal-area, and
+smaller drive variants.
+
+Timing optimization and timing-protected area recovery alternate for at most
+three rounds by default, stopping early at a local fixed point. Area recovery
+accepts only functionally equivalent smaller cells that preserve every
+achieved endpoint timing class. A final bounded, zero-area pin-swap cleanup
+can expose one last timing-protected recovery opportunity.
 
 `netlist::optimize::optimize_mapped_netlist` exposes the complete reusable
 buffer-then-resize pipeline. It verifies both initial and final results using
@@ -187,10 +211,22 @@ independent full parsed-netlist area and timing analysis. Both passes are
 disabled by default for NF mapping and can be explicitly enabled or bounded
 individually.
 
-Timing-driven buffering can also be enabled for registered mapping using the
-existing `buffer_options`. Sequential cell upsizing and post-buffering area
-recovery are separate follow-up work; requesting `resize_options` for a
-registered design remains an explicit error.
+The same engine handles mapped sequential modules without changing the
+objective or substituting unit delays. It tracks primary-input and register
+launches separately, recomputes actual Liberty clock-to-Q and setup arcs, and
+preserves register-to-register, input-to-register, register-to-output, and
+input-to-output timing independently. Candidate trials preserve clock-period
+and individual primary-output constraints, and physical flip-flop substitutions
+continue to track total clock-pin load.
+
+Sequential optimization runs in the order physical-register restoration,
+optional timing-aware buffer insertion, ABC-style smallest-adequate electrical
+sizing, and bounded alternating gate/buffer/flip-flop sizing, combinational
+pin swapping, and timing-preserving area recovery. Physical clock, data,
+reset, and enable pins are never exchanged. Both the existing `buffer_options`
+and `resize_options` remain independently optional; final area, register
+counts, setup slack, and endpoint timing are independently recomputed using
+the production `gv-stats` engine.
 
 ### Output Contract
 

@@ -81,6 +81,35 @@ pub struct SignalTiming {
     pub fall: EdgeTiming,
 }
 
+/// Identifies the physical transition that produced a Liberty timing result.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum TimingEdge {
+    Rise,
+    Fall,
+}
+
+/// Identifies the input pin and transition that determine an output edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TimingPredecessor {
+    pub input_index: usize,
+    pub input_edge: TimingEdge,
+}
+
+/// Exact Liberty output timing and the actual predecessor of each output edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TracedCombinationalTiming {
+    pub timing: SignalTiming,
+    pub rise_predecessor: Option<TimingPredecessor>,
+    pub fall_predecessor: Option<TimingPredecessor>,
+}
+
+/// Exact setup-adjusted register arrival and its winning data transition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TracedRegisterCapture {
+    pub arrival: f64,
+    pub input_edge: TimingEdge,
+}
+
 /// Component delays making up one launched register-to-capture-register path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct RegisterPathDelayBreakdown {
@@ -93,13 +122,25 @@ pub struct RegisterPathDelayBreakdown {
 struct EdgeTimingCandidate {
     timing: EdgeTiming,
     register_path_breakdown: Option<RegisterPathDelayBreakdown>,
+    source_edge: Option<TimingEdge>,
 }
 
 impl EdgeTimingCandidate {
+    #[cfg(test)]
     fn from_timing(timing: EdgeTiming) -> Self {
         Self {
             timing,
             register_path_breakdown: None,
+            source_edge: None,
+        }
+    }
+
+    /// Preserves the rise/fall input transition through Liberty arc evaluation.
+    fn from_source_timing(timing: EdgeTiming, source_edge: TimingEdge) -> Self {
+        Self {
+            timing,
+            register_path_breakdown: None,
+            source_edge: Some(source_edge),
         }
     }
 
@@ -110,6 +151,7 @@ impl EdgeTimingCandidate {
                 ..Default::default()
             }),
             timing,
+            source_edge: None,
         }
     }
 
@@ -117,6 +159,7 @@ impl EdgeTimingCandidate {
         Self {
             timing,
             register_path_breakdown: Some(RegisterPathDelayBreakdown::default()),
+            source_edge: None,
         }
     }
 }
@@ -127,6 +170,7 @@ struct EdgeTimingSet {
 }
 
 impl EdgeTimingSet {
+    #[cfg(test)]
     fn from_single(edge: EdgeTiming) -> Self {
         let mut set = Self::default();
         set.insert(EdgeTimingCandidate::from_timing(edge));
@@ -204,10 +248,17 @@ struct SignalTimingSet {
 
 impl SignalTimingSet {
     fn from_single(signal: SignalTiming) -> Self {
-        Self {
-            rise: EdgeTimingSet::from_single(signal.rise),
-            fall: EdgeTimingSet::from_single(signal.fall),
-        }
+        let mut rise = EdgeTimingSet::default();
+        rise.insert(EdgeTimingCandidate::from_source_timing(
+            signal.rise,
+            TimingEdge::Rise,
+        ));
+        let mut fall = EdgeTimingSet::default();
+        fall.insert(EdgeTimingCandidate::from_source_timing(
+            signal.fall,
+            TimingEdge::Fall,
+        ));
+        Self { rise, fall }
     }
 
     fn from_primary_input_launch(signal: SignalTiming) -> Self {
@@ -326,6 +377,8 @@ impl std::ops::AddAssign for TimingQueryDiagnosticCounts {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaReport {
     pub net_timing: Vec<Option<SignalTiming>>,
+    /// Exact timing for canonical normalized bits before net aggregation.
+    pub(crate) bit_timing: Vec<Option<SignalTiming>>,
     /// Exact rise/fall timing for each flattened primary-output bit.
     pub output_bit_timings: BTreeMap<String, SignalTiming>,
     pub worst_output_arrival: f64,
@@ -341,6 +394,11 @@ pub struct StaReport {
 impl StaReport {
     pub fn timing_for_net(&self, net: NetIndex) -> Option<SignalTiming> {
         self.net_timing.get(net.0).copied().flatten()
+    }
+
+    /// Returns the exact timing of one normalized, alias-resolved net bit.
+    pub(crate) fn timing_for_bit(&self, bit: usize) -> Option<SignalTiming> {
+        self.bit_timing.get(bit).copied().flatten()
     }
 
     /// Returns exact timing keyed by scalar or flattened packed-output name.
@@ -1608,6 +1666,18 @@ fn analyze_max_arrival_proto_with_mode(
         }
     }
 
+    let bit_timing = resolved_timing_sources
+        .iter()
+        .copied()
+        .map(|source| {
+            timing_set_for_resolved_source(
+                source,
+                bit_timing_sets.as_slice(),
+                &literal_source_timing_set,
+            )
+            .and_then(SignalTimingSet::as_report_signal_timing)
+        })
+        .collect();
     let net_timing = aggregate_bit_timing_by_net(
         bit_timing_sets.as_slice(),
         resolved_timing_sources.as_slice(),
@@ -1626,6 +1696,7 @@ fn analyze_max_arrival_proto_with_mode(
 
     Ok(StaReport {
         net_timing,
+        bit_timing,
         output_bit_timings,
         worst_output_arrival: worst_output
             .map(|timing| timing.timing.arrival)
@@ -2109,6 +2180,28 @@ pub(crate) fn evaluate_combinational_cell_output_timing(
     known_pin_values: &HashMap<String, bool>,
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
 ) -> Result<SignalTiming> {
+    evaluate_combinational_cell_output_timing_with_predecessors(
+        library,
+        cell_name,
+        output_pin,
+        input_timings,
+        output_load,
+        known_pin_values,
+        timing_query_diagnostic_counts,
+    )
+    .map(|result| result.timing)
+}
+
+/// Evaluates exact Liberty arcs while retaining both winning input transitions.
+pub(crate) fn evaluate_combinational_cell_output_timing_with_predecessors(
+    library: &crate::liberty_model::Library,
+    cell_name: &str,
+    output_pin: &Pin,
+    input_timings: &[(&str, SignalTiming)],
+    output_load: CombinationalOutputLoad,
+    known_pin_values: &HashMap<String, bool>,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+) -> Result<TracedCombinationalTiming> {
     let output_pin_name = library.resolve_string(&output_pin.name);
     if output_pin.direction != PinDirection::Output as i32 {
         return Err(anyhow!(
@@ -2136,15 +2229,19 @@ pub(crate) fn evaluate_combinational_cell_output_timing(
         .collect();
     if combinational_arcs.is_empty() {
         if constant_output_function_value(library, cell_name, output_pin)?.is_some() {
-            return Ok(SignalTiming {
-                rise: EdgeTiming {
-                    arrival: 0.0,
-                    transition: 0.0,
+            return Ok(TracedCombinationalTiming {
+                timing: SignalTiming {
+                    rise: EdgeTiming {
+                        arrival: 0.0,
+                        transition: 0.0,
+                    },
+                    fall: EdgeTiming {
+                        arrival: 0.0,
+                        transition: 0.0,
+                    },
                 },
-                fall: EdgeTiming {
-                    arrival: 0.0,
-                    transition: 0.0,
-                },
+                rise_predecessor: None,
+                fall_predecessor: None,
             });
         }
         return Err(anyhow!(
@@ -2155,6 +2252,8 @@ pub(crate) fn evaluate_combinational_cell_output_timing(
     }
 
     let mut accumulated: Option<SignalTimingSet> = None;
+    let mut rise_winner: Option<(EdgeTimingCandidate, TimingPredecessor)> = None;
+    let mut fall_winner: Option<(EdgeTimingCandidate, TimingPredecessor)> = None;
     for arc in combinational_arcs {
         let related_text = library.resolve_string(&arc.related_pin);
         let context = format!(
@@ -2165,9 +2264,10 @@ pub(crate) fn evaluate_combinational_cell_output_timing(
             continue;
         }
         for related_pin_name in split_related_pin_names(related_text) {
-            let Some((_, input_timing)) = input_timings
+            let Some((input_index, (_, input_timing))) = input_timings
                 .iter()
-                .find(|(pin_name, _)| *pin_name == related_pin_name)
+                .enumerate()
+                .find(|(_, (pin_name, _))| *pin_name == related_pin_name)
             else {
                 continue;
             };
@@ -2179,6 +2279,16 @@ pub(crate) fn evaluate_combinational_cell_output_timing(
                 timing_query_diagnostic_counts,
                 context.as_str(),
             )?;
+            update_traced_timing_predecessor(
+                &mut rise_winner,
+                candidate.rise.max_arrival_candidate(),
+                input_index,
+            );
+            update_traced_timing_predecessor(
+                &mut fall_winner,
+                candidate.fall.max_arrival_candidate(),
+                input_index,
+            );
             accumulated = Some(match accumulated {
                 Some(previous) => previous.merge(&candidate),
                 None => candidate,
@@ -2193,13 +2303,132 @@ pub(crate) fn evaluate_combinational_cell_output_timing(
         ));
     };
     collapse_signal_timing_set_to_envelope(&mut output);
-    output.as_report_signal_timing().ok_or_else(|| {
+    let timing = output.as_report_signal_timing().ok_or_else(|| {
         anyhow!(
             "cell '{}' output pin '{}' produced an incomplete rise/fall timing result",
             cell_name,
             output_pin_name
         )
+    })?;
+    Ok(TracedCombinationalTiming {
+        timing,
+        rise_predecessor: rise_winner.map(|(_, predecessor)| predecessor),
+        fall_predecessor: fall_winner.map(|(_, predecessor)| predecessor),
     })
+}
+
+/// Selects predecessors using precisely the STA arrival/transition tie-break.
+fn update_traced_timing_predecessor(
+    winner: &mut Option<(EdgeTimingCandidate, TimingPredecessor)>,
+    candidate: Option<EdgeTimingCandidate>,
+    input_index: usize,
+) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    let Some(input_edge) = candidate.source_edge else {
+        return;
+    };
+    let replaces = winner.as_ref().is_none_or(|(previous, _)| {
+        candidate.timing.arrival > previous.timing.arrival
+            || (candidate.timing.arrival == previous.timing.arrival
+                && candidate.timing.transition > previous.timing.transition)
+    });
+    if replaces {
+        *winner = Some((
+            candidate,
+            TimingPredecessor {
+                input_index,
+                input_edge,
+            },
+        ));
+    }
+}
+
+/// Evaluates one actual flip-flop output using production clock-to-Q tables.
+pub(crate) fn evaluate_sequential_cell_output_timing(
+    library: &crate::liberty_model::Library,
+    cell_name: &str,
+    output_pin: &Pin,
+    output_load: CombinationalOutputLoad,
+    known_pin_values: &HashMap<String, bool>,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+) -> Result<SignalTiming> {
+    let output_name = library.resolve_string(&output_pin.name);
+    if output_pin.direction != PinDirection::Output as i32 {
+        return Err(anyhow!(
+            "sequential cell '{}' pin '{}' is not an output",
+            cell_name,
+            output_name
+        ));
+    }
+    let mut validated_tables = HashSet::new();
+    let context = format!("sequential cell '{cell_name}.{output_name}' clock-to-output");
+    evaluate_register_launch_output_set(
+        library,
+        cell_name,
+        output_pin,
+        known_pin_values,
+        output_load.into(),
+        &mut validated_tables,
+        timing_query_diagnostic_counts,
+        context.as_str(),
+    )?
+    .as_report_signal_timing()
+    .ok_or_else(|| anyhow!("{context} produced incomplete rise/fall timing"))
+}
+
+/// Evaluates a physical register setup arc and retains its winning data edge.
+pub(crate) fn evaluate_sequential_cell_capture_timing_with_predecessor(
+    library: &crate::liberty_model::Library,
+    cell_name: &str,
+    input_pin: &Pin,
+    data_timing: SignalTiming,
+    known_pin_values: &HashMap<String, bool>,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+) -> Result<Option<TracedRegisterCapture>> {
+    let pin_name = library.resolve_string(&input_pin.name);
+    if input_pin.direction != PinDirection::Input as i32 {
+        return Err(anyhow!(
+            "sequential cell '{}' pin '{}' is not an input",
+            cell_name,
+            pin_name
+        ));
+    }
+    let setup_arcs: Vec<&TimingArc> = input_pin
+        .timing_arcs
+        .iter()
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(library)).is_setup())
+        .collect();
+    if setup_arcs.is_empty() {
+        return Ok(None);
+    }
+    let mut validated_tables = HashSet::new();
+    validate_constraint_tables_once(
+        library,
+        cell_name,
+        pin_name,
+        setup_arcs.as_slice(),
+        &mut validated_tables,
+    )?;
+    let context = format!("sequential cell '{cell_name}.{pin_name}' setup");
+    evaluate_register_setup_capture_arrival(
+        library,
+        setup_arcs.as_slice(),
+        known_pin_values,
+        &SignalTimingSet::from_single(data_timing),
+        timing_query_diagnostic_counts,
+        context.as_str(),
+    )?
+    .map(|candidate| {
+        Ok(TracedRegisterCapture {
+            arrival: candidate.arrival,
+            input_edge: candidate.source_edge.ok_or_else(|| {
+                anyhow!("{context} produced no winning data-transition predecessor")
+            })?,
+        })
+    })
+    .transpose()
 }
 
 /// Classifies continuous assigns into live-STA-supported bit sources and
@@ -2565,6 +2794,7 @@ fn evaluate_output_edge_set(
                 breakdown.combinational_delay += delay;
                 breakdown
             }),
+            source_edge: source_edge.source_edge,
         });
     }
 
@@ -2683,6 +2913,7 @@ fn evaluate_register_launch_output_set(
 struct RegisterCaptureTimingCandidate {
     arrival: f64,
     register_path_breakdown: Option<RegisterPathDelayBreakdown>,
+    source_edge: Option<TimingEdge>,
 }
 
 /// Returns the worst data arrival plus setup requirement at one capture pin.
@@ -2767,6 +2998,7 @@ fn register_capture_timing_candidate(
             breakdown.setup_delay += setup;
             breakdown
         }),
+        source_edge: data_edge.source_edge,
     }
 }
 
@@ -3674,6 +3906,166 @@ mod tests {
         builder.lu_table_templates = vec![template];
         let table = test_table(&mut builder, kind, 1, vec![], vec![], values, dimensions);
         (builder.finish(), table)
+    }
+
+    #[test]
+    fn traced_combinational_timing_follows_the_slowest_actual_liberty_pin() {
+        let mut builder = LibraryBuilder::new();
+        let a_arc = scalar_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            8.0,
+            8.0,
+            0.1,
+            0.1,
+        );
+        let b_arc = scalar_arc(
+            &mut builder,
+            "B",
+            "positive_unate",
+            "combinational",
+            "",
+            1.0,
+            1.0,
+            0.1,
+            0.1,
+        );
+        let input_a = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let input_b = test_pin(&mut builder, "B", PinDirection::Input, "", vec![]);
+        let output = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "A * B",
+            vec![a_arc, b_arc],
+        );
+        builder.cells.push(Cell {
+            name: "AND2".to_string(),
+            pins: vec![input_a, input_b, output],
+            ..Cell::default()
+        });
+        let library = builder.finish();
+        let output = library.cells[0]
+            .pins
+            .iter()
+            .find(|pin| library.resolve_string(&pin.name) == "Y")
+            .expect("find the characterized output pin");
+        let signal = |arrival| SignalTiming {
+            rise: EdgeTiming {
+                arrival,
+                transition: 0.1,
+            },
+            fall: EdgeTiming {
+                arrival,
+                transition: 0.1,
+            },
+        };
+        let inputs = [("A", signal(0.0)), ("B", signal(4.0))];
+        let traced = evaluate_combinational_cell_output_timing_with_predecessors(
+            &library,
+            "AND2",
+            output,
+            &inputs,
+            CombinationalOutputLoad::default(),
+            &HashMap::new(),
+            &mut TimingQueryDiagnosticCounts::default(),
+        )
+        .expect("trace the true pin-delay critical path");
+
+        assert_eq!(traced.timing.rise.arrival, 8.0);
+        assert_eq!(traced.timing.fall.arrival, 8.0);
+        assert_eq!(
+            traced.rise_predecessor,
+            Some(TimingPredecessor {
+                input_index: 0,
+                input_edge: TimingEdge::Rise,
+            })
+        );
+        assert_eq!(
+            traced.fall_predecessor,
+            Some(TimingPredecessor {
+                input_index: 0,
+                input_edge: TimingEdge::Fall,
+            })
+        );
+        assert_eq!(
+            traced.timing,
+            evaluate_combinational_cell_output_timing(
+                &library,
+                "AND2",
+                output,
+                &inputs,
+                CombinationalOutputLoad::default(),
+                &HashMap::new(),
+                &mut TimingQueryDiagnosticCounts::default(),
+            )
+            .expect("preserve the existing exact Liberty timing semantics")
+        );
+    }
+
+    #[test]
+    fn traced_combinational_timing_preserves_negative_unate_source_edges() {
+        let mut builder = LibraryBuilder::new();
+        let arc = scalar_arc(
+            &mut builder,
+            "A",
+            "negative_unate",
+            "combinational",
+            "",
+            2.0,
+            3.0,
+            0.1,
+            0.1,
+        );
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "!A", vec![arc]);
+        builder.cells.push(Cell {
+            name: "INV".to_string(),
+            pins: vec![input, output],
+            ..Cell::default()
+        });
+        let library = builder.finish();
+        let output = &library.cells[0].pins[1];
+        let input = SignalTiming {
+            rise: EdgeTiming {
+                arrival: 5.0,
+                transition: 0.1,
+            },
+            fall: EdgeTiming {
+                arrival: 7.0,
+                transition: 0.1,
+            },
+        };
+        let traced = evaluate_combinational_cell_output_timing_with_predecessors(
+            &library,
+            "INV",
+            output,
+            &[("A", input)],
+            CombinationalOutputLoad::default(),
+            &HashMap::new(),
+            &mut TimingQueryDiagnosticCounts::default(),
+        )
+        .expect("trace the actual inverting Liberty timing arc");
+
+        assert_eq!(traced.timing.rise.arrival, 9.0);
+        assert_eq!(traced.timing.fall.arrival, 8.0);
+        assert_eq!(
+            traced.rise_predecessor,
+            Some(TimingPredecessor {
+                input_index: 0,
+                input_edge: TimingEdge::Fall,
+            })
+        );
+        assert_eq!(
+            traced.fall_predecessor,
+            Some(TimingPredecessor {
+                input_index: 0,
+                input_edge: TimingEdge::Rise,
+            })
+        );
     }
 
     #[test]
