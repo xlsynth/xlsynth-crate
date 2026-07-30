@@ -238,12 +238,17 @@ fn flattened_choice_transition(design: &SequentialGateFn) -> ChoiceAig {
 }
 
 /// Checks mapping, restored bus ports, exact STA, and cycle-accurate behavior.
-fn assert_multibit_mapping(complemented_output: bool, enable_buffering: bool) {
+fn assert_multibit_mapping(
+    complemented_output: bool,
+    enable_buffering: bool,
+    enable_resizing: bool,
+) {
     let design = multibit_synchronous_design();
     let library = sequential_library(complemented_output);
     let choices = flattened_choice_transition(&design);
     let options = TechMapOptions {
         buffer_options: enable_buffering.then(BufferOptions::default),
+        resize_options: enable_resizing.then(ResizeOptions::default),
         ..TechMapOptions::default()
     };
 
@@ -318,7 +323,14 @@ fn assert_multibit_mapping(complemented_output: bool, enable_buffering: bool) {
             buffer_stats.final_worst_delay,
             buffer_stats.initial_worst_delay
         );
-        assert!(mapped.stats.resize_stats.is_none());
+    }
+    assert_eq!(mapped.stats.resize_stats.is_some(), enable_resizing);
+    if let Some(resize_stats) = &mapped.stats.resize_stats {
+        assert_eq!(resize_stats.final_area, mapped.stats.selected_area);
+        assert!(
+            resize_stats.final_clock_load.unwrap()
+                <= resize_stats.initial_clock_load.unwrap() * 1.05 + 1e-9
+        );
     }
 
     let report = build_netlist_report(
@@ -384,12 +396,12 @@ fn assert_multibit_mapping(complemented_output: bool, enable_buffering: bool) {
 
 #[test]
 fn sequential_mapping_preserves_multibit_buses_and_cycle_behavior() {
-    assert_multibit_mapping(false, false);
+    assert_multibit_mapping(false, false, false);
 }
 
 #[test]
 fn complemented_output_flip_flops_preserve_multibit_cycle_behavior() {
-    assert_multibit_mapping(true, false);
+    assert_multibit_mapping(true, false, false);
 }
 
 #[test]
@@ -416,24 +428,17 @@ fn sequential_mapping_rejects_unrepresentable_explicit_initial_state() {
 
 #[test]
 fn sequential_mapping_accepts_register_aware_buffer_insertion() {
-    assert_multibit_mapping(false, true);
+    assert_multibit_mapping(false, true, false);
 }
 
 #[test]
-fn sequential_mapping_rejects_combinational_only_cell_resizing() {
-    let design = multibit_synchronous_design();
-    let error = map_sequential_choice_aig_to_netlist(
-        &design,
-        &flattened_choice_transition(&design),
-        &sequential_library(false),
-        &SequentialTechMapConstraints::default(),
-        &TechMapOptions {
-            resize_options: Some(ResizeOptions::default()),
-            ..TechMapOptions::default()
-        },
-    )
-    .expect_err("register-unaware cell resizing must be rejected");
-    assert!(error.to_string().contains("resize"));
+fn sequential_mapping_accepts_register_aware_cell_resizing() {
+    assert_multibit_mapping(false, false, true);
+}
+
+#[test]
+fn sequential_mapping_buffers_then_resizes_physical_register_paths() {
+    assert_multibit_mapping(false, true, true);
 }
 
 #[test]

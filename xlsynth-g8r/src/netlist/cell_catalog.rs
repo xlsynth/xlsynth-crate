@@ -14,6 +14,13 @@ use std::collections::{BTreeMap, HashMap};
 
 const MAX_CATALOG_INPUTS: usize = 6;
 
+/// Two named input positions whose exchange preserves the cell truth table.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct SymmetricInputPair {
+    pub first_input: usize,
+    pub second_input: usize,
+}
+
 /// Pin-compatible Boolean identity shared by a standard-cell size family.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct CellFamilyKey {
@@ -28,6 +35,7 @@ pub(crate) struct CatalogCell {
     pub cell_index: usize,
     pub name: String,
     pub family: CellFamilyKey,
+    pub symmetric_input_pairs: Vec<SymmetricInputPair>,
     pub input_pin_indices: Vec<usize>,
     pub input_capacitances: Vec<CombinationalOutputLoad>,
     pub output_pin_index: usize,
@@ -119,6 +127,33 @@ fn catalog_cell_order(lhs: &CatalogCell, rhs: &CatalogCell) -> std::cmp::Orderin
         .total_cmp(&rhs.area)
         .then_with(|| lhs.nominal_delay.total_cmp(&rhs.nominal_delay))
         .then_with(|| lhs.name.cmp(&rhs.name))
+}
+
+/// Discovers Boolean-safe pin exchanges without relying on Liberty pin names.
+fn symmetric_input_pairs(input_count: usize, truth: u64) -> Vec<SymmetricInputPair> {
+    let mut pairs = Vec::new();
+    for first_input in 0..input_count {
+        for second_input in (first_input + 1)..input_count {
+            let swap_mask = (1usize << first_input) | (1usize << second_input);
+            let is_symmetric = (0..(1usize << input_count)).all(|assignment| {
+                let first_value = (assignment >> first_input) & 1;
+                let second_value = (assignment >> second_input) & 1;
+                let swapped = if first_value == second_value {
+                    assignment
+                } else {
+                    assignment ^ swap_mask
+                };
+                ((truth >> assignment) & 1) == ((truth >> swapped) & 1)
+            });
+            if is_symmetric {
+                pairs.push(SymmetricInputPair {
+                    first_input,
+                    second_input,
+                });
+            }
+        }
+    }
+    pairs
 }
 
 /// Extracts a timing-complete native combinational cell without name
@@ -235,6 +270,7 @@ fn classify_cell(library: &Library, cell_index: usize, cell: &Cell) -> Result<Op
     Ok(Some(CatalogCell {
         cell_index,
         name: cell.name.clone(),
+        symmetric_input_pairs: symmetric_input_pairs(input_names.len(), truth),
         family: CellFamilyKey {
             input_names,
             output_name: library.resolve_string(&output_pin.name).to_string(),
@@ -306,7 +342,7 @@ pub(crate) mod test_utils {
     }
 
     /// Creates one combinational cell with complete scalar rise/fall NLDM data.
-    fn timed_cell(
+    pub(crate) fn timed_cell(
         builder: &mut LibraryBuilder,
         name: &str,
         inputs: &[&str],
@@ -374,8 +410,9 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use super::CellCatalog;
-    use super::test_utils::sizing_library;
+    use super::test_utils::{sizing_library, timed_cell};
+    use super::{CellCatalog, SymmetricInputPair};
+    use crate::liberty_model::LibraryBuilder;
 
     #[test]
     fn groups_cells_by_function_instead_of_name() {
@@ -398,5 +435,54 @@ mod tests {
             .map(|candidate| candidate.name.as_str())
             .collect();
         assert_eq!(names, ["BUF", "BUF_FAST"]);
+    }
+
+    #[test]
+    fn discovers_boolean_symmetric_and_inputs() {
+        let library = sizing_library();
+        let catalog = CellCatalog::new(&library).expect("classify symmetric synthetic AND");
+        let and = catalog.by_name("AND2").expect("index the synthetic AND");
+
+        assert_eq!(
+            and.symmetric_input_pairs,
+            [SymmetricInputPair {
+                first_input: 0,
+                second_input: 1,
+            }]
+        );
+        assert!(
+            catalog
+                .by_name("BUF")
+                .expect("index the one-input buffer")
+                .symmetric_input_pairs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn swaps_only_the_equivalent_inputs_of_a_complex_gate() {
+        let mut builder = LibraryBuilder::new();
+        let aoi = timed_cell(
+            &mut builder,
+            "AOI21",
+            &["A1", "A2", "B"],
+            "!(A1 * A2 + B)",
+            1.0,
+            1.0,
+            0.1,
+            1.0,
+        );
+        builder.cells.push(aoi);
+        let library = builder.finish();
+        let catalog = CellCatalog::new(&library).expect("classify the synthetic AOI gate");
+        let aoi = catalog.by_name("AOI21").expect("index the synthetic AOI");
+
+        assert_eq!(
+            aoi.symmetric_input_pairs,
+            [SymmetricInputPair {
+                first_input: 0,
+                second_input: 1,
+            }]
+        );
     }
 }

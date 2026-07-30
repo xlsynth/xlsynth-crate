@@ -2528,7 +2528,16 @@ fn main() {
                         .value_name("BOOL")
                         .default_value("false")
                         .value_parser(clap::value_parser!(bool))
-                        .help("Run exact-Liberty critical-path sizing and timing-protected area recovery")
+                        .help("Run exact-Liberty sizing, safe input-pin swapping, and area recovery")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_rounds")
+                        .long("resize-rounds")
+                        .value_name("N")
+                        .default_value("3")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum alternating timing-optimization and area-recovery rounds")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2537,7 +2546,7 @@ fn main() {
                         .value_name("N")
                         .default_value("16")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum accepted critical-path upsizing moves")
+                        .help("Maximum adaptive, batched critical-path sizing rounds")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2555,7 +2564,7 @@ fn main() {
                         .value_name("N")
                         .default_value("64")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum exact incremental timing trials in one resize iteration")
+                        .help("Maximum exact sizing trials per iteration; pin swaps use a bounded separate budget")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2681,7 +2690,16 @@ fn main() {
                         .value_name("BOOL")
                         .default_value("true")
                         .value_parser(clap::value_parser!(bool))
-                        .help("Run incremental exact-Liberty cell sizing and area recovery")
+                        .help("Run exact-Liberty sizing, safe input-pin swapping, and area recovery")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_rounds")
+                        .long("resize-rounds")
+                        .value_name("N")
+                        .default_value("3")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum alternating timing-optimization and area-recovery rounds")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2690,7 +2708,7 @@ fn main() {
                         .value_name("N")
                         .default_value("16")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum accepted critical-path upsizing moves")
+                        .help("Maximum adaptive, batched critical-path sizing rounds")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2708,7 +2726,7 @@ fn main() {
                         .value_name("N")
                         .default_value("64")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum exact timing trials per resize iteration")
+                        .help("Maximum exact sizing trials per iteration; pin swaps use a bounded separate budget")
                         .action(ArgAction::Set),
                 )
                 .arg(

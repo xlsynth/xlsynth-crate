@@ -104,6 +104,9 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             .copied()
             .expect("resize has a default")
             .then(|| ResizeOptions {
+                max_outer_iterations: *matches
+                    .get_one::<usize>("resize_rounds")
+                    .expect("resize_rounds has a default"),
                 max_iterations: *matches
                     .get_one::<usize>("resize_iterations")
                     .expect("resize_iterations has a default"),

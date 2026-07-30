@@ -68,6 +68,9 @@ pub fn handle_gv_optimize(matches: &ArgMatches) -> Result<()> {
             .expect("resize has a default")
             .then(|| ResizeOptions {
                 sta_options,
+                max_outer_iterations: *matches
+                    .get_one::<usize>("resize_rounds")
+                    .expect("resize_rounds has a default"),
                 max_iterations: *matches
                     .get_one::<usize>("resize_iterations")
                     .expect("resize_iterations has a default"),

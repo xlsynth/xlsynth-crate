@@ -22,6 +22,7 @@ use crate::netlist::sta::{
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
 };
 use crate::netlist::timing_buffer::{BufferTimingConstraints, insert_timing_aware_buffers};
+use crate::netlist::timing_resize::resize_timing_aware_netlist;
 use crate::netlist::utils::scalar_constant_output_assignments;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -69,11 +70,6 @@ pub fn map_sequential_choice_aig_to_netlist(
     design
         .validate()
         .map_err(|error| anyhow!("invalid sequential design '{}': {error}", design.name))?;
-    if options.resize_options.is_some() {
-        bail!(
-            "sequential technology mapping does not support resize_options; the current cell resizer is combinational-only"
-        );
-    }
     validate_constraints(design, constraints)?;
     validate_transition_interface(&design.transition, choice_aig.graph())?;
 
@@ -85,6 +81,7 @@ pub fn map_sequential_choice_aig_to_netlist(
     // transition. Buffer the restored physical FF netlist, not those exposed
     // combinational pseudo-inputs and pseudo-outputs.
     effective_options.buffer_options = None;
+    effective_options.resize_options = None;
     let sta_options = StaOptions {
         primary_input_transition: options.primary_input_transition,
         module_output_load: options.module_output_load,
@@ -98,7 +95,7 @@ pub fn map_sequential_choice_aig_to_netlist(
         let mut mapped = map_transition(choice_aig, library, &timing, &effective_options)?;
         reinstate_sequential_boundary(&mut mapped, design, None)?;
         finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
-        apply_requested_sequential_buffering(
+        apply_requested_sequential_optimization(
             &mut mapped,
             library,
             constraints,
@@ -130,7 +127,7 @@ pub fn map_sequential_choice_aig_to_netlist(
             &flip_flop,
         ) {
             Ok(mut mapped) => {
-                apply_requested_sequential_buffering(
+                apply_requested_sequential_optimization(
                     &mut mapped,
                     library,
                     constraints,
@@ -152,35 +149,59 @@ pub fn map_sequential_choice_aig_to_netlist(
     )
 }
 
-/// Buffers restored register boundaries and independently verifies final STA.
-fn apply_requested_sequential_buffering(
+/// Buffers and resizes restored physical registers under full Liberty STA.
+fn apply_requested_sequential_optimization(
     mapped: &mut MappedNetlist,
     library: &Library,
     constraints: &SequentialTechMapConstraints,
     options: &TechMapOptions,
     sta_options: StaOptions,
 ) -> Result<()> {
-    let Some(buffer_options) = options.buffer_options.as_ref() else {
+    if options.buffer_options.is_none() && options.resize_options.is_none() {
         return Ok(());
-    };
+    }
     let timing_constraints = BufferTimingConstraints {
         primary_input_arrivals: constraints.primary_input_arrivals.clone(),
         primary_output_required: constraints.primary_output_required.clone(),
         clock_period: constraints.clock_period,
     };
-    let buffer_stats = insert_timing_aware_buffers(
-        &mut mapped.module,
-        &mut mapped.nets,
-        &mut mapped.interner,
-        library,
-        buffer_options,
-        sta_options,
-        &timing_constraints,
-    )
-    .context("inserting register-aware, timing-driven buffers")?;
+    let buffer_stats = options
+        .buffer_options
+        .as_ref()
+        .map(|buffer_options| {
+            insert_timing_aware_buffers(
+                &mut mapped.module,
+                &mut mapped.nets,
+                &mut mapped.interner,
+                library,
+                buffer_options,
+                sta_options,
+                &timing_constraints,
+            )
+            .context("inserting register-aware, timing-driven buffers")
+        })
+        .transpose()?;
+    let resize_stats = options
+        .resize_options
+        .as_ref()
+        .map(|resize_options| {
+            let mut resize_options = resize_options.clone();
+            resize_options.sta_options = sta_options;
+            resize_timing_aware_netlist(
+                &mut mapped.module,
+                &mapped.nets,
+                &mut mapped.interner,
+                library,
+                &resize_options,
+                &timing_constraints,
+            )
+            .context("resizing register-aware mapped gates and physical flip-flops")
+        })
+        .transpose()?;
     finalize_sequential_mapping(mapped, library, constraints, sta_options)
-        .context("verifying buffered sequential mapping")?;
-    mapped.stats.buffer_stats = Some(buffer_stats);
+        .context("verifying buffered and resized sequential mapping")?;
+    mapped.stats.buffer_stats = buffer_stats;
+    mapped.stats.resize_stats = resize_stats;
     Ok(())
 }
 
@@ -1957,10 +1978,10 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_rejects_register_unaware_resizing() {
+    fn accepts_register_aware_post_mapping_resizing() {
         let design = test_design();
         let choices = ChoiceAig::without_choices(design.transition.clone());
-        let error = map_sequential_choice_aig_to_netlist(
+        let mapped = map_sequential_choice_aig_to_netlist(
             &design,
             &choices,
             &test_library(),
@@ -1970,8 +1991,11 @@ mod tests {
                 ..TechMapOptions::default()
             },
         )
-        .expect_err("combinational-only resizing must not run on a sequential module");
-        assert!(error.to_string().contains("combinational-only"));
+        .expect("register-aware sizing must run after physical FF restoration");
+
+        assert_eq!(mapped.stats.sequential_instance_count, 2);
+        assert!(mapped.stats.buffer_stats.is_none());
+        assert!(mapped.stats.resize_stats.is_some());
     }
 
     #[test]
