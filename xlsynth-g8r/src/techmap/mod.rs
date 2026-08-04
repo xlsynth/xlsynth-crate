@@ -1138,12 +1138,13 @@ mod tests {
         );
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
         let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let alternative = builder.add_and_binary(a, a);
         let a_or_b = builder.add_or_binary(a, b);
         let absorbed = builder.add_and_binary(a, a_or_b);
         builder.add_output("o".to_string(), absorbed.into());
         let graph = builder.build();
         let mut siblings = vec![None; graph.gates.len()];
-        siblings[absorbed.node.id] = Some(a.node);
+        siblings[absorbed.node.id] = Some(alternative.node);
         let choice_aig = ChoiceAig::new(graph.clone(), siblings).unwrap();
         let options = TechMapOptions {
             max_cut_size: 1,
@@ -1179,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn sibling_choices_keep_distinct_output_mapping_states() {
+    fn sibling_choices_share_one_canonical_output_mapping_state() {
         let mut builder =
             GateBuilder::new("choice_roots".to_string(), GateBuilderOptions::no_opt());
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
@@ -1187,7 +1188,7 @@ mod tests {
         let first = builder.add_and_binary(a, b);
         let second = builder.add_and_binary(a, b);
         assert_ne!(first.node, second.node);
-        builder.add_output("o0".to_string(), first.into());
+        builder.add_output("o0".to_string(), second.into());
         builder.add_output("o1".to_string(), second.into());
         let graph = builder.build();
         let mut siblings = vec![None; graph.gates.len()];
@@ -1208,10 +1209,8 @@ mod tests {
             .filter(|instance| mapped.interner.resolve(instance.type_name) == Some("mystery_and"))
             .count();
 
-        // NF stores matches per GIA object. A sibling contributes cuts to its
-        // later representative, but it does not merge two referenced roots
-        // into one selected mapping state.
-        assert_eq!(and_instance_count, 2);
+        // Only the canonical head has fanout; both outputs share its mapping.
+        assert_eq!(and_instance_count, 1);
     }
 
     #[test]

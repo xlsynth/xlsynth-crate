@@ -270,16 +270,16 @@ mod tests {
     }
 
     fn binary_aiger_with_dead_duplicate_choice() -> Vec<u8> {
-        let mut bytes = b"aig 4 2 0 1 2\n6\n".to_vec();
-        // var 3 = i1 & i0; var 4 is a structurally identical, dead choice.
+        let mut bytes = b"aig 4 2 0 1 2\n8\n".to_vec();
+        // Var 4 is the live choice head; var 3 is its dead equivalent sibling.
         bytes.extend_from_slice(&[2, 2, 4, 2]);
         append_q_block(&mut bytes, &[(4, 3)]);
         bytes
     }
 
     fn binary_aiger_with_choice_chain() -> Vec<u8> {
-        let mut bytes = b"aig 5 2 0 1 3\n6\n".to_vec();
-        // vars 3, 4, and 5 are identical ANDs; only var 3 reaches the output.
+        let mut bytes = b"aig 5 2 0 1 3\n10\n".to_vec();
+        // Vars 3, 4, and 5 are identical ANDs; only head var 5 drives output.
         bytes.extend_from_slice(&[2, 2, 4, 2, 6, 2]);
         append_q_block(&mut bytes, &[(5, 4), (4, 3)]);
         bytes
@@ -292,9 +292,15 @@ mod tests {
         let choice_aig = load_abc_choice_aiger_binary(&bytes).unwrap();
 
         assert_eq!(choice_aig.graph().gates.len(), 5);
-        assert!(matches!(choice_aig.graph().gates[4], AigNode::And2 { .. }));
+        assert!(matches!(choice_aig.graph().gates[3], AigNode::And2 { .. }));
         assert!(
             !choice_aig
+                .graph()
+                .post_order_refs()
+                .contains(&AigRef { id: 3 })
+        );
+        assert!(
+            choice_aig
                 .graph()
                 .post_order_refs()
                 .contains(&AigRef { id: 4 })
@@ -316,6 +322,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_q_choice_sibling_with_primary_output_fanout() {
+        let mut bytes = b"aig 4 2 0 1 2\n6\n".to_vec();
+        bytes.extend_from_slice(&[2, 2, 4, 2]);
+        append_q_block(&mut bytes, &[(4, 3)]);
+
+        let error = load_abc_choice_aiger_binary(&bytes).unwrap_err();
+
+        assert!(error.contains("only the canonical chain head may have fanout"));
+    }
+
+    #[test]
     fn loads_multi_sibling_chain() {
         let bytes = binary_aiger_with_choice_chain();
 
@@ -330,7 +347,7 @@ mod tests {
 
     #[test]
     fn loads_q_after_ascii_symbol_table() {
-        let mut bytes = b"aig 4 2 0 1 2\n6\n".to_vec();
+        let mut bytes = b"aig 4 2 0 1 2\n8\n".to_vec();
         bytes.extend_from_slice(&[2, 2, 4, 2]);
         bytes.extend_from_slice(b"i0 a\ni1 b\no0 y\n");
         append_q_block(&mut bytes, &[(4, 3)]);
@@ -368,7 +385,7 @@ mod tests {
 
     #[test]
     fn loads_q_after_abc_model_name_extension() {
-        let mut bytes = b"aig 4 2 0 1 2\n6\n".to_vec();
+        let mut bytes = b"aig 4 2 0 1 2\n8\n".to_vec();
         bytes.extend_from_slice(&[2, 2, 4, 2]);
         bytes.extend_from_slice(b"cn");
         bytes.extend_from_slice(&4u32.to_be_bytes());
