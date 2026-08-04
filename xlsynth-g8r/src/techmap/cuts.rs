@@ -484,16 +484,17 @@ mod tests {
     fn choice_analysis_computes_sibling_relative_phase() {
         let mut builder = GateBuilder::new("choices".to_string(), GateBuilderOptions::no_opt());
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let alternative = builder.add_and_binary(a, a);
         let not_a = builder.add_and_binary(a.negate(), a.negate());
         builder.add_output("o".to_string(), not_a.into());
         let graph = builder.build();
         let mut siblings = vec![None; graph.gates.len()];
-        siblings[not_a.node.id] = Some(a.node);
+        siblings[not_a.node.id] = Some(alternative.node);
         let choice_aig = ChoiceAig::new(graph, siblings).unwrap();
 
         let analysis = analyze_choices(&choice_aig).unwrap();
 
-        assert!(!analysis.phase_by_node[a.node.id]);
+        assert!(!analysis.phase_by_node[alternative.node.id]);
         assert!(analysis.phase_by_node[not_a.node.id]);
     }
 
@@ -506,12 +507,14 @@ mod tests {
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
         let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
         let c: AigOperand = builder.add_input("c".to_string(), 1).try_into().unwrap();
-        let choice = builder.add_and_binary(a, b);
+        let alternative = builder.add_and_binary(a, a);
+        let tautology = builder.add_or_binary(b, b.negate());
+        let choice = builder.add_and_binary(a, tautology);
         let parent = builder.add_and_binary(choice.into(), c);
         builder.add_output("o".to_string(), parent.into());
         let graph = builder.build();
         let mut siblings = vec![None; graph.gates.len()];
-        siblings[choice.node.id] = Some(a.node);
+        siblings[choice.node.id] = Some(alternative.node);
         let choice_aig = ChoiceAig::new(graph, siblings).unwrap();
         let analysis = analyze_choices(&choice_aig).unwrap();
 

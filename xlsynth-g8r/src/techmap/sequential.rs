@@ -1618,8 +1618,8 @@ mod tests {
             .add_input("state__q".to_string(), 1)
             .try_into()
             .expect("extract state bit");
-        let live = builder.add_and_binary(data, q);
         let sibling = builder.add_and_binary(data, q);
+        let live = builder.add_and_binary(data, q);
         builder.add_output("out".to_string(), q.into());
         builder.add_output("state__d".to_string(), live.into());
         let transition = builder.build();
@@ -1640,7 +1640,7 @@ mod tests {
         )
         .expect("construct choice-rich registered design");
         let mut siblings = vec![None; transition.gates.len()];
-        siblings[sibling.node.id] = Some(live.node);
+        siblings[live.node.id] = Some(sibling.node);
         let choices = ChoiceAig::new(transition, siblings).expect("construct structural choices");
 
         let adjusted = adjust_register_data_phase(&design, &choices, true)

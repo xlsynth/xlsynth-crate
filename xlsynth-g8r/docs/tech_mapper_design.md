@@ -28,6 +28,11 @@ choices. The loader preserves otherwise-dead choice cones and records ABC's
 backwards sibling links in `ChoiceAig`. Ordinary ASCII or binary AIGER is
 also accepted and is represented as a no-choice graph.
 
+Every choice class must be a single nonbranching sibling chain. Only its
+canonical head may feed an ordinary AIG node or primary output; sibling
+alternatives are reachable only through their chain links. Construction and
+q-AIGER import reject branching chains and alternatives with ordinary fanout.
+
 The loader can close sibling links into complete deterministic choice classes
 for diagnostics. Mapping itself deliberately keeps one state per concrete AIG
 node and polarity, like ABC NF: a sibling contributes phase-adjusted cuts to

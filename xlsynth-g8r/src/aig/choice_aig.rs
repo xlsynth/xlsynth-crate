@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 /// graph.gates may intentionally contain nodes that are unreachable from the
 /// primary outputs. Choice alternatives commonly live in those otherwise
 /// dead cones, so consumers must follow sibling_next in addition to ordinary
-/// AIG fanins when traversing the choice graph.
+/// AIG fanins when traversing the choice graph. Each choice class is one
+/// nonbranching sibling chain, and only its head may have ordinary AIG or
+/// primary-output fanout.
 #[derive(Debug, Clone)]
 pub struct ChoiceAig {
     /// Ordinary AIG storage, including any otherwise-dead choice cones.
@@ -23,12 +25,13 @@ pub struct ChoiceAig {
     /// One optional next-sibling link per graph.gates entry.
     ///
     /// This mirrors ABC's pSibls: sibling_next[node.id] is the next
-    /// alternative for node. Links always point to an earlier AIG node.
+    /// alternative for node. Links always point to an earlier AIG node, and
+    /// their targets cannot have ordinary graph fanout or another predecessor.
     sibling_next: Vec<Option<AigRef>>,
 }
 
 impl ChoiceAig {
-    /// Constructs a choice AIG after validating sibling-chain invariants.
+    /// Constructs a choice AIG after validating canonical ABC sibling chains.
     pub fn new(graph: GateFn, sibling_next: Vec<Option<AigRef>>) -> Result<Self, String> {
         if sibling_next.len() != graph.gates.len() {
             return Err(format!(
@@ -37,6 +40,7 @@ impl ChoiceAig {
                 graph.gates.len()
             ));
         }
+        let mut sibling_predecessors = vec![None; graph.gates.len()];
         for (node_id, sibling) in sibling_next.iter().enumerate() {
             let Some(sibling) = sibling else {
                 continue;
@@ -53,6 +57,38 @@ impl ChoiceAig {
                 return Err(format!(
                     "choice sibling of node {} must be earlier than the node, got {}",
                     node_id, sibling.id
+                ));
+            }
+            if let Some(previous) = sibling_predecessors[sibling.id].replace(node_id) {
+                return Err(format!(
+                    "choice sibling node {} has multiple chain predecessors: {} and {}; each choice class must have one canonical head",
+                    sibling.id, previous, node_id
+                ));
+            }
+        }
+
+        let mut ordinary_fanouts = vec![0usize; graph.gates.len()];
+        for node in &graph.gates {
+            for operand in node.operands() {
+                ordinary_fanouts[operand.node.id] += 1;
+            }
+        }
+        for output in &graph.outputs {
+            for operand in output.bit_vector.iter_lsb_to_msb() {
+                ordinary_fanouts[operand.node.id] += 1;
+            }
+        }
+        for (node_id, predecessor) in sibling_predecessors.iter().enumerate() {
+            if predecessor.is_some() && ordinary_fanouts[node_id] != 0 {
+                return Err(format!(
+                    "choice sibling node {} has {} ordinary AIG or primary-output fanout{}; only the canonical chain head may have fanout",
+                    node_id,
+                    ordinary_fanouts[node_id],
+                    if ordinary_fanouts[node_id] == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 ));
             }
         }
@@ -168,8 +204,8 @@ mod tests {
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
         let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
         let first = builder.add_and_binary(a, b);
-        let second = builder.add_and_binary(a, b.negate());
-        builder.add_output("o".to_string(), first.into());
+        let second = builder.add_and_binary(a, b);
+        builder.add_output("o".to_string(), second.into());
         let graph = builder.build();
         let mut sibling_next = vec![None; graph.gates.len()];
         sibling_next[second.node.id] = Some(first.node);
@@ -196,6 +232,63 @@ mod tests {
     }
 
     #[test]
+    fn rejects_sibling_with_ordinary_aig_fanout() {
+        let mut builder = GateBuilder::new("choices".to_string(), GateBuilderOptions::no_opt());
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let alternative = builder.add_and_binary(a, b);
+        let head = builder.add_and_binary(a, b);
+        let consumer = builder.add_and_binary(alternative, a);
+        builder.add_output("head".to_string(), head.into());
+        builder.add_output("consumer".to_string(), consumer.into());
+        let graph = builder.build();
+        let mut sibling_next = vec![None; graph.gates.len()];
+        sibling_next[head.node.id] = Some(alternative.node);
+
+        let error = ChoiceAig::new(graph, sibling_next).unwrap_err();
+
+        assert!(error.contains("ordinary AIG or primary-output fanout"));
+    }
+
+    #[test]
+    fn rejects_sibling_driving_a_primary_output() {
+        let mut builder = GateBuilder::new("choices".to_string(), GateBuilderOptions::no_opt());
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let alternative = builder.add_and_binary(a, b);
+        let head = builder.add_and_binary(a, b);
+        builder.add_output("alternative".to_string(), alternative.into());
+        builder.add_output("head".to_string(), head.into());
+        let graph = builder.build();
+        let mut sibling_next = vec![None; graph.gates.len()];
+        sibling_next[head.node.id] = Some(alternative.node);
+
+        let error = ChoiceAig::new(graph, sibling_next).unwrap_err();
+
+        assert!(error.contains("ordinary AIG or primary-output fanout"));
+    }
+
+    #[test]
+    fn rejects_branching_sibling_chains() {
+        let mut builder = GateBuilder::new("choices".to_string(), GateBuilderOptions::no_opt());
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let alternative = builder.add_and_binary(a, b);
+        let first_head = builder.add_and_binary(a, b);
+        let second_head = builder.add_and_binary(a, b);
+        builder.add_output("first".to_string(), first_head.into());
+        builder.add_output("second".to_string(), second_head.into());
+        let graph = builder.build();
+        let mut sibling_next = vec![None; graph.gates.len()];
+        sibling_next[first_head.node.id] = Some(alternative.node);
+        sibling_next[second_head.node.id] = Some(alternative.node);
+
+        let error = ChoiceAig::new(graph, sibling_next).unwrap_err();
+
+        assert!(error.contains("multiple chain predecessors"));
+    }
+
+    #[test]
     fn exposes_read_only_parts_and_can_return_ownership() {
         let mut builder = GateBuilder::new("choices".to_string(), GateBuilderOptions::no_opt());
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
@@ -218,9 +311,9 @@ mod tests {
         let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
         let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
         let first = builder.add_and_binary(a, b);
-        let second = builder.add_and_binary(a, b.negate());
-        let third = builder.add_and_binary(a.negate(), b);
-        builder.add_output("o".to_string(), first.into());
+        let second = builder.add_and_binary(a, b);
+        let third = builder.add_and_binary(a, b);
+        builder.add_output("o".to_string(), third.into());
         let graph = builder.build();
         let mut sibling_next = vec![None; graph.gates.len()];
         sibling_next[second.node.id] = Some(first.node);
