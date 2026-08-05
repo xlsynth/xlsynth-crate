@@ -3,6 +3,7 @@
 //! Deterministic reconstruction of a selected cover into parsed netlist data.
 
 use crate::aig::ChoiceAig;
+use crate::liberty_model::Library;
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
     NetlistModule, NetlistPort, PortDirection, Pos, Span,
@@ -44,6 +45,7 @@ pub(super) fn emit_cover(
     choice_aig: &ChoiceAig,
     plan: &CoverPlan,
     cell_index: &LibertyCellIndex,
+    library: &Library,
     options: &TechMapOptions,
 ) -> Result<EmittedNetlist> {
     let graph = choice_aig.graph();
@@ -118,6 +120,11 @@ pub(super) fn emit_cover(
     let mut emitter = CoverEmitter {
         plan,
         cell_index,
+        output_buffer: cell_index.best_output_buffer(
+            library,
+            options.primary_input_transition,
+            options.module_output_load,
+        )?,
         builder: &mut builder,
         input_net_by_node,
         owner_net_by_solution,
@@ -134,6 +141,7 @@ pub(super) fn emit_cover(
 struct CoverEmitter<'a> {
     plan: &'a CoverPlan,
     cell_index: &'a LibertyCellIndex,
+    output_buffer: Option<CellBinding>,
     builder: &'a mut NetlistBuilder,
     input_net_by_node: HashMap<usize, NetIndex>,
     owner_net_by_solution: BTreeMap<SolutionId, NetIndex>,
@@ -196,7 +204,7 @@ impl CoverEmitter<'_> {
             Signal::Net(net) if net == output_net => Ok(()),
             Signal::Literal(value) => self.builder.add_constant_output(output_net, value),
             Signal::Net(net) => {
-                if let Some(buffer) = self.cell_index.best_buffer() {
+                if let Some(buffer) = &self.output_buffer {
                     return self
                         .builder
                         .add_cell(buffer.clone(), &[Signal::Net(net)], output_net);

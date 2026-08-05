@@ -8,11 +8,23 @@ use crate::netlist::parse::{Net, NetlistModule};
 use crate::netlist::report::{build_area_report, build_sta_report};
 use crate::netlist::resize::{ResizeOptions, ResizeStats, resize_netlist};
 use crate::netlist::sta::StaOptions;
-use crate::netlist::timing_buffer::{BufferTimingConstraints, insert_timing_aware_buffers};
+use crate::netlist::timing_buffer::{
+    BufferTimingConstraints, consolidate_timing_aware_buffers, has_slow_shared_primary_output,
+    insert_speculative_timing_aware_buffers, insert_timing_aware_buffers,
+};
 use anyhow::Result;
 use serde::Serialize;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+/// A smaller exploratory tree often isolates critical sinks after sizing.
+const COORDINATED_TIMING_MAX_FANOUT: usize = 6;
+/// Avoid duplicating expensive complete-network sizing on very large designs.
+const MAX_COORDINATED_INSTANCE_COUNT: usize = 4096;
+/// High-buffer designs would require rebuilding an already extensive tree.
+const MAX_COORDINATED_EXISTING_BUFFERS: usize = 256;
+/// Bound isolated output-slew diagnosis to inexpensive small mapped designs.
+const MAX_SHARED_OUTPUT_INSTANCE_COUNT: usize = 128;
 
 /// Shared timing assumptions and optional mapped-netlist optimization passes.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,7 +76,7 @@ pub fn optimize_mapped_netlist(
     )?
     .delay;
 
-    let buffer_stats = if let Some(configured) = &options.buffer_options {
+    let mut buffer_stats = if let Some(configured) = &options.buffer_options {
         let mut buffer_options = configured.clone();
         buffer_options.module_output_load = options.sta_options.module_output_load;
         Some(insert_timing_aware_buffers(
@@ -79,7 +91,7 @@ pub fn optimize_mapped_netlist(
     } else {
         None
     };
-    let resize_stats = if let Some(configured) = &options.resize_options {
+    let mut resize_stats = if let Some(configured) = &options.resize_options {
         let mut resize_options = configured.clone();
         resize_options.sta_options = options.sta_options;
         Some(resize_netlist(
@@ -92,6 +104,133 @@ pub fn optimize_mapped_netlist(
     } else {
         None
     };
+
+    if let (Some(buffer_options), Some(resize_options), Some(previous_sizing)) = (
+        options.buffer_options.as_ref(),
+        options.resize_options.as_ref(),
+        resize_stats.as_ref(),
+    ) && (previous_sizing.upsizes > 0
+        || previous_sizing.downsizes > 0
+        || previous_sizing.pin_swaps > 0)
+        && module.instances.len() <= MAX_COORDINATED_INSTANCE_COUNT
+        && buffer_stats
+            .as_ref()
+            .is_some_and(|stats| stats.buffers_inserted <= MAX_COORDINATED_EXISTING_BUFFERS)
+        && {
+            let stats = buffer_stats
+                .as_ref()
+                .expect("buffer diagnostics are present");
+            if stats.max_fanout_after > COORDINATED_TIMING_MAX_FANOUT
+                || stats.unresolved_overloaded_nets > 0
+            {
+                true
+            } else if module.instances.len() <= MAX_SHARED_OUTPUT_INSTANCE_COUNT
+                && stats.max_fanout_after >= 2
+                && options.sta_options.module_output_load > 0.0
+            {
+                let mut detection_options = buffer_options.clone();
+                detection_options.module_output_load = options.sta_options.module_output_load;
+                has_slow_shared_primary_output(
+                    module,
+                    nets.as_slice(),
+                    interner,
+                    library,
+                    &detection_options,
+                    options.sta_options,
+                )?
+            } else {
+                false
+            }
+        }
+    {
+        let previous_delay = previous_sizing.final_delay;
+        let mut trial_module = module.clone();
+        let mut trial_nets = nets.clone();
+        let mut trial_interner = interner.clone();
+        let mut exploratory_buffer_options = buffer_options.clone();
+        exploratory_buffer_options.module_output_load = options.sta_options.module_output_load;
+        exploratory_buffer_options.max_fanout = exploratory_buffer_options
+            .max_fanout
+            .min(COORDINATED_TIMING_MAX_FANOUT);
+        let trial_buffer_stats = insert_speculative_timing_aware_buffers(
+            &mut trial_module,
+            &mut trial_nets,
+            &mut trial_interner,
+            library,
+            &exploratory_buffer_options,
+            options.sta_options,
+            &BufferTimingConstraints::default(),
+        )?;
+
+        if trial_buffer_stats.buffers_inserted > 0 {
+            let mut exploratory_resize_options = resize_options.clone();
+            exploratory_resize_options.sta_options = options.sta_options;
+            let trial_resize_stats = resize_netlist(
+                &mut trial_module,
+                trial_nets.as_slice(),
+                &mut trial_interner,
+                library,
+                &exploratory_resize_options,
+            )?;
+            let candidate_delay = build_sta_report(
+                &trial_module,
+                trial_nets.as_slice(),
+                &trial_interner,
+                library,
+                options.sta_options,
+            )?
+            .delay;
+
+            if candidate_delay + exploratory_resize_options.improvement_epsilon < previous_delay {
+                *module = trial_module;
+                *nets = trial_nets;
+                *interner = trial_interner;
+                if let Some(stats) = buffer_stats.as_mut() {
+                    merge_buffer_stats(stats, trial_buffer_stats);
+                }
+                if let Some(stats) = resize_stats.as_mut() {
+                    merge_resize_stats(stats, trial_resize_stats);
+                }
+            }
+        }
+    }
+
+    if let (Some(configured), Some(sizing)) =
+        (options.buffer_options.as_ref(), resize_stats.as_ref())
+        && module.instances.len() <= MAX_COORDINATED_INSTANCE_COUNT
+        && buffer_stats.as_ref().is_some_and(|stats| {
+            (2..=MAX_COORDINATED_EXISTING_BUFFERS).contains(&stats.buffers_inserted)
+        })
+    {
+        let mut recovery_options = configured.clone();
+        recovery_options.module_output_load = options.sta_options.module_output_load;
+        let recovered = consolidate_timing_aware_buffers(
+            module,
+            nets.as_slice(),
+            interner,
+            library,
+            &recovery_options,
+            options.sta_options,
+            sizing.final_delay,
+        )?;
+        if recovered.buffers_removed > 0 {
+            if let Some(stats) = buffer_stats.as_mut() {
+                stats.buffers_inserted = stats
+                    .buffers_inserted
+                    .saturating_sub(recovered.buffers_removed);
+                stats.area_added = (stats.area_added - recovered.area_recovered).max(0.0);
+                stats.max_fanout_after = recovered.max_fanout_after;
+                stats.max_load_after = recovered.max_load_after;
+                stats.unresolved_overloaded_nets = recovered.unresolved_overloaded_nets;
+                stats.final_worst_delay = Some(recovered.final_delay);
+                stats.timing_evaluations += recovered.timing_evaluations;
+            }
+            if let Some(stats) = resize_stats.as_mut() {
+                stats.final_delay = recovered.final_delay;
+                stats.final_area = build_area_report(module, interner, library)?.area;
+            }
+        }
+    }
 
     let final_area = build_area_report(module, interner, library)?.area;
     let final_delay = build_sta_report(
@@ -112,11 +251,47 @@ pub fn optimize_mapped_netlist(
     })
 }
 
+/// Combines diagnostics from accepted electrically distinct buffer rounds.
+fn merge_buffer_stats(initial: &mut BufferStats, subsequent: BufferStats) {
+    initial.buffered_nets += subsequent.buffered_nets;
+    initial.buffers_inserted += subsequent.buffers_inserted;
+    initial.area_added += subsequent.area_added;
+    initial.max_fanout_after = subsequent.max_fanout_after;
+    initial.max_load_after = subsequent.max_load_after;
+    initial.unresolved_overloaded_nets = subsequent.unresolved_overloaded_nets;
+    initial.final_worst_delay = subsequent.final_worst_delay;
+    initial.timing_evaluations += subsequent.timing_evaluations;
+    initial.rejected_timing_batches += subsequent.rejected_timing_batches;
+}
+
+/// Preserves complete move accounting across coordinated sizing rounds.
+fn merge_resize_stats(initial: &mut ResizeStats, subsequent: ResizeStats) {
+    initial.final_delay = subsequent.final_delay;
+    initial.final_area = subsequent.final_area;
+    initial.outer_iterations += subsequent.outer_iterations;
+    initial.evaluations += subsequent.evaluations;
+    initial.pin_swap_evaluations += subsequent.pin_swap_evaluations;
+    initial.failed_evaluations += subsequent.failed_evaluations;
+    initial.recomputed_instances += subsequent.recomputed_instances;
+    initial.upsizes += subsequent.upsizes;
+    initial.downsizes += subsequent.downsizes;
+    initial.register_upsizes += subsequent.register_upsizes;
+    initial.register_downsizes += subsequent.register_downsizes;
+    initial.pin_swaps += subsequent.pin_swaps;
+    initial.final_clock_load = subsequent.final_clock_load;
+    initial.replacements.extend(subsequent.replacements);
+    initial.pin_swap_steps.extend(subsequent.pin_swap_steps);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{NetlistOptimizationOptions, optimize_mapped_netlist};
     use crate::netlist::buffer::BufferOptions;
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library};
+    use crate::netlist::sta::StaOptions;
+    use crate::netlist::timing_buffer::tests::{
+        slow_shared_output_library, slow_shared_output_source,
+    };
 
     #[test]
     fn buffers_then_resizes_using_consistent_exact_timing() {
@@ -195,6 +370,74 @@ endmodule
         assert_eq!(stats.initial_delay, stats.final_delay);
         assert!(stats.buffer_stats.is_none());
         assert!(stats.resize_stats.is_none());
+    }
+
+    #[test]
+    fn rejects_speculative_rebuffering_that_cannot_improve_exact_delay() {
+        let source = r#"
+module top(a, out);
+  input a;
+  output [6:0] out;
+  wire root;
+  BUF driver (.A(a), .Y(root));
+  BUF sink0 (.A(root), .Y(out[0]));
+  BUF sink1 (.A(root), .Y(out[1]));
+  BUF sink2 (.A(root), .Y(out[2]));
+  BUF sink3 (.A(root), .Y(out[3]));
+  BUF sink4 (.A(root), .Y(out[4]));
+  BUF sink5 (.A(root), .Y(out[5]));
+  BUF sink6 (.A(root), .Y(out[6]));
+endmodule
+"#;
+        let library = sizing_library();
+        let (mut module, mut nets, mut interner) = parse_module(source);
+        let original_instance_count = module.instances.len();
+
+        let stats = optimize_mapped_netlist(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &NetlistOptimizationOptions::default(),
+        )
+        .expect("roll back a tighter buffer tree when it cannot improve exact timing");
+
+        assert_eq!(module.instances.len(), original_instance_count);
+        assert_eq!(stats.buffer_stats.unwrap().buffers_inserted, 0);
+        assert!(stats.resize_stats.unwrap().upsizes > 0);
+        assert!(stats.final_delay < stats.initial_delay);
+    }
+
+    #[test]
+    fn isolates_slow_shared_output_only_after_strict_exact_timing_improvement() {
+        let library = slow_shared_output_library();
+        let (mut module, mut nets, mut interner) = parse_module(slow_shared_output_source());
+
+        let stats = optimize_mapped_netlist(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &NetlistOptimizationOptions {
+                sta_options: StaOptions {
+                    module_output_load: 0.6,
+                    ..StaOptions::default()
+                },
+                ..NetlistOptimizationOptions::default()
+            },
+        )
+        .expect("strictly improve full-network timing by isolating a shared output");
+
+        let buffering = stats
+            .buffer_stats
+            .expect("retain output-buffer diagnostics");
+        let sizing = stats
+            .resize_stats
+            .expect("retain coordinated sizing diagnostics");
+        assert_eq!(buffering.max_fanout_before, 2);
+        assert_eq!(buffering.buffers_inserted, 1);
+        assert!(sizing.upsizes > 0);
+        assert!(stats.final_delay < stats.initial_delay);
     }
 
     #[test]

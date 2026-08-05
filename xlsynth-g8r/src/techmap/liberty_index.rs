@@ -18,6 +18,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 const NF_ROOT_VARIANTS_PER_FUNCTION: usize = 1;
 const REPRESENTATIVE_OUTPUT_FANOUT: f64 = 2.0;
 
+/// Selects how equally priced Liberty roots are ordered for one NF index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NfRootTiePolicy {
+    Fastest,
+    StableIdentity,
+}
+
 /// One concrete cell/output/pin-permutation match.
 #[derive(Clone, Debug)]
 pub(super) struct CellBinding {
@@ -34,6 +41,8 @@ pub(super) struct CellBinding {
     pub input_delays: Vec<Option<f64>>,
     /// Rise/fall sink capacitance for each cell input pin.
     pub input_capacitances: Vec<CombinationalOutputLoad>,
+    /// Boolean-interchangeable input-pin masks in native Liberty pin order.
+    pub symmetric_input_masks: [u8; MAX_TRUTH_TABLE_INPUTS],
     /// Whether gv-stats-style rise/fall timing can evaluate this binding.
     pub timing_complete: bool,
     pub area: f64,
@@ -120,20 +129,36 @@ impl LibertyCellIndex {
     /// Builds a function index without relying on standard-cell family names.
     #[cfg(test)]
     pub fn build(library: &Library, max_arity: usize) -> Result<Self> {
-        Self::build_with_root_limit(library, max_arity, None)
+        Self::build_with_root_limit(library, max_arity, None, NfRootTiePolicy::Fastest)
     }
 
     /// Builds the compact root-cell library used by NF-style mapping. ABC NF
     /// keeps one area-root per native function. Drive-strength selection is a
     /// separate sizing problem rather than part of structural cut mapping.
     pub fn build_nf(library: &Library, max_arity: usize) -> Result<Self> {
-        Self::build_with_root_limit(library, max_arity, Some(NF_ROOT_VARIANTS_PER_FUNCTION))
+        Self::build_with_root_limit(
+            library,
+            max_arity,
+            Some(NF_ROOT_VARIANTS_PER_FUNCTION),
+            NfRootTiePolicy::Fastest,
+        )
+    }
+
+    /// Builds an alternate deterministic root library for oversized NF covers.
+    pub(super) fn build_nf_stable_roots(library: &Library, max_arity: usize) -> Result<Self> {
+        Self::build_with_root_limit(
+            library,
+            max_arity,
+            Some(NF_ROOT_VARIANTS_PER_FUNCTION),
+            NfRootTiePolicy::StableIdentity,
+        )
     }
 
     fn build_with_root_limit(
         library: &Library,
         max_arity: usize,
         root_limit: Option<usize>,
+        root_tie_policy: NfRootTiePolicy,
     ) -> Result<Self> {
         let mut bindings_by_truth: BTreeMap<(usize, u64), Vec<CellBinding>> = BTreeMap::new();
         let mut stats = LibertyIndexStats::default();
@@ -149,15 +174,16 @@ impl LibertyCellIndex {
             if let Some(root_limit) = root_limit {
                 let native_key = (native_binding.input_pin_names.len(), native_truth);
                 let roots = nf_roots.entry(native_key).or_default();
-                if roots
-                    .iter()
-                    .any(|(_, existing)| root_binding_dominates(existing, &native_binding))
-                {
+                if roots.iter().any(|(_, existing)| {
+                    root_binding_dominates(existing, &native_binding, root_tie_policy)
+                }) {
                     continue;
                 }
-                roots.retain(|(_, existing)| !root_binding_dominates(&native_binding, existing));
+                roots.retain(|(_, existing)| {
+                    !root_binding_dominates(&native_binding, existing, root_tie_policy)
+                });
                 roots.push((native_truth, native_binding));
-                roots.sort_by(|lhs, rhs| root_binding_order(&lhs.1, &rhs.1));
+                roots.sort_by(|lhs, rhs| root_binding_order(&lhs.1, &rhs.1, root_tie_policy));
                 roots.truncate(root_limit);
             } else {
                 indexed_cells.push(expand_native_cell(native_truth, &native_binding));
@@ -347,6 +373,78 @@ impl LibertyCellIndex {
             .map(|id| self.binding(id))
     }
 
+    /// Picks the fastest legal output buffer at the actual external load.
+    pub(super) fn best_output_buffer(
+        &self,
+        library: &Library,
+        input_transition: f64,
+        output_load: f64,
+    ) -> Result<Option<CellBinding>> {
+        let fallback = self.best_buffer().cloned();
+        if output_load <= 0.0 || fallback.is_none() {
+            return Ok(fallback);
+        }
+
+        let input_timing = SignalTiming {
+            rise: EdgeTiming {
+                arrival: 0.0,
+                transition: input_transition,
+            },
+            fall: EdgeTiming {
+                arrival: 0.0,
+                transition: input_transition,
+            },
+        };
+        let load = CombinationalOutputLoad {
+            rise: output_load,
+            fall: output_load,
+        };
+        let known_pin_values = HashMap::new();
+        let mut diagnostics = TimingQueryDiagnosticCounts::default();
+        let mut winner: Option<(f64, CellBinding)> = None;
+
+        for (cell_index, cell) in library.cells.iter().enumerate() {
+            let Some((truth, binding)) = index_native_cell(library, cell_index, cell, 1)? else {
+                continue;
+            };
+            if truth != variable_truth(1, 0) || !binding.has_complete_timing() {
+                continue;
+            }
+            if binding
+                .output_pin(library)
+                .max_capacitance
+                .is_some_and(|maximum| maximum.is_finite() && output_load > maximum)
+            {
+                continue;
+            }
+
+            let timing = evaluate_combinational_cell_output_timing(
+                library,
+                binding.cell_name.as_str(),
+                binding.output_pin(library),
+                &[(binding.input_pin_names[0].as_str(), input_timing)],
+                load,
+                &known_pin_values,
+                &mut diagnostics,
+            )?;
+            let delay = timing.rise.arrival.max(timing.fall.arrival);
+            if winner
+                .as_ref()
+                .is_none_or(|(winner_delay, winner_binding)| {
+                    delay
+                        .total_cmp(winner_delay)
+                        .then_with(|| binding.area.total_cmp(&winner_binding.area))
+                        .then_with(|| binding.stable_key().cmp(&winner_binding.stable_key()))
+                        .is_lt()
+                })
+            {
+                winner = Some((delay, binding));
+            }
+        }
+
+        Ok(winner.map(|(_, binding)| binding).or(fallback))
+    }
+
     /// Returns the cheapest unary inverter cell, if the library has one.
     pub fn best_inverter(&self) -> Option<&CellBinding> {
         self.matches(1, 0b01)
@@ -479,10 +577,44 @@ fn index_native_cell(
             input_negated: vec![false; input_count],
             input_delays,
             input_capacitances,
+            symmetric_input_masks: symmetric_input_masks(input_count, truth),
             timing_complete,
             area: cell.area,
         },
     )))
+}
+
+/// Groups exactly those Liberty inputs that can exchange signals safely.
+fn symmetric_input_masks(input_count: usize, truth: u64) -> [u8; MAX_TRUTH_TABLE_INPUTS] {
+    let mut masks = [0_u8; MAX_TRUTH_TABLE_INPUTS];
+    for input in 0..input_count {
+        masks[input] = 1_u8 << input;
+    }
+
+    for first_input in 0..input_count {
+        for second_input in (first_input + 1)..input_count {
+            let swap_mask = (1_usize << first_input) | (1_usize << second_input);
+            let interchangeable = (0..(1_usize << input_count)).all(|assignment| {
+                let first = (assignment >> first_input) & 1;
+                let second = (assignment >> second_input) & 1;
+                let swapped = if first == second {
+                    assignment
+                } else {
+                    assignment ^ swap_mask
+                };
+                ((truth >> assignment) & 1) == ((truth >> swapped) & 1)
+            });
+            if interchangeable {
+                let merged = masks[first_input] | masks[second_input];
+                for mask in masks.iter_mut().take(input_count) {
+                    if *mask & merged != 0 {
+                        *mask = merged;
+                    }
+                }
+            }
+        }
+    }
+    masks
 }
 
 /// Expands only a retained native root into deterministic Boolean bindings.
@@ -640,14 +772,25 @@ fn binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Ordering {
         .then_with(|| lhs.stable_key().cmp(&rhs.stable_key()))
 }
 
-fn root_binding_dominates(lhs: &CellBinding, rhs: &CellBinding) -> bool {
-    lhs.area < rhs.area
-        || (lhs.area.total_cmp(&rhs.area).is_eq() && lhs.stable_key() <= rhs.stable_key())
+fn root_binding_dominates(lhs: &CellBinding, rhs: &CellBinding, policy: NfRootTiePolicy) -> bool {
+    root_binding_order(lhs, rhs, policy).is_le()
 }
 
-fn root_binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Ordering {
+fn root_binding_order(
+    lhs: &CellBinding,
+    rhs: &CellBinding,
+    policy: NfRootTiePolicy,
+) -> std::cmp::Ordering {
     lhs.area
         .total_cmp(&rhs.area)
+        .then_with(|| {
+            if policy == NfRootTiePolicy::Fastest {
+                lhs.worst_nominal_delay()
+                    .total_cmp(&rhs.worst_nominal_delay())
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
         .then_with(|| lhs.stable_key().cmp(&rhs.stable_key()))
 }
 
@@ -656,6 +799,7 @@ mod tests {
     use super::*;
     use crate::liberty_model::{Cell, LibraryBuilder, LuTableTemplate, Pin, TimingArc};
     use crate::liberty_proto::TimingTableKind;
+    use crate::netlist::cell_catalog::test_utils::sizing_library;
 
     fn pin(
         builder: &mut LibraryBuilder,
@@ -762,7 +906,47 @@ mod tests {
     }
 
     #[test]
-    fn nf_root_ties_ignore_characterized_liberty_delay() {
+    fn loaded_output_buffers_use_exact_timing_across_all_drive_variants() {
+        let library = sizing_library();
+        let index = LibertyCellIndex::build_nf(&library, 6).unwrap();
+
+        assert_eq!(index.best_buffer().unwrap().cell_name, "BUF");
+        assert_eq!(
+            index
+                .best_output_buffer(&library, 0.01, 0.5)
+                .unwrap()
+                .unwrap()
+                .cell_name,
+            "BUF_FAST"
+        );
+        assert_eq!(
+            index
+                .best_output_buffer(&library, 0.01, 0.0)
+                .unwrap()
+                .unwrap()
+                .cell_name,
+            "BUF"
+        );
+    }
+
+    #[test]
+    fn symmetric_input_masks_preserve_asymmetric_complex_cell_inputs() {
+        assert_eq!(symmetric_input_masks(2, 0b1000)[..2], [0b11, 0b11]);
+
+        let mut truth = 0_u64;
+        for assignment in 0..8 {
+            let first = (assignment & 1) != 0;
+            let second = (assignment & 2) != 0;
+            let independent = (assignment & 4) != 0;
+            if (first && second) || independent {
+                truth |= 1_u64 << assignment;
+            }
+        }
+        assert_eq!(symmetric_input_masks(3, truth)[..3], [0b011, 0b011, 0b100]);
+    }
+
+    #[test]
+    fn nf_root_area_ties_prefer_the_faster_characterized_liberty_cell() {
         let mut builder = LibraryBuilder::new();
         let mut cells = Vec::new();
         for (name, delay) in [("A_SLOW", 9.0), ("Z_FAST", 1.0)] {
@@ -805,6 +989,14 @@ mod tests {
         assert_eq!(index.stats.indexed_cell_outputs, 1);
         assert_eq!(
             index.binding(index.matches(2, 0b1000)[0]).cell_name,
+            "Z_FAST"
+        );
+
+        let stable = LibertyCellIndex::build_nf_stable_roots(&library, 6).unwrap();
+
+        assert_eq!(stable.stats.indexed_cell_outputs, 1);
+        assert_eq!(
+            stable.binding(stable.matches(2, 0b1000)[0]).cell_name,
             "A_SLOW"
         );
     }

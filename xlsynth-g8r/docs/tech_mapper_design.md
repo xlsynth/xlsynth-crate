@@ -12,10 +12,12 @@ optimization:
 ```text
 final ABC q-AIGER + Liberty proto + endpoint timing constraints
     -> NF-priority choice-aware structural cuts
-    -> unit-delay or representative-pin-delay Liberty-cell matching
-    -> four area-flow mapping rounds
+    -> representative-pin-delay Liberty-cell matching
+    -> one delay-first and three area-flow mapping rounds
     -> two exact-area recovery rounds
-    -> parsed gate-level netlist and exact Liberty STA
+    -> parsed gate-level netlist
+    -> optional timing-aware buffering and cell resizing
+    -> exact full-netlist Liberty STA
 ```
 
 It is not an ABC-loop protocol. The mapper does not serialize a selected cover
@@ -28,17 +30,20 @@ choices. The loader preserves otherwise-dead choice cones and records ABC's
 backwards sibling links in `ChoiceAig`. Ordinary ASCII or binary AIGER is
 also accepted and is represented as a no-choice graph.
 
-Every choice class must be a single nonbranching sibling chain. Only its
-canonical head may feed an ordinary AIG node or primary output; sibling
-alternatives are reachable only through their chain links. Construction and
-q-AIGER import reject branching chains and alternatives with ordinary fanout.
+Every choice class must be a single nonbranching sibling chain whose links
+point toward earlier AIG nodes. Only the canonical chain head may feed an
+ordinary AIG node or primary output; every noncanonical alternative is
+reachable only through its choice links. Construction and q-AIGER import
+reject branching chains, forward links, noncanonical primary outputs, and
+alternatives with ordinary fanout.
 
 The loader can close sibling links into complete deterministic choice classes
 for diagnostics. Mapping itself deliberately keeps one state per concrete AIG
-node and polarity, like ABC NF: a sibling contributes phase-adjusted cuts to
-the later node, but referenced sibling roots are not merged into one shared
-mapping state. Because ABC choices may be equivalent up to complement, the
-mapper computes each AIG node's all-zero phase when it imports sibling cuts.
+node and polarity, like ABC NF: a noncanonical sibling contributes
+phase-adjusted cuts to the canonical choice, but cannot become an independently
+referenced sibling root. Because ABC choices may be equivalent up to
+complement, the mapper computes each AIG node's all-zero phase when it imports
+sibling cuts.
 
 ### Liberty Index
 
@@ -57,10 +62,10 @@ native Boolean function before expanding deterministic input-pin permutations
 and per-input polarity transforms. This avoids expanding and then discarding
 every drive-strength variant. Unlike ABC's intermediate GENLIB conversion,
 the root index retains the full-precision Liberty area rather than rounding
-it to two decimal places. With ABC's generated unit-delay arcs, equally
-priced roots are selected by deterministic cell identity; characterized
-Liberty arc delays do not influence root or cut selection. In NF mode the
-index also suppresses redundant
+it to two decimal places. Equal-area roots prefer the lower worst characterized
+nominal pin delay, then deterministic cell identity; a faster root never
+displaces a strictly smaller-area one. Structural cut flow remains independent
+of Liberty area and timing. In NF mode the index also suppresses redundant
 pin permutations with the same transformed truth and leaf-polarity mask, like
 ABC's default `fPinPerm=0` matching database. Drive-strength selection is
 intentionally left to a later sizing pass. The first implementation skips
@@ -73,7 +78,11 @@ node by default. Structural cut priority follows `giaNf.c`: useful function,
 structural area flow within the NF epsilon, unit-delay depth, and leaf count.
 The frontier applies ABC's early support-containment check, removes strict
 supersets on insertion, and reserves a unit-cut slot when preparing fanins.
-Cut flow uses structural leaf costs rather than Liberty areas or timing.
+Cut flow uses structural leaf costs rather than Liberty areas or timing. On a
+full frontier, up to three useful low-depth cuts are protected from
+structural-area eviction while at least one ordinary minimum-flow cut is
+retained. This small deterministic timing reserve exposes faster covers without
+expanding the configured 16-cut search frontier.
 
 Cut truth tables include complemented AIG edges and minimize away unused
 support variables after composition. Sibling cuts are phase-adjusted and
@@ -99,12 +108,17 @@ implementation drives the shared internal phase, and the inverter stays on the
 output-only phase. This avoids making an output polarity choice add a heavily
 loaded inverter to an otherwise shared cone.
 
-The default `NfLiberty` implementation is a separate single-objective engine in
+The default `NfLiberty` implementation is a separate compact two-match engine in
 `techmap::nf`. It visits retained cuts and native cell bindings directly,
 keeps one fastest and one lowest-area-flow match per concrete object and
-polarity, and selects an area child only when it meets the current required
-time. Its explicit inverter closure follows NF's direct-phase behavior and
-charges inverter area without dividing it by the root's flow references.
+polarity, and scores delay and area child choices independently. The delay
+candidate always follows its fastest child; the area candidate may follow a
+cheaper child only when that child meets the current required time. Exact
+Boolean truth tables identify interchangeable Liberty input pins, allowing
+late signals to move to faster functionally equivalent pins during both flow
+selection and exact-area recovery. Its explicit inverter closure follows NF's
+direct-phase behavior and charges inverter area without dividing it by the
+root's flow references.
 
 It uses the same 16-cut default frontier and the same flow and exact-area
 rounds as ABC NF. Each native cell input receives a fixed representative
@@ -125,6 +139,32 @@ The exact-area rounds recursively dereference the old cone and reference each
 trial cone, charging a shared cell only when its reference count changes
 between zero and one. Required times and output phase cleanup are propagated
 through the actual selected mapping.
+
+For an unusually large unconstrained combinational cover, the mapper can
+evaluate a bounded deterministic recovery portfolio before postprocessing. A
+selected cover containing more than 4,096 actual Liberty cells and driving at
+most 256 primary outputs admits up to seven alternate remappings that vary
+equal-area root tie-breaking, functionally interchangeable pin assignment,
+low-depth cut protection, and feasible-area child selection. An alternate
+cover is considered only when it has at least 15% fewer selected cells. The
+original and eligible unoptimized covers are emitted and independently timed
+with full rise/fall Liberty STA under the configured external loads; an
+alternative must also have strictly lower exact delay. To avoid replacing
+moderately large covers with candidates whose initial improvement disappears
+after buffering and resizing, an alternative must improve that unoptimized
+delay by at least 10% unless the original cover exceeds 5,000 cells. The
+fastest qualifying cover wins, with deterministic area and cell-count
+tie-breaking. Smaller designs, wide-output designs, endpoint-constrained
+combinational mapping, and registered transition mapping keep the original
+single-cover path. The chosen cover still proceeds through the same requested
+buffering, resizing, and final full-STA verification.
+
+When distinct primary outputs share a selected implementation, deterministic
+netlist emission may need an explicit unary identity driver. That driver is
+selected from every eligible Liberty identity cell, not just the compact NF
+root index. Full rise/fall NLDM interpolation at the actual configured
+primary-output load chooses the fastest legal output buffer, with area and
+stable cell identity breaking timing ties.
 
 The earlier `BufferedLiberty` and two-cover `Balanced` strategies remain
 available as explicitly selected experimental modes. They are not evaluated
@@ -159,13 +199,46 @@ sinks by downstream timing criticality. The inserter keeps critical sinks
 near the original driver, selects actual buffer strengths using ABC-style
 electrical effort and characterized slew/load timing, and checks bounded
 batches of proposed trees against independently recomputed worst-path
-timing.
+timing. Explicit fanout and target-load bounds, Liberty maximum output
+capacitances, and independent rise/fall sink loads remain electrical
+constraints rather than scalar fanout estimates.
 
 For registered modules, register Q pins are timing launches, register D pins
 are capture endpoints, and clock pins are never buffered. User clock periods
 and external output requirements remain hard constraints. Primary-input
 buffering is optional, and packed port bits, public primary-output names,
 and zero-area constant assignments retain their original spelling.
+
+After an initial combinational buffer-and-resize pass, a bounded speculative
+round can revisit actual post-sizing electrical conditions. On designs with
+at most 4,096 instances and 256 previously inserted buffers, an unresolved
+load or fanout above six permits a stricter timing-first buffer tree followed
+by another complete incremental resizing pass. The second tree is built on a
+cloned netlist; delay-oriented buffer-strength selection must still reduce its
+parent driver's load. The complete trial is retained only when independent
+full Liberty STA reports strictly better global delay. Otherwise every
+instance, net, and interned name is restored unchanged.
+
+A narrowly bounded variant also recognizes a weak combinational driver that
+simultaneously drives a visible primary output and an internal data sink. For
+designs with at most 128 instances, cheap normalized connectivity first checks
+whether such a shared output exists. Only matching topologies receive exact
+slew and critical-path analysis: the output transition must exceed half the
+global worst-path delay, and its root must be electrically stressed and
+near-critical. A speculative buffer can isolate the external output load while
+leaving the critical internal consumer directly connected to its original
+driver. Clocks, sequential designs, and unshared primary outputs are excluded;
+the same cloned-netlist and strictly improving full-STA acceptance rules
+apply.
+
+Once the best timing is fixed, bounded sibling-buffer consolidation can
+replace two inserted buffers driven by the same parent with one legal stronger
+identity buffer. Candidate mergers preserve maximum fanout, configured
+per-stage load, Liberty output capacitance, and the original parent load on
+both edges. A move is accepted only when exact full-netlist timing does not
+regress and total cell area strictly decreases. Public outputs, clocks, and
+sequential modules are protected, and the search is capped at four accepted
+mergers and 16 full timing evaluations.
 
 The retired capacitance-balanced `netlist::buffer::insert_buffers` entry point
 panics if called. Its algorithm is retained only for explicitly named test
@@ -192,6 +265,11 @@ independently meaningful endpoint delay, and non-overlapping changes are
 applied in deterministic batches rather than limiting each sizing iteration to
 a single replacement.
 
+Move sorting uses exact floating-point total order plus deterministic instance,
+cell, and pin tie-breakers. Numerical improvement tolerances apply only when
+accepting or rejecting a move; they never define equality inside a sort
+comparator.
+
 Cell substitution and input-pin exchange are moves in the same incremental
 optimizer. The Liberty catalog derives legal combinational input swaps by
 checking the complete cell truth table; a pin exchange is never inferred from
@@ -211,10 +289,11 @@ achieved endpoint timing class. A final bounded, zero-area pin-swap cleanup
 can expose one last timing-protected recovery opportunity.
 
 `netlist::optimize::optimize_mapped_netlist` exposes the complete reusable
-buffer-then-resize pipeline. It verifies both initial and final results using
-independent full parsed-netlist area and timing analysis. Both passes are
-disabled by default for NF mapping and can be explicitly enabled or bounded
-individually.
+combinational buffer-then-resize pipeline, including strictly improving
+speculative rebuffering and fixed-delay sibling-buffer recovery. It verifies
+both initial and final results using independent full parsed-netlist area and
+timing analysis. Both primary passes are disabled by default for NF mapping
+and can be explicitly enabled or bounded individually.
 
 The same engine handles mapped sequential modules without changing the
 objective or substituting unit delays. It tracks primary-input and register
@@ -232,6 +311,31 @@ reset, and enable pins are never exchanged. Both the existing `buffer_options`
 and `resize_options` remain independently optional; final area, register
 counts, setup slack, and endpoint timing are independently recomputed using
 the production `gv-stats` engine.
+
+### Exact Timing Engine and Runtime
+
+Mapping characterization, buffer evaluation, incremental resizing, and final
+reporting share the same exact Liberty rise/fall timing implementation. NLDM
+interpolation preserves arbitrary characterized axis values, conservative
+nonmonotonic-surface repair, conditional timing arcs, transition clamping, and
+register setup semantics. Hot-path interpolation coordinates and one- or
+two-edge timing candidates use bounded stack-backed storage, avoiding
+repeated heap allocations without changing the calculated timing values.
+
+During incremental resizing, a thread-local cache scoped to the borrowed
+Liberty library lazily computes each queried delay or transition table's
+complete coordinatewise monotone upper envelope. Later interpolation corners
+read the cached exact prefix maximum instead of repeatedly scanning every
+earlier characterized entry. Cache ownership ends before its library borrow,
+nested library scopes remain isolated, and setup tables retain their original
+unmodified semantics. Cached and uncached timing, interpolation diagnostics,
+and signed floating-point results remain bit-identical.
+
+Incremental registered timing indexes only real physical register capture
+instances when evaluating setup endpoints. Purely combinational instances do
+not enter the capture endpoint loop; input-to-output, input-to-register,
+register-to-register, and register-to-output objectives remain independently
+tracked.
 
 ### Output Contract
 
@@ -300,11 +404,15 @@ the clock period and each primary-output required time. Statistics distinguish
 flip-flop area, primary-input capture, register-to-register timing,
 register-to-output timing, and optional clock slack.
 
-The initial supported subset is one positive-edge clock and synchronous
-flip-flops. Latches, negative-edge cells, asynchronous clear or preset,
-explicit power-up state, and mapped-netlist buffering or resizing are
-rejected rather than silently approximated. Register-aware buffering and
-sizing are deliberately separate follow-up work.
+The supported sequential subset is one positive-edge clock and synchronous
+flip-flops, with synchronous reset and enable already represented in the
+transition logic. Physical-register restoration is followed by optional
+register-aware Liberty buffering and optional resizing of combinational cells,
+buffers, and eligible flip-flops. Clock nets are never buffered, physical
+control pins are never exchanged, and all timing classes and setup constraints
+are verified again after optimization. Latches, negative-edge cells,
+asynchronous clear or preset, and unsupported explicit power-up state are
+rejected rather than silently approximated.
 
 ## Structural Baseline
 

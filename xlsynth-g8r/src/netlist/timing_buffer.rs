@@ -25,6 +25,22 @@ use string_interner::{StringInterner, backend::StringBackend};
 
 /// ABC's default buffer gain is three, giving a nine-to-one gate effort.
 const MAX_ELECTRICAL_EFFORT: f64 = 9.0;
+/// Critical-path trials can profitably isolate loads below electrical limits.
+const TIMING_DRIVEN_EFFORT_FRACTION: f64 = 0.5;
+/// Bound speculative complete-STA work to actual near-critical paths.
+const MIN_CRITICAL_PATH_FRACTION: f64 = 0.9;
+/// Avoid exploring every fanout on large speculative timing rounds.
+const MAX_OPPORTUNISTIC_ROOTS: usize = 16;
+/// A timing-selected buffer must still reduce its parent driver's load.
+const MIN_TIMING_BUFFER_EFFORT: f64 = 2.0;
+/// Extremely slow directly exposed outputs can also delay their internal users.
+const MIN_SHARED_OUTPUT_SLEW_FRACTION: f64 = 0.5;
+/// Bound exact timing work spent recovering redundant sibling-buffer area.
+const MAX_BUFFER_CONSOLIDATION_EVALUATIONS: usize = 16;
+/// Avoid repeatedly rebuilding very large buffer trees during area recovery.
+const MAX_BUFFER_CONSOLIDATION_MOVES: usize = 4;
+/// Try only the fastest pin-compatible shared strengths for one sibling pair.
+const MAX_BUFFER_CONSOLIDATION_STRENGTHS: usize = 3;
 /// Bound full-STA work while allowing individually useful rejected batches.
 const MAX_TIMING_EVALUATIONS: usize = 64;
 /// Evaluate several independent net edits with one exact timing analysis.
@@ -120,6 +136,47 @@ struct BufferNames {
     instance: usize,
 }
 
+/// Exact-timing diagnostics for accepted sibling-buffer consolidation.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BufferConsolidationStats {
+    pub buffers_removed: usize,
+    pub area_recovered: f64,
+    pub timing_evaluations: usize,
+    pub final_delay: f64,
+    pub max_fanout_after: usize,
+    pub max_load_after: f64,
+    pub unresolved_overloaded_nets: usize,
+}
+
+/// One same-parent inserted-buffer pair and its legal shared strengths.
+#[derive(Clone, Debug)]
+struct BufferConsolidationCandidate {
+    keep_instance: usize,
+    remove_instance: usize,
+    keep_output: usize,
+    remove_output: usize,
+    combined_area: f64,
+    criticality: f64,
+    replacements: Vec<BufferConsolidationReplacement>,
+}
+
+/// One pin-compatible shared-buffer drive strength and local timing estimate.
+#[derive(Clone, Debug)]
+struct BufferConsolidationReplacement {
+    name: String,
+    area: f64,
+    predicted_delay: f64,
+}
+
+/// Best exact-timed replacement encountered for one sibling-buffer pair.
+#[derive(Clone)]
+struct AcceptedBufferConsolidation {
+    module: NetlistModule,
+    interner: StringInterner<StringBackend<SymbolU32>>,
+    delay: f64,
+    area_recovered: f64,
+}
+
 /// Inserts electrically bounded, exact-timing-validated register-aware buffers.
 pub fn insert_timing_aware_buffers(
     module: &mut NetlistModule,
@@ -129,6 +186,142 @@ pub fn insert_timing_aware_buffers(
     options: &BufferOptions,
     sta_options: StaOptions,
     constraints: &BufferTimingConstraints,
+) -> Result<BufferStats> {
+    insert_timing_aware_buffers_with_strategy(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        sta_options,
+        constraints,
+        false,
+    )
+}
+
+/// Explores critical fanouts inside an independently validated trial netlist.
+pub(crate) fn insert_speculative_timing_aware_buffers(
+    module: &mut NetlistModule,
+    nets: &mut Vec<Net>,
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &BufferOptions,
+    sta_options: StaOptions,
+    constraints: &BufferTimingConstraints,
+) -> Result<BufferStats> {
+    insert_timing_aware_buffers_with_strategy(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        sta_options,
+        constraints,
+        true,
+    )
+}
+
+/// Detects a near-critical, slow output shared with an internal data sink.
+pub(crate) fn has_slow_shared_primary_output(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &BufferOptions,
+    sta_options: StaOptions,
+) -> Result<bool> {
+    if sta_options.module_output_load <= 0.0 {
+        return Ok(false);
+    }
+
+    // Connectivity is much cheaper than Liberty STA; most small circuits have
+    // no output also consumed internally and need no extra timing analysis.
+    let normalized = NormalizedNetlistModule::new(module, nets, interner)
+        .context("normalizing shared primary-output buffer candidates")?;
+    let output_bits = normalized
+        .ports
+        .iter()
+        .filter(|port| port.direction == PortDirection::Output)
+        .flat_map(|port| port.bits.iter().copied())
+        .collect::<BTreeSet<_>>();
+    if output_bits.is_empty() {
+        return Ok(false);
+    }
+    let mut binding_counts = vec![0usize; normalized.bit_count()];
+    let mut shared_output = false;
+    for instance in &normalized.instances {
+        for connection in &instance.connections {
+            for bit in &connection.bits {
+                if let BitSource::Bit(bit) = bit
+                    && output_bits.contains(bit)
+                {
+                    binding_counts[*bit] += 1;
+                    shared_output |= binding_counts[*bit] >= 2;
+                }
+            }
+        }
+    }
+    if !shared_output {
+        return Ok(false);
+    }
+
+    let constraints = BufferTimingConstraints::default();
+    let snapshot =
+        analyze_timing_snapshot(module, nets, interner, library, sta_options, &constraints)?;
+    let graph = build_timing_graph(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        &constraints,
+        &snapshot,
+    )?;
+    if graph.instances.iter().any(|instance| instance.sequential) {
+        return Ok(false);
+    }
+    let catalog = CellCatalog::new(library)?;
+    let minimum_transition = worst_path_delay(&snapshot.report) * MIN_SHARED_OUTPUT_SLEW_FRACTION;
+
+    for (root, fanout) in graph.fanouts.iter().enumerate() {
+        if !fanout_eligible(fanout, options)
+            || fanout.driver.is_none()
+            || !fanout
+                .sinks
+                .iter()
+                .any(|sink| matches!(sink.target, TimingSinkTarget::ModuleOutput { .. }))
+            || !fanout
+                .sinks
+                .iter()
+                .any(|sink| matches!(sink.target, TimingSinkTarget::InstancePin { .. }))
+        {
+            continue;
+        }
+        let Some(timing) = snapshot.combined.timing_for_net(graph.bits[root].0) else {
+            continue;
+        };
+        if timing.rise.transition.max(timing.fall.transition) + TIMING_EPSILON < minimum_transition
+        {
+            continue;
+        }
+        if fanout_is_buffer_candidate(&graph, root, library, &catalog, options, &snapshot, true)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Separates conservative production buffering from speculative timing trials.
+#[allow(clippy::too_many_arguments)]
+fn insert_timing_aware_buffers_with_strategy(
+    module: &mut NetlistModule,
+    nets: &mut Vec<Net>,
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &BufferOptions,
+    sta_options: StaOptions,
+    constraints: &BufferTimingConstraints,
+    speculative: bool,
 ) -> Result<BufferStats> {
     validate_timing_options(options, sta_options, constraints)?;
     if module.net_index_range.end != nets.len() {
@@ -163,7 +356,14 @@ pub fn insert_timing_aware_buffers(
         ..BufferStats::default()
     };
 
-    let mut roots = overloaded_roots(&initial_graph, library, &catalog, options, &snapshot)?;
+    let mut roots = overloaded_roots(
+        &initial_graph,
+        library,
+        &catalog,
+        options,
+        &snapshot,
+        speculative,
+    )?;
     if roots.is_empty() {
         stats.max_fanout_after = stats.max_fanout_before;
         stats.max_load_after = stats.max_load_before;
@@ -199,6 +399,7 @@ pub fn insert_timing_aware_buffers(
                 &snapshot,
                 &initial_graph,
                 root,
+                speculative,
                 &mut names,
                 &mut batch_stats,
             )?;
@@ -232,7 +433,14 @@ pub fn insert_timing_aware_buffers(
                         constraints,
                         &snapshot,
                     )?;
-                    roots = overloaded_roots(&graph, library, &catalog, options, &snapshot)?;
+                    roots = overloaded_roots(
+                        &graph,
+                        library,
+                        &catalog,
+                        options,
+                        &snapshot,
+                        speculative,
+                    )?;
                 }
                 Ok(_) => {
                     stats.rejected_timing_batches += 1;
@@ -277,7 +485,15 @@ pub fn insert_timing_aware_buffers(
                 continue;
             };
             if !fanout_eligible(fanout, options)
-                || !fanout_is_overloaded(fanout, library, &catalog, options)?
+                || !fanout_is_buffer_candidate(
+                    &graph,
+                    *root,
+                    library,
+                    &catalog,
+                    options,
+                    &snapshot,
+                    speculative,
+                )?
             {
                 continue;
             }
@@ -293,6 +509,7 @@ pub fn insert_timing_aware_buffers(
                 &snapshot,
                 &graph,
                 *root,
+                speculative,
                 &mut names,
                 &mut batch_stats,
             )?;
@@ -366,6 +583,307 @@ pub fn insert_timing_aware_buffers(
             overloaded.map(|overloaded| count + usize::from(overloaded))
         })?;
     Ok(stats)
+}
+
+/// Merges equivalent sibling buffers only when exact final timing is preserved.
+pub(crate) fn consolidate_timing_aware_buffers(
+    module: &mut NetlistModule,
+    nets: &[Net],
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &BufferOptions,
+    sta_options: StaOptions,
+    achieved_delay: f64,
+) -> Result<BufferConsolidationStats> {
+    let constraints = BufferTimingConstraints::default();
+    validate_timing_options(options, sta_options, &constraints)?;
+    let catalog = CellCatalog::new(library)?;
+    let mut stats = BufferConsolidationStats {
+        final_delay: achieved_delay,
+        ..BufferConsolidationStats::default()
+    };
+
+    while stats.buffers_removed < MAX_BUFFER_CONSOLIDATION_MOVES
+        && stats.timing_evaluations < MAX_BUFFER_CONSOLIDATION_EVALUATIONS
+    {
+        let snapshot =
+            analyze_timing_snapshot(module, nets, interner, library, sta_options, &constraints)?;
+        let graph = build_timing_graph(
+            module,
+            nets,
+            interner,
+            library,
+            options,
+            &constraints,
+            &snapshot,
+        )?;
+        if graph.instances.iter().any(|instance| instance.sequential) {
+            break;
+        }
+        let candidates = sibling_buffer_consolidations(
+            module, interner, library, &catalog, options, &snapshot, &graph,
+        )?;
+        if candidates.is_empty() {
+            break;
+        }
+
+        let mut accepted = None::<AcceptedBufferConsolidation>;
+        for candidate in candidates {
+            for replacement in candidate
+                .replacements
+                .iter()
+                .take(MAX_BUFFER_CONSOLIDATION_STRENGTHS)
+            {
+                if stats.timing_evaluations == MAX_BUFFER_CONSOLIDATION_EVALUATIONS {
+                    break;
+                }
+                let mut trial_module = module.clone();
+                let mut trial_interner = interner.clone();
+                let keep_output = reference_for_bit(
+                    graph.bits[candidate.keep_output].0,
+                    graph.bits[candidate.keep_output].1,
+                    nets,
+                )?;
+                for sink in &graph.fanouts[candidate.remove_output].sinks {
+                    reconnect_sink(&mut trial_module, sink.target, keep_output.clone());
+                }
+                trial_module.instances[candidate.keep_instance].type_name =
+                    trial_interner.get_or_intern(replacement.name.as_str());
+                trial_module.instances.remove(candidate.remove_instance);
+                let timing = analyze_combinational_max_arrival_with_primary_input_arrivals(
+                    &trial_module,
+                    nets,
+                    &trial_interner,
+                    library,
+                    sta_options,
+                    &BTreeMap::new(),
+                );
+                stats.timing_evaluations += 1;
+                let trial_delay = match timing {
+                    Ok(report) => report.worst_output_arrival,
+                    Err(error) => {
+                        log::debug!("rejecting sibling buffer consolidation: {error:#}");
+                        continue;
+                    }
+                };
+                if trial_delay > stats.final_delay + TIMING_EPSILON {
+                    continue;
+                }
+                let area_recovered = candidate.combined_area - replacement.area;
+                let improves = accepted.as_ref().is_none_or(|best| {
+                    trial_delay + TIMING_EPSILON < best.delay
+                        || (trial_delay - best.delay).abs() <= TIMING_EPSILON
+                            && area_recovered > best.area_recovered + TIMING_EPSILON
+                });
+                if improves {
+                    accepted = Some(AcceptedBufferConsolidation {
+                        module: trial_module,
+                        interner: trial_interner,
+                        delay: trial_delay,
+                        area_recovered,
+                    });
+                }
+            }
+            if accepted.is_some()
+                || stats.timing_evaluations == MAX_BUFFER_CONSOLIDATION_EVALUATIONS
+            {
+                break;
+            }
+        }
+
+        let Some(best) = accepted else {
+            break;
+        };
+        *module = best.module;
+        *interner = best.interner;
+        stats.buffers_removed += 1;
+        stats.area_recovered += best.area_recovered;
+        stats.final_delay = best.delay;
+    }
+
+    if stats.buffers_removed > 0 {
+        let snapshot =
+            analyze_timing_snapshot(module, nets, interner, library, sta_options, &constraints)?;
+        let graph = build_timing_graph(
+            module,
+            nets,
+            interner,
+            library,
+            options,
+            &constraints,
+            &snapshot,
+        )?;
+        stats.final_delay = worst_path_delay(&snapshot.report);
+        stats.max_fanout_after = eligible_fanouts(&graph, options)
+            .map(|fanout| fanout.sinks.len())
+            .max()
+            .unwrap_or(0);
+        stats.max_load_after = eligible_fanouts(&graph, options)
+            .map(|fanout| max_load(sum_sink_load(&fanout.sinks)))
+            .fold(0.0, f64::max);
+        stats.unresolved_overloaded_nets = eligible_fanouts(&graph, options)
+            .map(|fanout| fanout_is_overloaded(fanout, library, &catalog, options))
+            .try_fold(0usize, |count, overloaded| {
+                overloaded.map(|overloaded| count + usize::from(overloaded))
+            })?;
+    }
+    Ok(stats)
+}
+
+/// Enumerates deterministic, pin-compatible same-parent buffer replacements.
+#[allow(clippy::too_many_arguments)]
+fn sibling_buffer_consolidations(
+    module: &NetlistModule,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    catalog: &CellCatalog,
+    options: &BufferOptions,
+    snapshot: &TimingSnapshot,
+    graph: &TimingGraph,
+) -> Result<Vec<BufferConsolidationCandidate>> {
+    let mut candidates = Vec::new();
+    for (root, fanout) in graph.fanouts.iter().enumerate() {
+        if fanout.protected_clock || fanout.constant {
+            continue;
+        }
+        let mut siblings = fanout
+            .sinks
+            .iter()
+            .filter_map(|sink| {
+                let TimingSinkTarget::InstancePin { instance_index, .. } = sink.target else {
+                    return None;
+                };
+                let instance = &module.instances[instance_index];
+                let name = interner.resolve(instance.instance_name)?;
+                let cell = catalog.by_name(interner.resolve(instance.type_name)?)?;
+                let output = graph.instances[instance_index]
+                    .outputs
+                    .as_slice()
+                    .first()
+                    .copied()?;
+                if !name.starts_with("u_buf_")
+                    || !cell.is_buffer()
+                    || graph.instances[instance_index].outputs.len() != 1
+                    || graph.fanouts[output].protected_clock
+                    || graph.fanouts[output]
+                        .sinks
+                        .iter()
+                        .any(|sink| matches!(sink.target, TimingSinkTarget::ModuleOutput { .. }))
+                {
+                    return None;
+                }
+                Some(instance_index)
+            })
+            .collect::<Vec<_>>();
+        siblings.sort_unstable();
+        siblings.dedup();
+
+        for pair in siblings.windows(2) {
+            let keep_instance = pair[0];
+            let remove_instance = pair[1];
+            let keep_output = graph.instances[keep_instance].outputs[0];
+            let remove_output = graph.instances[remove_instance].outputs[0];
+            let keep_fanout = &graph.fanouts[keep_output];
+            let remove_fanout = &graph.fanouts[remove_output];
+            if keep_fanout.sinks.len() + remove_fanout.sinks.len() > options.max_fanout {
+                continue;
+            }
+            let keep_name = interner
+                .resolve(module.instances[keep_instance].type_name)
+                .ok_or_else(|| anyhow!("cannot resolve a sibling buffer type"))?;
+            let remove_name = interner
+                .resolve(module.instances[remove_instance].type_name)
+                .ok_or_else(|| anyhow!("cannot resolve a sibling buffer type"))?;
+            let keep_cell = catalog
+                .by_name(keep_name)
+                .ok_or_else(|| anyhow!("cannot classify a sibling buffer type"))?;
+            let remove_cell = catalog
+                .by_name(remove_name)
+                .ok_or_else(|| anyhow!("cannot classify a sibling buffer type"))?;
+            let combined_area = keep_cell.area + remove_cell.area;
+            let keep_load = sum_sink_load(&keep_fanout.sinks);
+            let remove_load = sum_sink_load(&remove_fanout.sinks);
+            let combined_load = CombinationalOutputLoad {
+                rise: keep_load.rise + remove_load.rise,
+                fall: keep_load.fall + remove_load.fall,
+            };
+            if options.target_load.is_some_and(|limit| {
+                combined_load.rise > limit + TIMING_EPSILON
+                    || combined_load.fall > limit + TIMING_EPSILON
+            }) {
+                continue;
+            }
+            let old_parent_load = CombinationalOutputLoad {
+                rise: keep_cell.input_capacitances[0].rise + remove_cell.input_capacitances[0].rise,
+                fall: keep_cell.input_capacitances[0].fall + remove_cell.input_capacitances[0].fall,
+            };
+            let source_timing = snapshot.combined.timing_for_net(graph.bits[root].0);
+            let mut replacements = Vec::new();
+            for replacement in catalog.family(keep_cell) {
+                if !replacement.is_buffer()
+                    || replacement.area + TIMING_EPSILON >= combined_area
+                    || replacement.input_capacitances[0].rise
+                        > old_parent_load.rise + TIMING_EPSILON
+                    || replacement.input_capacitances[0].fall
+                        > old_parent_load.fall + TIMING_EPSILON
+                    || replacement
+                        .output_max_capacitance
+                        .is_some_and(|limit| max_load(combined_load) > limit + TIMING_EPSILON)
+                {
+                    continue;
+                }
+                let predicted_delay = if let Some(timing) = source_timing {
+                    let cell = &library.cells[replacement.cell_index];
+                    let input =
+                        library.resolve_string(&cell.pins[replacement.input_pin_indices[0]].name);
+                    let output = &cell.pins[replacement.output_pin_index];
+                    let mut diagnostics = TimingQueryDiagnosticCounts::default();
+                    let timing = evaluate_combinational_cell_output_timing(
+                        library,
+                        &cell.name,
+                        output,
+                        &[(input, timing)],
+                        combined_load,
+                        &HashMap::new(),
+                        &mut diagnostics,
+                    )?;
+                    timing.rise.arrival.max(timing.fall.arrival)
+                } else {
+                    replacement.nominal_delay
+                };
+                replacements.push(BufferConsolidationReplacement {
+                    name: replacement.name.clone(),
+                    area: replacement.area,
+                    predicted_delay,
+                });
+            }
+            replacements.sort_by(|lhs, rhs| {
+                lhs.predicted_delay
+                    .total_cmp(&rhs.predicted_delay)
+                    .then_with(|| lhs.area.total_cmp(&rhs.area))
+                    .then_with(|| lhs.name.cmp(&rhs.name))
+            });
+            if replacements.is_empty() {
+                continue;
+            }
+            candidates.push(BufferConsolidationCandidate {
+                keep_instance,
+                remove_instance,
+                keep_output,
+                remove_output,
+                combined_area,
+                criticality: graph.departures[keep_output].max(graph.departures[remove_output]),
+                replacements,
+            });
+        }
+    }
+    candidates.sort_by(|lhs, rhs| {
+        rhs.criticality
+            .total_cmp(&lhs.criticality)
+            .then_with(|| lhs.keep_instance.cmp(&rhs.keep_instance))
+            .then_with(|| lhs.remove_instance.cmp(&rhs.remove_instance))
+    });
+    Ok(candidates)
 }
 
 /// Rejects invalid electrical and endpoint constraints before editing a net.
@@ -738,14 +1256,24 @@ fn overloaded_roots(
     catalog: &CellCatalog,
     options: &BufferOptions,
     snapshot: &TimingSnapshot,
+    speculative: bool,
 ) -> Result<Vec<usize>> {
     let mut roots = Vec::new();
     for (index, fanout) in graph.fanouts.iter().enumerate() {
         if !fanout_eligible(fanout, options)
-            || !fanout_is_overloaded(fanout, library, catalog, options)?
+            || !fanout_is_buffer_candidate(
+                graph,
+                index,
+                library,
+                catalog,
+                options,
+                snapshot,
+                speculative,
+            )?
         {
             continue;
         }
+        let overloaded = fanout_is_overloaded(fanout, library, catalog, options)?;
         let priority = signal_arrival(snapshot, graph.bits[index].0)
             + fanout
                 .sinks
@@ -759,16 +1287,46 @@ fn overloaded_roots(
             .unwrap_or(0.0);
         let hard = fanout.sinks.len() > options.max_fanout
             || exceeds_characterized_output_limit(fanout, library, options);
-        roots.push((index, hard, fanout_ratio.max(load_ratio), priority));
+        roots.push((
+            index,
+            hard,
+            fanout_ratio.max(load_ratio),
+            priority,
+            overloaded,
+        ));
     }
     roots.sort_by(|lhs, rhs| {
         rhs.1
             .cmp(&lhs.1)
-            .then_with(|| rhs.2.total_cmp(&lhs.2))
-            .then_with(|| rhs.3.total_cmp(&lhs.3))
+            .then_with(|| {
+                if speculative {
+                    rhs.3.total_cmp(&lhs.3)
+                } else {
+                    rhs.2.total_cmp(&lhs.2)
+                }
+            })
+            .then_with(|| {
+                if speculative {
+                    rhs.2.total_cmp(&lhs.2)
+                } else {
+                    rhs.3.total_cmp(&lhs.3)
+                }
+            })
             .then_with(|| lhs.0.cmp(&rhs.0))
     });
-    Ok(roots.into_iter().map(|(index, _, _, _)| index).collect())
+    let mut opportunistic_roots = 0;
+    Ok(roots
+        .into_iter()
+        .filter_map(|(index, _, _, _, overloaded)| {
+            if !overloaded {
+                if opportunistic_roots == MAX_OPPORTUNISTIC_ROOTS {
+                    return None;
+                }
+                opportunistic_roots += 1;
+            }
+            Some(index)
+        })
+        .collect())
 }
 
 /// Returns only legal, driven data roots; clocks and constants are protected.
@@ -807,6 +1365,52 @@ fn fanout_is_overloaded(
     } else {
         Ok(false)
     }
+}
+
+/// Exposes heavily loaded critical fanouts only to speculative trial passes.
+#[allow(clippy::too_many_arguments)]
+fn fanout_is_buffer_candidate(
+    graph: &TimingGraph,
+    root: usize,
+    library: &Library,
+    catalog: &CellCatalog,
+    options: &BufferOptions,
+    snapshot: &TimingSnapshot,
+    speculative: bool,
+) -> Result<bool> {
+    let fanout = &graph.fanouts[root];
+    if fanout_is_overloaded(fanout, library, catalog, options)? {
+        return Ok(true);
+    }
+    if !speculative {
+        return Ok(false);
+    }
+
+    let drives_visible_output = fanout
+        .sinks
+        .iter()
+        .any(|sink| matches!(sink.target, TimingSinkTarget::ModuleOutput { .. }));
+    if fanout.driver.is_none() || (fanout.sinks.len() < 3 && !drives_visible_output) {
+        return Ok(false);
+    }
+
+    let worst_delay = worst_path_delay(&snapshot.report);
+    let root_criticality = signal_arrival(snapshot, graph.bits[root].0)
+        + fanout
+            .sinks
+            .iter()
+            .map(|sink| sink.criticality)
+            .fold(0.0, f64::max);
+    if root_criticality + TIMING_EPSILON < worst_delay * MIN_CRITICAL_PATH_FRACTION {
+        return Ok(false);
+    }
+
+    Ok(
+        characterized_load_limit(fanout, library, catalog, options)?.is_some_and(|limit| {
+            max_load(sum_sink_load(&fanout.sinks))
+                > limit * TIMING_DRIVEN_EFFORT_FRACTION + TIMING_EPSILON
+        }),
+    )
 }
 
 /// Uses explicit targets, Liberty max capacitance, and bounded gate effort.
@@ -957,6 +1561,7 @@ fn apply_buffer_tree(
     snapshot: &TimingSnapshot,
     graph: &TimingGraph,
     root: usize,
+    speculative: bool,
     names: &mut BufferNames,
     stats: &mut BatchStats,
 ) -> Result<()> {
@@ -1036,7 +1641,8 @@ fn apply_buffer_tree(
         let groups = partition_timing_sinks(level, options.max_fanout, root_limit);
         let mut next = Vec::with_capacity(groups.len());
         for group in groups {
-            let buffer = select_timing_buffer(catalog, library, source_timing, &group)?;
+            let buffer =
+                select_timing_buffer(catalog, library, source_timing, &group, speculative)?;
             let output = group
                 .sinks
                 .iter()
@@ -1138,10 +1744,12 @@ fn select_timing_buffer<'a>(
     library: &Library,
     source_timing: Option<SignalTiming>,
     group: &TimingSinkGroup,
+    speculative: bool,
 ) -> Result<&'a CatalogCell> {
     let load = max_load(group.load);
     let required_input_capacitance = load / MAX_ELECTRICAL_EFFORT;
     let mut best: Option<(&CatalogCell, f64)> = None;
+    let mut timing_best: Option<(&CatalogCell, f64)> = None;
     let mut fallback: Option<(&CatalogCell, f64)> = None;
     for buffer in catalog.buffers() {
         if buffer
@@ -1170,6 +1778,24 @@ fn select_timing_buffer<'a>(
         };
         let input_capacitance = max_load(buffer.input_capacitances[0]);
         if input_capacitance + TIMING_EPSILON >= required_input_capacitance {
+            if speculative
+                && source_timing.is_some()
+                && input_capacitance * MIN_TIMING_BUFFER_EFFORT <= load + TIMING_EPSILON
+            {
+                let replace = timing_best.is_none_or(|(current, current_delay)| {
+                    delay
+                        .total_cmp(&current_delay)
+                        .then_with(|| {
+                            input_capacitance.total_cmp(&max_load(current.input_capacitances[0]))
+                        })
+                        .then_with(|| buffer.area.total_cmp(&current.area))
+                        .then_with(|| buffer.name.cmp(&current.name))
+                        == Ordering::Less
+                });
+                if replace {
+                    timing_best = Some((buffer, delay));
+                }
+            }
             let replace = best.is_none_or(|(current, current_delay)| {
                 buffer
                     .area
@@ -1195,9 +1821,13 @@ fn select_timing_buffer<'a>(
             }
         }
     }
-    best.or(fallback).map(|(buffer, _)| buffer).ok_or_else(|| {
-        anyhow!("Liberty has no usable timing-characterized identity buffer for load {load}")
-    })
+    timing_best
+        .or(best)
+        .or(fallback)
+        .map(|(buffer, _)| buffer)
+        .ok_or_else(|| {
+            anyhow!("Liberty has no usable timing-characterized identity buffer for load {load}")
+        })
 }
 
 /// Creates a collision-free internal scalar net for a buffer tree.
@@ -1368,7 +1998,9 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        BufferTimingConstraints, TimingSinkGroup, insert_timing_aware_buffers, select_timing_buffer,
+        BufferTimingConstraints, TimingSinkGroup, consolidate_timing_aware_buffers,
+        has_slow_shared_primary_output, insert_speculative_timing_aware_buffers,
+        insert_timing_aware_buffers, select_timing_buffer,
     };
     use crate::liberty_model::{
         Cell, Library, LibraryBuilder, LuTableTemplate, Pin, PinDirection, Sequential,
@@ -1381,7 +2013,7 @@ pub(crate) mod tests {
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::parse::NetRef;
     use crate::netlist::report::build_netlist_report;
-    use crate::netlist::sta::{CombinationalOutputLoad, StaOptions};
+    use crate::netlist::sta::{CombinationalOutputLoad, EdgeTiming, SignalTiming, StaOptions};
     use std::collections::BTreeMap;
 
     /// Builds complete scalar setup tables for a test capture register.
@@ -1471,6 +2103,83 @@ pub(crate) mod tests {
         builder.finish()
     }
 
+    /// Models a legal but slow complex output also consumed internally.
+    pub(crate) fn slow_shared_output_library() -> Library {
+        let mut builder = LibraryBuilder::from_library(sizing_library());
+        builder.lu_table_templates.push(LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "shared_output_load".to_string(),
+            variable_1: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.0, 1.0],
+            ..LuTableTemplate::default()
+        });
+
+        let mut arcs = Vec::new();
+        for input in ["A", "B", "C"] {
+            let mut tables = Vec::new();
+            for (kind, values) in [
+                (TimingTableKind::CellRise, vec![0.5, 10.5]),
+                (TimingTableKind::CellFall, vec![0.5, 10.5]),
+                (TimingTableKind::RiseTransition, vec![0.1, 10.1]),
+                (TimingTableKind::FallTransition, vec![0.1, 10.1]),
+            ] {
+                tables.push(
+                    builder
+                        .add_timing_table_f64(kind, 1, vec![], vec![], vec![], values, vec![2], "")
+                        .expect("construct load-sensitive shared-output timing table"),
+                );
+            }
+            arcs.push(
+                builder
+                    .add_timing_arc(input, "positive_unate", "combinational", "", tables)
+                    .expect("construct shared-output combinational timing arc"),
+            );
+        }
+
+        let mut pins = ["A", "B", "C"]
+            .into_iter()
+            .map(|input| Pin {
+                name: builder
+                    .intern_string(input)
+                    .expect("intern weak logic input"),
+                direction: PinDirection::Input as i32,
+                capacitance: Some(0.1),
+                ..Pin::default()
+            })
+            .collect::<Vec<_>>();
+        pins.push(Pin {
+            name: builder
+                .intern_string("Y")
+                .expect("intern weak logic output"),
+            direction: PinDirection::Output as i32,
+            function: builder
+                .intern_string("A * B * C")
+                .expect("intern weak logic function"),
+            max_capacitance: Some(1.6),
+            timing_arcs: arcs,
+            ..Pin::default()
+        });
+        builder.cells.push(Cell {
+            name: "WEAK_AND3".to_string(),
+            pins,
+            area: 1.0,
+            ..Cell::default()
+        });
+        builder.finish()
+    }
+
+    /// Shares one directly exposed logic driver with a critical internal sink.
+    pub(crate) fn slow_shared_output_source() -> &'static str {
+        r#"
+module top(a, b, c, direct, path);
+  input a, b, c;
+  output direct, path;
+  WEAK_AND3 weak (.A(a), .B(b), .C(c), .Y(direct));
+  BUF consumer (.A(direct), .Y(path));
+endmodule
+"#
+    }
+
     /// Returns an eight-capture pipeline with a genuinely overloaded FF Q.
     pub(crate) fn high_fanout_register_source() -> &'static str {
         r#"
@@ -1504,7 +2213,7 @@ endmodule
             ..TimingSinkGroup::default()
         };
 
-        let buffer = select_timing_buffer(&catalog, &library, None, &group)
+        let buffer = select_timing_buffer(&catalog, &library, None, &group, false)
             .expect("select smallest electrically sufficient test buffer");
 
         assert_eq!(buffer.name, "BUF");
@@ -1522,10 +2231,329 @@ endmodule
             ..TimingSinkGroup::default()
         };
 
-        let buffer = select_timing_buffer(&catalog, &library, None, &group)
+        let buffer = select_timing_buffer(&catalog, &library, None, &group, false)
             .expect("select stronger buffer required by real Liberty load");
 
         assert_eq!(buffer.name, "BUF_FAST");
+    }
+
+    #[test]
+    fn speculative_buffer_strength_prioritizes_exact_delay_without_overloading_driver() {
+        let library = registered_timing_library();
+        let catalog = CellCatalog::new(&library).expect("catalog timing-complete test buffers");
+        let group = TimingSinkGroup {
+            load: CombinationalOutputLoad {
+                rise: 0.72,
+                fall: 0.72,
+            },
+            ..TimingSinkGroup::default()
+        };
+        let source_timing = SignalTiming {
+            rise: EdgeTiming {
+                arrival: 5.0,
+                transition: 0.1,
+            },
+            fall: EdgeTiming {
+                arrival: 5.0,
+                transition: 0.1,
+            },
+        };
+
+        let conservative =
+            select_timing_buffer(&catalog, &library, Some(source_timing), &group, false)
+                .expect("preserve the economical production buffer choice");
+        let speculative =
+            select_timing_buffer(&catalog, &library, Some(source_timing), &group, true)
+                .expect("choose the exactly faster load-relieving speculative buffer");
+
+        assert_eq!(conservative.name, "BUF");
+        assert_eq!(speculative.name, "BUF_FAST");
+    }
+
+    #[test]
+    fn speculative_pass_buffers_critical_register_fanout_below_hard_limit() {
+        let source = r#"
+module top(clk, a, out);
+  input clk;
+  input a;
+  output [3:0] out;
+  wire root;
+  DFF launch (.CLK(clk), .D(a), .Q(root));
+  DFF capture0 (.CLK(clk), .D(root), .Q(out[0]));
+  DFF capture1 (.CLK(clk), .D(root), .Q(out[1]));
+  DFF capture2 (.CLK(clk), .D(root), .Q(out[2]));
+  DFF capture3 (.CLK(clk), .D(root), .Q(out[3]));
+endmodule
+"#;
+        let library = registered_timing_library();
+        let (mut conservative_module, mut conservative_nets, mut conservative_interner) =
+            parse_module(source);
+        let conservative = insert_timing_aware_buffers(
+            &mut conservative_module,
+            &mut conservative_nets,
+            &mut conservative_interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("preserve conservative production buffering for a legal fanout");
+
+        let (mut module, mut nets, mut interner) = parse_module(source);
+        let speculative = insert_speculative_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("speculatively isolate a legally driven critical register fanout");
+
+        assert_eq!(conservative.buffers_inserted, 0);
+        assert_eq!(speculative.max_fanout_before, 4);
+        assert!(speculative.buffers_inserted > 0);
+        assert!(speculative.final_worst_delay.unwrap() < speculative.initial_worst_delay.unwrap());
+    }
+
+    #[test]
+    fn speculative_pass_buffers_loaded_critical_output_below_hard_limit() {
+        let source = r#"
+module top(clk, a, out);
+  input clk;
+  input a;
+  output out;
+  DFF launch (.CLK(clk), .D(a), .Q(out));
+endmodule
+"#;
+        let library = registered_timing_library();
+        let (mut module, mut nets, mut interner) = parse_module(source);
+        let sta_options = StaOptions {
+            module_output_load: 0.5,
+            ..StaOptions::default()
+        };
+
+        let stats = insert_speculative_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions {
+                module_output_load: sta_options.module_output_load,
+                ..BufferOptions::default()
+            },
+            sta_options,
+            &BufferTimingConstraints::default(),
+        )
+        .expect("speculatively improve a heavily loaded critical module output");
+
+        assert_eq!(stats.max_fanout_before, 1);
+        assert_eq!(stats.buffers_inserted, 1);
+        assert!(stats.final_worst_delay.unwrap() < stats.initial_worst_delay.unwrap());
+    }
+
+    #[test]
+    fn detects_only_slow_outputs_shared_with_internal_data_sinks() {
+        let library = slow_shared_output_library();
+        let (module, nets, interner) = parse_module(slow_shared_output_source());
+        let sta_options = StaOptions {
+            module_output_load: 0.6,
+            ..StaOptions::default()
+        };
+        let options = BufferOptions {
+            module_output_load: sta_options.module_output_load,
+            ..BufferOptions::default()
+        };
+
+        assert!(
+            has_slow_shared_primary_output(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                &options,
+                sta_options,
+            )
+            .expect("recognize a slow output shared with a critical internal sink")
+        );
+
+        let (unshared_module, unshared_nets, unshared_interner) = parse_module(
+            r#"
+module top(a, b, c, direct, path);
+  input a, b, c;
+  output direct, path;
+  WEAK_AND3 weak (.A(a), .B(b), .C(c), .Y(direct));
+  BUF consumer (.A(a), .Y(path));
+endmodule
+"#,
+        );
+        assert!(
+            !has_slow_shared_primary_output(
+                &unshared_module,
+                &unshared_nets,
+                &unshared_interner,
+                &library,
+                &options,
+                sta_options,
+            )
+            .expect("skip an output with no internal data consumers")
+        );
+    }
+
+    #[test]
+    fn speculative_pass_isolates_slow_output_from_critical_internal_sink() {
+        let library = slow_shared_output_library();
+        let (mut module, mut nets, mut interner) = parse_module(slow_shared_output_source());
+        module.instances[1].type_name = interner.get_or_intern("BUF_FAST");
+        let sta_options = StaOptions {
+            module_output_load: 0.6,
+            ..StaOptions::default()
+        };
+        let options = BufferOptions {
+            module_output_load: sta_options.module_output_load,
+            ..BufferOptions::default()
+        };
+
+        let stats = insert_speculative_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &options,
+            sta_options,
+            &BufferTimingConstraints::default(),
+        )
+        .expect("isolate the external load without buffering the critical internal sink");
+
+        assert_eq!(stats.max_fanout_before, 2);
+        assert_eq!(stats.buffers_inserted, 1);
+        assert!(stats.final_worst_delay.unwrap() < stats.initial_worst_delay.unwrap());
+        let direct = module
+            .find_net_index(
+                interner.get("direct").expect("resolve direct output"),
+                &nets,
+            )
+            .expect("find direct output net");
+        let weak_output = module.instances[0]
+            .connections
+            .iter()
+            .find(|(pin, _)| interner.resolve(*pin) == Some("Y"))
+            .expect("find weak logic output")
+            .1
+            .clone();
+        let consumer_input = module.instances[1]
+            .connections
+            .iter()
+            .find(|(pin, _)| interner.resolve(*pin) == Some("A"))
+            .expect("find critical internal input")
+            .1
+            .clone();
+        assert_eq!(weak_output, consumer_input);
+        assert_ne!(weak_output, NetRef::Simple(direct));
+    }
+
+    #[test]
+    fn consolidates_inserted_sibling_buffers_with_a_faster_cheaper_shared_driver() {
+        let source = r#"
+module top(a, out);
+  input a;
+  output [3:0] out;
+  wire root;
+  wire branch0;
+  wire branch1;
+  BUF_FAST driver (.A(a), .Y(root));
+  BUF u_buf_0 (.A(root), .Y(branch0));
+  BUF u_buf_1 (.A(root), .Y(branch1));
+  BUF sink0 (.A(branch0), .Y(out[0]));
+  BUF sink1 (.A(branch0), .Y(out[1]));
+  BUF sink2 (.A(branch1), .Y(out[2]));
+  BUF sink3 (.A(branch1), .Y(out[3]));
+endmodule
+"#;
+        let mut builder = LibraryBuilder::from_library(sizing_library());
+        builder
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "BUF_FAST")
+            .expect("find the pin-compatible stronger shared buffer")
+            .area = 1.5;
+        let library = builder.finish();
+        let (mut module, nets, mut interner) = parse_module(source);
+        let before =
+            build_netlist_report(&module, &nets, &interner, &library, StaOptions::default())
+                .expect("time the independent original buffer branches");
+
+        let stats = consolidate_timing_aware_buffers(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            before.max_delay.unwrap(),
+        )
+        .expect("replace sibling identity buffers with one stronger shared buffer");
+        let after =
+            build_netlist_report(&module, &nets, &interner, &library, StaOptions::default())
+                .expect("independently verify the consolidated buffer tree");
+
+        assert_eq!(stats.buffers_removed, 1);
+        assert_eq!(stats.area_recovered, 0.5);
+        assert!(after.cell_area < before.cell_area);
+        assert!(after.max_delay.unwrap() < before.max_delay.unwrap());
+        assert_eq!(stats.final_delay, after.max_delay.unwrap());
+    }
+
+    #[test]
+    fn sibling_buffer_consolidation_preserves_explicit_per_stage_load_limits() {
+        let source = r#"
+module top(a, out);
+  input a;
+  output [3:0] out;
+  wire root;
+  wire branch0;
+  wire branch1;
+  BUF_FAST driver (.A(a), .Y(root));
+  BUF u_buf_0 (.A(root), .Y(branch0));
+  BUF u_buf_1 (.A(root), .Y(branch1));
+  BUF sink0 (.A(branch0), .Y(out[0]));
+  BUF sink1 (.A(branch0), .Y(out[1]));
+  BUF sink2 (.A(branch1), .Y(out[2]));
+  BUF sink3 (.A(branch1), .Y(out[3]));
+endmodule
+"#;
+        let mut builder = LibraryBuilder::from_library(sizing_library());
+        builder
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "BUF_FAST")
+            .expect("find the pin-compatible stronger shared buffer")
+            .area = 1.5;
+        let library = builder.finish();
+        let (mut module, nets, mut interner) = parse_module(source);
+        let original_instance_count = module.instances.len();
+        let before =
+            build_netlist_report(&module, &nets, &interner, &library, StaOptions::default())
+                .expect("time independent electrically valid sibling branches");
+
+        let stats = consolidate_timing_aware_buffers(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &BufferOptions {
+                target_load: Some(0.3),
+                ..BufferOptions::default()
+            },
+            StaOptions::default(),
+            before.max_delay.unwrap(),
+        )
+        .expect("preserve the explicit per-stage load bound");
+
+        assert_eq!(stats.buffers_removed, 0);
+        assert_eq!(module.instances.len(), original_instance_count);
+        assert_eq!(stats.final_delay, before.max_delay.unwrap());
     }
 
     #[test]
