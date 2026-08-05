@@ -310,6 +310,42 @@ fn choice_aig_tech_map_loads_native_binary_sequential_design() {
 }
 
 #[test]
+fn choice_aig_portfolio_preserves_register_timing_and_stable_ties() {
+    let fixture = make_fixture("g8rbin");
+    let design_path = fixture
+        .sequential_design_path
+        .to_str()
+        .expect("UTF-8 temporary native design path");
+    let alternative_path = fixture
+        .aiger_path
+        .to_str()
+        .expect("UTF-8 temporary transition AIG path");
+    let output = run_choice_mapping(
+        &fixture,
+        &[
+            "--sequential-design",
+            design_path,
+            "--clock-period",
+            "10",
+            "--alternative-choice-aig",
+            alternative_path,
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "register-aware timing portfolio failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "choice-aig-tech-map: 4 instances, area=8, delay=3.75, choices=0, cuts=4, candidates=1, buffers=0, upsizes=0, downsizes=0, timing-model=nf-liberty, representative-slew=0.01, representative-load=0.04, registers=1, register-area=4, clock-period=10, worst-register-slack=6.25, portfolio-candidates=2, portfolio-selected=0\n"
+    );
+    assert!(fixture.netlist_path.is_file());
+}
+
+#[test]
 fn choice_aig_tech_map_accepts_register_aware_buffering() {
     let fixture = make_fixture("g8rbin");
     let design_path = fixture
@@ -453,6 +489,36 @@ fn choice_aig_tech_map_remains_combinational_without_sequential_design() {
         "combinational mapping did not use representative Liberty timing: {diagnostics}"
     );
     assert!(!diagnostics.contains("registers="));
+}
+
+#[test]
+fn choice_aig_portfolio_preserves_combinational_outputs_and_stable_ties() {
+    let fixture = make_fixture("g8r");
+    let baseline = run_choice_mapping(&fixture, &[]);
+    assert!(baseline.status.success());
+    let baseline_netlist =
+        std::fs::read(&fixture.netlist_path).expect("read deterministic baseline netlist");
+    let baseline_diagnostics = String::from_utf8(baseline.stderr).unwrap();
+
+    let alternative_path = fixture
+        .aiger_path
+        .to_str()
+        .expect("UTF-8 temporary transition AIG path");
+    let portfolio = run_choice_mapping(&fixture, &["--alternative-choice-aig", alternative_path]);
+
+    assert!(portfolio.status.success());
+    assert_eq!(portfolio.stdout, baseline.stdout);
+    assert_eq!(
+        std::fs::read(&fixture.netlist_path).expect("read selected portfolio netlist"),
+        baseline_netlist
+    );
+    assert_eq!(
+        String::from_utf8(portfolio.stderr).unwrap(),
+        format!(
+            "{}, portfolio-candidates=2, portfolio-selected=0\n",
+            baseline_diagnostics.trim_end()
+        )
+    );
 }
 
 #[test]

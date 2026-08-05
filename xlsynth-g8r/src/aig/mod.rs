@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod abc_choice;
 pub mod aig_hasher;
 pub mod aig_simplify;
 pub mod bulk_replace;
