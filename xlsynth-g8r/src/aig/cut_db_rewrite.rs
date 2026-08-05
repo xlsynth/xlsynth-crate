@@ -2552,6 +2552,24 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
     cur
 }
 
+/// Performs only the depth-improving small-cut and large-cone phases.
+pub(crate) fn rewrite_gatefn_delay_only_with_cut_db(
+    g: &GateFn,
+    db: &CutDb,
+    opts: RewriteOptions,
+) -> GateFn {
+    if !opts.mode.enables_depth_rewrite() {
+        return g.clone();
+    }
+
+    let rewritten = rewrite_gatefn_depth_with_cut_db(g, db, opts);
+    if opts.enable_large_cone_rewrite {
+        rewrite_gatefn_large_cone_depth_refactor(&rewritten, opts)
+    } else {
+        rewritten
+    }
+}
+
 /// Performs iterative depth and area rewriting with small cuts before large
 /// cones.
 pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) -> GateFn {
@@ -2709,9 +2727,19 @@ mod tests {
             rewrite_gatefn_depth_with_cut_db(&g, &db, RewriteOptions::default());
         let large_cone_rewritten =
             rewrite_gatefn_large_cone_depth_refactor(&g, RewriteOptions::default());
+        let combined_delay_rewritten =
+            rewrite_gatefn_delay_only_with_cut_db(&g, &db, RewriteOptions::default());
 
         assert_eq!(small_cut_rewritten.gates, g.gates);
         assert_eq!(large_cone_rewritten.gates, g.gates);
+        assert_eq!(combined_delay_rewritten.gates, g.gates);
+
+        let mut balanced_options = RewriteOptions::default();
+        balanced_options.mode = CutDbRewriteMode::Balanced;
+        assert_eq!(
+            rewrite_gatefn_delay_only_with_cut_db(&g, &db, balanced_options).gates,
+            g.gates
+        );
     }
 
     #[test]

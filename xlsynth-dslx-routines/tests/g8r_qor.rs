@@ -465,7 +465,7 @@ fn mul_variants_g8r_qor_snapshot() {
         QorRow { width: 16, variant: "shift_add_prefix", live_nodes: 1564, deepest_path: 103 },
         QorRow { width: 16, variant: "shift_add_carry_select_default", live_nodes: 2056, deepest_path: 97 },
         QorRow { width: 16, variant: "shift_add_carry_select_tuned", live_nodes: 2056, deepest_path: 97 },
-        QorRow { width: 32, variant: "shift_add", live_nodes: 5698, deepest_path: 67 },
+        QorRow { width: 32, variant: "shift_add", live_nodes: 5880, deepest_path: 64 },
         QorRow { width: 32, variant: "shift_add_ripple", live_nodes: 5676, deepest_path: 212 },
         QorRow { width: 32, variant: "shift_add_prefix", live_nodes: 8029, deepest_path: 236 },
         QorRow { width: 32, variant: "shift_add_carry_select_default", live_nodes: 9650, deepest_path: 224 },
@@ -485,7 +485,7 @@ fn seq_variants_g8r_step_qor_snapshot() {
         QorRow { width: 16, variant: "add_step", live_nodes: 109, deepest_path: 7 },
         QorRow { width: 16, variant: "mul_step", live_nodes: 225, deepest_path: 18 },
         QorRow { width: 32, variant: "add_step", live_nodes: 205, deepest_path: 7 },
-        QorRow { width: 32, variant: "mul_step", live_nodes: 475, deepest_path: 22 },
+        QorRow { width: 32, variant: "mul_step", live_nodes: 505, deepest_path: 21 },
     ];
     assert_eq!(got.as_slice(), want);
 }

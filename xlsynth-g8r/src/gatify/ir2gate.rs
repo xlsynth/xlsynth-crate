@@ -20,11 +20,11 @@ use xlsynth_pir::ir_verify;
 use xlsynth_prover::prover::SolverChoice;
 
 use crate::ir2gate_utils::{
-    AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
+    AdderMapping, Direction, array_add_multiply_with_carry_out, gatify_add_brent_kung,
     gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
     gatify_indexed_select_mux_tree_exact, gatify_indexed_select_mux_tree_pad_last_if_type_fits,
     gatify_mask_low, gatify_one_hot, gatify_one_hot_select, gatify_one_hot_with_nonzero_flag,
-    gatify_prio_encode,
+    gatify_one_hot_with_nonzero_flag_for_depth, gatify_prio_encode,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -320,6 +320,230 @@ pub(super) fn gatify_add_with_mapping(
         AdderMapping::BrentKung => gatify_add_brent_kung(lhs_bits, rhs_bits, c_in, tag, gb),
         AdderMapping::KoggeStone => gatify_add_kogge_stone(lhs_bits, rhs_bits, c_in, tag, gb),
     }
+}
+
+/// Uses a shallow prefix for medium-wide optimized arithmetic cones.
+fn select_delay_oriented_arithmetic_mapping(
+    options: &GatifyOptions,
+    output_bit_count: usize,
+) -> AdderMapping {
+    if options.adder_mapping == AdderMapping::BrentKung
+        && options.fold
+        && options.hash
+        && options.enable_rewrite_nary_add
+        && (33..=48).contains(&output_bit_count)
+    {
+        AdderMapping::KoggeStone
+    } else {
+        options.adder_mapping
+    }
+}
+
+/// Uses a shallow prefix for medium-width two's-complement negation.
+fn select_delay_oriented_subtraction_mapping(
+    options: &GatifyOptions,
+    output_bit_count: usize,
+    lhs_is_zero: bool,
+) -> AdderMapping {
+    if lhs_is_zero
+        && (17..=32).contains(&output_bit_count)
+        && options.adder_mapping == AdderMapping::BrentKung
+        && options.fold
+        && options.hash
+        && options.enable_rewrite_nary_add
+    {
+        AdderMapping::KoggeStone
+    } else {
+        select_delay_oriented_arithmetic_mapping(options, output_bit_count)
+    }
+}
+
+/// Chooses a shallow prefix network for wide optimized priority one-hot cones.
+fn gatify_delay_oriented_one_hot(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+    options: &GatifyOptions,
+) -> AigBitVector {
+    if bits.get_bit_count() >= 16
+        && options.fold
+        && options.hash
+        && options.enable_rewrite_nary_add
+        && options.adder_mapping != AdderMapping::RippleCarry
+    {
+        gatify_one_hot_with_nonzero_flag_for_depth(gb, bits, lsb_prio, value_cannot_be_zero)
+    } else if value_cannot_be_zero {
+        gatify_one_hot_with_nonzero_flag(gb, bits, lsb_prio, true)
+    } else {
+        gatify_one_hot(gb, bits, lsb_prio)
+    }
+}
+
+/// Schedules commuting logical-shift stages by increasing selector arrival.
+fn gatify_arrival_ordered_logical_shifter(
+    gb: &mut GateBuilder,
+    arg_bits: &AigBitVector,
+    amount_bits: &AigBitVector,
+    direction: Direction,
+    tag_prefix: &str,
+    options: &GatifyOptions,
+) -> AigBitVector {
+    let bit_count = arg_bits.get_bit_count();
+    if bit_count < 8
+        || !options.fold
+        || !options.hash
+        || !options.enable_rewrite_nary_add
+        || arg_bits
+            .iter_lsb_to_msb()
+            .all(|bit| gb.is_known_true(*bit) || gb.is_known_false(*bit))
+    {
+        return gatify_barrel_shifter(arg_bits, amount_bits, direction, tag_prefix, gb);
+    }
+
+    let natural_amount_bits = xlsynth_pir::math::ceil_log2(bit_count);
+    let stage_count = natural_amount_bits.min(amount_bits.get_bit_count());
+    if stage_count < 2 {
+        return gatify_barrel_shifter(arg_bits, amount_bits, direction, tag_prefix, gb);
+    }
+
+    let mut stages = Vec::with_capacity(stage_count);
+    for stage in 0..stage_count {
+        let Some(depth) = gb.aig_depth(*amount_bits.get_lsb(stage)) else {
+            return gatify_barrel_shifter(arg_bits, amount_bits, direction, tag_prefix, gb);
+        };
+        stages.push((stage, depth));
+    }
+    let min_depth = stages.iter().map(|(_, depth)| *depth).min().unwrap();
+    let max_depth = stages.iter().map(|(_, depth)| *depth).max().unwrap();
+    if max_depth.saturating_sub(min_depth) < 2 {
+        return gatify_barrel_shifter(arg_bits, amount_bits, direction, tag_prefix, gb);
+    }
+
+    stages.sort_by_key(|(stage, depth)| (*depth, *stage));
+    if stages
+        .iter()
+        .enumerate()
+        .all(|(original_stage, (ordered_stage, _))| original_stage == *ordered_stage)
+    {
+        return gatify_barrel_shifter(arg_bits, amount_bits, direction, tag_prefix, gb);
+    }
+
+    let overflow = if amount_bits.get_bit_count() > natural_amount_bits {
+        let high_bits = amount_bits.get_lsb_slice(
+            natural_amount_bits,
+            amount_bits.get_bit_count() - natural_amount_bits,
+        );
+        Some(gb.add_nez(&high_bits, ReductionKind::Tree))
+    } else {
+        None
+    };
+
+    let mut current: Vec<AigOperand> = arg_bits.iter_lsb_to_msb().copied().collect();
+    for (stage, _) in stages {
+        let shift = 1usize << stage;
+        let selector = *amount_bits.get_lsb(stage);
+        let mut next = Vec::with_capacity(bit_count);
+        for bit_index in 0..bit_count {
+            let shifted = match direction {
+                Direction::Left if bit_index >= shift => current[bit_index - shift],
+                Direction::Right if bit_index + shift < bit_count => current[bit_index + shift],
+                _ => gb.get_false(),
+            };
+            next.push(gb.add_mux2(selector, shifted, current[bit_index]));
+        }
+        current = next;
+    }
+
+    let direction_name = if direction == Direction::Left {
+        "left"
+    } else {
+        "right"
+    };
+    for gate in &current {
+        gb.add_tag(
+            gate.node,
+            format!("{tag_prefix}_barrel_shifter_{direction_name}_{bit_count}_count_output"),
+        );
+    }
+    let shifted = AigBitVector::from_lsb_is_index_0(&current);
+    if let Some(overflow) = overflow {
+        let zero = AigBitVector::zeros(bit_count);
+        gb.add_mux2_vec(&overflow, &zero, &shifted)
+    } else {
+        shifted
+    }
+}
+
+/// Stores the generate/propagate signals for a contiguous carry range.
+#[derive(Clone, Copy)]
+struct CarryGeneratePropagate {
+    generate: AigOperand,
+    propagate: AigOperand,
+}
+
+/// Computes only an adder carry-out using the requested carry architecture.
+fn gatify_carry_out_with_mapping(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    carry_in: AigOperand,
+    adder_mapping: AdderMapping,
+) -> AigOperand {
+    assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+    let bit_count = lhs_bits.get_bit_count();
+    if bit_count == 0 {
+        return carry_in;
+    }
+
+    if adder_mapping == AdderMapping::RippleCarry {
+        let mut carry = carry_in;
+        for bit_index in 0..bit_count {
+            let lhs = *lhs_bits.get_lsb(bit_index);
+            let rhs = *rhs_bits.get_lsb(bit_index);
+            let generate = gb.add_and_binary(lhs, rhs);
+            let propagate = gb.add_or_binary(lhs, rhs);
+            let propagated_carry = gb.add_and_binary(propagate, carry);
+            carry = gb.add_or_binary(generate, propagated_carry);
+        }
+        return carry;
+    }
+
+    fn reduce_range(
+        gb: &mut GateBuilder,
+        lhs_bits: &AigBitVector,
+        rhs_bits: &AigBitVector,
+        start: usize,
+        bit_count: usize,
+    ) -> CarryGeneratePropagate {
+        if bit_count == 1 {
+            let lhs = *lhs_bits.get_lsb(start);
+            let rhs = *rhs_bits.get_lsb(start);
+            return CarryGeneratePropagate {
+                generate: gb.add_and_binary(lhs, rhs),
+                propagate: gb.add_or_binary(lhs, rhs),
+            };
+        }
+
+        let low_count = bit_count / 2;
+        let lower = reduce_range(gb, lhs_bits, rhs_bits, start, low_count);
+        let upper = reduce_range(
+            gb,
+            lhs_bits,
+            rhs_bits,
+            start + low_count,
+            bit_count - low_count,
+        );
+        let propagated_generate = gb.add_and_binary(upper.propagate, lower.generate);
+        CarryGeneratePropagate {
+            generate: gb.add_or_binary(upper.generate, propagated_generate),
+            propagate: gb.add_and_binary(upper.propagate, lower.propagate),
+        }
+    }
+
+    let total = reduce_range(gb, lhs_bits, rhs_bits, 0, bit_count);
+    let propagated_input = gb.add_and_binary(total.propagate, carry_in);
+    gb.add_or_binary(total.generate, propagated_input)
 }
 
 fn gatify_priority_sel(
@@ -1079,7 +1303,7 @@ fn gatify_smul_widening(
 
     let operands =
         gatify_smul_baugh_wooley_partial_products(lhs_bits, rhs_bits, output_bit_count, gb);
-    Some(array_add_with_carry_out(gb, &operands, None, mul_adder_mapping).sum)
+    Some(array_add_multiply_with_carry_out(gb, &operands, None, mul_adder_mapping).sum)
 }
 
 /// Adds `2^bit_index` to a little-endian bit vector modulo its width.
@@ -1225,7 +1449,7 @@ fn gatify_umul(
         gatify_umul_partial_products(multiplicand_bits, multiplier_bits, output_bit_count, gb);
 
     // Sum all partial products using the requested adder mapping.
-    array_add_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
+    array_add_multiply_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
 }
 
 /// Builds shifted partial-product rows for unsigned multiplication.
@@ -1425,7 +1649,7 @@ fn gatify_umul_const_via_csd(
     if neg_term_count != 0 {
         operands.push(usize_as_aig_bits(neg_term_count, output_bit_count, gb));
     }
-    array_add_with_carry_out(gb, &operands, None, mul_adder_mapping).sum
+    array_add_multiply_with_carry_out(gb, &operands, None, mul_adder_mapping).sum
 }
 
 fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
@@ -3341,17 +3565,13 @@ fn gatify_node(
                 .try_into()
                 .expect("ExtCarryOut c_in should be bits[1]");
 
-            let w = lhs_bits.get_bit_count();
-            let mut carry: AigOperand = c_in_bit;
-            for i in 0..w {
-                let a_i = *lhs_bits.get_lsb(i);
-                let b_i = *rhs_bits.get_lsb(i);
-                let g_i = g8_builder.add_and_binary(a_i, b_i);
-                let p_i = g8_builder.add_or_binary(a_i, b_i);
-                let p_and_c = g8_builder.add_and_binary(p_i, carry);
-                carry = g8_builder.add_or_binary(g_i, p_and_c);
-            }
-
+            let carry = gatify_carry_out_with_mapping(
+                g8_builder,
+                &lhs_bits,
+                &rhs_bits,
+                c_in_bit,
+                options.adder_mapping,
+            );
             env.add(node_ref, GateOrVec::Gate(carry));
         }
         ir::NodePayload::ExtPrioEncode { arg, lsb_prio } => {
@@ -3464,11 +3684,12 @@ fn gatify_node(
             let reversed_lsb_to_msb: Vec<AigOperand> =
                 arg_bits.iter_msb_to_lsb().copied().collect();
             let reversed_bits = AigBitVector::from_lsb_is_index_0(&reversed_lsb_to_msb);
-            let clz_one_hot = gatify_one_hot_with_nonzero_flag(
+            let clz_one_hot = gatify_delay_oriented_one_hot(
                 g8_builder,
                 &reversed_bits,
                 /* lsb_prio= */ true,
                 /* value_cannot_be_zero= */ false,
+                options,
             );
             let out_bits = gatify_clz_value_bits_from_one_hot(
                 g8_builder,
@@ -3551,7 +3772,7 @@ fn gatify_node(
                 terms,
                 *arch,
                 output_width,
-                options.adder_mapping,
+                select_delay_oriented_arithmetic_mapping(options, output_width),
                 options.enable_rewrite_nary_add,
                 g8_builder,
             );
@@ -3790,7 +4011,7 @@ fn gatify_node(
                 node.text_id,
                 *a,
                 *b,
-                options.adder_mapping,
+                select_delay_oriented_arithmetic_mapping(options, node.ty.bit_count()),
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
@@ -3830,13 +4051,19 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(gated_bits));
         }
         ir::NodePayload::Binop(ir::Binop::Sub, a, b) => {
+            let lhs_is_zero = literal_bits_if_bits_node(f, *a)
+                .is_some_and(|literal_bits| is_all_zeros(&literal_bits));
             let gates = gatify_sub_binop(
                 &env,
                 node.text_id,
                 node.ty.bit_count(),
                 *a,
                 *b,
-                options.adder_mapping,
+                select_delay_oriented_subtraction_mapping(
+                    options,
+                    node.ty.bit_count(),
+                    lhs_is_zero,
+                ),
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
@@ -3906,12 +4133,13 @@ fn gatify_node(
                 arg_gates.get_bit_count(),
                 &amount_gates,
             );
-            let result_gates = gatify_barrel_shifter(
+            let result_gates = gatify_arrival_ordered_logical_shifter(
+                g8_builder,
                 &arg_gates,
                 &amount_gates,
                 Direction::Right,
                 &format!("shrl_{}", node.text_id),
-                g8_builder,
+                options,
             );
             env.add(node_ref, GateOrVec::BitVector(result_gates));
         }
@@ -3953,12 +4181,13 @@ fn gatify_node(
                 arg_gates.get_bit_count(),
                 &amount_gates,
             );
-            let result_gates = gatify_barrel_shifter(
+            let result_gates = gatify_arrival_ordered_logical_shifter(
+                g8_builder,
                 &arg_gates,
                 &amount_gates,
                 Direction::Left,
                 &format!("shll_{}", node.text_id),
-                g8_builder,
+                options,
             );
             env.add(node_ref, GateOrVec::BitVector(result_gates));
         }
@@ -3970,11 +4199,13 @@ fn gatify_node(
                 .range_info
                 .as_ref()
                 .is_some_and(|ri| ri.proves_nonzero(f.get_node(*arg).text_id));
-            let bit_vector = if proven_nonzero {
-                gatify_one_hot_with_nonzero_flag(g8_builder, &bits, *lsb_prio, true)
-            } else {
-                gatify_one_hot(g8_builder, &bits, *lsb_prio)
-            };
+            let bit_vector = gatify_delay_oriented_one_hot(
+                g8_builder,
+                &bits,
+                *lsb_prio,
+                proven_nonzero,
+                options,
+            );
             for (lsb_i, gate) in bit_vector.iter_lsb_to_msb().enumerate() {
                 g8_builder.add_tag(
                     gate.node,
@@ -4629,6 +4860,452 @@ mod tests {
         let mut bits = Vec::new();
         flatten_ir_value_to_lsb0_bits_for_type(value, ty, &mut bits).unwrap();
         IrBits::from_lsb_is_0(&bits)
+    }
+
+    /// Builds a carry-only gate function for one explicit adder architecture.
+    fn build_carry_only_gate_fn(bit_count: usize, adder_mapping: AdderMapping) -> GateFn {
+        let mut builder = GateBuilder::new(
+            format!("carry_only_{bit_count}_{adder_mapping}"),
+            GateBuilderOptions::opt(),
+        );
+        let lhs = builder.add_input("lhs".to_string(), bit_count);
+        let rhs = builder.add_input("rhs".to_string(), bit_count);
+        let carry_in = builder.add_input("carry_in".to_string(), 1);
+        let carry = super::gatify_carry_out_with_mapping(
+            &mut builder,
+            &lhs,
+            &rhs,
+            *carry_in.get_lsb(0),
+            adder_mapping,
+        );
+        builder.add_output("carry_out".to_string(), AigBitVector::from_bit(carry));
+        builder.build()
+    }
+
+    #[test]
+    fn test_delay_oriented_mapping_limits_prefix_to_medium_wide_arithmetic() {
+        let optimized = GatifyOptions::all_opts_enabled();
+        for width in [16, 24, 32, 49, 64] {
+            assert_eq!(
+                super::select_delay_oriented_arithmetic_mapping(&optimized, width),
+                AdderMapping::BrentKung,
+                "unexpected architecture override for width={width}"
+            );
+        }
+        for width in [33, 40, 48] {
+            assert_eq!(
+                super::select_delay_oriented_arithmetic_mapping(&optimized, width),
+                AdderMapping::KoggeStone
+            );
+        }
+
+        for explicit in [AdderMapping::RippleCarry, AdderMapping::KoggeStone] {
+            let explicit_options = GatifyOptions {
+                adder_mapping: explicit,
+                ..GatifyOptions::all_opts_enabled()
+            };
+            assert_eq!(
+                super::select_delay_oriented_arithmetic_mapping(&explicit_options, 40),
+                explicit
+            );
+        }
+        assert_eq!(
+            super::select_delay_oriented_arithmetic_mapping(
+                &GatifyOptions::all_opts_disabled(),
+                40,
+            ),
+            AdderMapping::BrentKung
+        );
+    }
+
+    #[test]
+    fn test_delay_oriented_negation_only_overrides_medium_zero_subtractions() {
+        let optimized = GatifyOptions::all_opts_enabled();
+        for width in [17, 23, 32] {
+            assert_eq!(
+                super::select_delay_oriented_subtraction_mapping(&optimized, width, true),
+                AdderMapping::KoggeStone,
+                "expected shallow negation prefix for width={width}"
+            );
+            assert_eq!(
+                super::select_delay_oriented_subtraction_mapping(&optimized, width, false),
+                AdderMapping::BrentKung,
+                "non-negating subtraction should keep the requested architecture"
+            );
+        }
+        for width in [8, 16, 49, 64] {
+            assert_eq!(
+                super::select_delay_oriented_subtraction_mapping(&optimized, width, true),
+                AdderMapping::BrentKung,
+                "unexpected negation architecture override for width={width}"
+            );
+        }
+        for explicit in [AdderMapping::RippleCarry, AdderMapping::KoggeStone] {
+            let explicit_options = GatifyOptions {
+                adder_mapping: explicit,
+                ..GatifyOptions::all_opts_enabled()
+            };
+            assert_eq!(
+                super::select_delay_oriented_subtraction_mapping(&explicit_options, 23, true),
+                explicit
+            );
+        }
+        assert_eq!(
+            super::select_delay_oriented_subtraction_mapping(
+                &GatifyOptions::all_opts_disabled(),
+                23,
+                true,
+            ),
+            AdderMapping::BrentKung
+        );
+    }
+
+    #[test]
+    fn test_delay_oriented_medium_negation_preserves_wrapping_semantics() {
+        for bit_count in [17usize, 23, 32] {
+            let ir_text = format!(
+                "fn f(x: bits[{bit_count}]) -> bits[{bit_count}] {{\n  zero: bits[{bit_count}] = literal(value=0, id=2)\n  ret neg: bits[{bit_count}] = sub(zero, x, id=3)\n}}"
+            );
+            let mut parser = ir_parser::Parser::new(&ir_text);
+            let ir_fn = parser.parse_fn().unwrap();
+            let gate_fn = gatify(&ir_fn, GatifyOptions::all_opts_enabled())
+                .unwrap()
+                .gate_fn;
+            let mask = (1u64 << bit_count) - 1;
+            for value in [0, 1, 2, 0x12345 & mask, 1 << (bit_count - 1), mask] {
+                let output = gate_sim::eval(
+                    &gate_fn,
+                    &[IrBits::make_ubits(bit_count, value).unwrap()],
+                    gate_sim::Collect::None,
+                );
+                assert_eq!(
+                    output.outputs[0],
+                    IrBits::make_ubits(bit_count, 0u64.wrapping_sub(value) & mask).unwrap(),
+                    "negation mismatch for width={bit_count} value={value}"
+                );
+            }
+        }
+    }
+
+    /// Builds a logical shifter whose low selector bit arrives several levels
+    /// late.
+    fn build_arrival_ordered_logical_shift_gate_fn(
+        bit_count: usize,
+        amount_bit_count: usize,
+        direction: Direction,
+        arrival_ordered: bool,
+    ) -> GateFn {
+        let direction_name = if direction == Direction::Left {
+            "left"
+        } else {
+            "right"
+        };
+        let mut builder = GateBuilder::new(
+            format!(
+                "arrival_ordered_shift_{direction_name}_{bit_count}_{amount_bit_count}_{arrival_ordered}"
+            ),
+            GateBuilderOptions::opt(),
+        );
+        let input = builder.add_input("input".to_string(), bit_count);
+        let amount = builder.add_input("amount".to_string(), amount_bit_count);
+        let guards = builder.add_input("guards".to_string(), 4);
+        let mut staged_amount: Vec<AigOperand> = amount.iter_lsb_to_msb().copied().collect();
+        for guard in guards.iter_lsb_to_msb() {
+            staged_amount[0] = builder.add_and_binary(staged_amount[0], *guard);
+        }
+        let staged_amount = AigBitVector::from_lsb_is_index_0(&staged_amount);
+        let shifted = if arrival_ordered {
+            super::gatify_arrival_ordered_logical_shifter(
+                &mut builder,
+                &input,
+                &staged_amount,
+                direction,
+                "arrival_ordered_test",
+                &GatifyOptions::all_opts_enabled(),
+            )
+        } else {
+            gatify_barrel_shifter(
+                &input,
+                &staged_amount,
+                direction,
+                "arrival_ordered_test",
+                &mut builder,
+            )
+        };
+        builder.add_output("shifted".to_string(), shifted);
+        builder.build()
+    }
+
+    #[test]
+    fn test_arrival_ordered_logical_shifts_preserve_exhaustive_saturation() {
+        for shift_left in [true, false] {
+            for bit_count in [8usize, 9] {
+                for amount_bit_count in [3usize, 4, 5] {
+                    let direction = if shift_left {
+                        Direction::Left
+                    } else {
+                        Direction::Right
+                    };
+                    let gate_fn = build_arrival_ordered_logical_shift_gate_fn(
+                        bit_count,
+                        amount_bit_count,
+                        direction,
+                        true,
+                    );
+                    let mask = (1u64 << bit_count) - 1;
+                    for value in 0..=mask {
+                        for amount in 0..(1u64 << amount_bit_count) {
+                            let output = gate_sim::eval(
+                                &gate_fn,
+                                &[
+                                    IrBits::make_ubits(bit_count, value).unwrap(),
+                                    IrBits::make_ubits(amount_bit_count, amount).unwrap(),
+                                    IrBits::make_ubits(4, 0b1111).unwrap(),
+                                ],
+                                gate_sim::Collect::None,
+                            );
+                            let expected = if amount >= bit_count as u64 {
+                                0
+                            } else if shift_left {
+                                (value << amount) & mask
+                            } else {
+                                value >> amount
+                            };
+                            assert_eq!(
+                                output.outputs[0],
+                                IrBits::make_ubits(bit_count, expected).unwrap(),
+                                "logical shift mismatch: shift_left={shift_left} width={bit_count} amount_width={amount_bit_count} value={value} amount={amount}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_arrival_ordered_logical_shifts_shorten_late_selector_paths() {
+        for shift_left in [true, false] {
+            let ordered_direction = if shift_left {
+                Direction::Left
+            } else {
+                Direction::Right
+            };
+            let ordered = get_summary_stats(&build_arrival_ordered_logical_shift_gate_fn(
+                16,
+                4,
+                ordered_direction,
+                true,
+            ));
+            let conventional_direction = if shift_left {
+                Direction::Left
+            } else {
+                Direction::Right
+            };
+            let conventional = get_summary_stats(&build_arrival_ordered_logical_shift_gate_fn(
+                16,
+                4,
+                conventional_direction,
+                false,
+            ));
+            assert!(
+                ordered.deepest_path < conventional.deepest_path,
+                "arrival-order scheduling should shorten the late-selector path: shift_left={shift_left} ordered={ordered:?} conventional={conventional:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_arrival_ordered_logical_shifts_preserve_constant_mask_structure() {
+        for shift_left in [true, false] {
+            let build_constant_shift = |arrival_ordered: bool| {
+                let mut builder = GateBuilder::new(
+                    format!("constant_mask_shift_{shift_left}_{arrival_ordered}"),
+                    GateBuilderOptions::opt(),
+                );
+                let input = builder.add_literal(&IrBits::make_ubits(24, 0xff_ffff).unwrap());
+                let amount = builder.add_input("amount".to_string(), 6);
+                let guards = builder.add_input("guards".to_string(), 4);
+                let mut staged_amount: Vec<AigOperand> =
+                    amount.iter_lsb_to_msb().copied().collect();
+                for guard in guards.iter_lsb_to_msb() {
+                    staged_amount[0] = builder.add_and_binary(staged_amount[0], *guard);
+                }
+                let staged_amount = AigBitVector::from_lsb_is_index_0(&staged_amount);
+                let direction = if shift_left {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                };
+                let result = if arrival_ordered {
+                    super::gatify_arrival_ordered_logical_shifter(
+                        &mut builder,
+                        &input,
+                        &staged_amount,
+                        direction,
+                        "constant_mask_test",
+                        &GatifyOptions::all_opts_enabled(),
+                    )
+                } else {
+                    gatify_barrel_shifter(
+                        &input,
+                        &staged_amount,
+                        direction,
+                        "constant_mask_test",
+                        &mut builder,
+                    )
+                };
+                builder.add_output("shifted".to_string(), result);
+                builder.build()
+            };
+            let guarded = build_constant_shift(true);
+            let conventional = build_constant_shift(false);
+            let guarded_stats = get_summary_stats(&guarded);
+            let conventional_stats = get_summary_stats(&conventional);
+            assert_eq!(guarded_stats.live_nodes, conventional_stats.live_nodes);
+            assert_eq!(guarded_stats.deepest_path, conventional_stats.deepest_path);
+            for amount in [0u64, 1, 7, 23, 24, 31, 32, 63] {
+                let output = gate_sim::eval(
+                    &guarded,
+                    &[
+                        IrBits::make_ubits(6, amount).unwrap(),
+                        IrBits::make_ubits(4, 0b1111).unwrap(),
+                    ],
+                    gate_sim::Collect::None,
+                );
+                let expected = if amount >= 24 {
+                    0
+                } else if shift_left {
+                    (0xff_ffff << amount) & 0xff_ffff
+                } else {
+                    0xff_ffff >> amount
+                };
+                assert_eq!(
+                    output.outputs[0],
+                    IrBits::make_ubits(24, expected).unwrap(),
+                    "constant logical shift mismatch: shift_left={shift_left} amount={amount}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_delay_oriented_wide_one_hot_preserves_priority_and_zero_flag() {
+        for lsb_prio in [false, true] {
+            let mut builder = GateBuilder::new(
+                format!("wide_priority_one_hot_{lsb_prio}"),
+                GateBuilderOptions::opt(),
+            );
+            let input = builder.add_input("input".to_string(), 32);
+            let output = super::gatify_delay_oriented_one_hot(
+                &mut builder,
+                &input,
+                lsb_prio,
+                false,
+                &GatifyOptions::all_opts_enabled(),
+            );
+            builder.add_output("one_hot".to_string(), output);
+            let gate_fn = builder.build();
+
+            for value in [0u64, 1, 2, 3, 0x1234_5678, 0x8000_0000, 0xffff_ffff] {
+                let got = gate_sim::eval(
+                    &gate_fn,
+                    &[IrBits::make_ubits(32, value).unwrap()],
+                    gate_sim::Collect::None,
+                )
+                .outputs[0]
+                    .clone();
+                let expected_index = if value == 0 {
+                    32
+                } else if lsb_prio {
+                    value.trailing_zeros() as usize
+                } else {
+                    63usize - value.leading_zeros() as usize
+                };
+                for bit_index in 0..33 {
+                    assert_eq!(
+                        got.get_bit(bit_index).unwrap(),
+                        bit_index == expected_index,
+                        "one-hot mismatch: lsb_prio={lsb_prio} value={value:#x} bit={bit_index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_delay_oriented_wide_one_hot_reduces_prefix_depth() {
+        let build = |enable_fast_prefix| {
+            let mut builder = GateBuilder::new(
+                format!("priority_prefix_{enable_fast_prefix}"),
+                GateBuilderOptions::opt(),
+            );
+            let input = builder.add_input("input".to_string(), 32);
+            let options = GatifyOptions {
+                enable_rewrite_nary_add: enable_fast_prefix,
+                ..GatifyOptions::all_opts_enabled()
+            };
+            let output =
+                super::gatify_delay_oriented_one_hot(&mut builder, &input, true, false, &options);
+            builder.add_output("one_hot".to_string(), output);
+            get_summary_stats(&builder.build())
+        };
+
+        let fast = build(true);
+        let standard = build(false);
+        assert!(
+            fast.deepest_path < standard.deepest_path,
+            "wide priority prefix should reduce AIG depth: fast={fast:?} standard={standard:?}"
+        );
+    }
+
+    #[test]
+    fn test_carry_only_prefix_tree_matches_ripple_exhaustively() {
+        for bit_count in 1usize..=5 {
+            for architecture in [AdderMapping::BrentKung, AdderMapping::KoggeStone] {
+                let gate_fn = build_carry_only_gate_fn(bit_count, architecture);
+                let modulus = 1u64 << bit_count;
+                for lhs in 0..modulus {
+                    for rhs in 0..modulus {
+                        for carry_in in 0..2 {
+                            let output = gate_sim::eval(
+                                &gate_fn,
+                                &[
+                                    IrBits::make_ubits(bit_count, lhs).unwrap(),
+                                    IrBits::make_ubits(bit_count, rhs).unwrap(),
+                                    IrBits::make_ubits(1, carry_in).unwrap(),
+                                ],
+                                gate_sim::Collect::None,
+                            );
+                            let expected_carry = lhs + rhs + carry_in >= modulus;
+                            assert_eq!(
+                                output.outputs[0].get_bit(0).unwrap(),
+                                expected_carry,
+                                "carry mismatch: architecture={architecture} width={bit_count} lhs={lhs} rhs={rhs} carry_in={carry_in}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_carry_only_prefix_tree_reduces_wide_carry_depth() {
+        for bit_count in [8, 16, 32, 64] {
+            let prefix = get_summary_stats(&build_carry_only_gate_fn(
+                bit_count,
+                AdderMapping::BrentKung,
+            ));
+            let ripple = get_summary_stats(&build_carry_only_gate_fn(
+                bit_count,
+                AdderMapping::RippleCarry,
+            ));
+            assert!(
+                prefix.deepest_path < ripple.deepest_path,
+                "carry prefix tree should reduce depth for width={bit_count}: prefix={prefix:?} ripple={ripple:?}"
+            );
+        }
     }
 
     #[test]
@@ -6473,10 +7150,10 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
             ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 2, old_and_nodes: 35, old_depth: 10, elem_mux_and_nodes: 23, elem_mux_depth: 6, public_and_nodes: 23, public_depth: 6 },
             ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 3, old_and_nodes: 43, old_depth: 10, elem_mux_and_nodes: 28, elem_mux_depth: 6, public_and_nodes: 28, public_depth: 6 },
             ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 4, old_and_nodes: 48, old_depth: 10, elem_mux_and_nodes: 32, elem_mux_depth: 6, public_and_nodes: 32, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 1, old_and_nodes: 136, old_depth: 14, elem_mux_and_nodes: 36, elem_mux_depth: 6, public_and_nodes: 36, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 2, old_and_nodes: 189, old_depth: 15, elem_mux_and_nodes: 69, elem_mux_depth: 6, public_and_nodes: 69, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 3, old_and_nodes: 221, old_depth: 15, elem_mux_and_nodes: 84, elem_mux_depth: 6, public_and_nodes: 84, public_depth: 6 },
-            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 4, old_and_nodes: 241, old_depth: 15, elem_mux_and_nodes: 96, elem_mux_depth: 6, public_and_nodes: 96, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 1, old_and_nodes: 133, old_depth: 14, elem_mux_and_nodes: 36, elem_mux_depth: 6, public_and_nodes: 36, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 2, old_and_nodes: 186, old_depth: 15, elem_mux_and_nodes: 69, elem_mux_depth: 6, public_and_nodes: 69, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 3, old_and_nodes: 218, old_depth: 15, elem_mux_and_nodes: 84, elem_mux_depth: 6, public_and_nodes: 84, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 4, old_and_nodes: 238, old_depth: 15, elem_mux_and_nodes: 96, elem_mux_depth: 6, public_and_nodes: 96, public_depth: 6 },
             ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 1, old_and_nodes: 252, old_depth: 15, elem_mux_and_nodes: 60, elem_mux_depth: 6, public_and_nodes: 60, public_depth: 6 },
             ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 2, old_and_nodes: 340, old_depth: 15, elem_mux_and_nodes: 115, elem_mux_depth: 6, public_and_nodes: 115, public_depth: 6 },
             ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 3, old_and_nodes: 398, old_depth: 16, elem_mux_and_nodes: 140, elem_mux_depth: 6, public_and_nodes: 140, public_depth: 6 },
@@ -6486,10 +7163,10 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
             ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 2, old_and_nodes: 39, old_depth: 6, elem_mux_and_nodes: 39, elem_mux_depth: 6, public_and_nodes: 39, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 3, old_and_nodes: 47, old_depth: 6, elem_mux_and_nodes: 47, elem_mux_depth: 6, public_and_nodes: 47, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 4, old_and_nodes: 53, old_depth: 6, elem_mux_and_nodes: 53, elem_mux_depth: 6, public_and_nodes: 53, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 1, old_and_nodes: 193, old_depth: 10, elem_mux_and_nodes: 63, elem_mux_depth: 6, public_and_nodes: 63, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 2, old_and_nodes: 272, old_depth: 10, elem_mux_and_nodes: 117, elem_mux_depth: 6, public_and_nodes: 117, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 3, old_and_nodes: 318, old_depth: 10, elem_mux_and_nodes: 141, elem_mux_depth: 6, public_and_nodes: 141, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 4, old_and_nodes: 344, old_depth: 10, elem_mux_and_nodes: 159, elem_mux_depth: 6, public_and_nodes: 159, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 1, old_and_nodes: 190, old_depth: 10, elem_mux_and_nodes: 63, elem_mux_depth: 6, public_and_nodes: 63, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 2, old_and_nodes: 269, old_depth: 10, elem_mux_and_nodes: 117, elem_mux_depth: 6, public_and_nodes: 117, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 3, old_and_nodes: 315, old_depth: 10, elem_mux_and_nodes: 141, elem_mux_depth: 6, public_and_nodes: 141, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 4, old_and_nodes: 341, old_depth: 10, elem_mux_and_nodes: 159, elem_mux_depth: 6, public_and_nodes: 159, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 1, old_and_nodes: 389, old_depth: 12, elem_mux_and_nodes: 105, elem_mux_depth: 6, public_and_nodes: 105, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 2, old_and_nodes: 525, old_depth: 12, elem_mux_and_nodes: 195, elem_mux_depth: 6, public_and_nodes: 195, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 3, old_and_nodes: 607, old_depth: 12, elem_mux_and_nodes: 235, elem_mux_depth: 6, public_and_nodes: 235, public_depth: 6 },
@@ -6499,14 +7176,14 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 87, old_depth: 8, elem_mux_and_nodes: 87, elem_mux_depth: 8, public_and_nodes: 87, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 3, old_and_nodes: 107, old_depth: 8, elem_mux_and_nodes: 107, elem_mux_depth: 8, public_and_nodes: 107, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 4, old_and_nodes: 125, old_depth: 8, elem_mux_and_nodes: 125, elem_mux_depth: 8, public_and_nodes: 125, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 388, old_depth: 13, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 542, old_depth: 13, elem_mux_and_nodes: 261, elem_mux_depth: 8, public_and_nodes: 261, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 636, old_depth: 13, elem_mux_and_nodes: 321, elem_mux_depth: 8, public_and_nodes: 321, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 694, old_depth: 13, elem_mux_and_nodes: 375, elem_mux_depth: 8, public_and_nodes: 375, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 1, old_and_nodes: 790, old_depth: 14, elem_mux_and_nodes: 225, elem_mux_depth: 8, public_and_nodes: 225, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1051, old_depth: 14, elem_mux_and_nodes: 435, elem_mux_depth: 8, public_and_nodes: 435, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1211, old_depth: 14, elem_mux_and_nodes: 535, elem_mux_depth: 8, public_and_nodes: 535, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 4, old_and_nodes: 1311, old_depth: 14, elem_mux_and_nodes: 625, elem_mux_depth: 8, public_and_nodes: 625, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 379, old_depth: 12, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 533, old_depth: 12, elem_mux_and_nodes: 261, elem_mux_depth: 8, public_and_nodes: 261, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 627, old_depth: 12, elem_mux_and_nodes: 321, elem_mux_depth: 8, public_and_nodes: 321, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 685, old_depth: 12, elem_mux_and_nodes: 375, elem_mux_depth: 8, public_and_nodes: 375, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 1, old_and_nodes: 789, old_depth: 14, elem_mux_and_nodes: 225, elem_mux_depth: 8, public_and_nodes: 225, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1050, old_depth: 14, elem_mux_and_nodes: 435, elem_mux_depth: 8, public_and_nodes: 435, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1210, old_depth: 14, elem_mux_and_nodes: 535, elem_mux_depth: 8, public_and_nodes: 535, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 4, old_and_nodes: 1310, old_depth: 14, elem_mux_and_nodes: 625, elem_mux_depth: 8, public_and_nodes: 625, public_depth: 8 },
         ];
 
         assert_eq!(got.as_slice(), want);
@@ -7545,14 +8222,15 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
 
         // Characterization guard for the original regression report:
         // before this lowering path, this cone was observed at roughly
-        // 562 nodes / 33 levels in g8r output.
+        // 562 nodes / 33 levels in g8r output. The delay-oriented medium-width
+        // prefix deliberately trades a few nodes for a shorter critical path.
         assert!(
-            cone_stats.live_nodes <= 434,
+            cone_stats.live_nodes <= 465,
             "expected improved node count for regression cone; got {}",
             cone_stats.live_nodes
         );
         assert!(
-            cone_stats.deepest_path <= 28,
+            cone_stats.deepest_path <= 27,
             "expected improved depth for regression cone; got {}",
             cone_stats.deepest_path
         );

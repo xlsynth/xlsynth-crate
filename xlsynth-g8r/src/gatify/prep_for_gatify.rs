@@ -1742,10 +1742,10 @@ fn mark_dead_nodes_as_nil(f: &mut ir::Fn) {
     }
 }
 
-/// Rewrites the canonical carry-out idiom:
-/// `bit_slice(add(add(zero_ext(lhs), zero_ext(rhs)), zero_ext(c_in)), start=w,
-/// width=1)` into `ext_carry_out(lhs, rhs, c_in)` when the add-chain nodes have
-/// a single use (the slice) so we can safely DCE the chain.
+/// Rewrites recognized add-result carry slices into `ext_carry_out`.
+///
+/// Dead single-use add chains are removed; independently observed sums and
+/// shared carry consumers remain intact.
 fn rewrite_add_slice_carry_out_to_ext_carry_out(
     f: &mut ir::Fn,
     range_info: Option<&IrRangeInfo>,
@@ -1774,10 +1774,7 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
             continue;
         }
 
-        // The add feeding the slice must be single-use, so we can drop it.
-        if use_counts[arg.index] != 1 {
-            continue;
-        }
+        let sum_has_no_other_consumers = use_counts[arg.index] == 1;
 
         // Supported idioms (c_in opportunistic):
         // (a) bit_slice(add(add(zero_ext(x), zero_ext(y)), zero_ext(c_in)), msb)
@@ -1787,7 +1784,10 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
 
         // First, try the existing canonical zero_ext chain (a).
         if let NodePayload::Binop(Binop::Add, sum_w1, c_in_ext) = arg_payload.clone() {
-            if use_counts[sum_w1.index] == 1 && use_counts[c_in_ext.index] == 1 {
+            if sum_has_no_other_consumers
+                && use_counts[sum_w1.index] == 1
+                && use_counts[c_in_ext.index] == 1
+            {
                 let sum_payload = f.nodes[sum_w1.index].payload.clone();
                 if let NodePayload::Binop(Binop::Add, lhs_ext, rhs_ext) = sum_payload {
                     if use_counts[lhs_ext.index] == 1 && use_counts[rhs_ext.index] == 1 {
@@ -1866,11 +1866,6 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
             }
         }
 
-        // Inner add must be single-use if present, so we can drop it.
-        if inner_add_to_nil.is_some() && use_counts[base_add.index] != 1 {
-            continue;
-        }
-
         let base_payload = f.nodes[base_add.index].payload.clone();
         let NodePayload::Binop(Binop::Add, x, y) = base_payload else {
             continue;
@@ -1885,61 +1880,29 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
 
         let bit_slice_nr = ir::NodeRef { index: node_index };
 
-        // We may have appended helper nodes (e.g. low-bit slices) while
-        // computing `lhs_low`/`rhs_low`. To preserve the SSA / textual ordering
-        // invariant (operands must be defined before use) without reindexing,
-        // we materialize the `ExtCarryOut` node *after* helpers and then use the
-        // node replacement helpers to redirect the return to it.
-        //
-        // This rewrite is intended for cone-style patterns where the carry-out
-        // slice is the (single-use) return value (possibly wrapped in an
-        // `identity`).
-        let Some(ret_nr) = f.ret_node_ref else {
-            continue;
-        };
-
-        // Require that the slice is return-only (or return-only via identity),
-        // since we will delete the old slice and add nodes.
-        let (ret_target, bit_slice_to_nil): (ir::NodeRef, Option<ir::NodeRef>) =
-            if ret_nr == bit_slice_nr {
-                (bit_slice_nr, None)
-            } else {
-                match f.get_node(ret_nr).payload.clone() {
-                    NodePayload::Unop(Unop::Identity, arg) if arg == bit_slice_nr => {
-                        (ret_nr, Some(bit_slice_nr))
-                    }
-                    _ => continue,
-                }
-            };
-        if use_counts[bit_slice_nr.index] != 1 {
-            continue;
-        }
-        if use_counts[ret_target.index] != 1 {
-            continue;
-        }
-
-        let ext_nr = push_node(
+        // Keep the existing slice identity so arbitrary internal consumers and
+        // shared carry users remain connected. Low-bit helpers may have been
+        // appended after this node; final compaction restores topological SSA
+        // order before the prepared function becomes observable.
+        ir_utils::replace_node_payload(
             f,
-            Type::Bits(1),
+            bit_slice_nr,
             NodePayload::ExtCarryOut {
                 lhs: lhs_low,
                 rhs: rhs_low,
                 c_in: c_in_lit,
             },
-        );
+            Some(Type::Bits(1)),
+        )
+        .expect("prep_for_gatify: internal ext_carry_out payload replacement failed");
 
-        // Redirect the return (and any users) to the new node, then drop the old
-        // return node(s).
-        ir_utils::replace_node_with_ref(f, ret_target, ext_nr)
-            .expect("prep_for_gatify: redirecting return to ext_carry_out failed");
-        nil_out_node(f, ret_target);
-        if let Some(bs) = bit_slice_to_nil {
-            nil_out_node(f, bs);
-        }
-
-        nil_out_node(f, arg);
-        if let Some(inner) = inner_add_to_nil {
-            nil_out_node(f, inner);
+        if sum_has_no_other_consumers {
+            nil_out_node(f, arg);
+            if let Some(inner) = inner_add_to_nil {
+                if use_counts[inner.index] == 1 {
+                    nil_out_node(f, inner);
+                }
+            }
         }
 
         rewrites += 1;
@@ -2005,6 +1968,48 @@ fn rewrite_add_xor_and_to_or(f: &mut ir::Fn) -> usize {
             Some(f.get_node_ty(NodeRef { index: node_index }).clone()),
         )
         .expect("prep_for_gatify: rewriting add(xor, and) to or failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
+/// Replaces zero comparisons of a difference with direct operand comparison.
+fn rewrite_zero_comparison_of_difference(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0;
+    for node_index in 0..f.nodes.len() {
+        let node_ref = NodeRef { index: node_index };
+        let NodePayload::Binop(comparison @ (Binop::Eq | Binop::Ne), _, _) =
+            f.get_node(node_ref).payload.clone()
+        else {
+            continue;
+        };
+
+        let context = MatchCtx::new(f);
+        let Some(bindings) = context.commutative_binop_pair(
+            node_ref,
+            comparison,
+            ir_match::binop(Binop::Sub, ir_match::any("lhs"), ir_match::any("rhs")),
+            ir_match::any("zero"),
+        ) else {
+            continue;
+        };
+        let zero = bindings.get_node("zero").expect("matched zero binding");
+        let NodePayload::Literal(value) = &f.get_node(zero).payload else {
+            continue;
+        };
+        if !value.bits_equals_u64_value(0) {
+            continue;
+        }
+
+        let lhs = bindings.get_node("lhs").expect("matched lhs binding");
+        let rhs = bindings.get_node("rhs").expect("matched rhs binding");
+        ir_utils::replace_node_payload(
+            f,
+            node_ref,
+            NodePayload::Binop(comparison, lhs, rhs),
+            Some(Type::Bits(1)),
+        )
+        .expect("prep_for_gatify: direct difference comparison rewrite failed");
         rewrites += 1;
     }
     rewrites
@@ -2453,6 +2458,7 @@ pub fn prep_for_gatify(
     let mut cloned = f.clone();
     combine_or_reduces(&mut cloned);
     let _rewrites = rewrite_add_xor_and_to_or(&mut cloned);
+    let _rewrites = rewrite_zero_comparison_of_difference(&mut cloned);
     if options.enable_rewrite_small_shift_choices {
         let _rewrites = rewrite_small_shift_choice_bit_slices(&mut cloned);
         let _rewrites = rewrite_small_shift_choices(&mut cloned);
@@ -2522,6 +2528,162 @@ mod tests {
                 ..PrepForGatifyOptions::default()
             },
         )
+    }
+
+    /// Checks direct equality rewrites across every small two-input assignment.
+    fn assert_small_difference_comparison_equivalence(original: &ir::Fn, optimized: &ir::Fn) {
+        for lhs in 0u64..16 {
+            for rhs in 0u64..16 {
+                let arguments = [
+                    IrValue::make_ubits(4, lhs).unwrap(),
+                    IrValue::make_ubits(4, rhs).unwrap(),
+                ];
+                let original_value = match eval_fn(original, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected original evaluation failure: {failure:?}")
+                    }
+                };
+                let optimized_value = match eval_fn(optimized, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected optimized evaluation failure: {failure:?}")
+                    }
+                };
+                assert_eq!(
+                    original_value, optimized_value,
+                    "mismatch at lhs={lhs} rhs={rhs}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_equality_of_difference_becomes_direct_equality() {
+        let original = parse_test_fn(
+            r#"package sample
+
+top fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> bits[1] {
+  difference: bits[4] = sub(lhs, rhs, id=3)
+  zero: bits[4] = literal(value=0, id=4)
+  ret result: bits[1] = eq(zero, difference, id=5)
+}"#,
+        );
+        let optimized = prep_for_gatify(&original, None, PrepForGatifyOptions::default());
+        let expected = r#"fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> bits[1] {
+  ret result: bits[1] = eq(lhs, rhs, id=5)
+}"#;
+        assert_eq!(optimized.to_string(), expected);
+        assert_small_difference_comparison_equivalence(&original, &optimized);
+    }
+
+    #[test]
+    fn zero_inequality_of_difference_becomes_direct_inequality() {
+        let original = parse_test_fn(
+            r#"package sample
+
+top fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> bits[1] {
+  difference: bits[4] = sub(lhs, rhs, id=3)
+  zero: bits[4] = literal(value=0, id=4)
+  ret result: bits[1] = ne(difference, zero, id=5)
+}"#,
+        );
+        let optimized = prep_for_gatify(&original, None, PrepForGatifyOptions::default());
+        let expected = r#"fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> bits[1] {
+  ret result: bits[1] = ne(lhs, rhs, id=5)
+}"#;
+        assert_eq!(optimized.to_string(), expected);
+        assert_small_difference_comparison_equivalence(&original, &optimized);
+    }
+
+    #[test]
+    fn difference_comparison_rewrite_preserves_independently_shared_difference() {
+        let original = parse_test_fn(
+            r#"package sample
+
+top fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> (bits[4], bits[1]) {
+  difference: bits[4] = sub(lhs, rhs, id=3)
+  zero: bits[4] = literal(value=0, id=4)
+  is_zero: bits[1] = eq(difference, zero, id=5)
+  ret result: (bits[4], bits[1]) = tuple(difference, is_zero, id=6)
+}"#,
+        );
+        let optimized = prep_for_gatify(&original, None, PrepForGatifyOptions::default());
+        let expected = r#"fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> (bits[4], bits[1]) {
+  difference: bits[4] = sub(lhs, rhs, id=3)
+  is_zero: bits[1] = eq(lhs, rhs, id=5)
+  ret result: (bits[4], bits[1]) = tuple(difference, is_zero, id=6)
+}"#;
+        assert_eq!(optimized.to_string(), expected);
+        assert_small_difference_comparison_equivalence(&original, &optimized);
+    }
+
+    #[test]
+    fn nonzero_difference_comparison_is_preserved() {
+        let original = parse_test_fn(
+            r#"package sample
+
+top fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> bits[1] {
+  difference: bits[4] = sub(lhs, rhs, id=3)
+  one: bits[4] = literal(value=1, id=4)
+  ret result: bits[1] = eq(difference, one, id=5)
+}"#,
+        );
+        let optimized = prep_for_gatify(&original, None, PrepForGatifyOptions::default());
+        let expected = r#"fn f(lhs: bits[4] id=1, rhs: bits[4] id=2) -> bits[1] {
+  difference: bits[4] = sub(lhs, rhs, id=3)
+  one: bits[4] = literal(value=1, id=4)
+  ret result: bits[1] = eq(difference, one, id=5)
+}"#;
+        assert_eq!(optimized.to_string(), expected);
+        assert_small_difference_comparison_equivalence(&original, &optimized);
+    }
+
+    #[test]
+    fn zero_difference_comparison_supports_operands_wider_than_u64() {
+        let original = parse_test_fn(
+            r#"package sample
+
+top fn f(lhs: bits[96] id=1, rhs: bits[96] id=2) -> bits[1] {
+  difference: bits[96] = sub(lhs, rhs, id=3)
+  zero: bits[96] = literal(value=0, id=4)
+  ret result: bits[1] = eq(difference, zero, id=5)
+}"#,
+        );
+        let optimized = prep_for_gatify(&original, None, PrepForGatifyOptions::default());
+        let expected = r#"fn f(lhs: bits[96] id=1, rhs: bits[96] id=2) -> bits[1] {
+  ret result: bits[1] = eq(lhs, rhs, id=5)
+}"#;
+        assert_eq!(optimized.to_string(), expected);
+
+        for lhs_bit in [None, Some(0), Some(63), Some(80), Some(95)] {
+            for rhs_bit in [None, Some(0), Some(63), Some(80), Some(95)] {
+                let make_value = |set_bit: Option<usize>| {
+                    let mut bits = vec![false; 96];
+                    if let Some(index) = set_bit {
+                        bits[index] = true;
+                    }
+                    IrValue::from_bits(&xlsynth::IrBits::from_lsb_is_0(&bits))
+                };
+                let arguments = [make_value(lhs_bit), make_value(rhs_bit)];
+                let original_value = match eval_fn(&original, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected original evaluation failure: {failure:?}")
+                    }
+                };
+                let optimized_value = match eval_fn(&optimized, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected optimized evaluation failure: {failure:?}")
+                    }
+                };
+                assert_eq!(
+                    original_value, optimized_value,
+                    "mismatch at lhs_bit={lhs_bit:?} rhs_bit={rhs_bit:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2951,6 +3113,272 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
                     FnEvalResult::Failure(f) => panic!("unexpected eval failure: {:?}", f),
                 };
                 assert_eq!(got_orig, got_opt, "mismatch at x={} y={}", x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn internal_carry_out_rewrite_preserves_multiple_independent_consumers() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[4] id=1, y: bits[4] id=2, enabled: bits[1] id=3) -> (bits[1], bits[1]) {
+  extended_x: bits[5] = zero_ext(x, new_bit_count=5, id=4)
+  extended_y: bits[5] = zero_ext(y, new_bit_count=5, id=5)
+  sum: bits[5] = add(extended_x, extended_y, id=6)
+  carry: bits[1] = bit_slice(sum, start=4, width=1, id=7)
+  gated: bits[1] = and(carry, enabled, id=8)
+  inverted: bits[1] = not(carry, id=9)
+  ret result: (bits[1], bits[1]) = tuple(gated, inverted, id=10)
+}"#;
+        let original = parse_test_fn(ir_text);
+        let mut package = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
+        package.set_top_by_name("f").unwrap();
+        let analysis = package.create_ir_analysis().unwrap();
+        let ranges = IrRangeInfo::build_from_analysis(&analysis, &original).unwrap();
+        let optimized = prep_for_gatify(
+            &original,
+            Some(ranges.as_ref()),
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let carries = optimized
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.payload, NodePayload::ExtCarryOut { .. }))
+            .count();
+        assert_eq!(
+            carries, 1,
+            "expected the shared internal carry to be recovered"
+        );
+        assert!(
+            optimized
+                .nodes
+                .iter()
+                .all(|node| !matches!(node.payload, NodePayload::Binop(Binop::Add, _, _)))
+        );
+
+        for x in 0u64..16 {
+            for y in 0u64..16 {
+                for enabled in 0u64..2 {
+                    let arguments = [
+                        IrValue::make_ubits(4, x).unwrap(),
+                        IrValue::make_ubits(4, y).unwrap(),
+                        IrValue::make_ubits(1, enabled).unwrap(),
+                    ];
+                    let original_value = match eval_fn(&original, &arguments) {
+                        FnEvalResult::Success(result) => result.value,
+                        FnEvalResult::Failure(failure) => {
+                            panic!("unexpected original evaluation failure: {failure:?}")
+                        }
+                    };
+                    let optimized_value = match eval_fn(&optimized, &arguments) {
+                        FnEvalResult::Success(result) => result.value,
+                        FnEvalResult::Failure(failure) => {
+                            panic!("unexpected optimized evaluation failure: {failure:?}")
+                        }
+                    };
+                    assert_eq!(
+                        original_value, optimized_value,
+                        "mismatch at x={x} y={y} enabled={enabled}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn internal_carry_out_rewrite_preserves_incremented_sum() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[4] id=1, y: bits[4] id=2, invert: bits[1] id=3) -> bits[1] {
+  extended_x: bits[5] = zero_ext(x, new_bit_count=5, id=4)
+  extended_y: bits[5] = zero_ext(y, new_bit_count=5, id=5)
+  sum: bits[5] = add(extended_x, extended_y, id=6)
+  one: bits[5] = literal(value=1, id=7)
+  incremented: bits[5] = add(one, sum, id=8)
+  carry: bits[1] = bit_slice(incremented, start=4, width=1, id=9)
+  ret result: bits[1] = xor(carry, invert, id=10)
+}"#;
+        let original = parse_test_fn(ir_text);
+        let mut package = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
+        package.set_top_by_name("f").unwrap();
+        let analysis = package.create_ir_analysis().unwrap();
+        let ranges = IrRangeInfo::build_from_analysis(&analysis, &original).unwrap();
+        let optimized = prep_for_gatify(
+            &original,
+            Some(ranges.as_ref()),
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let NodePayload::ExtCarryOut { c_in, .. } = optimized
+            .nodes
+            .iter()
+            .find_map(|node| {
+                matches!(node.payload, NodePayload::ExtCarryOut { .. }).then_some(&node.payload)
+            })
+            .expect("expected incremented sum to become internal carry")
+        else {
+            unreachable!("the payload was selected as an ExtCarryOut")
+        };
+        let NodePayload::Literal(carry_in) = &optimized.get_node(*c_in).payload else {
+            panic!("expected carry-in to remain a literal");
+        };
+        assert!(carry_in.to_bool().unwrap());
+
+        for x in 0u64..16 {
+            for y in 0u64..16 {
+                for invert in 0u64..2 {
+                    let arguments = [
+                        IrValue::make_ubits(4, x).unwrap(),
+                        IrValue::make_ubits(4, y).unwrap(),
+                        IrValue::make_ubits(1, invert).unwrap(),
+                    ];
+                    let original_value = match eval_fn(&original, &arguments) {
+                        FnEvalResult::Success(result) => result.value,
+                        FnEvalResult::Failure(failure) => {
+                            panic!("unexpected original evaluation failure: {failure:?}")
+                        }
+                    };
+                    let optimized_value = match eval_fn(&optimized, &arguments) {
+                        FnEvalResult::Success(result) => result.value,
+                        FnEvalResult::Failure(failure) => {
+                            panic!("unexpected optimized evaluation failure: {failure:?}")
+                        }
+                    };
+                    assert_eq!(
+                        original_value, optimized_value,
+                        "mismatch at x={x} y={y} invert={invert}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn carry_out_rewrite_preserves_an_independently_observed_full_sum() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[4] id=1, y: bits[4] id=2) -> (bits[5], bits[1]) {
+  extended_x: bits[5] = zero_ext(x, new_bit_count=5, id=3)
+  extended_y: bits[5] = zero_ext(y, new_bit_count=5, id=4)
+  sum: bits[5] = add(extended_x, extended_y, id=5)
+  carry: bits[1] = bit_slice(sum, start=4, width=1, id=6)
+  ret result: (bits[5], bits[1]) = tuple(sum, carry, id=7)
+}"#;
+        let original = parse_test_fn(ir_text);
+        let mut package = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
+        package.set_top_by_name("f").unwrap();
+        let analysis = package.create_ir_analysis().unwrap();
+        let ranges = IrRangeInfo::build_from_analysis(&analysis, &original).unwrap();
+        let optimized = prep_for_gatify(
+            &original,
+            Some(ranges.as_ref()),
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        assert!(
+            optimized
+                .nodes
+                .iter()
+                .any(|node| matches!(node.payload, NodePayload::Binop(Binop::Add, _, _)))
+        );
+        assert!(
+            optimized
+                .nodes
+                .iter()
+                .any(|node| matches!(node.payload, NodePayload::ExtCarryOut { .. }))
+        );
+
+        for x in 0u64..16 {
+            for y in 0u64..16 {
+                let arguments = [
+                    IrValue::make_ubits(4, x).unwrap(),
+                    IrValue::make_ubits(4, y).unwrap(),
+                ];
+                let original_value = match eval_fn(&original, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected original evaluation failure: {failure:?}")
+                    }
+                };
+                let optimized_value = match eval_fn(&optimized, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected optimized evaluation failure: {failure:?}")
+                    }
+                };
+                assert_eq!(original_value, optimized_value, "mismatch at x={x} y={y}");
+            }
+        }
+    }
+
+    #[test]
+    fn carry_out_rewrite_preserves_a_shared_inner_sum_before_increment() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[4] id=1, y: bits[4] id=2) -> (bits[5], bits[1]) {
+  extended_x: bits[5] = zero_ext(x, new_bit_count=5, id=3)
+  extended_y: bits[5] = zero_ext(y, new_bit_count=5, id=4)
+  sum: bits[5] = add(extended_x, extended_y, id=5)
+  one: bits[5] = literal(value=1, id=6)
+  incremented: bits[5] = add(sum, one, id=7)
+  carry: bits[1] = bit_slice(incremented, start=4, width=1, id=8)
+  ret result: (bits[5], bits[1]) = tuple(sum, carry, id=9)
+}"#;
+        let original = parse_test_fn(ir_text);
+        let mut package = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
+        package.set_top_by_name("f").unwrap();
+        let analysis = package.create_ir_analysis().unwrap();
+        let ranges = IrRangeInfo::build_from_analysis(&analysis, &original).unwrap();
+        let optimized = prep_for_gatify(
+            &original,
+            Some(ranges.as_ref()),
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let addition_count = optimized
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.payload, NodePayload::Binop(Binop::Add, _, _)))
+            .count();
+        assert_eq!(
+            addition_count, 1,
+            "the independently observed sum must remain"
+        );
+        assert!(
+            optimized
+                .nodes
+                .iter()
+                .any(|node| matches!(node.payload, NodePayload::ExtCarryOut { .. }))
+        );
+
+        for x in 0u64..16 {
+            for y in 0u64..16 {
+                let arguments = [
+                    IrValue::make_ubits(4, x).unwrap(),
+                    IrValue::make_ubits(4, y).unwrap(),
+                ];
+                let original_value = match eval_fn(&original, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected original evaluation failure: {failure:?}")
+                    }
+                };
+                let optimized_value = match eval_fn(&optimized, &arguments) {
+                    FnEvalResult::Success(result) => result.value,
+                    FnEvalResult::Failure(failure) => {
+                        panic!("unexpected optimized evaluation failure: {failure:?}")
+                    }
+                };
+                assert_eq!(original_value, optimized_value, "mismatch at x={x} y={y}");
             }
         }
     }

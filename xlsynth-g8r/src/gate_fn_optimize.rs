@@ -11,6 +11,7 @@ use crate::aig::GateFn;
 use crate::aig::cut_db_rewrite::{self, CutDbRewriteMode};
 use crate::aig::dce;
 use crate::aig::fraig::{self, FraigPassStat};
+use crate::aig::get_summary_stats::{AigStats, get_aig_stats};
 use crate::aig::reassociation;
 use crate::cut_db::loader::CutDb;
 use crate::prove_gate_fn_equiv_common::GateFormalBackend;
@@ -128,21 +129,38 @@ pub fn optimize_gate_fn(
 
     if let Some(db) = options.cut_db.as_ref() {
         log::info!("cut-db rewrite enabled");
-        gate_fn = cut_db_rewrite::rewrite_gatefn_with_cut_db(
-            &gate_fn,
-            db.as_ref(),
-            cut_db_rewrite::RewriteOptions {
-                max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
-                max_iterations: options.cut_db_rewrite_max_iterations,
-                verify_area_costing: false,
-                verify_delay_costing: false,
-                enable_large_cone_rewrite: options.cut_db_enable_large_cone_rewrite,
-                mode: options.cut_db_rewrite_mode,
-            },
-        );
+        let rewrite_options = cut_db_rewrite::RewriteOptions {
+            max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
+            max_iterations: options.cut_db_rewrite_max_iterations,
+            verify_area_costing: false,
+            verify_delay_costing: false,
+            enable_large_cone_rewrite: options.cut_db_enable_large_cone_rewrite,
+            mode: options.cut_db_rewrite_mode,
+        };
+        gate_fn =
+            cut_db_rewrite::rewrite_gatefn_with_cut_db(&gate_fn, db.as_ref(), rewrite_options);
         if options.reassociation {
             log::info!("post-cut-db reassociation enabled");
             gate_fn = reassociation::reassociate_gatefn(&gate_fn);
+            if options.cut_db_rewrite_mode == CutDbRewriteMode::Delay {
+                let original_stats = get_aig_stats(&gate_fn);
+                let rewritten = cut_db_rewrite::rewrite_gatefn_delay_only_with_cut_db(
+                    &gate_fn,
+                    db.as_ref(),
+                    rewrite_options,
+                );
+                let rewritten_stats = get_aig_stats(&rewritten);
+                if accept_post_reassociation_delay_rewrite(&original_stats, &rewritten_stats) {
+                    log::info!(
+                        "post-reassociation delay rewrite reduced AIG depth {} -> {} with AND count {} -> {}",
+                        original_stats.max_depth,
+                        rewritten_stats.max_depth,
+                        original_stats.and_nodes,
+                        rewritten_stats.and_nodes
+                    );
+                    gate_fn = rewritten;
+                }
+            }
         }
     }
 
@@ -156,10 +174,28 @@ fn round_up_to_nearest_multiple(x: usize, y: usize) -> usize {
     ((x + y - 1) / y) * y
 }
 
+/// Rejects expensive one-level rewrites that obscure mapped critical paths.
+fn accept_post_reassociation_delay_rewrite(original: &AigStats, candidate: &AigStats) -> bool {
+    if candidate.max_depth >= original.max_depth {
+        return false;
+    }
+    if original.and_nodes <= 500 {
+        return true;
+    }
+
+    let depth_reduction = original.max_depth - candidate.max_depth;
+    if depth_reduction == 1 {
+        return candidate.and_nodes <= original.and_nodes;
+    }
+    let added_nodes = candidate.and_nodes.saturating_sub(original.and_nodes);
+    (added_nodes as u128) * 20 <= (original.and_nodes as u128) * (depth_reduction as u128)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::aig::get_summary_stats::get_aig_stats;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     fn build_linear_and4() -> GateFn {
@@ -186,5 +222,74 @@ mod tests {
         assert_eq!(stats.and_nodes, 3);
         assert_eq!(stats.max_depth, 2);
         assert!(outcome.fraig_pass_stat.is_none());
+    }
+
+    #[test]
+    fn post_reassociation_delay_rewrite_never_increases_depth() {
+        let input = build_linear_and4();
+        let initial_depth = get_aig_stats(&input).max_depth;
+        let mut options = GateFnOptimizeOptions::default();
+        options.fraig = false;
+
+        let outcome = optimize_gate_fn(input, &options).unwrap();
+        assert!(get_aig_stats(&outcome.gate_fn).max_depth <= initial_depth);
+    }
+
+    #[test]
+    fn post_reassociation_delay_guard_scales_allowed_growth_with_depth_gain() {
+        let stats = |and_nodes, max_depth| AigStats {
+            and_nodes,
+            max_depth,
+            fanout_histogram: BTreeMap::new(),
+        };
+
+        assert!(accept_post_reassociation_delay_rewrite(
+            &stats(500, 20),
+            &stats(1_000, 19)
+        ));
+        assert!(!accept_post_reassociation_delay_rewrite(
+            &stats(501, 20),
+            &stats(527, 19)
+        ));
+        assert!(!accept_post_reassociation_delay_rewrite(
+            &stats(501, 20),
+            &stats(526, 19)
+        ));
+        assert!(accept_post_reassociation_delay_rewrite(
+            &stats(501, 20),
+            &stats(501, 19)
+        ));
+        assert!(accept_post_reassociation_delay_rewrite(
+            &stats(501, 20),
+            &stats(551, 18)
+        ));
+        assert!(!accept_post_reassociation_delay_rewrite(
+            &stats(501, 20),
+            &stats(552, 18)
+        ));
+        assert!(!accept_post_reassociation_delay_rewrite(
+            &stats(638, 23),
+            &stats(715, 21)
+        ));
+        assert!(!accept_post_reassociation_delay_rewrite(
+            &stats(1_522, 50),
+            &stats(1_720, 49)
+        ));
+        assert!(!accept_post_reassociation_delay_rewrite(
+            &stats(1_688, 40),
+            &stats(1_824, 39)
+        ));
+        assert!(accept_post_reassociation_delay_rewrite(
+            &stats(983, 48),
+            &stats(1_050, 46)
+        ));
+        assert!(accept_post_reassociation_delay_rewrite(
+            &stats(1_264, 21),
+            &stats(1_410, 18)
+        ));
+        assert!(!accept_post_reassociation_delay_rewrite(
+            &stats(500, 20),
+            &stats(400, 20)
+        ));
     }
 }

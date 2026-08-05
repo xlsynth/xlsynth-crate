@@ -1438,11 +1438,46 @@ fn is_cone_leaf_node(g: &GateFn, node: AigRef) -> bool {
     !matches!(g.gates[node.id], AigNode::Literal { .. })
 }
 
+/// Orders bounded-cone expansion by reconvergence or critical arrival.
+fn cone_expansion_priority(
+    new_leaf_count: usize,
+    depth: usize,
+    prefer_arrival_depth: bool,
+) -> (usize, usize) {
+    let reverse_depth = usize::MAX - depth;
+    if prefer_arrival_depth {
+        (reverse_depth, new_leaf_count)
+    } else {
+        (new_leaf_count, reverse_depth)
+    }
+}
+
 fn find_reconvergent_cone(
     g: &GateFn,
     root: AigRef,
     depths: &[usize],
     use_counts: &[usize],
+) -> Option<Vec<AigOperand>> {
+    find_large_cone_boundary(g, root, depths, use_counts, false)
+}
+
+/// Builds an alternative boundary by expanding late-arriving leaves first.
+fn find_arrival_depth_cone(
+    g: &GateFn,
+    root: AigRef,
+    depths: &[usize],
+    use_counts: &[usize],
+) -> Option<Vec<AigOperand>> {
+    find_large_cone_boundary(g, root, depths, use_counts, true)
+}
+
+/// Chooses one bounded cone boundary using reconvergence or arrival priority.
+fn find_large_cone_boundary(
+    g: &GateFn,
+    root: AigRef,
+    depths: &[usize],
+    use_counts: &[usize],
+    prefer_arrival_depth: bool,
 ) -> Option<Vec<AigOperand>> {
     let AigNode::And2 { a, b, .. } = &g.gates[root.id] else {
         return None;
@@ -1484,12 +1519,9 @@ fn find_reconvergent_cone(
             if leaves.len().saturating_sub(1) + cost > LARGE_CONE_MAX_LEAVES {
                 continue;
             }
-            let key = (
-                cost,
-                usize::MAX - depths[leaf.id],
-                *leaf,
-                new_children.clone(),
-            );
+            let (primary, secondary) =
+                cone_expansion_priority(cost, depths[leaf.id], prefer_arrival_depth);
+            let key = (primary, secondary, *leaf, new_children.clone());
             match &best {
                 None => best = Some(key),
                 Some((best_cost, best_reverse_depth, best_leaf, best_children)) => {
@@ -1616,68 +1648,78 @@ pub(super) fn construct_large_cone_candidate_replacements_for_root(
     let mut cands = Vec::new();
     let mut candidates_considered = 0usize;
 
-    let Some(leaf_ops) = find_reconvergent_cone(g, root, depths, use_counts) else {
+    let Some(baseline_boundary) = find_reconvergent_cone(g, root, depths, use_counts) else {
         stats.rejected_no_cone += 1;
         return ConstructedLargeConeCandidates {
             candidates: cands,
             candidates_considered,
         };
     };
-    stats.cones_built += 1;
-    stats.cone_leaves_sum += leaf_ops.len();
-    stats.cone_leaves_max = stats.cone_leaves_max.max(leaf_ops.len());
-    let internal_node_count = collect_internal_and_nodes_under_cut(g, root, &leaf_ops).len();
-    stats.cone_internal_sum += internal_node_count;
-    stats.cone_internal_max = stats.cone_internal_max.max(internal_node_count);
-    let mffc_nodes = collect_mffc_nodes_under_cut(structural_hash_state, root, &leaf_ops);
-    if mffc_nodes.is_empty() {
-        stats.rejected_empty_mffc += 1;
-        return ConstructedLargeConeCandidates {
-            candidates: cands,
-            candidates_considered,
-        };
+    let mut boundaries = vec![baseline_boundary];
+    if let Some(arrival_boundary) = find_arrival_depth_cone(g, root, depths, use_counts) {
+        if arrival_boundary != boundaries[0] {
+            boundaries.push(arrival_boundary);
+        }
     }
-    stats.cone_mffc_sum += mffc_nodes.len();
-    stats.cone_mffc_max = stats.cone_mffc_max.max(mffc_nodes.len());
 
-    let tt = collapse_cone_truth(g, root, &leaf_ops);
+    let mut baseline_best_depth = usize::MAX;
+    for (boundary_order, leaf_ops) in boundaries.into_iter().enumerate() {
+        stats.cones_built += 1;
+        stats.cone_leaves_sum += leaf_ops.len();
+        stats.cone_leaves_max = stats.cone_leaves_max.max(leaf_ops.len());
+        let internal_node_count = collect_internal_and_nodes_under_cut(g, root, &leaf_ops).len();
+        stats.cone_internal_sum += internal_node_count;
+        stats.cone_internal_max = stats.cone_internal_max.max(internal_node_count);
+        let mffc_nodes = collect_mffc_nodes_under_cut(structural_hash_state, root, &leaf_ops);
+        if mffc_nodes.is_empty() {
+            stats.rejected_empty_mffc += 1;
+            continue;
+        }
+        stats.cone_mffc_sum += mffc_nodes.len();
+        stats.cone_mffc_max = stats.cone_mffc_max.max(mffc_nodes.len());
 
-    candidates_considered += 1;
-    let leaf_depths: Vec<usize> = leaf_ops.iter().map(|leaf| depths[leaf.node.id]).collect();
-    let sops = derive_sop_replacements_with_memo(&tt, &leaf_depths, sop_cover_memo);
-    if sops.is_empty() {
-        stats.rejected_sop_failed += 1;
-        return ConstructedLargeConeCandidates {
-            candidates: cands,
-            candidates_considered,
-        };
-    }
-    *candidate_evals += sops.len();
-    stats.sop_variants_sum += sops.len();
-    stats.sop_variants_max = stats.sop_variants_max.max(sops.len());
+        let tt = collapse_cone_truth(g, root, &leaf_ops);
 
-    for (variant_order, sop) in sops.into_iter().enumerate() {
-        let raw_and_count = estimate_factored_and_count(&sop.factored);
-        let implementation = ReplacementImpl::Sop(sop);
-        let new_root_depth = match &implementation {
-            ReplacementImpl::Fragment { .. } => unreachable!("large-cone rewrites use SOPs"),
-            ReplacementImpl::Sop(sop) => sop_depth_from_depths(&leaf_ops, sop, depths),
-        };
-        cands.push(LargeConeCandidate {
-            replacement: Replacement {
-                root,
-                leaf_ops: leaf_ops.clone(),
-                score_depth: new_root_depth,
-                score_ands: raw_and_count,
-                raw_score_ands: raw_and_count,
-                structural_hash_only_area_win: false,
-                implementation,
-            },
-            mffc_nodes: mffc_nodes.clone(),
-            new_root_depth,
-            raw_and_count,
-            variant_order,
-        });
+        candidates_considered += 1;
+        let leaf_depths: Vec<usize> = leaf_ops.iter().map(|leaf| depths[leaf.node.id]).collect();
+        let sops = derive_sop_replacements_with_memo(&tt, &leaf_depths, sop_cover_memo);
+        if sops.is_empty() {
+            stats.rejected_sop_failed += 1;
+            continue;
+        }
+        *candidate_evals += sops.len();
+        stats.sop_variants_sum += sops.len();
+        stats.sop_variants_max = stats.sop_variants_max.max(sops.len());
+
+        for (sop_order, sop) in sops.into_iter().enumerate() {
+            let raw_and_count = estimate_factored_and_count(&sop.factored);
+            let implementation = ReplacementImpl::Sop(sop);
+            let new_root_depth = match &implementation {
+                ReplacementImpl::Fragment { .. } => unreachable!("large-cone rewrites use SOPs"),
+                ReplacementImpl::Sop(sop) => sop_depth_from_depths(&leaf_ops, sop, depths),
+            };
+            if boundary_order != 0 && new_root_depth >= baseline_best_depth {
+                continue;
+            }
+            if boundary_order == 0 {
+                baseline_best_depth = baseline_best_depth.min(new_root_depth);
+            }
+            cands.push(LargeConeCandidate {
+                replacement: Replacement {
+                    root,
+                    leaf_ops: leaf_ops.clone(),
+                    score_depth: new_root_depth,
+                    score_ands: raw_and_count,
+                    raw_score_ands: raw_and_count,
+                    structural_hash_only_area_win: false,
+                    implementation,
+                },
+                mffc_nodes: mffc_nodes.clone(),
+                new_root_depth,
+                raw_and_count,
+                variant_order: boundary_order * 1024 + sop_order,
+            });
+        }
     }
 
     cands.sort_by(|a, b| {
@@ -1746,6 +1788,17 @@ mod tests {
             depths.push(depth);
         }
         depths[expr.root().0]
+    }
+
+    #[test]
+    fn test_arrival_cone_prioritizes_depth_without_changing_baseline_order() {
+        let shallow_reconvergent = cone_expansion_priority(0, 3, false);
+        let deep_expanding = cone_expansion_priority(2, 8, false);
+        assert!(shallow_reconvergent < deep_expanding);
+
+        let shallow_reconvergent = cone_expansion_priority(0, 3, true);
+        let deep_expanding = cone_expansion_priority(2, 8, true);
+        assert!(deep_expanding < shallow_reconvergent);
     }
 
     #[test]

@@ -184,7 +184,13 @@ pub fn gatify_add_kogge_stone(
         .collect();
     let pg_inputs: Vec<PrefixPg> = (0..bits)
         .map(|i| PrefixPg {
-            p: xor_bits[i],
+            p: prefix_carry_propagate(
+                g8_builder,
+                *lhs.get_lsb(i),
+                *rhs.get_lsb(i),
+                xor_bits[i],
+                bits,
+            ),
             g: g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)),
         })
         .collect();
@@ -244,7 +250,13 @@ pub fn gatify_add_brent_kung(
         .collect();
     let pg_inputs: Vec<PrefixPg> = (0..bits)
         .map(|i| PrefixPg {
-            p: xor_bits[i],
+            p: prefix_carry_propagate(
+                g8_builder,
+                *lhs.get_lsb(i),
+                *rhs.get_lsb(i),
+                xor_bits[i],
+                bits,
+            ),
             g: g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)),
         })
         .collect();
@@ -349,9 +361,66 @@ fn compress_3_to_2(
     )
 }
 
+/// Compresses active bit columns in parallel Wallace-tree rounds.
+fn reduce_active_columns_to_two(
+    gb: &mut GateBuilder,
+    operands: &[AigBitVector],
+    bit_count: usize,
+) -> (AigBitVector, AigBitVector) {
+    let mut columns = vec![Vec::new(); bit_count];
+    for operand in operands {
+        for (index, bit) in operand.iter_lsb_to_msb().copied().enumerate() {
+            if !gb.is_known_false(bit) {
+                columns[index].push(bit);
+            }
+        }
+    }
+
+    while columns.iter().any(|column| column.len() > 2) {
+        let mut next = vec![Vec::new(); bit_count];
+        for (index, column) in columns.into_iter().enumerate() {
+            for chunk in column.chunks(3) {
+                match chunk {
+                    [a, b, c] => {
+                        if index + 1 == bit_count {
+                            next[index].push(gb.add_xor_nary(chunk, ReductionKind::Linear));
+                        } else {
+                            let result = gb.add_full_adder(*a, *b, *c);
+                            next[index].push(result.sum);
+                            next[index + 1].push(result.carry);
+                        }
+                    }
+                    [a, b] => next[index].extend([*a, *b]),
+                    [a] => next[index].push(*a),
+                    _ => unreachable!("chunks(3) only yields nonempty chunks"),
+                }
+            }
+        }
+        columns = next;
+    }
+
+    let mut first = Vec::with_capacity(bit_count);
+    let mut second = Vec::with_capacity(bit_count);
+    for column in columns {
+        first.push(column.first().copied().unwrap_or_else(|| gb.get_false()));
+        second.push(column.get(1).copied().unwrap_or_else(|| gb.get_false()));
+    }
+    (
+        AigBitVector::from_lsb_is_index_0(&first),
+        AigBitVector::from_lsb_is_index_0(&second),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperandCompression {
+    Rows,
+    ActiveColumns,
+}
+
 fn reduce_operands_to_two(
     gb: &mut GateBuilder,
     mut operands: Vec<AigBitVector>,
+    compression: OperandCompression,
 ) -> (AigBitVector, AigBitVector) {
     assert!(!operands.is_empty(), "expected at least one operand");
     let bit_count = operands[0].get_bit_count();
@@ -362,6 +431,13 @@ fn reduce_operands_to_two(
 
     if operands.len() == 1 {
         return (operands[0].clone(), AigBitVector::zeros(bit_count));
+    }
+
+    if compression == OperandCompression::ActiveColumns
+        && operands.len() > 2
+        && gb.aig_depth(*operands[0].get_lsb(0)).is_some()
+    {
+        return reduce_active_columns_to_two(gb, &operands, bit_count);
     }
 
     while operands.len() > 2 {
@@ -399,6 +475,39 @@ pub fn array_add_with_carry_out(
     carry_in: Option<AigOperand>,
     adder_mapping: AdderMapping,
 ) -> ArrayAddResult {
+    array_add_with_compression(
+        gb,
+        operands,
+        carry_in,
+        adder_mapping,
+        OperandCompression::Rows,
+    )
+}
+
+/// Adds multiplier partial products with parallel active-column compression.
+pub(crate) fn array_add_multiply_with_carry_out(
+    gb: &mut GateBuilder,
+    operands: &[AigBitVector],
+    carry_in: Option<AigOperand>,
+    adder_mapping: AdderMapping,
+) -> ArrayAddResult {
+    array_add_with_compression(
+        gb,
+        operands,
+        carry_in,
+        adder_mapping,
+        OperandCompression::ActiveColumns,
+    )
+}
+
+/// Adds equally wide operands under the selected compressor architecture.
+fn array_add_with_compression(
+    gb: &mut GateBuilder,
+    operands: &[AigBitVector],
+    carry_in: Option<AigOperand>,
+    adder_mapping: AdderMapping,
+    compression: OperandCompression,
+) -> ArrayAddResult {
     assert!(
         !operands.is_empty(),
         "array_add expects at least one operand"
@@ -422,7 +531,7 @@ pub fn array_add_with_carry_out(
         assert_eq!(op.get_bit_count(), ext_width);
     }
 
-    let (a, b) = reduce_operands_to_two(gb, ext_ops);
+    let (a, b) = reduce_operands_to_two(gb, ext_ops, compression);
     let c_in = carry_in.unwrap_or_else(|| gb.get_false());
     let (_ignored, sum_ext) = add_with_mapping(adder_mapping, &a, &b, c_in, gb);
     assert_eq!(sum_ext.get_bit_count(), ext_width);
@@ -1015,6 +1124,21 @@ struct PrefixPg {
     g: AigOperand,
 }
 
+/// Builds a shallower carry-propagate signal for sufficiently wide adders.
+fn prefix_carry_propagate(
+    gb: &mut GateBuilder,
+    lhs: AigOperand,
+    rhs: AigOperand,
+    sum_propagate: AigOperand,
+    bit_count: usize,
+) -> AigOperand {
+    if gb.options.fold && (25..=48).contains(&bit_count) {
+        gb.add_or_binary(lhs, rhs)
+    } else {
+        sum_propagate
+    }
+}
+
 fn combine_prefix_pg(gb: &mut GateBuilder, lhs: PrefixPg, rhs: PrefixPg) -> PrefixPg {
     let and = gb.add_and_binary(rhs.p, lhs.g);
     let g = gb.add_or_binary(rhs.g, and);
@@ -1042,7 +1166,21 @@ mod tests {
         operand_values: &[u64],
         carry_in: Option<bool>,
     ) -> (u64, bool) {
-        let mut gb = GateBuilder::new("array_add_test".to_string(), GateBuilderOptions::no_opt());
+        eval_array_add_case_with_options(
+            bit_count,
+            operand_values,
+            carry_in,
+            GateBuilderOptions::no_opt(),
+        )
+    }
+
+    fn eval_array_add_case_with_options(
+        bit_count: usize,
+        operand_values: &[u64],
+        carry_in: Option<bool>,
+        options: GateBuilderOptions,
+    ) -> (u64, bool) {
+        let mut gb = GateBuilder::new("array_add_test".to_string(), options);
         let mut operands = Vec::new();
         for (i, _) in operand_values.iter().enumerate() {
             operands.push(gb.add_input(format!("op_{}", i), bit_count));
@@ -1050,8 +1188,16 @@ mod tests {
         let carry_in_op = carry_in.map(|_| gb.add_input("carry_in".to_string(), 1));
         let carry_in_bit = carry_in_op.as_ref().map(|v| *v.get_lsb(0));
 
-        let res =
-            array_add_with_carry_out(&mut gb, &operands, carry_in_bit, AdderMapping::default());
+        let res = if options.hash {
+            array_add_multiply_with_carry_out(
+                &mut gb,
+                &operands,
+                carry_in_bit,
+                AdderMapping::default(),
+            )
+        } else {
+            array_add_with_carry_out(&mut gb, &operands, carry_in_bit, AdderMapping::default())
+        };
         gb.add_output("sum".to_string(), res.sum.clone());
         gb.add_output(
             "carry_out".to_string(),
@@ -1116,6 +1262,185 @@ mod tests {
                             b,
                             c,
                             carry_in
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_active_column_compression_exhaustive_three_operands() {
+        for a in 0u64..8 {
+            for b in 0u64..8 {
+                for c in 0u64..8 {
+                    for carry_in in [false, true] {
+                        let (sum, carry) = eval_array_add_case_with_options(
+                            3,
+                            &[a, b, c],
+                            Some(carry_in),
+                            GateBuilderOptions::opt(),
+                        );
+                        let total = a + b + c + u64::from(carry_in);
+                        assert_eq!(sum, total & 7);
+                        assert_eq!(carry, (total & 8) != 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_active_column_compression_exhaustive_five_operands() {
+        for a in 0u64..4 {
+            for b in 0u64..4 {
+                for c in 0u64..4 {
+                    for d in 0u64..4 {
+                        for e in 0u64..4 {
+                            let values = [a, b, c, d, e];
+                            let (sum, carry) = eval_array_add_case_with_options(
+                                2,
+                                &values,
+                                None,
+                                GateBuilderOptions::opt(),
+                            );
+                            let total = values.iter().sum::<u64>();
+                            assert_eq!(sum, total & 3);
+                            assert_eq!(carry, (total & 4) != 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_prefix_or_propagate_reduces_carry_input_depth() {
+        let mut builder = GateBuilder::new("or_propagate".to_string(), GateBuilderOptions::opt());
+        let lhs = *builder.add_input("lhs".to_string(), 1).get_lsb(0);
+        let rhs = *builder.add_input("rhs".to_string(), 1).get_lsb(0);
+        let xor = builder.add_xor_binary(lhs, rhs);
+        assert_eq!(prefix_carry_propagate(&mut builder, lhs, rhs, xor, 24), xor);
+        assert_eq!(prefix_carry_propagate(&mut builder, lhs, rhs, xor, 49), xor);
+        let propagate = prefix_carry_propagate(&mut builder, lhs, rhs, xor, 25);
+        assert_eq!(
+            prefix_carry_propagate(&mut builder, lhs, rhs, xor, 48),
+            propagate
+        );
+        assert_eq!(builder.aig_depth(xor), Some(2));
+        assert_eq!(builder.aig_depth(propagate), Some(1));
+        builder.add_output("propagate".to_string(), AigBitVector::from_bit(propagate));
+        let gate_fn = builder.build();
+
+        for lhs_value in [false, true] {
+            for rhs_value in [false, true] {
+                let evaluated = gate_sim::eval(
+                    &gate_fn,
+                    &[IrBits::bool(lhs_value), IrBits::bool(rhs_value)],
+                    gate_sim::Collect::None,
+                );
+                assert_eq!(
+                    evaluated.outputs[0].get_bit(0).unwrap(),
+                    lhs_value || rhs_value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_prefix_adders_without_or_propagate_exhaustive_6bit() {
+        let six_bit_values = (0u64..=63)
+            .map(|value| IrBits::make_ubits(6, value).unwrap())
+            .collect::<Vec<_>>();
+        for mapping in [AdderMapping::BrentKung, AdderMapping::KoggeStone] {
+            let mut builder =
+                GateBuilder::new("or_prefix_adder".to_string(), GateBuilderOptions::opt());
+            let lhs = builder.add_input("lhs".to_string(), 6);
+            let rhs = builder.add_input("rhs".to_string(), 6);
+            let carry_in = *builder.add_input("carry_in".to_string(), 1).get_lsb(0);
+            let (carry_out, sum) = add_with_mapping(mapping, &lhs, &rhs, carry_in, &mut builder);
+            builder.add_output("sum".to_string(), sum);
+            builder.add_output("carry_out".to_string(), AigBitVector::from_bit(carry_out));
+            let gate_fn = builder.build();
+
+            for lhs_value in 0u64..=63 {
+                for rhs_value in 0u64..=63 {
+                    for carry_value in [false, true] {
+                        let evaluated = gate_sim::eval(
+                            &gate_fn,
+                            &[
+                                six_bit_values[lhs_value as usize].clone(),
+                                six_bit_values[rhs_value as usize].clone(),
+                                IrBits::bool(carry_value),
+                            ],
+                            gate_sim::Collect::None,
+                        );
+                        let expected = lhs_value + rhs_value + u64::from(carry_value);
+                        assert_eq!(evaluated.outputs[0].to_u64().unwrap(), expected & 63);
+                        assert_eq!(evaluated.outputs[1].get_bit(0).unwrap(), expected > 63);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_prefix_adders_with_or_propagate_sampled_32bit() {
+        let mut values = vec![
+            0u64,
+            1,
+            2,
+            3,
+            0xff,
+            0xffff,
+            0x7fff_ffff,
+            0x8000_0000,
+            0xffff_fffe,
+            0xffff_ffff,
+        ];
+        let mut state = 0x9e37_79b9u32;
+        for _ in 0..54 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            values.push(u64::from(state));
+        }
+        let bits = values
+            .iter()
+            .map(|value| IrBits::make_ubits(32, *value).unwrap())
+            .collect::<Vec<_>>();
+
+        for mapping in [AdderMapping::BrentKung, AdderMapping::KoggeStone] {
+            let mut builder = GateBuilder::new(
+                "wide_or_prefix_adder".to_string(),
+                GateBuilderOptions::opt(),
+            );
+            let lhs = builder.add_input("lhs".to_string(), 32);
+            let rhs = builder.add_input("rhs".to_string(), 32);
+            let carry_in = *builder.add_input("carry_in".to_string(), 1).get_lsb(0);
+            let (carry_out, sum) = add_with_mapping(mapping, &lhs, &rhs, carry_in, &mut builder);
+            builder.add_output("sum".to_string(), sum);
+            builder.add_output("carry_out".to_string(), AigBitVector::from_bit(carry_out));
+            let graph = builder.build();
+
+            for (lhs_index, lhs_value) in values.iter().enumerate() {
+                for (rhs_index, rhs_value) in values.iter().enumerate() {
+                    for carry_value in [false, true] {
+                        let evaluated = gate_sim::eval(
+                            &graph,
+                            &[
+                                bits[lhs_index].clone(),
+                                bits[rhs_index].clone(),
+                                IrBits::bool(carry_value),
+                            ],
+                            gate_sim::Collect::None,
+                        );
+                        let expected = lhs_value + rhs_value + u64::from(carry_value);
+                        assert_eq!(
+                            evaluated.outputs[0].to_u64().unwrap(),
+                            expected & 0xffff_ffff
+                        );
+                        assert_eq!(
+                            evaluated.outputs[1].get_bit(0).unwrap(),
+                            expected > 0xffff_ffff
                         );
                     }
                 }

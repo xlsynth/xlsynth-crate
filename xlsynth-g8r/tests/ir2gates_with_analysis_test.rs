@@ -68,8 +68,8 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
     let got = get_summary_stats(&out.gatify_output.gate_fn);
     // This is a "microbenchmark sweep" style test: lock in the expected gate
     // count + depth so we can notice regressions and improvements.
-    assert_eq!(got.live_nodes, 2280);
-    assert_eq!(got.deepest_path, 45);
+    assert_eq!(got.live_nodes, 2299);
+    assert_eq!(got.deepest_path, 44);
 }
 
 #[test]

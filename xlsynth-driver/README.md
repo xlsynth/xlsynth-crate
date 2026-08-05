@@ -2320,7 +2320,9 @@ Supported flags include the common gate-optimization controls:
 - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
 - `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
-  topology.
+  topology. With optimized lowering, the default Brent-Kung architecture may
+  select a shallower Kogge-Stone implementation for medium-width arithmetic;
+  explicit ripple-carry and Kogge-Stone selections remain fixed.
 - `--mul-adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – optional override
   for the adder topology used inside multipliers. If not set, inherits
   `--adder-mapping`.
