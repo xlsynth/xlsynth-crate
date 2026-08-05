@@ -41,6 +41,7 @@ mod aig2v;
 mod aig_equiv;
 mod aig_eval;
 mod aig_ir_equiv;
+mod aig_optimize_choices;
 mod aig_stats;
 mod aig_tech_map;
 mod blif2g8r;
@@ -2308,6 +2309,109 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("aig-optimize-choices")
+                .about("Optimizes an AIG through ABC and exports canonical structural choices")
+                .arg(
+                    clap::Arg::new("aig_input_file")
+                        .help("Input ASCII or binary AIGER file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("abc")
+                        .long("abc")
+                        .value_name("PATH")
+                        .help("Path to an ABC-compatible executable")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty")
+                        .long("liberty")
+                        .value_name("PATH")
+                        .help("Raw Liberty file used by intermediate ABC optimization; repeat for multiple files")
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("constraints")
+                        .long("constraints")
+                        .value_name("PATH")
+                        .help("Optional ABC input-drive and output-load constraints")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("aiger_out")
+                        .long("aiger-out")
+                        .value_name("PATH")
+                        .help("Output canonical choice-preserving binary AIGER")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("rounds")
+                        .long("rounds")
+                        .value_name("N")
+                        .default_value("5")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Number of Liberty-assisted restructuring and choice-generation rounds")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("dch_command")
+                        .long("dch-command")
+                        .value_name("COMMAND")
+                        .default_value("&dch")
+                        .help("Initial GIA structural-choice preparation command")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("syn_command")
+                        .long("syn-command")
+                        .value_name("COMMAND")
+                        .default_value("&resyn3")
+                        .help("GIA restructuring command used in every round")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("if_command")
+                        .long("if-command")
+                        .value_name("COMMAND")
+                        .default_value("&if -g -K 6")
+                        .help("LUT-balancing command used in every round")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("synch_command")
+                        .long("synch-command")
+                        .value_name("COMMAND")
+                        .default_value("&synch2")
+                        .help("GIA structural-choice synthesis command used in every round")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("nf_command")
+                        .long("nf-command")
+                        .value_name("COMMAND")
+                        .default_value("&nf")
+                        .help("Temporary Liberty-mapping command between restructuring rounds")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("prefix_command")
+                        .long("prefix-command")
+                        .value_name("COMMAND")
+                        .help("Additional classic-network command before GIA conversion; repeatable")
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("suffix_command")
+                        .long("suffix-command")
+                        .value_name("COMMAND")
+                        .help("Additional GIA command before canonical choice export; repeatable")
+                        .action(ArgAction::Append),
+                ),
+        )
+        .subcommand(
             clap::Command::new("choice-aig-tech-map")
                 .about("Maps a final ABC choice-AIG into a Liberty cell netlist")
                 .arg(
@@ -2315,6 +2419,13 @@ fn main() {
                         .help("Input AIGER file; binary ABC q-AIGER choices are preserved")
                         .required(true)
                         .index(1),
+                )
+                .arg(
+                    Arg::new("alternative_choice_aig")
+                        .long("alternative-choice-aig")
+                        .value_name("PATH")
+                        .help("Additional equivalent choice AIG to map completely; fastest final Liberty timing wins; repeatable")
+                        .action(ArgAction::Append),
                 )
                 .arg(
                     Arg::new("liberty_proto")
@@ -4377,6 +4488,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("gv-eval", subm)) => {
             if let Err(e) = gv_eval::handle_gv_eval(subm) {
                 eprintln!("gv-eval error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(("aig-optimize-choices", subm)) => {
+            if let Err(error) = aig_optimize_choices::handle_aig_optimize_choices(subm) {
+                eprintln!("aig-optimize-choices error: {error:#}");
                 std::process::exit(1);
             }
         }

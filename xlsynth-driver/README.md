@@ -560,6 +560,60 @@ Key flags:
   `max-speed` prefers the highest available VT class and then the highest
   available drive strength.
 
+### `aig-optimize-choices`: ABC Boolean optimization and structural choices
+
+Optimizes an ordinary AIGER graph with ABC and writes a canonical binary
+choice AIG for `choice-aig-tech-map`. ABC may use temporary Liberty covers to
+guide Boolean restructuring, but its final cover is never selected: the
+exported graph retains structural choices, and native technology mapping,
+buffer insertion, and resizing remain independent downstream stages.
+
+The command verifies that primary-input, latch, and primary-output counts
+remain unchanged and rejects noncanonical ABC choice-sibling chains. Graphs
+without outputs or AND nodes bypass ABC and retain their complete interfaces.
+The default five-round schedule uses level-preserving `&resyn3` rewriting;
+pass `--syn-command '&syn2'` to reproduce the conventional speed schedule.
+Choice-AIG output omits ABC's wall-clock timestamp for reproducibility.
+
+```shell
+xlsynth-driver aig-optimize-choices top.aig \
+  --abc /path/to/yosys-abc \
+  --liberty /path/to/slow-corner.lib \
+  --constraints /path/to/abc.constraints \
+  --aiger-out top.choices.aig
+
+xlsynth-driver choice-aig-tech-map top.choices.aig \
+  --liberty_proto /path/to/slow-corner.liberty.proto \
+  --buffer true --resize true \
+  --netlist_out top.mapped.gv
+```
+
+Flags:
+
+- `--abc <PATH>`: ABC-compatible executable. Required.
+- `--liberty <PATH>`: raw Liberty file for temporary ABC optimization covers;
+  repeat to merge multiple Liberty files. Required unless `--rounds 0` is
+  selected.
+- `--constraints <PATH>`: optional ABC input-drive and output-load
+  constraints.
+- `--aiger-out <PATH>`: output canonical choice-preserving AIGER. Required.
+- `--rounds <N>`: number of Liberty-assisted restructuring and
+  choice-generation rounds. Default: `5`.
+- `--dch-command <COMMAND>`: initial GIA choice-preparation command. Default:
+  `&dch`.
+- `--syn-command <COMMAND>`: per-round restructuring command. Default:
+  `&resyn3`.
+- `--if-command <COMMAND>`: per-round LUT-balancing command. Default:
+  `&if -g -K 6`.
+- `--synch-command <COMMAND>`: per-round choice-synthesis command. Default:
+  `&synch2`.
+- `--nf-command <COMMAND>`: temporary Liberty mapping between optimization
+  rounds. Default: `&nf`.
+- `--prefix-command <COMMAND>`: additional classic-network optimization
+  before GIA conversion; repeatable.
+- `--suffix-command <COMMAND>`: additional GIA optimization before
+  choice-preserving DFS and q-AIGER export; repeatable.
+
 ### `choice-aig-tech-map`: final choice-AIG to Liberty cell netlist
 
 Runs the clean-sheet final technology mapper. The command accepts ordinary
@@ -605,6 +659,58 @@ xlsynth-driver choice-aig-tech-map final_choices.aig \
   --netlist_out final.mapped.gv
 ```
 
+Passing repeatable `--alternative-choice-aig` inputs enables a deterministic
+timing-first portfolio. Each equivalent AIG is independently mapped,
+buffered, resized, and scored with complete Liberty STA under identical
+options. The fastest finished netlist wins; lower cell area breaks only
+numerically insignificant timing ties, and input order breaks exact ties.
+Keep the established baseline first to guarantee that alternatives never
+degrade its final delay. Four useful structurally distinct candidates are
+the conventional five-round schedule, the default level-preserving schedule,
+a conventional schedule initialized with `&dch -p`, and a one-round
+level-preserving schedule:
+
+```shell
+xlsynth-driver aig-optimize-choices top.aig \
+  --abc /path/to/yosys-abc \
+  --liberty /path/to/slow-corner.lib \
+  --syn-command '&syn2' \
+  --aiger-out baseline.choices.aig
+
+xlsynth-driver aig-optimize-choices top.aig \
+  --abc /path/to/yosys-abc \
+  --liberty /path/to/slow-corner.lib \
+  --aiger-out level-preserving.choices.aig
+
+xlsynth-driver aig-optimize-choices top.aig \
+  --abc /path/to/yosys-abc \
+  --liberty /path/to/slow-corner.lib \
+  --syn-command '&syn2' \
+  --dch-command '&dch -p' \
+  --aiger-out partitioned.choices.aig
+
+xlsynth-driver aig-optimize-choices top.aig \
+  --abc /path/to/yosys-abc \
+  --liberty /path/to/slow-corner.lib \
+  --rounds 1 \
+  --aiger-out one-round.choices.aig
+
+xlsynth-driver choice-aig-tech-map baseline.choices.aig \
+  --alternative-choice-aig level-preserving.choices.aig \
+  --alternative-choice-aig partitioned.choices.aig \
+  --alternative-choice-aig one-round.choices.aig \
+  --liberty_proto /path/to/slow-corner.liberty.proto \
+  --buffer true --resize true \
+  --netlist_out fastest.mapped.gv
+```
+
+The portfolio's runtime includes complete native optimization of every
+alternative, while combinational mapping shares its indexed Liberty library.
+An alternative that cannot be mapped is reported without discarding another
+successfully mapped candidate.
+Without `--alternative-choice-aig`, existing single-candidate behavior and
+runtime are unchanged.
+
 Registered transition example:
 
 ```shell
@@ -626,6 +732,10 @@ Key flags:
   gzip-compressed. Required.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout.
   Required.
+- `--alternative-choice-aig <PATH>`: additional equivalent, interface-matched
+  structural-choice AIG to map through the complete native flow; repeatable.
+  Selection prefers final Liberty STA delay, then timing-preserving area
+  recovery, then stable input order. No alternatives are selected by default.
 - `--sequential-design <PATH>`: optional native `.g8r` or `.g8rbin` design
   providing the clock, external interface, and register bindings for an
   optimized transition AIG. Without this flag, the existing combinational

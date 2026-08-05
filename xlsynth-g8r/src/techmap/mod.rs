@@ -34,8 +34,10 @@ const LARGE_NF_COVER_MIN_DELAY_IMPROVEMENT: f64 = 0.10;
 const LARGE_NF_COVER_MAX_CELL_PERCENT: usize = 85;
 /// An alternate cover must improve exact Liberty timing beyond roundoff.
 const LARGE_NF_COVER_TIMING_EPSILON: f64 = 1e-9;
+/// Only numerically insignificant timing differences permit area tie-breaking.
+const CHOICE_PORTFOLIO_TIMING_EPSILON: f64 = 1e-9;
 
-use crate::aig::{ChoiceAig, GateFn};
+use crate::aig::{ChoiceAig, GateFn, SequentialGateFn};
 use crate::liberty_model::Library;
 use crate::netlist::buffer::{BufferOptions, BufferStats};
 use crate::netlist::optimize::{NetlistOptimizationOptions, optimize_mapped_netlist};
@@ -194,6 +196,41 @@ pub struct MappedNetlist {
     pub stats: TechMapStats,
 }
 
+/// Complete post-buffering and post-resizing results for one AIG alternative.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TechMapPortfolioCandidateStats {
+    /// Stable input position of this structural-choice alternative.
+    pub index: usize,
+    /// Exact final Liberty STA delay after every requested optimization.
+    pub delay: f64,
+    /// Exact final cell area after every requested optimization.
+    pub area: f64,
+    /// Number of canonical structural-choice sibling links.
+    pub choice_links: usize,
+}
+
+/// A rejected structural alternative whose failure did not discard a winner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TechMapPortfolioCandidateFailure {
+    /// Stable input position of the unsuccessfully mapped alternative.
+    pub index: usize,
+    /// Complete diagnostic returned by native mapping or final timing.
+    pub error: String,
+}
+
+/// Timing-first selection across independently mapped choice-AIG alternatives.
+#[derive(Debug)]
+pub struct TechMapPortfolioResult {
+    /// Completely mapped, buffered, resized, and Liberty-timed best netlist.
+    pub mapped: MappedNetlist,
+    /// Stable index of the selected structural-choice alternative.
+    pub selected_index: usize,
+    /// Full final-timing diagnostics for every evaluated alternative.
+    pub candidates: Vec<TechMapPortfolioCandidateStats>,
+    /// Alternatives that failed while another candidate remained available.
+    pub failed_candidates: Vec<TechMapPortfolioCandidateFailure>,
+}
+
 /// Prevents callers from accidentally selecting the structural unit-delay mode.
 fn assert_supported_timing_model(options: &TechMapOptions) {
     assert!(
@@ -213,6 +250,163 @@ pub fn map_choice_aig_to_netlist(
     assert_supported_timing_model(options);
     let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
     map_choice_aig_to_netlist_with_prepared(choice_aig, &prepared, constraints, options)
+}
+
+/// Selects the fastest complete combinational mapping, reusing Liberty state.
+///
+/// Each alternative receives the same requested native mapping, buffering,
+/// resizing, and final Liberty STA. Area breaks only numerically insignificant
+/// timing ties; otherwise an earlier candidate breaks exact ties.
+pub fn map_choice_aig_portfolio_to_netlist(
+    choice_aigs: &[ChoiceAig],
+    library: &Library,
+    constraints: &TechMapTimingConstraints,
+    options: &TechMapOptions,
+) -> Result<TechMapPortfolioResult> {
+    assert_supported_timing_model(options);
+    validate_choice_portfolio_interfaces(choice_aigs)?;
+    let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
+    evaluate_choice_mapping_portfolio(choice_aigs, |choice_aig| {
+        map_choice_aig_to_netlist_with_prepared(choice_aig, &prepared, constraints, options)
+    })
+}
+
+/// Selects the fastest complete register-aware structural-choice alternative.
+///
+/// Every candidate independently restores registers and preserves all external
+/// endpoint, setup, clock, buffering, and resizing constraints before final
+/// Liberty timing decides the winner.
+pub fn map_sequential_choice_aig_portfolio_to_netlist(
+    design: &SequentialGateFn,
+    choice_aigs: &[ChoiceAig],
+    library: &Library,
+    constraints: &SequentialTechMapConstraints,
+    options: &TechMapOptions,
+) -> Result<TechMapPortfolioResult> {
+    validate_choice_portfolio_interfaces(choice_aigs)?;
+    evaluate_choice_mapping_portfolio(choice_aigs, |choice_aig| {
+        map_sequential_choice_aig_to_netlist(design, choice_aig, library, constraints, options)
+    })
+}
+
+/// Maps candidates independently and prefers delay, then area, then input
+/// order.
+fn evaluate_choice_mapping_portfolio<F>(
+    choice_aigs: &[ChoiceAig],
+    mut map: F,
+) -> Result<TechMapPortfolioResult>
+where
+    F: FnMut(&ChoiceAig) -> Result<MappedNetlist>,
+{
+    let mut best: Option<MappedNetlist> = None;
+    let mut selected_index = 0;
+    let mut candidates = Vec::with_capacity(choice_aigs.len());
+    let mut failed_candidates = Vec::new();
+    for (index, choice_aig) in choice_aigs.iter().enumerate() {
+        let mapped = match map(choice_aig) {
+            Ok(mapped) => mapped,
+            Err(error) => {
+                failed_candidates.push(TechMapPortfolioCandidateFailure {
+                    index,
+                    error: format!("choice-AIG portfolio candidate {index} failed: {error:#}"),
+                });
+                continue;
+            }
+        };
+        let delay = mapped.stats.worst_estimated_output_arrival;
+        let area = mapped.stats.selected_area;
+        if !delay.is_finite() || !area.is_finite() {
+            failed_candidates.push(TechMapPortfolioCandidateFailure {
+                index,
+                error: format!(
+                    "choice-AIG portfolio candidate {index} has non-finite delay {delay} or area {area}"
+                ),
+            });
+            continue;
+        }
+        candidates.push(TechMapPortfolioCandidateStats {
+            index,
+            delay,
+            area,
+            choice_links: mapped.stats.choice_link_count,
+        });
+        if best.as_ref().is_none_or(|current| {
+            prefer_timing_portfolio_candidate(
+                delay,
+                area,
+                current.stats.worst_estimated_output_arrival,
+                current.stats.selected_area,
+            )
+        }) {
+            selected_index = index;
+            best = Some(mapped);
+        }
+    }
+
+    let Some(mapped) = best else {
+        let first_failure = failed_candidates
+            .first()
+            .map_or("no structural alternatives were evaluated", |failure| {
+                failure.error.as_str()
+            });
+        return Err(anyhow!(
+            "all choice-AIG portfolio candidates failed; first failure: {first_failure}"
+        ));
+    };
+
+    Ok(TechMapPortfolioResult {
+        mapped,
+        selected_index,
+        candidates,
+        failed_candidates,
+    })
+}
+
+/// Never trades meaningful Liberty delay for lower area.
+fn prefer_timing_portfolio_candidate(
+    candidate_delay: f64,
+    candidate_area: f64,
+    best_delay: f64,
+    best_area: f64,
+) -> bool {
+    candidate_delay < best_delay - CHOICE_PORTFOLIO_TIMING_EPSILON
+        || (candidate_delay - best_delay).abs() <= CHOICE_PORTFOLIO_TIMING_EPSILON
+            && candidate_area < best_area
+}
+
+/// Rejects empty portfolios and alternative scalar-interface mismatches.
+fn validate_choice_portfolio_interfaces(choice_aigs: &[ChoiceAig]) -> Result<()> {
+    let Some(baseline) = choice_aigs.first() else {
+        return Err(anyhow!(
+            "choice-AIG mapping portfolio requires at least one candidate"
+        ));
+    };
+    for (index, candidate) in choice_aigs.iter().enumerate().skip(1) {
+        let input_matches = baseline.graph().inputs.len() == candidate.graph().inputs.len()
+            && baseline
+                .graph()
+                .inputs
+                .iter()
+                .zip(&candidate.graph().inputs)
+                .all(|(lhs, rhs)| {
+                    lhs.name == rhs.name && lhs.get_bit_count() == rhs.get_bit_count()
+                });
+        let output_matches = baseline.graph().outputs.len() == candidate.graph().outputs.len()
+            && baseline
+                .graph()
+                .outputs
+                .iter()
+                .zip(&candidate.graph().outputs)
+                .all(|(lhs, rhs)| {
+                    lhs.name == rhs.name && lhs.get_bit_count() == rhs.get_bit_count()
+                });
+        if !input_matches || !output_matches {
+            return Err(anyhow!(
+                "choice-AIG portfolio candidate {index} has a different ordered primary-input or primary-output interface"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Maps a transition cover with NF-native register endpoint constraints.
@@ -922,6 +1116,26 @@ mod tests {
         builder.build()
     }
 
+    /// Builds equivalent four-input ANDs with skewed or balanced AIG depth.
+    fn make_four_input_and_graph(balanced: bool) -> GateFn {
+        let mut builder =
+            GateBuilder::new("four_input_and".to_string(), GateBuilderOptions::no_opt());
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let c: AigOperand = builder.add_input("c".to_string(), 1).try_into().unwrap();
+        let d: AigOperand = builder.add_input("d".to_string(), 1).try_into().unwrap();
+        let ab = builder.add_and_binary(a, b);
+        let result = if balanced {
+            let cd = builder.add_and_binary(c, d);
+            builder.add_and_binary(ab.into(), cd.into())
+        } else {
+            let abc = builder.add_and_binary(ab.into(), c);
+            builder.add_and_binary(abc.into(), d)
+        };
+        builder.add_output("o".to_string(), result.into());
+        builder.build()
+    }
+
     fn make_unit_vs_liberty_timing_library() -> Library {
         let mut builder = LibraryBuilder::new();
         builder.cells = vec![
@@ -1024,6 +1238,166 @@ mod tests {
         assert_eq!(options.timing_model, TechMapTimingModel::NfLiberty);
         assert!(options.buffer_options.is_none());
         assert!(options.resize_options.is_none());
+    }
+
+    #[test]
+    fn choice_portfolio_prioritizes_final_timing_then_safe_area_recovery() {
+        assert!(prefer_timing_portfolio_candidate(9.0, 100.0, 10.0, 1.0));
+        assert!(!prefer_timing_portfolio_candidate(11.0, 0.0, 10.0, 100.0));
+        assert!(prefer_timing_portfolio_candidate(10.0, 5.0, 10.0, 6.0));
+        assert!(!prefer_timing_portfolio_candidate(10.0, 6.0, 10.0, 6.0));
+        assert!(prefer_timing_portfolio_candidate(
+            10.0 + 5e-10,
+            5.0,
+            10.0,
+            6.0
+        ));
+        assert!(!prefer_timing_portfolio_candidate(
+            10.0 + 2e-9,
+            0.0,
+            10.0,
+            6.0
+        ));
+    }
+
+    #[test]
+    fn choice_portfolio_rejects_empty_and_mismatched_interfaces() {
+        let library = make_library();
+        let constraints = TechMapTimingConstraints::default();
+        let options = TechMapOptions::default();
+
+        let empty = map_choice_aig_portfolio_to_netlist(&[], &library, &constraints, &options)
+            .expect_err("empty portfolios cannot select a netlist");
+        assert_eq!(
+            empty.to_string(),
+            "choice-AIG mapping portfolio requires at least one candidate"
+        );
+
+        let candidates = vec![
+            ChoiceAig::without_choices(make_and_graph()),
+            ChoiceAig::without_choices(make_three_input_and_graph()),
+        ];
+        let mismatch =
+            map_choice_aig_portfolio_to_netlist(&candidates, &library, &constraints, &options)
+                .expect_err("different scalar input interfaces cannot share a portfolio");
+        assert_eq!(
+            mismatch.to_string(),
+            "choice-AIG portfolio candidate 1 has a different ordered primary-input or primary-output interface"
+        );
+    }
+
+    #[test]
+    fn choice_portfolio_preserves_baseline_on_identical_timing_and_area() {
+        let candidates = vec![
+            ChoiceAig::without_choices(make_and_graph()),
+            ChoiceAig::without_choices(make_and_graph()),
+        ];
+        let result = map_choice_aig_portfolio_to_netlist(
+            &candidates,
+            &make_library(),
+            &TechMapTimingConstraints::default(),
+            &TechMapOptions::default(),
+        )
+        .expect("identical structural alternatives should map deterministically");
+
+        assert_eq!(result.selected_index, 0);
+        assert_eq!(result.candidates.len(), 2);
+        assert_eq!(result.candidates[0].delay, result.candidates[1].delay);
+        assert_eq!(result.candidates[0].area, result.candidates[1].area);
+        assert!(result.failed_candidates.is_empty());
+    }
+
+    #[test]
+    fn choice_portfolio_preserves_successful_mapping_when_an_alternative_fails() {
+        let alternatives = vec![
+            ChoiceAig::without_choices(make_and_graph()),
+            ChoiceAig::without_choices(make_and_graph()),
+        ];
+        let library = make_library();
+        let mut invocation = 0;
+        let result = evaluate_choice_mapping_portfolio(&alternatives, |candidate| {
+            invocation += 1;
+            if invocation == 2 {
+                return Err(anyhow!("synthetic alternative mapping failure"));
+            }
+            map_choice_aig_to_netlist(
+                candidate,
+                &library,
+                &TechMapTimingConstraints::default(),
+                &TechMapOptions::default(),
+            )
+        })
+        .expect("the successful baseline must survive an alternative mapping failure");
+
+        assert_eq!(result.selected_index, 0);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.failed_candidates,
+            vec![TechMapPortfolioCandidateFailure {
+                index: 1,
+                error:
+                    "choice-AIG portfolio candidate 1 failed: synthetic alternative mapping failure"
+                        .to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn choice_portfolio_reports_when_no_alternative_can_be_mapped() {
+        let alternatives = vec![ChoiceAig::without_choices(make_and_graph())];
+        let error = evaluate_choice_mapping_portfolio(&alternatives, |_| {
+            Err(anyhow!("synthetic baseline mapping failure"))
+        })
+        .expect_err("a portfolio without any valid mapped result must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "all choice-AIG portfolio candidates failed; first failure: choice-AIG portfolio candidate 0 failed: synthetic baseline mapping failure"
+        );
+    }
+
+    #[test]
+    fn choice_portfolio_selects_faster_final_mapping_after_full_sta() {
+        let original = make_four_input_and_graph(false);
+        let candidates = vec![
+            ChoiceAig::without_choices(original.clone()),
+            ChoiceAig::without_choices(make_four_input_and_graph(true)),
+        ];
+        let library = make_complete_unit_vs_liberty_timing_library();
+        let result = map_choice_aig_portfolio_to_netlist(
+            &candidates,
+            &library,
+            &TechMapTimingConstraints::default(),
+            &TechMapOptions {
+                max_cut_size: 2,
+                ..TechMapOptions::default()
+            },
+        )
+        .expect("equivalent balanced and skewed covers should map independently");
+
+        assert_eq!(result.selected_index, 1);
+        assert_eq!(result.candidates[0].delay, 3.0);
+        assert_eq!(result.candidates[1].delay, 2.0);
+        assert_eq!(result.mapped.stats.worst_estimated_output_arrival, 2.0);
+
+        let projected = project_gatefn_from_netlist_and_liberty(
+            &result.mapped.module,
+            result.mapped.nets.as_slice(),
+            &result.mapped.interner,
+            &library,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("the timing-selected gate netlist should project back to an AIG");
+        for assignment in 0..16u64 {
+            let inputs = (0..4)
+                .map(|index| IrBits::make_ubits(1, (assignment >> index) & 1).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                eval(&original, &inputs, Collect::None).outputs,
+                eval(&projected, &inputs, Collect::None).outputs
+            );
+        }
     }
 
     #[test]

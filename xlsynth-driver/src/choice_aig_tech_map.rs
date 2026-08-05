@@ -12,7 +12,8 @@ use xlsynth_g8r::netlist::io::load_liberty_with_timing_data_from_path;
 use xlsynth_g8r::netlist::resize::ResizeOptions;
 use xlsynth_g8r::techmap::{
     SequentialTechMapConstraints, TechMapOptions, TechMapTimingConstraints, TechMapTimingModel,
-    map_choice_aig_to_netlist, map_sequential_choice_aig_to_netlist,
+    map_choice_aig_portfolio_to_netlist, map_choice_aig_to_netlist,
+    map_sequential_choice_aig_portfolio_to_netlist, map_sequential_choice_aig_to_netlist,
 };
 
 /// Parses a finite, strictly positive sequential clock period.
@@ -41,8 +42,23 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         .expect("netlist_out is required");
     let sequential_design = matches.get_one::<String>("sequential_design");
     let clock_period = matches.get_one::<f64>("clock_period").copied();
-    let choice_aig = load_abc_choice_aiger_auto_from_path(Path::new(aig_input_file))
-        .map_err(|error| anyhow!("failed to load AIG '{}': {}", aig_input_file, error))?;
+    let mut choice_aigs = vec![
+        load_abc_choice_aiger_auto_from_path(Path::new(aig_input_file))
+            .map_err(|error| anyhow!("failed to load AIG '{}': {}", aig_input_file, error))?,
+    ];
+    if let Some(alternatives) = matches.get_many::<String>("alternative_choice_aig") {
+        for alternative in alternatives {
+            choice_aigs.push(
+                load_abc_choice_aiger_auto_from_path(Path::new(alternative)).map_err(|error| {
+                    anyhow!(
+                        "failed to load alternative AIG '{}': {}",
+                        alternative,
+                        error
+                    )
+                })?,
+            );
+        }
+    }
     let library = load_liberty_with_timing_data_from_path(Path::new(liberty_proto_path))
         .with_context(|| {
             format!(
@@ -119,6 +135,8 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 ..ResizeOptions::default()
             }),
     };
+    let mut selected_portfolio_index = None;
+    let mut failed_portfolio_candidates = 0;
     let mapped = if let Some(design_path) = sequential_design {
         let design =
             load_sequential_gate_fn_from_path(Path::new(design_path)).map_err(|error| {
@@ -133,15 +151,44 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             primary_output_required,
             clock_period,
         };
-        map_sequential_choice_aig_to_netlist(&design, &choice_aig, &library, &constraints, &options)
+        if choice_aigs.len() == 1 {
+            map_sequential_choice_aig_to_netlist(
+                &design,
+                &choice_aigs[0],
+                &library,
+                &constraints,
+                &options,
+            )
             .context("sequential choice-AIG technology mapping failed")?
+        } else {
+            let portfolio = map_sequential_choice_aig_portfolio_to_netlist(
+                &design,
+                &choice_aigs,
+                &library,
+                &constraints,
+                &options,
+            )
+            .context("sequential choice-AIG portfolio technology mapping failed")?;
+            selected_portfolio_index = Some(portfolio.selected_index);
+            failed_portfolio_candidates = portfolio.failed_candidates.len();
+            portfolio.mapped
+        }
     } else {
         let constraints = TechMapTimingConstraints {
             primary_input_arrivals,
             primary_output_required,
         };
-        map_choice_aig_to_netlist(&choice_aig, &library, &constraints, &options)
-            .context("final choice-AIG technology mapping failed")?
+        if choice_aigs.len() == 1 {
+            map_choice_aig_to_netlist(&choice_aigs[0], &library, &constraints, &options)
+                .context("final choice-AIG technology mapping failed")?
+        } else {
+            let portfolio =
+                map_choice_aig_portfolio_to_netlist(&choice_aigs, &library, &constraints, &options)
+                    .context("final choice-AIG portfolio technology mapping failed")?;
+            selected_portfolio_index = Some(portfolio.selected_index);
+            failed_portfolio_candidates = portfolio.failed_candidates.len();
+            portfolio.mapped
+        }
     };
     let text =
         emit_module_as_netlist_text(&mapped.module, mapped.nets.as_slice(), &mapped.interner)
@@ -176,8 +223,20 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     } else {
         String::new()
     };
+    let portfolio_diagnostics = selected_portfolio_index.map_or_else(String::new, |index| {
+        let mut diagnostics = format!(
+            ", portfolio-candidates={}, portfolio-selected={index}",
+            choice_aigs.len()
+        );
+        if failed_portfolio_candidates != 0 {
+            diagnostics.push_str(&format!(
+                ", portfolio-failures={failed_portfolio_candidates}"
+            ));
+        }
+        diagnostics
+    });
     eprintln!(
-        "choice-aig-tech-map: {} instances, area={}, delay={}, choices={}, cuts={}, candidates={}, buffers={}, upsizes={}, downsizes={}, timing-model={}{}{}",
+        "choice-aig-tech-map: {} instances, area={}, delay={}, choices={}, cuts={}, candidates={}, buffers={}, upsizes={}, downsizes={}, timing-model={}{}{}{}",
         mapped.stats.selected_instance_count,
         mapped.stats.selected_area,
         mapped.stats.worst_estimated_output_arrival,
@@ -207,6 +266,7 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         },
         representative_timing,
         sequential_diagnostics,
+        portfolio_diagnostics,
     );
     Ok(())
 }
