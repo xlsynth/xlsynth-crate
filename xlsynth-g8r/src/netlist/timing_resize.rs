@@ -13,8 +13,8 @@ use crate::netlist::resize::{
 };
 use crate::netlist::sequential_liberty::get_gv_eval_sequential_cell_spec;
 use crate::netlist::sta::{
-    CombinationalOutputLoad, EdgeTiming, SignalTiming, StaOptions, TimingEdge, TimingPredecessor,
-    TimingQueryDiagnosticCounts, TracedCombinationalTiming,
+    CombinationalOutputLoad, EdgeTiming, ScopedTimingTableEnvelopeCache, SignalTiming, StaOptions,
+    TimingEdge, TimingPredecessor, TimingQueryDiagnosticCounts, TracedCombinationalTiming,
     analyze_combinational_max_arrival_with_primary_input_arrivals,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
     effective_input_capacitance_for_mapping,
@@ -645,6 +645,7 @@ pub fn resize_timing_aware_netlist(
     validate_options(options)?;
     validate_constant_output_assignments(module, nets)
         .context("validating register-aware sizing output assignments")?;
+    let _timing_table_envelopes = ScopedTimingTableEnvelopeCache::new(library);
     let original_report = build_netlist_report_with_primary_input_arrivals(
         module,
         nets,
@@ -880,11 +881,11 @@ fn compare_delay_moves(
     lhs: &SizingMove,
     rhs: &SizingMove,
     library: &Library,
-    options: &ResizeOptions,
 ) -> std::cmp::Ordering {
     for (left, right) in lhs.score.values().into_iter().zip(rhs.score.values()) {
-        if (left - right).abs() > options.improvement_epsilon {
-            return left.total_cmp(&right);
+        let ordering = left.total_cmp(&right);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
         }
     }
     rhs.ranking
@@ -933,15 +934,10 @@ fn compare_move_kinds(
 }
 
 /// Orders timing-safe area recovery by physical area savings first.
-fn compare_area_moves(
-    lhs: &SizingMove,
-    rhs: &SizingMove,
-    library: &Library,
-    options: &ResizeOptions,
-) -> std::cmp::Ordering {
+fn compare_area_moves(lhs: &SizingMove, rhs: &SizingMove, library: &Library) -> std::cmp::Ordering {
     rhs.ranking
         .total_cmp(&lhs.ranking)
-        .then_with(|| compare_delay_moves(lhs, rhs, library, options))
+        .then_with(|| compare_delay_moves(lhs, rhs, library))
 }
 
 /// Restores the best complete assignment before timing-safe area recovery.
@@ -1041,7 +1037,7 @@ fn size_alternatives(
     }
 }
 
-/// Orders equivalent cells using their real current Liberty operating point.
+/// Orders equivalent cells by area for timing-preserving area recovery.
 fn ordered_size_alternatives(
     timing: &mut IncrementalRegisteredSta<'_>,
     instance_index: usize,
@@ -1073,6 +1069,34 @@ fn ordered_size_alternatives(
             .total_cmp(&library.cells[rhs.cell_index].area)
             .then_with(|| lhs.arrival.total_cmp(&rhs.arrival))
             .then_with(|| lhs.input_load.total_cmp(&rhs.input_load))
+            .then_with(|| {
+                library.cells[lhs.cell_index]
+                    .name
+                    .cmp(&library.cells[rhs.cell_index].name)
+            })
+    });
+    candidates
+}
+
+/// Orders equivalent cell sizes by their actual loaded output arrival.
+fn timing_ordered_size_alternatives(
+    timing: &mut IncrementalRegisteredSta<'_>,
+    instance_index: usize,
+    library: &Library,
+    catalog: &CellCatalog,
+    registers: &RegisterCellCatalog,
+) -> Vec<EstimatedCellAlternative> {
+    let mut candidates =
+        ordered_size_alternatives(timing, instance_index, library, catalog, registers);
+    candidates.sort_by(|lhs, rhs| {
+        lhs.arrival
+            .total_cmp(&rhs.arrival)
+            .then_with(|| lhs.input_load.total_cmp(&rhs.input_load))
+            .then_with(|| {
+                library.cells[lhs.cell_index]
+                    .area
+                    .total_cmp(&library.cells[rhs.cell_index].area)
+            })
             .then_with(|| {
                 library.cells[lhs.cell_index]
                     .name
@@ -1309,9 +1333,13 @@ fn timing_move_queues(
         }
 
         if !pin_only {
-            for candidate in
-                ordered_size_alternatives(timing, instance_index, library, catalog, registers)
-            {
+            for candidate in timing_ordered_size_alternatives(
+                timing,
+                instance_index,
+                library,
+                catalog,
+                registers,
+            ) {
                 let alternative_area = library.cells[candidate.cell_index].area;
                 let group = if (alternative_area - current_area).abs() <= options.area_epsilon {
                     2
@@ -1328,12 +1356,19 @@ fn timing_move_queues(
 
         let mut moves = VecDeque::new();
         if !pin_only {
-            for group_index in [2, 0, 3] {
-                while moves.len() < options.max_cell_candidates_per_instance {
-                    let Some(kind) = groups[group_index].pop_front() else {
+            while moves.len() < options.max_cell_candidates_per_instance {
+                let mut added = false;
+                for group_index in [0, 2, 3] {
+                    if moves.len() == options.max_cell_candidates_per_instance {
                         break;
-                    };
-                    moves.push_back(kind);
+                    }
+                    if let Some(kind) = groups[group_index].pop_front() {
+                        moves.push_back(kind);
+                        added = true;
+                    }
+                }
+                if !added {
+                    break;
                 }
             }
         }
@@ -1451,12 +1486,11 @@ fn retain_timing_candidate(
     best_moves: &mut BTreeMap<usize, SizingMove>,
     proposed: SizingMove,
     library: &Library,
-    options: &ResizeOptions,
 ) {
     let preferred = best_moves
         .get(&proposed.instance_index)
         .is_none_or(|existing| {
-            compare_delay_moves(&proposed, existing, library, options) == std::cmp::Ordering::Less
+            compare_delay_moves(&proposed, existing, library) == std::cmp::Ordering::Less
         });
     if preferred {
         best_moves.insert(proposed.instance_index, proposed);
@@ -1492,15 +1526,30 @@ fn apply_coordinated_timing_waves<'a>(
         .max_iterations
         .saturating_mul(COORDINATED_SIZING_WAVE_MULTIPLIER)
     {
-        let critical = timing
+        let mut critical = timing
             .critical_window_instances(options.max_candidate_paths, INITIAL_CRITICAL_WINDOW)?;
-        if critical.len() < MIN_COORDINATED_SIZING_CONE {
-            break;
+        let mut tied_boundary = timing.tied_boundary_instances(options.improvement_epsilon);
+        if !timing.are_independent_leaf_boundaries(&tied_boundary) {
+            tied_boundary.clear();
         }
-        let critical_indices = critical
+        let mut known_critical = critical
             .iter()
             .map(|candidate| candidate.instance_index)
             .collect::<BTreeSet<_>>();
+        for instance_index in &tied_boundary {
+            if known_critical.insert(*instance_index) {
+                critical.push(CriticalInstance {
+                    instance_index: *instance_index,
+                    path_count: 1,
+                    first_path: critical.len(),
+                    slack: 0.0,
+                });
+            }
+        }
+        if critical.len() < MIN_COORDINATED_SIZING_CONE {
+            break;
+        }
+        let critical_indices = known_critical;
         let mut prioritized =
             prioritized_timing_instances(timing, &critical, library, catalog, registers, options);
         let mut prioritized_indices = prioritized.iter().copied().collect::<BTreeSet<_>>();
@@ -1582,16 +1631,29 @@ fn apply_coordinated_timing_waves<'a>(
         if proposals.is_empty() {
             break;
         }
-        proposals.sort_by(|lhs, rhs| {
-            rhs.ranking
-                .total_cmp(&lhs.ranking)
-                .then_with(|| lhs.instance_index.cmp(&rhs.instance_index))
-        });
-        let batch_limit = critical
+        let normal_batch_limit = critical
             .len()
             .div_ceil(SIZING_BATCH_DIVISOR)
             .min(options.max_evaluations_per_iteration)
             .max(1);
+        let tied_batch_limit = proposals
+            .iter()
+            .filter(|candidate| tied_boundary.contains(&candidate.instance_index))
+            .count()
+            .min(options.max_evaluations_per_iteration);
+        let finish_tied_boundaries = tied_batch_limit > normal_batch_limit;
+        proposals.sort_by(|lhs, rhs| {
+            finish_tied_boundaries
+                .then(|| {
+                    tied_boundary
+                        .contains(&rhs.instance_index)
+                        .cmp(&tied_boundary.contains(&lhs.instance_index))
+                })
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| rhs.ranking.total_cmp(&lhs.ranking))
+                .then_with(|| lhs.instance_index.cmp(&rhs.instance_index))
+        });
+        let batch_limit = normal_batch_limit.max(tied_batch_limit);
         let mut selected = timing.independent_move_batch(proposals, batch_limit);
         let mut accepted = false;
         while !selected.is_empty() {
@@ -1791,7 +1853,7 @@ fn optimize_timing_moves(
                         best_solution.score,
                         *area,
                     ) {
-                        retain_timing_candidate(&mut best_moves, candidate, library, options);
+                        retain_timing_candidate(&mut best_moves, candidate, library);
                     }
                 }
                 if !attempted {
@@ -1844,7 +1906,7 @@ fn optimize_timing_moves(
                     best_solution.score,
                     *area,
                 ) {
-                    retain_timing_candidate(&mut best_moves, candidate, library, options);
+                    retain_timing_candidate(&mut best_moves, candidate, library);
                 }
             }
             if !attempted {
@@ -1860,7 +1922,7 @@ fn optimize_timing_moves(
             critical_window = (critical_window * 2.0).min(MAX_CRITICAL_WINDOW);
             continue;
         }
-        candidates.sort_by(|lhs, rhs| compare_delay_moves(lhs, rhs, library, options));
+        candidates.sort_by(|lhs, rhs| compare_delay_moves(lhs, rhs, library));
         let batch_limit = critical.len().div_ceil(SIZING_BATCH_DIVISOR).max(1);
         let selected = timing.independent_move_batch(candidates, batch_limit);
         let mut committed = 0usize;
@@ -2072,8 +2134,7 @@ fn recover_timing_protected_area(
                 let preferred = best_moves
                     .get(&queue.instance_index)
                     .is_none_or(|existing| {
-                        compare_area_moves(&proposed, existing, library, options)
-                            == std::cmp::Ordering::Less
+                        compare_area_moves(&proposed, existing, library) == std::cmp::Ordering::Less
                     });
                 if preferred {
                     best_moves.insert(queue.instance_index, proposed);
@@ -2087,7 +2148,7 @@ fn recover_timing_protected_area(
         if candidates.is_empty() {
             break;
         }
-        candidates.sort_by(|lhs, rhs| compare_area_moves(lhs, rhs, library, options));
+        candidates.sort_by(|lhs, rhs| compare_area_moves(lhs, rhs, library));
         let selected = timing.independent_move_batch(candidates, batch_limit);
         let mut committed = 0usize;
         for mut candidate in selected {
@@ -2469,6 +2530,7 @@ struct IncrementalRegisteredSta<'a> {
     successors: Vec<Vec<usize>>,
     capture_consumers: Vec<Vec<usize>>,
     captures: Vec<RegisterCaptureScore>,
+    capture_instances: Vec<usize>,
     capture_predecessors: Vec<CapturePredecessors>,
     outputs: Vec<OutputEndpoint>,
     topological_order: Vec<usize>,
@@ -2756,6 +2818,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
             successors,
             capture_consumers,
             captures,
+            capture_instances: registers,
             capture_predecessors: vec![CapturePredecessors::default(); normalized.instances.len()],
             outputs,
             topological_order,
@@ -2769,7 +2832,8 @@ impl<'a> IncrementalRegisteredSta<'a> {
             let instance = state.topological_order[position];
             state.recompute_instance(instance)?;
         }
-        for instance in registers {
+        for capture_index in 0..state.capture_instances.len() {
+            let instance = state.capture_instances[capture_index];
             state.recompute_capture(instance)?;
         }
         Ok(state)
@@ -2784,14 +2848,14 @@ impl<'a> IncrementalRegisteredSta<'a> {
     fn score(&self) -> BoundaryTimingScore {
         BoundaryTimingScore {
             register_to_register: self
-                .captures
+                .capture_instances
                 .iter()
-                .filter_map(|capture| capture.register)
+                .filter_map(|index| self.captures[*index].register)
                 .reduce(f64::max),
             input_to_register: self
-                .captures
+                .capture_instances
                 .iter()
-                .filter_map(|capture| capture.primary_input)
+                .filter_map(|index| self.captures[*index].primary_input)
                 .reduce(f64::max),
             register_to_output: self
                 .outputs
@@ -2810,8 +2874,10 @@ impl<'a> IncrementalRegisteredSta<'a> {
 
     /// Ranks only a small, bounded set of near-critical physical endpoints.
     fn secondary_delay(&self) -> f64 {
-        let mut arrivals = Vec::with_capacity(self.captures.len() * 2 + self.outputs.len() * 4);
-        for capture in &self.captures {
+        let mut arrivals =
+            Vec::with_capacity(self.capture_instances.len() * 2 + self.outputs.len() * 4);
+        for instance_index in &self.capture_instances {
+            let capture = &self.captures[*instance_index];
             arrivals.extend(
                 [capture.register, capture.primary_input]
                     .into_iter()
@@ -2974,6 +3040,55 @@ impl<'a> IncrementalRegisteredSta<'a> {
         true
     }
 
+    /// Finds physical boundary cells tied for their timing-class maximum.
+    fn tied_boundary_instances(&self, epsilon: f64) -> BTreeSet<usize> {
+        let maxima = self.score().values();
+        let tolerance = epsilon.max(TIMING_VERIFICATION_EPSILON);
+        let mut result = BTreeSet::new();
+
+        for instance_index in &self.capture_instances {
+            let capture = &self.captures[*instance_index];
+            for (class, arrival) in [(0, capture.register), (1, capture.primary_input)] {
+                if arrival.is_some_and(|arrival| arrival + tolerance >= maxima[class]) {
+                    result.insert(*instance_index);
+                }
+            }
+        }
+
+        for output in &self.outputs {
+            let Some(instance_index) = self.drivers[output.bit] else {
+                continue;
+            };
+            let timing = self.bit_timing[output.bit];
+            for (class, signal) in [(2, timing.register), (3, timing.primary_input)] {
+                if signal.is_some_and(|signal| signal_arrival(signal) + tolerance >= maxima[class])
+                {
+                    result.insert(instance_index);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Keeps broad tied waves from starving upstream logic or register cones.
+    fn are_independent_leaf_boundaries(&self, instances: &BTreeSet<usize>) -> bool {
+        !instances.is_empty()
+            && instances.iter().all(|instance_index| {
+                let instance = &self.instances[*instance_index];
+                !instance.sequential
+                    && self.successors[*instance_index].is_empty()
+                    && instance
+                        .outputs
+                        .iter()
+                        .all(|output| self.capture_consumers[output.bit].is_empty())
+                    && instance
+                        .inputs
+                        .iter()
+                        .all(|input| input.bit.is_none_or(|bit| self.drivers[bit].is_none()))
+            })
+    }
+
     /// Traces all exact-Liberty arcs inside an adaptive near-critical window.
     fn critical_window_instances(
         &mut self,
@@ -2983,7 +3098,9 @@ impl<'a> IncrementalRegisteredSta<'a> {
         let score = self.score();
         let class_maxima = score.values();
         let mut endpoints = Vec::new();
-        for (index, capture) in self.captures.iter().enumerate() {
+        for index in &self.capture_instances {
+            let index = *index;
+            let capture = &self.captures[index];
             let predecessors = self.capture_predecessors[index];
             for (class, arrival, transition, register_launch) in [
                 (0, capture.register, predecessors.register, true),
@@ -3842,7 +3959,8 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundaryTimingScore, IncrementalRegisteredSta, RegisterCellCatalog, SizingTrial,
+        BoundaryTimingScore, IncrementalRegisteredSta, RegisterCellCatalog, SizingMove,
+        SizingMoveKind, SizingTrial, compare_area_moves, compare_delay_moves,
         prioritized_timing_instances, resize_timing_aware_netlist, timing_trial_is_acceptable,
     };
     use crate::liberty_model::{Library, LibraryBuilder};
@@ -4010,6 +4128,206 @@ module top(clk, a, b, y);
   AND2 offpath (.A(root), .B(b), .Y(unused));
 endmodule
 "#
+    }
+
+    #[test]
+    fn move_comparators_remain_transitive_for_epsilon_spaced_scores() {
+        let library = sizing_library();
+        let epsilon = ResizeOptions::default().improvement_epsilon;
+        let moves = [
+            SizingMove {
+                instance_index: 2,
+                kind: SizingMoveKind::SwapPins {
+                    first_input: 0,
+                    second_input: 1,
+                },
+                score: BoundaryTimingScore {
+                    input_to_output: Some(1.0),
+                    ..BoundaryTimingScore::default()
+                },
+                ranking: 0.0,
+                area: 1.0,
+            },
+            SizingMove {
+                instance_index: 1,
+                kind: SizingMoveKind::SwapPins {
+                    first_input: 0,
+                    second_input: 1,
+                },
+                score: BoundaryTimingScore {
+                    input_to_output: Some(1.0 + epsilon * 0.75),
+                    ..BoundaryTimingScore::default()
+                },
+                ranking: 0.0,
+                area: 1.0,
+            },
+            SizingMove {
+                instance_index: 0,
+                kind: SizingMoveKind::SwapPins {
+                    first_input: 0,
+                    second_input: 1,
+                },
+                score: BoundaryTimingScore {
+                    input_to_output: Some(1.0 + epsilon * 1.5),
+                    ..BoundaryTimingScore::default()
+                },
+                ranking: 0.0,
+                area: 1.0,
+            },
+        ];
+        let comparisons = [
+            (
+                "timing",
+                compare_delay_moves as fn(&SizingMove, &SizingMove, &Library) -> std::cmp::Ordering,
+            ),
+            (
+                "area",
+                compare_area_moves as fn(&SizingMove, &SizingMove, &Library) -> std::cmp::Ordering,
+            ),
+        ];
+
+        for (name, compare) in comparisons {
+            assert_eq!(
+                compare(&moves[0], &moves[1], &library),
+                std::cmp::Ordering::Less,
+                "{name} comparator must not treat distinct nearby scores as equal"
+            );
+            assert_eq!(
+                compare(&moves[1], &moves[2], &library),
+                std::cmp::Ordering::Less,
+                "{name} comparator must order the second epsilon-spaced pair"
+            );
+            assert_eq!(
+                compare(&moves[0], &moves[2], &library),
+                std::cmp::Ordering::Less,
+                "{name} comparator must preserve transitivity across the epsilon chain"
+            );
+
+            let mut sorted = vec![moves[2].clone(), moves[0].clone(), moves[1].clone()];
+            sorted.sort_by(|left, right| compare(left, right, &library));
+            assert_eq!(
+                sorted
+                    .iter()
+                    .map(|candidate| candidate.instance_index)
+                    .collect::<Vec<_>>(),
+                [2, 1, 0],
+                "{name} comparator must produce deterministic full timing order"
+            );
+        }
+    }
+
+    #[test]
+    fn timing_search_considers_fastest_output_driver_among_many_equal_area_cells() {
+        let mut builder = LibraryBuilder::new();
+        let original = timed_cell(&mut builder, "BUF_BASE", &["A"], "A", 1.0, 12.0, 0.1, 1.0);
+        builder.cells.push(original);
+        for index in 0..12 {
+            let alternative = timed_cell(
+                &mut builder,
+                &format!("BUF_EQUAL_{index}"),
+                &["A"],
+                "A",
+                1.0,
+                11.0 - index as f64 * 0.1,
+                0.1,
+                1.0,
+            );
+            builder.cells.push(alternative);
+        }
+        let fastest = timed_cell(&mut builder, "BUF_FASTEST", &["A"], "A", 2.0, 1.0, 0.2, 1.0);
+        builder.cells.push(fastest);
+        let library = builder.finish();
+        let source = r#"
+module top(a, y);
+  input a;
+  output y;
+  BUF_BASE output_driver (.A(a), .Y(y));
+endmodule
+"#;
+        let (mut module, nets, mut interner) = parse_module(source);
+
+        let stats = resize_timing_aware_netlist(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                sta_options: StaOptions {
+                    module_output_load: 0.2,
+                    ..StaOptions::default()
+                },
+                max_outer_iterations: 1,
+                max_iterations: 1,
+                max_area_iterations: 0,
+                max_evaluations_per_iteration: 2,
+                max_cell_candidates_per_instance: 2,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("size the full-load primary-output driver by actual Liberty delay");
+
+        assert_eq!(
+            interner.resolve(module.instances[0].type_name),
+            Some("BUF_FASTEST"),
+            "same-area variants must not exhaust the bounded timing candidate queue"
+        );
+        assert!(stats.final_delay < stats.initial_delay / 2.0);
+        assert_eq!(stats.upsizes, 1);
+    }
+
+    #[test]
+    fn coordinates_all_tied_output_drivers_beyond_the_traced_path_limit() {
+        const OUTPUT_COUNT: usize = 40;
+        let mut source = format!(
+            r#"module top(a, y);
+  input [{}:0] a;
+  output [{}:0] y;
+"#,
+            OUTPUT_COUNT - 1,
+            OUTPUT_COUNT - 1,
+        );
+        for index in 0..OUTPUT_COUNT {
+            source.push_str(&format!(
+                "  BUF output_driver_{index} (.A(a[{index}]), .Y(y[{index}]));\n"
+            ));
+        }
+        source.push_str("endmodule\n");
+
+        let library = sizing_library();
+        let (mut module, nets, mut interner) = parse_module(&source);
+        let stats = resize_timing_aware_netlist(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                sta_options: StaOptions {
+                    module_output_load: 0.2,
+                    ..StaOptions::default()
+                },
+                max_outer_iterations: 1,
+                max_iterations: 1,
+                max_area_iterations: 0,
+                max_candidate_paths: 32,
+                max_evaluations_per_iteration: 64,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("jointly improve independent tied primary-output drivers");
+
+        assert_eq!(
+            stats.upsizes, OUTPUT_COUNT,
+            "a bounded exact-STA wave must finish every tied independent driver"
+        );
+        assert!(stats.final_delay < stats.initial_delay);
+        assert!(
+            module
+                .instances
+                .iter()
+                .all(|instance| { interner.resolve(instance.type_name) == Some("BUF_FAST") })
+        );
     }
 
     #[test]
@@ -4802,6 +5120,75 @@ endmodule
                 .map(|cell| cell.name.as_str())
                 .collect::<Vec<_>>(),
             ["DFF", "DFF_FAST"]
+        );
+    }
+
+    #[test]
+    fn endpoint_scoring_indexes_only_physical_register_captures() {
+        let combinational_source = r#"
+module top(a, b, y);
+  input a, b;
+  output y;
+  wire first, second;
+  BUF first_driver (.A(a), .Y(first));
+  BUF second_driver (.A(b), .Y(second));
+  AND2 output_driver (.A(first), .B(second), .Y(y));
+endmodule
+"#;
+        let combinational_library = sizing_library();
+        let (combinational, combinational_nets, combinational_interner) =
+            parse_module(combinational_source);
+        let combinational_report = build_netlist_report(
+            &combinational,
+            &combinational_nets,
+            &combinational_interner,
+            &combinational_library,
+            StaOptions::default(),
+        )
+        .expect("independently time the register-free endpoint graph");
+        let combinational_timing = IncrementalRegisteredSta::new(
+            &combinational,
+            &combinational_nets,
+            &combinational_interner,
+            &combinational_library,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("construct register-free incremental endpoint timing");
+
+        assert_eq!(combinational_timing.captures.len(), 3);
+        assert!(combinational_timing.capture_instances.is_empty());
+        assert_eq!(
+            combinational_timing.score(),
+            BoundaryTimingScore::from_report(&combinational_report)
+        );
+
+        let registered_library = asymmetric_register_load_library();
+        let (registered, registered_nets, registered_interner) =
+            parse_module(asymmetric_register_load_source());
+        let registered_report = build_netlist_report(
+            &registered,
+            &registered_nets,
+            &registered_interner,
+            &registered_library,
+            StaOptions::default(),
+        )
+        .expect("independently time the mixed register and logic graph");
+        let registered_timing = IncrementalRegisteredSta::new(
+            &registered,
+            &registered_nets,
+            &registered_interner,
+            &registered_library,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("construct mixed register and logic incremental endpoint timing");
+
+        assert_eq!(registered_timing.captures.len(), 3);
+        assert_eq!(registered_timing.capture_instances, [0, 1]);
+        assert_eq!(
+            registered_timing.score(),
+            BoundaryTimingScore::from_report(&registered_report)
         );
     }
 

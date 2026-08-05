@@ -22,6 +22,18 @@ pub use sequential::{SequentialTechMapConstraints, map_sequential_choice_aig_to_
 
 /// Timing-oriented covers may safely use a stricter tree than the caller's cap.
 const BALANCED_TIMING_MAX_FANOUT: usize = 8;
+/// Reconsider root tie-breaking only after a cover becomes unusually large.
+const LARGE_NF_COVER_CELL_THRESHOLD: usize = 4096;
+/// Wide shallow output fabrics do not benefit from compact arithmetic covers.
+const LARGE_NF_COVER_MAX_OUTPUTS: usize = 256;
+/// Moderately sized covers require a substantial pre-sizing timing gain.
+const LARGE_NF_COVER_RELAXED_TIMING_CELL_THRESHOLD: usize = 5000;
+/// Require this minimum exact delay gain before changing moderate covers.
+const LARGE_NF_COVER_MIN_DELAY_IMPROVEMENT: f64 = 0.10;
+/// An alternate cover must remove at least this fraction of mapped cells.
+const LARGE_NF_COVER_MAX_CELL_PERCENT: usize = 85;
+/// An alternate cover must improve exact Liberty timing beyond roundoff.
+const LARGE_NF_COVER_TIMING_EPSILON: f64 = 1e-9;
 
 use crate::aig::{ChoiceAig, GateFn};
 use crate::liberty_model::Library;
@@ -113,6 +125,15 @@ pub struct PreparedTechMapLibrary<'a> {
     library: &'a Library,
     cell_index: liberty_index::LibertyCellIndex,
     max_cut_size: usize,
+}
+
+/// Exact pre-sizing result for one bounded oversized-cover alternative.
+struct LargeNfCoverCandidate {
+    cover: nf::NfCover,
+    uses_stable_roots: bool,
+    exact_delay: f64,
+    area: f64,
+    cell_count: usize,
 }
 
 impl<'a> PreparedTechMapLibrary<'a> {
@@ -262,6 +283,132 @@ pub fn map_choice_aig_to_netlist_with_prepared(
             options,
             constraints,
         )?;
+        let selected_cell_count = selected_cover_cell_count(&cover.plan);
+        let scalar_output_count = cover.plan.output_solutions.len();
+        if selected_cell_count > LARGE_NF_COVER_CELL_THRESHOLD
+            && scalar_output_count <= LARGE_NF_COVER_MAX_OUTPUTS
+        {
+            let emitted = emit::emit_cover(
+                choice_aig,
+                &cover.plan,
+                cell_index,
+                prepared.library,
+                options,
+            )?;
+            if emitted.timing_complete {
+                let sta_options = StaOptions {
+                    primary_input_transition: options.primary_input_transition,
+                    module_output_load: options.module_output_load,
+                };
+                let current_delay = build_sta_report(
+                    &emitted.module,
+                    emitted.nets.as_slice(),
+                    &emitted.interner,
+                    prepared.library,
+                    sta_options,
+                )?
+                .delay;
+                let alternate_prepared = PreparedTechMapLibrary {
+                    library: prepared.library,
+                    cell_index: liberty_index::LibertyCellIndex::build_nf_stable_roots(
+                        prepared.library,
+                        prepared.max_cut_size,
+                    )?,
+                    max_cut_size: prepared.max_cut_size,
+                };
+                let policies = [
+                    (true, nf::NfCoverPolicy::Standard),
+                    (false, nf::NfCoverPolicy::NativePinOrder),
+                    (false, nf::NfCoverPolicy::StructuralAreaCuts),
+                    (false, nf::NfCoverPolicy::AreaChildrenNativePinOrder),
+                    (false, nf::NfCoverPolicy::AreaChildrenStructuralAreaCuts),
+                    (false, nf::NfCoverPolicy::NativePinOrderStructuralAreaCuts),
+                    (true, nf::NfCoverPolicy::AreaChildren),
+                ];
+                let mut best: Option<LargeNfCoverCandidate> = None;
+                for (uses_stable_roots, policy) in policies {
+                    let candidate_prepared = if uses_stable_roots {
+                        &alternate_prepared
+                    } else {
+                        prepared
+                    };
+                    let candidate_cover = nf::build_cover_plan_with_policy(
+                        choice_aig,
+                        &analysis,
+                        candidate_prepared.library,
+                        &candidate_prepared.cell_index,
+                        options,
+                        constraints,
+                        policy,
+                    )?;
+                    let candidate_cell_count = selected_cover_cell_count(&candidate_cover.plan);
+                    if !has_substantially_fewer_cover_cells(
+                        selected_cell_count,
+                        candidate_cell_count,
+                    ) {
+                        continue;
+                    }
+                    let candidate_emitted = emit::emit_cover(
+                        choice_aig,
+                        &candidate_cover.plan,
+                        &candidate_prepared.cell_index,
+                        candidate_prepared.library,
+                        options,
+                    )?;
+                    if !candidate_emitted.timing_complete {
+                        continue;
+                    }
+                    let candidate_delay = build_sta_report(
+                        &candidate_emitted.module,
+                        candidate_emitted.nets.as_slice(),
+                        &candidate_emitted.interner,
+                        candidate_prepared.library,
+                        sta_options,
+                    )?
+                    .delay;
+                    if !prefer_compact_nf_cover(
+                        selected_cell_count,
+                        candidate_cell_count,
+                        scalar_output_count,
+                        current_delay,
+                        candidate_delay,
+                    ) {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|winner| {
+                        candidate_delay
+                            .total_cmp(&winner.exact_delay)
+                            .then_with(|| candidate_emitted.area.total_cmp(&winner.area))
+                            .then_with(|| candidate_cell_count.cmp(&winner.cell_count))
+                            .is_lt()
+                    }) {
+                        best = Some(LargeNfCoverCandidate {
+                            cover: candidate_cover,
+                            uses_stable_roots,
+                            exact_delay: candidate_delay,
+                            area: candidate_emitted.area,
+                            cell_count: candidate_cell_count,
+                        });
+                    }
+                }
+                if let Some(winner) = best {
+                    let winning_prepared = if winner.uses_stable_roots {
+                        &alternate_prepared
+                    } else {
+                        prepared
+                    };
+                    return finish_prepared_choice_cover(
+                        choice_aig,
+                        winning_prepared,
+                        &analysis,
+                        winner.cover.plan,
+                        winner.cover.enumerated_cut_count,
+                        winner.cover.representative_output_load,
+                        options,
+                    );
+                }
+            }
+        }
         return finish_prepared_choice_cover(
             choice_aig,
             prepared,
@@ -339,6 +486,35 @@ pub fn map_choice_aig_to_netlist_with_prepared(
     )
 }
 
+/// Counts real Liberty cells without including zero-area primary-input sources.
+fn selected_cover_cell_count(plan: &cover::CoverPlan) -> usize {
+    plan.solutions
+        .iter()
+        .filter(|solution| matches!(solution.choice, cover::SolutionChoice::Cell { .. }))
+        .count()
+}
+
+/// Requires a meaningfully smaller alternate cover before spending on STA.
+fn has_substantially_fewer_cover_cells(current_cells: usize, alternate_cells: usize) -> bool {
+    alternate_cells.saturating_mul(100)
+        <= current_cells.saturating_mul(LARGE_NF_COVER_MAX_CELL_PERCENT)
+}
+
+/// Chooses compact remapping only when full Liberty timing also improves.
+fn prefer_compact_nf_cover(
+    current_cells: usize,
+    alternate_cells: usize,
+    scalar_output_count: usize,
+    current_delay: f64,
+    alternate_delay: f64,
+) -> bool {
+    scalar_output_count <= LARGE_NF_COVER_MAX_OUTPUTS
+        && has_substantially_fewer_cover_cells(current_cells, alternate_cells)
+        && alternate_delay + LARGE_NF_COVER_TIMING_EPSILON < current_delay
+        && (current_cells > LARGE_NF_COVER_RELAXED_TIMING_CELL_THRESHOLD
+            || alternate_delay <= current_delay * (1.0 - LARGE_NF_COVER_MIN_DELAY_IMPROVEMENT))
+}
+
 /// Builds and exactly scores one cover from shared choice and Liberty state.
 fn map_prepared_choice_cover(
     choice_aig: &ChoiceAig,
@@ -386,7 +562,7 @@ fn finish_prepared_choice_cover(
     let library = prepared.library;
     let cell_index = &prepared.cell_index;
     let retime_approximate_cover_for_fallback = !cell_index.all_bindings_have_complete_timing();
-    let mut emitted = emit::emit_cover(choice_aig, &plan, cell_index, options)?;
+    let mut emitted = emit::emit_cover(choice_aig, &plan, cell_index, library, options)?;
     let mut buffer_stats = None;
     let mut resize_stats = None;
     let mut optimized_area = None;
@@ -851,6 +1027,31 @@ mod tests {
     }
 
     #[test]
+    fn large_cover_fallback_requires_substantial_area_recovery_and_strict_timing_improvement() {
+        assert!(prefer_compact_nf_cover(4402, 2772, 16, 6023.332, 5387.443));
+        assert!(prefer_compact_nf_cover(100, 85, 1, 10.0, 9.0));
+        assert!(!prefer_compact_nf_cover(100, 86, 1, 10.0, 9.0));
+        assert!(!prefer_compact_nf_cover(100, 85, 1, 10.0, 10.0));
+        assert!(!prefer_compact_nf_cover(100, 85, 1, 10.0, 10.1));
+        assert!(!prefer_compact_nf_cover(100, 85, 1, 10.0, 10.0 - 5e-10));
+
+        // Wide, shallow output fabrics may improve unbuffered timing while
+        // worsening the finished high-fanout buffer trees.
+        assert!(!prefer_compact_nf_cover(
+            5127, 4103, 3072, 16841.18, 14181.63,
+        ));
+
+        // Moderate-size arithmetic requires at least ten percent exact gain.
+        assert!(!prefer_compact_nf_cover(4237, 2711, 32, 4413.72, 3995.35,));
+        assert!(!prefer_compact_nf_cover(5000, 4250, 32, 100.0, 91.0));
+
+        // Very large arithmetic covers may recover reliability and timing
+        // even when the pre-sizing delay improvement is more modest.
+        assert!(prefer_compact_nf_cover(6915, 4182, 64, 7930.14, 7463.60,));
+        assert!(prefer_compact_nf_cover(5001, 4250, 32, 100.0, 91.0));
+    }
+
+    #[test]
     fn nf_mapping_preserves_full_precision_liberty_cell_area() {
         let mut library = make_library();
         library.cells[0].area = 1.234_567_89;
@@ -1071,6 +1272,34 @@ mod tests {
                 .unwrap(),
             "mystery_buf"
         );
+    }
+
+    #[test]
+    fn loaded_primary_input_output_uses_the_fastest_liberty_buffer() {
+        let mut builder =
+            GateBuilder::new("loaded_identity".to_string(), GateBuilderOptions::no_opt());
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        builder.add_output("o".to_string(), a.into());
+
+        let mapped = map_gatefn_to_netlist(
+            builder.build(),
+            &sizing_library(),
+            &TechMapTimingConstraints::default(),
+            &TechMapOptions {
+                module_output_load: 0.5,
+                ..TechMapOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(mapped.module.instances.len(), 1);
+        assert_eq!(
+            mapped
+                .interner
+                .resolve(mapped.module.instances[0].type_name),
+            Some("BUF_FAST")
+        );
+        assert_eq!(mapped.stats.worst_estimated_output_arrival, 1.0);
     }
 
     #[test]

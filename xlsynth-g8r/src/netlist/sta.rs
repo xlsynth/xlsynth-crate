@@ -63,6 +63,8 @@ use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule, No
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
@@ -166,7 +168,7 @@ impl EdgeTimingCandidate {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct EdgeTimingSet {
-    values: Vec<EdgeTimingCandidate>,
+    values: SmallVec<[EdgeTimingCandidate; 2]>,
 }
 
 impl EdgeTimingSet {
@@ -360,6 +362,58 @@ pub struct TimingQueryDiagnosticCounts {
     pub delay_slew_multiple_above_max_clamp_count: usize,
     pub setup_below_min_clamp_count: usize,
     pub setup_above_max_clamp_count: usize,
+}
+
+/// Identifies immutable pooled Liberty values inside one live library scope.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TimingTableEnvelopeKey {
+    values_address: usize,
+    values_len: usize,
+    shape_id: u32,
+}
+
+/// Owns exact coordinatewise prefix maxima for a currently borrowed library.
+#[derive(Default)]
+struct TimingTableEnvelopeScope {
+    library_address: usize,
+    envelopes: HashMap<TimingTableEnvelopeKey, Vec<f64>>,
+}
+
+thread_local! {
+    static TIMING_TABLE_ENVELOPE_SCOPES: RefCell<Vec<TimingTableEnvelopeScope>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Limits lazy Liberty envelope caching to one nested, immutable STA run.
+pub(crate) struct ScopedTimingTableEnvelopeCache<'library> {
+    library: &'library Library,
+}
+
+impl<'library> ScopedTimingTableEnvelopeCache<'library> {
+    /// Starts a thread-local scope tied to the borrowed library's lifetime.
+    pub(crate) fn new(library: &'library Library) -> Self {
+        TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+            scopes.borrow_mut().push(TimingTableEnvelopeScope {
+                library_address: library as *const Library as usize,
+                envelopes: HashMap::new(),
+            });
+        });
+        Self { library }
+    }
+}
+
+impl Drop for ScopedTimingTableEnvelopeCache<'_> {
+    /// Drops every pooled-value address before releasing its library borrow.
+    fn drop(&mut self) {
+        TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+            let removed = scopes.borrow_mut().pop();
+            debug_assert_eq!(
+                removed.map(|scope| scope.library_address),
+                Some(self.library as *const Library as usize),
+                "nested Liberty timing envelope scopes must unwind in reverse order"
+            );
+        });
+    }
 }
 
 impl std::ops::AddAssign for TimingQueryDiagnosticCounts {
@@ -2222,12 +2276,7 @@ pub(crate) fn evaluate_combinational_cell_output_timing_with_predecessors(
             unsupported_arc.timing_type_str(library)
         ));
     }
-    let combinational_arcs: Vec<&TimingArc> = output_pin
-        .timing_arcs
-        .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(library)).is_combinational())
-        .collect();
-    if combinational_arcs.is_empty() {
+    if output_pin.timing_arcs.is_empty() {
         if constant_output_function_value(library, cell_name, output_pin)?.is_some() {
             return Ok(TracedCombinationalTiming {
                 timing: SignalTiming {
@@ -2254,7 +2303,7 @@ pub(crate) fn evaluate_combinational_cell_output_timing_with_predecessors(
     let mut accumulated: Option<SignalTimingSet> = None;
     let mut rise_winner: Option<(EdgeTimingCandidate, TimingPredecessor)> = None;
     let mut fall_winner: Option<(EdgeTimingCandidate, TimingPredecessor)> = None;
-    for arc in combinational_arcs {
+    for arc in &output_pin.timing_arcs {
         let related_text = library.resolve_string(&arc.related_pin);
         let context = format!(
             "cell '{}' output pin '{}' timing arc related_pin '{}'",
@@ -3403,8 +3452,8 @@ fn evaluate_table_with_query_and_diagnostics(
             .get(&[])
             .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
     }
-    let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
-    let mut axis_queries: Vec<f64> = Vec::with_capacity(rank);
+    let mut bounds = SmallVec::<[(usize, usize, f64); 3]>::with_capacity(rank);
+    let mut axis_queries = SmallVec::<[f64; 3]>::with_capacity(rank);
     let is_setup = matches!(
         LibertyTableKind::from_raw(table.kind_str()),
         LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
@@ -3503,8 +3552,9 @@ fn evaluate_table_with_query_and_diagnostics(
         bounds.push(bracket_axis(axis, axis_query));
     }
 
-    let mut indices = vec![0usize; rank];
-    let mut varying_axes: Vec<(usize, usize, usize, f64)> = Vec::with_capacity(rank);
+    let mut indices = SmallVec::<[usize; 3]>::new();
+    indices.resize(rank, 0);
+    let mut varying_axes = SmallVec::<[(usize, usize, usize, f64); 3]>::with_capacity(rank);
     for (axis_idx, (lo, hi, t)) in bounds.iter().copied().enumerate() {
         if lo == hi {
             indices[axis_idx] = lo;
@@ -3526,7 +3576,8 @@ fn evaluate_table_with_query_and_diagnostics(
                 weight *= 1.0 - *t;
             }
         }
-        let value = evaluate_table_corner_value(&array, table, indices.as_slice(), context)?;
+        let value =
+            evaluate_table_corner_value(library, &array, table, indices.as_slice(), context)?;
         result += weight * value;
     }
     if !result.is_finite() {
@@ -3551,6 +3602,7 @@ fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
 /// Evaluates one characterized point after conservatively repairing delay/slew
 /// values: a point is at least as large as any predecessor along its axes.
 fn evaluate_table_corner_value(
+    library: &Library,
     array: &TimingTableArrayView<'_>,
     table: &TimingTable,
     indices: &[usize],
@@ -3562,7 +3614,13 @@ fn evaluate_table_corner_value(
             .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices));
     }
 
-    let mut cursor = vec![0usize; indices.len()];
+    if let Some(value) = cached_monotone_timing_table_corner(library, array, table, indices) {
+        return value
+            .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices));
+    }
+
+    let mut cursor = SmallVec::<[usize; 3]>::new();
+    cursor.resize(indices.len(), 0);
     let mut maximum = f64::NEG_INFINITY;
     loop {
         let value = array
@@ -3586,6 +3644,57 @@ fn evaluate_table_corner_value(
         }
     }
     Ok(maximum)
+}
+
+/// Retrieves an exact envelope only while its immutable library is scoped.
+fn cached_monotone_timing_table_corner(
+    library: &Library,
+    array: &TimingTableArrayView<'_>,
+    table: &TimingTable,
+    indices: &[usize],
+) -> Option<Option<f64>> {
+    TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+        let mut scopes = scopes.borrow_mut();
+        let scope = scopes.last_mut()?;
+        if scope.library_address != library as *const Library as usize {
+            return None;
+        }
+        let Some(linear_index) = array.linear_index(indices) else {
+            return Some(None);
+        };
+        let values = array.values();
+        let key = TimingTableEnvelopeKey {
+            values_address: values.as_ptr() as usize,
+            values_len: values.len(),
+            shape_id: table.shape_id(),
+        };
+        let envelope = scope
+            .envelopes
+            .entry(key)
+            .or_insert_with(|| build_monotone_timing_table_envelope(array));
+        Some(envelope.get(linear_index).copied())
+    })
+}
+
+/// Builds the same inclusive coordinatewise f64 maximum as exhaustive lookup.
+fn build_monotone_timing_table_envelope(array: &TimingTableArrayView<'_>) -> Vec<f64> {
+    let mut envelope = array
+        .values()
+        .iter()
+        .copied()
+        .map(f64::from)
+        .collect::<Vec<_>>();
+    let mut axis_stride = 1usize;
+    for dimension in array.dimensions().iter().rev().copied() {
+        let dimension = dimension as usize;
+        for index in 0..envelope.len() {
+            if (index / axis_stride) % dimension != 0 {
+                envelope[index] = envelope[index].max(envelope[index - axis_stride]);
+            }
+        }
+        axis_stride *= dimension;
+    }
+    envelope
 }
 
 fn validate_non_negative_finite(value: f64, what: &str, context: &str) -> Result<()> {
@@ -7041,6 +7150,333 @@ endmodule
             evaluate_table(&lib, &table, 1.0, 1.0, "non_monotone_2d").expect("table eval"),
             4.0,
         );
+    }
+
+    #[test]
+    fn evaluate_table_interpolates_and_repairs_three_dimensional_surfaces() {
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_three_dimensional".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            variable_3: "constrained_pin_transition".to_string().into(),
+            index_1: vec![0.0, 1.0],
+            index_2: vec![0.0, 1.0],
+            index_3: vec![0.0, 1.0],
+            ..Default::default()
+        }];
+        let monotonic = builder
+            .add_timing_table_f64(
+                crate::liberty_proto::TimingTableKind::CellRise,
+                1,
+                vec![],
+                vec![],
+                vec![],
+                vec![0.0, 1.0, 10.0, 11.0, 100.0, 101.0, 110.0, 111.0],
+                vec![2, 2, 2],
+                "",
+            )
+            .expect("construct the complete three-axis timing surface");
+        let non_monotonic = builder
+            .add_timing_table_f64(
+                crate::liberty_proto::TimingTableKind::CellRise,
+                1,
+                vec![],
+                vec![],
+                vec![],
+                vec![1.0, 9.0, 3.0, 4.0, 5.0, 6.0, 7.0, 2.0],
+                vec![2, 2, 2],
+                "",
+            )
+            .expect("construct the non-monotonic three-axis timing surface");
+        let library = builder.finish();
+        let mut diagnostics = TimingQueryDiagnosticCounts::default();
+
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &library,
+                &monotonic,
+                TimingTableQuery {
+                    input_transition: 0.25,
+                    output_load: 0.5,
+                    constrained_pin_transition: 0.75,
+                    related_pin_transition: 0.75,
+                    minimum_characterized_axis: MinimumCharacterizedAxis::None,
+                },
+                &mut diagnostics,
+                "three_dimensional_interpolation",
+            )
+            .expect("interpolate every corner of the three-axis surface"),
+            30.75,
+        );
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &library,
+                &non_monotonic,
+                TimingTableQuery {
+                    input_transition: 1.0,
+                    output_load: 1.0,
+                    constrained_pin_transition: 1.0,
+                    related_pin_transition: 1.0,
+                    minimum_characterized_axis: MinimumCharacterizedAxis::None,
+                },
+                &mut diagnostics,
+                "three_dimensional_upper_envelope",
+            )
+            .expect("preserve the conservative three-axis monotone envelope"),
+            9.0,
+        );
+        assert_eq!(diagnostics, TimingQueryDiagnosticCounts::default());
+    }
+
+    #[test]
+    fn scoped_timing_envelopes_match_exhaustive_scalar_and_multidimensional_queries() {
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "scoped_rank_one".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
+                index_1: vec![0.0, 1.0, 2.0, 3.0],
+                ..Default::default()
+            },
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "scoped_rank_two".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
+                variable_2: "total_output_net_capacitance".to_string().into(),
+                index_1: vec![0.0, 1.0],
+                index_2: vec![0.0, 1.0],
+                ..Default::default()
+            },
+            LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "scoped_rank_three".to_string(),
+                variable_1: "input_net_transition".to_string().into(),
+                variable_2: "total_output_net_capacitance".to_string().into(),
+                variable_3: "constrained_pin_transition".to_string().into(),
+                index_1: vec![0.0, 1.0],
+                index_2: vec![0.0, 1.0],
+                index_3: vec![0.0, 1.0],
+                ..Default::default()
+            },
+        ];
+        let scalar = scalar_table(&mut builder, "cell_rise", -0.0);
+        let rank_one = test_table(
+            &mut builder,
+            "cell_rise",
+            1,
+            vec![],
+            vec![],
+            vec![0.0, -0.0, 3.0, 1.0],
+            vec![4],
+        );
+        let rank_two = test_table(
+            &mut builder,
+            "rise_transition",
+            2,
+            vec![],
+            vec![],
+            vec![1.0, 4.0, 3.0, 2.0],
+            vec![2, 2],
+        );
+        let setup = test_table(
+            &mut builder,
+            "rise_constraint",
+            2,
+            vec![],
+            vec![],
+            vec![4.0, 1.0, 2.0, 3.0],
+            vec![2, 2],
+        );
+        let rank_three = builder
+            .add_timing_table_f64(
+                crate::liberty_proto::TimingTableKind::CellFall,
+                3,
+                vec![],
+                vec![],
+                vec![],
+                vec![1.0, 9.0, 3.0, 4.0, 5.0, 6.0, 7.0, 2.0],
+                vec![2, 2, 2],
+                "",
+            )
+            .expect("construct the cached three-axis non-monotone surface");
+        let library = builder.finish();
+        let cases = [
+            (&scalar, TimingTableQuery::combinational(0.0, 0.0)),
+            (&rank_one, TimingTableQuery::combinational(1.0, 0.0)),
+            (&rank_one, TimingTableQuery::combinational(2.5, 0.0)),
+            (&rank_two, TimingTableQuery::combinational(0.4, 0.7)),
+            (&rank_two, TimingTableQuery::combinational(1.3, 0.6)),
+            (&setup, TimingTableQuery::combinational(0.4, 0.7)),
+            (
+                &rank_three,
+                TimingTableQuery {
+                    input_transition: 0.35,
+                    output_load: 0.6,
+                    constrained_pin_transition: 0.85,
+                    related_pin_transition: 0.2,
+                    minimum_characterized_axis: MinimumCharacterizedAxis::None,
+                },
+            ),
+        ];
+        let mut uncached_diagnostics = TimingQueryDiagnosticCounts::default();
+        let expected = cases
+            .iter()
+            .map(|(table, query)| {
+                evaluate_table_with_query_and_diagnostics(
+                    &library,
+                    table,
+                    *query,
+                    &mut uncached_diagnostics,
+                    "scoped_envelope_comparison",
+                )
+                .expect("evaluate the original exhaustive conservative corner")
+                .to_bits()
+            })
+            .collect::<Vec<_>>();
+
+        let mut cached_diagnostics = TimingQueryDiagnosticCounts::default();
+        {
+            let _scope = ScopedTimingTableEnvelopeCache::new(&library);
+            let actual = cases
+                .iter()
+                .map(|(table, query)| {
+                    evaluate_table_with_query_and_diagnostics(
+                        &library,
+                        table,
+                        *query,
+                        &mut cached_diagnostics,
+                        "scoped_envelope_comparison",
+                    )
+                    .expect("evaluate the cached conservative corner")
+                    .to_bits()
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                actual, expected,
+                "cached interpolation must remain bit-exact"
+            );
+            TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+                assert_eq!(
+                    scopes
+                        .borrow()
+                        .last()
+                        .expect("find the scoped cache")
+                        .envelopes
+                        .len(),
+                    3,
+                    "scalar and setup tables must never enter the monotone cache"
+                );
+            });
+
+            {
+                let _nested = ScopedTimingTableEnvelopeCache::new(&library);
+                let mut nested_diagnostics = TimingQueryDiagnosticCounts::default();
+                let nested = evaluate_table_with_query_and_diagnostics(
+                    &library,
+                    &rank_three,
+                    cases[6].1,
+                    &mut nested_diagnostics,
+                    "nested_scoped_envelope",
+                )
+                .expect("preserve exact interpolation in a nested cache scope");
+                assert_eq!(nested.to_bits(), expected[6]);
+            }
+
+            TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+                assert_eq!(scopes.borrow().len(), 1, "nested scope must unwind cleanly");
+            });
+        }
+
+        assert_eq!(cached_diagnostics, uncached_diagnostics);
+        TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+            assert!(
+                scopes.borrow().is_empty(),
+                "library-owned timing envelopes must never escape their guard"
+            );
+        });
+    }
+
+    #[test]
+    fn scoped_timing_envelopes_isolate_libraries_and_unwind_on_panic() {
+        let template = LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "scoped_library_identity".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            index_1: vec![0.0, 1.0],
+            ..Default::default()
+        };
+        let (first_library, first_table) =
+            library_and_table(template.clone(), "cell_rise", vec![7.0, 3.0], vec![2]);
+        let (second_library, second_table) =
+            library_and_table(template, "cell_rise", vec![2.0, 11.0], vec![2]);
+        let query = TimingTableQuery::combinational(1.0, 0.0);
+
+        {
+            let _first = ScopedTimingTableEnvelopeCache::new(&first_library);
+            let mut first_diagnostics = TimingQueryDiagnosticCounts::default();
+            assert_eq!(
+                evaluate_table_with_query_and_diagnostics(
+                    &first_library,
+                    &first_table,
+                    query,
+                    &mut first_diagnostics,
+                    "outer_library",
+                )
+                .unwrap(),
+                7.0
+            );
+            {
+                let _second = ScopedTimingTableEnvelopeCache::new(&second_library);
+                let mut second_diagnostics = TimingQueryDiagnosticCounts::default();
+                assert_eq!(
+                    evaluate_table_with_query_and_diagnostics(
+                        &second_library,
+                        &second_table,
+                        query,
+                        &mut second_diagnostics,
+                        "nested_independent_library",
+                    )
+                    .unwrap(),
+                    11.0
+                );
+                assert_eq!(
+                    evaluate_table_with_query_and_diagnostics(
+                        &first_library,
+                        &first_table,
+                        query,
+                        &mut first_diagnostics,
+                        "suspended_outer_library",
+                    )
+                    .unwrap(),
+                    7.0,
+                    "an unrelated inner library must not expose stale cached values"
+                );
+            }
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _nested = ScopedTimingTableEnvelopeCache::new(&second_library);
+                panic!("exercise scoped Liberty envelope unwinding");
+            }));
+            assert!(panic.is_err());
+            TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+                assert_eq!(
+                    scopes.borrow().len(),
+                    1,
+                    "panic must restore the outer scope"
+                );
+            });
+        }
+
+        TIMING_TABLE_ENVELOPE_SCOPES.with(|scopes| {
+            assert!(
+                scopes.borrow().is_empty(),
+                "all scope-owned values must drop"
+            );
+        });
     }
 
     #[test]

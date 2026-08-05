@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const NF_AREA_FLOW_ROUNDS: usize = 4;
 const NF_EXACT_AREA_ROUNDS: usize = 2;
+const NF_DELAY_CUT_RESERVE: usize = 3;
 const NF_EPSILON: f64 = 0.001;
 const NF_TIMING_EPSILON: f64 = 1e-9;
 const NF_UNIT_DELAY: f64 = 1.0;
@@ -37,6 +38,58 @@ pub(super) struct NfCover {
     pub plan: CoverPlan,
     pub enumerated_cut_count: usize,
     pub representative_output_load: Option<f64>,
+}
+
+/// Bounded alternative covering policies for unusually large mapped cones.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum NfCoverPolicy {
+    /// Preserve the normal delay-oriented cut, pin, and child selection.
+    #[default]
+    Standard,
+    /// Keep native Liberty pin assignments during candidate matching.
+    NativePinOrder,
+    /// Retain only the normal structural-area-flow priority cuts.
+    StructuralAreaCuts,
+    /// Combine timing-feasible area children with native pin assignments.
+    AreaChildrenNativePinOrder,
+    /// Combine timing-feasible area children with structural-area cuts.
+    AreaChildrenStructuralAreaCuts,
+    /// Combine native pin assignments with structural-area cuts.
+    NativePinOrderStructuralAreaCuts,
+    /// Select timing-feasible area children in both scalar matching states.
+    AreaChildren,
+}
+
+impl NfCoverPolicy {
+    /// Reports whether the frontier retains protected delay-oriented cuts.
+    fn preserve_delay_cuts(self) -> bool {
+        !matches!(
+            self,
+            Self::StructuralAreaCuts
+                | Self::AreaChildrenStructuralAreaCuts
+                | Self::NativePinOrderStructuralAreaCuts
+        )
+    }
+
+    /// Reports whether interchangeable Liberty input pins may be exchanged.
+    fn optimize_symmetric_pins(self) -> bool {
+        !matches!(
+            self,
+            Self::NativePinOrder
+                | Self::AreaChildrenNativePinOrder
+                | Self::NativePinOrderStructuralAreaCuts
+        )
+    }
+
+    /// Reports whether delay matches must always preserve fastest children.
+    fn preserve_fast_delay_children(self) -> bool {
+        !matches!(
+            self,
+            Self::AreaChildren
+                | Self::AreaChildrenNativePinOrder
+                | Self::AreaChildrenStructuralAreaCuts
+        )
+    }
 }
 
 /// Maps using ABC's structural cuts, four flow rounds, and two exact rounds.
@@ -55,6 +108,28 @@ pub(super) fn build_cover_plan(
         cell_index,
         options,
         constraints,
+    )?;
+    mapper.map()
+}
+
+/// Maps with one explicit, deterministic large-cover recovery policy.
+pub(super) fn build_cover_plan_with_policy(
+    choice_aig: &ChoiceAig,
+    analysis: &ChoiceAnalysis,
+    library: &Library,
+    cell_index: &LibertyCellIndex,
+    options: &TechMapOptions,
+    constraints: &TechMapTimingConstraints,
+    policy: NfCoverPolicy,
+) -> Result<NfCover> {
+    let mut mapper = NfMapper::new_with_policy(
+        choice_aig,
+        analysis,
+        library,
+        cell_index,
+        options,
+        constraints,
+        policy,
     )?;
     mapper.map()
 }
@@ -86,6 +161,13 @@ impl NfState {
 struct NfCandidate {
     binding: CellBindingId,
     inputs: SmallVec<[NfState; MAX_TRUTH_TABLE_INPUTS]>,
+}
+
+/// Arrival information used when assigning interchangeable Liberty pins.
+#[derive(Clone, Copy, Debug)]
+enum NfCandidateTimingSource {
+    Flow,
+    Exact,
 }
 
 /// The implementation retained in one compact NF mapping match.
@@ -200,15 +282,22 @@ fn validate_output_required(output: &NfOutput, arrival: f64) -> Result<()> {
 struct NfCutFrontier {
     cuts: Vec<Cut>,
     limit: usize,
+    delay_cut_reserve: usize,
 }
 
 impl NfCutFrontier {
     /// Reserves the nontrivial-cut slots; a fanin unit cut is added on demand.
     fn new(max_cuts_per_node: usize) -> Self {
+        Self::with_delay_cut_reserve(max_cuts_per_node, NF_DELAY_CUT_RESERVE)
+    }
+
+    /// Configures the structural and protected-delay cut-frontier balance.
+    fn with_delay_cut_reserve(max_cuts_per_node: usize, delay_cut_reserve: usize) -> Self {
         let limit = max_cuts_per_node.saturating_sub(1).max(1);
         Self {
             cuts: Vec::with_capacity(limit),
             limit,
+            delay_cut_reserve: delay_cut_reserve.min(NF_DELAY_CUT_RESERVE),
         }
     }
 
@@ -235,7 +324,29 @@ impl NfCutFrontier {
             .unwrap_or(self.cuts.len());
         self.cuts.insert(position, cut);
         if self.cuts.len() > self.limit {
-            self.cuts.pop();
+            let reserve = self.delay_cut_reserve.min(self.limit.saturating_sub(1));
+            let mut protected = [None; NF_DELAY_CUT_RESERVE];
+            for (index, candidate) in self.cuts.iter().enumerate() {
+                if !candidate.useful {
+                    continue;
+                }
+                let Some(slot) = (0..reserve).find(|slot| {
+                    protected[*slot].is_none_or(|existing| {
+                        nf_timing_cut_order(candidate, &self.cuts[existing]).is_lt()
+                    })
+                }) else {
+                    continue;
+                };
+                for target in ((slot + 1)..reserve).rev() {
+                    protected[target] = protected[target - 1];
+                }
+                protected[slot] = Some(index);
+            }
+            let removed = (0..self.cuts.len())
+                .rev()
+                .find(|index| !protected[..reserve].contains(&Some(*index)))
+                .expect("a bounded frontier must have one unprotected overflow cut");
+            self.cuts.remove(removed);
         }
     }
 
@@ -259,6 +370,16 @@ fn nf_cut_order(lhs: &Cut, rhs: &Cut) -> Ordering {
     lhs.delay
         .total_cmp(&rhs.delay)
         .then_with(|| lhs.leaves.len().cmp(&rhs.leaves.len()))
+}
+
+/// Ranks a small protected frontier by depth before structural area flow.
+fn nf_timing_cut_order(lhs: &Cut, rhs: &Cut) -> Ordering {
+    lhs.delay
+        .total_cmp(&rhs.delay)
+        .then_with(|| lhs.flow.total_cmp(&rhs.flow))
+        .then_with(|| lhs.leaves.len().cmp(&rhs.leaves.len()))
+        .then_with(|| lhs.leaves.as_slice().cmp(rhs.leaves.as_slice()))
+        .then_with(|| lhs.truth.cmp(&rhs.truth))
 }
 
 /// Returns whether the sorted first leaf set is contained in the second.
@@ -398,6 +519,7 @@ fn enumerate_nf_cuts(
     cell_index: &LibertyCellIndex,
     options: &TechMapOptions,
     flow_references: &[f64],
+    policy: NfCoverPolicy,
 ) -> Result<Vec<Vec<Cut>>> {
     if options.max_cut_size == 0 || options.max_cut_size > MAX_TRUTH_TABLE_INPUTS {
         return Err(anyhow!(
@@ -438,7 +560,11 @@ fn enumerate_nf_cuts(
                     ));
                 }
 
-                let mut frontier = NfCutFrontier::new(options.max_cuts_per_node);
+                let mut frontier = if policy.preserve_delay_cuts() {
+                    NfCutFrontier::new(options.max_cuts_per_node)
+                } else {
+                    NfCutFrontier::with_delay_cut_reserve(options.max_cuts_per_node, 0)
+                };
                 if let Some(sibling) = choice_aig.next_sibling(node_ref) {
                     let complemented =
                         analysis.phase_by_node[node_id] ^ analysis.phase_by_node[sibling.id];
@@ -594,6 +720,7 @@ struct NfMapper<'a> {
     choice_aig: &'a ChoiceAig,
     cell_index: &'a LibertyCellIndex,
     pin_delays: Option<RepresentativePinDelayTable>,
+    policy: NfCoverPolicy,
     input_arrivals: Option<Vec<f64>>,
     cuts_by_node: Vec<Vec<Cut>>,
     candidates: Vec<[Vec<NfCandidate>; 2]>,
@@ -620,6 +747,27 @@ impl<'a> NfMapper<'a> {
         cell_index: &'a LibertyCellIndex,
         options: &TechMapOptions,
         constraints: &TechMapTimingConstraints,
+    ) -> Result<Self> {
+        Self::new_with_policy(
+            choice_aig,
+            analysis,
+            library,
+            cell_index,
+            options,
+            constraints,
+            NfCoverPolicy::Standard,
+        )
+    }
+
+    /// Builds one bounded mapping variant without changing public options.
+    fn new_with_policy(
+        choice_aig: &'a ChoiceAig,
+        analysis: &ChoiceAnalysis,
+        library: &Library,
+        cell_index: &'a LibertyCellIndex,
+        options: &TechMapOptions,
+        constraints: &TechMapTimingConstraints,
+        policy: NfCoverPolicy,
     ) -> Result<Self> {
         if options.max_frontier_size == 0 {
             return Err(anyhow!("max_frontier_size must be at least 1"));
@@ -695,6 +843,7 @@ impl<'a> NfMapper<'a> {
             cell_index,
             options,
             structural_refs.as_slice(),
+            policy,
         )?;
         let enumerated_cut_count = cuts_by_node.iter().map(Vec::len).sum();
         let node_count = graph.gates.len();
@@ -762,6 +911,7 @@ impl<'a> NfMapper<'a> {
             choice_aig,
             cell_index,
             pin_delays,
+            policy,
             input_arrivals,
             cuts_by_node,
             candidates,
@@ -837,12 +987,12 @@ impl<'a> NfMapper<'a> {
                 let required = self.requireds[node_id][state.polarity_index()];
 
                 for candidate in &self.candidates[node_id][state.polarity_index()] {
-                    let Some(candidate_match) =
+                    let Some((delay_candidate, area_candidate)) =
                         self.score_flow_candidate(state, candidate, required)
                     else {
                         continue;
                     };
-                    if candidate_match.arrival > required
+                    if delay_candidate.arrival > required
                         && direct_delay.is_some()
                         && direct_area.is_some()
                     {
@@ -850,15 +1000,15 @@ impl<'a> NfMapper<'a> {
                     }
                     if direct_delay
                         .as_ref()
-                        .is_none_or(|best| candidate_match.arrival < best.arrival)
+                        .is_none_or(|best| delay_candidate.arrival < best.arrival)
                     {
-                        direct_delay = Some(candidate_match.clone());
+                        direct_delay = Some(delay_candidate);
                     }
                     if direct_area
                         .as_ref()
-                        .is_none_or(|best| candidate_match.flow < best.flow - NF_EPSILON)
+                        .is_none_or(|best| area_candidate.flow < best.flow - NF_EPSILON)
                     {
-                        direct_area = Some(candidate_match);
+                        direct_area = Some(area_candidate);
                     }
                 }
 
@@ -944,22 +1094,80 @@ impl<'a> NfMapper<'a> {
         })
     }
 
-    /// Applies NF's per-pin area-under-required choice and selected arc delay.
+    /// Assigns late signals to faster Boolean-interchangeable Liberty pins.
+    fn ordered_candidate_inputs(
+        &self,
+        candidate: &NfCandidate,
+        timing_source: NfCandidateTimingSource,
+    ) -> Option<SmallVec<[NfState; MAX_TRUTH_TABLE_INPUTS]>> {
+        if !self.policy.optimize_symmetric_pins() {
+            return Some(candidate.inputs.clone());
+        }
+        let binding = self.cell_index.binding(candidate.binding);
+        let mut inputs = candidate.inputs.clone();
+        for first_input in 0..inputs.len() {
+            for second_input in (first_input + 1)..inputs.len() {
+                if binding.symmetric_input_masks[first_input] & (1_u8 << second_input) == 0 {
+                    continue;
+                }
+                let first_state = inputs[first_input];
+                let second_state = inputs[second_input];
+                let first_arrival = match timing_source {
+                    NfCandidateTimingSource::Flow => {
+                        self.matches[first_state.node_id][first_state.polarity_index()]
+                            .delay
+                            .as_ref()?
+                            .arrival
+                    }
+                    NfCandidateTimingSource::Exact => {
+                        self.best[first_state.node_id][first_state.polarity_index()]
+                            .as_ref()?
+                            .arrival
+                    }
+                };
+                let second_arrival = match timing_source {
+                    NfCandidateTimingSource::Flow => {
+                        self.matches[second_state.node_id][second_state.polarity_index()]
+                            .delay
+                            .as_ref()?
+                            .arrival
+                    }
+                    NfCandidateTimingSource::Exact => {
+                        self.best[second_state.node_id][second_state.polarity_index()]
+                            .as_ref()?
+                            .arrival
+                    }
+                };
+                let first_delay = self.pin_delay(candidate.binding, first_input);
+                let second_delay = self.pin_delay(candidate.binding, second_input);
+                let current = (first_arrival + first_delay).max(second_arrival + second_delay);
+                let swapped = (second_arrival + first_delay).max(first_arrival + second_delay);
+                if swapped + NF_TIMING_EPSILON < current {
+                    inputs.swap(first_input, second_input);
+                }
+            }
+        }
+        Some(inputs)
+    }
+
+    /// Scores fastest and area-under-required child choices independently.
     fn score_flow_candidate(
         &self,
         state: NfState,
         candidate: &NfCandidate,
         required: f64,
-    ) -> Option<NfMatch> {
+    ) -> Option<(NfMatch, NfMatch)> {
         let binding = self.cell_index.binding(candidate.binding);
-        let mut arrival: f64 = 0.0;
-        let mut flow = binding.area;
-
-        for (input_index, child) in candidate.inputs.iter().enumerate() {
+        let inputs = self.ordered_candidate_inputs(candidate, NfCandidateTimingSource::Flow)?;
+        let mut delay_arrival: f64 = 0.0;
+        let mut delay_flow = binding.area;
+        let mut area_arrival: f64 = 0.0;
+        let mut area_flow = binding.area;
+        for (input_index, child) in inputs.iter().enumerate() {
             let pin_delay = self.pin_delay(candidate.binding, input_index);
             let child_matches = &self.matches[child.node_id][child.polarity_index()];
             let delay_match = child_matches.delay.as_ref()?;
-            let chosen = if required.is_finite()
+            let area_match = if required.is_finite()
                 && child_matches
                     .area
                     .as_ref()
@@ -972,18 +1180,34 @@ impl<'a> NfMapper<'a> {
             } else {
                 delay_match
             };
-            arrival = arrival.max(chosen.arrival + pin_delay);
-            flow += chosen.flow;
+            let delay_child = if self.policy.preserve_fast_delay_children() {
+                delay_match
+            } else {
+                area_match
+            };
+            delay_arrival = delay_arrival.max(delay_child.arrival + pin_delay);
+            delay_flow += delay_child.flow;
+            area_arrival = area_arrival.max(area_match.arrival + pin_delay);
+            area_flow += area_match.flow;
         }
 
-        Some(NfMatch {
-            arrival,
-            flow: flow / self.flow_refs[state.node_id][state.polarity_index()].max(1.0),
-            choice: NfChoice::Cell {
-                binding: candidate.binding,
-                inputs: candidate.inputs.clone(),
+        let flow_references = self.flow_refs[state.node_id][state.polarity_index()].max(1.0);
+        let choice = NfChoice::Cell {
+            binding: candidate.binding,
+            inputs,
+        };
+        Some((
+            NfMatch {
+                arrival: delay_arrival,
+                flow: delay_flow / flow_references,
+                choice: choice.clone(),
             },
-        })
+            NfMatch {
+                arrival: area_arrival,
+                flow: area_flow / flow_references,
+                choice,
+            },
+        ))
     }
 
     /// Implements ABC's direct-phase-first explicit inverter closure.
@@ -998,7 +1222,6 @@ impl<'a> NfMapper<'a> {
         };
         let inverter_area = self.cell_index.binding(inverter).area;
         let inverter_delay = self.pin_delay(inverter, 0);
-
         for polarity in [false, true] {
             let state = NfState { node_id, polarity };
             let opposite = state.opposite();
@@ -1367,8 +1590,9 @@ impl<'a> NfMapper<'a> {
 
     /// Builds a timing-feasible exact-area candidate from current child states.
     fn exact_candidate(&self, candidate: &NfCandidate, required: f64) -> Option<NfMatch> {
+        let inputs = self.ordered_candidate_inputs(candidate, NfCandidateTimingSource::Exact)?;
         let mut arrival: f64 = 0.0;
-        for (input_index, child) in candidate.inputs.iter().enumerate() {
+        for (input_index, child) in inputs.iter().enumerate() {
             let child_match = self.best[child.node_id][child.polarity_index()].as_ref()?;
             arrival =
                 arrival.max(child_match.arrival + self.pin_delay(candidate.binding, input_index));
@@ -1381,7 +1605,7 @@ impl<'a> NfMapper<'a> {
             flow: 0.0,
             choice: NfChoice::Cell {
                 binding: candidate.binding,
-                inputs: candidate.inputs.clone(),
+                inputs,
             },
         })
     }
@@ -1789,6 +2013,62 @@ mod tests {
     }
 
     #[test]
+    fn bounded_frontier_preserves_fast_cuts_without_losing_cheapest_cut() {
+        let mut frontier = NfCutFrontier::new(4);
+        frontier.insert(structural_cut(&[1, 2], true, 1.0, 9.0));
+        frontier.insert(structural_cut(&[3, 4], true, 2.0, 4.0));
+        frontier.insert(structural_cut(&[5, 6], true, 3.0, 2.0));
+        frontier.insert(structural_cut(&[7, 8], true, 99.0, 1.0));
+
+        let cuts = frontier.finish();
+
+        assert_eq!(cuts.len(), 3);
+        assert!(cuts.iter().any(|cut| cut.delay == 9.0 && cut.flow == 1.0));
+        assert!(cuts.iter().any(|cut| cut.delay == 2.0 && cut.flow == 3.0));
+        assert!(cuts.iter().any(|cut| cut.delay == 1.0 && cut.flow == 99.0));
+    }
+
+    #[test]
+    fn structural_area_policy_disables_only_the_protected_delay_cut_slots() {
+        let mut frontier = NfCutFrontier::with_delay_cut_reserve(4, 0);
+        frontier.insert(structural_cut(&[1, 2], true, 1.0, 9.0));
+        frontier.insert(structural_cut(&[3, 4], true, 2.0, 4.0));
+        frontier.insert(structural_cut(&[5, 6], true, 3.0, 2.0));
+        frontier.insert(structural_cut(&[7, 8], true, 99.0, 1.0));
+
+        let cuts = frontier.finish();
+
+        assert_eq!(cuts.len(), 3);
+        assert!(cuts.iter().any(|cut| cut.delay == 9.0 && cut.flow == 1.0));
+        assert!(cuts.iter().any(|cut| cut.delay == 4.0 && cut.flow == 2.0));
+        assert!(cuts.iter().any(|cut| cut.delay == 2.0 && cut.flow == 3.0));
+        assert!(cuts.iter().all(|cut| cut.delay != 1.0));
+    }
+
+    #[test]
+    fn large_cover_policies_change_only_their_declared_mapping_dimensions() {
+        assert!(NfCoverPolicy::Standard.preserve_delay_cuts());
+        assert!(NfCoverPolicy::Standard.optimize_symmetric_pins());
+        assert!(NfCoverPolicy::Standard.preserve_fast_delay_children());
+
+        assert!(NfCoverPolicy::NativePinOrder.preserve_delay_cuts());
+        assert!(!NfCoverPolicy::NativePinOrder.optimize_symmetric_pins());
+        assert!(NfCoverPolicy::NativePinOrder.preserve_fast_delay_children());
+
+        assert!(!NfCoverPolicy::StructuralAreaCuts.preserve_delay_cuts());
+        assert!(NfCoverPolicy::StructuralAreaCuts.optimize_symmetric_pins());
+        assert!(NfCoverPolicy::StructuralAreaCuts.preserve_fast_delay_children());
+
+        assert!(!NfCoverPolicy::AreaChildrenNativePinOrder.optimize_symmetric_pins());
+        assert!(!NfCoverPolicy::AreaChildrenNativePinOrder.preserve_fast_delay_children());
+        assert!(!NfCoverPolicy::AreaChildrenStructuralAreaCuts.preserve_delay_cuts());
+        assert!(!NfCoverPolicy::AreaChildrenStructuralAreaCuts.preserve_fast_delay_children());
+        assert!(!NfCoverPolicy::NativePinOrderStructuralAreaCuts.preserve_delay_cuts());
+        assert!(!NfCoverPolicy::NativePinOrderStructuralAreaCuts.optimize_symmetric_pins());
+        assert!(!NfCoverPolicy::AreaChildren.preserve_fast_delay_children());
+    }
+
+    #[test]
     fn smaller_support_removes_existing_supersets_without_cost_comparison() {
         let mut frontier = NfCutFrontier::new(4);
         frontier.insert(structural_cut(&[1, 2, 3], true, 0.1, 1.0));
@@ -1801,6 +2081,151 @@ mod tests {
             cuts[0].leaves,
             CutLeaves::from_slice(&[AigRef { id: 1 }, AigRef { id: 2 }])
         );
+    }
+
+    #[test]
+    fn delay_match_keeps_fast_children_when_area_children_meet_required_time() {
+        let mut builder = GateBuilder::new(
+            "independent_delay_match".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let a: AigOperand = builder.add_input("a".to_string(), 1).try_into().unwrap();
+        let b: AigOperand = builder.add_input("b".to_string(), 1).try_into().unwrap();
+        let c: AigOperand = builder.add_input("c".to_string(), 1).try_into().unwrap();
+        let d: AigOperand = builder.add_input("d".to_string(), 1).try_into().unwrap();
+        let first = builder.add_and_binary(a, b);
+        let child = builder.add_and_binary(first, c);
+        let root = builder.add_and_binary(child, d);
+        builder.add_output("o".to_string(), root.into());
+        let graph = ChoiceAig::without_choices(builder.build());
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A * B", 1.0, 1.0),
+            ("AND3", &["A", "B", "C"], "A * B * C", 3.0, 0.5),
+        ]);
+        let options = TechMapOptions::default();
+        let constraints = TechMapTimingConstraints::default();
+        let analysis = crate::techmap::cuts::analyze_choices(&graph).unwrap();
+        let cell_index = LibertyCellIndex::build_nf(&library, options.max_cut_size).unwrap();
+        let mut mapper = NfMapper::new(
+            &graph,
+            &analysis,
+            &library,
+            &cell_index,
+            &options,
+            &constraints,
+        )
+        .unwrap();
+        mapper.compute_round_matches(0).unwrap();
+        let root_state = NfState {
+            node_id: root.node.id,
+            polarity: false,
+        };
+        let candidate = mapper.candidates[root.node.id][0]
+            .iter()
+            .find(|candidate| {
+                cell_index.binding(candidate.binding).cell_name == "AND2"
+                    && candidate
+                        .inputs
+                        .iter()
+                        .any(|input| input.node_id == child.node.id && !input.polarity)
+            })
+            .expect("the two-input root cut must expose its three-input child");
+
+        let (delay_match, area_match) = mapper
+            .score_flow_candidate(root_state, candidate, 3.0)
+            .expect("both child implementations should be available");
+
+        assert_eq!(delay_match.arrival, 1.5);
+        assert_eq!(area_match.arrival, 3.0);
+        assert!(area_match.flow < delay_match.flow);
+    }
+
+    #[test]
+    fn delay_mapping_routes_late_inputs_to_faster_symmetric_liberty_pins() {
+        let mut builder = LibraryBuilder::new();
+        let mut inputs = Vec::new();
+        let mut timing_arcs = Vec::new();
+        for (name, delay) in [("A", 9.0), ("B", 1.0)] {
+            inputs.push(Pin {
+                direction: PinDirection::Input as i32,
+                name: builder.intern_string(name).unwrap(),
+                capacitance: Some(0.1),
+                ..Pin::default()
+            });
+            let table = builder
+                .add_timing_table_f64(
+                    TimingTableKind::CellRise,
+                    0,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![delay],
+                    vec![],
+                    "",
+                )
+                .unwrap();
+            timing_arcs.push(
+                builder
+                    .add_timing_arc(name, "positive_unate", "combinational", "", vec![table])
+                    .unwrap(),
+            );
+        }
+        inputs.push(Pin {
+            direction: PinDirection::Output as i32,
+            name: builder.intern_string("Y").unwrap(),
+            function: builder.intern_string("A * B").unwrap(),
+            timing_arcs,
+            ..Pin::default()
+        });
+        builder.cells = vec![Cell {
+            name: "AND2".to_string(),
+            pins: inputs,
+            area: 1.0,
+            ..Cell::default()
+        }];
+        let library = builder.finish();
+        let graph = two_input_and(&[("o", false)]);
+        let mut constraints = TechMapTimingConstraints::default();
+        constraints
+            .primary_input_arrivals
+            .insert("a".to_string(), 5.0);
+
+        let cover =
+            endpoint_cover(&graph, &library, &constraints, &TechMapOptions::default()).unwrap();
+
+        assert_eq!(cover.plan.output_arrivals, [9.0]);
+
+        let options = TechMapOptions::default();
+        let analysis = crate::techmap::cuts::analyze_choices(&graph).unwrap();
+        let cell_index = LibertyCellIndex::build_nf(&library, options.max_cut_size).unwrap();
+        let mut mapper = NfMapper::new(
+            &graph,
+            &analysis,
+            &library,
+            &cell_index,
+            &options,
+            &constraints,
+        )
+        .unwrap();
+        mapper.compute_round_matches(0).unwrap();
+        mapper.set_mapping_references(0).unwrap();
+        mapper.reset_exact_matches(0).unwrap();
+        let root = graph.graph().outputs[0]
+            .bit_vector
+            .iter_lsb_to_msb()
+            .next()
+            .unwrap()
+            .node
+            .id;
+        let candidate = mapper.candidates[root][0]
+            .iter()
+            .find(|candidate| candidate.inputs.iter().all(|input| !input.polarity))
+            .expect("the direct symmetric AND candidate should be available");
+        let recovered = mapper
+            .exact_candidate(candidate, 14.0)
+            .expect("exact-area recovery should preserve the faster assignment");
+
+        assert_eq!(recovered.arrival, 9.0);
     }
 
     #[test]
