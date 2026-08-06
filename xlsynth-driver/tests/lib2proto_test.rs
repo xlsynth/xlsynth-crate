@@ -87,7 +87,7 @@ library (test) {
     assert_eq!(minimal.format_magic, LIBERTY_FORMAT_MAGIC);
     assert_eq!(minimal.provenance, provenance);
     assert_eq!(minimal.source_files, vec!["test.lib"]);
-    assert_eq!(minimal.nominal_voltage, None);
+    assert_eq!(minimal.nominal_voltage, Some(0.7));
     assert!(minimal.lu_table_templates.is_empty());
     assert!(minimal.cells[0].pins[0].internal_power.is_empty());
     assert!(minimal.cells[0].pins[1].timing_arcs.is_empty());

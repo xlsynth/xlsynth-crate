@@ -86,6 +86,9 @@ pub struct Library {
     pub default_threshold_voltage_group_id: u32,
     pub threshold_voltage_group_class_indices: Vec<i32>,
     pub nominal_voltage: Option<f64>,
+    pub default_max_fanout: Option<f64>,
+    pub default_max_transition: Option<f64>,
+    pub default_fanout_load: Option<f64>,
     pub provenance: String,
     pub source_files: Vec<String>,
     pub(crate) strings: Vec<Box<str>>,
@@ -506,6 +509,9 @@ pub struct Pin {
     pub rise_capacitance: Option<f64>,
     pub fall_capacitance: Option<f64>,
     pub max_capacitance: Option<f64>,
+    pub max_fanout: Option<f64>,
+    pub max_transition: Option<f64>,
+    pub fanout_load: Option<f64>,
     pub timing_arcs: Vec<TimingArc>,
     pub internal_power: Vec<InternalPower>,
 }
@@ -1424,6 +1430,9 @@ pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
                         rise_capacitance: pin.rise_capacitance,
                         fall_capacitance: pin.fall_capacitance,
                         max_capacitance: pin.max_capacitance,
+                        max_fanout: pin.max_fanout,
+                        max_transition: pin.max_transition,
+                        fanout_load: pin.fanout_load,
                         timing_arcs,
                         internal_power,
                     })
@@ -1450,6 +1459,9 @@ pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
         default_threshold_voltage_group_id: library.default_threshold_voltage_group_id,
         threshold_voltage_group_class_indices: library.threshold_voltage_group_class_indices,
         nominal_voltage: library.nominal_voltage,
+        default_max_fanout: library.default_max_fanout,
+        default_max_transition: library.default_max_transition,
+        default_fanout_load: library.default_fanout_load,
         provenance: library.provenance,
         source_files: library.source_files,
         lut_axes,
@@ -1745,6 +1757,9 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                         rise_capacitance: pin.rise_capacitance,
                         fall_capacitance: pin.fall_capacitance,
                         max_capacitance: pin.max_capacitance,
+                        max_fanout: pin.max_fanout,
+                        max_transition: pin.max_transition,
+                        fanout_load: pin.fanout_load,
                         timing_arcs,
                         internal_power,
                     })
@@ -1770,6 +1785,9 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
         default_threshold_voltage_group_id: library.default_threshold_voltage_group_id,
         threshold_voltage_group_class_indices: library.threshold_voltage_group_class_indices,
         nominal_voltage: library.nominal_voltage,
+        default_max_fanout: library.default_max_fanout,
+        default_max_transition: library.default_max_transition,
+        default_fanout_load: library.default_fanout_load,
         provenance: library.provenance,
         source_files: library.source_files,
         strings,
@@ -1784,6 +1802,30 @@ mod tests {
     use super::*;
     use prost::Message;
 
+    #[derive(Clone, PartialEq, Message)]
+    struct ElectricalDefaultsAbsentLibraryPayload {
+        #[prost(fixed64, tag = "1")]
+        format_magic: u64,
+        #[prost(message, repeated, tag = "2")]
+        cells: Vec<ElectricalDefaultsAbsentCellPayload>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct ElectricalDefaultsAbsentCellPayload {
+        #[prost(string, tag = "1")]
+        name: String,
+        #[prost(message, repeated, tag = "2")]
+        pins: Vec<ElectricalDefaultsAbsentPinPayload>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct ElectricalDefaultsAbsentPinPayload {
+        #[prost(int32, tag = "1")]
+        direction: i32,
+        #[prost(double, optional, tag = "5")]
+        capacitance: Option<f64>,
+    }
+
     #[test]
     fn string_id_is_a_four_byte_copy_handle() {
         fn assert_copy<T: Copy>() {}
@@ -1792,9 +1834,42 @@ mod tests {
     }
 
     #[test]
+    fn proto_without_electrical_fields_remains_backward_compatible() {
+        let original_bytes = ElectricalDefaultsAbsentLibraryPayload {
+            format_magic: LIBERTY_FORMAT_MAGIC,
+            cells: vec![ElectricalDefaultsAbsentCellPayload {
+                name: "BUF".to_string(),
+                pins: vec![ElectricalDefaultsAbsentPinPayload {
+                    direction: wire::PinDirection::Input as i32,
+                    capacitance: Some(0.125),
+                }],
+            }],
+        }
+        .encode_to_vec();
+        let wire = wire::Library::decode(original_bytes.as_slice()).unwrap();
+        let library = library_from_proto(wire).unwrap();
+
+        assert_eq!(library.default_max_fanout, None);
+        assert_eq!(library.default_max_transition, None);
+        assert_eq!(library.default_fanout_load, None);
+        let pin = &library.cells[0].pins[0];
+        assert_eq!(pin.capacitance, Some(0.125));
+        assert_eq!(pin.max_fanout, None);
+        assert_eq!(pin.max_transition, None);
+        assert_eq!(pin.fanout_load, None);
+        assert_eq!(
+            library_to_proto(library).unwrap().encode_to_vec(),
+            original_bytes
+        );
+    }
+
+    #[test]
     fn proto_conversion_roundtrips_with_float32_precision() {
         let shared_axis = vec![0.01, 0.02];
         let mut builder = LibraryBuilder::new();
+        builder.default_max_fanout = Some(5.5);
+        builder.default_max_transition = Some(0.75);
+        builder.default_fanout_load = Some(0.0);
         let rise = builder
             .add_timing_table_f64(
                 wire::TimingTableKind::CellRise,
@@ -1857,6 +1932,9 @@ mod tests {
             pins: vec![Pin {
                 function,
                 name,
+                max_fanout: Some(2.5),
+                max_transition: Some(0.25),
+                fanout_load: Some(0.0),
                 timing_arcs: vec![arc],
                 internal_power: vec![InternalPower {
                     related_pins: vec![related_pin],
@@ -1875,6 +1953,12 @@ mod tests {
 
         assert!(has_valid_header(&proto));
         assert_eq!(proto.encode_to_vec(), second_proto.encode_to_vec());
+        assert_eq!(proto.default_max_fanout, Some(5.5));
+        assert_eq!(proto.default_max_transition, Some(0.75));
+        assert_eq!(proto.default_fanout_load, Some(0.0));
+        assert_eq!(proto.cells[0].pins[0].max_fanout, Some(2.5));
+        assert_eq!(proto.cells[0].pins[0].max_transition, Some(0.25));
+        assert_eq!(proto.cells[0].pins[0].fanout_load, Some(0.0));
         assert_eq!(proto.lut_axes.len(), 1);
         assert_eq!(proto.lut_shapes.len(), 1);
         assert!(proto.interned_strings.iter().any(|value| value == "ENABLE"));
@@ -1906,6 +1990,12 @@ mod tests {
             vec![0.1_f32, 0.2_f32]
         );
         let roundtrip = library_from_proto(proto).unwrap();
+        assert_eq!(roundtrip.default_max_fanout, Some(5.5));
+        assert_eq!(roundtrip.default_max_transition, Some(0.75));
+        assert_eq!(roundtrip.default_fanout_load, Some(0.0));
+        assert_eq!(roundtrip.cells[0].pins[0].max_fanout, Some(2.5));
+        assert_eq!(roundtrip.cells[0].pins[0].max_transition, Some(0.25));
+        assert_eq!(roundtrip.cells[0].pins[0].fanout_load, Some(0.0));
         assert_eq!(
             roundtrip.lu_table_templates[0].kind_str(&roundtrip),
             "custom_template"

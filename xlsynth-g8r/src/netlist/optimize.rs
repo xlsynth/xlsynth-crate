@@ -7,11 +7,13 @@ use crate::netlist::buffer::{BufferOptions, BufferStats};
 use crate::netlist::parse::{Net, NetlistModule};
 use crate::netlist::report::{build_area_report, build_sta_report};
 use crate::netlist::resize::{ResizeOptions, ResizeStats, resize_netlist};
-use crate::netlist::sta::StaOptions;
+use crate::netlist::sta::{StaOptions, analyze_combinational_max_arrival};
 use crate::netlist::timing_buffer::{
     BufferTimingConstraints, consolidate_timing_aware_buffers, has_slow_shared_primary_output,
     insert_speculative_timing_aware_buffers, insert_timing_aware_buffers,
+    refresh_timing_buffer_diagnostics,
 };
+use crate::netlist::timing_resize::recover_final_timing_protected_area;
 use anyhow::Result;
 use serde::Serialize;
 use string_interner::symbol::SymbolU32;
@@ -21,6 +23,8 @@ use string_interner::{StringInterner, backend::StringBackend};
 const COORDINATED_TIMING_MAX_FANOUT: usize = 6;
 /// Avoid duplicating expensive complete-network sizing on very large designs.
 const MAX_COORDINATED_INSTANCE_COUNT: usize = 4096;
+/// Tiny mapped modules rarely repay a second complete Liberty timing graph.
+const MIN_FINAL_AREA_RECOVERY_INSTANCE_COUNT: usize = 128;
 /// High-buffer designs would require rebuilding an already extensive tree.
 const MAX_COORDINATED_EXISTING_BUFFERS: usize = 256;
 /// Bound isolated output-slew diagnosis to inexpensive small mapped designs.
@@ -232,15 +236,50 @@ pub fn optimize_mapped_netlist(
         }
     }
 
+    if let Some(configured) = &options.resize_options
+        && configured.max_area_iterations > 0
+        && (MIN_FINAL_AREA_RECOVERY_INSTANCE_COUNT..=MAX_COORDINATED_INSTANCE_COUNT)
+            .contains(&module.instances.len())
+    {
+        let mut recovery_options = configured.clone();
+        recovery_options.sta_options = options.sta_options;
+        let recovered = recover_final_timing_protected_area(
+            module,
+            nets.as_slice(),
+            interner,
+            library,
+            &recovery_options,
+            &BufferTimingConstraints::default(),
+        )?;
+        if let Some(stats) = resize_stats.as_mut() {
+            merge_resize_stats(stats, recovered);
+        }
+    }
+
     let final_area = build_area_report(module, interner, library)?.area;
-    let final_delay = build_sta_report(
+    let final_timing = analyze_combinational_max_arrival(
         module,
         nets.as_slice(),
         interner,
         library,
         options.sta_options,
-    )?
-    .delay;
+    )?;
+    let final_delay = final_timing.worst_output_arrival;
+    if let (Some(stats), Some(configured)) =
+        (buffer_stats.as_mut(), options.buffer_options.as_ref())
+    {
+        let mut final_options = configured.clone();
+        final_options.module_output_load = options.sta_options.module_output_load;
+        refresh_timing_buffer_diagnostics(
+            module,
+            nets.as_slice(),
+            interner,
+            library,
+            &final_options,
+            &final_timing,
+            stats,
+        )?;
+    }
     Ok(NetlistOptimizationStats {
         initial_area,
         final_area,
@@ -286,6 +325,7 @@ fn merge_resize_stats(initial: &mut ResizeStats, subsequent: ResizeStats) {
 #[cfg(test)]
 mod tests {
     use super::{NetlistOptimizationOptions, optimize_mapped_netlist};
+    use crate::liberty_model::PinDirection;
     use crate::netlist::buffer::BufferOptions;
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library};
     use crate::netlist::sta::StaOptions;
@@ -335,7 +375,7 @@ endmodule
         assert!(
             buffer_stats
                 .final_worst_delay
-                .is_some_and(|delay| (delay - resize_stats.initial_delay).abs() < 1e-9)
+                .is_some_and(|delay| (delay - stats.final_delay).abs() < 1e-9)
         );
         assert!(resize_stats.upsizes > 0);
         assert!(stats.final_delay < stats.initial_delay);
@@ -370,6 +410,52 @@ endmodule
         assert_eq!(stats.initial_delay, stats.final_delay);
         assert!(stats.buffer_stats.is_none());
         assert!(stats.resize_stats.is_none());
+    }
+
+    #[test]
+    fn refreshes_buffer_electrical_diagnostics_after_cell_resizing() {
+        let mut library = sizing_library();
+        for (name, transition_limit) in [("BUF", 0.05), ("BUF_FAST", 0.2)] {
+            let cell = library
+                .cells
+                .iter()
+                .position(|cell| cell.name == name)
+                .expect("find electrically characterized buffer variant");
+            let output = library.cells[cell]
+                .pins
+                .iter()
+                .position(|pin| pin.direction == PinDirection::Output as i32)
+                .expect("find characterized output pin");
+            library.cells[cell].pins[output].max_transition = Some(transition_limit);
+        }
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, y);
+  input a;
+  output y;
+  BUF driver (.A(a), .Y(y));
+endmodule
+"#,
+        );
+
+        let stats = optimize_mapped_netlist(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &NetlistOptimizationOptions::default(),
+        )
+        .expect("refresh final diagnostics after repairing a real slew violation");
+        let buffering = stats
+            .buffer_stats
+            .expect("retain final buffer electrical diagnostics");
+
+        assert_eq!(
+            interner.resolve(module.instances[0].type_name),
+            Some("BUF_FAST")
+        );
+        assert_eq!(buffering.unresolved_overloaded_nets, 0);
+        assert_eq!(buffering.final_worst_delay, Some(stats.final_delay));
     }
 
     #[test]

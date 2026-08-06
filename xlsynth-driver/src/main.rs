@@ -1955,7 +1955,7 @@ fn main() {
                 .arg(
                     Arg::new("include_power")
                         .long("include-power")
-                        .help("Include nominal voltage, internal-power groups, and power LUT templates")
+                        .help("Include internal-power groups and power LUT templates")
                         .action(ArgAction::SetTrue),
                 ),
         )

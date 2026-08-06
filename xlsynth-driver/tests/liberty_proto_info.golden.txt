@@ -7,6 +7,14 @@ Cells: 1
   Combinational: 1
   Sequential: 0
   Native dont-use: 0
+Electrical defaults:
+  Maximum fanout: <unspecified>
+  Maximum transition: <unspecified>
+  Fanout load: <unspecified>
+Pins with electrical limits:
+  Maximum fanout: 0
+  Maximum transition: 0
+  Fanout load: 0
 LUT templates: 2
 Timing arcs: 1
 Internal-power groups: 1

@@ -79,8 +79,9 @@ xlsynth-driver lib2proto \
 Timing and dynamic-power payloads are independently excluded by default. Pass
 `--include-timing` to preserve timing arcs, the nominal delay/transition and
 constraint tables consumed by the deterministic evaluator, and
-`lu_table_template` definitions. Pass `--include-power` to preserve `nom_voltage`,
-`internal_power` groups, and `power_lut_template` definitions.
+`lu_table_template` definitions. Pass `--include-power` to preserve
+`internal_power` groups and `power_lut_template` definitions. Nominal voltage
+and Liberty electrical limits are preserved independently of both payload flags.
 For example, the two standard variants are:
 
 ```shell
@@ -103,7 +104,11 @@ generated when needed.
 typed enums for standard Liberty vocabularies, and library-wide interned
 strings, axis vectors, and table shapes. Loaders expand it to strings, float64
 values, and inline table geometry for the in-memory evaluator API. This is a
-breaking wire-format change, and older Liberty proto files must be regenerated.
+breaking wire-format change from the earlier legacy representation, and those
+legacy Liberty proto files must be regenerated. Additive optional fields in the
+current binary representation remain backward-compatible with existing readers
+and files. Textprotos containing newly added fields require a reader with a
+descriptor that supports those fields.
 In Rust, `xlsynth_g8r::liberty_proto` contains the generated wire types, while
 `xlsynth_g8r::liberty_model` contains the normalized evaluator-facing types.
 
@@ -169,8 +174,9 @@ xlsynth-driver liberty-proto-info /path/to/asap7.proto.gz
 ```
 
 The report includes file size and SHA-256, provenance, source files, total,
-combinational, sequential, and native `dont_use` cell counts, LUT templates,
-timing arcs, internal-power groups and tables, and nominal voltage.
+combinational, sequential, and native `dont_use` cell counts, library electrical
+defaults and constrained-pin counts, LUT templates, timing arcs, internal-power
+groups and tables, and nominal voltage.
 
 All `xlsynth-driver` subcommands that consume a Liberty proto accept `.proto`,
 `.textproto`, `.proto.gz`, and `.textproto.gz`. `lib2proto` itself emits

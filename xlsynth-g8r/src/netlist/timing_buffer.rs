@@ -75,6 +75,8 @@ enum TimingSinkTarget {
 struct TimingSink {
     target: TimingSinkTarget,
     load: CombinationalOutputLoad,
+    fanout_load: f64,
+    max_transition: Option<f64>,
     criticality: f64,
 }
 
@@ -114,6 +116,7 @@ struct TimingGraph {
 struct TimingSinkGroup {
     sinks: Vec<TimingSink>,
     load: CombinationalOutputLoad,
+    fanout_load: f64,
     has_module_output: bool,
 }
 
@@ -197,6 +200,31 @@ pub fn insert_timing_aware_buffers(
         constraints,
         false,
     )
+}
+
+/// Refreshes final electrical diagnostics using an already-computed STA report.
+pub(crate) fn refresh_timing_buffer_diagnostics(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &BufferOptions,
+    timing: &StaReport,
+    stats: &mut BufferStats,
+) -> Result<()> {
+    let graph = build_electrical_timing_graph(module, nets, interner, library, options)?;
+    let catalog = CellCatalog::new(library)?;
+    stats.max_fanout_after = eligible_fanouts(&graph, options)
+        .map(|fanout| fanout.sinks.len())
+        .max()
+        .unwrap_or(0);
+    stats.max_load_after = eligible_fanouts(&graph, options)
+        .map(|fanout| max_load(sum_sink_load(&fanout.sinks)))
+        .fold(0.0, f64::max);
+    stats.unresolved_overloaded_nets =
+        count_unresolved_overloaded_nets(&graph, library, &catalog, options, timing)?;
+    stats.final_worst_delay = Some(timing.worst_output_arrival);
+    Ok(())
 }
 
 /// Explores critical fanouts inside an independently validated trial netlist.
@@ -367,6 +395,13 @@ fn insert_timing_aware_buffers_with_strategy(
     if roots.is_empty() {
         stats.max_fanout_after = stats.max_fanout_before;
         stats.max_load_after = stats.max_load_before;
+        stats.unresolved_overloaded_nets = count_unresolved_overloaded_nets(
+            &initial_graph,
+            library,
+            &catalog,
+            options,
+            &snapshot.combined,
+        )?;
         return Ok(stats);
     }
     if catalog.buffers().next().is_none() {
@@ -380,6 +415,7 @@ fn insert_timing_aware_buffers_with_strategy(
             let fanout = &initial_graph.fanouts[*root];
             fanout.sinks.len() > options.max_fanout
                 || exceeds_characterized_output_limit(fanout, library, options)
+                || exceeds_weighted_fanout_limit(fanout, library)
         })
         .collect::<Vec<_>>();
     if !hard_roots.is_empty() {
@@ -498,7 +534,8 @@ fn insert_timing_aware_buffers_with_strategy(
                 continue;
             }
             fixes_hard_violation |= fanout.sinks.len() > options.max_fanout
-                || exceeds_characterized_output_limit(fanout, library, options);
+                || exceeds_characterized_output_limit(fanout, library, options)
+                || exceeds_weighted_fanout_limit(fanout, library);
             apply_buffer_tree(
                 &mut trial_module,
                 &mut trial_nets,
@@ -577,11 +614,13 @@ fn insert_timing_aware_buffers_with_strategy(
     stats.max_load_after = eligible_fanouts(&final_graph, options)
         .map(|fanout| max_load(sum_sink_load(&fanout.sinks)))
         .fold(0.0, f64::max);
-    stats.unresolved_overloaded_nets = eligible_fanouts(&final_graph, options)
-        .map(|fanout| fanout_is_overloaded(fanout, library, &catalog, options))
-        .try_fold(0usize, |count, overloaded| {
-            overloaded.map(|overloaded| count + usize::from(overloaded))
-        })?;
+    stats.unresolved_overloaded_nets = count_unresolved_overloaded_nets(
+        &final_graph,
+        library,
+        &catalog,
+        options,
+        &snapshot.combined,
+    )?;
     Ok(stats)
 }
 
@@ -721,11 +760,13 @@ pub(crate) fn consolidate_timing_aware_buffers(
         stats.max_load_after = eligible_fanouts(&graph, options)
             .map(|fanout| max_load(sum_sink_load(&fanout.sinks)))
             .fold(0.0, f64::max);
-        stats.unresolved_overloaded_nets = eligible_fanouts(&graph, options)
-            .map(|fanout| fanout_is_overloaded(fanout, library, &catalog, options))
-            .try_fold(0usize, |count, overloaded| {
-                overloaded.map(|overloaded| count + usize::from(overloaded))
-            })?;
+        stats.unresolved_overloaded_nets = count_unresolved_overloaded_nets(
+            &graph,
+            library,
+            &catalog,
+            options,
+            &snapshot.combined,
+        )?;
     }
     Ok(stats)
 }
@@ -807,6 +848,14 @@ fn sibling_buffer_consolidations(
                 rise: keep_load.rise + remove_load.rise,
                 fall: keep_load.fall + remove_load.fall,
             };
+            let combined_fanout_load = sum_sink_fanout_load(&keep_fanout.sinks)
+                + sum_sink_fanout_load(&remove_fanout.sinks);
+            let sink_transition_limit = keep_fanout
+                .sinks
+                .iter()
+                .chain(&remove_fanout.sinks)
+                .filter_map(|sink| sink.max_transition)
+                .reduce(f64::min);
             if options.target_load.is_some_and(|limit| {
                 combined_load.rise > limit + TIMING_EPSILON
                     || combined_load.fall > limit + TIMING_EPSILON
@@ -817,11 +866,23 @@ fn sibling_buffer_consolidations(
                 rise: keep_cell.input_capacitances[0].rise + remove_cell.input_capacitances[0].rise,
                 fall: keep_cell.input_capacitances[0].fall + remove_cell.input_capacitances[0].fall,
             };
+            let old_parent_fanout_load = library.cells[keep_cell.cell_index].pins
+                [keep_cell.input_pin_indices[0]]
+                .fanout_load
+                .unwrap_or(0.0)
+                + library.cells[remove_cell.cell_index].pins[remove_cell.input_pin_indices[0]]
+                    .fanout_load
+                    .unwrap_or(0.0);
             let source_timing = snapshot.combined.timing_for_net(graph.bits[root].0);
             let mut replacements = Vec::new();
             for replacement in catalog.family(keep_cell) {
-                if !replacement.is_buffer()
-                    || replacement.area + TIMING_EPSILON >= combined_area
+                if !replacement.is_buffer() {
+                    continue;
+                }
+                let cell = &library.cells[replacement.cell_index];
+                let output = &cell.pins[replacement.output_pin_index];
+                let input = &cell.pins[replacement.input_pin_indices[0]];
+                if replacement.area + TIMING_EPSILON >= combined_area
                     || replacement.input_capacitances[0].rise
                         > old_parent_load.rise + TIMING_EPSILON
                     || replacement.input_capacitances[0].fall
@@ -829,14 +890,15 @@ fn sibling_buffer_consolidations(
                     || replacement
                         .output_max_capacitance
                         .is_some_and(|limit| max_load(combined_load) > limit + TIMING_EPSILON)
+                    || input.fanout_load.unwrap_or(0.0) > old_parent_fanout_load + TIMING_EPSILON
+                    || output
+                        .max_fanout
+                        .is_some_and(|limit| combined_fanout_load > limit + TIMING_EPSILON)
                 {
                     continue;
                 }
                 let predicted_delay = if let Some(timing) = source_timing {
-                    let cell = &library.cells[replacement.cell_index];
-                    let input =
-                        library.resolve_string(&cell.pins[replacement.input_pin_indices[0]].name);
-                    let output = &cell.pins[replacement.output_pin_index];
+                    let input = library.resolve_string(&input.name);
                     let mut diagnostics = TimingQueryDiagnosticCounts::default();
                     let timing = evaluate_combinational_cell_output_timing(
                         library,
@@ -847,6 +909,16 @@ fn sibling_buffer_consolidations(
                         &HashMap::new(),
                         &mut diagnostics,
                     )?;
+                    let transition_limit = match (output.max_transition, sink_transition_limit) {
+                        (Some(output), Some(sink)) => Some(output.min(sink)),
+                        (Some(output), None) => Some(output),
+                        (None, sink) => sink,
+                    };
+                    if transition_limit.is_some_and(|limit| {
+                        timing.rise.transition.max(timing.fall.transition) > limit + TIMING_EPSILON
+                    }) {
+                        continue;
+                    }
                     timing.rise.arrival.max(timing.fall.arrival)
                 } else {
                     replacement.nominal_delay
@@ -990,6 +1062,19 @@ fn build_timing_graph(
     constraints: &BufferTimingConstraints,
     snapshot: &TimingSnapshot,
 ) -> Result<TimingGraph> {
+    let mut graph = build_electrical_timing_graph(module, nets, interner, library, options)?;
+    compute_downstream_criticality(&mut graph, module, nets, interner, constraints, snapshot)?;
+    Ok(graph)
+}
+
+/// Builds exact per-bit electrical connectivity without another STA pass.
+fn build_electrical_timing_graph(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &BufferOptions,
+) -> Result<TimingGraph> {
     validate_constant_output_assignments(module, nets)?;
     let normalized = NormalizedNetlistModule::new(module, nets, interner)
         .context("normalizing timing-driven buffer connectivity")?;
@@ -1036,6 +1121,8 @@ fn build_timing_graph(
                             rise: options.module_output_load,
                             fall: options.module_output_load,
                         },
+                        fanout_load: 0.0,
+                        max_transition: None,
                         criticality: 0.0,
                     });
                 }
@@ -1091,6 +1178,8 @@ fn build_timing_graph(
                         connection_index,
                     },
                     load,
+                    fanout_load: pin.fanout_load.unwrap_or(0.0),
+                    max_transition: pin.max_transition,
                     criticality: 0.0,
                 });
                 if !pin.is_clocking_pin {
@@ -1116,14 +1205,12 @@ fn build_timing_graph(
         }
     }
 
-    let mut graph = TimingGraph {
+    Ok(TimingGraph {
         fanouts,
         bits,
         instances,
         departures: vec![0.0; normalized.bit_count()],
-    };
-    compute_downstream_criticality(&mut graph, module, nets, interner, constraints, snapshot)?;
-    Ok(graph)
+    })
 }
 
 /// Propagates actual endpoint arrival and setup urgency toward source nets.
@@ -1286,7 +1373,8 @@ fn overloaded_roots(
             .map(|limit| max_load(sum_sink_load(&fanout.sinks)) / limit)
             .unwrap_or(0.0);
         let hard = fanout.sinks.len() > options.max_fanout
-            || exceeds_characterized_output_limit(fanout, library, options);
+            || exceeds_characterized_output_limit(fanout, library, options)
+            || exceeds_weighted_fanout_limit(fanout, library);
         roots.push((
             index,
             hard,
@@ -1349,6 +1437,26 @@ fn eligible_fanouts<'a>(
         .filter(move |fanout| fanout_eligible(fanout, options))
 }
 
+/// Counts remaining count, capacitive, weighted-fanout, and slew violations.
+fn count_unresolved_overloaded_nets(
+    graph: &TimingGraph,
+    library: &Library,
+    catalog: &CellCatalog,
+    options: &BufferOptions,
+    timing: &StaReport,
+) -> Result<usize> {
+    graph
+        .fanouts
+        .iter()
+        .enumerate()
+        .filter(|(_, fanout)| fanout_eligible(fanout, options))
+        .try_fold(0usize, |count, (root, fanout)| -> Result<usize> {
+            let overloaded = fanout_is_overloaded(fanout, library, catalog, options)?
+                || exceeds_transition_limit(fanout, library, timing.timing_for_bit(root));
+            Ok(count + usize::from(overloaded))
+        })
+}
+
 /// Tests the real driver capacitance and ABC-style electrical effort.
 fn fanout_is_overloaded(
     fanout: &TimingFanout,
@@ -1357,6 +1465,9 @@ fn fanout_is_overloaded(
     options: &BufferOptions,
 ) -> Result<bool> {
     if fanout.sinks.len() > options.max_fanout {
+        return Ok(true);
+    }
+    if exceeds_weighted_fanout_limit(fanout, library) {
         return Ok(true);
     }
     let load = max_load(sum_sink_load(&fanout.sinks));
@@ -1477,6 +1588,44 @@ fn exceeds_characterized_output_limit(
             .filter(|limit| limit.is_finite() && *limit > 0.0)
     });
     limit.is_some_and(|limit| max_load(sum_sink_load(&fanout.sinks)) > limit + TIMING_EPSILON)
+        || exceeds_weighted_fanout_limit(fanout, library)
+}
+
+/// Compares real Liberty sink weights against their driver's fanout budget.
+fn exceeds_weighted_fanout_limit(fanout: &TimingFanout, library: &Library) -> bool {
+    let Some(driver) = fanout.driver else {
+        return false;
+    };
+    let Some(limit) = library.cells[driver.cell_index].pins[driver.pin_index].max_fanout else {
+        return false;
+    };
+    limit.is_finite()
+        && limit >= 0.0
+        && sum_sink_fanout_load(&fanout.sinks) > limit + TIMING_EPSILON
+}
+
+/// Checks the strictest legal output/sink slew on one actual timed net.
+fn exceeds_transition_limit(
+    fanout: &TimingFanout,
+    library: &Library,
+    timing: Option<SignalTiming>,
+) -> bool {
+    let Some(timing) = timing else {
+        return false;
+    };
+    let output_limit = fanout
+        .driver
+        .and_then(|driver| library.cells[driver.cell_index].pins[driver.pin_index].max_transition);
+    let limit = fanout
+        .sinks
+        .iter()
+        .filter_map(|sink| sink.max_transition)
+        .chain(output_limit)
+        .filter(|limit| limit.is_finite() && *limit >= 0.0)
+        .reduce(f64::min);
+    limit.is_some_and(|limit| {
+        timing.rise.transition.max(timing.fall.transition) > limit + TIMING_EPSILON
+    })
 }
 
 /// Preserves exact capture and externally supplied output deadlines.
@@ -1629,8 +1778,13 @@ fn apply_buffer_tree(
                 rise: total_load.rise + level_load.rise,
                 fall: total_load.fall + level_load.fall,
             };
+            let weighted_load = sum_sink_fanout_load(&direct) + sum_sink_fanout_load(&level);
+            let weighted_limit = fanout.driver.and_then(|driver| {
+                library.cells[driver.cell_index].pins[driver.pin_index].max_fanout
+            });
             if total_count <= options.max_fanout
                 && root_limit.is_none_or(|limit| max_load(root_load) <= limit + TIMING_EPSILON)
+                && weighted_limit.is_none_or(|limit| weighted_load <= limit + TIMING_EPSILON)
             {
                 break;
             }
@@ -1638,7 +1792,10 @@ fn apply_buffer_tree(
 
         let previous_count = level.len();
         let previous_load = max_load(sum_sink_load(&level));
-        let groups = partition_timing_sinks(level, options.max_fanout, root_limit);
+        let fanout_limit = fanout
+            .driver
+            .and_then(|driver| library.cells[driver.cell_index].pins[driver.pin_index].max_fanout);
+        let groups = partition_timing_sinks(level, options.max_fanout, root_limit, fanout_limit);
         let mut next = Vec::with_capacity(groups.len());
         for group in groups {
             let buffer =
@@ -1674,6 +1831,11 @@ fn apply_buffer_tree(
                     connection_index,
                 },
                 load: buffer.input_capacitances[0],
+                fanout_load: library.cells[buffer.cell_index].pins[buffer.input_pin_indices[0]]
+                    .fanout_load
+                    .unwrap_or(0.0),
+                max_transition: library.cells[buffer.cell_index].pins[buffer.input_pin_indices[0]]
+                    .max_transition,
                 criticality: group
                     .sinks
                     .iter()
@@ -1703,6 +1865,7 @@ fn partition_timing_sinks(
     sinks: Vec<TimingSink>,
     max_fanout: usize,
     target_load: Option<f64>,
+    target_fanout_load: Option<f64>,
 ) -> Vec<TimingSinkGroup> {
     let mut groups = Vec::<TimingSinkGroup>::new();
     for sink in sinks {
@@ -1716,6 +1879,9 @@ fn partition_timing_sinks(
                     && target_load.is_none_or(|limit| {
                         group.load.rise + sink.load.rise <= limit + TIMING_EPSILON
                             && group.load.fall + sink.load.fall <= limit + TIMING_EPSILON
+                    })
+                    && target_fanout_load.is_none_or(|limit| {
+                        group.fanout_load + sink.fanout_load <= limit + TIMING_EPSILON
                     })
             })
             .min_by(|(lhs_index, lhs), (rhs_index, rhs)| {
@@ -1731,6 +1897,7 @@ fn partition_timing_sinks(
         let group = &mut groups[group_index];
         group.load.rise += sink.load.rise;
         group.load.fall += sink.load.fall;
+        group.fanout_load += sink.fanout_load;
         group.has_module_output |= is_output;
         group.sinks.push(sink);
     }
@@ -1752,16 +1919,19 @@ fn select_timing_buffer<'a>(
     let mut timing_best: Option<(&CatalogCell, f64)> = None;
     let mut fallback: Option<(&CatalogCell, f64)> = None;
     for buffer in catalog.buffers() {
+        let cell = &library.cells[buffer.cell_index];
+        let output = &cell.pins[buffer.output_pin_index];
         if buffer
             .output_max_capacitance
             .is_some_and(|limit| load > limit + TIMING_EPSILON)
+            || output
+                .max_fanout
+                .is_some_and(|limit| group.fanout_load > limit + TIMING_EPSILON)
         {
             continue;
         }
         let delay = if let Some(timing) = source_timing {
-            let cell = &library.cells[buffer.cell_index];
             let input = library.resolve_string(&cell.pins[buffer.input_pin_indices[0]].name);
-            let output = &cell.pins[buffer.output_pin_index];
             let mut diagnostics = TimingQueryDiagnosticCounts::default();
             let result = evaluate_combinational_cell_output_timing(
                 library,
@@ -1990,6 +2160,11 @@ fn sum_sink_load(sinks: &[TimingSink]) -> CombinationalOutputLoad {
         })
 }
 
+/// Sums dimensionless Liberty fanout weights independently of capacitance.
+fn sum_sink_fanout_load(sinks: &[TimingSink]) -> f64 {
+    sinks.iter().map(|sink| sink.fanout_load).sum()
+}
+
 /// Returns the conservative scalar of independently modeled edge loads.
 fn max_load(load: CombinationalOutputLoad) -> f64 {
     load.rise.max(load.fall)
@@ -1998,9 +2173,10 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        BufferTimingConstraints, TimingSinkGroup, consolidate_timing_aware_buffers,
-        has_slow_shared_primary_output, insert_speculative_timing_aware_buffers,
-        insert_timing_aware_buffers, select_timing_buffer,
+        BufferTimingConstraints, TimingDriver, TimingFanout, TimingSink, TimingSinkGroup,
+        TimingSinkTarget, consolidate_timing_aware_buffers, exceeds_transition_limit,
+        fanout_is_overloaded, has_slow_shared_primary_output,
+        insert_speculative_timing_aware_buffers, insert_timing_aware_buffers, select_timing_buffer,
     };
     use crate::liberty_model::{
         Cell, Library, LibraryBuilder, LuTableTemplate, Pin, PinDirection, Sequential,
@@ -2220,6 +2396,207 @@ endmodule
     }
 
     #[test]
+    fn zero_weight_fanout_does_not_turn_liberty_limit_into_sink_count() {
+        let mut library = sizing_library();
+        let driver_cell = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "BUF")
+            .expect("test library contains the driver");
+        let driver_pin = library.cells[driver_cell]
+            .pins
+            .iter()
+            .position(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("driver contains an output");
+        library.cells[driver_cell].pins[driver_pin].max_fanout = Some(1.5);
+        let catalog = CellCatalog::new(&library).expect("classify test library");
+        let mut fanout = TimingFanout {
+            driver: Some(TimingDriver {
+                instance_index: 0,
+                connection_index: 0,
+                cell_index: driver_cell,
+                pin_index: driver_pin,
+            }),
+            sinks: (0..3)
+                .map(|index| TimingSink {
+                    target: TimingSinkTarget::InstancePin {
+                        instance_index: index + 1,
+                        connection_index: 0,
+                    },
+                    load: CombinationalOutputLoad::default(),
+                    fanout_load: 0.0,
+                    max_transition: None,
+                    criticality: 0.0,
+                })
+                .collect(),
+            ..TimingFanout::default()
+        };
+
+        assert!(
+            !fanout_is_overloaded(&fanout, &library, &catalog, &BufferOptions::default())
+                .expect("evaluate zero-weight fanout")
+        );
+
+        for sink in &mut fanout.sinks {
+            sink.fanout_load = 0.75;
+        }
+        assert!(
+            fanout_is_overloaded(&fanout, &library, &catalog, &BufferOptions::default())
+                .expect("evaluate fractional weighted fanout")
+        );
+    }
+
+    #[test]
+    fn checks_strictest_driver_and_sink_transition_limits() {
+        let mut library = sizing_library();
+        let driver_cell = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "BUF")
+            .expect("test library contains the driver");
+        let driver_pin = library.cells[driver_cell]
+            .pins
+            .iter()
+            .position(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("driver contains an output");
+        library.cells[driver_cell].pins[driver_pin].max_transition = Some(0.3);
+        let mut fanout = TimingFanout {
+            driver: Some(TimingDriver {
+                instance_index: 0,
+                connection_index: 0,
+                cell_index: driver_cell,
+                pin_index: driver_pin,
+            }),
+            sinks: vec![TimingSink {
+                target: TimingSinkTarget::InstancePin {
+                    instance_index: 1,
+                    connection_index: 0,
+                },
+                load: CombinationalOutputLoad::default(),
+                fanout_load: 0.0,
+                max_transition: Some(0.15),
+                criticality: 0.0,
+            }],
+            ..TimingFanout::default()
+        };
+        let timing = SignalTiming {
+            rise: EdgeTiming {
+                arrival: 0.0,
+                transition: 0.2,
+            },
+            fall: EdgeTiming {
+                arrival: 0.0,
+                transition: 0.1,
+            },
+        };
+
+        assert!(exceeds_transition_limit(&fanout, &library, Some(timing)));
+        fanout.sinks[0].max_transition = Some(0.25);
+        assert!(!exceeds_transition_limit(&fanout, &library, Some(timing)));
+        library.cells[driver_cell].pins[driver_pin].max_transition = Some(0.18);
+        assert!(exceeds_transition_limit(&fanout, &library, Some(timing)));
+    }
+
+    #[test]
+    fn reports_actual_unresolved_transition_without_creating_a_slew_only_buffer_root() {
+        let mut library = sizing_library();
+        let driver = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "BUF")
+            .expect("find slew-limited output driver");
+        let output = library.cells[driver]
+            .pins
+            .iter()
+            .position(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find slew-limited output pin");
+        library.cells[driver].pins[output].max_transition = Some(0.05);
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, y);
+  input a;
+  output y;
+  BUF driver (.A(a), .Y(y));
+endmodule
+"#,
+        );
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("diagnose an actual final slew violation without speculative topology changes");
+
+        assert_eq!(stats.buffers_inserted, 0);
+        assert_eq!(stats.unresolved_overloaded_nets, 1);
+    }
+
+    #[test]
+    fn reports_transition_violations_for_exact_packed_output_bits() {
+        let mut builder = LibraryBuilder::from_library(sizing_library());
+        let buffer_index = builder
+            .cells
+            .iter()
+            .position(|cell| cell.name == "BUF")
+            .expect("find packed-output buffer");
+        let output_index = builder.cells[buffer_index]
+            .pins
+            .iter()
+            .position(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find packed-output buffer pin");
+        builder.cells[buffer_index].pins[output_index].max_transition = Some(0.2);
+
+        let mut slow = builder.cells[buffer_index].clone();
+        slow.name = "BUF_SLOW".to_string();
+        slow.pins[output_index].max_transition = Some(0.3);
+        let tables = [
+            (TimingTableKind::CellRise, 5.0),
+            (TimingTableKind::CellFall, 5.0),
+            (TimingTableKind::RiseTransition, 0.4),
+            (TimingTableKind::FallTransition, 0.4),
+        ]
+        .into_iter()
+        .map(|(kind, value)| scalar_table(&mut builder, kind, value))
+        .collect();
+        slow.pins[output_index].timing_arcs = vec![
+            builder
+                .add_timing_arc("A", "positive_unate", "combinational", "", tables)
+                .expect("characterize slower packed-output bit"),
+        ];
+        builder.cells.push(slow);
+        let library = builder.finish();
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, y);
+  input [1:0] a;
+  output [1:0] y;
+  BUF fast (.A(a[0]), .Y(y[0]));
+  BUF_SLOW slow (.A(a[1]), .Y(y[1]));
+endmodule
+"#,
+        );
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("evaluate each packed output with its own final Liberty slew");
+
+        assert_eq!(stats.buffers_inserted, 0);
+        assert_eq!(stats.unresolved_overloaded_nets, 1);
+    }
+
+    #[test]
     fn increases_buffer_strength_when_small_buffer_exceeds_liberty_load() {
         let library = registered_timing_library();
         let catalog = CellCatalog::new(&library).expect("catalog timing-complete test buffers");
@@ -2235,6 +2612,95 @@ endmodule
             .expect("select stronger buffer required by real Liberty load");
 
         assert_eq!(buffer.name, "BUF_FAST");
+    }
+
+    #[test]
+    fn retains_provisional_buffer_when_overloaded_source_slew_exceeds_every_limit() {
+        let mut library = sizing_library();
+        for (name, transition_limit) in [("BUF", 0.01), ("BUF_FAST", 0.02)] {
+            let cell = library
+                .cells
+                .iter()
+                .position(|cell| cell.name == name)
+                .expect("find timing-characterized provisional buffer");
+            let output = library.cells[cell]
+                .pins
+                .iter()
+                .position(|pin| pin.direction == PinDirection::Output as i32)
+                .expect("find provisional-buffer output");
+            library.cells[cell].pins[output].max_transition = Some(transition_limit);
+        }
+        let catalog = CellCatalog::new(&library).expect("catalog provisional buffer variants");
+        let group = TimingSinkGroup {
+            load: CombinationalOutputLoad {
+                rise: 0.72,
+                fall: 0.72,
+            },
+            ..TimingSinkGroup::default()
+        };
+        let overloaded_source = SignalTiming {
+            rise: EdgeTiming {
+                arrival: 5.0,
+                transition: 1.0,
+            },
+            fall: EdgeTiming {
+                arrival: 5.0,
+                transition: 1.0,
+            },
+        };
+
+        let selected =
+            select_timing_buffer(&catalog, &library, Some(overloaded_source), &group, false)
+                .expect("unloading the original source requires retaining a provisional buffer");
+
+        assert_eq!(selected.name, "BUF");
+
+        let speculative =
+            select_timing_buffer(&catalog, &library, Some(overloaded_source), &group, true)
+                .expect("preserve the original timing-ranked speculative choice");
+        assert_eq!(speculative.name, "BUF_FAST");
+    }
+
+    #[test]
+    fn overloaded_source_repair_preserves_legacy_ranking_even_when_stronger_buffer_looks_legal() {
+        let mut library = sizing_library();
+        for (name, transition_limit) in [("BUF", 0.05), ("BUF_FAST", 0.2)] {
+            let cell = library
+                .cells
+                .iter()
+                .position(|cell| cell.name == name)
+                .expect("find overloaded-source repair buffer");
+            let output = library.cells[cell]
+                .pins
+                .iter()
+                .position(|pin| pin.direction == PinDirection::Output as i32)
+                .expect("find overloaded-source repair output");
+            library.cells[cell].pins[output].max_transition = Some(transition_limit);
+        }
+        let catalog = CellCatalog::new(&library).expect("catalog overloaded-source repair cells");
+        let group = TimingSinkGroup {
+            load: CombinationalOutputLoad {
+                rise: 0.72,
+                fall: 0.72,
+            },
+            ..TimingSinkGroup::default()
+        };
+        let overloaded_source = SignalTiming {
+            rise: EdgeTiming {
+                arrival: 5.0,
+                transition: 1.0,
+            },
+            fall: EdgeTiming {
+                arrival: 5.0,
+                transition: 1.0,
+            },
+        };
+
+        let repaired =
+            select_timing_buffer(&catalog, &library, Some(overloaded_source), &group, false)
+                .expect("retain the original economical repair tree");
+
+        assert_eq!(repaired.name, "BUF");
     }
 
     #[test]

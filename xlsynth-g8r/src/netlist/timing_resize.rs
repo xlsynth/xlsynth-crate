@@ -568,6 +568,13 @@ struct BestSizingState {
     pin_swaps: usize,
 }
 
+/// Keeps optimization slack intact until the complete timing flow has frozen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AreaRecoveryStrategy {
+    PreserveNearCriticalArrivals,
+    PreserveEndpointMaxima,
+}
+
 impl BestSizingState {
     /// Captures the complete current solution rather than only a local move.
     fn capture(
@@ -641,6 +648,53 @@ pub fn resize_timing_aware_netlist(
     library: &Library,
     options: &ResizeOptions,
     constraints: &BufferTimingConstraints,
+) -> Result<ResizeStats> {
+    resize_timing_aware_netlist_with_area_strategy(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        constraints,
+        AreaRecoveryStrategy::PreserveNearCriticalArrivals,
+    )
+}
+
+/// Recovers area after all timing decisions while preserving every endpoint
+/// maximum.
+pub(crate) fn recover_final_timing_protected_area(
+    module: &mut NetlistModule,
+    nets: &[Net],
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &ResizeOptions,
+    constraints: &BufferTimingConstraints,
+) -> Result<ResizeStats> {
+    let mut recovery_options = options.clone();
+    recovery_options.max_outer_iterations = 1;
+    recovery_options.max_iterations = 0;
+    resize_timing_aware_netlist_with_area_strategy(
+        module,
+        nets,
+        interner,
+        library,
+        &recovery_options,
+        constraints,
+        AreaRecoveryStrategy::PreserveEndpointMaxima,
+    )
+}
+
+/// Keeps near-critical slack intact during timing and spends it only after
+/// timing freezes.
+#[allow(clippy::too_many_arguments)]
+fn resize_timing_aware_netlist_with_area_strategy(
+    module: &mut NetlistModule,
+    nets: &[Net],
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &ResizeOptions,
+    constraints: &BufferTimingConstraints,
+    area_strategy: AreaRecoveryStrategy,
 ) -> Result<ResizeStats> {
     validate_options(options)?;
     validate_constant_output_assignments(module, nets)
@@ -769,6 +823,7 @@ pub fn resize_timing_aware_netlist(
             &mut area,
             &mut stats,
             achieved,
+            area_strategy,
         )?;
         best_solution.update_if_better(module, &timing, score, area, &stats, options, &pin_history);
 
@@ -831,6 +886,7 @@ pub fn resize_timing_aware_netlist(
                 &mut area,
                 &mut stats,
                 achieved,
+                area_strategy,
             )?;
         }
     }
@@ -2043,6 +2099,7 @@ fn recover_timing_protected_area(
     area: &mut f64,
     stats: &mut ResizeStats,
     achieved: BoundaryTimingScore,
+    area_strategy: AreaRecoveryStrategy,
 ) -> Result<usize> {
     let mut total_committed = 0usize;
     let achieved_secondary = timing.secondary_delay();
@@ -2113,7 +2170,8 @@ fn recover_timing_protected_area(
                 if !trial
                     .score
                     .no_worse_than(achieved, options.improvement_epsilon)
-                    || trial.secondary_delay > achieved_secondary + options.improvement_epsilon
+                    || (area_strategy == AreaRecoveryStrategy::PreserveNearCriticalArrivals
+                        && trial.secondary_delay > achieved_secondary + options.improvement_epsilon)
                     || !trial.constraints_satisfied
                 {
                     continue;
@@ -2170,7 +2228,8 @@ fn recover_timing_protected_area(
             if !trial
                 .score
                 .no_worse_than(achieved, options.improvement_epsilon)
-                || trial.secondary_delay > achieved_secondary + options.improvement_epsilon
+                || (area_strategy == AreaRecoveryStrategy::PreserveNearCriticalArrivals
+                    && trial.secondary_delay > achieved_secondary + options.improvement_epsilon)
                 || !trial.constraints_satisfied
             {
                 continue;
@@ -2390,11 +2449,41 @@ fn apply_electrical_sizing(
             .filter(|limit| limit.is_finite() && *limit > 0.0)
             .map(|limit| output_load / limit)
             .unwrap_or(0.0);
-        let severity = effort_ratio.max(characterized_ratio);
+        let weighted_fanout_ratio = output_pin
+            .and_then(|pin| pin.max_fanout)
+            .filter(|limit| limit.is_finite() && *limit >= 0.0)
+            .map(|limit| {
+                if limit > TIMING_VERIFICATION_EPSILON {
+                    timing.fanout_loads[output.bit] / limit
+                } else if timing.fanout_loads[output.bit] > TIMING_VERIFICATION_EPSILON {
+                    f64::INFINITY
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        let transition_ratio = output_pin
+            .and_then(|pin| pin.max_transition)
+            .filter(|limit| limit.is_finite() && *limit > 0.0)
+            .map(|limit| {
+                [
+                    timing.bit_timing[output.bit].primary_input,
+                    timing.bit_timing[output.bit].register,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|signal| signal.rise.transition.max(signal.fall.transition) / limit)
+                .fold(0.0, f64::max)
+            })
+            .unwrap_or(0.0);
+        let severity = effort_ratio
+            .max(characterized_ratio)
+            .max(weighted_fanout_ratio)
+            .max(transition_ratio);
         if severity > 1.0 + TIMING_VERIFICATION_EPSILON {
             candidates.push((
                 instance_index,
-                characterized_ratio > 1.0,
+                characterized_ratio > 1.0 || weighted_fanout_ratio > 1.0 || transition_ratio > 1.0,
                 severity,
                 priority,
             ));
@@ -2432,7 +2521,10 @@ fn apply_electrical_sizing(
                 });
                 let output_is_legal = output_pin
                     .and_then(|pin| pin.max_capacitance)
-                    .is_none_or(|limit| max_load(timing.loads[output.bit]) <= limit + 1e-9);
+                    .is_none_or(|limit| max_load(timing.loads[output.bit]) <= limit + 1e-9)
+                    && output_pin
+                        .and_then(|pin| pin.max_fanout)
+                        .is_none_or(|limit| timing.fanout_loads[output.bit] <= limit + 1e-9);
                 output_is_legal
                     && average_functional_input_capacitance(library, cell)
                         .is_ok_and(|capacitance| capacitance + 1e-9 >= required_input)
@@ -2525,10 +2617,14 @@ struct IncrementalRegisteredSta<'a> {
     instances: Vec<SizingInstance>,
     drivers: Vec<Option<usize>>,
     loads: Vec<CombinationalOutputLoad>,
+    fanout_loads: Vec<f64>,
     bit_timing: Vec<BoundarySignalTiming>,
     bit_predecessors: Vec<BoundaryPredecessors>,
     successors: Vec<Vec<usize>>,
     capture_consumers: Vec<Vec<usize>>,
+    data_consumers: Vec<Vec<usize>>,
+    clock_bits: Vec<bool>,
+    data_transition_limits: Vec<Option<f64>>,
     captures: Vec<RegisterCaptureScore>,
     capture_instances: Vec<usize>,
     capture_predecessors: Vec<CapturePredecessors>,
@@ -2536,6 +2632,7 @@ struct IncrementalRegisteredSta<'a> {
     topological_order: Vec<usize>,
     topological_positions: Vec<usize>,
     has_registers: bool,
+    has_transition_limits: bool,
     clock_load: f64,
     constraints: BufferTimingConstraints,
     diagnostics: TimingQueryDiagnosticCounts,
@@ -2561,6 +2658,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
             .collect::<HashMap<_, _>>();
         let mut drivers = vec![None; normalized.bit_count()];
         let mut loads = vec![CombinationalOutputLoad::default(); normalized.bit_count()];
+        let mut fanout_loads = vec![0.0; normalized.bit_count()];
         let mut instances = Vec::with_capacity(normalized.instances.len());
         let mut registers = Vec::new();
         let mut clock_load = 0.0;
@@ -2603,6 +2701,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
                         )?;
                         loads[bit].rise += capacitance.rise;
                         loads[bit].fall += capacitance.fall;
+                        fanout_loads[bit] += pin.fanout_load.unwrap_or(0.0);
                         if pin.is_clocking_pin {
                             clock_load += max_load(capacitance);
                         }
@@ -2753,8 +2852,19 @@ impl<'a> IncrementalRegisteredSta<'a> {
 
         let mut successors = vec![Vec::new(); instances.len()];
         let mut capture_consumers = vec![Vec::new(); normalized.bit_count()];
+        let mut data_consumers = vec![Vec::new(); normalized.bit_count()];
+        let mut clock_bits = vec![false; normalized.bit_count()];
         let mut indegrees = vec![0usize; instances.len()];
         for (index, instance) in instances.iter().enumerate() {
+            for input in &instance.inputs {
+                if let Some(bit) = input.bit {
+                    if input.clock {
+                        clock_bits[bit] = true;
+                    } else {
+                        data_consumers[bit].push(index);
+                    }
+                }
+            }
             if instance.sequential {
                 for input in instance.inputs.iter().filter(|input| !input.clock) {
                     if let Some(bit) = input.bit {
@@ -2781,6 +2891,10 @@ impl<'a> IncrementalRegisteredSta<'a> {
             successor.sort_unstable();
         }
         for consumers in &mut capture_consumers {
+            consumers.sort_unstable();
+            consumers.dedup();
+        }
+        for consumers in &mut data_consumers {
             consumers.sort_unstable();
             consumers.dedup();
         }
@@ -2813,10 +2927,14 @@ impl<'a> IncrementalRegisteredSta<'a> {
             instances,
             drivers,
             loads,
+            fanout_loads,
             bit_timing,
             bit_predecessors: vec![BoundaryPredecessors::default(); normalized.bit_count()],
             successors,
             capture_consumers,
+            data_consumers,
+            clock_bits,
+            data_transition_limits: vec![None; normalized.bit_count()],
             captures,
             capture_instances: registers,
             capture_predecessors: vec![CapturePredecessors::default(); normalized.instances.len()],
@@ -2824,10 +2942,20 @@ impl<'a> IncrementalRegisteredSta<'a> {
             topological_order,
             topological_positions,
             has_registers,
+            has_transition_limits: library
+                .cells
+                .iter()
+                .flat_map(|cell| &cell.pins)
+                .any(|pin| pin.max_transition.is_some()),
             clock_load,
             constraints: constraints.clone(),
             diagnostics: TimingQueryDiagnosticCounts::default(),
         };
+        if state.has_transition_limits {
+            for bit in 0..normalized.bit_count() {
+                state.data_transition_limits[bit] = state.data_transition_limit(bit);
+            }
+        }
         for position in 0..state.topological_order.len() {
             let instance = state.topological_order[position];
             state.recompute_instance(instance)?;
@@ -2842,6 +2970,60 @@ impl<'a> IncrementalRegisteredSta<'a> {
     /// Returns whether this timing graph contains physical register endpoints.
     fn has_registers(&self) -> bool {
         self.has_registers
+    }
+
+    /// Returns the strictest actual driver or nonclock sink slew constraint.
+    fn data_transition_limit(&self, bit: BitIndex) -> Option<f64> {
+        if self.clock_bits[bit] {
+            return None;
+        }
+
+        let output_limit = self.drivers[bit].and_then(|driver_index| {
+            let driver = &self.instances[driver_index];
+            driver
+                .outputs
+                .iter()
+                .find(|output| output.bit == bit)
+                .and_then(|output| {
+                    self.library.cells[driver.cell_index].pins[output.pin_index].max_transition
+                })
+        });
+        let sink_limit = self.data_consumers[bit]
+            .iter()
+            .flat_map(|consumer_index| {
+                let consumer = &self.instances[*consumer_index];
+                let cell = &self.library.cells[consumer.cell_index];
+                consumer
+                    .inputs
+                    .iter()
+                    .filter(move |input| !input.clock && input.bit == Some(bit))
+                    .filter_map(move |input| {
+                        cell.pins
+                            .iter()
+                            .find(|pin| self.library.resolve_string(&pin.name) == input.name)
+                            .and_then(|pin| pin.max_transition)
+                    })
+            })
+            .reduce(f64::min);
+        match (output_limit, sink_limit) {
+            (Some(output), Some(sink)) => Some(output.min(sink)),
+            (Some(output), None) => Some(output),
+            (None, Some(sink)) => Some(sink),
+            (None, None) => None,
+        }
+    }
+
+    /// Measures the final worst rise/fall slew above a data-net constraint.
+    fn data_transition_violation(&self, bit: BitIndex, timing: BoundarySignalTiming) -> f64 {
+        let Some(limit) = self.data_transition_limits[bit] else {
+            return 0.0;
+        };
+        let transition = [timing.primary_input, timing.register]
+            .into_iter()
+            .flatten()
+            .flat_map(|timing| [timing.rise.transition, timing.fall.transition])
+            .fold(0.0_f64, f64::max);
+        (transition - limit).max(0.0)
     }
 
     /// Computes the exact register/input launch endpoint objective.
@@ -2930,9 +3112,11 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 .ok_or_else(|| anyhow!("estimated replacement changes output '{}'", output.name))?;
             if pin.max_capacitance.is_some_and(|limit| {
                 max_load(self.loads[output.bit]) > limit + TIMING_VERIFICATION_EPSILON
+            }) || pin.max_fanout.is_some_and(|limit| {
+                self.fanout_loads[output.bit] > limit + TIMING_VERIFICATION_EPSILON
             }) {
                 bail!(
-                    "estimated replacement '{}.{}' cannot drive its actual output load",
+                    "estimated replacement '{}.{}' cannot drive its actual output or fanout load",
                     cell.name,
                     output.name
                 );
@@ -3476,6 +3660,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
 
         let mut changed_loads =
             BTreeMap::<BitIndex, (CombinationalOutputLoad, CombinationalOutputLoad)>::new();
+        let mut changed_fanout_loads = BTreeMap::<BitIndex, (f64, f64)>::new();
         let mut clock_delta = 0.0;
         for (old_input, new_input) in original.inputs.iter().zip(&replacement.inputs) {
             if old_input.name != new_input.name || old_input.clock != new_input.clock {
@@ -3513,6 +3698,13 @@ impl<'a> IncrementalRegisteredSta<'a> {
                     .or_insert((self.loads[bit], CombinationalOutputLoad::default()));
                 entry.1.rise -= capacitance.rise;
                 entry.1.fall -= capacitance.fall;
+                let fanout_load = old_pin.fanout_load.unwrap_or(0.0);
+                if fanout_load != 0.0 {
+                    changed_fanout_loads
+                        .entry(bit)
+                        .or_insert((self.fanout_loads[bit], 0.0))
+                        .1 -= fanout_load;
+                }
                 if old_input.clock {
                     clock_delta -= max_load(capacitance);
                 }
@@ -3530,6 +3722,13 @@ impl<'a> IncrementalRegisteredSta<'a> {
                     .or_insert((self.loads[bit], CombinationalOutputLoad::default()));
                 entry.1.rise += capacitance.rise;
                 entry.1.fall += capacitance.fall;
+                let fanout_load = new_pin.fanout_load.unwrap_or(0.0);
+                if fanout_load != 0.0 {
+                    changed_fanout_loads
+                        .entry(bit)
+                        .or_insert((self.fanout_loads[bit], 0.0))
+                        .1 += fanout_load;
+                }
                 if new_input.clock {
                     clock_delta += max_load(capacitance);
                 }
@@ -3548,15 +3747,68 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 .ok_or_else(|| anyhow!("replacement changes output pin '{}'", output.name))?;
             if pin.max_capacitance.is_some_and(|limit| {
                 max_load(self.loads[output.bit]) > limit + TIMING_VERIFICATION_EPSILON
+            }) || pin.max_fanout.is_some_and(|limit| {
+                changed_fanout_loads
+                    .get(&output.bit)
+                    .map(|(previous, delta)| previous + delta)
+                    .unwrap_or(self.fanout_loads[output.bit])
+                    > limit + TIMING_VERIFICATION_EPSILON
             }) {
                 bail!(
-                    "replacement '{}.{}' cannot drive its actual output load",
+                    "replacement '{}.{}' cannot drive its actual output or fanout load",
                     new_cell.name,
                     output.name
                 );
             }
             output.pin_index = pin_index;
         }
+
+        for (bit, (previous, delta)) in &changed_fanout_loads {
+            if *delta <= TIMING_VERIFICATION_EPSILON {
+                continue;
+            }
+            let Some(driver_index) = self.drivers[*bit] else {
+                continue;
+            };
+            let driver = &self.instances[driver_index];
+            let Some(output) = driver.outputs.iter().find(|output| output.bit == *bit) else {
+                continue;
+            };
+            let pin = &self.library.cells[driver.cell_index].pins[output.pin_index];
+            if pin
+                .max_fanout
+                .is_some_and(|limit| previous + delta > limit + TIMING_VERIFICATION_EPSILON)
+            {
+                bail!(
+                    "replacement '{}.{}' exceeds its upstream driver's weighted fanout limit",
+                    new_cell.name,
+                    output.name
+                );
+            }
+        }
+
+        let original_transition_violations = if self.has_transition_limits {
+            original
+                .inputs
+                .iter()
+                .chain(&replacement.inputs)
+                .filter(|input| !input.clock)
+                .filter_map(|input| input.bit)
+                .chain(original.outputs.iter().map(|output| output.bit))
+                .chain(replacement.outputs.iter().map(|output| output.bit))
+                .filter(|bit| !self.clock_bits[*bit])
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|bit| {
+                    (
+                        bit,
+                        self.data_transition_violation(bit, self.bit_timing[bit]),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::new()
+        };
 
         let mut original_driver_timing = BTreeMap::new();
         let original_clock_load = self.clock_load;
@@ -3581,6 +3833,22 @@ impl<'a> IncrementalRegisteredSta<'a> {
 
         self.instances[instance_index] = replacement;
         self.clock_load += clock_delta;
+        for (bit, (previous, delta)) in &changed_fanout_loads {
+            self.fanout_loads[*bit] = previous + delta;
+            if self.fanout_loads[*bit] < -TIMING_VERIFICATION_EPSILON {
+                self.restore_trial(
+                    instance_index,
+                    original,
+                    &changed_loads,
+                    &changed_fanout_loads,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    original_clock_load,
+                );
+                bail!("registered sizing produced a negative weighted fanout load");
+            }
+            self.fanout_loads[*bit] = self.fanout_loads[*bit].max(0.0);
+        }
         for (bit, (previous, delta)) in &changed_loads {
             self.loads[*bit].rise = previous.rise + delta.rise;
             self.loads[*bit].fall = previous.fall + delta.fall;
@@ -3591,6 +3859,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
                     instance_index,
                     original,
                     &changed_loads,
+                    &changed_fanout_loads,
                     &BTreeMap::new(),
                     &BTreeMap::new(),
                     original_clock_load,
@@ -3605,6 +3874,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
             BTreeMap::<BitIndex, (BoundarySignalTiming, BoundaryPredecessors)>::new();
         let mut saved_captures =
             BTreeMap::<usize, (RegisterCaptureScore, CapturePredecessors)>::new();
+        let mut changed_transition_limits = BTreeMap::<BitIndex, Option<f64>>::new();
         let result = (|| {
             let mut recomputed = 0usize;
             while let Some((_, index)) = dirty.pop_first() {
@@ -3644,6 +3914,43 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 self.recompute_capture(capture)?;
                 recomputed += 1;
             }
+            if self.has_transition_limits {
+                for bit in original_transition_violations.keys().copied() {
+                    let previous_limit = self.data_transition_limits[bit];
+                    let current_limit = self.data_transition_limit(bit);
+                    if current_limit != previous_limit {
+                        changed_transition_limits.insert(bit, previous_limit);
+                        self.data_transition_limits[bit] = current_limit;
+                    }
+                }
+                for (bit, (previous, _)) in &saved_timings {
+                    let original_violation = original_transition_violations
+                        .get(bit)
+                        .copied()
+                        .unwrap_or_else(|| self.data_transition_violation(*bit, *previous));
+                    let current_violation =
+                        self.data_transition_violation(*bit, self.bit_timing[*bit]);
+                    if current_violation > original_violation + TIMING_VERIFICATION_EPSILON {
+                        bail!(
+                            "replacement '{}' worsens an actual data-net transition violation",
+                            new_cell.name
+                        );
+                    }
+                }
+                for (bit, original_violation) in &original_transition_violations {
+                    if saved_timings.contains_key(bit) {
+                        continue;
+                    }
+                    let current_violation =
+                        self.data_transition_violation(*bit, self.bit_timing[*bit]);
+                    if current_violation > *original_violation + TIMING_VERIFICATION_EPSILON {
+                        bail!(
+                            "replacement '{}' tightens a violated data-net transition limit",
+                            new_cell.name
+                        );
+                    }
+                }
+            }
             let score = self.score();
             let local_improvement = original_output_timing
                 .iter()
@@ -3673,10 +3980,14 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 instance_index,
                 original,
                 &changed_loads,
+                &changed_fanout_loads,
                 &saved_timings,
                 &saved_captures,
                 original_clock_load,
             );
+            for (bit, previous_limit) in changed_transition_limits {
+                self.data_transition_limits[bit] = previous_limit;
+            }
         }
         result
     }
@@ -3687,6 +3998,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
         instance_index: usize,
         original: SizingInstance,
         changed_loads: &BTreeMap<BitIndex, (CombinationalOutputLoad, CombinationalOutputLoad)>,
+        changed_fanout_loads: &BTreeMap<BitIndex, (f64, f64)>,
         saved_timings: &BTreeMap<BitIndex, (BoundarySignalTiming, BoundaryPredecessors)>,
         saved_captures: &BTreeMap<usize, (RegisterCaptureScore, CapturePredecessors)>,
         original_clock_load: f64,
@@ -3694,6 +4006,9 @@ impl<'a> IncrementalRegisteredSta<'a> {
         self.instances[instance_index] = original;
         for (bit, (previous, _)) in changed_loads {
             self.loads[*bit] = *previous;
+        }
+        for (bit, (previous, _)) in changed_fanout_loads {
+            self.fanout_loads[*bit] = *previous;
         }
         for (bit, (previous, predecessors)) in saved_timings {
             self.bit_timing[*bit] = *previous;
@@ -3961,9 +4276,10 @@ mod tests {
     use super::{
         BoundaryTimingScore, IncrementalRegisteredSta, RegisterCellCatalog, SizingMove,
         SizingMoveKind, SizingTrial, compare_area_moves, compare_delay_moves,
-        prioritized_timing_instances, resize_timing_aware_netlist, timing_trial_is_acceptable,
+        prioritized_timing_instances, recover_final_timing_protected_area,
+        resize_timing_aware_netlist, timing_trial_is_acceptable,
     };
-    use crate::liberty_model::{Library, LibraryBuilder};
+    use crate::liberty_model::{Cell, Library, LibraryBuilder, PinDirection};
     use crate::liberty_proto::TimingTableKind;
     use crate::netlist::cell_catalog::CellCatalog;
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library, timed_cell};
@@ -4034,6 +4350,100 @@ mod tests {
             }
         }
         builder.cells.push(fast);
+        builder.finish()
+    }
+
+    /// Characterizes a buffer with an exact output slew and optional limit.
+    fn transition_limited_buffer(
+        builder: &mut LibraryBuilder,
+        name: &str,
+        area: f64,
+        delay: f64,
+        transition: f64,
+        max_transition: Option<f64>,
+    ) -> Cell {
+        let mut cell = timed_cell(builder, name, &["A"], "A", area, delay, 0.1, 0.8);
+        let tables = [
+            (TimingTableKind::CellRise, delay),
+            (TimingTableKind::CellFall, delay),
+            (TimingTableKind::RiseTransition, transition),
+            (TimingTableKind::FallTransition, transition),
+        ]
+        .into_iter()
+        .map(|(kind, value)| {
+            builder
+                .add_timing_table_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
+                .expect("construct exact synthetic buffer slew")
+        })
+        .collect();
+        let output = cell
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find slew-characterized buffer output");
+        output.max_transition = max_transition;
+        output.timing_arcs = vec![
+            builder
+                .add_timing_arc("A", "positive_unate", "combinational", "", tables)
+                .expect("construct exact synthetic buffer timing arc"),
+        ];
+        cell
+    }
+
+    /// Provides a timing-protected recovery path with explicit slew limits.
+    fn transition_limited_area_library(
+        fast_transition: f64,
+        small_transition: f64,
+        output_limit: Option<f64>,
+        sink_limit: Option<f64>,
+    ) -> Library {
+        let mut builder = LibraryBuilder::new();
+        let critical = timed_cell(
+            &mut builder,
+            "AND2",
+            &["A", "B"],
+            "A * B",
+            1.0,
+            100.0,
+            0.1,
+            0.8,
+        );
+        let fast = transition_limited_buffer(
+            &mut builder,
+            "BUF_FAST",
+            2.0,
+            96.0,
+            fast_transition,
+            output_limit,
+        );
+        let small = transition_limited_buffer(
+            &mut builder,
+            "BUF",
+            1.0,
+            98.0,
+            small_transition,
+            output_limit,
+        );
+        builder.cells = vec![critical, fast, small];
+        if let Some(limit) = sink_limit {
+            let mut sink = timed_cell(
+                &mut builder,
+                "OR2",
+                &["A", "B"],
+                "A + B",
+                1.0,
+                0.0,
+                0.1,
+                0.8,
+            );
+            let input = sink
+                .pins
+                .iter_mut()
+                .find(|pin| builder.resolve_string(&pin.name) == "A")
+                .expect("find independently slew-limited data sink");
+            input.max_transition = Some(limit);
+            builder.cells.push(sink);
+        }
         builder.finish()
     }
 
@@ -4527,7 +4937,24 @@ endmodule
 
     #[test]
     fn rejected_pin_swap_restores_loads_timing_and_predecessors() {
-        let library = asymmetric_register_load_library();
+        let mut library = asymmetric_register_load_library();
+        let cell = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "AND2")
+            .expect("find weighted interchangeable input pins");
+        let first = library.cells[cell]
+            .pins
+            .iter()
+            .position(|pin| library.resolve_string(&pin.name) == "A")
+            .expect("find weighted A input");
+        let second = library.cells[cell]
+            .pins
+            .iter()
+            .position(|pin| library.resolve_string(&pin.name) == "B")
+            .expect("find weighted B input");
+        library.cells[cell].pins[first].fanout_load = Some(0.25);
+        library.cells[cell].pins[second].fanout_load = Some(0.75);
         let (module, nets, interner) = parse_module(asymmetric_register_load_source());
         let catalog = CellCatalog::new(&library).expect("classify asymmetric pin loads");
         let mut timing = IncrementalRegisteredSta::new(
@@ -4541,6 +4968,7 @@ endmodule
         .expect("construct load-sensitive registered incremental timing");
         let before_score = timing.score();
         let before_loads = timing.loads.clone();
+        let before_fanout_loads = timing.fanout_loads.clone();
         let before_timings = timing.bit_timing.clone();
         let before_bit_predecessors = timing.bit_predecessors.clone();
         let before_captures = timing.captures.clone();
@@ -4555,12 +4983,75 @@ endmodule
         assert!(trial.score.register_to_register < before_score.register_to_register);
         assert_eq!(timing.score(), before_score);
         assert_eq!(timing.loads, before_loads);
+        assert_eq!(timing.fanout_loads, before_fanout_loads);
         assert_eq!(timing.bit_timing, before_timings);
         assert_eq!(timing.bit_predecessors, before_bit_predecessors);
         assert_eq!(timing.captures, before_captures);
         assert_eq!(timing.capture_predecessors, before_capture_predecessors);
         assert_eq!(timing.clock_load, before_clock_load);
         assert_eq!(timing.instances[2].known_pin_values, before_known);
+    }
+
+    #[test]
+    fn rejects_replacement_exceeding_upstream_weighted_fanout_limit() {
+        let mut library = sizing_library();
+        let driver = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "BUF")
+            .expect("find weighted-fanout test driver");
+        let driver_output = library.cells[driver]
+            .pins
+            .iter()
+            .position(|pin| library.resolve_string(&pin.name) == "Y")
+            .expect("find weighted-fanout driver output");
+        library.cells[driver].pins[driver_output].max_fanout = Some(1.0);
+        for (name, fanout_load) in [("AND2", 0.5), ("AND2_FAST", 1.5)] {
+            let cell = library
+                .cells
+                .iter()
+                .position(|cell| cell.name == name)
+                .expect("find weighted-fanout test replacement");
+            let pin = library.cells[cell]
+                .pins
+                .iter()
+                .position(|pin| library.resolve_string(&pin.name) == "A")
+                .expect("find weighted-fanout replacement input");
+            library.cells[cell].pins[pin].fanout_load = Some(fanout_load);
+        }
+        let (module, nets, interner) = parse_module(
+            r#"
+module top(a, b, y);
+  input a, b;
+  output y;
+  wire intermediate;
+  BUF driver (.A(a), .Y(intermediate));
+  AND2 logic (.A(intermediate), .B(b), .Y(y));
+endmodule
+"#,
+        );
+        let mut timing = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("construct weighted-fanout incremental timing");
+        let replacement = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "AND2_FAST")
+            .expect("find excessively weighted replacement");
+        let before = timing.fanout_loads.clone();
+
+        let error = timing
+            .evaluate_cell_substitution(1, replacement, false)
+            .expect_err("reject an otherwise faster replacement that overloads its driver");
+
+        assert!(error.to_string().contains("weighted fanout"), "{error:#}");
+        assert_eq!(timing.fanout_loads, before);
     }
 
     #[test]
@@ -4733,6 +5224,339 @@ endmodule
         );
         assert_eq!(stats.final_area, stats.initial_area);
         assert_eq!(stats.final_delay, stats.initial_delay);
+    }
+
+    #[test]
+    fn area_recovery_allows_noncritical_arrivals_to_rise_without_changing_maxima() {
+        let mut builder = LibraryBuilder::new();
+        let critical = timed_cell(
+            &mut builder,
+            "AND2",
+            &["A", "B"],
+            "A * B",
+            1.0,
+            100.0,
+            0.1,
+            0.8,
+        );
+        let fast = timed_cell(&mut builder, "BUF_FAST", &["A"], "A", 2.0, 96.0, 0.2, 0.8);
+        let small = timed_cell(&mut builder, "BUF", &["A"], "A", 1.0, 98.0, 0.1, 0.8);
+        builder.cells = vec![critical, fast, small];
+        let library = builder.finish();
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(near));
+endmodule
+"#,
+        );
+        let constraints = BufferTimingConstraints::default();
+        let before = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &constraints,
+        )
+        .expect("construct independent critical and near-critical paths");
+        let original_score = before.score();
+        let original_secondary = before.secondary_delay();
+
+        let stats = recover_final_timing_protected_area(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 0,
+                ..ResizeOptions::default()
+            },
+            &constraints,
+        )
+        .expect("recover area while preserving every independent timing maximum");
+        let after = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &constraints,
+        )
+        .expect("independently recompute all final endpoint arrivals");
+        let exact_report =
+            build_netlist_report(&module, &nets, &interner, &library, StaOptions::default())
+                .expect("verify recovered timing with complete Liberty STA");
+
+        assert_eq!(after.score(), original_score);
+        assert!(after.secondary_delay() > original_secondary);
+        assert_eq!(interner.resolve(module.instances[1].type_name), Some("BUF"));
+        assert_eq!(stats.downsizes, 1);
+        assert_eq!(stats.initial_area, 3.0);
+        assert_eq!(stats.final_area, 2.0);
+        assert_eq!(stats.final_delay, stats.initial_delay);
+        assert_eq!(exact_report.max_delay, Some(stats.initial_delay));
+    }
+
+    #[test]
+    fn final_area_recovery_rejects_an_actual_output_slew_violation() {
+        let library = transition_limited_area_library(0.1, 0.4, Some(0.2), None);
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(near));
+endmodule
+"#,
+        );
+
+        let stats = recover_final_timing_protected_area(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 0,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("reject an electrically illegal but timing-preserving downsize");
+
+        assert_eq!(
+            interner.resolve(module.instances[1].type_name),
+            Some("BUF_FAST")
+        );
+        assert_eq!(stats.downsizes, 0);
+        assert_eq!(stats.final_area, stats.initial_area);
+        assert!(stats.failed_evaluations > 0);
+    }
+
+    #[test]
+    fn rejected_slew_trial_restores_cell_timing_and_transition_limits() {
+        let library = transition_limited_area_library(0.1, 0.4, Some(0.2), None);
+        let catalog = CellCatalog::new(&library).expect("classify slew-limited alternatives");
+        let (module, nets, interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(near));
+endmodule
+"#,
+        );
+        let mut timing = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("prepare exact incremental transition verification");
+        let original_cell = timing.instances[1].cell_index;
+        let original_timings = timing.bit_timing.clone();
+        let original_limits = timing.data_transition_limits.clone();
+        let original_loads = timing.loads.clone();
+        let smaller = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "BUF")
+            .expect("find electrically illegal smaller cell");
+
+        let result = timing.evaluate_optimization_move(
+            1,
+            SizingMoveKind::Resize {
+                cell_index: smaller,
+            },
+            &catalog,
+            false,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(timing.instances[1].cell_index, original_cell);
+        assert_eq!(timing.bit_timing, original_timings);
+        assert_eq!(timing.data_transition_limits, original_limits);
+        assert_eq!(timing.loads, original_loads);
+    }
+
+    #[test]
+    fn final_area_recovery_respects_a_connected_data_sink_slew_limit() {
+        let library = transition_limited_area_library(0.1, 0.4, None, Some(0.2));
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  wire buffered;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(buffered));
+  OR2 sink (.A(buffered), .B(c), .Y(near));
+endmodule
+"#,
+        );
+
+        let stats = recover_final_timing_protected_area(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 0,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("preserve the strictest real nonclock sink transition");
+
+        assert_eq!(
+            interner.resolve(module.instances[1].type_name),
+            Some("BUF_FAST")
+        );
+        assert_eq!(stats.downsizes, 0);
+        assert!(stats.failed_evaluations > 0);
+    }
+
+    #[test]
+    fn final_area_recovery_can_improve_an_existing_output_slew_violation() {
+        let library = transition_limited_area_library(0.4, 0.3, Some(0.2), None);
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(near));
+endmodule
+"#,
+        );
+
+        let stats = recover_final_timing_protected_area(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 0,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("permit a smaller cell that improves a pre-existing slew violation");
+
+        assert_eq!(interner.resolve(module.instances[1].type_name), Some("BUF"));
+        assert_eq!(stats.downsizes, 1);
+        assert_eq!(stats.final_delay, stats.initial_delay);
+    }
+
+    #[test]
+    fn final_area_recovery_rejects_a_tighter_limit_without_changing_slew() {
+        let mut library = transition_limited_area_library(0.1, 0.1, None, None);
+        let smaller = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "BUF")
+            .expect("find smaller equally fast-transition buffer");
+        let output = library.cells[smaller]
+            .pins
+            .iter()
+            .position(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find smaller-buffer output pin");
+        library.cells[smaller].pins[output].max_transition = Some(0.05);
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(near));
+endmodule
+"#,
+        );
+
+        let stats = recover_final_timing_protected_area(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 0,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("reject a newly violated output limit even when slew stays identical");
+
+        assert_eq!(
+            interner.resolve(module.instances[1].type_name),
+            Some("BUF_FAST")
+        );
+        assert_eq!(stats.downsizes, 0);
+        assert!(stats.failed_evaluations > 0);
+    }
+
+    #[test]
+    fn final_area_recovery_rejects_a_tighter_sink_limit_without_changing_slew() {
+        let mut library = transition_limited_area_library(0.1, 0.1, None, Some(0.05));
+        let small_sink = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "OR2")
+            .expect("find smaller slew-limited sink");
+        let mut original_sink = library.cells[small_sink].clone();
+        original_sink.name = "OR2_FAST".to_string();
+        original_sink.area = 2.0;
+        let input = original_sink
+            .pins
+            .iter_mut()
+            .find(|pin| library.resolve_string(&pin.name) == "A")
+            .expect("find original sink transition constraint");
+        input.max_transition = Some(0.2);
+        library.cells.push(original_sink);
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  wire buffered;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF noncritical (.A(c), .Y(buffered));
+  OR2_FAST sink (.A(buffered), .B(c), .Y(near));
+endmodule
+"#,
+        );
+
+        let stats = recover_final_timing_protected_area(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 0,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("reject a stricter sink limit even when its driver slew is unchanged");
+
+        assert_eq!(
+            interner.resolve(module.instances[2].type_name),
+            Some("OR2_FAST")
+        );
+        assert_eq!(stats.downsizes, 0);
+        assert!(stats.failed_evaluations > 0);
     }
 
     #[test]
@@ -5279,6 +6103,7 @@ endmodule
         .expect("build incremental FF sizing state");
         let before_score = timing.score();
         let before_loads = timing.loads.clone();
+        let before_fanout_loads = timing.fanout_loads.clone();
         let before_bit_predecessors = timing.bit_predecessors.clone();
         let before_capture_predecessors = timing.capture_predecessors.clone();
         let before_clock_load = timing.clock_load;
@@ -5295,6 +6120,7 @@ endmodule
         assert!(trial.score.register_to_register < before_score.register_to_register);
         assert_eq!(timing.score(), before_score);
         assert_eq!(timing.loads, before_loads);
+        assert_eq!(timing.fanout_loads, before_fanout_loads);
         assert_eq!(timing.bit_predecessors, before_bit_predecessors);
         assert_eq!(timing.capture_predecessors, before_capture_predecessors);
         assert_eq!(timing.clock_load, before_clock_load);
