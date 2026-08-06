@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::liberty_proto as wire;
+pub use crate::liberty_proto::BoundaryTimingDefaults;
 use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
@@ -89,6 +90,8 @@ pub struct Library {
     pub default_max_fanout: Option<f64>,
     pub default_max_transition: Option<f64>,
     pub default_fanout_load: Option<f64>,
+    /// Representative Liberty cells defining optional electrical boundaries.
+    pub boundary_timing_defaults: Option<BoundaryTimingDefaults>,
     pub provenance: String,
     pub source_files: Vec<String>,
     pub(crate) strings: Vec<Box<str>>,
@@ -1462,6 +1465,7 @@ pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
         default_max_fanout: library.default_max_fanout,
         default_max_transition: library.default_max_transition,
         default_fanout_load: library.default_fanout_load,
+        boundary_timing_defaults: library.boundary_timing_defaults,
         provenance: library.provenance,
         source_files: library.source_files,
         lut_axes,
@@ -1788,6 +1792,7 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
         default_max_fanout: library.default_max_fanout,
         default_max_transition: library.default_max_transition,
         default_fanout_load: library.default_fanout_load,
+        boundary_timing_defaults: library.boundary_timing_defaults,
         provenance: library.provenance,
         source_files: library.source_files,
         strings,
@@ -1852,6 +1857,7 @@ mod tests {
         assert_eq!(library.default_max_fanout, None);
         assert_eq!(library.default_max_transition, None);
         assert_eq!(library.default_fanout_load, None);
+        assert_eq!(library.boundary_timing_defaults, None);
         let pin = &library.cells[0].pins[0];
         assert_eq!(pin.capacitance, Some(0.125));
         assert_eq!(pin.max_fanout, None);
@@ -1861,6 +1867,52 @@ mod tests {
             library_to_proto(library).unwrap().encode_to_vec(),
             original_bytes
         );
+    }
+
+    #[test]
+    fn boundary_timing_defaults_survive_binary_proto_roundtrip() {
+        let defaults = BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "DFF".to_string(),
+            representative_load_count: 4,
+        };
+        let library = Library {
+            boundary_timing_defaults: Some(defaults.clone()),
+            ..Default::default()
+        };
+
+        let proto = library_to_proto(library).unwrap();
+        assert_eq!(proto.boundary_timing_defaults, Some(defaults.clone()));
+
+        let encoded = proto.encode_to_vec();
+        let decoded = wire::Library::decode(encoded.as_slice()).unwrap();
+        let roundtrip = library_from_proto(decoded).unwrap();
+        assert_eq!(roundtrip.boundary_timing_defaults, Some(defaults));
+    }
+
+    #[test]
+    fn boundary_timing_defaults_survive_text_proto_roundtrip() {
+        let defaults = BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "DFF".to_string(),
+            representative_load_count: 3,
+        };
+        let library = Library {
+            boundary_timing_defaults: Some(defaults.clone()),
+            ..Default::default()
+        };
+        let wire = library_to_proto(library).unwrap();
+        let text = crate::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto(
+            wire.encode_to_vec().as_slice(),
+        )
+        .unwrap();
+
+        let roundtrip = crate::liberty::load::decode_library_binary_or_text(
+            text.as_bytes(),
+            "boundary-defaults.textproto",
+        )
+        .unwrap();
+        assert_eq!(roundtrip.boundary_timing_defaults, Some(defaults));
     }
 
     #[test]

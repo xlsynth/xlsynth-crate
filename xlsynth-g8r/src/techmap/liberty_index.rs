@@ -6,9 +6,10 @@ use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, Pin, PinDirection};
 use crate::liberty_proto::TimingTableKind;
 use crate::netlist::sta::{
-    CombinationalOutputLoad, EdgeTiming, SignalTiming, TimingQueryDiagnosticCounts,
-    effective_input_capacitance_for_mapping, evaluate_combinational_cell_output_timing,
-    validate_output_pin_for_basic_sta,
+    CombinationalOutputLoad, EdgeTiming, SignalTiming, StaOptions, TimingQueryDiagnosticCounts,
+    effective_input_capacitance_for_mapping, effective_representative_driver,
+    evaluate_combinational_cell_output_timing, evaluate_primary_input_driver_timing,
+    resolved_module_output_load, validate_output_pin_for_basic_sta,
 };
 use crate::techmap::truth::{MAX_TRUTH_TABLE_INPUTS, transform_truth, variable_truth};
 use anyhow::{Result, anyhow};
@@ -417,24 +418,18 @@ impl LibertyCellIndex {
         output_load: f64,
     ) -> Result<Option<CellBinding>> {
         let fallback = self.best_buffer().cloned();
-        if output_load <= 0.0 || fallback.is_none() {
+        if fallback.is_none() {
             return Ok(fallback);
         }
-
-        let input_timing = SignalTiming {
-            rise: EdgeTiming {
-                arrival: 0.0,
-                transition: input_transition,
-            },
-            fall: EdgeTiming {
-                arrival: 0.0,
-                transition: input_transition,
-            },
+        let input_options = StaOptions {
+            primary_input_transition: input_transition,
+            module_output_load: output_load,
         };
-        let load = CombinationalOutputLoad {
-            rise: output_load,
-            fall: output_load,
-        };
+        let load = resolved_module_output_load(library, input_options)?;
+        if load.rise <= 0.0 && load.fall <= 0.0 {
+            return Ok(fallback);
+        }
+        let upstream_driver = effective_representative_driver(library)?;
         let known_pin_values = HashMap::new();
         let mut diagnostics = TimingQueryDiagnosticCounts::default();
         let mut winner: Option<(f64, CellBinding)> = None;
@@ -449,11 +444,19 @@ impl LibertyCellIndex {
             if binding
                 .output_pin(library)
                 .max_capacitance
-                .is_some_and(|maximum| maximum.is_finite() && output_load > maximum)
+                .is_some_and(|maximum| maximum.is_finite() && load.rise.max(load.fall) > maximum)
             {
                 continue;
             }
 
+            let input_timing = evaluate_primary_input_driver_timing(
+                library,
+                upstream_driver.as_ref(),
+                input_options,
+                0.0,
+                binding.input_capacitances[0],
+                &mut diagnostics,
+            )?;
             let timing = evaluate_combinational_cell_output_timing(
                 library,
                 binding.cell_name.as_str(),
@@ -969,6 +972,98 @@ mod tests {
         assert_eq!(
             index
                 .best_output_buffer(&library, 0.01, 0.0)
+                .unwrap()
+                .unwrap()
+                .cell_name,
+            "BUF"
+        );
+    }
+
+    #[test]
+    fn output_buffer_selection_charges_representative_upstream_driver_load() {
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "boundary_load".to_string(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.01, 0.1],
+            index_2: vec![0.1, 1.0],
+            ..Default::default()
+        }];
+
+        let mut driver_input = pin(&mut builder, PinDirection::Input, "A", "");
+        driver_input.capacitance = Some(0.1);
+        let mut driver_output = pin(&mut builder, PinDirection::Output, "Y", "!A");
+        let mut driver_arc = representative_timing_arc(
+            &mut builder,
+            "A",
+            [1.0, 10.0, 1.0, 10.0],
+            [1.0, 10.0, 1.0, 10.0],
+        );
+        driver_arc.timing_sense = "negative_unate".into();
+        driver_output.timing_arcs = vec![driver_arc];
+
+        let mut small_input = pin(&mut builder, PinDirection::Input, "A", "");
+        small_input.capacitance = Some(0.1);
+        let mut small_output = pin(&mut builder, PinDirection::Output, "Y", "A");
+        small_output.timing_arcs = vec![representative_timing_arc(
+            &mut builder,
+            "A",
+            [4.0; 4],
+            [4.0; 4],
+        )];
+
+        let mut large_input = pin(&mut builder, PinDirection::Input, "A", "");
+        large_input.capacitance = Some(1.0);
+        let mut large_output = pin(&mut builder, PinDirection::Output, "Y", "A");
+        large_output.timing_arcs = vec![representative_timing_arc(
+            &mut builder,
+            "A",
+            [1.0; 4],
+            [1.0; 4],
+        )];
+
+        builder.cells = vec![
+            Cell {
+                name: "DRIVER".to_string(),
+                pins: vec![driver_input, driver_output],
+                area: 1.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "BUF".to_string(),
+                pins: vec![small_input, small_output],
+                area: 1.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "BUF_FAST".to_string(),
+                pins: vec![large_input, large_output],
+                area: 8.0,
+                ..Default::default()
+            },
+        ];
+        let mut library = builder.finish();
+        let legacy_index = LibertyCellIndex::build_nf(&library, 6).unwrap();
+        assert_eq!(
+            legacy_index
+                .best_output_buffer(&library, 0.01, 0.5)
+                .unwrap()
+                .unwrap()
+                .cell_name,
+            "BUF_FAST"
+        );
+
+        library.boundary_timing_defaults = Some(crate::liberty_proto::BoundaryTimingDefaults {
+            representative_driver_cell: "DRIVER".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 2,
+        });
+        let realistic_index = LibertyCellIndex::build_nf(&library, 6).unwrap();
+        assert_eq!(
+            realistic_index
+                .best_output_buffer(&library, 0.01, 0.5)
                 .unwrap()
                 .unwrap()
                 .cell_name,

@@ -13,7 +13,7 @@ use crate::netlist::sta::{
     analyze_combinational_max_arrival_with_primary_input_arrivals,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
     effective_input_capacitance_for_mapping, evaluate_combinational_cell_output_timing,
-    is_sequential_boundary_cell,
+    is_sequential_boundary_cell, resolved_module_output_load,
 };
 use crate::netlist::utils::validate_constant_output_assignments;
 use anyhow::{Context, Result, anyhow, bail};
@@ -258,7 +258,8 @@ pub(crate) fn has_slow_shared_primary_output(
     options: &BufferOptions,
     sta_options: StaOptions,
 ) -> Result<bool> {
-    if sta_options.module_output_load <= 0.0 {
+    let output_load = resolved_module_output_load(library, sta_options)?;
+    if output_load.rise <= 0.0 && output_load.fall <= 0.0 {
         return Ok(false);
     }
 
@@ -1076,6 +1077,13 @@ fn build_electrical_timing_graph(
     options: &BufferOptions,
 ) -> Result<TimingGraph> {
     validate_constant_output_assignments(module, nets)?;
+    let output_load = resolved_module_output_load(
+        library,
+        StaOptions {
+            module_output_load: options.module_output_load,
+            ..StaOptions::default()
+        },
+    )?;
     let normalized = NormalizedNetlistModule::new(module, nets, interner)
         .context("normalizing timing-driven buffer connectivity")?;
     let cells: HashMap<&str, usize> = library
@@ -1117,10 +1125,7 @@ fn build_electrical_timing_graph(
                             net: port_net,
                             bit: bit_number,
                         },
-                        load: CombinationalOutputLoad {
-                            rise: options.module_output_load,
-                            fall: options.module_output_load,
-                        },
+                        load: output_load,
                         fanout_load: 0.0,
                         max_transition: None,
                         criticality: 0.0,

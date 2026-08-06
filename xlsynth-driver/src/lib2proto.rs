@@ -5,12 +5,14 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use xlsynth_g8r::liberty::CellFilterPolicy;
+use xlsynth_g8r::liberty::boundary::validate_boundary_timing_defaults;
 use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
 use xlsynth_g8r::liberty::model::library_to_proto;
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, ThresholdVoltageGroupRule,
     parse_liberty_files_with_vt_rules_and_payload_options,
 };
+use xlsynth_g8r::liberty_proto::BoundaryTimingDefaults;
 
 fn parse_vt_group_rule(raw: &str) -> Result<ThresholdVoltageGroupRule, String> {
     let mut parts = raw.splitn(3, ':');
@@ -111,6 +113,22 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
             stats.retained_cells,
             stats.removed_cells
         );
+    }
+    if let (Some(driver), Some(load)) = (
+        matches.get_one::<String>("representative_driver_cell"),
+        matches.get_one::<String>("representative_load_cell"),
+    ) {
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: driver.clone(),
+            representative_load_cell: load.clone(),
+            representative_load_count: matches
+                .get_one::<u32>("representative_load_count")
+                .copied()
+                .unwrap_or(2),
+        });
+        validate_boundary_timing_defaults(&library).unwrap_or_else(|error| {
+            panic!("Invalid representative boundary timing defaults: {error:#}")
+        });
     }
     let proto = library_to_proto(library).expect("Failed to encode Liberty LUT data");
 

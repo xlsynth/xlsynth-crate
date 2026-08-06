@@ -7,7 +7,9 @@ use crate::netlist::buffer::{BufferOptions, BufferStats};
 use crate::netlist::parse::{Net, NetlistModule};
 use crate::netlist::report::{build_area_report, build_sta_report};
 use crate::netlist::resize::{ResizeOptions, ResizeStats, resize_netlist};
-use crate::netlist::sta::{StaOptions, analyze_combinational_max_arrival};
+use crate::netlist::sta::{
+    StaOptions, analyze_combinational_max_arrival, resolved_module_output_load,
+};
 use crate::netlist::timing_buffer::{
     BufferTimingConstraints, consolidate_timing_aware_buffers, has_slow_shared_primary_output,
     insert_speculative_timing_aware_buffers, insert_timing_aware_buffers,
@@ -70,6 +72,7 @@ pub fn optimize_mapped_netlist(
     library: &Library,
     options: &NetlistOptimizationOptions,
 ) -> Result<NetlistOptimizationStats> {
+    let output_load = resolved_module_output_load(library, options.sta_options)?;
     let initial_area = build_area_report(module, interner, library)?.area;
     let initial_delay = build_sta_report(
         module,
@@ -130,7 +133,7 @@ pub fn optimize_mapped_netlist(
                 true
             } else if module.instances.len() <= MAX_SHARED_OUTPUT_INSTANCE_COUNT
                 && stats.max_fanout_after >= 2
-                && options.sta_options.module_output_load > 0.0
+                && output_load.rise.max(output_load.fall) > 0.0
             {
                 let mut detection_options = buffer_options.clone();
                 detection_options.module_output_load = options.sta_options.module_output_load;

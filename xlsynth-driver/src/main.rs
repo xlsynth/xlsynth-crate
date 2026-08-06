@@ -1960,6 +1960,31 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("representative_driver_cell")
+                        .long("representative-driver-cell")
+                        .value_name("CELL")
+                        .help("Store CELL as the characterized unary driver for module inputs")
+                        .requires("representative_load_cell")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("representative_load_cell")
+                        .long("representative-load-cell")
+                        .value_name("CELL")
+                        .help("Store the unary CELL whose input capacitance loads module outputs")
+                        .requires("representative_driver_cell")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("representative_load_count")
+                        .long("representative-load-count")
+                        .value_name("COUNT")
+                        .help("Number of representative receiver inputs per output (default: 2)")
+                        .value_parser(clap::value_parser!(u32))
+                        .requires("representative_driver_cell")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("include_timing")
                         .long("include-timing")
                         .help("Include timing arcs, evaluator timing tables, and timing LUT templates")
@@ -2698,7 +2723,7 @@ fn main() {
                         .value_name("TIME")
                         .default_value("0.01")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Input rise/fall transition for final STA and constrained matching")
+                        .help("Input transition at the ideal source or representative driver")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2707,7 +2732,7 @@ fn main() {
                         .value_name("CAPACITANCE")
                         .default_value("0")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Output load for final STA and constrained matching")
+                        .help("Explicit output load; zero uses Liberty representative-load defaults")
                         .action(ArgAction::Set),
                 ),
         )
@@ -2751,7 +2776,7 @@ fn main() {
                         .value_name("TIME")
                         .default_value("0.01")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Primary-input transition for exact Liberty STA")
+                        .help("Input transition at the ideal source or representative driver")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2760,7 +2785,7 @@ fn main() {
                         .value_name("CAPACITANCE")
                         .default_value("0")
                         .value_parser(clap::value_parser!(f64))
-                        .help("External capacitive load on each module output")
+                        .help("Explicit output load; zero uses Liberty representative-load defaults")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2878,7 +2903,7 @@ fn main() {
                         .value_name("VALUE")
                         .default_value("0.01")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Transition applied at primary inputs")
+                        .help("Transition at ideal primary inputs or representative driver inputs")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2887,7 +2912,7 @@ fn main() {
                         .value_name("VALUE")
                         .default_value("0.0")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Additional load capacitance added to module outputs")
+                        .help("Explicit output load; zero uses Liberty representative-load defaults")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2960,7 +2985,7 @@ fn main() {
                         .value_name("VALUE")
                         .default_value("0.01")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Transition applied at primary inputs")
+                        .help("Transition at ideal primary inputs or representative driver inputs")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2969,7 +2994,7 @@ fn main() {
                         .value_name("VALUE")
                         .default_value("0.0")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Additional load capacitance added to module outputs")
+                        .help("Explicit output load; zero uses Liberty representative-load defaults")
                         .action(ArgAction::Set),
                 )
                 .arg(

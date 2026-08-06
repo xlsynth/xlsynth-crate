@@ -10,7 +10,7 @@ use crate::netlist::sta::{
     analyze_combinational_max_arrival,
     analyze_combinational_max_arrival_with_primary_input_arrivals,
     analyze_register_boundary_max_arrival,
-    analyze_register_boundary_max_arrival_with_primary_input_arrivals,
+    analyze_register_boundary_max_arrival_with_primary_input_arrivals, resolved_module_output_load,
 };
 use crate::netlist::stages::{StagePartitionStatus, analyze_register_stages};
 use anyhow::{Result, anyhow};
@@ -216,7 +216,10 @@ fn build_sta_report_with_primary_input_arrivals(
         module: module_name,
         time_unit,
         primary_input_transition: options.primary_input_transition,
-        module_output_load: options.module_output_load,
+        module_output_load: {
+            let load = resolved_module_output_load(library, options)?;
+            load.rise.max(load.fall)
+        },
         delay: report.worst_output_arrival,
         cell_levels: report.cell_levels,
         timing_query_diagnostic_counts: report.timing_query_diagnostic_counts,
@@ -420,7 +423,10 @@ pub fn build_netlist_report_with_primary_input_arrivals(
         module: area.module,
         time_unit,
         primary_input_transition: options.primary_input_transition,
-        module_output_load: options.module_output_load,
+        module_output_load: {
+            let load = resolved_module_output_load(library, options)?;
+            load.rise.max(load.fall)
+        },
         cell_area: area.area,
         max_delay: maximum_output_arrival(outputs.as_slice()),
         max_input_to_register_delay: maximum_register_input_arrival(&input_launch),

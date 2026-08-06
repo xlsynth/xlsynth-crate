@@ -8,7 +8,7 @@ use super::{
 };
 use crate::aig::{ChoiceAig, GateFn, SequentialGateFn};
 use crate::liberty::cell_formula::{Term, parse_formula};
-use crate::liberty_model::{Cell, Library, PinDirection};
+use crate::liberty_model::{Cell, Library, Pin, PinDirection};
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
     NetlistModule, NetlistPort, PortDirection, Pos, Span,
@@ -18,9 +18,14 @@ use crate::netlist::sequential_liberty::{
     GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec,
 };
 use crate::netlist::sta::{
-    PreparedStaLibrary, StaOptions, analyze_register_boundary_max_arrival,
+    CombinationalOutputLoad, PreparedStaLibrary, ScopedBoundaryTimingDefaultsSuppression,
+    StaOptions, TimingQueryDiagnosticCounts, analyze_register_boundary_max_arrival,
     analyze_register_boundary_max_arrival_with_prepared_library,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
+    effective_input_capacitance_for_mapping, effective_representative_driver,
+    evaluate_combinational_cell_output_timing, evaluate_primary_input_driver_timing,
+    evaluate_sequential_cell_capture_timing_with_predecessor,
+    evaluate_sequential_cell_output_timing, resolved_module_output_load,
 };
 use crate::netlist::timing_buffer::{BufferTimingConstraints, insert_timing_aware_buffers};
 use crate::netlist::timing_resize::resize_timing_aware_netlist;
@@ -102,6 +107,7 @@ pub fn map_sequential_choice_aig_to_netlist(
             constraints,
             options,
             sta_options,
+            None,
         )?;
         return Ok(mapped);
     }
@@ -126,6 +132,7 @@ pub fn map_sequential_choice_aig_to_netlist(
             &effective_options,
             sta_options,
             &flip_flop,
+            options.resize_options.is_some() && library.boundary_timing_defaults.is_some(),
         ) {
             Ok(mut mapped) => {
                 apply_requested_sequential_optimization(
@@ -134,6 +141,7 @@ pub fn map_sequential_choice_aig_to_netlist(
                     constraints,
                     options,
                     sta_options,
+                    Some(&flip_flop),
                 )?;
                 return Ok(mapped);
             }
@@ -157,6 +165,7 @@ fn apply_requested_sequential_optimization(
     constraints: &SequentialTechMapConstraints,
     options: &TechMapOptions,
     sta_options: StaOptions,
+    flip_flop: Option<&FlipFlopBinding>,
 ) -> Result<()> {
     if options.buffer_options.is_none() && options.resize_options.is_none() {
         return Ok(());
@@ -182,7 +191,7 @@ fn apply_requested_sequential_optimization(
             .context("inserting register-aware, timing-driven buffers")
         })
         .transpose()?;
-    let resize_stats = options
+    let mut resize_stats = options
         .resize_options
         .as_ref()
         .map(|resize_options| {
@@ -199,8 +208,27 @@ fn apply_requested_sequential_optimization(
             .context("resizing register-aware mapped gates and physical flip-flops")
         })
         .transpose()?;
+    if let Some(flip_flop) = flip_flop
+        && resize_stats.is_some()
+        && library.boundary_timing_defaults.is_some()
+    {
+        // Keep input isolation while sizing launch registers, then remove only
+        // electrically safe artifacts from their final characterized variants.
+        bypass_register_boundary_identity_buffers(
+            mapped,
+            library,
+            flip_flop,
+            sta_options,
+            RegisterBoundaryCleanupPhase::InputsOnly,
+        )
+        .context("removing register-input identity buffers after physical sizing")?;
+    }
     finalize_sequential_mapping(mapped, library, constraints, sta_options)
         .context("verifying buffered and resized sequential mapping")?;
+    if let Some(stats) = resize_stats.as_mut() {
+        stats.final_area = mapped.stats.selected_area;
+        stats.final_delay = mapped.stats.worst_estimated_output_arrival;
+    }
     mapped.stats.buffer_stats = buffer_stats;
     mapped.stats.resize_stats = resize_stats;
     Ok(())
@@ -382,6 +410,7 @@ fn map_with_flip_flop(
     options: &TechMapOptions,
     sta_options: StaOptions,
     flip_flop: &FlipFlopBinding,
+    defer_input_cleanup: bool,
 ) -> Result<MappedNetlist> {
     if let Some(period) = constraints.clock_period {
         if period < flip_flop.setup {
@@ -415,11 +444,762 @@ fn map_with_flip_flop(
         }
     }
 
-    let mut mapped = map_transition(&adjusted, library, &timing, options)
-        .with_context(|| format!("mapping transition for flip-flop '{}'", flip_flop.cell_name))?;
+    let physical_inputs = design
+        .inputs
+        .iter()
+        .flat_map(|input| {
+            let port = &design.transition.inputs[input.index()];
+            (0..port.get_bit_count())
+                .map(move |bit| scalar_bit_name(&port.name, bit, port.get_bit_count()))
+        })
+        .collect::<BTreeSet<_>>();
+    let physical_outputs = design
+        .outputs
+        .iter()
+        .flat_map(|output| {
+            let port = &design.transition.outputs[output.index()];
+            (0..port.get_bit_count())
+                .map(move |bit| scalar_bit_name(&port.name, bit, port.get_bit_count()))
+        })
+        .collect::<BTreeSet<_>>();
+    // Preserve actual external electrical conditions while excluding synthetic
+    // register Q/D interchange ports from virtual driving and output loading.
+    let mut mapped = {
+        let _physical_boundary = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            physical_inputs,
+            physical_outputs,
+        );
+        map_transition(&adjusted, library, &timing, options)
+            .with_context(|| format!("mapping transition for flip-flop '{}'", flip_flop.cell_name))
+    }?;
     reinstate_sequential_boundary(&mut mapped, design, Some(flip_flop))?;
+    bypass_register_boundary_identity_buffers(
+        &mut mapped,
+        library,
+        flip_flop,
+        sta_options,
+        if defer_input_cleanup {
+            RegisterBoundaryCleanupPhase::OutputsOnly
+        } else {
+            RegisterBoundaryCleanupPhase::All
+        },
+    )
+    .context("removing redundant transition-interface identity buffers")?;
     finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
     Ok(mapped)
+}
+
+/// Identifies one scalar bit without conflating packed-port bit positions.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RegisterBoundaryBit {
+    net: usize,
+    bit: u32,
+}
+
+/// Records the exact physical Liberty pin connected to one scalar bit.
+#[derive(Clone, Copy, Debug)]
+struct RegisterBoundaryPinUse {
+    instance: usize,
+    connection: usize,
+    cell: usize,
+    pin: usize,
+}
+
+/// Stores the real physical pin indices of a Boolean unary identity cell.
+#[derive(Clone, Copy, Debug)]
+struct RegisterBoundaryIdentityCell {
+    input_pin: usize,
+    output_pin: usize,
+}
+
+/// Records the complete physical load already attached to one external input.
+#[derive(Clone, Copy, Debug, Default)]
+struct RegisterBoundaryInputLoad {
+    capacitance: CombinationalOutputLoad,
+    fanout: f64,
+    has_other_consumers: bool,
+}
+
+/// Selects boundary artifacts appropriate to one physical optimization phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegisterBoundaryCleanupPhase {
+    All,
+    InputsOnly,
+    OutputsOnly,
+}
+
+impl RegisterBoundaryCleanupPhase {
+    /// Returns whether isolated package-input-to-register buffers may be
+    /// removed.
+    fn removes_inputs(self) -> bool {
+        matches!(self, Self::All | Self::InputsOnly)
+    }
+
+    /// Returns whether isolated register-to-package-output buffers may be
+    /// removed.
+    fn removes_outputs(self) -> bool {
+        matches!(self, Self::All | Self::OutputsOnly)
+    }
+}
+
+/// Recognizes unary identity by Liberty truth, independently of cell spelling.
+fn register_boundary_identity_cell(
+    library: &Library,
+    cell: &Cell,
+) -> Option<RegisterBoundaryIdentityCell> {
+    if !cell.sequential.is_empty() || cell.clock_gate.is_some() {
+        return None;
+    }
+    let mut inputs = cell
+        .pins
+        .iter()
+        .enumerate()
+        .filter(|(_, pin)| pin.direction == PinDirection::Input as i32);
+    let (input_pin, input) = inputs.next()?;
+    if inputs.next().is_some() || input.is_clocking_pin {
+        return None;
+    }
+    let mut outputs = cell
+        .pins
+        .iter()
+        .enumerate()
+        .filter(|(_, pin)| pin.direction == PinDirection::Output as i32);
+    let (output_pin, output) = outputs.next()?;
+    if outputs.next().is_some() {
+        return None;
+    }
+    let function = parse_formula(library.resolve_string(&output.function)).ok()?;
+    let input_name = library.resolve_string(&input.name).to_string();
+    for value in [false, true] {
+        if function.evaluate_partial(&HashMap::from([(input_name.clone(), value)])) != Some(value) {
+            return None;
+        }
+    }
+    Some(RegisterBoundaryIdentityCell {
+        input_pin,
+        output_pin,
+    })
+}
+
+/// Returns the exact scalar bit for a one-bit Liberty pin connection.
+fn register_boundary_scalar_bit(reference: &NetRef, nets: &[Net]) -> Option<RegisterBoundaryBit> {
+    match reference {
+        NetRef::Simple(index) if nets.get(index.0)?.width_bits() == 1 => {
+            Some(RegisterBoundaryBit {
+                net: index.0,
+                bit: nets[index.0].bit_number(0)?,
+            })
+        }
+        NetRef::BitSelect(index, bit) if nets.get(index.0)?.bit_offset(*bit).is_some() => {
+            Some(RegisterBoundaryBit {
+                net: index.0,
+                bit: *bit,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Marks every bit touched by a structural assignment or non-scalar pin.
+fn protect_register_boundary_reference(
+    reference: &NetRef,
+    nets: &[Net],
+    protected: &mut BTreeSet<RegisterBoundaryBit>,
+) {
+    match reference {
+        NetRef::Simple(index) | NetRef::PartSelect(index, _, _) => {
+            if let Some(net) = nets.get(index.0) {
+                for offset in 0..net.width_bits() {
+                    if let Some(bit) = net.bit_number(offset) {
+                        protected.insert(RegisterBoundaryBit { net: index.0, bit });
+                    }
+                }
+            }
+        }
+        NetRef::BitSelect(index, bit) => {
+            protected.insert(RegisterBoundaryBit {
+                net: index.0,
+                bit: *bit,
+            });
+        }
+        NetRef::Concat(parts) => {
+            for part in parts {
+                protect_register_boundary_reference(part, nets, protected);
+            }
+        }
+        NetRef::Literal(_) | NetRef::UnknownLiteral(_) | NetRef::Unconnected => {
+            // Literal and absent connections have no physical net bit to alias.
+        }
+    }
+}
+
+/// Protects all physical bits mentioned by a preserved assignment expression.
+fn protect_register_boundary_expression(
+    expression: &AssignExpr,
+    nets: &[Net],
+    protected: &mut BTreeSet<RegisterBoundaryBit>,
+) {
+    match expression {
+        AssignExpr::Leaf(reference) => {
+            protect_register_boundary_reference(reference, nets, protected);
+        }
+        AssignExpr::Not(inner) => protect_register_boundary_expression(inner, nets, protected),
+        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
+            protect_register_boundary_expression(lhs, nets, protected);
+            protect_register_boundary_expression(rhs, nets, protected);
+        }
+    }
+}
+
+/// Checks that directly loading a register Q is legal and no slower.
+fn can_bypass_register_output_buffer(
+    library: &Library,
+    flip_flop: &FlipFlopBinding,
+    flip_flop_output: &Pin,
+    buffer: &Cell,
+    identity: RegisterBoundaryIdentityCell,
+    options: StaOptions,
+) -> Result<bool> {
+    let direct_load = resolved_module_output_load(library, options)?;
+    if flip_flop_output.max_capacitance.is_some_and(|maximum| {
+        direct_load.rise.max(direct_load.fall) > maximum + REGISTER_SETUP_SLACK_EPSILON
+    }) {
+        return Ok(false);
+    }
+
+    let buffer_input = &buffer.pins[identity.input_pin];
+    let buffered_q_load = effective_input_capacitance_for_mapping(
+        buffer_input,
+        &format!(
+            "register output buffer '{}.{}'",
+            buffer.name,
+            library.resolve_string(&buffer_input.name)
+        ),
+    )?;
+    let known_flip_flop_inputs = flip_flop
+        .tied_inputs
+        .iter()
+        .map(|(name, value)| (name.clone(), *value))
+        .collect::<HashMap<_, _>>();
+    let mut diagnostics = TimingQueryDiagnosticCounts::default();
+    let direct = evaluate_sequential_cell_output_timing(
+        library,
+        &flip_flop.cell_name,
+        flip_flop_output,
+        direct_load,
+        &known_flip_flop_inputs,
+        &mut diagnostics,
+    )?;
+    if flip_flop_output
+        .max_transition
+        .or(library.default_max_transition)
+        .is_some_and(|maximum| {
+            direct.rise.transition.max(direct.fall.transition)
+                > maximum + REGISTER_SETUP_SLACK_EPSILON
+        })
+    {
+        return Ok(false);
+    }
+
+    let buffered_launch = evaluate_sequential_cell_output_timing(
+        library,
+        &flip_flop.cell_name,
+        flip_flop_output,
+        buffered_q_load,
+        &known_flip_flop_inputs,
+        &mut diagnostics,
+    )?;
+    let buffered = evaluate_combinational_cell_output_timing(
+        library,
+        &buffer.name,
+        &buffer.pins[identity.output_pin],
+        &[(library.resolve_string(&buffer_input.name), buffered_launch)],
+        direct_load,
+        &HashMap::new(),
+        &mut diagnostics,
+    )?;
+    Ok(
+        direct.rise.arrival <= buffered.rise.arrival + REGISTER_SETUP_SLACK_EPSILON
+            && direct.fall.arrival <= buffered.fall.arrival + REGISTER_SETUP_SLACK_EPSILON,
+    )
+}
+
+/// Keeps a register-input buffer whenever direct wiring worsens actual capture.
+fn can_bypass_register_input_buffer(
+    library: &Library,
+    flip_flop: &FlipFlopBinding,
+    flip_flop_input: &Pin,
+    buffer: &Cell,
+    identity: RegisterBoundaryIdentityCell,
+    buffered_source_load: RegisterBoundaryInputLoad,
+    options: StaOptions,
+) -> Result<bool> {
+    let buffer_input = &buffer.pins[identity.input_pin];
+    let buffered_input_load = effective_input_capacitance_for_mapping(
+        buffer_input,
+        "buffered register-boundary data input",
+    )?;
+    let direct_input_load = effective_input_capacitance_for_mapping(
+        flip_flop_input,
+        "direct register-boundary data input",
+    )?;
+    let representative_driver = effective_representative_driver(library)?;
+    if (representative_driver.is_none() || buffered_source_load.has_other_consumers)
+        && (direct_input_load.rise > buffered_input_load.rise + REGISTER_SETUP_SLACK_EPSILON
+            || direct_input_load.fall > buffered_input_load.fall + REGISTER_SETUP_SLACK_EPSILON
+            || flip_flop_input.fanout_load.unwrap_or(0.0)
+                > buffer_input.fanout_load.unwrap_or(0.0) + REGISTER_SETUP_SLACK_EPSILON)
+    {
+        return Ok(false);
+    }
+
+    let direct_source_load = RegisterBoundaryInputLoad {
+        capacitance: CombinationalOutputLoad {
+            rise: buffered_source_load.capacitance.rise - buffered_input_load.rise
+                + direct_input_load.rise,
+            fall: buffered_source_load.capacitance.fall - buffered_input_load.fall
+                + direct_input_load.fall,
+        },
+        fanout: buffered_source_load.fanout - buffer_input.fanout_load.unwrap_or(0.0)
+            + flip_flop_input.fanout_load.unwrap_or(0.0),
+        has_other_consumers: buffered_source_load.has_other_consumers,
+    };
+    if let Some(driver) = representative_driver.as_ref() {
+        if driver.output_pin.max_capacitance.is_some_and(|maximum| {
+            direct_source_load
+                .capacitance
+                .rise
+                .max(direct_source_load.capacitance.fall)
+                > maximum + REGISTER_SETUP_SLACK_EPSILON
+        }) || driver
+            .output_pin
+            .max_fanout
+            .or(library.default_max_fanout)
+            .is_some_and(|maximum| {
+                direct_source_load.fanout > maximum + REGISTER_SETUP_SLACK_EPSILON
+            })
+        {
+            return Ok(false);
+        }
+    }
+
+    let mut diagnostics = TimingQueryDiagnosticCounts::default();
+    let direct = evaluate_primary_input_driver_timing(
+        library,
+        representative_driver.as_ref(),
+        options,
+        0.0,
+        direct_source_load.capacitance,
+        &mut diagnostics,
+    )?;
+    let direct_transition = direct.rise.transition.max(direct.fall.transition);
+    if flip_flop_input
+        .max_transition
+        .or(library.default_max_transition)
+        .is_some_and(|maximum| direct_transition > maximum + REGISTER_SETUP_SLACK_EPSILON)
+        || representative_driver
+            .as_ref()
+            .and_then(|driver| driver.output_pin.max_transition)
+            .is_some_and(|maximum| direct_transition > maximum + REGISTER_SETUP_SLACK_EPSILON)
+    {
+        return Ok(false);
+    }
+
+    let buffered_source = evaluate_primary_input_driver_timing(
+        library,
+        representative_driver.as_ref(),
+        options,
+        0.0,
+        buffered_source_load.capacitance,
+        &mut diagnostics,
+    )?;
+    let buffered = evaluate_combinational_cell_output_timing(
+        library,
+        &buffer.name,
+        &buffer.pins[identity.output_pin],
+        &[(library.resolve_string(&buffer_input.name), buffered_source)],
+        direct_input_load,
+        &HashMap::new(),
+        &mut diagnostics,
+    )?;
+    let known_flip_flop_inputs = flip_flop
+        .tied_inputs
+        .iter()
+        .map(|(name, value)| (name.clone(), *value))
+        .collect::<HashMap<_, _>>();
+    let Some(direct_capture) = evaluate_sequential_cell_capture_timing_with_predecessor(
+        library,
+        &flip_flop.cell_name,
+        flip_flop_input,
+        direct,
+        &known_flip_flop_inputs,
+        &mut diagnostics,
+    )?
+    else {
+        return Ok(false);
+    };
+    let Some(buffered_capture) = evaluate_sequential_cell_capture_timing_with_predecessor(
+        library,
+        &flip_flop.cell_name,
+        flip_flop_input,
+        buffered,
+        &known_flip_flop_inputs,
+        &mut diagnostics,
+    )?
+    else {
+        return Ok(false);
+    };
+
+    Ok(direct_capture.arrival <= buffered_capture.arrival + REGISTER_SETUP_SLACK_EPSILON)
+}
+
+/// Rebinds only state-, clock-, control-, and polarity-equivalent resized FFs.
+fn compatible_register_boundary_binding(
+    library: &Library,
+    original: &FlipFlopBinding,
+    cell: &Cell,
+) -> Option<FlipFlopBinding> {
+    if cell.name == original.cell_name {
+        return Some(original.clone());
+    }
+    let spec = get_gv_eval_sequential_cell_spec(cell, library)
+        .ok()
+        .flatten()?;
+    if spec.clock.is_negated || spec.clock.pin_name != original.clock_pin {
+        return None;
+    }
+
+    let mut found_data = false;
+    let mut controls = BTreeSet::new();
+    for pin in cell
+        .pins
+        .iter()
+        .filter(|pin| pin.direction == PinDirection::Input as i32)
+    {
+        let name = library.resolve_string(&pin.name);
+        if name == spec.clock.pin_name {
+            if !pin.is_clocking_pin {
+                return None;
+            }
+            continue;
+        }
+        if pin.is_clocking_pin {
+            return None;
+        }
+        if name == original.data_pin {
+            if found_data {
+                return None;
+            }
+            found_data = true;
+        } else if !controls.insert(name.to_string()) {
+            return None;
+        }
+    }
+    let original_controls = original
+        .tied_inputs
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !found_data || controls != original_controls {
+        return None;
+    }
+
+    let data_inverted = data_formula_polarity(
+        &spec.next_state,
+        &spec,
+        &original.data_pin,
+        &original.tied_inputs,
+    )?;
+    let output = cell.pins.iter().find(|pin| {
+        pin.direction == PinDirection::Output as i32
+            && library.resolve_string(&pin.name) == original.output_pin
+    })?;
+    let output_formula = parse_formula(library.resolve_string(&output.function)).ok()?;
+    let output_inverted = state_formula_polarity(&output_formula, &spec)?;
+    if data_inverted ^ output_inverted != original.invert_data {
+        return None;
+    }
+
+    Some(FlipFlopBinding {
+        cell_name: cell.name.clone(),
+        area: cell.area,
+        ..original.clone()
+    })
+}
+
+/// Removes identity cells used solely to expose temporary register Q/D ports.
+fn bypass_register_boundary_identity_buffers(
+    mapped: &mut MappedNetlist,
+    library: &Library,
+    flip_flop: &FlipFlopBinding,
+    options: StaOptions,
+    phase: RegisterBoundaryCleanupPhase,
+) -> Result<()> {
+    let library_indices = library
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| (cell.name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut drivers = BTreeMap::<RegisterBoundaryBit, Vec<RegisterBoundaryPinUse>>::new();
+    let mut sinks = BTreeMap::<RegisterBoundaryBit, Vec<RegisterBoundaryPinUse>>::new();
+    let mut protected = BTreeSet::new();
+    let mut instance_cells = Vec::with_capacity(mapped.module.instances.len());
+
+    for (instance_index, instance) in mapped.module.instances.iter().enumerate() {
+        let cell_name = mapped
+            .interner
+            .resolve(instance.type_name)
+            .ok_or_else(|| anyhow!("cannot resolve register-boundary instance cell"))?;
+        let cell_index = *library_indices.get(cell_name).ok_or_else(|| {
+            anyhow!("register-boundary instance references unknown cell '{cell_name}'")
+        })?;
+        instance_cells.push(cell_index);
+        let cell = &library.cells[cell_index];
+        for (connection_index, (name, reference)) in instance.connections.iter().enumerate() {
+            let pin_name = mapped
+                .interner
+                .resolve(*name)
+                .ok_or_else(|| anyhow!("cannot resolve register-boundary pin on '{cell_name}'"))?;
+            let (pin_index, pin) = cell
+                .pins
+                .iter()
+                .enumerate()
+                .find(|(_, pin)| library.resolve_string(&pin.name) == pin_name)
+                .ok_or_else(|| anyhow!("cell '{cell_name}' has no physical pin '{pin_name}'"))?;
+            let Some(bit) = register_boundary_scalar_bit(reference, &mapped.nets) else {
+                protect_register_boundary_reference(reference, &mapped.nets, &mut protected);
+                continue;
+            };
+            let use_record = RegisterBoundaryPinUse {
+                instance: instance_index,
+                connection: connection_index,
+                cell: cell_index,
+                pin: pin_index,
+            };
+            if pin.direction == PinDirection::Output as i32 {
+                drivers.entry(bit).or_default().push(use_record);
+            } else if pin.direction == PinDirection::Input as i32 {
+                sinks.entry(bit).or_default().push(use_record);
+            } else {
+                protected.insert(bit);
+            }
+        }
+    }
+
+    for assignment in &mapped.module.assigns {
+        protect_register_boundary_reference(&assignment.lhs, &mapped.nets, &mut protected);
+        protect_register_boundary_expression(&assignment.rhs, &mapped.nets, &mut protected);
+    }
+
+    let mut module_inputs = BTreeSet::new();
+    let mut module_outputs = BTreeSet::new();
+    for port in &mapped.module.ports {
+        let net = mapped
+            .module
+            .find_net_index(port.name, &mapped.nets)
+            .ok_or_else(|| anyhow!("register-boundary port has no physical net"))?;
+        let destination = match port.direction {
+            PortDirection::Input => &mut module_inputs,
+            PortDirection::Output => &mut module_outputs,
+            PortDirection::Inout => continue,
+        };
+        for offset in 0..mapped.nets[net.0].width_bits() {
+            let bit = mapped.nets[net.0]
+                .bit_number(offset)
+                .ok_or_else(|| anyhow!("register-boundary port has an invalid bit index"))?;
+            destination.insert(RegisterBoundaryBit { net: net.0, bit });
+        }
+    }
+
+    let mut identities = HashMap::<usize, Option<RegisterBoundaryIdentityCell>>::new();
+    let mut actual_flip_flops = HashMap::<usize, Option<FlipFlopBinding>>::new();
+    let mut removed = BTreeSet::new();
+    let mut possibly_dead_nets = BTreeSet::new();
+
+    for (instance_index, cell_index) in instance_cells.iter().copied().enumerate() {
+        let Some(identity) = *identities.entry(cell_index).or_insert_with(|| {
+            register_boundary_identity_cell(library, &library.cells[cell_index])
+        }) else {
+            continue;
+        };
+        let instance = &mapped.module.instances[instance_index];
+        let Some((input_connection, input_reference)) =
+            instance
+                .connections
+                .iter()
+                .enumerate()
+                .find_map(|(index, (name, reference))| {
+                    (mapped.interner.resolve(*name)
+                        == Some(library.resolve_string(
+                            &library.cells[cell_index].pins[identity.input_pin].name,
+                        )))
+                    .then_some((index, reference.clone()))
+                })
+        else {
+            continue;
+        };
+        let Some((output_connection, output_reference)) =
+            instance
+                .connections
+                .iter()
+                .enumerate()
+                .find_map(|(index, (name, reference))| {
+                    (mapped.interner.resolve(*name)
+                        == Some(library.resolve_string(
+                            &library.cells[cell_index].pins[identity.output_pin].name,
+                        )))
+                    .then_some((index, reference.clone()))
+                })
+        else {
+            continue;
+        };
+        let Some(input_bit) = register_boundary_scalar_bit(&input_reference, &mapped.nets) else {
+            continue;
+        };
+        let Some(output_bit) = register_boundary_scalar_bit(&output_reference, &mapped.nets) else {
+            continue;
+        };
+        if protected.contains(&input_bit)
+            || protected.contains(&output_bit)
+            || drivers.get(&output_bit).is_none_or(|uses| {
+                uses.len() != 1
+                    || uses[0].instance != instance_index
+                    || uses[0].connection != output_connection
+            })
+        {
+            continue;
+        }
+
+        if module_inputs.contains(&input_bit)
+            && !module_outputs.contains(&output_bit)
+            && drivers.get(&input_bit).is_none_or(Vec::is_empty)
+            && let Some(output_sinks) = sinks.get(&output_bit)
+            && output_sinks.len() == 1
+        {
+            if !phase.removes_inputs() {
+                continue;
+            }
+            let sink = output_sinks[0];
+            let sink_cell = &library.cells[sink.cell];
+            let sink_pin = &sink_cell.pins[sink.pin];
+            if library.resolve_string(&sink_pin.name) == flip_flop.data_pin
+                && let Some(actual_flip_flop) = actual_flip_flops
+                    .entry(sink.cell)
+                    .or_insert_with(|| {
+                        compatible_register_boundary_binding(library, flip_flop, sink_cell)
+                    })
+                    .as_ref()
+            {
+                let mut source_load = RegisterBoundaryInputLoad::default();
+                if let Some(source_sinks) = sinks.get(&input_bit) {
+                    source_load.has_other_consumers = source_sinks.len() != 1
+                        || source_sinks[0].instance != instance_index
+                        || source_sinks[0].connection != input_connection;
+                    for source_sink in source_sinks {
+                        let pin = &library.cells[source_sink.cell].pins[source_sink.pin];
+                        let capacitance = effective_input_capacitance_for_mapping(
+                            pin,
+                            "register-boundary primary-input sink",
+                        )?;
+                        source_load.capacitance.rise += capacitance.rise;
+                        source_load.capacitance.fall += capacitance.fall;
+                        source_load.fanout += pin.fanout_load.unwrap_or(0.0);
+                    }
+                }
+                if module_outputs.contains(&input_bit) {
+                    source_load.has_other_consumers = true;
+                    let output_load = resolved_module_output_load(library, options)?;
+                    source_load.capacitance.rise += output_load.rise;
+                    source_load.capacitance.fall += output_load.fall;
+                }
+                if can_bypass_register_input_buffer(
+                    library,
+                    actual_flip_flop,
+                    sink_pin,
+                    &library.cells[cell_index],
+                    identity,
+                    source_load,
+                    options,
+                )? {
+                    mapped.module.instances[sink.instance].connections[sink.connection].1 =
+                        input_reference;
+                    removed.insert(instance_index);
+                    possibly_dead_nets.insert(output_bit.net);
+                }
+            }
+            continue;
+        }
+
+        if !phase.removes_outputs()
+            || !module_outputs.contains(&output_bit)
+            || module_inputs.contains(&input_bit)
+            || module_outputs.contains(&input_bit)
+            || sinks.get(&output_bit).is_some_and(|uses| !uses.is_empty())
+            || sinks.get(&input_bit).is_none_or(|uses| {
+                uses.len() != 1
+                    || uses[0].instance != instance_index
+                    || uses[0].connection != input_connection
+            })
+        {
+            continue;
+        }
+        let Some(q_drivers) = drivers.get(&input_bit) else {
+            continue;
+        };
+        if q_drivers.len() != 1 {
+            continue;
+        }
+        let q_driver = q_drivers[0];
+        let q_cell = &library.cells[q_driver.cell];
+        let q_pin = &q_cell.pins[q_driver.pin];
+        if q_cell.name != flip_flop.cell_name
+            || library.resolve_string(&q_pin.name) != flip_flop.output_pin
+            || !can_bypass_register_output_buffer(
+                library,
+                flip_flop,
+                q_pin,
+                &library.cells[cell_index],
+                identity,
+                options,
+            )?
+        {
+            continue;
+        }
+        mapped.module.instances[q_driver.instance].connections[q_driver.connection].1 =
+            output_reference;
+        removed.insert(instance_index);
+        possibly_dead_nets.insert(input_bit.net);
+    }
+
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let mut index = 0usize;
+    mapped.module.instances.retain(|_| {
+        let keep = !removed.contains(&index);
+        index += 1;
+        keep
+    });
+    let mut remaining_nets = BTreeSet::new();
+    for instance in &mapped.module.instances {
+        for (_, reference) in &instance.connections {
+            let mut indices = Vec::new();
+            reference.collect_net_indices(&mut indices);
+            remaining_nets.extend(indices.into_iter().map(|net| net.0));
+        }
+    }
+    for assignment in &mapped.module.assigns {
+        let mut indices = Vec::new();
+        assignment.lhs.collect_net_indices(&mut indices);
+        assignment.rhs.collect_net_indices(&mut indices);
+        remaining_nets.extend(indices.into_iter().map(|net| net.0));
+    }
+    mapped
+        .module
+        .wires
+        .retain(|wire| !possibly_dead_nets.contains(&wire.0) || remaining_nets.contains(&wire.0));
+    Ok(())
 }
 
 /// Inverts physical D roots without discarding ABC structural-choice links.
@@ -761,6 +1541,9 @@ fn characterize_flip_flop(
             inst_colno: 1,
         }],
     };
+    // The characterization probe's Q output and D launch are synthetic ports,
+    // so optional package-level external boundary models must not alter them.
+    let _internal_boundary = ScopedBoundaryTimingDefaultsSuppression::new();
     let launch = analyze_register_boundary_max_arrival_with_prepared_library(
         &module,
         &nets,
@@ -1344,7 +2127,7 @@ mod tests {
     use crate::liberty_model::{
         LibraryBuilder, LuTableTemplate, Pin, Sequential, SequentialKind, TimingArc, TimingTable,
     };
-    use crate::liberty_proto::TimingTableKind;
+    use crate::liberty_proto::{BoundaryTimingDefaults, TimingTableKind};
     use crate::netlist::buffer::BufferOptions;
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::gatefn_from_netlist::project_labeled_sequential_netlist_aig;
@@ -1526,6 +2309,142 @@ mod tests {
         builder.finish()
     }
 
+    /// Adds a fast, oversized identity cell without relying on a buffer name.
+    fn fast_boundary_buffer_library(library: Library, input_capacitance: f64) -> Library {
+        let mut builder = LibraryBuilder::from_library(library);
+        let input = builder
+            .intern_string("A")
+            .expect("intern fast identity input");
+        let output = builder
+            .intern_string("Y")
+            .expect("intern fast identity output");
+        let identity = builder
+            .intern_string("!!A")
+            .expect("intern semantically equivalent identity");
+        let arc = test_output_arc(&mut builder, "A", "positive_unate", "combinational", 0.01);
+        builder.cells.push(Cell {
+            name: "DRIVE24".to_string(),
+            pins: vec![
+                Pin {
+                    name: input,
+                    direction: PinDirection::Input as i32,
+                    capacitance: Some(input_capacitance),
+                    ..Pin::default()
+                },
+                Pin {
+                    name: output,
+                    direction: PinDirection::Output as i32,
+                    function: identity,
+                    max_capacitance: Some(2.0),
+                    timing_arcs: vec![arc],
+                    ..Pin::default()
+                },
+            ],
+            area: 24.0,
+            ..Cell::default()
+        });
+        builder.finish()
+    }
+
+    /// Adds a slow-slew external driver and optionally slew-sensitive setup.
+    fn slow_representative_driver_library(
+        register_max_transition: Option<f64>,
+        slew_sensitive_setup: bool,
+    ) -> Library {
+        let mut builder = LibraryBuilder::from_library(test_library());
+        let input = builder.intern_string("A").expect("intern source input");
+        let output = builder.intern_string("Y").expect("intern source output");
+        let identity = builder
+            .intern_string("A")
+            .expect("intern source identity function");
+        let tables = vec![
+            test_timing_table(&mut builder, TimingTableKind::CellRise, 0.0),
+            test_timing_table(&mut builder, TimingTableKind::CellFall, 0.0),
+            test_timing_table(&mut builder, TimingTableKind::RiseTransition, 0.5),
+            test_timing_table(&mut builder, TimingTableKind::FallTransition, 0.5),
+        ];
+        let source_arc = builder
+            .add_timing_arc("A", "positive_unate", "combinational", "", tables)
+            .expect("construct slow-transition representative-driver arc");
+        builder.cells.push(Cell {
+            name: "SOURCE".to_string(),
+            pins: vec![
+                Pin {
+                    name: input,
+                    direction: PinDirection::Input as i32,
+                    capacitance: Some(0.02),
+                    ..Pin::default()
+                },
+                Pin {
+                    name: output,
+                    direction: PinDirection::Output as i32,
+                    function: identity,
+                    timing_arcs: vec![source_arc],
+                    ..Pin::default()
+                },
+            ],
+            area: 32.0,
+            ..Cell::default()
+        });
+
+        let setup = if slew_sensitive_setup {
+            builder.lu_table_templates.push(LuTableTemplate {
+                kind: "lu_table_template".to_string().into(),
+                name: "register_data_transition".to_string(),
+                variable_1: "constrained_pin_transition".to_string().into(),
+                index_1: vec![0.1, 0.5],
+                ..LuTableTemplate::default()
+            });
+            let template = builder.lu_table_templates.len() as u32;
+            let mut tables = Vec::new();
+            for kind in [
+                TimingTableKind::RiseConstraint,
+                TimingTableKind::FallConstraint,
+            ] {
+                tables.push(
+                    builder
+                        .add_timing_table_f64(
+                            kind,
+                            template,
+                            vec![],
+                            vec![],
+                            vec![],
+                            vec![0.1, 4.1],
+                            vec![2],
+                            "",
+                        )
+                        .expect("construct transition-sensitive register setup"),
+                );
+            }
+            Some(
+                builder
+                    .add_timing_arc("CLK", "", "setup_rising", "", tables)
+                    .expect("construct transition-sensitive register setup arc"),
+            )
+        } else {
+            None
+        };
+        let data_name = builder.intern_string("D").expect("intern register data");
+        let data_pin = builder
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "DFF")
+            .and_then(|cell| cell.pins.iter_mut().find(|pin| pin.name == data_name))
+            .expect("find synthetic register data pin");
+        data_pin.max_transition = register_max_transition;
+        if let Some(setup) = setup {
+            data_pin.timing_arcs = vec![setup];
+        }
+
+        let mut library = builder.finish();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "SOURCE".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 1,
+        });
+        library
+    }
+
     /// Creates a two-bit registered transition with canonical external ports.
     fn test_design() -> SequentialGateFn {
         let mut builder = GateBuilder::new(
@@ -1552,6 +2471,93 @@ mod tests {
             }],
         )
         .expect("construct registered mapper test design")
+    }
+
+    /// Identifies actual identity cells between register outputs and package
+    /// outputs.
+    fn buffered_register_output_cells(mapped: &MappedNetlist, library: &Library) -> Vec<String> {
+        let output = mapped
+            .module
+            .find_net_index(
+                mapped
+                    .interner
+                    .get("out")
+                    .expect("intern registered package output"),
+                &mapped.nets,
+            )
+            .expect("find registered package output");
+        let mut buffers = Vec::new();
+        for instance in &mapped.module.instances {
+            let cell_name = mapped
+                .interner
+                .resolve(instance.type_name)
+                .expect("resolve registered-mapping cell type");
+            let cell = library
+                .cells
+                .iter()
+                .find(|cell| cell.name == cell_name)
+                .expect("resolve registered-mapping Liberty cell");
+            let Some(identity) = register_boundary_identity_cell(library, cell) else {
+                continue;
+            };
+            let output_reference = instance
+                .connections
+                .iter()
+                .find(|(name, _)| {
+                    mapped.interner.resolve(*name)
+                        == Some(library.resolve_string(&cell.pins[identity.output_pin].name))
+                })
+                .map(|(_, reference)| reference)
+                .expect("find identity-buffer output connection");
+            let Some(output_bit) = register_boundary_scalar_bit(output_reference, &mapped.nets)
+            else {
+                continue;
+            };
+            if output_bit.net != output.0 {
+                continue;
+            }
+            let input_reference = instance
+                .connections
+                .iter()
+                .find(|(name, _)| {
+                    mapped.interner.resolve(*name)
+                        == Some(library.resolve_string(&cell.pins[identity.input_pin].name))
+                })
+                .map(|(_, reference)| reference)
+                .expect("find identity-buffer input connection");
+            let input_bit = register_boundary_scalar_bit(input_reference, &mapped.nets)
+                .expect("resolve identity-buffer register-output source");
+            let driven_by_register_output = mapped.module.instances.iter().any(|source| {
+                let source_name = mapped
+                    .interner
+                    .resolve(source.type_name)
+                    .expect("resolve potential register-output driver type");
+                let source_cell = library
+                    .cells
+                    .iter()
+                    .find(|candidate| candidate.name == source_name)
+                    .expect("resolve potential register-output Liberty cell");
+                !source_cell.sequential.is_empty()
+                    && source.connections.iter().any(|(name, reference)| {
+                        let Some(pin) = source_cell.pins.iter().find(|pin| {
+                            mapped.interner.resolve(*name)
+                                == Some(library.resolve_string(&pin.name))
+                        }) else {
+                            return false;
+                        };
+                        pin.direction == PinDirection::Output as i32
+                            && register_boundary_scalar_bit(reference, &mapped.nets)
+                                .is_some_and(|bit| bit == input_bit)
+                    })
+            });
+            assert!(
+                driven_by_register_output,
+                "physical output identity buffer '{cell_name}' must be driven by a register"
+            );
+            buffers.push(cell_name.to_string());
+        }
+        buffers.sort();
+        buffers
     }
 
     /// Creates parsed Liberty state metadata without relying on pin spelling.
@@ -1797,6 +2803,459 @@ mod tests {
             binding.clock_to_output
         );
         assert!((binding.setup - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn characterizes_register_without_external_boundary_driver_or_receiver() {
+        let mut library = load_dependent_flip_flop_library();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 3,
+        });
+        let candidates = index_flip_flops(&library, StaOptions::default())
+            .expect("suppress external boundary defaults while characterizing synthetic FF ports");
+        let binding = candidates
+            .iter()
+            .find(|binding| binding.cell_name == "DFF")
+            .expect("find load-sensitive synthetic flip-flop");
+
+        assert!((binding.clock_to_output - 0.5).abs() < 1e-12);
+        assert!((binding.setup - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn restores_external_boundary_models_after_registered_transition_mapping() {
+        let design = test_design();
+        let mut library = load_dependent_flip_flop_library();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 1,
+        });
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions::default(),
+        )
+        .expect("restore package boundary models after mapping internal Q/D pseudo-ports");
+
+        assert_eq!(mapped.stats.selected_instance_count, 2);
+        assert!(
+            (mapped.stats.worst_input_to_register_arrival.unwrap() - 1.25).abs() < 1e-12,
+            "physical external data must still include the representative-driver delay"
+        );
+        assert!(
+            (mapped.stats.worst_register_to_output_arrival.unwrap() - 0.7).abs() < 1e-12,
+            "physical register output must still include the receiver-pin default load"
+        );
+    }
+
+    #[test]
+    fn preserves_real_transition_boundaries_while_hiding_register_interchange_ports() {
+        let mut builder = GateBuilder::new(
+            "mixed_boundary__transition".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let data = builder.add_input("data".to_string(), 2);
+        let state = builder.add_input("state__q".to_string(), 2);
+        builder.add_output("out".to_string(), state);
+        builder.add_output("bypass".to_string(), data.clone());
+        builder.add_output("state__d".to_string(), data);
+        let design = SequentialGateFn::new(
+            "mixed_boundary".to_string(),
+            builder.build(),
+            vec![TransitionInputId::new(0)],
+            vec![TransitionOutputId::new(0), TransitionOutputId::new(1)],
+            Some(ClockPort {
+                name: "clk".to_string(),
+            }),
+            vec![RegisterBinding {
+                name: "state".to_string(),
+                q: TransitionInputId::new(1),
+                d: TransitionOutputId::new(2),
+                initial_value: None,
+            }],
+        )
+        .expect("construct mixed real and synthetic transition interfaces");
+        let mut library = fast_boundary_buffer_library(test_library(), 0.2);
+        let cheap_buffer = library
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "BUF")
+            .expect("find minimum-area synthetic-interchange buffer");
+        cheap_buffer
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find minimum-area buffer output")
+            .max_capacitance = Some(0.3);
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 1,
+        });
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
+                module_output_load: 0.5,
+                ..TechMapOptions::default()
+            },
+        )
+        .expect("distinguish physical external boundaries from register Q/D interchange");
+
+        let bypass = mapped
+            .module
+            .find_net_index(mapped.interner.get("bypass").unwrap(), &mapped.nets)
+            .expect("find packed physical bypass output");
+        let physical_output_buffers = mapped
+            .module
+            .instances
+            .iter()
+            .filter(|instance| mapped.interner.resolve(instance.type_name) == Some("DRIVE24"))
+            .collect::<Vec<_>>();
+        assert_eq!(physical_output_buffers.len(), 2);
+        for (bit, instance) in physical_output_buffers.into_iter().enumerate() {
+            let output = instance
+                .connections
+                .iter()
+                .find(|(name, _)| mapped.interner.resolve(*name) == Some("Y"))
+                .expect("find physically selected output-buffer pin");
+            assert_eq!(output.1, NetRef::BitSelect(bypass, bit as u32));
+        }
+        assert_eq!(mapped.stats.selected_instance_count, 4);
+        assert!((mapped.stats.worst_input_to_register_arrival.unwrap() - 1.25).abs() < 1e-12);
+        assert!((mapped.stats.worst_register_to_output_arrival.unwrap() - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn bypasses_oversized_identity_cells_on_packed_register_boundaries() {
+        let design = test_design();
+        let library = fast_boundary_buffer_library(test_library(), 0.2);
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
+                module_output_load: 0.05,
+                ..TechMapOptions::default()
+            },
+        )
+        .expect("bypass high-drive identity connections on both register boundaries");
+
+        assert_eq!(mapped.stats.sequential_instance_count, 2);
+        assert_eq!(mapped.stats.selected_instance_count, 2);
+        assert_eq!(mapped.stats.selected_area, 8.0);
+        let data = mapped
+            .module
+            .find_net_index(mapped.interner.get("data").unwrap(), &mapped.nets)
+            .expect("resolve packed external input");
+        let output = mapped
+            .module
+            .find_net_index(mapped.interner.get("out").unwrap(), &mapped.nets)
+            .expect("resolve packed external output");
+        for (bit, instance) in mapped.module.instances.iter().enumerate() {
+            assert_eq!(mapped.interner.resolve(instance.type_name), Some("DFF"));
+            let data_connection = instance
+                .connections
+                .iter()
+                .find(|(name, _)| mapped.interner.resolve(*name) == Some("D"))
+                .expect("find directly connected physical register data pin");
+            assert_eq!(data_connection.1, NetRef::BitSelect(data, bit as u32));
+            let output_connection = instance
+                .connections
+                .iter()
+                .find(|(name, _)| mapped.interner.resolve(*name) == Some("Q"))
+                .expect("find directly connected physical register output pin");
+            assert_eq!(output_connection.1, NetRef::BitSelect(output, bit as u32));
+        }
+
+        let projected = project_labeled_sequential_netlist_aig(
+            &mapped.module,
+            &mapped.nets,
+            &mapped.interner,
+            &library,
+            Some("clk"),
+        )
+        .expect("project directly wired physical register boundaries");
+        let inputs = [0, 1, 3, 2, 0]
+            .into_iter()
+            .map(|value| vec![IrBits::make_ubits(2, value).unwrap()])
+            .collect::<Vec<_>>();
+        let expected = simulate(&design, &inputs, SequentialState::all_zeros(&design)).unwrap();
+        let actual = simulate(
+            &projected.sequential_gate_fn,
+            &inputs,
+            SequentialState::all_zeros(&projected.sequential_gate_fn),
+        )
+        .unwrap();
+        assert_eq!(actual.external_outputs(), expected.external_outputs());
+    }
+
+    #[test]
+    fn retains_input_buffer_when_representative_driver_violates_register_slew() {
+        let design = test_design();
+        let library = slow_representative_driver_library(Some(0.2), false);
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions::default(),
+        )
+        .expect("preserve register-input buffers that repair the actual source slew");
+
+        assert_eq!(
+            mapped
+                .module
+                .instances
+                .iter()
+                .filter(|instance| mapped.interner.resolve(instance.type_name) == Some("BUF"))
+                .count(),
+            2
+        );
+        assert_eq!(mapped.stats.selected_instance_count, 4);
+        assert!((mapped.stats.worst_input_to_register_arrival.unwrap() - 1.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn retains_input_buffer_when_direct_slew_worsens_register_setup() {
+        let design = test_design();
+        let library = slow_representative_driver_library(None, true);
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions::default(),
+        )
+        .expect("preserve register-input buffers that improve setup-inclusive arrival");
+
+        assert_eq!(
+            mapped
+                .module
+                .instances
+                .iter()
+                .filter(|instance| mapped.interner.resolve(instance.type_name) == Some("BUF"))
+                .count(),
+            2
+        );
+        assert_eq!(mapped.stats.selected_instance_count, 4);
+        assert!((mapped.stats.worst_input_to_register_arrival.unwrap() - 1.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bypasses_private_input_buffer_when_driver_can_charge_larger_register_load() {
+        let design = test_design();
+        let mut library = slow_representative_driver_library(None, false);
+        let flip_flop = library
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "DFF")
+            .expect("find synthetic physical register");
+        flip_flop
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
+            .expect("find synthetic register data input")
+            .capacitance = Some(0.04);
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions::default(),
+        )
+        .expect("allow a characterized private driver to charge a larger register input");
+
+        assert_eq!(mapped.stats.selected_instance_count, 2);
+        assert!(
+            mapped
+                .module
+                .instances
+                .iter()
+                .all(|instance| mapped.interner.resolve(instance.type_name) == Some("DFF"))
+        );
+        assert!((mapped.stats.worst_input_to_register_arrival.unwrap() - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn defers_private_input_cleanup_until_after_register_drive_sizing() {
+        let design = test_design();
+        let mut builder = LibraryBuilder::from_library(slow_representative_driver_library(
+            /* register_max_transition= */ None, /* slew_sensitive_setup= */ false,
+        ));
+        let fast_clock = test_output_arc(&mut builder, "CLK", "non_unate", "rising_edge", 0.05);
+        let mut fast_register = builder
+            .cells
+            .iter()
+            .find(|cell| cell.name == "DFF")
+            .cloned()
+            .expect("clone the original physical register family");
+        fast_register.name = "DFF_FAST".to_string();
+        fast_register.area = 5.0;
+        fast_register
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
+            .expect("find faster register data input")
+            .capacitance = Some(0.04);
+        fast_register
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find faster register state output")
+            .timing_arcs = vec![fast_clock];
+        builder.cells.push(fast_register);
+        let library = builder.finish();
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
+                resize_options: Some(ResizeOptions::default()),
+                ..TechMapOptions::default()
+            },
+        )
+        .expect("retain input isolation while sizing and remove it from the final FF variant");
+
+        assert_eq!(mapped.stats.selected_instance_count, 2);
+        assert!(
+            mapped
+                .module
+                .instances
+                .iter()
+                .all(|instance| mapped.interner.resolve(instance.type_name) == Some("DFF_FAST"))
+        );
+        assert!((mapped.stats.worst_input_to_register_arrival.unwrap() - 0.25).abs() < 1e-12);
+        let register_output_delay = mapped.stats.worst_register_to_output_arrival.unwrap();
+        assert!(
+            (register_output_delay - 0.05).abs() < 1e-6,
+            "float32 Liberty tables must preserve the upsized register delay: {register_output_delay}"
+        );
+        let sizing = mapped
+            .stats
+            .resize_stats
+            .as_ref()
+            .expect("preserve sizing diagnostics after deferred boundary cleanup");
+        assert_eq!(sizing.register_upsizes, 2);
+        assert_eq!(sizing.final_area, mapped.stats.selected_area);
+        assert_eq!(
+            sizing.final_delay,
+            mapped.stats.worst_estimated_output_arrival
+        );
+    }
+
+    #[test]
+    fn retains_output_buffer_when_register_cannot_drive_external_load() {
+        let design = test_design();
+        let mut library = fast_boundary_buffer_library(test_library(), 0.025);
+        let flip_flop = library
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "DFF")
+            .expect("find synthetic physical register");
+        flip_flop
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find synthetic register output")
+            .max_capacitance = Some(0.03);
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
+                module_output_load: 0.05,
+                ..TechMapOptions::default()
+            },
+        )
+        .expect("retain an electrically necessary register-output buffer");
+
+        let retained = buffered_register_output_cells(&mapped, &library);
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().all(|cell| cell == "DRIVE24"));
+        assert_eq!(mapped.stats.selected_instance_count, 4);
+    }
+
+    #[test]
+    fn retains_output_buffer_when_direct_clock_to_q_is_slower() {
+        let design = test_design();
+        let library = fast_boundary_buffer_library(load_dependent_flip_flop_library(), 0.025);
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
+                module_output_load: 0.5,
+                ..TechMapOptions::default()
+            },
+        )
+        .expect("retain a register-output buffer that improves actual output arrival");
+
+        let retained = buffered_register_output_cells(&mapped, &library);
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().all(|cell| cell == "DRIVE24"));
+    }
+
+    #[test]
+    fn preserves_shared_register_output_buffers_on_register_capture_paths() {
+        let mut design = test_design();
+        design.transition.outputs[1].bit_vector = design.transition.inputs[1].bit_vector.clone();
+        let library = fast_boundary_buffer_library(test_library(), 0.2);
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
+                module_output_load: 0.05,
+                ..TechMapOptions::default()
+            },
+        )
+        .expect("preserve identity cells sharing register-output capture fanout");
+
+        let output_buffers = buffered_register_output_cells(&mapped, &library);
+        assert_eq!(output_buffers.len(), 2);
+        assert!(output_buffers.iter().all(|cell| cell == "DRIVE24"));
+        let identity_count = mapped
+            .module
+            .instances
+            .iter()
+            .filter(|instance| {
+                let name = mapped
+                    .interner
+                    .resolve(instance.type_name)
+                    .expect("resolve shared register-boundary cell type");
+                let cell = library
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .expect("resolve shared register-boundary Liberty cell");
+                register_boundary_identity_cell(&library, cell).is_some()
+            })
+            .count();
+        assert_eq!(identity_count, 4);
+        assert!(mapped.stats.worst_register_to_register_arrival.is_some());
     }
 
     #[test]

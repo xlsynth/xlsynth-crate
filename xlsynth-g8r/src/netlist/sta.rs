@@ -7,9 +7,12 @@
 //!   `rise_transition`, `fall_transition`).
 //! - Propagates rise/fall arrival and transition values bit-by-bit, then
 //!   aggregates report timing back to parsed nets.
-//! - Assumes fixed transition at primary-input sources.
-//! - Uses summed input-pin capacitance on each net plus a fixed module-output
-//!   load to query timing tables; zero output load is evaluated at each table's
+//! - Assumes fixed transition at primary-input sources or, when the Liberty
+//!   library specifies one, propagates that transition through a representative
+//!   external driver under each input's actual capacitive load.
+//! - Uses summed input-pin capacitance on each net plus an explicitly supplied
+//!   module-output load or the library's representative receiving-cell load to
+//!   query timing tables; absent both, zero load is evaluated at each table's
 //!   minimum characterized load coordinate.
 //! - In register-boundary analysis, models flip-flop clock-to-output arcs and
 //!   setup checks using an ideal clock edge evaluated at each table's minimum
@@ -56,6 +59,9 @@
 //! 6. Report the maximum rise/fall arrival observed at module outputs.
 
 use crate::liberty::Library;
+use crate::liberty::boundary::{
+    RepresentativeDriver, representative_driver, representative_output_load,
+};
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
@@ -66,7 +72,7 @@ use serde::Serialize;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -338,9 +344,9 @@ fn format_optional_edge_timing(edge: Option<EdgeTiming>) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StaOptions {
-    /// Transition applied to primary-input source nets.
+    /// Transition at ideal primary inputs or representative driver inputs.
     pub primary_input_transition: f64,
-    /// Extra load added to nets attached to module outputs.
+    /// Explicit module-output load; zero uses optional Liberty defaults.
     pub module_output_load: f64,
 }
 
@@ -547,6 +553,167 @@ struct EdgeLoadCapacitance {
 pub(crate) struct CombinationalOutputLoad {
     pub rise: f64,
     pub fall: f64,
+}
+
+/// Describes whether temporary module ports represent actual package
+/// boundaries.
+enum BoundaryTimingDefaultsScope {
+    Suppressed,
+    PhysicalPorts {
+        inputs: BTreeSet<String>,
+        outputs: BTreeSet<String>,
+    },
+}
+
+thread_local! {
+    /// Classifies synthetic versus physical ports in nested timing operations.
+    static BOUNDARY_TIMING_DEFAULTS_SCOPES: RefCell<Vec<BoundaryTimingDefaultsScope>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Temporarily disables implicit PDK boundary models on this thread.
+///
+/// Sequential mapping mixes real package inputs/outputs with synthetic register
+/// Q/D ports, while flip-flop characterization uses entirely synthetic ports.
+/// This nest-safe guard can either hide every implicit boundary model or keep
+/// real boundary models only on explicitly identified physical port bits.
+pub(crate) struct ScopedBoundaryTimingDefaultsSuppression;
+
+impl ScopedBoundaryTimingDefaultsSuppression {
+    /// Suppresses implicit boundary models until this guard leaves scope.
+    pub(crate) fn new() -> Self {
+        BOUNDARY_TIMING_DEFAULTS_SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .push(BoundaryTimingDefaultsScope::Suppressed);
+        });
+        Self
+    }
+
+    /// Keeps actual package boundary timing while excluding synthetic Q/D bits.
+    pub(crate) fn for_physical_ports(inputs: BTreeSet<String>, outputs: BTreeSet<String>) -> Self {
+        BOUNDARY_TIMING_DEFAULTS_SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .push(BoundaryTimingDefaultsScope::PhysicalPorts { inputs, outputs });
+        });
+        Self
+    }
+}
+
+impl Drop for ScopedBoundaryTimingDefaultsSuppression {
+    fn drop(&mut self) {
+        BOUNDARY_TIMING_DEFAULTS_SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .pop()
+                .expect("boundary timing suppression guard was unbalanced");
+        });
+    }
+}
+
+/// Returns whether any enclosing operation hides every PDK boundary model.
+fn boundary_timing_defaults_are_suppressed() -> bool {
+    BOUNDARY_TIMING_DEFAULTS_SCOPES.with(|scopes| {
+        scopes
+            .borrow()
+            .iter()
+            .any(|scope| matches!(scope, BoundaryTimingDefaultsScope::Suppressed))
+    })
+}
+
+/// Identifies a real package input among exposed transition-register Q bits.
+pub(crate) fn boundary_timing_applies_to_primary_input(name: &str) -> bool {
+    BOUNDARY_TIMING_DEFAULTS_SCOPES.with(|scopes| {
+        scopes.borrow().iter().all(|scope| match scope {
+            BoundaryTimingDefaultsScope::Suppressed => false,
+            BoundaryTimingDefaultsScope::PhysicalPorts { inputs, .. } => inputs.contains(name),
+        })
+    })
+}
+
+/// Identifies a real package output among exposed transition-register D bits.
+pub(crate) fn boundary_timing_applies_to_module_output(name: &str) -> bool {
+    BOUNDARY_TIMING_DEFAULTS_SCOPES.with(|scopes| {
+        scopes.borrow().iter().all(|scope| match scope {
+            BoundaryTimingDefaultsScope::Suppressed => false,
+            BoundaryTimingDefaultsScope::PhysicalPorts { outputs, .. } => outputs.contains(name),
+        })
+    })
+}
+
+/// Resolves the representative external driver unless internal STA hides it.
+pub(crate) fn effective_representative_driver(
+    library: &crate::liberty_model::Library,
+) -> Result<Option<RepresentativeDriver<'_>>> {
+    if boundary_timing_defaults_are_suppressed() {
+        Ok(None)
+    } else {
+        representative_driver(library)
+    }
+}
+
+/// Resolves explicit boundary loading before optional PDK receiving-cell
+/// defaults.
+pub(crate) fn resolved_module_output_load(
+    library: &crate::liberty_model::Library,
+    options: StaOptions,
+) -> Result<CombinationalOutputLoad> {
+    if options.module_output_load > 0.0 {
+        return Ok(CombinationalOutputLoad {
+            rise: options.module_output_load,
+            fall: options.module_output_load,
+        });
+    }
+    if boundary_timing_defaults_are_suppressed() {
+        return Ok(CombinationalOutputLoad::default());
+    }
+    Ok(representative_output_load(library)?
+        .map(|load| CombinationalOutputLoad {
+            rise: load.rise,
+            fall: load.fall,
+        })
+        .unwrap_or_default())
+}
+
+/// Propagates an external input through its optional actual-load Liberty
+/// driver.
+pub(crate) fn evaluate_primary_input_driver_timing(
+    library: &crate::liberty_model::Library,
+    driver: Option<&RepresentativeDriver<'_>>,
+    options: StaOptions,
+    arrival: f64,
+    output_load: CombinationalOutputLoad,
+    diagnostics: &mut TimingQueryDiagnosticCounts,
+) -> Result<SignalTiming> {
+    let source = SignalTiming {
+        rise: EdgeTiming {
+            arrival,
+            transition: options.primary_input_transition,
+        },
+        fall: EdgeTiming {
+            arrival,
+            transition: options.primary_input_transition,
+        },
+    };
+    let Some(driver) = driver else {
+        return Ok(source);
+    };
+    evaluate_combinational_cell_output_timing(
+        library,
+        driver.cell.name.as_str(),
+        driver.output_pin,
+        &[(library.resolve_string(&driver.input_pin.name), source)],
+        output_load,
+        &HashMap::new(),
+        diagnostics,
+    )
+    .map_err(|error| {
+        anyhow!(
+            "could not evaluate representative primary-input driver '{}': {error}",
+            driver.cell.name
+        )
+    })
 }
 
 impl From<CombinationalOutputLoad> for EdgeLoadCapacitance {
@@ -863,6 +1030,8 @@ fn analyze_max_arrival_proto_with_mode_and_index(
             options.module_output_load
         ));
     }
+    let representative_input_driver = effective_representative_driver(lib.library)?;
+    let module_output_load = resolved_module_output_load(lib.library, options)?;
 
     let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
     let instance_count = normalized.instances.len();
@@ -1081,6 +1250,8 @@ fn analyze_max_arrival_proto_with_mode_and_index(
     let mut module_output_bit_names: Vec<(usize, String)> = Vec::new();
     let mut has_module_output = vec![false; bit_count];
     let mut is_module_input = vec![false; bit_count];
+    let mut has_physical_module_output = vec![false; bit_count];
+    let mut is_physical_module_input = vec![false; bit_count];
     let mut primary_input_bits = BTreeMap::new();
     for port in &normalized.ports {
         let port_name = resolve_symbol(interner, port.name, "port name")
@@ -1089,8 +1260,10 @@ fn analyze_max_arrival_proto_with_mode_and_index(
             PortDirection::Input => {
                 for (bit_offset, bit_idx) in port.bits.iter().enumerate() {
                     is_module_input[*bit_idx] = true;
+                    let name = flattened_port_bit_name(&port_name, port, bit_offset)?;
+                    is_physical_module_input[*bit_idx] |=
+                        boundary_timing_applies_to_primary_input(name.as_str());
                     if !primary_input_arrivals.is_empty() {
-                        let name = flattened_port_bit_name(&port_name, port, bit_offset)?;
                         if primary_input_bits.insert(name.clone(), *bit_idx).is_some() {
                             return Err(anyhow!(
                                 "module has duplicate flattened primary input '{name}'"
@@ -1101,10 +1274,10 @@ fn analyze_max_arrival_proto_with_mode_and_index(
             }
             PortDirection::Output => {
                 for (bit_offset, bit_idx) in port.bits.iter().enumerate() {
-                    module_output_bit_names.push((
-                        *bit_idx,
-                        flattened_port_bit_name(&port_name, port, bit_offset)?,
-                    ));
+                    let name = flattened_port_bit_name(&port_name, port, bit_offset)?;
+                    has_physical_module_output[*bit_idx] |=
+                        boundary_timing_applies_to_module_output(name.as_str());
+                    module_output_bit_names.push((*bit_idx, name));
                     if !has_module_output[*bit_idx] {
                         has_module_output[*bit_idx] = true;
                         module_output_bits.push(*bit_idx);
@@ -1194,6 +1367,7 @@ fn analyze_max_arrival_proto_with_mode_and_index(
     }
 
     let mut bit_load_capacitance = vec![EdgeLoadCapacitance::default(); bit_count];
+    let mut is_clock_bit = vec![false; bit_count];
     for (load_source_bit_idx, loads) in bit_loads.iter().enumerate() {
         let mut cap = EdgeLoadCapacitance::default();
         for load in loads {
@@ -1212,6 +1386,7 @@ fn analyze_max_arrival_proto_with_mode_and_index(
                     instance_cell_names[load.inst_idx], load.pin_name
                 ),
             )?;
+            is_clock_bit[load_source_bit_idx] |= pin.is_clocking_pin;
             cap.rise += pin_cap.rise;
             cap.fall += pin_cap.fall;
         }
@@ -1219,29 +1394,18 @@ fn analyze_max_arrival_proto_with_mode_and_index(
         bit_load_capacitance[load_source_bit_idx].fall += cap.fall;
     }
     for bit_idx in &module_output_bits {
+        if !has_physical_module_output[*bit_idx] {
+            continue;
+        }
         let ResolvedTimingSource::Bit(output_source_bit_idx) = resolved_timing_sources[*bit_idx]
         else {
             continue;
         };
-        bit_load_capacitance[output_source_bit_idx].rise += options.module_output_load;
-        bit_load_capacitance[output_source_bit_idx].fall += options.module_output_load;
+        bit_load_capacitance[output_source_bit_idx].rise += module_output_load.rise;
+        bit_load_capacitance[output_source_bit_idx].fall += module_output_load.fall;
     }
 
-    let source_timing = SignalTiming {
-        rise: EdgeTiming {
-            arrival: 0.0,
-            transition: options.primary_input_transition,
-        },
-        fall: EdgeTiming {
-            arrival: 0.0,
-            transition: options.primary_input_transition,
-        },
-    };
-    let source_timing_set = if analysis_mode.uses_register_boundaries() {
-        SignalTimingSet::from_primary_input_launch(source_timing)
-    } else {
-        SignalTimingSet::from_single(source_timing)
-    };
+    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
     let literal_source_timing_set = SignalTimingSet::from_single(SignalTiming {
         rise: EdgeTiming {
             arrival: 0.0,
@@ -1264,25 +1428,26 @@ fn analyze_max_arrival_proto_with_mode_and_index(
             ResolvedTimingSource::Bit(_) => {}
         }
         if is_module_input[bit_idx] && analysis_mode.launches_primary_inputs() {
-            let timing_set = match primary_input_arrivals_by_bit.get(&bit_idx).copied() {
-                Some(arrival) if arrival != 0.0 => {
-                    let timing = SignalTiming {
-                        rise: EdgeTiming {
-                            arrival,
-                            transition: options.primary_input_transition,
-                        },
-                        fall: EdgeTiming {
-                            arrival,
-                            transition: options.primary_input_transition,
-                        },
-                    };
-                    if analysis_mode.uses_register_boundaries() {
-                        SignalTimingSet::from_primary_input_launch(timing)
-                    } else {
-                        SignalTimingSet::from_single(timing)
-                    }
-                }
-                _ => source_timing_set.clone(),
+            let arrival = primary_input_arrivals_by_bit
+                .get(&bit_idx)
+                .copied()
+                .unwrap_or(0.0);
+            let timing = evaluate_primary_input_driver_timing(
+                lib.library,
+                if is_clock_bit[bit_idx] || !is_physical_module_input[bit_idx] {
+                    None
+                } else {
+                    representative_input_driver.as_ref()
+                },
+                options,
+                arrival,
+                bit_load_capacitance[bit_idx].into(),
+                &mut timing_query_diagnostic_counts,
+            )?;
+            let timing_set = if analysis_mode.uses_register_boundaries() {
+                SignalTimingSet::from_primary_input_launch(timing)
+            } else {
+                SignalTimingSet::from_single(timing)
             };
             bit_timing_sets[bit_idx] = Some(timing_set);
             continue;
@@ -1300,7 +1465,6 @@ fn analyze_max_arrival_proto_with_mode_and_index(
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
     let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
-    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
             queue.push_back(idx);
@@ -3937,8 +4101,10 @@ fn resolve_symbol(
 mod tests {
     use super::*;
     use crate::liberty_model::{Cell, LibraryBuilder, Pin, TimingArc, TimingTable};
+    use crate::liberty_proto::BoundaryTimingDefaults;
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
+    use crate::netlist::timing_buffer::tests::registered_timing_library;
 
     fn parse_single_module(
         src: &str,
@@ -4402,6 +4568,459 @@ mod tests {
 
     fn scalar_inv_library() -> crate::liberty_model::Library {
         scalar_inv_builder().finish()
+    }
+
+    /// Creates a load-sensitive virtual driver and electrically distinct sinks.
+    fn representative_boundary_library() -> crate::liberty_model::Library {
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "boundary_output_load".to_string(),
+            variable_1: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.0, 10.0],
+            ..Default::default()
+        }];
+        let driver_tables = [
+            ("cell_rise", vec![0.0, 10.0]),
+            ("cell_fall", vec![0.0, 10.0]),
+            ("rise_transition", vec![0.1, 1.1]),
+            ("fall_transition", vec![0.2, 1.2]),
+        ]
+        .into_iter()
+        .map(|(kind, values)| test_table(&mut builder, kind, 1, vec![], vec![], values, vec![2]))
+        .collect::<Vec<_>>();
+        let driver_arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            driver_tables,
+        );
+        let mut driver_input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        driver_input.rise_capacitance = Some(0.2);
+        driver_input.fall_capacitance = Some(0.3);
+        let driver_output = test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            "A",
+            vec![driver_arc],
+        );
+        builder.cells.push(Cell {
+            name: "DRIVER".to_string(),
+            pins: vec![driver_input, driver_output],
+            ..Default::default()
+        });
+        for (name, capacitance) in [("LIGHT", 0.5), ("HEAVY", 4.0)] {
+            let arc = scalar_arc(
+                &mut builder,
+                "A",
+                "positive_unate",
+                "combinational",
+                "",
+                1.0,
+                1.0,
+                0.1,
+                0.1,
+            );
+            let mut input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+            input.capacitance = Some(capacitance);
+            let output = test_pin(&mut builder, "Y", PinDirection::Output, "A", vec![arc]);
+            builder.cells.push(Cell {
+                name: name.to_string(),
+                pins: vec![input, output],
+                ..Default::default()
+            });
+        }
+        let mut library = builder.finish();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "DRIVER".to_string(),
+            representative_load_cell: "DRIVER".to_string(),
+            representative_load_count: 2,
+        });
+        library
+    }
+
+    #[test]
+    fn representative_input_driver_charges_the_actual_sink_capacitance() {
+        let library = representative_boundary_library();
+        for (cell, expected_source_arrival, expected_output_arrival) in
+            [("LIGHT", 0.5, 1.5), ("HEAVY", 4.0, 5.0)]
+        {
+            let source = format!(
+                r#"module top(a, y);
+  input a;
+  output y;
+  {cell} sink (.A(a), .Y(y));
+endmodule
+"#
+            );
+            let (module, nets, interner) = parse_single_module(&source);
+            let report = analyze_combinational_max_arrival_proto(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                StaOptions::default(),
+            )
+            .expect("analyze an actually loaded representative input driver");
+            let input = report
+                .timing_for_net(find_net_index(&nets, &interner, "a"))
+                .expect("retain primary input timing");
+            assert_close(input.rise.arrival, expected_source_arrival);
+            assert_close(input.fall.arrival, expected_source_arrival);
+            assert_close(report.worst_output_arrival, expected_output_arrival);
+        }
+    }
+
+    #[test]
+    fn representative_receiver_load_preserves_distinct_rise_and_fall_capacitance() {
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(a, y);
+  input a;
+  output y;
+  DRIVER output_driver (.A(a), .Y(y));
+endmodule
+"#,
+        );
+        let library = representative_boundary_library();
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("apply twice the edge-specific receiver input capacitance");
+        let output = report.timing_for_output_bit("y").unwrap();
+        assert_close(output.rise.arrival, 0.6);
+        assert_close(output.fall.arrival, 0.9);
+    }
+
+    #[test]
+    fn explicit_output_load_overrides_representative_receiver_defaults() {
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(a, y);
+  input a;
+  output y;
+  DRIVER output_driver (.A(a), .Y(y));
+endmodule
+"#,
+        );
+        let library = representative_boundary_library();
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions {
+                module_output_load: 2.0,
+                ..StaOptions::default()
+            },
+        )
+        .expect("respect an explicit scalar output-load override");
+        let output = report.timing_for_output_bit("y").unwrap();
+        assert_close(output.rise.arrival, 2.2);
+        assert_close(output.fall.arrival, 2.3);
+    }
+
+    #[test]
+    fn scoped_boundary_suppression_is_nested_and_preserves_explicit_loads() {
+        let library = representative_boundary_library();
+        let defaults = StaOptions::default();
+        assert!(effective_representative_driver(&library).unwrap().is_some());
+        assert_close(
+            resolved_module_output_load(&library, defaults)
+                .unwrap()
+                .rise,
+            0.4,
+        );
+
+        {
+            let _outer = ScopedBoundaryTimingDefaultsSuppression::new();
+            assert!(effective_representative_driver(&library).unwrap().is_none());
+            assert_eq!(
+                resolved_module_output_load(&library, defaults).unwrap(),
+                CombinationalOutputLoad::default()
+            );
+            assert_eq!(
+                resolved_module_output_load(
+                    &library,
+                    StaOptions {
+                        module_output_load: 1.5,
+                        ..defaults
+                    }
+                )
+                .unwrap(),
+                CombinationalOutputLoad {
+                    rise: 1.5,
+                    fall: 1.5,
+                }
+            );
+            {
+                let _inner = ScopedBoundaryTimingDefaultsSuppression::new();
+                assert!(effective_representative_driver(&library).unwrap().is_none());
+            }
+            assert!(effective_representative_driver(&library).unwrap().is_none());
+        }
+
+        assert!(effective_representative_driver(&library).unwrap().is_some());
+        assert_close(
+            resolved_module_output_load(&library, defaults)
+                .unwrap()
+                .rise,
+            0.4,
+        );
+    }
+
+    #[test]
+    fn selective_boundary_scope_keeps_only_actual_packed_package_ports() {
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(a, q, y, d);
+  input [1:0] a;
+  input [1:0] q;
+  output [1:0] y;
+  output [1:0] d;
+  DRIVER physical0 (.A(a[0]), .Y(y[0]));
+  DRIVER physical1 (.A(a[1]), .Y(y[1]));
+  DRIVER synthetic0 (.A(q[0]), .Y(d[0]));
+  DRIVER synthetic1 (.A(q[1]), .Y(d[1]));
+endmodule
+"#,
+        );
+        let library = representative_boundary_library();
+        let _physical = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            BTreeSet::from(["a_0".to_string(), "a_1".to_string()]),
+            BTreeSet::from(["y_0".to_string(), "y_1".to_string()]),
+        );
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("keep true boundary models while excluding packed Q/D pseudo-ports");
+
+        for index in 0..2 {
+            let physical = report
+                .timing_for_output_bit(&format!("y_{index}"))
+                .expect("retain a physical package output");
+            let synthetic = report
+                .timing_for_output_bit(&format!("d_{index}"))
+                .expect("retain an unloaded register-D pseudo-output");
+            assert_close(physical.rise.arrival, 0.6);
+            assert_close(physical.fall.arrival, 0.9);
+            assert_close(synthetic.rise.arrival, 0.0);
+            assert_close(synthetic.fall.arrival, 0.0);
+        }
+        assert!(boundary_timing_applies_to_primary_input("a_1"));
+        assert!(!boundary_timing_applies_to_primary_input("q_1"));
+        assert!(boundary_timing_applies_to_module_output("y_1"));
+        assert!(!boundary_timing_applies_to_module_output("d_1"));
+    }
+
+    #[test]
+    fn selective_boundary_scope_excludes_explicit_load_from_synthetic_outputs() {
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(a, q, y, d);
+  input a;
+  input q;
+  output y;
+  output d;
+  DRIVER physical (.A(a), .Y(y));
+  DRIVER synthetic (.A(q), .Y(d));
+endmodule
+"#,
+        );
+        let library = representative_boundary_library();
+        let _physical = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            BTreeSet::from(["a".to_string()]),
+            BTreeSet::from(["y".to_string()]),
+        );
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions {
+                module_output_load: 2.0,
+                ..StaOptions::default()
+            },
+        )
+        .expect("retain explicit loading only on a true external output");
+
+        let physical = report.timing_for_output_bit("y").unwrap();
+        let synthetic = report.timing_for_output_bit("d").unwrap();
+        assert_close(physical.rise.arrival, 2.2);
+        assert_close(physical.fall.arrival, 2.3);
+        assert_close(synthetic.rise.arrival, 0.0);
+        assert_close(synthetic.fall.arrival, 0.0);
+    }
+
+    #[test]
+    fn selective_boundary_scope_charges_an_aliased_physical_output_once() {
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(a, y, d);
+  input a;
+  output y;
+  output d;
+  DRIVER physical (.A(a), .Y(y));
+  assign d = y;
+endmodule
+"#,
+        );
+        let library = representative_boundary_library();
+        let _physical = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            BTreeSet::from(["a".to_string()]),
+            BTreeSet::from(["y".to_string()]),
+        );
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("charge a real aliased package output without loading synthetic D");
+
+        for output in ["y", "d"] {
+            let timing = report.timing_for_output_bit(output).unwrap();
+            assert_close(timing.rise.arrival, 0.6);
+            assert_close(timing.fall.arrival, 0.9);
+        }
+    }
+
+    #[test]
+    fn nested_full_suppression_temporarily_hides_selective_physical_ports() {
+        let library = representative_boundary_library();
+        let _physical = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            BTreeSet::from(["a".to_string()]),
+            BTreeSet::from(["y".to_string()]),
+        );
+        assert!(effective_representative_driver(&library).unwrap().is_some());
+        assert!(boundary_timing_applies_to_primary_input("a"));
+        assert!(boundary_timing_applies_to_module_output("y"));
+        assert!(!boundary_timing_applies_to_primary_input("q"));
+        {
+            let _probe = ScopedBoundaryTimingDefaultsSuppression::new();
+            assert!(effective_representative_driver(&library).unwrap().is_none());
+            assert!(!boundary_timing_applies_to_primary_input("a"));
+            assert!(!boundary_timing_applies_to_module_output("y"));
+        }
+        assert!(effective_representative_driver(&library).unwrap().is_some());
+        assert!(boundary_timing_applies_to_primary_input("a"));
+        assert!(boundary_timing_applies_to_module_output("y"));
+    }
+
+    #[test]
+    fn representative_driver_does_not_delay_a_register_clock_input() {
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(clk, a, q);
+  input clk;
+  input a;
+  output q;
+  DFF register (.CLK(clk), .D(a), .Q(q));
+endmodule
+"#,
+        );
+        let mut library = registered_timing_library();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 2,
+        });
+        let report = analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            true,
+            &[0],
+        )
+        .expect("leave physical clock launch ideal");
+        let clock = report
+            .timing_for_net(find_net_index(&nets, &interner, "clk"))
+            .expect("retain the primary clock timing");
+        let data = report
+            .timing_for_net(find_net_index(&nets, &interner, "a"))
+            .expect("retain the representative-driven data timing");
+        assert_close(clock.rise.arrival, 0.0);
+        assert_close(clock.fall.arrival, 0.0);
+        assert_close(data.rise.arrival, 4.0);
+        assert_close(data.fall.arrival, 4.0);
+    }
+
+    #[test]
+    fn scoped_boundary_suppression_preserves_raw_flip_flop_characterization() {
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(clk, a, q);
+  input clk;
+  input a;
+  output q;
+  DFF register (.CLK(clk), .D(a), .Q(q));
+endmodule
+"#,
+        );
+        let mut library = registered_timing_library();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 2,
+        });
+        let external_launch = analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            false,
+            &[0],
+        )
+        .expect("analyze a real loaded module output");
+        let external_capture = analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            true,
+            &[],
+        )
+        .expect("analyze a real representative-driven module input");
+
+        let (raw_launch, raw_capture) = {
+            let _internal_probe = ScopedBoundaryTimingDefaultsSuppression::new();
+            (
+                analyze_register_boundary_max_arrival(
+                    &module,
+                    &nets,
+                    &interner,
+                    &library,
+                    StaOptions::default(),
+                    false,
+                    &[0],
+                )
+                .expect("measure unloaded clock-to-Q inside an internal probe"),
+                analyze_register_boundary_max_arrival(
+                    &module,
+                    &nets,
+                    &interner,
+                    &library,
+                    StaOptions::default(),
+                    true,
+                    &[],
+                )
+                .expect("measure setup without an external virtual data driver"),
+            )
+        };
+
+        assert_close(external_launch.worst_output_arrival, 8.5);
+        assert_close(raw_launch.worst_output_arrival, 0.5);
+        assert_close(external_capture.worst_register_input_arrival, 4.25);
+        assert_close(raw_capture.worst_register_input_arrival, 0.25);
     }
 
     #[test]
