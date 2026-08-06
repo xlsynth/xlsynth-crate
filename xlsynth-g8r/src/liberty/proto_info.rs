@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::liberty::load::{decode_library_binary_or_text, read_liberty_proto_bytes_from_path};
-use crate::liberty::model::Library;
+use crate::liberty::model::{BoundaryTimingDefaults, Library};
 use crate::liberty_model::PowerTransition;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -31,6 +31,7 @@ pub struct LibertyProtoInfo {
     pub default_max_fanout: Option<f64>,
     pub default_max_transition: Option<f64>,
     pub default_fanout_load: Option<f64>,
+    pub boundary_timing_defaults: Option<BoundaryTimingDefaults>,
     pub pins_with_max_fanout: usize,
     pub pins_with_max_transition: usize,
     pub pins_with_fanout_load: usize,
@@ -98,6 +99,7 @@ fn summarize_liberty_proto(size_bytes: u64, sha256: String, proto: &Library) -> 
         default_max_fanout: proto.default_max_fanout,
         default_max_transition: proto.default_max_transition,
         default_fanout_load: proto.default_fanout_load,
+        boundary_timing_defaults: proto.boundary_timing_defaults.clone(),
         pins_with_max_fanout,
         pins_with_max_transition,
         pins_with_fanout_load,
@@ -179,6 +181,11 @@ mod tests {
         builder.default_max_fanout = Some(5.5);
         builder.default_max_transition = Some(0.75);
         builder.default_fanout_load = Some(0.0);
+        builder.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "DFF".to_string(),
+            representative_load_count: 4,
+        });
         builder.lu_table_templates = vec![Default::default(), Default::default()];
         builder.cells = vec![
             Cell {
@@ -231,6 +238,14 @@ mod tests {
         assert_eq!(info.default_max_fanout, Some(5.5));
         assert_eq!(info.default_max_transition, Some(0.75));
         assert_eq!(info.default_fanout_load, Some(0.0));
+        assert_eq!(
+            info.boundary_timing_defaults,
+            Some(BoundaryTimingDefaults {
+                representative_driver_cell: "BUF".to_string(),
+                representative_load_cell: "DFF".to_string(),
+                representative_load_count: 4,
+            })
+        );
         assert_eq!(info.pins_with_max_fanout, 1);
         assert_eq!(info.pins_with_max_transition, 1);
         assert_eq!(info.pins_with_fanout_load, 1);

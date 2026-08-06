@@ -1,0 +1,29 @@
+Size: 83 bytes (0.00 MiB)
+SHA-256: 9b7a93d680735e508105954b5b093e831b819d0360042f34576f93f6e56fa966
+Provenance: <unspecified>
+Source files (1):
+  - boundary.lib
+Cells: 1
+  Combinational: 1
+  Sequential: 0
+  Native dont-use: 0
+Electrical defaults:
+  Maximum fanout: <unspecified>
+  Maximum transition: <unspecified>
+  Fanout load: <unspecified>
+Boundary timing defaults:
+  Representative driver: BUF
+  Representative load: BUF
+  Representative load count: 2
+Pins with electrical limits:
+  Maximum fanout: 0
+  Maximum transition: 0
+  Fanout load: 0
+LUT templates: 0
+Timing arcs: 0
+Internal-power groups: 0
+Rise power tables: 0
+Fall power tables: 0
+Both-direction power tables: 0
+Unknown-direction power tables: 0
+Nominal voltage: <unspecified>

@@ -8,6 +8,7 @@ use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
     NetlistModule, NetlistPort, PortDirection, Pos, Span,
 };
+use crate::netlist::sta::boundary_timing_applies_to_module_output;
 use crate::techmap::cover::{CoverPlan, SolutionChoice, SolutionId, SourceKind};
 use crate::techmap::liberty_index::{CellBinding, LibertyCellIndex};
 use crate::techmap::{TechMapOptions, scalar_bit_name};
@@ -120,11 +121,12 @@ pub(super) fn emit_cover(
     let mut emitter = CoverEmitter {
         plan,
         cell_index,
-        output_buffer: cell_index.best_output_buffer(
+        physical_output_buffer: cell_index.best_output_buffer(
             library,
             options.primary_input_transition,
             options.module_output_load,
         )?,
+        internal_output_buffer: cell_index.best_buffer().cloned(),
         builder: &mut builder,
         input_net_by_node,
         owner_net_by_solution,
@@ -141,7 +143,8 @@ pub(super) fn emit_cover(
 struct CoverEmitter<'a> {
     plan: &'a CoverPlan,
     cell_index: &'a LibertyCellIndex,
-    output_buffer: Option<CellBinding>,
+    physical_output_buffer: Option<CellBinding>,
+    internal_output_buffer: Option<CellBinding>,
     builder: &'a mut NetlistBuilder,
     input_net_by_node: HashMap<usize, NetIndex>,
     owner_net_by_solution: BTreeMap<SolutionId, NetIndex>,
@@ -204,7 +207,12 @@ impl CoverEmitter<'_> {
             Signal::Net(net) if net == output_net => Ok(()),
             Signal::Literal(value) => self.builder.add_constant_output(output_net, value),
             Signal::Net(net) => {
-                if let Some(buffer) = &self.output_buffer {
+                let buffer = if boundary_timing_applies_to_module_output(output_name) {
+                    &self.physical_output_buffer
+                } else {
+                    &self.internal_output_buffer
+                };
+                if let Some(buffer) = buffer {
                     return self
                         .builder
                         .add_cell(buffer.clone(), &[Signal::Net(net)], output_net);
@@ -408,5 +416,75 @@ fn signal_to_netref(signal: Signal) -> NetRef {
         Signal::Literal(value) => NetRef::Literal(
             IrBits::make_ubits(1, u64::from(value)).expect("one-bit literal should be valid"),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aig::AigOperand;
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::netlist::cell_catalog::test_utils::sizing_library;
+    use crate::netlist::sta::ScopedBoundaryTimingDefaultsSuppression;
+    use crate::techmap::{TechMapTimingConstraints, map_gatefn_to_netlist};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn sizes_physical_and_synthetic_output_buffers_independently() {
+        let mut builder = GateBuilder::new(
+            "mixed_boundary_outputs".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let source: AigOperand = builder
+            .add_input("data".to_string(), 1)
+            .try_into()
+            .expect("extract physical primary-input bit");
+        builder.add_output("out".to_string(), source.into());
+        builder.add_output("state__d".to_string(), source.into());
+        let graph = builder.build();
+        let library = sizing_library();
+        let options = TechMapOptions {
+            module_output_load: 0.5,
+            ..TechMapOptions::default()
+        };
+        let _physical_ports = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            BTreeSet::from(["data".to_string()]),
+            BTreeSet::from(["out".to_string()]),
+        );
+        let mapped = map_gatefn_to_netlist(
+            graph,
+            &library,
+            &TechMapTimingConstraints::default(),
+            &options,
+        )
+        .expect("emit separate identity strengths for real output and synthetic register D");
+
+        let mut cell_by_output = BTreeMap::new();
+        for instance in &mapped.module.instances {
+            let output = instance
+                .connections
+                .iter()
+                .find(|(pin, _)| mapped.interner.resolve(*pin) == Some("Y"))
+                .expect("find emitted identity-cell output");
+            let NetRef::Simple(net) = &output.1 else {
+                panic!("one-bit transition output must remain a simple scalar net");
+            };
+            let output_name = mapped
+                .interner
+                .resolve(mapped.nets[net.0].name)
+                .expect("resolve emitted transition output");
+            let cell_name = mapped
+                .interner
+                .resolve(instance.type_name)
+                .expect("resolve emitted identity cell");
+            cell_by_output.insert(output_name.to_string(), cell_name.to_string());
+        }
+        assert_eq!(
+            cell_by_output,
+            BTreeMap::from([
+                ("out".to_string(), "BUF_FAST".to_string()),
+                ("state__d".to_string(), "BUF".to_string()),
+            ])
+        );
     }
 }

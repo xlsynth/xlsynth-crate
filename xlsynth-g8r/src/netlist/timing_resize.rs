@@ -2,6 +2,7 @@
 
 //! Incremental exact-Liberty sizing across physical register boundaries.
 
+use crate::liberty::boundary::RepresentativeDriver;
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Cell, Library, PinDirection};
 use crate::netlist::cell_catalog::CellCatalog;
@@ -17,10 +18,11 @@ use crate::netlist::sta::{
     TimingEdge, TimingPredecessor, TimingQueryDiagnosticCounts, TracedCombinationalTiming,
     analyze_combinational_max_arrival_with_primary_input_arrivals,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
-    effective_input_capacitance_for_mapping,
+    effective_input_capacitance_for_mapping, effective_representative_driver,
     evaluate_combinational_cell_output_timing_with_predecessors,
-    evaluate_sequential_cell_capture_timing_with_predecessor,
+    evaluate_primary_input_driver_timing, evaluate_sequential_cell_capture_timing_with_predecessor,
     evaluate_sequential_cell_output_timing, is_sequential_boundary_cell,
+    resolved_module_output_load,
 };
 use crate::netlist::timing_buffer::BufferTimingConstraints;
 use crate::netlist::utils::validate_constant_output_assignments;
@@ -2614,6 +2616,9 @@ fn average_functional_input_capacitance(library: &Library, cell: &Cell) -> Resul
 /// Incremental per-bit STA for both sides of synchronous register boundaries.
 struct IncrementalRegisteredSta<'a> {
     library: &'a Library,
+    representative_driver: Option<RepresentativeDriver<'a>>,
+    primary_input_options: StaOptions,
+    primary_input_arrivals_by_bit: Vec<Option<f64>>,
     instances: Vec<SizingInstance>,
     drivers: Vec<Option<usize>>,
     loads: Vec<CombinationalOutputLoad>,
@@ -2650,6 +2655,8 @@ impl<'a> IncrementalRegisteredSta<'a> {
     ) -> Result<Self> {
         let normalized = NormalizedNetlistModule::new(module, nets, interner)
             .context("normalizing register-aware sizing connectivity")?;
+        let representative_driver = effective_representative_driver(library)?;
+        let module_output_load = resolved_module_output_load(library, options)?;
         let by_name = library
             .cells
             .iter()
@@ -2773,8 +2780,8 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 if constant_bits.contains(&bit) {
                     continue;
                 }
-                loads[bit].rise += options.module_output_load;
-                loads[bit].fall += options.module_output_load;
+                loads[bit].rise += module_output_load.rise;
+                loads[bit].fall += module_output_load.fall;
                 let bit_number = nets[net.0]
                     .bit_number(offset)
                     .ok_or_else(|| anyhow!("invalid registered sizing output bit '{name}'"))?;
@@ -2786,6 +2793,37 @@ impl<'a> IncrementalRegisteredSta<'a> {
                     },
                     bit,
                 });
+            }
+        }
+
+        let mut primary_input_arrivals_by_bit = vec![None; normalized.bit_count()];
+        for port in normalized
+            .ports
+            .iter()
+            .filter(|port| port.direction == PortDirection::Input)
+        {
+            let name = interner
+                .resolve(port.name)
+                .ok_or_else(|| anyhow!("cannot resolve registered sizing primary input"))?;
+            let net = module
+                .find_net_index(port.name, nets)
+                .ok_or_else(|| anyhow!("registered sizing input '{name}' has no net"))?;
+            for (offset, bit) in port.bits.iter().copied().enumerate() {
+                let flattened_name = if nets[net.0].width_bits() == 1 {
+                    name.to_string()
+                } else {
+                    let bit_number = nets[net.0]
+                        .bit_number(offset)
+                        .ok_or_else(|| anyhow!("invalid registered sizing input bit '{name}'"))?;
+                    format!("{name}_{bit_number}")
+                };
+                primary_input_arrivals_by_bit[bit] = Some(
+                    constraints
+                        .primary_input_arrivals
+                        .get(&flattened_name)
+                        .copied()
+                        .unwrap_or(0.0),
+                );
             }
         }
 
@@ -2924,6 +2962,9 @@ impl<'a> IncrementalRegisteredSta<'a> {
         let has_registers = !registers.is_empty();
         let mut state = Self {
             library,
+            representative_driver,
+            primary_input_options: options,
+            primary_input_arrivals_by_bit,
             instances,
             drivers,
             loads,
@@ -3819,14 +3860,21 @@ impl<'a> IncrementalRegisteredSta<'a> {
             dirty_captures.insert(instance_index);
         }
         for (bit, (_, delta)) in &changed_loads {
-            if (delta.rise != 0.0 || delta.fall != 0.0)
-                && let Some(driver) = self.drivers[*bit]
-            {
-                dirty.insert((self.topological_positions[driver], driver));
-                for output in &self.instances[driver].outputs {
+            if delta.rise != 0.0 || delta.fall != 0.0 {
+                if let Some(driver) = self.drivers[*bit] {
+                    dirty.insert((self.topological_positions[driver], driver));
+                    for output in &self.instances[driver].outputs {
+                        original_driver_timing
+                            .entry(output.bit)
+                            .or_insert(self.bit_timing[output.bit]);
+                    }
+                } else if self.representative_driver.is_some()
+                    && self.primary_input_arrivals_by_bit[*bit].is_some()
+                    && !self.clock_bits[*bit]
+                {
                     original_driver_timing
-                        .entry(output.bit)
-                        .or_insert(self.bit_timing[output.bit]);
+                        .entry(*bit)
+                        .or_insert(self.bit_timing[*bit]);
                 }
             }
         }
@@ -3877,6 +3925,31 @@ impl<'a> IncrementalRegisteredSta<'a> {
         let mut changed_transition_limits = BTreeMap::<BitIndex, Option<f64>>::new();
         let result = (|| {
             let mut recomputed = 0usize;
+            for (bit, (_, delta)) in &changed_loads {
+                if (delta.rise == 0.0 && delta.fall == 0.0)
+                    || self.representative_driver.is_none()
+                    || self.drivers[*bit].is_some()
+                    || self.primary_input_arrivals_by_bit[*bit].is_none()
+                    || self.clock_bits[*bit]
+                {
+                    continue;
+                }
+                let previous = self.bit_timing[*bit];
+                saved_timings
+                    .entry(*bit)
+                    .or_insert((previous, self.bit_predecessors[*bit]));
+                self.recompute_primary_input(*bit)?;
+                recomputed += 1;
+                if self.bit_timing[*bit] != previous {
+                    for consumer in &self.data_consumers[*bit] {
+                        if self.instances[*consumer].sequential {
+                            dirty_captures.insert(*consumer);
+                        } else {
+                            dirty.insert((self.topological_positions[*consumer], *consumer));
+                        }
+                    }
+                }
+            }
             while let Some((_, index)) = dirty.pop_first() {
                 let old_outputs = self.instances[index]
                     .outputs
@@ -4019,6 +4092,23 @@ impl<'a> IncrementalRegisteredSta<'a> {
             self.capture_predecessors[*index] = *predecessors;
         }
         self.clock_load = original_clock_load;
+    }
+
+    /// Updates a virtual external driver after a sized input changes its load.
+    fn recompute_primary_input(&mut self, bit: BitIndex) -> Result<()> {
+        let arrival = self.primary_input_arrivals_by_bit[bit]
+            .ok_or_else(|| anyhow!("cannot recompute a non-primary-input launch"))?;
+        let timing = evaluate_primary_input_driver_timing(
+            self.library,
+            self.representative_driver.as_ref(),
+            self.primary_input_options,
+            arrival,
+            self.loads[bit],
+            &mut self.diagnostics,
+        )?;
+        self.bit_timing[bit].primary_input = Some(timing);
+        self.bit_predecessors[bit].primary_input = EdgePredecessors::default();
+        Ok(())
     }
 
     /// Recomputes an exact Liberty combinational or FF launch output.
@@ -4279,8 +4369,8 @@ mod tests {
         prioritized_timing_instances, recover_final_timing_protected_area,
         resize_timing_aware_netlist, timing_trial_is_acceptable,
     };
-    use crate::liberty_model::{Cell, Library, LibraryBuilder, PinDirection};
-    use crate::liberty_proto::TimingTableKind;
+    use crate::liberty_model::{Cell, Library, LibraryBuilder, LuTableTemplate, PinDirection};
+    use crate::liberty_proto::{BoundaryTimingDefaults, TimingTableKind};
     use crate::netlist::cell_catalog::CellCatalog;
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library, timed_cell};
     use crate::netlist::emit::emit_module_as_netlist_text;
@@ -4351,6 +4441,52 @@ mod tests {
         }
         builder.cells.push(fast);
         builder.finish()
+    }
+
+    /// Provides a weak virtual source and two interchangeable data drivers.
+    fn representative_sizing_library() -> Library {
+        let mut builder = LibraryBuilder::new();
+        builder.lu_table_templates.push(LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "representative_input_load".to_string(),
+            variable_1: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.0, 1.0],
+            ..LuTableTemplate::default()
+        });
+        let mut virtual_driver =
+            timed_cell(&mut builder, "VIRTUAL", &["A"], "A", 10.0, 1.0, 0.1, 10.0);
+        let tables = [
+            (TimingTableKind::CellRise, vec![0.0, 20.0]),
+            (TimingTableKind::CellFall, vec![0.0, 20.0]),
+            (TimingTableKind::RiseTransition, vec![0.1, 0.5]),
+            (TimingTableKind::FallTransition, vec![0.1, 0.5]),
+        ]
+        .into_iter()
+        .map(|(kind, values)| {
+            builder
+                .add_timing_table_f64(kind, 1, vec![], vec![], vec![], values, vec![2], "")
+                .expect("construct representative-driver load-sensitive timing")
+        })
+        .collect();
+        let arc = builder
+            .add_timing_arc("A", "positive_unate", "combinational", "", tables)
+            .expect("construct representative-driver timing arc");
+        virtual_driver
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("locate representative-driver output")
+            .timing_arcs = vec![arc];
+        let weak = timed_cell(&mut builder, "WEAK", &["A"], "A", 1.0, 3.0, 0.1, 1.0);
+        let oversized = timed_cell(&mut builder, "OVERSIZED", &["A"], "A", 2.0, 1.0, 0.8, 1.0);
+        builder.cells = vec![virtual_driver, weak, oversized];
+        let mut library = builder.finish();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "VIRTUAL".to_string(),
+            representative_load_cell: "VIRTUAL".to_string(),
+            representative_load_count: 2,
+        });
+        library
     }
 
     /// Characterizes a buffer with an exact output slew and optional limit.
@@ -4624,6 +4760,92 @@ endmodule
                 "{name} comparator must produce deterministic full timing order"
             );
         }
+    }
+
+    #[test]
+    fn incremental_sizing_recomputes_and_restores_loaded_primary_input_drivers() {
+        let source = r#"module top(a, y);
+  input a;
+  output y;
+  WEAK output_driver (.A(a), .Y(y));
+endmodule
+"#;
+        let library = representative_sizing_library();
+        let (module, nets, interner) = parse_module(source);
+        let mut timing = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("construct representative-driver incremental timing");
+        let original_score = timing.score();
+        let input_bit = timing.instances[0].inputs[0]
+            .bit
+            .expect("find the actual primary input");
+        let original_input = timing.bit_timing[input_bit];
+        let oversized = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "OVERSIZED")
+            .unwrap();
+
+        let trial = timing
+            .evaluate_cell_substitution(0, oversized, false)
+            .expect("evaluate and roll back a high-capacitance replacement");
+        assert_eq!(original_score.input_to_output, Some(5.0));
+        assert_eq!(trial.score.input_to_output, Some(17.0));
+        assert_eq!(timing.score(), original_score);
+        assert_eq!(timing.bit_timing[input_bit], original_input);
+
+        let committed = timing
+            .evaluate_cell_substitution(0, oversized, true)
+            .expect("commit the same representative-driver timing update");
+        assert_eq!(committed.score.input_to_output, Some(17.0));
+        assert_eq!(
+            timing.bit_timing[input_bit]
+                .primary_input
+                .expect("preserve primary-input launch")
+                .rise
+                .arrival,
+            16.0
+        );
+    }
+
+    #[test]
+    fn resizing_rejects_intrinsically_fast_cells_that_overload_primary_inputs() {
+        let source = r#"module top(a, y);
+  input a;
+  output y;
+  WEAK output_driver (.A(a), .Y(y));
+endmodule
+"#;
+        let library = representative_sizing_library();
+        let (mut module, nets, mut interner) = parse_module(source);
+        let stats = resize_timing_aware_netlist(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 2,
+                max_area_iterations: 0,
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("size with the physical cost of an external driver load");
+
+        assert_eq!(
+            interner.resolve(module.instances[0].type_name),
+            Some("WEAK")
+        );
+        assert_eq!(stats.initial_delay, 5.0);
+        assert_eq!(stats.final_delay, 5.0);
+        assert_eq!(stats.upsizes, 0);
     }
 
     #[test]

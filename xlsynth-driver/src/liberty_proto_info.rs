@@ -45,6 +45,21 @@ pub fn handle_liberty_proto_info(matches: &clap::ArgMatches) -> Result<(), Strin
         Some(value) => println!("  Fanout load: {value}"),
         None => println!("  Fanout load: <unspecified>"),
     }
+    if let Some(defaults) = &info.boundary_timing_defaults {
+        println!("Boundary timing defaults:");
+        println!(
+            "  Representative driver: {}",
+            defaults.representative_driver_cell
+        );
+        println!(
+            "  Representative load: {}",
+            defaults.representative_load_cell
+        );
+        println!(
+            "  Representative load count: {}",
+            defaults.representative_load_count
+        );
+    }
     println!("Pins with electrical limits:");
     println!("  Maximum fanout: {}", info.pins_with_max_fanout);
     println!("  Maximum transition: {}", info.pins_with_max_transition);

@@ -35,6 +35,15 @@ message Library {
   optional double default_max_fanout = 14;
   optional double default_max_transition = 15;
   optional double default_fanout_load = 16;
+  // Optional technology-scaled primary-input driver and primary-output load.
+  BoundaryTimingDefaults boundary_timing_defaults = 17;
+}
+
+// Representative Liberty cells used to derive electrical boundary conditions.
+message BoundaryTimingDefaults {
+  string representative_driver_cell = 1;
+  string representative_load_cell = 2;
+  uint32 representative_load_count = 3;
 }
 
 message Cell {

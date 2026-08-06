@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod ascii_stream;
+pub mod boundary;
 pub mod cell_filter;
 pub mod cell_formula;
 pub mod descriptor;

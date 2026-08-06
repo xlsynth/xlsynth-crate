@@ -384,3 +384,84 @@ include ^CLOCK_GATE$
             .all(|cell| cell.dont_use == Some(false))
     );
 }
+
+#[test]
+fn lib2proto_records_and_validates_representative_boundary_defaults() {
+    let temp_dir = tempfile::tempdir().expect("create temp directory");
+    let liberty_path = temp_dir.path().join("boundary.lib");
+    let output_path = temp_dir.path().join("boundary.proto");
+    std::fs::write(
+        &liberty_path,
+        r#"
+library (boundary_test) {
+  cell (BUF) {
+    area : 1.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.125;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+    }
+  }
+}
+"#,
+    )
+    .expect("write boundary Liberty input");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("lib2proto")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--representative-driver-cell")
+        .arg("BUF")
+        .arg("--representative-load-cell")
+        .arg("BUF")
+        .arg(&liberty_path)
+        .output()
+        .expect("run lib2proto with boundary defaults");
+    assert!(
+        output.status.success(),
+        "lib2proto with boundary defaults failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = std::fs::read(&output_path).expect("read generated boundary proto");
+    let library = Library::decode(bytes.as_slice()).expect("decode generated boundary proto");
+    let defaults = library
+        .boundary_timing_defaults
+        .expect("boundary defaults should be serialized");
+    assert_eq!(defaults.representative_driver_cell, "BUF");
+    assert_eq!(defaults.representative_load_cell, "BUF");
+    assert_eq!(defaults.representative_load_count, 2);
+
+    let info = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("liberty-proto-info")
+        .arg(&output_path)
+        .output()
+        .expect("inspect representative boundary defaults");
+    assert!(info.status.success());
+    compare_golden_text(
+        &String::from_utf8(info.stdout).expect("UTF-8 boundary info report"),
+        "tests/liberty_proto_info_boundary.golden.txt",
+    );
+
+    let invalid_count = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("lib2proto")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--representative-driver-cell")
+        .arg("BUF")
+        .arg("--representative-load-cell")
+        .arg("BUF")
+        .arg("--representative-load-count")
+        .arg("0")
+        .arg(&liberty_path)
+        .output()
+        .expect("run lib2proto with invalid representative load count");
+    assert!(!invalid_count.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_count.stderr)
+            .contains("representative output-load count must be greater than zero")
+    );
+}

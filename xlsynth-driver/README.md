@@ -99,6 +99,32 @@ xlsynth-driver lib2proto \
 The flags are independent, so timing-only and power-only payloads can also be
 generated when needed.
 
+Use `--representative-driver-cell <CELL>` together with
+`--representative-load-cell <CELL>` to record technology-specific module
+boundary timing defaults in the generated library. The representative driver
+must be an available combinational cell with one input and one output; when
+timing data is present, it must also have complete delay and transition tables.
+The representative load cell must have one input with characterized
+capacitance. `--representative-load-count <COUNT>` controls the number of
+receiver inputs modeled at each module output and defaults to two:
+
+```shell
+xlsynth-driver lib2proto \
+  --include-timing \
+  --representative-driver-cell BUF_X2 \
+  --representative-load-cell BUF_X2 \
+  --representative-load-count 2 \
+  --output /path/to/cells.timing.proto \
+  /path/to/cells.lib
+```
+
+When boundary defaults are present, timing analysis models primary inputs using
+the representative driver's characterized, load-dependent delay and slew.
+Unless an explicit nonzero module-output load is provided, the output load is
+derived from the representative receiver's edge-specific input capacitance and
+load count. Existing libraries without these optional defaults retain their
+previous ideal-input and explicit-load behavior.
+
 `lib2proto` emits the `liberty.Library` format defined in
 `xlsynth-g8r/proto/liberty.proto`. The wire format uses float32 table values,
 typed enums for standard Liberty vocabularies, and library-wide interned
@@ -796,10 +822,12 @@ Key flags:
   time; may be repeated.
 - `--primary-output-required <NAME=TIME>`: optional scalar primary-output
   required time; may be repeated.
-- `--primary-input-transition <TIME>`: rise/fall transition used for primary
-  inputs during final STA and constrained matching (default: `0.01`).
-- `--module-output-load <CAPACITANCE>`: external load added to each module
-  output bit during final STA and constrained matching (default: `0`).
+- `--primary-input-transition <TIME>`: rise/fall transition at each ideal
+  primary input or at the configured representative driver's input
+  (default: `0.01`).
+- `--module-output-load <CAPACITANCE>`: explicit external load for each module
+  output bit. The default `0` uses representative receiver defaults when the
+  Liberty proto supplies them; otherwise it retains zero external load.
 
 Timing constraint names use flattened scalar port names: one-bit ports retain
 their original name, while bit `i` of a wider port is named `<port>_<i>`.
@@ -830,8 +858,10 @@ Key flags:
 - `--liberty_proto <PATH>`: timing-enabled Liberty proto. Required.
 - `--netlist_out <PATH>`: optimized netlist; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional input-module selection.
-- `--primary-input-transition <TIME>`: source transition (default: `0.01`).
-- `--module-output-load <CAPACITANCE>`: external output load (default: `0`).
+- `--primary-input-transition <TIME>`: transition at the ideal source or
+  representative driver's input (default: `0.01`).
+- `--module-output-load <CAPACITANCE>`: explicit external output load; the
+  default `0` uses representative receiver defaults when available.
 - `--buffer <true|false>`: enable buffer insertion (default: `true`).
 - `--max-fanout <N>`: maximum sinks per buffer-tree level (default: `12`).
 - `--buffer-target-load <CAPACITANCE>`: optional explicit stage load bound.
@@ -867,8 +897,10 @@ Key flags:
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
 - `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
-- `--primary_input_transition <VALUE>`: source transition for primary inputs (default: `0.01`).
-- `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
+- `--primary_input_transition <VALUE>`: transition at ideal primary inputs or
+  representative driver inputs (default: `0.01`).
+- `--module_output_load <VALUE>`: explicit module-output load; default `0.0`
+  uses representative receiver defaults when available.
 - `--json_out <PATH>`: optional JSON summary output path.
 - Debug tracing: set `XLSYNTH_G8R_STA_TRACE=1` and enable the
   `xlsynth_g8r::netlist::sta_trace` log target to emit per-arc timing-candidate
@@ -912,8 +944,10 @@ Key flags:
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
 - `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
-- `--primary_input_transition <VALUE>`: source transition for primary inputs (default: `0.01`).
-- `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
+- `--primary_input_transition <VALUE>`: transition at ideal primary inputs or
+  representative driver inputs (default: `0.01`).
+- `--module_output_load <VALUE>`: explicit module-output load; default `0.0`
+  uses representative receiver defaults when available.
 - `--json_out <PATH>`: optional JSON report output path.
 
 ### `gv-read-stats`: netlist statistics
