@@ -15,8 +15,11 @@ use anyhow::{Result, anyhow};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-const NF_ROOT_VARIANTS_PER_FUNCTION: usize = 1;
+const NF_ROOT_VARIANTS_PER_FUNCTION: usize = 2;
+// Sparse libraries rarely expose enough drive diversity to repay extra roots.
+const MINIMUM_CELLS_FOR_NF_PARETO_ROOTS: usize = 512;
 const REPRESENTATIVE_OUTPUT_FANOUT: f64 = 2.0;
+const PARETO_REPRESENTATIVE_OUTPUT_FANOUT: f64 = 2.5;
 
 /// Selects how equally priced Liberty roots are ordered for one NF index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,6 +122,8 @@ pub(super) struct LibertyIndexStats {
 pub(super) struct LibertyCellIndex {
     bindings: Vec<CellBinding>,
     by_truth: BTreeMap<(usize, u64), Vec<CellBindingId>>,
+    /// Tracks whether this index retained bounded area/delay root variants.
+    has_pareto_roots: bool,
     /// Dense rank of each stable key, used by mapper tie-breaks without
     /// repeatedly comparing cell/pin-name strings in the inner loop.
     stable_key_ranks: Vec<usize>,
@@ -132,14 +137,38 @@ impl LibertyCellIndex {
         Self::build_with_root_limit(library, max_arity, None, NfRootTiePolicy::Fastest)
     }
 
-    /// Builds the compact root-cell library used by NF-style mapping. ABC NF
-    /// keeps one area-root per native function. Drive-strength selection is a
-    /// separate sizing problem rather than part of structural cut mapping.
+    /// Builds a bounded area/delay Pareto root library for NF-style mapping.
     pub fn build_nf(library: &Library, max_arity: usize) -> Result<Self> {
+        let eligible_combinational_cells = library
+            .cells
+            .iter()
+            .filter(|cell| {
+                cell.dont_use != Some(true)
+                    && cell.sequential.is_empty()
+                    && cell.clock_gate.is_none()
+                    && cell
+                        .pins
+                        .iter()
+                        .filter(|pin| pin.direction == PinDirection::Output as i32)
+                        .count()
+                        == 1
+                    && cell
+                        .pins
+                        .iter()
+                        .filter(|pin| pin.direction == PinDirection::Input as i32)
+                        .count()
+                        <= max_arity
+            })
+            .count();
+        let root_limit = if eligible_combinational_cells >= MINIMUM_CELLS_FOR_NF_PARETO_ROOTS {
+            NF_ROOT_VARIANTS_PER_FUNCTION
+        } else {
+            1
+        };
         Self::build_with_root_limit(
             library,
             max_arity,
-            Some(NF_ROOT_VARIANTS_PER_FUNCTION),
+            Some(root_limit),
             NfRootTiePolicy::Fastest,
         )
     }
@@ -231,6 +260,8 @@ impl LibertyCellIndex {
         Ok(Self {
             bindings,
             by_truth,
+            has_pareto_roots: root_limit.is_some_and(|limit| limit > 1)
+                && root_tie_policy == NfRootTiePolicy::Fastest,
             stable_key_ranks,
             stats,
         })
@@ -281,7 +312,12 @@ impl LibertyCellIndex {
             count if count % 2 == 1 => input_loads[count / 2],
             count => (input_loads[count / 2 - 1] + input_loads[count / 2]) / 2.0,
         };
-        let output_load = REPRESENTATIVE_OUTPUT_FANOUT * median_input_load;
+        let output_fanout = if self.has_pareto_roots {
+            PARETO_REPRESENTATIVE_OUTPUT_FANOUT
+        } else {
+            REPRESENTATIVE_OUTPUT_FANOUT
+        };
+        let output_load = output_fanout * median_input_load;
         let representative_load = CombinationalOutputLoad {
             rise: output_load,
             fall: output_load,
@@ -773,7 +809,18 @@ fn binding_order(lhs: &CellBinding, rhs: &CellBinding) -> std::cmp::Ordering {
 }
 
 fn root_binding_dominates(lhs: &CellBinding, rhs: &CellBinding, policy: NfRootTiePolicy) -> bool {
-    root_binding_order(lhs, rhs, policy).is_le()
+    if policy == NfRootTiePolicy::StableIdentity {
+        return root_binding_order(lhs, rhs, policy).is_le();
+    }
+
+    let area_order = lhs.area.total_cmp(&rhs.area);
+    let delay_order = lhs
+        .worst_nominal_delay()
+        .total_cmp(&rhs.worst_nominal_delay());
+    if area_order.is_gt() || delay_order.is_gt() {
+        return false;
+    }
+    area_order.is_lt() || delay_order.is_lt() || lhs.stable_key().cmp(&rhs.stable_key()).is_le()
 }
 
 fn root_binding_order(
@@ -999,6 +1046,91 @@ mod tests {
             stable.binding(stable.matches(2, 0b1000)[0]).cell_name,
             "A_SLOW"
         );
+    }
+
+    #[test]
+    fn nf_roots_preserve_bounded_nondominated_area_delay_alternatives() {
+        let mut builder = LibraryBuilder::new();
+        let mut cells = Vec::new();
+        for (name, area, delay) in [
+            ("SMALL_SLOW", 1.0, 9.0),
+            ("DOMINATED", 2.0, 10.0),
+            ("LARGE_FAST", 3.0, 1.0),
+        ] {
+            let mut output = pin(&mut builder, PinDirection::Output, "Y", "A * B");
+            for input in ["A", "B"] {
+                let table = builder
+                    .add_timing_table_f64(
+                        TimingTableKind::CellRise,
+                        0,
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![delay],
+                        vec![],
+                        "",
+                    )
+                    .unwrap();
+                output.timing_arcs.push(
+                    builder
+                        .add_timing_arc(input, "", "combinational", "", vec![table])
+                        .unwrap(),
+                );
+            }
+            cells.push(Cell {
+                name: name.to_string(),
+                pins: vec![
+                    pin(&mut builder, PinDirection::Input, "A", ""),
+                    pin(&mut builder, PinDirection::Input, "B", ""),
+                    output,
+                ],
+                area,
+                ..Default::default()
+            });
+        }
+        builder.cells = cells;
+        let library = builder.finish();
+
+        let index =
+            LibertyCellIndex::build_with_root_limit(&library, 6, Some(2), NfRootTiePolicy::Fastest)
+                .expect("bounded Pareto roots should be indexed");
+        let root_names = index
+            .matches(2, 0b1000)
+            .iter()
+            .map(|binding| index.binding(*binding).cell_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(index.stats.indexed_cell_outputs, 2);
+        assert_eq!(root_names, vec!["SMALL_SLOW", "LARGE_FAST"]);
+    }
+
+    #[test]
+    fn nf_pareto_roots_are_reserved_for_large_combinational_libraries() {
+        let mut library = sizing_library();
+        let compact = LibertyCellIndex::build_nf(&library, 6)
+            .expect("compact libraries should preserve a single area root");
+
+        assert_eq!(compact.matches(2, 0b1000).len(), 1);
+        assert_eq!(
+            compact.binding(compact.matches(2, 0b1000)[0]).cell_name,
+            "AND2"
+        );
+
+        let filler = library.cells[0].clone();
+        for index in library.cells.len()..MINIMUM_CELLS_FOR_NF_PARETO_ROOTS {
+            let mut cell = filler.clone();
+            cell.name = format!("ADDITIONAL_BUFFER_{index}");
+            library.cells.push(cell);
+        }
+        let rich = LibertyCellIndex::build_nf(&library, 6)
+            .expect("large libraries should preserve fast Pareto alternatives");
+        let root_names = rich
+            .matches(2, 0b1000)
+            .iter()
+            .map(|binding| rich.binding(*binding).cell_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(root_names, vec!["AND2", "AND2_FAST"]);
     }
 
     #[test]

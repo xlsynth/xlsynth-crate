@@ -255,11 +255,78 @@ fn parse_nominal_voltage(block: &Block) -> Result<Option<f64>, String> {
                     "Liberty library contains conflicting nom_voltage declarations: {existing} and {incoming}"
                 ));
             }
-            Some(_) => {}
+            Some(_) => {
+                // Repeating the identical nominal voltage has no effect.
+            }
             None => nominal_voltage = Some(incoming),
         }
     }
     Ok(nominal_voltage)
+}
+
+/// Electrical defaults are local to one source Liberty library.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LibraryElectricalDefaults {
+    max_fanout: Option<f64>,
+    max_transition: Option<f64>,
+    fanout_load: Option<f64>,
+}
+
+/// Parses nonnegative library electrical defaults without conflating zero with
+/// absence.
+fn parse_library_electrical_defaults(block: &Block) -> Result<LibraryElectricalDefaults, String> {
+    let mut defaults = LibraryElectricalDefaults::default();
+    for member in &block.members {
+        let BlockMember::BlockAttr(attr) = member else {
+            continue;
+        };
+        let field = match attr.attr_name.as_str() {
+            "default_max_fanout" => &mut defaults.max_fanout,
+            "default_max_transition" => &mut defaults.max_transition,
+            "default_fanout_load" => &mut defaults.fanout_load,
+            _ => continue,
+        };
+        let Some(incoming) = value_to_optional_f64(&attr.value) else {
+            return Err(format!(
+                "Could not parse {} value {:?} as a number",
+                attr.attr_name,
+                value_to_attr_string(&attr.value)
+            ));
+        };
+        if !incoming.is_finite() || incoming < 0.0 {
+            return Err(format!(
+                "{} must be finite and nonnegative, got {incoming}",
+                attr.attr_name
+            ));
+        }
+        match field {
+            Some(existing) if *existing != incoming => {
+                return Err(format!(
+                    "Liberty library contains conflicting {} declarations: {existing} and {incoming}",
+                    attr.attr_name
+                ));
+            }
+            Some(_) => {
+                // Repeating the identical electrical default has no effect.
+            }
+            None => *field = Some(incoming),
+        }
+    }
+    Ok(defaults)
+}
+
+/// Keeps a library-level default only when every source agrees, including
+/// absence.
+fn common_electrical_default(
+    defaults: &[LibraryElectricalDefaults],
+    select: impl Fn(LibraryElectricalDefaults) -> Option<f64>,
+) -> Option<f64> {
+    let first = select(*defaults.first()?);
+    if defaults.iter().copied().all(|value| select(value) == first) {
+        first
+    } else {
+        None
+    }
 }
 
 /// Returns the library-level default VT group when declared in the source.
@@ -1131,6 +1198,7 @@ fn block_to_model_cells(
     threshold_voltage_group_interner: &mut ThresholdVoltageGroupInterner,
     builder: &mut LibraryBuilder,
     payload_options: LibertyPayloadOptions,
+    electrical_defaults: LibraryElectricalDefaults,
 ) -> Result<Vec<Cell>, String> {
     let mut cells = Vec::new();
     for member in &block.members {
@@ -1216,6 +1284,9 @@ fn block_to_model_cells(
             let mut rise_capacitance = None;
             let mut fall_capacitance = None;
             let mut max_capacitance = None;
+            let mut max_fanout = None;
+            let mut max_transition = None;
+            let mut fanout_load = None;
             for pin_member in &pin_block.members {
                 match pin_member {
                     BlockMember::BlockAttr(attr) => {
@@ -1242,6 +1313,12 @@ fn block_to_model_cells(
                             fall_capacitance = value_to_optional_f64(&attr.value);
                         } else if attr.attr_name == "max_capacitance" {
                             max_capacitance = value_to_optional_f64(&attr.value);
+                        } else if attr.attr_name == "max_fanout" {
+                            max_fanout = value_to_optional_f64(&attr.value);
+                        } else if attr.attr_name == "max_transition" {
+                            max_transition = value_to_optional_f64(&attr.value);
+                        } else if attr.attr_name == "fanout_load" {
+                            fanout_load = value_to_optional_f64(&attr.value);
                         }
                     }
                     BlockMember::SubBlock(sub_block) => {
@@ -1280,6 +1357,15 @@ fn block_to_model_cells(
                     .then(a.when.cmp(&b.when))
                     .then(a.related_pg_pin.cmp(&b.related_pg_pin))
             });
+            if direction == PinDirection::Output as i32 {
+                max_fanout = max_fanout.or(electrical_defaults.max_fanout);
+            }
+            if direction == PinDirection::Input as i32 {
+                fanout_load = fanout_load.or(electrical_defaults.fanout_load);
+            }
+            if direction == PinDirection::Input as i32 || direction == PinDirection::Output as i32 {
+                max_transition = max_transition.or(electrical_defaults.max_transition);
+            }
             pins.push(Pin {
                 direction,
                 function: builder
@@ -1293,6 +1379,9 @@ fn block_to_model_cells(
                 rise_capacitance,
                 fall_capacitance,
                 max_capacitance,
+                max_fanout,
+                max_transition,
+                fanout_load,
                 timing_arcs,
                 internal_power,
             });
@@ -1694,22 +1783,24 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
     let mut merged_library = Library::default();
     let mut units: Option<LibraryUnits> = None;
     let mut nominal_voltage: Option<f64> = None;
+    let mut electrical_defaults = Vec::with_capacity(libraries.len());
     let mut default_threshold_voltage_group: Option<String> = None;
     let mut saw_library_with_default_threshold_voltage_group = false;
     let mut saw_no_default_library_with_implicit_threshold_voltage_group = false;
     let mut threshold_voltage_group_interner = ThresholdVoltageGroupInterner::default();
     for lib in &libraries {
         let parsed_default_threshold_voltage_group = parse_default_threshold_voltage_group(lib);
-        let parsed_nominal_voltage = if payload_options.include_power {
-            parse_nominal_voltage(lib)?
-        } else {
-            None
-        };
+        let parsed_nominal_voltage = parse_nominal_voltage(lib)?;
+        let parsed_electrical_defaults = parse_library_electrical_defaults(lib)?;
+        electrical_defaults.push(parsed_electrical_defaults);
         if parsed_default_threshold_voltage_group.is_some() {
             saw_library_with_default_threshold_voltage_group = true;
         }
         let mut builder = LibraryBuilder::new();
         builder.library_mut().nominal_voltage = parsed_nominal_voltage;
+        builder.library_mut().default_max_fanout = parsed_electrical_defaults.max_fanout;
+        builder.library_mut().default_max_transition = parsed_electrical_defaults.max_transition;
+        builder.library_mut().default_fanout_load = parsed_electrical_defaults.fanout_load;
         // Field name is historical; this stores all parsed template kinds.
         let templates = parse_table_templates(lib, &mut builder, payload_options);
         builder.library_mut().lu_table_templates = templates;
@@ -1718,6 +1809,7 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
             &mut threshold_voltage_group_interner,
             &mut builder,
             payload_options,
+            parsed_electrical_defaults,
         )?;
         builder.library_mut().cells = cells;
         let mut per_library = builder.finish();
@@ -1813,6 +1905,12 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
     merged_library.default_threshold_voltage_group_id = default_threshold_voltage_group_id;
     merged_library.threshold_voltage_group_class_indices = threshold_voltage_group_class_indices;
     merged_library.nominal_voltage = nominal_voltage;
+    merged_library.default_max_fanout =
+        common_electrical_default(&electrical_defaults, |defaults| defaults.max_fanout);
+    merged_library.default_max_transition =
+        common_electrical_default(&electrical_defaults, |defaults| defaults.max_transition);
+    merged_library.default_fanout_load =
+        common_electrical_default(&electrical_defaults, |defaults| defaults.fanout_load);
     validate_library_consistency(&merged_library)?;
     Ok(merged_library)
 }
@@ -2331,6 +2429,256 @@ mod tests {
         let units = lib.units.as_ref().expect("units should be present");
         assert_eq!(units.time_unit, "1ns");
         assert_eq!(units.capacitance_unit, "1pf");
+    }
+
+    #[test]
+    fn test_electrical_defaults_and_explicit_pin_limits_are_preserved() {
+        let liberty_text = r#"
+        library (electrical) {
+            default_max_fanout : 5.5;
+            default_max_transition : 0.75;
+            default_fanout_load : 0;
+            cell (AND2) {
+                area : 1;
+                pin (A) {
+                    direction : input;
+                    fanout_load : 1.25;
+                    max_transition : 0.2;
+                }
+                pin (B) {
+                    direction : input;
+                    fanout_load : 0;
+                    max_transition : 0;
+                }
+                pin (Y) {
+                    direction : output;
+                    function : "A * B";
+                    max_fanout : 2.5;
+                    max_transition : 0.125;
+                }
+            }
+            cell (BUF) {
+                area : 1;
+                pin (I) { direction : input; }
+                pin (O) { direction : output; function : "I"; }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let library = parse_liberty_files(&[tmp.path()]).unwrap();
+
+        assert_eq!(library.default_max_fanout, Some(5.5));
+        assert_eq!(library.default_max_transition, Some(0.75));
+        assert_eq!(library.default_fanout_load, Some(0.0));
+        let pin = |cell_name: &str, pin_name: &str| {
+            library
+                .cells
+                .iter()
+                .find(|cell| cell.name == cell_name)
+                .unwrap()
+                .pins
+                .iter()
+                .find(|pin| library.resolve_string(&pin.name) == pin_name)
+                .unwrap()
+        };
+        assert_eq!(pin("AND2", "A").fanout_load, Some(1.25));
+        assert_eq!(pin("AND2", "A").max_transition, Some(0.2));
+        assert_eq!(pin("AND2", "A").max_fanout, None);
+        assert_eq!(pin("AND2", "B").fanout_load, Some(0.0));
+        assert_eq!(pin("AND2", "B").max_transition, Some(0.0));
+        assert_eq!(pin("AND2", "Y").max_fanout, Some(2.5));
+        assert_eq!(pin("AND2", "Y").max_transition, Some(0.125));
+        assert_eq!(pin("AND2", "Y").fanout_load, None);
+        assert_eq!(pin("BUF", "I").fanout_load, Some(0.0));
+        assert_eq!(pin("BUF", "I").max_transition, Some(0.75));
+        assert_eq!(pin("BUF", "I").max_fanout, None);
+        assert_eq!(pin("BUF", "O").max_fanout, Some(5.5));
+        assert_eq!(pin("BUF", "O").max_transition, Some(0.75));
+        assert_eq!(pin("BUF", "O").fanout_load, None);
+    }
+
+    #[test]
+    fn test_internal_pins_do_not_inherit_external_electrical_defaults() {
+        let liberty_text = r#"
+        library (electrical) {
+            default_max_fanout : 5;
+            default_max_transition : 0.75;
+            default_fanout_load : 0;
+            cell (BUF) {
+                pin (A) { direction : input; }
+                pin (Y) { direction : output; function : "A"; }
+                pin (INTERNAL_DEFAULT) { direction : internal; }
+                pin (INTERNAL_EXPLICIT) {
+                    direction : internal;
+                    max_fanout : 2;
+                    max_transition : 0.25;
+                    fanout_load : 0.5;
+                }
+            }
+        }
+        "#;
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{}", liberty_text).unwrap();
+
+        let library = parse_liberty_files(&[file.path()]).unwrap();
+        let internal_pin = |name: &str| {
+            library.cells[0]
+                .pins
+                .iter()
+                .find(|pin| library.resolve_string(&pin.name) == name)
+                .unwrap()
+        };
+        let inherited = internal_pin("INTERNAL_DEFAULT");
+        assert_eq!(inherited.direction, PinDirection::Invalid as i32);
+        assert_eq!(inherited.max_fanout, None);
+        assert_eq!(inherited.max_transition, None);
+        assert_eq!(inherited.fanout_load, None);
+        let explicit = internal_pin("INTERNAL_EXPLICIT");
+        assert_eq!(explicit.direction, PinDirection::Invalid as i32);
+        assert_eq!(explicit.max_fanout, Some(2.0));
+        assert_eq!(explicit.max_transition, Some(0.25));
+        assert_eq!(explicit.fanout_load, Some(0.5));
+    }
+
+    #[test]
+    fn test_conflicting_electrical_defaults_remain_local_to_each_source() {
+        let first = r#"
+        library (first) {
+            default_max_fanout : 5;
+            default_max_transition : 320;
+            default_fanout_load : 0;
+            cell (BUF_FIRST) {
+                area : 1;
+                pin (A) { direction : input; }
+                pin (Y) { direction : output; function : "A"; }
+            }
+        }
+        "#;
+        let second = r#"
+        library (second) {
+            default_max_fanout : 5;
+            default_max_transition : 4000;
+            default_fanout_load : 0.5;
+            cell (BUF_SECOND) {
+                area : 1;
+                pin (A) { direction : input; }
+                pin (Y) { direction : output; function : "A"; }
+            }
+        }
+        "#;
+        let mut first_file = NamedTempFile::new().unwrap();
+        write!(first_file, "{}", first).unwrap();
+        let mut second_file = NamedTempFile::new().unwrap();
+        write!(second_file, "{}", second).unwrap();
+
+        let library = parse_liberty_files(&[first_file.path(), second_file.path()]).unwrap();
+
+        assert_eq!(library.default_max_fanout, Some(5.0));
+        assert_eq!(library.default_max_transition, None);
+        assert_eq!(library.default_fanout_load, None);
+        for (name, transition, load) in [("BUF_FIRST", 320.0, 0.0), ("BUF_SECOND", 4000.0, 0.5)] {
+            let cell = library.cells.iter().find(|cell| cell.name == name).unwrap();
+            let input = cell
+                .pins
+                .iter()
+                .find(|pin| library.resolve_string(&pin.name) == "A")
+                .unwrap();
+            let output = cell
+                .pins
+                .iter()
+                .find(|pin| library.resolve_string(&pin.name) == "Y")
+                .unwrap();
+            assert_eq!(input.max_transition, Some(transition));
+            assert_eq!(input.fanout_load, Some(load));
+            assert_eq!(output.max_transition, Some(transition));
+            assert_eq!(output.max_fanout, Some(5.0));
+        }
+    }
+
+    #[test]
+    fn test_missing_electrical_defaults_do_not_inherit_from_other_sources() {
+        let first = r#"
+        library (first) {
+            default_max_transition : 320;
+            cell (BUF_FIRST) {
+                pin (A) { direction : input; }
+                pin (Y) { direction : output; function : "A"; }
+            }
+        }
+        "#;
+        let second = r#"
+        library (second) {
+            cell (BUF_SECOND) {
+                pin (A) { direction : input; }
+                pin (Y) { direction : output; function : "A"; }
+            }
+        }
+        "#;
+        let mut first_file = NamedTempFile::new().unwrap();
+        write!(first_file, "{}", first).unwrap();
+        let mut second_file = NamedTempFile::new().unwrap();
+        write!(second_file, "{}", second).unwrap();
+
+        let library = parse_liberty_files(&[first_file.path(), second_file.path()]).unwrap();
+
+        assert_eq!(library.default_max_transition, None);
+        let first = library
+            .cells
+            .iter()
+            .find(|cell| cell.name == "BUF_FIRST")
+            .unwrap();
+        assert!(
+            first
+                .pins
+                .iter()
+                .all(|pin| pin.max_transition == Some(320.0))
+        );
+        let second = library
+            .cells
+            .iter()
+            .find(|cell| cell.name == "BUF_SECOND")
+            .unwrap();
+        assert!(second.pins.iter().all(|pin| pin.max_transition.is_none()));
+    }
+
+    #[test]
+    fn test_nominal_voltage_is_preserved_without_power_or_timing_payloads() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "library (minimal) {{ nom_voltage : 0.585; }}").unwrap();
+
+        let library = parse_liberty_files_with_payload_options(
+            &[file.path()],
+            LibertyPayloadOptions {
+                include_timing: false,
+                include_power: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(library.nominal_voltage, Some(0.585));
+    }
+
+    #[test]
+    fn test_electrical_defaults_reject_invalid_or_conflicting_values() {
+        let mut negative = NamedTempFile::new().unwrap();
+        write!(
+            negative,
+            "library (negative) {{ default_fanout_load : -0.5; }}"
+        )
+        .unwrap();
+        let error = parse_liberty_files(&[negative.path()]).unwrap_err();
+        assert!(error.contains("default_fanout_load must be finite and nonnegative"));
+
+        let mut conflicting = NamedTempFile::new().unwrap();
+        write!(
+            conflicting,
+            "library (conflicting) {{ default_max_fanout : 5; default_max_fanout : 6; }}"
+        )
+        .unwrap();
+        let error = parse_liberty_files(&[conflicting.path()]).unwrap_err();
+        assert!(error.contains("conflicting default_max_fanout declarations"));
     }
 
     #[test]

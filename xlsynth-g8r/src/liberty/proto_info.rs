@@ -28,6 +28,12 @@ pub struct LibertyProtoInfo {
     pub both_power_tables: usize,
     pub unknown_power_tables: usize,
     pub nominal_voltage: Option<f64>,
+    pub default_max_fanout: Option<f64>,
+    pub default_max_transition: Option<f64>,
+    pub default_fanout_load: Option<f64>,
+    pub pins_with_max_fanout: usize,
+    pub pins_with_max_transition: usize,
+    pub pins_with_fanout_load: usize,
 }
 
 /// Summarizes one decoded Liberty proto and its stored-file identity.
@@ -38,8 +44,14 @@ fn summarize_liberty_proto(size_bytes: u64, sha256: String, proto: &Library) -> 
     let mut fall_power_tables = 0;
     let mut both_power_tables = 0;
     let mut unknown_power_tables = 0;
+    let mut pins_with_max_fanout = 0;
+    let mut pins_with_max_transition = 0;
+    let mut pins_with_fanout_load = 0;
     for cell in &proto.cells {
         for pin in &cell.pins {
+            pins_with_max_fanout += usize::from(pin.max_fanout.is_some());
+            pins_with_max_transition += usize::from(pin.max_transition.is_some());
+            pins_with_fanout_load += usize::from(pin.fanout_load.is_some());
             timing_arcs += pin.timing_arcs.len();
             internal_power_groups += pin.internal_power.len();
             for group in &pin.internal_power {
@@ -83,6 +95,12 @@ fn summarize_liberty_proto(size_bytes: u64, sha256: String, proto: &Library) -> 
         both_power_tables,
         unknown_power_tables,
         nominal_voltage: proto.nominal_voltage,
+        default_max_fanout: proto.default_max_fanout,
+        default_max_transition: proto.default_max_transition,
+        default_fanout_load: proto.default_fanout_load,
+        pins_with_max_fanout,
+        pins_with_max_transition,
+        pins_with_fanout_load,
     }
 }
 
@@ -158,12 +176,18 @@ mod tests {
             "sequential.lib".to_string(),
         ];
         builder.nominal_voltage = Some(0.7);
+        builder.default_max_fanout = Some(5.5);
+        builder.default_max_transition = Some(0.75);
+        builder.default_fanout_load = Some(0.0);
         builder.lu_table_templates = vec![Default::default(), Default::default()];
         builder.cells = vec![
             Cell {
                 name: "INV".to_string().into(),
                 dont_use: Some(true),
                 pins: vec![Pin {
+                    max_fanout: Some(5.5),
+                    max_transition: Some(0.75),
+                    fanout_load: Some(0.0),
                     timing_arcs: vec![TimingArc::default()],
                     internal_power: vec![InternalPower {
                         tables: vec![rise, fall],
@@ -204,6 +228,12 @@ mod tests {
         assert_eq!(info.both_power_tables, 0);
         assert_eq!(info.unknown_power_tables, 0);
         assert_eq!(info.nominal_voltage, Some(0.7));
+        assert_eq!(info.default_max_fanout, Some(5.5));
+        assert_eq!(info.default_max_transition, Some(0.75));
+        assert_eq!(info.default_fanout_load, Some(0.0));
+        assert_eq!(info.pins_with_max_fanout, 1);
+        assert_eq!(info.pins_with_max_transition, 1);
+        assert_eq!(info.pins_with_fanout_load, 1);
     }
 
     #[test]

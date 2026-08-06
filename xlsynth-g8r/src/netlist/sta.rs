@@ -472,6 +472,20 @@ struct StaLibraryIndex<'a> {
     pin_by_cell: Vec<HashMap<String, usize>>,
 }
 
+/// Reuses validated Liberty cell and pin lookup tables across STA queries.
+pub(crate) struct PreparedStaLibrary<'a> {
+    index: StaLibraryIndex<'a>,
+}
+
+impl<'a> PreparedStaLibrary<'a> {
+    /// Validates and indexes a Liberty library once for repeated timing probes.
+    pub(crate) fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
+        Ok(Self {
+            index: StaLibraryIndex::new(library)?,
+        })
+    }
+}
+
 impl<'a> StaLibraryIndex<'a> {
     fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
         let mut cell_by_name = HashMap::new();
@@ -647,6 +661,32 @@ pub fn analyze_register_boundary_max_arrival(
     )
 }
 
+/// Analyzes register boundaries without rebuilding an existing Liberty index.
+pub(crate) fn analyze_register_boundary_max_arrival_with_prepared_library(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &PreparedStaLibrary<'_>,
+    options: StaOptions,
+    launch_primary_inputs: bool,
+    launch_register_instances: &[usize],
+) -> Result<StaReport> {
+    let launch_register_instances: HashSet<usize> =
+        launch_register_instances.iter().copied().collect();
+    analyze_max_arrival_proto_with_mode_and_index(
+        module,
+        nets,
+        interner,
+        &library.index,
+        options,
+        StaAnalysisMode::RegisterBoundaries {
+            launch_primary_inputs,
+            launch_register_instances: &launch_register_instances,
+        },
+        &BTreeMap::new(),
+    )
+}
+
 /// Analyzes register-bounded paths with flattened primary-input arrivals.
 pub fn analyze_register_boundary_max_arrival_with_primary_input_arrivals(
     module: &NetlistModule,
@@ -777,6 +817,28 @@ fn analyze_max_arrival_proto_with_mode(
     analysis_mode: StaAnalysisMode<'_>,
     primary_input_arrivals: &BTreeMap<String, f64>,
 ) -> Result<StaReport> {
+    let index = StaLibraryIndex::new(library)?;
+    analyze_max_arrival_proto_with_mode_and_index(
+        module,
+        nets,
+        interner,
+        &index,
+        options,
+        analysis_mode,
+        primary_input_arrivals,
+    )
+}
+
+/// Performs one timing traversal using an already validated Liberty index.
+fn analyze_max_arrival_proto_with_mode_and_index(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    lib: &StaLibraryIndex<'_>,
+    options: StaOptions,
+    analysis_mode: StaAnalysisMode<'_>,
+    primary_input_arrivals: &BTreeMap<String, f64>,
+) -> Result<StaReport> {
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
             "primary_input_transition must be finite; got {}",
@@ -802,7 +864,6 @@ fn analyze_max_arrival_proto_with_mode(
         ));
     }
 
-    let lib = StaLibraryIndex::new(library)?;
     let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
     let instance_count = normalized.instances.len();
     let bit_count = normalized.bit_count();
@@ -4632,6 +4693,57 @@ endmodule
             )
             .expect("empty-arrival register-boundary STA");
         assert_eq!(register_boundary, named_register_boundary);
+    }
+
+    #[test]
+    fn prepared_sta_library_preserves_exact_reports_across_repeated_modules() {
+        let library = scalar_inv_library();
+        let prepared = PreparedStaLibrary::new(&library).expect("prepare reusable Liberty index");
+        for source in [
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  INV u0 (.A(a), .Y(y));
+endmodule
+"#,
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire intermediate;
+  INV u0 (.A(a), .Y(intermediate));
+  INV u1 (.A(intermediate), .Y(y));
+endmodule
+"#,
+        ] {
+            let (module, nets, interner) = parse_single_module(source);
+            let expected = analyze_register_boundary_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                StaOptions::default(),
+                true,
+                &[],
+            )
+            .expect("analyze with separately prepared Liberty index");
+            let actual = analyze_register_boundary_max_arrival_with_prepared_library(
+                &module,
+                &nets,
+                &interner,
+                &prepared,
+                StaOptions::default(),
+                true,
+                &[],
+            )
+            .expect("analyze with shared Liberty index");
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

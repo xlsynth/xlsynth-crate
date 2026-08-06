@@ -31,6 +31,10 @@ message Library {
   repeated string interned_strings = 12;
   // Nonzero shape IDs are 1-based references into this list.
   repeated LutShape lut_shapes = 13;
+  // Shared electrical defaults; omitted when merged source libraries disagree.
+  optional double default_max_fanout = 14;
+  optional double default_max_transition = 15;
+  optional double default_fanout_load = 16;
 }
 
 message Cell {
@@ -61,6 +65,10 @@ message Pin {
   optional double max_capacitance = 8;
   repeated TimingArc timing_arcs = 9;
   repeated InternalPower internal_power = 10;
+  // Effective electrical limits include source-library defaults when present.
+  optional double max_fanout = 11;
+  optional double max_transition = 12;
+  optional double fanout_load = 13;
 }
 
 message ClockGate {

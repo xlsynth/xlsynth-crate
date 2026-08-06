@@ -32,6 +32,23 @@ pub fn handle_liberty_proto_info(matches: &clap::ArgMatches) -> Result<(), Strin
     println!("  Combinational: {}", info.combinational_cells);
     println!("  Sequential: {}", info.sequential_cells);
     println!("  Native dont-use: {}", info.dont_use_cells);
+    println!("Electrical defaults:");
+    match info.default_max_fanout {
+        Some(value) => println!("  Maximum fanout: {value}"),
+        None => println!("  Maximum fanout: <unspecified>"),
+    }
+    match info.default_max_transition {
+        Some(value) => println!("  Maximum transition: {value}"),
+        None => println!("  Maximum transition: <unspecified>"),
+    }
+    match info.default_fanout_load {
+        Some(value) => println!("  Fanout load: {value}"),
+        None => println!("  Fanout load: <unspecified>"),
+    }
+    println!("Pins with electrical limits:");
+    println!("  Maximum fanout: {}", info.pins_with_max_fanout);
+    println!("  Maximum transition: {}", info.pins_with_max_transition);
+    println!("  Fanout load: {}", info.pins_with_fanout_load);
     println!("LUT templates: {}", info.lut_templates);
     println!("Timing arcs: {}", info.timing_arcs);
     println!("Internal-power groups: {}", info.internal_power_groups);

@@ -18,7 +18,8 @@ use crate::netlist::sequential_liberty::{
     GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec,
 };
 use crate::netlist::sta::{
-    StaOptions, analyze_register_boundary_max_arrival,
+    PreparedStaLibrary, StaOptions, analyze_register_boundary_max_arrival,
+    analyze_register_boundary_max_arrival_with_prepared_library,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
 };
 use crate::netlist::timing_buffer::{BufferTimingConstraints, insert_timing_aware_buffers};
@@ -463,6 +464,8 @@ fn adjust_register_data_phase(
 /// Builds and timing-characterizes eligible Liberty FFs without cell-name
 /// rules.
 fn index_flip_flops(library: &Library, options: StaOptions) -> Result<Vec<FlipFlopBinding>> {
+    let prepared_library = PreparedStaLibrary::new(library)
+        .context("indexing Liberty cells for sequential timing characterization")?;
     let mut candidates = Vec::new();
     let mut rejected = BTreeSet::new();
     for cell in &library.cells {
@@ -485,7 +488,7 @@ fn index_flip_flops(library: &Library, options: StaOptions) -> Result<Vec<FlipFl
             rejected.insert(format!("{} requires a negative clock edge", cell.name));
             continue;
         }
-        match enumerate_flip_flop_bindings(cell, &spec, library, options) {
+        match enumerate_flip_flop_bindings(cell, &spec, library, &prepared_library, options) {
             Ok(bindings) if !bindings.is_empty() => candidates.extend(bindings),
             Ok(_) => {
                 rejected.insert(format!(
@@ -529,6 +532,7 @@ fn enumerate_flip_flop_bindings(
     cell: &Cell,
     spec: &GvEvalSequentialCellSpec,
     library: &Library,
+    prepared_library: &PreparedStaLibrary<'_>,
     options: StaOptions,
 ) -> Result<Vec<FlipFlopBinding>> {
     let mut input_names = cell
@@ -624,7 +628,7 @@ fn enumerate_flip_flop_bindings(
                     setup: 0.0,
                 };
                 if let Ok((clock_to_output, setup)) =
-                    characterize_flip_flop(&candidate, library, options)
+                    characterize_flip_flop(&candidate, prepared_library, options)
                 {
                     candidate.clock_to_output = clock_to_output;
                     candidate.setup = setup;
@@ -684,7 +688,7 @@ fn data_formula_polarity(
 /// Measures Liberty setup and clock-to-Q with the production STA engine.
 fn characterize_flip_flop(
     binding: &FlipFlopBinding,
-    library: &Library,
+    library: &PreparedStaLibrary<'_>,
     options: StaOptions,
 ) -> Result<(f64, f64)> {
     let probe_options = StaOptions {
@@ -757,7 +761,7 @@ fn characterize_flip_flop(
             inst_colno: 1,
         }],
     };
-    let launch = analyze_register_boundary_max_arrival(
+    let launch = analyze_register_boundary_max_arrival_with_prepared_library(
         &module,
         &nets,
         &interner,
@@ -770,7 +774,7 @@ fn characterize_flip_flop(
         .timing_for_net(NetIndex(2))
         .ok_or_else(|| anyhow!("flip-flop output has no characterized clock-to-Q timing"))?;
     let clock_to_output = q_timing.rise.arrival.max(q_timing.fall.arrival);
-    let capture = analyze_register_boundary_max_arrival(
+    let capture = analyze_register_boundary_max_arrival_with_prepared_library(
         &module,
         &nets,
         &interner,
