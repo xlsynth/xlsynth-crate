@@ -611,10 +611,11 @@ fn emit_link_directives_for_managed_dso(
 
 /// Returns Cargo's profile-level `deps` directory for this build script.
 ///
-/// Cargo sets `OUT_DIR` to:
+/// Depending on the Cargo version, `OUT_DIR` has one of these layouts:
 ///
 /// ```text
 /// target/<profile>/build/<pkg-hash>/out
+/// target/<profile>/build/<pkg>/<hash>/out
 /// ```
 ///
 /// When Cargo runs host binaries it just built, including downstream `build.rs`
@@ -623,11 +624,9 @@ fn emit_link_directives_for_managed_dso(
 /// that loader path, so a DSO that only lives in `OUT_DIR` can link
 /// successfully but fail when a dependent build script starts.
 fn cargo_profile_deps_dir(out_dir: &Path) -> Option<PathBuf> {
-    let build_script_dir = out_dir.parent()?;
-    let build_dir = build_script_dir.parent()?;
-    if build_dir.file_name()? != "build" {
-        return None;
-    }
+    let build_dir = out_dir
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "build"))?;
     Some(build_dir.parent()?.join("deps"))
 }
 
