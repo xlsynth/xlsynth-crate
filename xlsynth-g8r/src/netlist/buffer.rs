@@ -36,7 +36,8 @@ pub struct BufferOptions {
     pub target_load: Option<f64>,
     /// Extra capacitive load attached to each module output.
     pub module_output_load: f64,
-    /// Whether data primary inputs may be roots of inserted buffer trees.
+    /// Whether ideal data primary inputs may be roots of inserted buffer trees.
+    /// Inputs with a representative Liberty driver are eligible automatically.
     pub buffer_primary_inputs: bool,
 }
 

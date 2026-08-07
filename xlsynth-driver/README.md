@@ -797,9 +797,12 @@ Key flags:
   (default: `12`). Balanced mapping may select a stricter timing-oriented tree
   within this bound.
 - `--buffer-target-load <CAPACITANCE>`: optional explicit buffer-stage load
-  bound; by default, use the Liberty output's characterized maximum load.
-- `--buffer-primary-inputs`: also buffer high-fanout data primary inputs;
-  clock pins are never buffered.
+  bound; never exceeds the Liberty output's characterized maximum load.
+- `--buffer-primary-inputs`: permit buffering high-fanout data primary inputs
+  when the Liberty library models them as ideal sources. When the Liberty proto
+  specifies a representative external input driver, overloaded physical data
+  inputs are buffered automatically whenever `--buffer true` is enabled,
+  without requiring this flag. Clock pins are never buffered.
 - `--resize <true|false>`: enable exact-timing cell sizing, Boolean-safe
   combinational input-pin swapping, and timing-protected area recovery
   (default: `false`). For registered designs, resize functionally equivalent
@@ -864,8 +867,13 @@ Key flags:
   default `0` uses representative receiver defaults when available.
 - `--buffer <true|false>`: enable buffer insertion (default: `true`).
 - `--max-fanout <N>`: maximum sinks per buffer-tree level (default: `12`).
-- `--buffer-target-load <CAPACITANCE>`: optional explicit stage load bound.
-- `--buffer-primary-inputs`: permit buffering data primary inputs.
+- `--buffer-target-load <CAPACITANCE>`: optional explicit stage load bound;
+  never exceeds the Liberty output's characterized maximum load.
+- `--buffer-primary-inputs`: permit buffering data primary inputs when the
+  Liberty library models them as ideal sources. When the Liberty proto
+  specifies a representative external input driver, overloaded physical data
+  inputs are buffered automatically whenever buffering is enabled, without
+  requiring this flag. Clock pins are never buffered.
 - `--resize <true|false>`: enable exact-Liberty critical-path sizing,
   Boolean-safe combinational input-pin swapping, and timing-protected area
   recovery (default: `true`).
