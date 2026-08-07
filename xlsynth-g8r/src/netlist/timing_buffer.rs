@@ -12,8 +12,10 @@ use crate::netlist::sta::{
     CombinationalOutputLoad, SignalTiming, StaOptions, StaReport, TimingQueryDiagnosticCounts,
     analyze_combinational_max_arrival_with_primary_input_arrivals,
     analyze_register_boundary_max_arrival_with_primary_input_arrivals,
-    effective_input_capacitance_for_mapping, evaluate_combinational_cell_output_timing,
-    is_sequential_boundary_cell, resolved_module_output_load,
+    boundary_timing_applies_to_module_output, boundary_timing_applies_to_primary_input,
+    effective_input_capacitance_for_mapping, effective_representative_driver,
+    evaluate_combinational_cell_output_timing, is_sequential_boundary_cell,
+    resolved_module_output_load,
 };
 use crate::netlist::utils::validate_constant_output_assignments;
 use anyhow::{Context, Result, anyhow, bail};
@@ -88,13 +90,33 @@ struct TimingDriver {
     pin_index: usize,
 }
 
+/// Characterized output pin of either a real gate or a virtual input driver.
+#[derive(Clone, Copy, Debug)]
+struct TimingDriverPin {
+    cell_index: usize,
+    pin_index: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 struct TimingFanout {
     sinks: Vec<TimingSink>,
     driver: Option<TimingDriver>,
+    representative_driver: Option<TimingDriverPin>,
     is_primary_input: bool,
     protected_clock: bool,
     constant: bool,
+}
+
+impl TimingFanout {
+    /// Returns the real or scope-valid virtual Liberty output driving this net.
+    fn electrical_driver(&self) -> Option<TimingDriverPin> {
+        self.driver
+            .map(|driver| TimingDriverPin {
+                cell_index: driver.cell_index,
+                pin_index: driver.pin_index,
+            })
+            .or(self.representative_driver)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -417,6 +439,12 @@ fn insert_timing_aware_buffers_with_strategy(
             fanout.sinks.len() > options.max_fanout
                 || exceeds_characterized_output_limit(fanout, library, options)
                 || exceeds_weighted_fanout_limit(fanout, library)
+                || exceeds_representative_transition_limit(
+                    fanout,
+                    library,
+                    &catalog,
+                    snapshot.combined.timing_for_bit(*root),
+                )
         })
         .collect::<Vec<_>>();
     if !hard_roots.is_empty() {
@@ -536,7 +564,13 @@ fn insert_timing_aware_buffers_with_strategy(
             }
             fixes_hard_violation |= fanout.sinks.len() > options.max_fanout
                 || exceeds_characterized_output_limit(fanout, library, options)
-                || exceeds_weighted_fanout_limit(fanout, library);
+                || exceeds_weighted_fanout_limit(fanout, library)
+                || exceeds_representative_transition_limit(
+                    fanout,
+                    library,
+                    &catalog,
+                    snapshot.combined.timing_for_bit(*root),
+                );
             apply_buffer_tree(
                 &mut trial_module,
                 &mut trial_nets,
@@ -1092,6 +1126,33 @@ fn build_electrical_timing_graph(
         .enumerate()
         .map(|(index, cell)| (cell.name.as_str(), index))
         .collect();
+    let representative_driver = effective_representative_driver(library)?
+        .map(|driver| -> Result<TimingDriverPin> {
+            let cell_index = cells
+                .get(driver.cell.name.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "representative input driver '{}' is absent from the timing library",
+                        driver.cell.name
+                    )
+                })?;
+            let pin_index = library.cells[cell_index]
+                .pins
+                .iter()
+                .position(|pin| std::ptr::eq(pin, driver.output_pin))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "representative input driver '{}' has no characterized output pin",
+                        driver.cell.name
+                    )
+                })?;
+            Ok(TimingDriverPin {
+                cell_index,
+                pin_index,
+            })
+        })
+        .transpose()?;
     let mut fanouts = vec![TimingFanout::default(); normalized.bit_count()];
     let bits = (0..normalized.bit_count())
         .map(|index| {
@@ -1115,17 +1176,45 @@ fn build_electrical_timing_graph(
         })?;
         for (offset, &bit) in port.bits.iter().enumerate() {
             match port.direction {
-                PortDirection::Input => fanouts[bit].is_primary_input = true,
+                PortDirection::Input => {
+                    fanouts[bit].is_primary_input = true;
+                    if let Some(driver) = representative_driver {
+                        let port_name = interner.resolve(port.name).ok_or_else(|| {
+                            anyhow!("timing-driven buffering cannot resolve an input port name")
+                        })?;
+                        let input_name = if port.bits.len() == 1 {
+                            port_name.to_string()
+                        } else {
+                            let bit_number =
+                                nets[port_net.0].bit_number(offset).ok_or_else(|| {
+                                    anyhow!(
+                                        "timing-driven buffering found an invalid packed input bit"
+                                    )
+                                })?;
+                            format!("{port_name}_{bit_number}")
+                        };
+                        if boundary_timing_applies_to_primary_input(input_name.as_str()) {
+                            fanouts[bit].representative_driver = Some(driver);
+                        }
+                    }
+                }
                 PortDirection::Output => {
                     let bit_number = nets[port_net.0].bit_number(offset).ok_or_else(|| {
                         anyhow!("timing-driven buffering found an invalid packed output bit")
                     })?;
+                    let output_name =
+                        flattened_output_name(port_net, bit_number, module, nets, interner)?;
+                    let load = if boundary_timing_applies_to_module_output(output_name.as_str()) {
+                        output_load
+                    } else {
+                        CombinationalOutputLoad::default()
+                    };
                     fanouts[bit].sinks.push(TimingSink {
                         target: TimingSinkTarget::ModuleOutput {
                             net: port_net,
                             bit: bit_number,
                         },
-                        load: output_load,
+                        load,
                         fanout_load: 0.0,
                         max_transition: None,
                         criticality: 0.0,
@@ -1365,7 +1454,13 @@ fn overloaded_roots(
         {
             continue;
         }
-        let overloaded = fanout_is_overloaded(fanout, library, catalog, options)?;
+        let overloaded = fanout_is_overloaded(fanout, library, catalog, options)?
+            || exceeds_representative_transition_limit(
+                fanout,
+                library,
+                catalog,
+                snapshot.combined.timing_for_bit(index),
+            );
         let priority = signal_arrival(snapshot, graph.bits[index].0)
             + fanout
                 .sinks
@@ -1379,7 +1474,13 @@ fn overloaded_roots(
             .unwrap_or(0.0);
         let hard = fanout.sinks.len() > options.max_fanout
             || exceeds_characterized_output_limit(fanout, library, options)
-            || exceeds_weighted_fanout_limit(fanout, library);
+            || exceeds_weighted_fanout_limit(fanout, library)
+            || exceeds_representative_transition_limit(
+                fanout,
+                library,
+                catalog,
+                snapshot.combined.timing_for_bit(index),
+            );
         roots.push((
             index,
             hard,
@@ -1424,11 +1525,13 @@ fn overloaded_roots(
 
 /// Returns only legal, driven data roots; clocks and constants are protected.
 fn fanout_eligible(fanout: &TimingFanout, options: &BufferOptions) -> bool {
+    let driven_primary_input = fanout.is_primary_input
+        && (fanout.representative_driver.is_some() || options.buffer_primary_inputs);
     !fanout.protected_clock
         && !fanout.constant
         && !fanout.sinks.is_empty()
-        && (fanout.driver.is_some() || (fanout.is_primary_input && options.buffer_primary_inputs))
-        && (!fanout.is_primary_input || options.buffer_primary_inputs)
+        && (fanout.driver.is_some() || driven_primary_input)
+        && (!fanout.is_primary_input || driven_primary_input)
 }
 
 /// Iterates eligible data fanouts without allocating temporary root lists.
@@ -1495,7 +1598,22 @@ fn fanout_is_buffer_candidate(
     speculative: bool,
 ) -> Result<bool> {
     let fanout = &graph.fanouts[root];
-    if fanout_is_overloaded(fanout, library, catalog, options)? {
+    if fanout.representative_driver.is_some()
+        && fanout.sinks.len() == 1
+        && hard_output_load_limit(fanout, library, options)
+            .is_some_and(|limit| max_load(sum_sink_load(&fanout.sinks)) > limit + TIMING_EPSILON)
+        && !representative_driver_load_can_be_reduced(fanout, catalog)
+    {
+        return Ok(false);
+    }
+    if fanout_is_overloaded(fanout, library, catalog, options)?
+        || exceeds_representative_transition_limit(
+            fanout,
+            library,
+            catalog,
+            snapshot.combined.timing_for_bit(root),
+        )
+    {
         return Ok(true);
     }
     if !speculative {
@@ -1506,7 +1624,7 @@ fn fanout_is_buffer_candidate(
         .sinks
         .iter()
         .any(|sink| matches!(sink.target, TimingSinkTarget::ModuleOutput { .. }));
-    if fanout.driver.is_none() || (fanout.sinks.len() < 3 && !drives_visible_output) {
+    if fanout.electrical_driver().is_none() || (fanout.sinks.len() < 3 && !drives_visible_output) {
         return Ok(false);
     }
 
@@ -1536,10 +1654,10 @@ fn characterized_load_limit(
     catalog: &CellCatalog,
     options: &BufferOptions,
 ) -> Result<Option<f64>> {
-    if let Some(limit) = options.target_load {
-        return Ok(Some(limit));
+    if options.target_load.is_some() {
+        return Ok(hard_output_load_limit(fanout, library, options));
     }
-    let Some(driver) = fanout.driver else {
+    let Some(driver) = fanout.electrical_driver() else {
         return Ok(catalog
             .buffers()
             .next()
@@ -1578,27 +1696,38 @@ fn characterized_load_limit(
     })
 }
 
+/// Intersects an explicit load target with the driver's hard Liberty limit.
+fn hard_output_load_limit(
+    fanout: &TimingFanout,
+    library: &Library,
+    options: &BufferOptions,
+) -> Option<f64> {
+    let characterized = fanout
+        .electrical_driver()
+        .and_then(|driver| library.cells[driver.cell_index].pins[driver.pin_index].max_capacitance)
+        .filter(|limit| limit.is_finite() && *limit > 0.0);
+    match (options.target_load, characterized) {
+        (Some(target), Some(characterized)) => Some(target.min(characterized)),
+        (Some(target), None) => Some(target),
+        (None, Some(characterized)) => Some(characterized),
+        (None, None) => None,
+    }
+}
+
 /// Distinguishes hard Liberty/user electrical bounds from soft effort targets.
 fn exceeds_characterized_output_limit(
     fanout: &TimingFanout,
     library: &Library,
     options: &BufferOptions,
 ) -> bool {
-    let limit = options.target_load.or_else(|| {
-        fanout
-            .driver
-            .and_then(|driver| {
-                library.cells[driver.cell_index].pins[driver.pin_index].max_capacitance
-            })
-            .filter(|limit| limit.is_finite() && *limit > 0.0)
-    });
+    let limit = hard_output_load_limit(fanout, library, options);
     limit.is_some_and(|limit| max_load(sum_sink_load(&fanout.sinks)) > limit + TIMING_EPSILON)
         || exceeds_weighted_fanout_limit(fanout, library)
 }
 
 /// Compares real Liberty sink weights against their driver's fanout budget.
 fn exceeds_weighted_fanout_limit(fanout: &TimingFanout, library: &Library) -> bool {
-    let Some(driver) = fanout.driver else {
+    let Some(driver) = fanout.electrical_driver() else {
         return false;
     };
     let Some(limit) = library.cells[driver.cell_index].pins[driver.pin_index].max_fanout else {
@@ -1619,7 +1748,7 @@ fn exceeds_transition_limit(
         return false;
     };
     let output_limit = fanout
-        .driver
+        .electrical_driver()
         .and_then(|driver| library.cells[driver.cell_index].pins[driver.pin_index].max_transition);
     let limit = fanout
         .sinks
@@ -1630,6 +1759,41 @@ fn exceeds_transition_limit(
         .reduce(f64::min);
     limit.is_some_and(|limit| {
         timing.rise.transition.max(timing.fall.transition) > limit + TIMING_EPSILON
+    })
+}
+
+/// Repairs illegal virtual-driver slew without changing legacy real-gate
+/// policy.
+fn exceeds_representative_transition_limit(
+    fanout: &TimingFanout,
+    library: &Library,
+    catalog: &CellCatalog,
+    timing: Option<SignalTiming>,
+) -> bool {
+    if fanout.representative_driver.is_none() || !exceeds_transition_limit(fanout, library, timing)
+    {
+        return false;
+    }
+    representative_driver_load_can_be_reduced(fanout, catalog)
+}
+
+/// Determines whether a real buffer can lower an external driver's sink load.
+fn representative_driver_load_can_be_reduced(fanout: &TimingFanout, catalog: &CellCatalog) -> bool {
+    let movable = fanout
+        .sinks
+        .iter()
+        .filter(|sink| matches!(sink.target, TimingSinkTarget::InstancePin { .. }))
+        .fold(CombinationalOutputLoad::default(), |mut load, sink| {
+            load.rise += sink.load.rise;
+            load.fall += sink.load.fall;
+            load
+        });
+    catalog.buffers().any(|buffer| {
+        let input = buffer.input_capacitances[0];
+        input.rise <= movable.rise + TIMING_EPSILON
+            && input.fall <= movable.fall + TIMING_EPSILON
+            && (input.rise + TIMING_EPSILON < movable.rise
+                || input.fall + TIMING_EPSILON < movable.fall)
     })
 }
 
@@ -1784,7 +1948,7 @@ fn apply_buffer_tree(
                 fall: total_load.fall + level_load.fall,
             };
             let weighted_load = sum_sink_fanout_load(&direct) + sum_sink_fanout_load(&level);
-            let weighted_limit = fanout.driver.and_then(|driver| {
+            let weighted_limit = fanout.electrical_driver().and_then(|driver| {
                 library.cells[driver.cell_index].pins[driver.pin_index].max_fanout
             });
             if total_count <= options.max_fanout
@@ -1798,7 +1962,7 @@ fn apply_buffer_tree(
         let previous_count = level.len();
         let previous_load = max_load(sum_sink_load(&level));
         let fanout_limit = fanout
-            .driver
+            .electrical_driver()
             .and_then(|driver| library.cells[driver.cell_index].pins[driver.pin_index].max_fanout);
         let groups = partition_timing_sinks(level, options.max_fanout, root_limit, fanout_limit);
         let mut next = Vec::with_capacity(groups.len());
@@ -2179,23 +2343,27 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 pub(crate) mod tests {
     use super::{
         BufferTimingConstraints, TimingDriver, TimingFanout, TimingSink, TimingSinkGroup,
-        TimingSinkTarget, consolidate_timing_aware_buffers, exceeds_transition_limit,
-        fanout_is_overloaded, has_slow_shared_primary_output,
-        insert_speculative_timing_aware_buffers, insert_timing_aware_buffers, select_timing_buffer,
+        TimingSinkTarget, build_electrical_timing_graph, consolidate_timing_aware_buffers,
+        exceeds_transition_limit, fanout_eligible, fanout_is_overloaded,
+        has_slow_shared_primary_output, insert_speculative_timing_aware_buffers,
+        insert_timing_aware_buffers, select_timing_buffer,
     };
     use crate::liberty_model::{
         Cell, Library, LibraryBuilder, LuTableTemplate, Pin, PinDirection, Sequential,
         SequentialKind, TimingArc, TimingTable,
     };
-    use crate::liberty_proto::TimingTableKind;
+    use crate::liberty_proto::{BoundaryTimingDefaults, TimingTableKind};
     use crate::netlist::buffer::BufferOptions;
     use crate::netlist::cell_catalog::CellCatalog;
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library};
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::parse::NetRef;
     use crate::netlist::report::build_netlist_report;
-    use crate::netlist::sta::{CombinationalOutputLoad, EdgeTiming, SignalTiming, StaOptions};
-    use std::collections::BTreeMap;
+    use crate::netlist::sta::{
+        CombinationalOutputLoad, EdgeTiming, ScopedBoundaryTimingDefaultsSuppression, SignalTiming,
+        StaOptions, resolved_module_output_load,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// Builds complete scalar setup tables for a test capture register.
     fn scalar_table(
@@ -2380,6 +2548,569 @@ module top(clk, a, out);
   DFF capture7 (.CLK(clk), .D(root), .Q(out[7]));
 endmodule
 "#
+    }
+
+    /// Creates a load-sensitive external driver beside ordinary legal buffers.
+    fn representative_input_library() -> Library {
+        let mut builder = LibraryBuilder::from_library(sizing_library());
+        builder.lu_table_templates.push(LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "representative_input_load".to_string(),
+            variable_1: "total_output_net_capacitance".to_string().into(),
+            index_1: vec![0.0, 1.0],
+            ..LuTableTemplate::default()
+        });
+        let template_index = u32::try_from(builder.lu_table_templates.len())
+            .expect("test template index fits in a Liberty timing reference");
+        let tables = [
+            (TimingTableKind::CellRise, vec![0.0, 50.0]),
+            (TimingTableKind::CellFall, vec![0.0, 50.0]),
+            (TimingTableKind::RiseTransition, vec![0.01, 1.01]),
+            (TimingTableKind::FallTransition, vec![0.01, 1.01]),
+        ]
+        .into_iter()
+        .map(|(kind, values)| {
+            builder
+                .add_timing_table_f64(
+                    kind,
+                    template_index,
+                    vec![],
+                    vec![],
+                    vec![],
+                    values,
+                    vec![2],
+                    "",
+                )
+                .expect("construct load-sensitive representative input timing")
+        })
+        .collect();
+        let arc = builder
+            .add_timing_arc("A", "positive_unate", "combinational", "", tables)
+            .expect("characterize the virtual primary-input driver");
+        let mut driver = builder
+            .cells
+            .iter()
+            .find(|cell| cell.name == "BUF")
+            .cloned()
+            .expect("clone the ordinary characterized test buffer");
+        driver.name = "DRIVER".to_string();
+        driver.area = 1000.0;
+        let output = driver
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find the virtual-driver output");
+        output.max_capacitance = Some(1.0);
+        output.timing_arcs = vec![arc];
+        builder.cells.push(driver);
+
+        let mut library = builder.finish();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "DRIVER".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 1,
+        });
+        library
+    }
+
+    /// Builds a scalar primary input with independently exposed buffer sinks.
+    fn high_fanout_primary_input_source(sinks: usize) -> String {
+        assert!(sinks > 0);
+        let mut source = format!(
+            "module top(a, out);\n  input a;\n  output [{}:0] out;\n",
+            sinks - 1
+        );
+        for sink in 0..sinks {
+            source.push_str(&format!("  BUF sink{sink} (.A(a), .Y(out[{sink}]));\n"));
+        }
+        source.push_str("endmodule\n");
+        source
+    }
+
+    /// Mutably resolves the output limits of the synthetic external driver.
+    fn representative_driver_output(library: &mut Library) -> &mut Pin {
+        library
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "DRIVER")
+            .expect("find the synthetic representative driver")
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find the synthetic representative-driver output")
+    }
+
+    #[test]
+    fn automatically_buffers_representative_driven_primary_inputs() {
+        let library = representative_input_library();
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(4));
+        let before =
+            build_netlist_report(&module, &nets, &interner, &library, StaOptions::default())
+                .expect("time the overloaded representative external driver");
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions {
+                max_fanout: 3,
+                ..BufferOptions::default()
+            },
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("automatically repair the characterized primary-input fanout");
+        let after =
+            build_netlist_report(&module, &nets, &interner, &library, StaOptions::default())
+                .expect("independently time the repaired representative-driver load");
+
+        assert!(stats.buffers_inserted > 0);
+        assert_eq!(stats.max_fanout_before, 4);
+        assert!(stats.max_fanout_after <= 3);
+        assert_eq!(stats.unresolved_overloaded_nets, 0);
+        assert!(after.max_delay.unwrap() < before.max_delay.unwrap());
+    }
+
+    #[test]
+    fn representative_driver_max_capacitance_triggers_primary_input_buffering() {
+        let mut library = representative_input_library();
+        representative_driver_output(&mut library).max_capacitance = Some(0.25);
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(4));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("repair the virtual output capacitance below the generic fanout bound");
+
+        assert_eq!(stats.max_fanout_before, 4);
+        assert!(stats.buffers_inserted > 0);
+        assert!(stats.max_load_after <= 0.25 + 1e-9);
+        assert_eq!(stats.unresolved_overloaded_nets, 0);
+    }
+
+    #[test]
+    fn explicit_load_target_cannot_override_representative_driver_max_capacitance() {
+        let mut library = representative_input_library();
+        representative_driver_output(&mut library).max_capacitance = Some(0.25);
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(4));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions {
+                target_load: Some(1.0),
+                ..BufferOptions::default()
+            },
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("preserve the hard Liberty capacitance under a looser explicit target");
+
+        assert!(stats.buffers_inserted > 0);
+        assert!(stats.max_load_after <= 0.25 + 1e-9);
+        assert_eq!(stats.unresolved_overloaded_nets, 0);
+    }
+
+    #[test]
+    fn unrepairable_representative_driver_capacitance_does_not_add_redundant_buffers() {
+        let mut library = representative_input_library();
+        representative_driver_output(&mut library).max_capacitance = Some(0.05);
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(1));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("report an impossible single-sink capacitance without worsening the circuit");
+
+        assert_eq!(stats.buffers_inserted, 0);
+        assert_eq!(stats.unresolved_overloaded_nets, 1);
+    }
+
+    #[test]
+    fn representative_driver_max_fanout_triggers_primary_input_buffering() {
+        let mut library = representative_input_library();
+        representative_driver_output(&mut library).max_fanout = Some(2.5);
+        for cell in &mut library.cells {
+            if matches!(cell.name.as_str(), "BUF" | "BUF_FAST") {
+                cell.pins
+                    .iter_mut()
+                    .find(|pin| pin.direction == PinDirection::Input as i32)
+                    .expect("find the weighted actual buffer input")
+                    .fanout_load = Some(1.0);
+            }
+        }
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(4));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("repair the representative driver's stricter weighted-fanout limit");
+
+        assert_eq!(stats.max_fanout_before, 4);
+        assert!(stats.buffers_inserted > 0);
+        assert!(stats.max_fanout_after <= 2);
+        assert_eq!(stats.unresolved_overloaded_nets, 0);
+    }
+
+    #[test]
+    fn representative_driver_max_transition_triggers_primary_input_buffering() {
+        let mut library = representative_input_library();
+        representative_driver_output(&mut library).max_transition = Some(0.25);
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(4));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("repair a representative-driver slew violation below generic fanout bounds");
+
+        assert_eq!(stats.max_fanout_before, 4);
+        assert!(stats.buffers_inserted > 0);
+        assert_eq!(stats.unresolved_overloaded_nets, 0);
+        assert!(stats.final_worst_delay.unwrap() < stats.initial_worst_delay.unwrap());
+    }
+
+    #[test]
+    fn unrepairable_representative_driver_slew_does_not_add_redundant_buffers() {
+        let mut library = representative_input_library();
+        representative_driver_output(&mut library).max_transition = Some(0.05);
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(1));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("report an unrepairable single-sink source slew without redundant buffers");
+
+        assert_eq!(stats.buffers_inserted, 0);
+        assert_eq!(stats.unresolved_overloaded_nets, 1);
+    }
+
+    #[test]
+    fn ideal_primary_inputs_still_require_explicit_buffering_opt_in() {
+        let library = sizing_library();
+        let source = high_fanout_primary_input_source(4);
+        let options = BufferOptions {
+            max_fanout: 3,
+            ..BufferOptions::default()
+        };
+        let (mut ideal_module, mut ideal_nets, mut ideal_interner) = parse_module(&source);
+        let ideal = insert_timing_aware_buffers(
+            &mut ideal_module,
+            &mut ideal_nets,
+            &mut ideal_interner,
+            &library,
+            &options,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("preserve the legacy ideal-input buffering default");
+        assert_eq!(ideal.buffers_inserted, 0);
+
+        let (mut module, mut nets, mut interner) = parse_module(&source);
+        let explicit = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions {
+                buffer_primary_inputs: true,
+                ..options
+            },
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("preserve explicit buffering of legacy ideal primary inputs");
+        assert!(explicit.buffers_inserted > 0);
+    }
+
+    #[test]
+    fn selective_physical_scope_excludes_packed_synthetic_register_inputs() {
+        let library = representative_input_library();
+        let source = r#"
+module top(a, q, out);
+  input [3:2] a;
+  input [3:2] q;
+  output [7:0] out;
+  BUF physical0 (.A(a[3]), .Y(out[0]));
+  BUF physical1 (.A(a[3]), .Y(out[1]));
+  BUF physical2 (.A(a[3]), .Y(out[2]));
+  BUF physical3 (.A(a[3]), .Y(out[3]));
+  BUF synthetic0 (.A(q[3]), .Y(out[4]));
+  BUF synthetic1 (.A(q[3]), .Y(out[5]));
+  BUF synthetic2 (.A(q[3]), .Y(out[6]));
+  BUF synthetic3 (.A(q[3]), .Y(out[7]));
+endmodule
+"#;
+        let (mut module, mut nets, mut interner) = parse_module(source);
+        let options = BufferOptions {
+            max_fanout: 3,
+            ..BufferOptions::default()
+        };
+        let _physical = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            BTreeSet::from(["a_3".to_string()]),
+            (0..8).map(|index| format!("out_{index}")).collect(),
+        );
+        let graph = build_electrical_timing_graph(&module, &nets, &interner, &library, &options)
+            .expect("identify the actual packed external bit and exclude synthetic Q");
+        let a = module
+            .find_net_index(interner.get("a").expect("resolve a"), &nets)
+            .expect("find packed physical input");
+        let q = module
+            .find_net_index(interner.get("q").expect("resolve q"), &nets)
+            .expect("find packed synthetic input");
+        let physical = graph
+            .bits
+            .iter()
+            .position(|&(net, bit)| net == a && bit == 3)
+            .expect("find a[3]");
+        let synthetic = graph
+            .bits
+            .iter()
+            .position(|&(net, bit)| net == q && bit == 3)
+            .expect("find q[3]");
+        assert!(graph.fanouts[physical].representative_driver.is_some());
+        assert!(graph.fanouts[synthetic].representative_driver.is_none());
+        assert!(fanout_eligible(&graph.fanouts[physical], &options));
+        assert!(!fanout_eligible(&graph.fanouts[synthetic], &options));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &options,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("buffer only the genuinely driven packed physical input");
+        assert_eq!(stats.buffered_nets, 1);
+        let after = build_electrical_timing_graph(&module, &nets, &interner, &library, &options)
+            .expect("inspect the buffered physical and untouched synthetic bits");
+        let physical = after
+            .bits
+            .iter()
+            .position(|&(net, bit)| net == a && bit == 3)
+            .expect("find buffered a[3]");
+        let synthetic = after
+            .bits
+            .iter()
+            .position(|&(net, bit)| net == q && bit == 3)
+            .expect("find unbuffered q[3]");
+        assert!(after.fanouts[physical].sinks.len() <= options.max_fanout);
+        assert_eq!(after.fanouts[synthetic].sinks.len(), 4);
+    }
+
+    #[test]
+    fn selective_physical_scope_excludes_packed_synthetic_register_outputs() {
+        let library = representative_input_library();
+        let source = r#"
+module top(a, y, d);
+  input a;
+  output [3:2] y;
+  output [3:2] d;
+  BUF physical0 (.A(a), .Y(y[3]));
+  BUF physical1 (.A(a), .Y(y[2]));
+  BUF synthetic0 (.A(a), .Y(d[3]));
+  BUF synthetic1 (.A(a), .Y(d[2]));
+endmodule
+"#;
+        let (module, nets, interner) = parse_module(source);
+        let physical_net = module
+            .find_net_index(interner.get("y").expect("resolve y"), &nets)
+            .expect("find packed physical outputs");
+        let synthetic_net = module
+            .find_net_index(interner.get("d").expect("resolve d"), &nets)
+            .expect("find packed synthetic register D outputs");
+        let _physical = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+            BTreeSet::from(["a".to_string()]),
+            BTreeSet::from(["y_3".to_string(), "y_2".to_string()]),
+        );
+
+        for module_output_load in [0.0, 0.75] {
+            let options = BufferOptions {
+                module_output_load,
+                ..BufferOptions::default()
+            };
+            let expected = resolved_module_output_load(
+                &library,
+                StaOptions {
+                    module_output_load,
+                    ..StaOptions::default()
+                },
+            )
+            .expect("resolve explicit or representative physical-output loading");
+            let graph =
+                build_electrical_timing_graph(&module, &nets, &interner, &library, &options)
+                    .expect("distinguish physical outputs from packed synthetic D endpoints");
+            for bit in [3, 2] {
+                let physical = graph
+                    .bits
+                    .iter()
+                    .position(|&(net, candidate)| net == physical_net && candidate == bit)
+                    .expect("find packed physical output");
+                let synthetic = graph
+                    .bits
+                    .iter()
+                    .position(|&(net, candidate)| net == synthetic_net && candidate == bit)
+                    .expect("find packed synthetic register output");
+                assert_eq!(graph.fanouts[physical].sinks.len(), 1);
+                assert_eq!(graph.fanouts[synthetic].sinks.len(), 1);
+                assert_eq!(graph.fanouts[physical].sinks[0].load, expected);
+                assert_eq!(
+                    graph.fanouts[synthetic].sinks[0].load,
+                    CombinationalOutputLoad::default()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fully_suppressed_boundary_scope_preserves_ideal_input_behavior() {
+        let library = representative_input_library();
+        let (mut module, mut nets, mut interner) =
+            parse_module(&high_fanout_primary_input_source(4));
+        let _suppressed = ScopedBoundaryTimingDefaultsSuppression::new();
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions {
+                max_fanout: 3,
+                ..BufferOptions::default()
+            },
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("leave implicitly ideal synthetic boundaries untouched");
+
+        assert_eq!(stats.buffers_inserted, 0);
+    }
+
+    #[test]
+    fn fully_suppressed_boundary_scope_excludes_explicit_module_output_load() {
+        let library = representative_input_library();
+        let (module, nets, interner) = parse_module(&high_fanout_primary_input_source(1));
+        let _suppressed = ScopedBoundaryTimingDefaultsSuppression::new();
+        let graph = build_electrical_timing_graph(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            &BufferOptions {
+                module_output_load: 0.75,
+                ..BufferOptions::default()
+            },
+        )
+        .expect("keep explicitly specified loads off suppressed synthetic output boundaries");
+
+        let output = module
+            .find_net_index(interner.get("out").expect("resolve out"), &nets)
+            .expect("find the suppressed output");
+        let bit = graph
+            .bits
+            .iter()
+            .position(|&(net, _)| net == output)
+            .expect("find the suppressed output bit");
+        assert_eq!(graph.fanouts[bit].sinks.len(), 1);
+        assert_eq!(
+            graph.fanouts[bit].sinks[0].load,
+            CombinationalOutputLoad::default()
+        );
+    }
+
+    #[test]
+    fn representative_driver_never_enables_primary_clock_buffering() {
+        let mut library = registered_timing_library();
+        library.boundary_timing_defaults = Some(BoundaryTimingDefaults {
+            representative_driver_cell: "BUF".to_string(),
+            representative_load_cell: "BUF".to_string(),
+            representative_load_count: 1,
+        });
+        let (mut module, mut nets, mut interner) = parse_module(high_fanout_register_source());
+        let options = BufferOptions {
+            max_fanout: 3,
+            ..BufferOptions::default()
+        };
+        let clock = module
+            .find_net_index(interner.get("clk").expect("resolve clk"), &nets)
+            .expect("resolve clock net");
+        let graph = build_electrical_timing_graph(&module, &nets, &interner, &library, &options)
+            .expect("classify the representative-driven clock and register data fanouts");
+        let clock_bit = graph
+            .bits
+            .iter()
+            .position(|&(net, _)| net == clock)
+            .expect("find the primary clock bit");
+        assert!(graph.fanouts[clock_bit].representative_driver.is_some());
+        assert!(graph.fanouts[clock_bit].protected_clock);
+        assert!(!fanout_eligible(&graph.fanouts[clock_bit], &options));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &options,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("repair physical register data without ever buffering the clock");
+        assert!(stats.buffers_inserted > 0);
+        for instance in &module.instances {
+            if interner
+                .resolve(instance.instance_name)
+                .is_some_and(|name| name.starts_with("u_buf_"))
+            {
+                assert!(
+                    instance
+                        .connections
+                        .iter()
+                        .all(|(_, net)| !matches!(net, NetRef::Simple(net) if *net == clock)),
+                    "a representative driver must never allow clock buffering"
+                );
+            }
+        }
     }
 
     #[test]

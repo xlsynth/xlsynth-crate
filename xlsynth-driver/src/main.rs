@@ -2655,7 +2655,7 @@ fn main() {
                 .arg(
                     Arg::new("buffer_primary_inputs")
                         .long("buffer-primary-inputs")
-                        .help("Allow inserted buffer trees on data primary inputs")
+                        .help("Also buffer ideal data inputs; representative-driven inputs are automatic")
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
@@ -2817,7 +2817,7 @@ fn main() {
                 .arg(
                     Arg::new("buffer_primary_inputs")
                         .long("buffer-primary-inputs")
-                        .help("Allow buffer insertion on data primary inputs")
+                        .help("Also buffer ideal data inputs; representative-driven inputs are automatic")
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
