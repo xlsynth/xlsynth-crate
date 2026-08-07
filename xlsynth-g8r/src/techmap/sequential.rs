@@ -9,11 +9,14 @@ use super::{
 use crate::aig::{ChoiceAig, GateFn, SequentialGateFn};
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, Pin, PinDirection};
+use crate::netlist::buffer::BufferStats;
+use crate::netlist::optimize::{merge_buffer_stats, merge_resize_stats};
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
     NetlistModule, NetlistPort, PortDirection, Pos, Span,
 };
 use crate::netlist::report::build_netlist_report_with_primary_input_arrivals;
+use crate::netlist::resize::ResizeStats;
 use crate::netlist::sequential_liberty::{
     GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec,
 };
@@ -27,8 +30,13 @@ use crate::netlist::sta::{
     evaluate_sequential_cell_capture_timing_with_predecessor,
     evaluate_sequential_cell_output_timing, resolved_module_output_load,
 };
-use crate::netlist::timing_buffer::{BufferTimingConstraints, insert_timing_aware_buffers};
-use crate::netlist::timing_resize::resize_timing_aware_netlist;
+use crate::netlist::timing_buffer::{
+    BufferTimingConstraints, consolidate_timing_aware_buffers,
+    insert_speculative_timing_aware_buffers, insert_timing_aware_buffers,
+};
+use crate::netlist::timing_resize::{
+    recover_final_timing_protected_area, resize_timing_aware_netlist,
+};
 use crate::netlist::utils::scalar_constant_output_assignments;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -39,6 +47,16 @@ use xlsynth::IrBits;
 
 /// Numerical tolerance used when checking an exact register setup violation.
 const REGISTER_SETUP_SLACK_EPSILON: f64 = 1e-9;
+/// Bound full sequential STA while consolidating buffered physical designs.
+const MAX_SEQUENTIAL_BUFFER_CONSOLIDATION_INSTANCES: usize = 8192;
+/// Avoid repeated complete timing of exceptionally large buffer forests.
+const MAX_SEQUENTIAL_BUFFER_CONSOLIDATION_BUFFERS: usize = 512;
+/// Revisit moderately broad data roots after their sink cells were resized.
+const COORDINATED_SEQUENTIAL_MAX_FANOUT: usize = 6;
+/// Retune affected paths without repeating the original complete sizing effort.
+const MAX_POST_BUFFER_RESIZE_ITERATIONS: usize = 12;
+/// Bound speculative downsizing; a final complete recovery pass still follows.
+const MAX_POST_BUFFER_AREA_ITERATIONS: usize = 16;
 
 /// Controller-owned timing constraints for one synchronous mapped design.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -175,7 +193,7 @@ fn apply_requested_sequential_optimization(
         primary_output_required: constraints.primary_output_required.clone(),
         clock_period: constraints.clock_period,
     };
-    let buffer_stats = options
+    let mut buffer_stats = options
         .buffer_options
         .as_ref()
         .map(|buffer_options| {
@@ -225,12 +243,185 @@ fn apply_requested_sequential_optimization(
     }
     finalize_sequential_mapping(mapped, library, constraints, sta_options)
         .context("verifying buffered and resized sequential mapping")?;
+    if let (Some(buffering), Some(sizing)) = (buffer_stats.as_mut(), resize_stats.as_mut()) {
+        revisit_sequential_buffering_after_sizing(
+            mapped,
+            library,
+            constraints,
+            options,
+            &timing_constraints,
+            buffering,
+            sizing,
+        )
+        .context("revisiting register-aware buffering after physical gate and register sizing")?;
+    }
+    if let (Some(configured), Some(sizing), Some(buffering)) = (
+        options.buffer_options.as_ref(),
+        resize_stats.as_mut(),
+        buffer_stats.as_mut(),
+    ) && (1..=MAX_SEQUENTIAL_BUFFER_CONSOLIDATION_BUFFERS).contains(&buffering.buffers_inserted)
+        && mapped.module.instances.len() <= MAX_SEQUENTIAL_BUFFER_CONSOLIDATION_INSTANCES
+    {
+        let mut recovery_options = configured.clone();
+        recovery_options.module_output_load = sta_options.module_output_load;
+        let recovered = consolidate_timing_aware_buffers(
+            &mut mapped.module,
+            mapped.nets.as_slice(),
+            &mut mapped.interner,
+            library,
+            &recovery_options,
+            sta_options,
+            &timing_constraints,
+            mapped.stats.worst_estimated_output_arrival,
+        )
+        .context("consolidating register-aware, timing-protected buffer trees")?;
+        if recovered.buffers_removed > 0 {
+            buffering.buffers_inserted = buffering
+                .buffers_inserted
+                .saturating_sub(recovered.buffers_removed);
+            buffering.area_added = (buffering.area_added - recovered.area_recovered).max(0.0);
+            buffering.max_fanout_after = recovered.max_fanout_after;
+            buffering.max_load_after = recovered.max_load_after;
+            buffering.unresolved_overloaded_nets = recovered.unresolved_overloaded_nets;
+            buffering.final_worst_delay = Some(recovered.final_delay);
+            buffering.timing_evaluations += recovered.timing_evaluations;
+            sizing.final_delay = recovered.final_delay;
+            finalize_sequential_mapping(mapped, library, constraints, sta_options)
+                .context("verifying consolidated register-aware buffer trees")?;
+        }
+    }
+    if let (Some(configured), Some(sizing)) =
+        (options.resize_options.as_ref(), resize_stats.as_mut())
+        && configured.max_area_iterations > 0
+    {
+        let mut resize_options = configured.clone();
+        resize_options.sta_options = sta_options;
+        let recovered = recover_final_timing_protected_area(
+            &mut mapped.module,
+            mapped.nets.as_slice(),
+            &mut mapped.interner,
+            library,
+            &resize_options,
+            &timing_constraints,
+        )
+        .context("recovering final register-aware area without worsening exact timing")?;
+        if recovered.downsizes > 0 {
+            finalize_sequential_mapping(mapped, library, constraints, sta_options)
+                .context("verifying final register-aware area recovery")?;
+        }
+        merge_resize_stats(sizing, recovered);
+    }
     if let Some(stats) = resize_stats.as_mut() {
         stats.final_area = mapped.stats.selected_area;
         stats.final_delay = mapped.stats.worst_estimated_output_arrival;
     }
+    if let Some(stats) = buffer_stats.as_mut() {
+        stats.final_worst_delay = Some(mapped.stats.worst_estimated_output_arrival);
+    }
     mapped.stats.buffer_stats = buffer_stats;
     mapped.stats.resize_stats = resize_stats;
+    Ok(())
+}
+
+/// Keeps post-sizing buffer and resizing changes only when capture timing
+/// improves.
+fn revisit_sequential_buffering_after_sizing(
+    mapped: &mut MappedNetlist,
+    library: &Library,
+    constraints: &SequentialTechMapConstraints,
+    options: &TechMapOptions,
+    timing_constraints: &BufferTimingConstraints,
+    buffer_stats: &mut BufferStats,
+    resize_stats: &mut ResizeStats,
+) -> Result<()> {
+    let (Some(buffer_options), Some(resize_options)) = (
+        options.buffer_options.as_ref(),
+        options.resize_options.as_ref(),
+    ) else {
+        return Ok(());
+    };
+    if (resize_stats.upsizes == 0 && resize_stats.downsizes == 0 && resize_stats.pin_swaps == 0)
+        || mapped.module.instances.len() > MAX_SEQUENTIAL_BUFFER_CONSOLIDATION_INSTANCES
+        || buffer_stats.buffers_inserted > MAX_SEQUENTIAL_BUFFER_CONSOLIDATION_BUFFERS
+        || (buffer_stats.max_fanout_after <= COORDINATED_SEQUENTIAL_MAX_FANOUT
+            && buffer_stats.unresolved_overloaded_nets == 0)
+    {
+        return Ok(());
+    }
+
+    let sta_options = StaOptions {
+        primary_input_transition: options.primary_input_transition,
+        module_output_load: options.module_output_load,
+    };
+    let mut trial = MappedNetlist {
+        module: mapped.module.clone(),
+        nets: mapped.nets.clone(),
+        interner: mapped.interner.clone(),
+        stats: mapped.stats.clone(),
+    };
+    let mut exploratory_buffer_options = buffer_options.clone();
+    exploratory_buffer_options.module_output_load = options.module_output_load;
+    let trial_buffer_stats = insert_speculative_timing_aware_buffers(
+        &mut trial.module,
+        &mut trial.nets,
+        &mut trial.interner,
+        library,
+        &exploratory_buffer_options,
+        sta_options,
+        timing_constraints,
+    )?;
+    if trial_buffer_stats.buffers_inserted == 0 {
+        return Ok(());
+    }
+
+    let mut exploratory_resize_options = resize_options.clone();
+    exploratory_resize_options.sta_options = sta_options;
+    exploratory_resize_options.max_outer_iterations =
+        exploratory_resize_options.max_outer_iterations.min(2);
+    exploratory_resize_options.max_iterations = exploratory_resize_options
+        .max_iterations
+        .min(MAX_POST_BUFFER_RESIZE_ITERATIONS);
+    exploratory_resize_options.max_area_iterations = exploratory_resize_options
+        .max_area_iterations
+        .min(MAX_POST_BUFFER_AREA_ITERATIONS);
+    let trial_resize_stats = resize_timing_aware_netlist(
+        &mut trial.module,
+        &trial.nets,
+        &mut trial.interner,
+        library,
+        &exploratory_resize_options,
+        timing_constraints,
+    )?;
+    if let Err(error) = finalize_sequential_mapping(&mut trial, library, constraints, sta_options) {
+        log::debug!("rejecting post-sizing register-aware buffering: {error:#}");
+        return Ok(());
+    }
+    let previous_delay = mapped
+        .stats
+        .worst_register_to_register_arrival
+        .unwrap_or(mapped.stats.worst_estimated_output_arrival);
+    let trial_delay = trial
+        .stats
+        .worst_register_to_register_arrival
+        .unwrap_or(trial.stats.worst_estimated_output_arrival);
+    if trial_delay + exploratory_resize_options.improvement_epsilon >= previous_delay {
+        log::debug!(
+            "rejecting post-sizing register-aware buffering: capture delay {} does not improve {}",
+            trial_delay,
+            previous_delay,
+        );
+        return Ok(());
+    }
+
+    log::debug!(
+        "accepted post-sizing register-aware buffering: capture delay {} -> {}, buffers={}",
+        previous_delay,
+        trial_delay,
+        trial_buffer_stats.buffers_inserted,
+    );
+    *mapped = trial;
+    merge_buffer_stats(buffer_stats, trial_buffer_stats);
+    merge_resize_stats(resize_stats, trial_resize_stats);
     Ok(())
 }
 
@@ -2129,10 +2320,15 @@ mod tests {
     };
     use crate::liberty_proto::{BoundaryTimingDefaults, TimingTableKind};
     use crate::netlist::buffer::BufferOptions;
+    use crate::netlist::cell_catalog::test_utils::parse_module;
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::gatefn_from_netlist::project_labeled_sequential_netlist_aig;
     use crate::netlist::resize::ResizeOptions;
     use crate::netlist::sequential_liberty::SequentialClockSpec;
+    use crate::netlist::timing_buffer::tests::{
+        high_fanout_register_source, registered_timing_library,
+    };
+    use crate::techmap::TechMapStats;
 
     /// Builds one constant, fully characterized Liberty timing table.
     fn test_timing_table(
@@ -3459,6 +3655,106 @@ mod tests {
         assert_eq!(mapped.stats.sequential_instance_count, 2);
         assert!(mapped.stats.buffer_stats.is_none());
         assert!(mapped.stats.resize_stats.is_some());
+    }
+
+    #[test]
+    fn revisits_resized_register_fanout_when_exact_capture_timing_improves() {
+        let library = registered_timing_library();
+        let (module, nets, interner) = parse_module(high_fanout_register_source());
+        let mut mapped = MappedNetlist {
+            module,
+            nets,
+            interner,
+            stats: TechMapStats::default(),
+        };
+        let constraints = SequentialTechMapConstraints::default();
+        finalize_sequential_mapping(&mut mapped, &library, &constraints, StaOptions::default())
+            .expect("characterize the overloaded physical launch register");
+        let initial_delay = mapped
+            .stats
+            .worst_register_to_register_arrival
+            .expect("the synthetic pipeline has a capture path");
+        let mut buffer_stats = BufferStats {
+            max_fanout_after: 8,
+            ..BufferStats::default()
+        };
+        let mut resize_stats = ResizeStats {
+            upsizes: 1,
+            ..ResizeStats::default()
+        };
+        let options = TechMapOptions {
+            buffer_options: Some(BufferOptions {
+                max_fanout: 12,
+                ..BufferOptions::default()
+            }),
+            resize_options: Some(ResizeOptions::default()),
+            ..TechMapOptions::default()
+        };
+
+        revisit_sequential_buffering_after_sizing(
+            &mut mapped,
+            &library,
+            &constraints,
+            &options,
+            &BufferTimingConstraints::default(),
+            &mut buffer_stats,
+            &mut resize_stats,
+        )
+        .expect("rebuffer and resize a newly overloaded physical register output");
+
+        assert!(buffer_stats.buffers_inserted > 0);
+        assert!(mapped.stats.worst_register_to_register_arrival.unwrap() < initial_delay);
+    }
+
+    #[test]
+    fn rejects_post_sizing_register_buffers_that_do_not_improve_capture_timing() {
+        let library = test_library();
+        let (module, nets, interner) = parse_module(high_fanout_register_source());
+        let mut mapped = MappedNetlist {
+            module,
+            nets,
+            interner,
+            stats: TechMapStats::default(),
+        };
+        let constraints = SequentialTechMapConstraints::default();
+        finalize_sequential_mapping(&mut mapped, &library, &constraints, StaOptions::default())
+            .expect("characterize a load-independent physical launch register");
+        let initial_delay = mapped.stats.worst_register_to_register_arrival;
+        let initial_instances = mapped.module.instances.clone();
+        let mut buffer_stats = BufferStats {
+            max_fanout_after: 8,
+            ..BufferStats::default()
+        };
+        let mut resize_stats = ResizeStats {
+            upsizes: 1,
+            ..ResizeStats::default()
+        };
+        let options = TechMapOptions {
+            buffer_options: Some(BufferOptions {
+                max_fanout: 12,
+                ..BufferOptions::default()
+            }),
+            resize_options: Some(ResizeOptions::default()),
+            ..TechMapOptions::default()
+        };
+
+        revisit_sequential_buffering_after_sizing(
+            &mut mapped,
+            &library,
+            &constraints,
+            &options,
+            &BufferTimingConstraints::default(),
+            &mut buffer_stats,
+            &mut resize_stats,
+        )
+        .expect("discard speculative buffers that only add register-path delay");
+
+        assert_eq!(buffer_stats.buffers_inserted, 0);
+        assert_eq!(mapped.module.instances, initial_instances);
+        assert_eq!(
+            mapped.stats.worst_register_to_register_arrival,
+            initial_delay
+        );
     }
 
     #[test]

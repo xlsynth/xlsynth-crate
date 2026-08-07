@@ -218,6 +218,7 @@ pub fn optimize_mapped_netlist(
             library,
             &recovery_options,
             options.sta_options,
+            &BufferTimingConstraints::default(),
             sizing.final_delay,
         )?;
         if recovered.buffers_removed > 0 {
@@ -294,7 +295,7 @@ pub fn optimize_mapped_netlist(
 }
 
 /// Combines diagnostics from accepted electrically distinct buffer rounds.
-fn merge_buffer_stats(initial: &mut BufferStats, subsequent: BufferStats) {
+pub(crate) fn merge_buffer_stats(initial: &mut BufferStats, subsequent: BufferStats) {
     initial.buffered_nets += subsequent.buffered_nets;
     initial.buffers_inserted += subsequent.buffers_inserted;
     initial.area_added += subsequent.area_added;
@@ -307,7 +308,7 @@ fn merge_buffer_stats(initial: &mut BufferStats, subsequent: BufferStats) {
 }
 
 /// Preserves complete move accounting across coordinated sizing rounds.
-fn merge_resize_stats(initial: &mut ResizeStats, subsequent: ResizeStats) {
+pub(crate) fn merge_resize_stats(initial: &mut ResizeStats, subsequent: ResizeStats) {
     initial.final_delay = subsequent.final_delay;
     initial.final_area = subsequent.final_area;
     initial.outer_iterations += subsequent.outer_iterations;
