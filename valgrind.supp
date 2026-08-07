@@ -29,11 +29,11 @@
    ...
 }
 {
-   xls_v0543_z3_solver_static_registration
+   xls_v0546_z3_solver_static_registration
    Memcheck:Leak
    match-leak-kinds: possible
    fun:malloc
-   obj:*/libxls-v0.54.3-ubuntu2004.so
+   obj:*/libxls-v0.54.6-ubuntu2004.so
    fun:*PrepareInsertSmallNonSoo*
    fun:*SolverFactoryRegistry*Register*
    fun:_GLOBAL__sub_I_z3_ir_translator.cc
