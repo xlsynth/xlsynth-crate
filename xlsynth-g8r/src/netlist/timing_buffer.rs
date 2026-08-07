@@ -27,6 +27,8 @@ use string_interner::{StringInterner, backend::StringBackend};
 
 /// ABC's default buffer gain is three, giving a nine-to-one gate effort.
 const MAX_ELECTRICAL_EFFORT: f64 = 9.0;
+/// Keep spare stage capacity for resizing without rebuilding full trees.
+const PREFERRED_BUFFER_STAGE_FANOUT: usize = 10;
 /// Critical-path trials can profitably isolate loads below electrical limits.
 const TIMING_DRIVEN_EFFORT_FRACTION: f64 = 0.5;
 /// Bound speculative complete-STA work to actual near-critical paths.
@@ -1961,10 +1963,10 @@ fn apply_buffer_tree(
 
         let previous_count = level.len();
         let previous_load = max_load(sum_sink_load(&level));
-        let fanout_limit = fanout
-            .electrical_driver()
-            .and_then(|driver| library.cells[driver.cell_index].pins[driver.pin_index].max_fanout);
-        let groups = partition_timing_sinks(level, options.max_fanout, root_limit, fanout_limit);
+        // The root's effort and Liberty limits constrain only its own direct
+        // fanout. Each child group is driven by a newly selected buffer, whose
+        // electrical limits can be substantially larger than the root's.
+        let groups = partition_timing_sinks(level, catalog, library, options);
         let mut next = Vec::with_capacity(groups.len());
         for group in groups {
             let buffer =
@@ -2029,12 +2031,12 @@ fn apply_buffer_tree(
     Ok(())
 }
 
-/// Groups critical sinks deterministically without joining two visible outputs.
+/// Packs sinks using each prospective buffer's own hard electrical limits.
 fn partition_timing_sinks(
     sinks: Vec<TimingSink>,
-    max_fanout: usize,
-    target_load: Option<f64>,
-    target_fanout_load: Option<f64>,
+    catalog: &CellCatalog,
+    library: &Library,
+    options: &BufferOptions,
 ) -> Vec<TimingSinkGroup> {
     let mut groups = Vec::<TimingSinkGroup>::new();
     for sink in sinks {
@@ -2043,15 +2045,25 @@ fn partition_timing_sinks(
             .iter()
             .enumerate()
             .filter(|(_, group)| {
-                group.sinks.len() < max_fanout
-                    && !(is_output && group.has_module_output)
-                    && target_load.is_none_or(|limit| {
-                        group.load.rise + sink.load.rise <= limit + TIMING_EPSILON
-                            && group.load.fall + sink.load.fall <= limit + TIMING_EPSILON
-                    })
-                    && target_fanout_load.is_none_or(|limit| {
-                        group.fanout_load + sink.fanout_load <= limit + TIMING_EPSILON
-                    })
+                if group.sinks.len() >= options.max_fanout.min(PREFERRED_BUFFER_STAGE_FANOUT)
+                    || is_output && group.has_module_output
+                {
+                    return false;
+                }
+                let load = CombinationalOutputLoad {
+                    rise: group.load.rise + sink.load.rise,
+                    fall: group.load.fall + sink.load.fall,
+                };
+                if options
+                    .target_load
+                    .is_some_and(|limit| max_load(load) > limit + TIMING_EPSILON)
+                {
+                    return false;
+                }
+                let fanout_load = group.fanout_load + sink.fanout_load;
+                catalog
+                    .buffers()
+                    .any(|buffer| timing_buffer_can_drive(buffer, library, load, fanout_load))
             })
             .min_by(|(lhs_index, lhs), (rhs_index, rhs)| {
                 max_load(lhs.load)
@@ -2073,6 +2085,22 @@ fn partition_timing_sinks(
     groups
 }
 
+/// Checks hard Liberty output limits independently of soft electrical effort.
+fn timing_buffer_can_drive(
+    buffer: &CatalogCell,
+    library: &Library,
+    load: CombinationalOutputLoad,
+    fanout_load: f64,
+) -> bool {
+    let output = &library.cells[buffer.cell_index].pins[buffer.output_pin_index];
+    buffer
+        .output_max_capacitance
+        .is_none_or(|limit| max_load(load) <= limit + TIMING_EPSILON)
+        && output
+            .max_fanout
+            .is_none_or(|limit| fanout_load <= limit + TIMING_EPSILON)
+}
+
 /// Chooses the smallest buffer meeting ABC-style effort and real Liberty
 /// timing.
 fn select_timing_buffer<'a>(
@@ -2090,13 +2118,7 @@ fn select_timing_buffer<'a>(
     for buffer in catalog.buffers() {
         let cell = &library.cells[buffer.cell_index];
         let output = &cell.pins[buffer.output_pin_index];
-        if buffer
-            .output_max_capacitance
-            .is_some_and(|limit| load > limit + TIMING_EPSILON)
-            || output
-                .max_fanout
-                .is_some_and(|limit| group.fanout_load > limit + TIMING_EPSILON)
-        {
+        if !timing_buffer_can_drive(buffer, library, group.load, group.fanout_load) {
             continue;
         }
         let delay = if let Some(timing) = source_timing {
@@ -2342,11 +2364,12 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        BufferTimingConstraints, TimingDriver, TimingFanout, TimingSink, TimingSinkGroup,
-        TimingSinkTarget, build_electrical_timing_graph, consolidate_timing_aware_buffers,
-        exceeds_transition_limit, fanout_eligible, fanout_is_overloaded,
-        has_slow_shared_primary_output, insert_speculative_timing_aware_buffers,
-        insert_timing_aware_buffers, select_timing_buffer,
+        BufferTimingConstraints, TimingDriver, TimingFanout, TimingGraph, TimingSink,
+        TimingSinkGroup, TimingSinkTarget, build_electrical_timing_graph,
+        consolidate_timing_aware_buffers, exceeds_transition_limit, fanout_eligible,
+        fanout_is_overloaded, has_slow_shared_primary_output,
+        insert_speculative_timing_aware_buffers, insert_timing_aware_buffers, max_load,
+        partition_timing_sinks, select_timing_buffer, sum_sink_fanout_load, sum_sink_load,
     };
     use crate::liberty_model::{
         Cell, Library, LibraryBuilder, LuTableTemplate, Pin, PinDirection, Sequential,
@@ -2627,6 +2650,20 @@ endmodule
         source
     }
 
+    /// Builds a weak internal root with independently observable buffer sinks.
+    fn weak_root_buffer_source(sinks: usize) -> String {
+        assert!(sinks > 0);
+        let mut source = format!(
+            "module top(a, b, out);\n  input a, b;\n  output [{}:0] out;\n  wire root;\n  AND2 driver (.A(a), .B(b), .Y(root));\n",
+            sinks - 1
+        );
+        for sink in 0..sinks {
+            source.push_str(&format!("  BUF sink{sink} (.A(root), .Y(out[{sink}]));\n"));
+        }
+        source.push_str("endmodule\n");
+        source
+    }
+
     /// Mutably resolves the output limits of the synthetic external driver.
     fn representative_driver_output(library: &mut Library) -> &mut Pin {
         library
@@ -2638,6 +2675,15 @@ endmodule
             .iter_mut()
             .find(|pin| pin.direction == PinDirection::Output as i32)
             .expect("find the synthetic representative-driver output")
+    }
+
+    /// Resolves the electrically constrained virtual driver of scalar input A.
+    fn representative_primary_input_fanout(graph: &TimingGraph) -> &TimingFanout {
+        graph
+            .fanouts
+            .iter()
+            .find(|fanout| fanout.is_primary_input && fanout.representative_driver.is_some())
+            .expect("find the characterized representative primary-input driver")
     }
 
     #[test]
@@ -2691,9 +2737,18 @@ endmodule
         )
         .expect("repair the virtual output capacitance below the generic fanout bound");
 
+        let graph = build_electrical_timing_graph(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            &BufferOptions::default(),
+        )
+        .expect("inspect the repaired representative driver separately from child buffers");
+        let root = representative_primary_input_fanout(&graph);
         assert_eq!(stats.max_fanout_before, 4);
         assert!(stats.buffers_inserted > 0);
-        assert!(stats.max_load_after <= 0.25 + 1e-9);
+        assert!(max_load(sum_sink_load(&root.sinks)) <= 0.25 + 1e-9);
         assert_eq!(stats.unresolved_overloaded_nets, 0);
     }
 
@@ -2704,22 +2759,26 @@ endmodule
         let (mut module, mut nets, mut interner) =
             parse_module(&high_fanout_primary_input_source(4));
 
+        let options = BufferOptions {
+            target_load: Some(1.0),
+            ..BufferOptions::default()
+        };
         let stats = insert_timing_aware_buffers(
             &mut module,
             &mut nets,
             &mut interner,
             &library,
-            &BufferOptions {
-                target_load: Some(1.0),
-                ..BufferOptions::default()
-            },
+            &options,
             StaOptions::default(),
             &BufferTimingConstraints::default(),
         )
         .expect("preserve the hard Liberty capacitance under a looser explicit target");
 
+        let graph = build_electrical_timing_graph(&module, &nets, &interner, &library, &options)
+            .expect("inspect the actual representative-driver load");
+        let root = representative_primary_input_fanout(&graph);
         assert!(stats.buffers_inserted > 0);
-        assert!(stats.max_load_after <= 0.25 + 1e-9);
+        assert!(max_load(sum_sink_load(&root.sinks)) <= 0.25 + 1e-9);
         assert_eq!(stats.unresolved_overloaded_nets, 0);
     }
 
@@ -2772,9 +2831,18 @@ endmodule
         )
         .expect("repair the representative driver's stricter weighted-fanout limit");
 
+        let graph = build_electrical_timing_graph(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            &BufferOptions::default(),
+        )
+        .expect("inspect the representative driver's own weighted fanout");
+        let root = representative_primary_input_fanout(&graph);
         assert_eq!(stats.max_fanout_before, 4);
         assert!(stats.buffers_inserted > 0);
-        assert!(stats.max_fanout_after <= 2);
+        assert!(sum_sink_fanout_load(&root.sinks) <= 2.5 + 1e-9);
         assert_eq!(stats.unresolved_overloaded_nets, 0);
     }
 
@@ -3129,6 +3197,133 @@ endmodule
             .expect("select smallest electrically sufficient test buffer");
 
         assert_eq!(buffer.name, "BUF");
+    }
+
+    #[test]
+    fn packs_buffer_groups_using_their_own_capacitance_and_weighted_fanout() {
+        let mut library = sizing_library();
+        let driver = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "AND2")
+            .expect("find the electrically weak root driver");
+        let output = library.cells[driver]
+            .pins
+            .iter()
+            .position(|pin| pin.direction == PinDirection::Output as i32)
+            .expect("find the weak root output");
+        library.cells[driver].pins[output].max_capacitance = Some(0.35);
+        library.cells[driver].pins[output].max_fanout = Some(2.0);
+        for name in ["BUF", "BUF_FAST"] {
+            let buffer = library
+                .cells
+                .iter_mut()
+                .find(|cell| cell.name == name)
+                .expect("find the characterized child buffer");
+            buffer
+                .pins
+                .iter_mut()
+                .find(|pin| pin.direction == PinDirection::Input as i32)
+                .expect("find the child buffer input")
+                .fanout_load = Some(1.0);
+            buffer
+                .pins
+                .iter_mut()
+                .find(|pin| pin.direction == PinDirection::Output as i32)
+                .expect("find the child buffer output")
+                .max_fanout = Some(12.0);
+        }
+        let (mut module, mut nets, mut interner) = parse_module(&weak_root_buffer_source(11));
+
+        let stats = insert_timing_aware_buffers(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            &library,
+            &BufferOptions::default(),
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .expect("repair a weak root with one electrically stronger child buffer");
+
+        assert_eq!(stats.buffers_inserted, 1);
+        assert_eq!(stats.unresolved_overloaded_nets, 0);
+        let inserted = module
+            .instances
+            .iter()
+            .find(|instance| {
+                interner
+                    .resolve(instance.instance_name)
+                    .is_some_and(|name| name.starts_with("u_buf_"))
+            })
+            .expect("find the sole inserted child stage");
+        assert_eq!(interner.resolve(inserted.type_name), Some("BUF_FAST"));
+        assert_eq!(stats.max_fanout_after, 10);
+    }
+
+    #[test]
+    fn child_buffer_grouping_preserves_explicit_per_stage_load_targets() {
+        let library = sizing_library();
+        let catalog = CellCatalog::new(&library).expect("classify legal child buffers");
+        let sinks = (0..6)
+            .map(|index| TimingSink {
+                target: TimingSinkTarget::InstancePin {
+                    instance_index: index,
+                    connection_index: 0,
+                },
+                load: CombinationalOutputLoad {
+                    rise: 0.1,
+                    fall: 0.1,
+                },
+                fanout_load: 0.0,
+                max_transition: None,
+                criticality: 0.0,
+            })
+            .collect();
+
+        let groups = partition_timing_sinks(
+            sinks,
+            &catalog,
+            &library,
+            &BufferOptions {
+                target_load: Some(0.25),
+                ..BufferOptions::default()
+            },
+        );
+
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().all(|group| group.sinks.len() == 2));
+        assert!(groups.iter().all(|group| group.load.rise <= 0.25));
+    }
+
+    #[test]
+    fn child_buffer_grouping_keeps_timing_headroom_below_the_hard_fanout_limit() {
+        let library = sizing_library();
+        let catalog = CellCatalog::new(&library).expect("classify legal child buffers");
+        let sinks = (0..21)
+            .map(|index| TimingSink {
+                target: TimingSinkTarget::InstancePin {
+                    instance_index: index,
+                    connection_index: 0,
+                },
+                load: CombinationalOutputLoad {
+                    rise: 0.1,
+                    fall: 0.1,
+                },
+                fanout_load: 0.0,
+                max_transition: None,
+                criticality: 0.0,
+            })
+            .collect();
+
+        let groups = partition_timing_sinks(sinks, &catalog, &library, &BufferOptions::default());
+
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().all(|group| group.sinks.len() <= 10));
+        assert_eq!(
+            groups.iter().map(|group| group.sinks.len()).sum::<usize>(),
+            21
+        );
     }
 
     #[test]
