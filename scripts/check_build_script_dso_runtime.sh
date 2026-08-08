@@ -74,10 +74,10 @@ env \
   -u DEV_XLS_DSO_WORKSPACE \
   cargo check --manifest-path "${tmp_dir}/Cargo.toml"
 
-# The fix stages managed libxls DSOs into the downstream Cargo profile's deps
-# directory, which Cargo includes in the runtime loader environment for host
-# binaries it runs. Check for the staged DSO explicitly so the test fails if
-# Cargo happens to succeed for some unrelated reason.
+# Managed libxls DSOs are also staged into the downstream Cargo profile's deps
+# directory for older Cargo versions. Check for the staged DSO explicitly so
+# that compatibility remains covered even when a newer nightly executable can
+# locate the original managed DSO through its embedded runtime search path.
 #
 # Use a shell glob instead of find: the Rocky CI image used by this repo is
 # intentionally small and may not have find installed.
@@ -87,3 +87,37 @@ if [[ ! -e "${staged_dsos[0]}" ]]; then
   exit 1
 fi
 printf '%s\n' "${staged_dsos[0]}"
+
+# macOS DSOs already have absolute install names. On Linux, nightly Rust also
+# propagates the managed DSO directory into the final build-script executable.
+# Exercise both binaries outside Cargo so Cargo's loader environment cannot
+# hide a regression in startup-time native-library discovery. Stable Linux
+# retains the existing Cargo-provided loader-path behavior instead.
+runtime_os="$(uname -s)"
+rustc_version="$("${RUSTC:-rustc}" --version)"
+if [[ "${runtime_os}" == "Darwin" ]] ||
+  [[ "${runtime_os}" == "Linux" && "${rustc_version}" == *-nightly* ]]; then
+  build_script_executable=""
+  for candidate in \
+    "${tmp_dir}"/target/debug/build/xlsynth-build-script-dso-check-*/build-script-build \
+    "${tmp_dir}"/target/debug/build/xlsynth-build-script-dso-check/*/out/build_script_build; do
+    if [[ -x "${candidate}" ]]; then
+      if [[ -n "${build_script_executable}" ]]; then
+        echo "error: found multiple downstream build-script executables" >&2
+        exit 1
+      fi
+      build_script_executable="${candidate}"
+    fi
+  done
+
+  if [[ -z "${build_script_executable}" ]]; then
+    echo "error: could not locate the downstream build-script executable" >&2
+    exit 1
+  fi
+
+  env \
+    -u LD_LIBRARY_PATH \
+    -u DYLD_LIBRARY_PATH \
+    -u DYLD_FALLBACK_LIBRARY_PATH \
+    "${build_script_executable}"
+fi

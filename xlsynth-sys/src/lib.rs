@@ -2,6 +2,11 @@
 
 //! Declarations for the C API for the XLS dynamic shared object.
 
+#![cfg_attr(xlsynth_runtime_runpath, feature(link_arg_attribute))]
+
+#[cfg(xlsynth_runtime_runpath)]
+include!(concat!(env!("OUT_DIR"), "/xlsynth_runtime_link_arg.rs"));
+
 extern crate libc;
 
 #[repr(C)]
