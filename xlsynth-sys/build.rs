@@ -11,7 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.54.3";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.54.6";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
 #[derive(Clone, Copy)]
@@ -587,6 +587,45 @@ fn emit_explicit_artifact_override(
     }
 }
 
+/// Makes a managed Linux DSO discoverable in downstream nightly executables.
+///
+/// Cargo applies `cargo:rustc-link-arg` only to this package, so it cannot give
+/// dependent build-script executables an ELF runtime search path. Nightly Rust
+/// can propagate a source-level native linker argument through this library
+/// instead, allowing the operating-system loader to find the managed DSO
+/// before those executables start.
+fn emit_transitive_linux_runtime_path(out_dir: &Path) {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let rustc_version = Command::new(&rustc)
+            .arg("--version")
+            .output()
+            .unwrap_or_else(|error| panic!("failed to inspect Rust compiler {rustc:?}: {error}"));
+        assert!(
+            rustc_version.status.success(),
+            "Rust compiler {rustc:?} --version failed: {}",
+            String::from_utf8_lossy(&rustc_version.stderr)
+        );
+
+        if String::from_utf8_lossy(&rustc_version.stdout).contains("-nightly") {
+            let runtime_link_arg = format!("-rpath={}", out_dir.display());
+            let runtime_link_source = format!(
+                "#[link(kind = \"link-arg\", name = {runtime_link_arg:?})]\nunsafe extern \"C\" {{}}\n"
+            );
+            let runtime_link_source_path = out_dir.join("xlsynth_runtime_link_arg.rs");
+            std::fs::write(&runtime_link_source_path, runtime_link_source).unwrap_or_else(
+                |error| {
+                    panic!(
+                        "failed to write transitive runtime linker argument {}: {error}",
+                        runtime_link_source_path.display()
+                    )
+                },
+            );
+            println!("cargo:rustc-cfg=xlsynth_runtime_runpath");
+        }
+    }
+}
+
 fn emit_link_directives_for_managed_dso(
     out_dir: &Path,
     link_name: &str,
@@ -595,6 +634,7 @@ fn emit_link_directives_for_managed_dso(
 ) {
     match link_directive_mode {
         LinkDirectiveMode::Native => {
+            emit_transitive_linux_runtime_path(out_dir);
             if include_rpath {
                 println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
             }
@@ -618,11 +658,10 @@ fn emit_link_directives_for_managed_dso(
 /// target/<profile>/build/<pkg>/<hash>/out
 /// ```
 ///
-/// When Cargo runs host binaries it just built, including downstream `build.rs`
-/// executables, it includes `target/<profile>/deps` in
-/// `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`. `OUT_DIR` itself is not in
-/// that loader path, so a DSO that only lives in `OUT_DIR` can link
-/// successfully but fail when a dependent build script starts.
+/// Older Cargo versions include `target/<profile>/deps` in the loader
+/// environment when running downstream `build.rs` executables. Newer nightly
+/// layouts can omit that directory, so managed Linux DSOs also need the
+/// propagated runtime search path when the compiler supports it.
 fn cargo_profile_deps_dir(out_dir: &Path) -> Option<PathBuf> {
     let build_dir = out_dir
         .ancestors()
@@ -639,7 +678,9 @@ fn cargo_profile_deps_dir(out_dir: &Path) -> Option<PathBuf> {
 /// `cargo:rustc-link-arg=-Wl,-rpath,...` helps binaries built directly from
 /// this package, but Cargo does not propagate that rpath into dependent
 /// build-script executables. Staging the managed DSO into Cargo's `deps`
-/// directory uses the loader path Cargo already provides for host binaries.
+/// directory preserves the loader path older Cargo versions provide for host
+/// binaries. Newer nightly layouts additionally use the propagated source-level
+/// linker argument emitted by `emit_transitive_linux_runtime_path`.
 fn stage_managed_dso_for_cargo_runtime(out_dir: &Path, dso_filename: &str) {
     let Some(deps_dir) = cargo_profile_deps_dir(out_dir) else {
         println!(
@@ -791,6 +832,7 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &Path) -> PathBuf {
 fn main() {
     // Ensure Cargo rebuilds this sys crate if caller-provided artifact paths
     // change, since they affect link args and rpath settings.
+    println!("cargo:rustc-check-cfg=cfg(xlsynth_runtime_runpath)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=DEV_XLS_DSO_WORKSPACE");
     println!("cargo:rerun-if-env-changed=XLSYNTH_ARTIFACT_CONFIG");
