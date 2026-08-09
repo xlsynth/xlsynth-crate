@@ -339,3 +339,83 @@ fn gv_stats_reports_registered_pipeline_stages() {
         0.25
     );
 }
+
+#[test]
+fn gv_mcmc_optimize_emits_combinational_netlist_and_search_statistics() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let fixture = write_fixture();
+    let output_path = fixture.path().join("optimized.gv");
+    let stats_path = fixture.path().join("mcmc.json");
+    let output = Command::new(driver)
+        .arg("gv-mcmc-optimize")
+        .arg("--netlist")
+        .arg(fixture.path().join("mapped.gv"))
+        .arg("--liberty_proto")
+        .arg(fixture.path().join("lib.textproto"))
+        .arg("--netlist_out")
+        .arg(&output_path)
+        .arg("--json-out")
+        .arg(&stats_path)
+        .arg("--buffer")
+        .arg("false")
+        .arg("--iterations")
+        .arg("24")
+        .output()
+        .expect("combinational mapped MCMC invocation should run");
+    assert!(
+        output.status.success(),
+        "mapped MCMC failed: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.is_file());
+    let stats: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(stats_path).expect("read mapped MCMC statistics"))
+            .expect("parse mapped MCMC statistics");
+    assert_eq!(stats["initial_area"], 3.0);
+    assert_eq!(stats["final_area"], 3.0);
+    assert_eq!(stats["initial_delay"], 3.0);
+    assert_eq!(stats["final_delay"], 3.0);
+    assert_eq!(stats["iterations"], 24);
+}
+
+#[test]
+fn gv_mcmc_optimize_uses_register_to_register_delay_for_registered_netlists() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let fixture = write_pipeline_fixture();
+    let output_path = fixture.path().join("registered.gv");
+    let stats_path = fixture.path().join("registered-mcmc.json");
+    let output = Command::new(driver)
+        .arg("gv-mcmc-optimize")
+        .arg("--netlist")
+        .arg(fixture.path().join("mapped.gv"))
+        .arg("--liberty_proto")
+        .arg(fixture.path().join("lib.textproto"))
+        .arg("--netlist_out")
+        .arg(&output_path)
+        .arg("--json-out")
+        .arg(&stats_path)
+        .arg("--buffer")
+        .arg("false")
+        .arg("--iterations")
+        .arg("24")
+        .output()
+        .expect("registered mapped MCMC invocation should run");
+    assert!(
+        output.status.success(),
+        "registered mapped MCMC failed: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.is_file());
+    let stats: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(stats_path).expect("read registered mapped MCMC statistics"),
+    )
+    .expect("parse registered mapped MCMC statistics");
+    assert_eq!(stats["initial_delay"], 1.75);
+    assert_eq!(stats["final_delay"], 1.75);
+    assert_eq!(stats["initial_area"], 11.0);
+    assert_eq!(stats["final_area"], 11.0);
+}

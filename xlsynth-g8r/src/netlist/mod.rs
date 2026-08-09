@@ -16,6 +16,7 @@ pub mod gv_eval;
 pub mod hierarchy;
 pub mod integrity;
 pub mod io;
+pub mod mcmc;
 pub mod normalized;
 pub mod optimize;
 pub mod parse;

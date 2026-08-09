@@ -835,6 +835,64 @@ Key flags:
 Timing constraint names use flattened scalar port names: one-bit ports retain
 their original name, while bit `i` of a wider port is named `<port>_<i>`.
 
+### `gv-mcmc-optimize`: explore mapped cell sizes and buffer trees
+
+Searches the neighborhood of an existing combinational or registered mapped
+netlist without changing its Boolean or sequential behavior. Proposals include
+single-cell and coordinated neighboring-cell resizing, physical flip-flop
+resizing, safe interchangeable input-pin swaps, buffer insertion/removal, sink
+migration, sibling splitting/merging, buffer reparenting, and coordinated
+buffer/driver sizing. Cell substitutions use incremental Liberty STA; topology
+changes rebuild exact register-aware Liberty timing. Clock nets are protected.
+
+```shell
+xlsynth-driver gv-mcmc-optimize \
+  --netlist mapped.gv \
+  --liberty_proto /path/to/timing-enabled.liberty.proto \
+  --netlist_out improved.gv \
+  --objective delay \
+  --iterations 5000 \
+  --threads 4 \
+  --primary-input-transition 0.01 \
+  --module-output-load 2.308 \
+  --json-out mcmc.json
+```
+
+Key flags:
+
+- `--netlist <PATH>`: mapped combinational or registered input. Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto. Required.
+- `--netlist_out <PATH>`: best discovered mapped netlist; `-` writes stdout.
+- `--module_name <MODULE>`: optional mapped-module selection.
+- `--objective <delay|area>`: minimize delay or timing-constrained area
+  (default: `delay`).
+- `--iterations <N>`: search iterations per chain (default: `1000`).
+- `--time-limit-seconds <SECONDS>`: optional wall-clock search budget; overrides
+  the iteration ceiling and returns the best solution when all chains stop.
+- `--threads <N>`: deterministic parallel explorer/exploit chains (default: `1`).
+- `--seed <N>`: deterministic random seed (default: `0`).
+- `--temperature <VALUE>`: initial normalized Metropolis temperature
+  (default: `0.02`).
+- `--checkpoint-iterations <N>`: parallel-chain exchange interval
+  (default: `128`).
+- `--delay-limit <TIME>`: area-recovery timing ceiling; defaults to initial delay.
+- `--max-area-growth <FRACTION>`: optional relative area-growth limit when
+  optimizing delay.
+- `--clock-period <TIME>`: optional capture deadline for registered netlists.
+- `--sizing <true|false>`: enable gate, buffer, and FF sizing (default: `true`).
+- `--pin-swaps <true|false>`: enable equivalent input-pin swaps (default: `true`).
+- `--buffer <true|false>`: enable buffer-tree moves (default: `true`).
+- `--max-buffer-fanout <N>`: maximum sinks behind each inserted buffer
+  (default: `12`).
+- `--buffer-primary-inputs`: permit buffering non-clock primary inputs.
+- `--critical-window <FRACTION>`: exact-STA candidate-selection window
+  (default: `0.10`).
+- `--primary-input-transition <TIME>`: Liberty input transition (default: `0.01`).
+- `--module-output-load <CAPACITANCE>`: external output load; `0` uses optional
+  representative receiver defaults.
+- `--json-out <PATH>`: write before/after QoR, move statistics, timing work,
+  and the accepted move sequence leading to the best netlist.
+
 ### `gv-optimize`: buffer and resize an existing mapped netlist
 
 Optimizes a combinational gate-level netlist without repeating AIG mapping.

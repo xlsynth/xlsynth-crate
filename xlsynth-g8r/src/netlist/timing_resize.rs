@@ -464,6 +464,261 @@ struct SizingTrial {
     local_improvement: f64,
 }
 
+/// Exact endpoint timing returned by a reversible mapped-netlist search move.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SearchTimingScore {
+    pub register_to_register: Option<f64>,
+    pub input_to_register: Option<f64>,
+    pub register_to_output: Option<f64>,
+    pub input_to_output: Option<f64>,
+    pub constraints_satisfied: bool,
+    pub recomputed_instances: usize,
+}
+
+impl SearchTimingScore {
+    /// Preserves the register-first objective used throughout mapped sizing.
+    pub(crate) fn objective_delay(self) -> f64 {
+        self.register_to_register
+            .or(self.input_to_register)
+            .or(self.register_to_output)
+            .or(self.input_to_output)
+            .unwrap_or(0.0)
+    }
+
+    /// Exposes the exact timing classes needed by the mapped-netlist search.
+    fn from_trial(trial: SizingTrial) -> Self {
+        Self {
+            register_to_register: trial.score.register_to_register,
+            input_to_register: trial.score.input_to_register,
+            register_to_output: trial.score.register_to_output,
+            input_to_output: trial.score.input_to_output,
+            constraints_satisfied: trial.constraints_satisfied,
+            recomputed_instances: trial.recomputed_instances,
+        }
+    }
+}
+
+/// Narrow incremental-STA interface shared with mapped-netlist MCMC search.
+pub(crate) struct SearchIncrementalSta<'a> {
+    timing: IncrementalRegisteredSta<'a>,
+    catalog: CellCatalog,
+    registers: RegisterCellCatalog,
+}
+
+impl<'a> SearchIncrementalSta<'a> {
+    /// Initializes exact timing and function-safe combinational/FF families.
+    pub(crate) fn new(
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        library: &'a Library,
+        options: StaOptions,
+        constraints: &BufferTimingConstraints,
+    ) -> Result<Self> {
+        Ok(Self {
+            timing: IncrementalRegisteredSta::new(
+                module,
+                nets,
+                interner,
+                library,
+                options,
+                constraints,
+            )?,
+            catalog: CellCatalog::new(library)?,
+            registers: RegisterCellCatalog::new(library)?,
+        })
+    }
+
+    /// Returns the current exact endpoint timing classes.
+    pub(crate) fn score(&self) -> SearchTimingScore {
+        let score = self.timing.score();
+        SearchTimingScore {
+            register_to_register: score.register_to_register,
+            input_to_register: score.input_to_register,
+            register_to_output: score.register_to_output,
+            input_to_output: score.input_to_output,
+            constraints_satisfied: self.timing.satisfies_constraints(score),
+            recomputed_instances: 0,
+        }
+    }
+
+    /// Counts actual hard Liberty load/fanout/slew violations on data nets.
+    pub(crate) fn electrical_violations(&self) -> usize {
+        let mut violations = 0;
+        for instance in &self.timing.instances {
+            let cell = &self.timing.library.cells[instance.cell_index];
+            for output in &instance.outputs {
+                if self.timing.clock_bits[output.bit] {
+                    continue;
+                }
+                let pin = &cell.pins[output.pin_index];
+                if pin.max_capacitance.is_some_and(|limit| {
+                    max_load(self.timing.loads[output.bit]) > limit + TIMING_VERIFICATION_EPSILON
+                }) {
+                    violations += 1;
+                }
+                if pin.max_fanout.is_some_and(|limit| {
+                    self.timing.fanout_loads[output.bit] > limit + TIMING_VERIFICATION_EPSILON
+                }) {
+                    violations += 1;
+                }
+                if self
+                    .timing
+                    .data_transition_violation(output.bit, self.timing.bit_timing[output.bit])
+                    > TIMING_VERIFICATION_EPSILON
+                {
+                    violations += 1;
+                }
+            }
+        }
+        violations
+    }
+
+    /// Returns exact-interface alternatives for either a gate or flip-flop.
+    pub(crate) fn size_alternatives(&self, instance_index: usize) -> Vec<usize> {
+        if instance_index >= self.timing.instances.len() {
+            return Vec::new();
+        }
+        let current = self.timing.instances[instance_index].cell_index;
+        size_alternatives(
+            &self.timing,
+            instance_index,
+            self.timing.library,
+            &self.catalog,
+            &self.registers,
+        )
+        .into_iter()
+        .filter(|candidate| *candidate != current)
+        .collect()
+    }
+
+    /// Returns the Liberty cell currently assigned to one physical instance.
+    pub(crate) fn current_cell_index(&self, instance_index: usize) -> Option<usize> {
+        self.timing
+            .instances
+            .get(instance_index)
+            .map(|instance| instance.cell_index)
+    }
+
+    /// Returns only Boolean-symmetric, non-clock combinational input pairs.
+    pub(crate) fn symmetric_input_pairs(&self, instance_index: usize) -> Vec<(usize, usize)> {
+        let Some(instance) = self.timing.instances.get(instance_index) else {
+            return Vec::new();
+        };
+        if instance.sequential {
+            return Vec::new();
+        }
+        let Some(cell) = self
+            .catalog
+            .by_name(self.timing.library.cells[instance.cell_index].name.as_str())
+        else {
+            return Vec::new();
+        };
+        cell.symmetric_input_pairs
+            .iter()
+            .filter_map(|pair| {
+                let first_name = &cell.family.input_names[pair.first_input];
+                let second_name = &cell.family.input_names[pair.second_input];
+                let first = instance
+                    .inputs
+                    .iter()
+                    .position(|input| input.name == *first_name && !input.clock)?;
+                let second = instance
+                    .inputs
+                    .iter()
+                    .position(|input| input.name == *second_name && !input.clock)?;
+                (instance.inputs[first].bit != instance.inputs[second].bit)
+                    .then_some((first, second))
+            })
+            .collect()
+    }
+
+    /// Resolves one incremental input position to its physical Liberty pin.
+    pub(crate) fn input_pin_name(&self, instance_index: usize, input_index: usize) -> Option<&str> {
+        self.timing
+            .instances
+            .get(instance_index)?
+            .inputs
+            .get(input_index)
+            .map(|input| input.name.as_str())
+    }
+
+    /// Lists immediately connected data drivers and consumers for joint moves.
+    pub(crate) fn neighboring_instances(&self, instance_index: usize) -> Vec<usize> {
+        let Some(instance) = self.timing.instances.get(instance_index) else {
+            return Vec::new();
+        };
+        let mut neighbors = BTreeSet::new();
+        for input in &instance.inputs {
+            if !input.clock
+                && let Some(bit) = input.bit
+                && let Some(driver) = self.timing.drivers[bit]
+                && driver != instance_index
+            {
+                neighbors.insert(driver);
+            }
+        }
+        for successor in &self.timing.successors[instance_index] {
+            if *successor != instance_index {
+                neighbors.insert(*successor);
+            }
+        }
+        for output in &instance.outputs {
+            for capture in &self.timing.capture_consumers[output.bit] {
+                if *capture != instance_index {
+                    neighbors.insert(*capture);
+                }
+            }
+        }
+        neighbors.into_iter().collect()
+    }
+
+    /// Traces actual Liberty timing arcs to bias search toward critical cells.
+    pub(crate) fn critical_instances(
+        &mut self,
+        max_paths: usize,
+        window_fraction: f64,
+    ) -> Result<Vec<usize>> {
+        Ok(self
+            .timing
+            .critical_window_instances(max_paths, window_fraction)?
+            .into_iter()
+            .map(|candidate| candidate.instance_index)
+            .collect())
+    }
+
+    /// Evaluates or commits an exactly equivalent gate/buffer/FF replacement.
+    pub(crate) fn evaluate_resize(
+        &mut self,
+        instance_index: usize,
+        replacement_index: usize,
+        commit: bool,
+    ) -> Result<SearchTimingScore> {
+        self.timing
+            .evaluate_cell_substitution(instance_index, replacement_index, commit)
+            .map(SearchTimingScore::from_trial)
+    }
+
+    /// Evaluates or commits a function-preserving combinational pin exchange.
+    pub(crate) fn evaluate_pin_swap(
+        &mut self,
+        instance_index: usize,
+        first_input: usize,
+        second_input: usize,
+        commit: bool,
+    ) -> Result<SearchTimingScore> {
+        self.timing
+            .evaluate_pin_swap(
+                instance_index,
+                first_input,
+                second_input,
+                &self.catalog,
+                commit,
+            )
+            .map(SearchTimingScore::from_trial)
+    }
+}
+
 /// One function-preserving incremental cell-assignment change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SizingMoveKind {

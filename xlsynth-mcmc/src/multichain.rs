@@ -48,6 +48,11 @@ pub struct SegmentOutcome<S, C, K> {
 pub trait SegmentRunner<S, C, K>: Send + Sync {
     type Error: Send + 'static;
 
+    /// Requests a graceful stop after the current synchronized chain segment.
+    fn should_stop(&self) -> bool {
+        false
+    }
+
     fn run_segment(
         &self,
         start_state: S,
@@ -193,6 +198,9 @@ where
 
             let mut iter_offset = 0u64;
             while iter_offset < total_iters {
+                if global_best_state.is_some() && runner.should_stop() {
+                    break;
+                }
                 let seg = std::cmp::min(seg_size, total_iters - iter_offset);
 
                 let mut handles = Vec::with_capacity(thread_count);

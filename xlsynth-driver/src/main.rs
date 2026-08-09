@@ -85,6 +85,7 @@ mod gv_area;
 mod gv_dump_cone;
 mod gv_eval;
 mod gv_instance_csv;
+mod gv_mcmc_optimize;
 mod gv_optimize;
 mod gv_read_stats;
 mod gv_sta;
@@ -2636,6 +2637,190 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("gv-mcmc-optimize")
+                .about("Explores equivalent mapped cell sizes and buffer trees with Liberty-timed MCMC")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Input mapped combinational or registered netlist")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Timing-enabled Liberty proto")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("netlist_out")
+                        .long("netlist_out")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Best discovered mapped netlist; use '-' for stdout")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Mapped module to optimize")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("objective")
+                        .long("objective")
+                        .default_value("delay")
+                        .value_parser(["delay", "area"])
+                        .help("Minimize delay or recover area under an exact delay ceiling")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("iterations")
+                        .long("iterations")
+                        .default_value("1000")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("MCMC iterations per independent/explore-exploit chain")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("time_limit_seconds")
+                        .long("time-limit-seconds")
+                        .value_name("SECONDS")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("Wall-clock search budget; overrides the iteration ceiling")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("threads")
+                        .long("threads")
+                        .default_value("1")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Number of deterministic parallel search chains")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("seed")
+                        .long("seed")
+                        .default_value("0")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("Deterministic search seed")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("temperature")
+                        .long("temperature")
+                        .default_value("0.02")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Initial normalized Metropolis temperature")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("checkpoint_iterations")
+                        .long("checkpoint-iterations")
+                        .default_value("128")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("Iterations between deterministic parallel-chain exchanges")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("delay_limit")
+                        .long("delay-limit")
+                        .value_name("TIME")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Area-recovery timing ceiling; defaults to initial delay")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_area_growth")
+                        .long("max-area-growth")
+                        .value_name("FRACTION")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Maximum relative area increase for delay optimization")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("clock_period")
+                        .long("clock-period")
+                        .value_name("TIME")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Optional registered capture timing requirement")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("sizing")
+                        .long("sizing")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Enable combinational, buffer, and flip-flop resizing")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("pin_swaps")
+                        .long("pin-swaps")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Enable function-preserving symmetric input-pin swaps")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer")
+                        .long("buffer")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Enable reversible buffer-tree topology changes")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_buffer_fanout")
+                        .long("max-buffer-fanout")
+                        .default_value("12")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum sinks moved behind one newly inserted buffer")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("buffer_primary_inputs")
+                        .long("buffer-primary-inputs")
+                        .help("Allow buffer insertion on non-clock primary-input nets")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("critical_window")
+                        .long("critical-window")
+                        .default_value("0.10")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Relative exact-STA window used to bias candidate selection")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary-input-transition")
+                        .default_value("0.01")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Input transition at the ideal source or representative driver")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module-output-load")
+                        .default_value("0")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Explicit output load; zero uses Liberty representative defaults")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("json_out")
+                        .long("json-out")
+                        .value_name("PATH")
+                        .help("Write detailed search diagnostics and best-path moves")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv-optimize")
                 .about("Buffers and resizes a mapped combinational Liberty cell netlist")
                 .arg(
@@ -4528,6 +4713,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("choice-aig-tech-map", subm)) => {
             if let Err(error) = choice_aig_tech_map::handle_choice_aig_tech_map(subm) {
                 eprintln!("choice-aig-tech-map error: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        Some(("gv-mcmc-optimize", subm)) => {
+            if let Err(error) = gv_mcmc_optimize::handle_gv_mcmc_optimize(subm) {
+                eprintln!("gv-mcmc-optimize error: {error:#}");
                 std::process::exit(1);
             }
         }
