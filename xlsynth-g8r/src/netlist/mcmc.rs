@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Function-preserving MCMC over mapped cell sizes and buffer-tree topology.
+//! Function-preserving MCMC over mapped covers, cell sizes, and buffer trees.
+
+mod remap;
 
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::cell_catalog::{CatalogCell, CellCatalog};
@@ -16,6 +18,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
+use remap::{RemapLibrary, RemapRequest, RemapShape, propose_equivalent_remap};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,6 +35,7 @@ const OBJECTIVE_EPSILON: f64 = 1e-9;
 const SECONDARY_OBJECTIVE_WEIGHT: f64 = 1e-6;
 const DEFAULT_CRITICAL_PATHS: usize = 16;
 const CRITICAL_REFRESH_INTERVAL: u64 = 16;
+const MAX_REMAP_TRUTH_INPUTS: usize = 6;
 
 /// Whether mapped-netlist exploration prioritizes delay or constrained area.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +64,12 @@ pub struct NetlistMcmcOptions {
     pub enable_sizing: bool,
     pub enable_pin_swaps: bool,
     pub enable_buffer_moves: bool,
+    /// Enables truth-table-proven alternate combinational cell coverings.
+    pub enable_remap: bool,
+    /// Maximum distinct external data inputs of one remapped logic cone.
+    pub max_remap_leaves: usize,
+    /// Exact incremental sizing trials used to settle each remapped cone.
+    pub remap_relax_evaluations: usize,
     pub buffer_primary_inputs: bool,
     pub max_buffer_fanout: usize,
     pub critical_window: f64,
@@ -82,6 +92,9 @@ impl Default for NetlistMcmcOptions {
             enable_sizing: true,
             enable_pin_swaps: true,
             enable_buffer_moves: true,
+            enable_remap: true,
+            max_remap_leaves: MAX_REMAP_TRUTH_INPUTS,
+            remap_relax_evaluations: 16,
             buffer_primary_inputs: false,
             max_buffer_fanout: 12,
             critical_window: 0.10,
@@ -104,6 +117,9 @@ pub enum NetlistMcmcMoveKind {
     ReparentBuffer,
     InsertBufferAndResizeDriver,
     RemoveBufferAndResizeDriver,
+    CollapseCone,
+    ExpandCone,
+    RemapCone,
 }
 
 impl NetlistMcmcMoveKind {
@@ -121,6 +137,9 @@ impl NetlistMcmcMoveKind {
             Self::ReparentBuffer => "reparent_buffer",
             Self::InsertBufferAndResizeDriver => "insert_buffer_and_resize_driver",
             Self::RemoveBufferAndResizeDriver => "remove_buffer_and_resize_driver",
+            Self::CollapseCone => "collapse_cone",
+            Self::ExpandCone => "expand_cone",
+            Self::RemapCone => "remap_cone",
         }
     }
 }
@@ -188,6 +207,7 @@ struct SearchCounters {
 
 struct SearchRunner {
     library: Arc<Library>,
+    remap_library: Option<Arc<RemapLibrary>>,
     options: NetlistMcmcOptions,
     baseline_area: f64,
     baseline_delay: f64,
@@ -221,9 +241,18 @@ struct BufferInstance {
     input_location: PinLocation,
 }
 
+/// One normalized, single-output combinational Liberty implementation.
+#[derive(Clone, Debug)]
+struct LogicInstance {
+    cell_index: usize,
+    input_bits: Vec<usize>,
+    output_bit: usize,
+}
+
 struct Connectivity {
     fanouts: Vec<NetFanout>,
     buffers: Vec<BufferInstance>,
+    logic: Vec<Option<LogicInstance>>,
 }
 
 enum Proposal<'a> {
@@ -257,8 +286,12 @@ pub fn optimize_mapped_netlist_mcmc(
     options: &NetlistMcmcOptions,
 ) -> Result<NetlistMcmcStats> {
     validate_options(options)?;
-    if options.enable_buffer_moves && module.net_index_range.end != nets.len() {
-        bail!("mapped MCMC buffering requires the selected module to own the end of the net table");
+    if (options.enable_buffer_moves || options.enable_remap)
+        && module.net_index_range.end != nets.len()
+    {
+        bail!(
+            "mapped MCMC topology changes require the selected module to own the end of the net table"
+        );
     }
 
     let initial_report = build_netlist_report_with_primary_input_arrivals(
@@ -287,6 +320,16 @@ pub fn optimize_mapped_netlist_mcmc(
     let initial_electrical_violations = initial_timing.electrical_violations();
     drop(initial_timing);
 
+    let remap_library = if options.enable_remap {
+        let catalog = CellCatalog::new(library.as_ref())?;
+        Some(Arc::new(RemapLibrary::new(
+            &catalog,
+            options.max_remap_leaves,
+        )))
+    } else {
+        None
+    };
+
     let started_at = Instant::now();
     let deadline = options
         .time_limit_seconds
@@ -294,6 +337,7 @@ pub fn optimize_mapped_netlist_mcmc(
     let counters = Arc::new(SearchCounters::default());
     let runner = Arc::new(SearchRunner {
         library: library.clone(),
+        remap_library,
         options: options.clone(),
         baseline_area: initial_area,
         baseline_delay: initial_delay,
@@ -594,6 +638,15 @@ impl SearchRunner {
                 weighted.push((NetlistMcmcMoveKind::RemoveBufferAndResizeDriver, 5));
             }
         }
+        if self.options.enable_remap {
+            let area = self.options.objective == NetlistMcmcObjective::Area;
+            weighted.push((
+                NetlistMcmcMoveKind::CollapseCone,
+                if area { 16 } else { 10 },
+            ));
+            weighted.push((NetlistMcmcMoveKind::ExpandCone, if area { 4 } else { 8 }));
+            weighted.push((NetlistMcmcMoveKind::RemapCone, 10));
+        }
         let total = weighted.iter().map(|(_, weight)| *weight).sum::<usize>();
         if total == 0 {
             return None;
@@ -680,7 +733,8 @@ impl SearchRunner {
         }
     }
 
-    /// Builds and exactly validates one coupled sizing or buffer-tree trial.
+    /// Builds and exactly validates one coupled sizing, mapping, or buffer
+    /// trial.
     fn propose_topology<'a>(
         &'a self,
         kind: NetlistMcmcMoveKind,
@@ -754,11 +808,39 @@ impl SearchRunner {
             NetlistMcmcMoveKind::ReparentBuffer => {
                 reparent_buffer(&mut candidate, &connectivity, rng)
             }
+            NetlistMcmcMoveKind::CollapseCone
+            | NetlistMcmcMoveKind::ExpandCone
+            | NetlistMcmcMoveKind::RemapCone => {
+                let Some(remap_library) = self.remap_library.as_ref() else {
+                    return Ok(None);
+                };
+                let shape = match kind {
+                    NetlistMcmcMoveKind::CollapseCone => RemapShape::Collapse,
+                    NetlistMcmcMoveKind::ExpandCone => RemapShape::Expand,
+                    NetlistMcmcMoveKind::RemapCone => RemapShape::Recover,
+                    _ => unreachable!("only remapping moves reach remap dispatch"),
+                };
+                propose_equivalent_remap(
+                    &mut candidate,
+                    &connectivity,
+                    catalog,
+                    self.library.as_ref(),
+                    remap_library,
+                    current_timing,
+                    RemapRequest {
+                        shape,
+                        objective: self.options.objective,
+                        max_leaves: self.options.max_remap_leaves,
+                        critical,
+                    },
+                    rng,
+                )
+            }
             NetlistMcmcMoveKind::ResizeCell | NetlistMcmcMoveKind::SwapInputPins => {
                 bail!("incremental proposal reached topology search")
             }
         }?;
-        let Some(instances) = instances else {
+        let Some(mut instances) = instances else {
             return Ok(None);
         };
         let candidate_connectivity =
@@ -781,7 +863,29 @@ impl SearchRunner {
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
-        let candidate_timing = self.build_timing(&candidate)?;
+        let mut candidate_timing = self.build_timing(&candidate)?;
+        let mut area = build_area_report(
+            &candidate.module,
+            &candidate.interner,
+            self.library.as_ref(),
+        )?
+        .area;
+        if matches!(
+            kind,
+            NetlistMcmcMoveKind::CollapseCone
+                | NetlistMcmcMoveKind::ExpandCone
+                | NetlistMcmcMoveKind::RemapCone
+        ) && self.options.enable_sizing
+            && self.options.remap_relax_evaluations > 0
+        {
+            self.relax_remapped_neighborhood(
+                &mut candidate,
+                &mut candidate_timing,
+                &mut instances,
+                &mut area,
+                rng,
+            )?;
+        }
         let score = candidate_timing.score();
         if !score.constraints_satisfied
             || candidate_timing.electrical_violations() > self.baseline_electrical_violations
@@ -791,18 +895,130 @@ impl SearchRunner {
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
-        let area = build_area_report(
-            &candidate.module,
-            &candidate.interner,
-            self.library.as_ref(),
-        )?
-        .area;
         Ok(Some(Proposal::Topology {
             state: candidate,
             timing: Box::new(candidate_timing),
             cost: self.cost(area, score),
             instances,
         }))
+    }
+
+    /// Repairs a changed cover and its immediate electrical neighborhood.
+    fn relax_remapped_neighborhood(
+        &self,
+        state: &mut SearchState,
+        timing: &mut SearchIncrementalSta<'_>,
+        instances: &mut Vec<String>,
+        area: &mut f64,
+        rng: &mut Xoshiro256PlusPlus,
+    ) -> Result<()> {
+        let mut focus = BTreeSet::new();
+        for name in instances.iter() {
+            let Some(index) = state.module.instances.iter().position(|instance| {
+                state.interner.resolve(instance.instance_name) == Some(name.as_str())
+            }) else {
+                continue;
+            };
+            focus.insert(index);
+            focus.extend(timing.neighboring_instances(index));
+        }
+        if focus.is_empty() {
+            return Ok(());
+        }
+
+        let mut focus = focus.into_iter().collect::<Vec<_>>();
+        let mut remaining = self.options.remap_relax_evaluations;
+        while remaining > 0 && !self.should_stop() {
+            focus.shuffle(rng);
+            let current_score = timing.score();
+            let current_rank =
+                self.relaxation_energy(self.cost(*area, current_score), current_score);
+            let mut best = None;
+            let mut trials_this_round = 0;
+            for &instance in &focus {
+                if remaining == 0 || trials_this_round >= 8 || self.should_stop() {
+                    break;
+                }
+                let Some(previous) = timing.current_cell_index(instance) else {
+                    continue;
+                };
+                let mut alternatives = timing.size_alternatives(instance);
+                alternatives.shuffle(rng);
+                alternatives.sort_by(|lhs, rhs| {
+                    let comparison = self.library.cells[*lhs]
+                        .area
+                        .total_cmp(&self.library.cells[*rhs].area);
+                    if self.options.objective == NetlistMcmcObjective::Area {
+                        comparison
+                    } else {
+                        comparison.reverse()
+                    }
+                });
+                for replacement in alternatives.into_iter().take(2) {
+                    if remaining == 0 || trials_this_round >= 8 || self.should_stop() {
+                        break;
+                    }
+                    remaining -= 1;
+                    trials_this_round += 1;
+                    self.counters
+                        .incremental_evaluations
+                        .fetch_add(1, Ordering::Relaxed);
+                    let Ok(score) = timing.evaluate_resize(instance, replacement, false) else {
+                        continue;
+                    };
+                    self.counters
+                        .recomputed_instances
+                        .fetch_add(score.recomputed_instances, Ordering::Relaxed);
+                    let trial_area = *area - self.library.cells[previous].area
+                        + self.library.cells[replacement].area;
+                    let rank = self.relaxation_energy(self.cost(trial_area, score), score);
+                    if rank + OBJECTIVE_EPSILON < current_rank
+                        && best.as_ref().is_none_or(
+                            |(_, _, _, best_rank): &(usize, usize, f64, f64)| {
+                                rank + OBJECTIVE_EPSILON < *best_rank
+                            },
+                        )
+                    {
+                        best = Some((instance, replacement, trial_area, rank));
+                    }
+                }
+            }
+            let Some((instance, replacement, next_area, _)) = best else {
+                break;
+            };
+            let score = timing.evaluate_resize(instance, replacement, true)?;
+            self.counters
+                .recomputed_instances
+                .fetch_add(score.recomputed_instances, Ordering::Relaxed);
+            state.module.instances[instance].type_name = state
+                .interner
+                .get_or_intern(self.library.cells[replacement].name.as_str());
+            let name = instance_name(state, instance)?;
+            if !instances.contains(&name) {
+                instances.push(name);
+            }
+            *area = next_area;
+        }
+        Ok(())
+    }
+
+    /// Guides local repair toward feasibility before comparing final QoR.
+    fn relaxation_energy(&self, cost: SearchCost, score: SearchTimingScore) -> f64 {
+        let mut energy = cost.energy;
+        if self.options.objective == NetlistMcmcObjective::Area {
+            let limit = self.options.delay_limit.unwrap_or(self.baseline_delay);
+            energy +=
+                8.0 * (cost.delay - limit).max(0.0) / self.baseline_delay.max(OBJECTIVE_EPSILON);
+        }
+        if let Some(growth) = self.options.max_area_growth {
+            let limit = self.baseline_area * (1.0 + growth);
+            energy +=
+                8.0 * (cost.area - limit).max(0.0) / self.baseline_area.max(OBJECTIVE_EPSILON);
+        }
+        if !score.constraints_satisfied {
+            energy += 8.0;
+        }
+        energy
     }
 
     /// Commits a validated proposal while keeping raw and incremental state
@@ -880,6 +1096,9 @@ fn validate_options(options: &NetlistMcmcOptions) -> Result<()> {
     }
     if !options.critical_window.is_finite() || !(0.0..=1.0).contains(&options.critical_window) {
         bail!("mapped MCMC critical window must be between zero and one");
+    }
+    if options.enable_remap && !(2..=MAX_REMAP_TRUTH_INPUTS).contains(&options.max_remap_leaves) {
+        bail!("mapped MCMC remapping requires between two and six boundary inputs");
     }
     if options
         .delay_limit
@@ -988,6 +1207,7 @@ fn build_connectivity(
         .map(|cell| (cell.name.as_str(), cell))
         .collect::<HashMap<_, _>>();
     let mut buffers = Vec::new();
+    let mut logic = vec![None; state.module.instances.len()];
     for normalized_instance in &normalized.instances {
         let index = normalized_instance.raw_index.0;
         let name = state
@@ -1035,7 +1255,45 @@ fn build_connectivity(
                 buffer_output = Some(bit);
             }
         }
-        if catalog.by_name(name).is_some_and(CatalogCell::is_buffer)
+        let catalog_cell = catalog.by_name(name);
+        if let Some(classified) = catalog_cell {
+            let input_bits = classified
+                .family
+                .input_names
+                .iter()
+                .map(|input_name| {
+                    normalized_instance
+                        .connections
+                        .iter()
+                        .find(|connection| {
+                            state.interner.resolve(connection.port) == Some(input_name.as_str())
+                        })
+                        .and_then(|connection| match connection.bits.as_slice() {
+                            [BitSource::Bit(bit)] => Some(*bit),
+                            _ => None,
+                        })
+                })
+                .collect::<Option<Vec<_>>>();
+            let output_bit = normalized_instance
+                .connections
+                .iter()
+                .find(|connection| {
+                    state.interner.resolve(connection.port)
+                        == Some(classified.family.output_name.as_str())
+                })
+                .and_then(|connection| match connection.bits.as_slice() {
+                    [BitSource::Bit(bit)] => Some(*bit),
+                    _ => None,
+                });
+            if let (Some(input_bits), Some(output_bit)) = (input_bits, output_bit) {
+                logic[index] = Some(LogicInstance {
+                    cell_index: classified.cell_index,
+                    input_bits,
+                    output_bit,
+                });
+            }
+        }
+        if catalog_cell.is_some_and(CatalogCell::is_buffer)
             && let (Some(input_bit), Some(output_bit), Some(input_location)) =
                 (buffer_input, buffer_output, buffer_input_location)
             && input_bit != output_bit
@@ -1048,7 +1306,11 @@ fn build_connectivity(
             });
         }
     }
-    Ok(Connectivity { fanouts, buffers })
+    Ok(Connectivity {
+        fanouts,
+        buffers,
+        logic,
+    })
 }
 
 /// Applies several exact-function size changes as one jointly timed proposal.
@@ -1508,14 +1770,81 @@ fn instance_name(state: &SearchState, index: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{NetlistMcmcObjective, NetlistMcmcOptions, optimize_mapped_netlist_mcmc};
-    use crate::liberty_model::LibraryBuilder;
-    use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library};
+    use crate::liberty_model::{Library, LibraryBuilder};
+    use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library, timed_cell};
     use crate::netlist::emit::emit_module_as_netlist_text;
+    use crate::netlist::gatefn_from_netlist::{LabeledNetlistAig, project_labeled_netlist_aig};
+    use crate::netlist::parse::{Net, NetlistModule};
     use crate::netlist::report::build_netlist_report;
     use crate::netlist::timing_buffer::tests::{
         high_fanout_register_source, registered_timing_library,
     };
     use std::sync::Arc;
+    use string_interner::symbol::SymbolU32;
+    use string_interner::{StringInterner, backend::StringBackend};
+    use xlsynth::IrBits;
+
+    /// Supplies exact AND/OR/complex alternatives with complete Liberty timing.
+    fn remapping_library(complex_delay: f64, complex_area: f64) -> Library {
+        let mut builder = LibraryBuilder::from_library(sizing_library());
+        let or = timed_cell(
+            &mut builder,
+            "OR2",
+            &["A", "B"],
+            "A + B",
+            1.0,
+            2.0,
+            0.1,
+            1.6,
+        );
+        let complex = timed_cell(
+            &mut builder,
+            "AO21",
+            &["A", "B", "C"],
+            "(A * B) + C",
+            complex_area,
+            complex_delay,
+            0.1,
+            1.6,
+        );
+        let inverter = timed_cell(&mut builder, "INV", &["A"], "!A", 0.5, 1.0, 0.1, 1.6);
+        builder.cells.extend([or, complex, inverter]);
+        builder.finish()
+    }
+
+    /// Exhaustively evaluates every scalar input combination after remapping.
+    fn assert_same_scalar_truth(
+        original: &LabeledNetlistAig,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        library: &Library,
+    ) {
+        let remapped = project_labeled_netlist_aig(module, nets, interner, library)
+            .expect("project the remapped combinational netlist");
+        assert_eq!(original.gate_fn.inputs.len(), remapped.gate_fn.inputs.len());
+        for assignment in 0..(1usize << original.gate_fn.inputs.len()) {
+            let inputs = original
+                .gate_fn
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    IrBits::make_ubits(1, ((assignment >> index) & 1) as u64)
+                        .expect("construct one scalar input")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                original
+                    .evaluate_bits(inputs.as_slice())
+                    .expect("evaluate the original netlist"),
+                remapped
+                    .evaluate_bits(inputs.as_slice())
+                    .expect("evaluate the remapped netlist"),
+                "mapped cone changed its function on input assignment {assignment}"
+            );
+        }
+    }
 
     #[test]
     fn incrementally_upsizes_a_slow_critical_gate() {
@@ -1647,6 +1976,7 @@ endmodule
                 iterations: 96,
                 enable_sizing: false,
                 enable_pin_swaps: false,
+                enable_remap: false,
                 ..NetlistMcmcOptions::default()
             },
         )
@@ -1852,5 +2182,280 @@ endmodule
         assert!(stats.elapsed_seconds < 5.0);
         assert!(stats.attempted_moves > 1);
         assert!(stats.final_delay < stats.initial_delay);
+    }
+
+    #[test]
+    fn collapses_a_fanout_free_cone_into_an_exact_complex_cell() {
+        let library = Arc::new(remapping_library(3.0, 1.25));
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, y);
+  input a, b, c;
+  output y;
+  wire product;
+  AND2 first (.A(a), .B(b), .Y(product));
+  OR2 second (.A(product), .B(c), .Y(y));
+endmodule
+"#,
+        );
+        let original = project_labeled_netlist_aig(&module, &nets, &interner, library.as_ref())
+            .expect("project the original fanout-free cone");
+
+        let stats = optimize_mapped_netlist_mcmc(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            library.clone(),
+            &NetlistMcmcOptions {
+                objective: NetlistMcmcObjective::Area,
+                iterations: 256,
+                enable_sizing: false,
+                enable_pin_swaps: false,
+                enable_buffer_moves: false,
+                ..NetlistMcmcOptions::default()
+            },
+        )
+        .expect("replace a closed AND/OR cone with one exact Liberty complex gate");
+
+        assert_eq!(module.instances.len(), 1);
+        assert_eq!(
+            interner.resolve(module.instances[0].type_name),
+            Some("AO21")
+        );
+        assert!(stats.final_area < stats.initial_area);
+        assert!(stats.final_delay <= stats.initial_delay);
+        assert!(stats.accepted_edits_by_kind.contains_key("collapse_cone"));
+        assert_same_scalar_truth(&original, &module, &nets, &interner, library.as_ref());
+    }
+
+    #[test]
+    fn expands_a_slow_complex_cell_into_a_faster_equivalent_cover() {
+        let library = Arc::new(remapping_library(12.0, 1.25));
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, y);
+  input a, b, c;
+  output y;
+  AO21 complex (.A(a), .B(b), .C(c), .Y(y));
+endmodule
+"#,
+        );
+        let original = project_labeled_netlist_aig(&module, &nets, &interner, library.as_ref())
+            .expect("project the original complex gate");
+
+        let stats = optimize_mapped_netlist_mcmc(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            library.clone(),
+            &NetlistMcmcOptions {
+                iterations: 256,
+                enable_sizing: false,
+                enable_pin_swaps: false,
+                enable_buffer_moves: false,
+                ..NetlistMcmcOptions::default()
+            },
+        )
+        .expect("expand a slow complex function into faster exact combinational gates");
+
+        assert!(module.instances.len() >= 2);
+        assert!(stats.final_delay < stats.initial_delay);
+        assert!(stats.accepted_edits_by_kind.contains_key("expand_cone"));
+        assert_same_scalar_truth(&original, &module, &nets, &interner, library.as_ref());
+    }
+
+    #[test]
+    fn relaxes_complex_cell_sizing_while_recovering_area() {
+        let mut builder = LibraryBuilder::from_library(remapping_library(12.0, 0.75));
+        let fast_complex = timed_cell(
+            &mut builder,
+            "AO21_FAST",
+            &["A", "B", "C"],
+            "(A * B) + C",
+            1.5,
+            3.0,
+            0.2,
+            1.6,
+        );
+        builder.cells.push(fast_complex);
+        let library = Arc::new(builder.finish());
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, y);
+  input a, b, c;
+  output y;
+  wire product;
+  AND2 first (.A(a), .B(b), .Y(product));
+  OR2 second (.A(product), .B(c), .Y(y));
+endmodule
+"#,
+        );
+
+        let stats = optimize_mapped_netlist_mcmc(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            library,
+            &NetlistMcmcOptions {
+                objective: NetlistMcmcObjective::Area,
+                iterations: 256,
+                enable_pin_swaps: false,
+                enable_buffer_moves: false,
+                remap_relax_evaluations: 16,
+                ..NetlistMcmcOptions::default()
+            },
+        )
+        .expect("jointly recover mapped area and settle the replacement drive strength");
+
+        assert_eq!(module.instances.len(), 1);
+        assert_eq!(
+            interner.resolve(module.instances[0].type_name),
+            Some("AO21_FAST")
+        );
+        assert!(stats.final_area < stats.initial_area);
+        assert!(stats.final_delay <= stats.initial_delay);
+        assert!(stats.incremental_timing_evaluations > 0);
+    }
+
+    #[test]
+    fn rejects_unsupported_remap_truth_table_widths() {
+        for max_remap_leaves in [1, 7] {
+            let library = Arc::new(sizing_library());
+            let (mut module, mut nets, mut interner) = parse_module(
+                r#"
+module top(a, b, y);
+  input a, b;
+  output y;
+  AND2 gate (.A(a), .B(b), .Y(y));
+endmodule
+"#,
+            );
+
+            let error = optimize_mapped_netlist_mcmc(
+                &mut module,
+                &mut nets,
+                &mut interner,
+                library,
+                &NetlistMcmcOptions {
+                    max_remap_leaves,
+                    ..NetlistMcmcOptions::default()
+                },
+            )
+            .expect_err("reject truth tables outside the supported input range");
+
+            assert_eq!(
+                error.to_string(),
+                "mapped MCMC remapping requires between two and six boundary inputs"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_shared_logic_when_replacing_a_mapped_cone() {
+        let library = Arc::new(remapping_library(3.0, 1.25));
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, y, shared_output);
+  input a, b, c;
+  output y, shared_output;
+  wire shared;
+  AND2 shared_gate (.A(a), .B(b), .Y(shared));
+  OR2 first_use (.A(shared), .B(c), .Y(y));
+  BUF second_use (.A(shared), .Y(shared_output));
+endmodule
+"#,
+        );
+
+        optimize_mapped_netlist_mcmc(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            library,
+            &NetlistMcmcOptions {
+                objective: NetlistMcmcObjective::Area,
+                iterations: 256,
+                enable_sizing: false,
+                enable_pin_swaps: false,
+                enable_buffer_moves: false,
+                ..NetlistMcmcOptions::default()
+            },
+        )
+        .expect("preserve an externally shared fanin when replacing local covers");
+
+        assert!(
+            module.instances.iter().any(|instance| {
+                interner.resolve(instance.instance_name) == Some("shared_gate")
+            })
+        );
+    }
+
+    #[test]
+    fn remaps_registered_data_without_crossing_clock_or_state_boundaries() {
+        let mut builder = LibraryBuilder::from_library(registered_timing_library());
+        let or = timed_cell(
+            &mut builder,
+            "OR2",
+            &["A", "B"],
+            "A + B",
+            1.0,
+            2.0,
+            0.1,
+            1.6,
+        );
+        let complex = timed_cell(
+            &mut builder,
+            "AO21",
+            &["A", "B", "C"],
+            "(A * B) + C",
+            1.25,
+            2.0,
+            0.1,
+            1.6,
+        );
+        builder.cells.extend([or, complex]);
+        let library = Arc::new(builder.finish());
+        let (mut module, mut nets, mut interner) = parse_module(
+            r#"
+module top(clk, a, b, c, y);
+  input clk, a, b, c;
+  output y;
+  wire registered_a, registered_b, registered_c, product, combined;
+  DFF launch_a (.CLK(clk), .D(a), .Q(registered_a));
+  DFF launch_b (.CLK(clk), .D(b), .Q(registered_b));
+  DFF launch_c (.CLK(clk), .D(c), .Q(registered_c));
+  AND2 first (.A(registered_a), .B(registered_b), .Y(product));
+  OR2 second (.A(product), .B(registered_c), .Y(combined));
+  DFF capture (.CLK(clk), .D(combined), .Q(y));
+endmodule
+"#,
+        );
+
+        let stats = optimize_mapped_netlist_mcmc(
+            &mut module,
+            &mut nets,
+            &mut interner,
+            library,
+            &NetlistMcmcOptions {
+                iterations: 384,
+                enable_sizing: false,
+                enable_pin_swaps: false,
+                enable_buffer_moves: false,
+                ..NetlistMcmcOptions::default()
+            },
+        )
+        .expect("replace logic between physical launch and capture registers");
+
+        assert!(stats.final_delay < stats.initial_delay);
+        assert_eq!(
+            module
+                .instances
+                .iter()
+                .filter(|instance| interner.resolve(instance.type_name) == Some("DFF"))
+                .count(),
+            4
+        );
+        let text = emit_module_as_netlist_text(&module, nets.as_slice(), &interner)
+            .expect("render remapped registered netlist");
+        assert_eq!(text.matches(".CLK(clk)").count(), 4);
     }
 }

@@ -2638,7 +2638,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("gv-mcmc-optimize")
-                .about("Explores equivalent mapped cell sizes and buffer trees with Liberty-timed MCMC")
+                .about("Explores equivalent mapped covers, cell sizes, and buffer trees with Liberty-timed MCMC")
                 .arg(
                     Arg::new("netlist")
                         .long("netlist")
@@ -2772,6 +2772,30 @@ fn main() {
                         .default_value("true")
                         .value_parser(clap::value_parser!(bool))
                         .help("Enable reversible buffer-tree topology changes")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("remap")
+                        .long("remap")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Enable exact-truth combinational cone collapse, expansion, and remapping")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("remap_max_leaves")
+                        .long("remap-max-leaves")
+                        .default_value("6")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum distinct Boolean boundary inputs for one remapped cone")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("remap_relax_evaluations")
+                        .long("remap-relax-evaluations")
+                        .default_value("16")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Incremental neighboring-cell sizing trials after each mapping change")
                         .action(ArgAction::Set),
                 )
                 .arg(

@@ -835,15 +835,20 @@ Key flags:
 Timing constraint names use flattened scalar port names: one-bit ports retain
 their original name, while bit `i` of a wider port is named `<port>_<i>`.
 
-### `gv-mcmc-optimize`: explore mapped cell sizes and buffer trees
+### `gv-mcmc-optimize`: explore mapped covers, cell sizes, and buffer trees
 
 Searches the neighborhood of an existing combinational or registered mapped
 netlist without changing its Boolean or sequential behavior. Proposals include
 single-cell and coordinated neighboring-cell resizing, physical flip-flop
 resizing, safe interchangeable input-pin swaps, buffer insertion/removal, sink
-migration, sibling splitting/merging, buffer reparenting, and coordinated
-buffer/driver sizing. Cell substitutions use incremental Liberty STA; topology
-changes rebuild exact register-aware Liberty timing. Clock nets are protected.
+migration, sibling splitting/merging, buffer reparenting, coordinated
+buffer/driver sizing, and exhaustively verified alternate combinational cell
+coverings. Remapped fanout-free cones can collapse into complex cells, expand
+into equivalent two-cell networks, or change physical cell families; bounded
+incremental sizing settles adjacent gates, buffers, and flip-flops before each
+candidate is evaluated. Cell substitutions use incremental Liberty STA;
+topology changes rebuild exact register-aware Liberty timing. Clock nets and
+sequential boundaries are protected.
 
 ```shell
 xlsynth-driver gv-mcmc-optimize \
@@ -882,6 +887,12 @@ Key flags:
 - `--sizing <true|false>`: enable gate, buffer, and FF sizing (default: `true`).
 - `--pin-swaps <true|false>`: enable equivalent input-pin swaps (default: `true`).
 - `--buffer <true|false>`: enable buffer-tree moves (default: `true`).
+- `--remap <true|false>`: enable equivalent combinational cone collapse,
+  expansion, and alternative coverings (default: `true`).
+- `--remap-max-leaves <N>`: maximum external Boolean inputs per remapped cone;
+  valid values are `2` through `6` (default: `6`).
+- `--remap-relax-evaluations <N>`: maximum exact incremental neighboring-cell
+  sizing trials after each remap; `0` disables local relaxation (default: `16`).
 - `--max-buffer-fanout <N>`: maximum sinks behind each inserted buffer
   (default: `12`).
 - `--buffer-primary-inputs`: permit buffering non-clock primary inputs.

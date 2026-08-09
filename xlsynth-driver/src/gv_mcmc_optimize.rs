@@ -90,6 +90,15 @@ pub fn handle_gv_mcmc_optimize(matches: &ArgMatches) -> Result<()> {
         enable_buffer_moves: *matches
             .get_one::<bool>("buffer")
             .expect("buffer has a default"),
+        enable_remap: *matches
+            .get_one::<bool>("remap")
+            .expect("remap has a default"),
+        max_remap_leaves: *matches
+            .get_one::<usize>("remap_max_leaves")
+            .expect("remap_max_leaves has a default"),
+        remap_relax_evaluations: *matches
+            .get_one::<usize>("remap_relax_evaluations")
+            .expect("remap_relax_evaluations has a default"),
         buffer_primary_inputs: matches.get_flag("buffer_primary_inputs"),
         max_buffer_fanout: *matches
             .get_one::<usize>("max_buffer_fanout")

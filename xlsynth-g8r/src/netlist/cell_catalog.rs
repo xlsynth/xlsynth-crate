@@ -106,6 +106,11 @@ impl CellCatalog {
         self.by_name.get(name).map(|index| &self.cells[*index])
     }
 
+    /// Visits every usable, timing-complete combinational Liberty cell.
+    pub(crate) fn cells(&self) -> impl Iterator<Item = &CatalogCell> {
+        self.cells.iter()
+    }
+
     /// Returns exact same-interface, same-function size alternatives.
     pub(crate) fn family(&self, cell: &CatalogCell) -> impl Iterator<Item = &CatalogCell> {
         self.families
