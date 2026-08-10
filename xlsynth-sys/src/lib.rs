@@ -2602,6 +2602,9 @@ unsafe extern "C" {
     pub fn xls_dslx_parametric_binding_get_expr(
         binding: *const CDslxParametricBinding,
     ) -> *mut CDslxExpr;
+    pub fn xls_dslx_parametric_binding_get_default_generic_type(
+        binding: *const CDslxParametricBinding,
+    ) -> *mut CDslxTypeAnnotation;
 
     // -- "requires implicit token?" determination for a DSLX function
     pub fn xls_dslx_type_info_get_requires_implicit_token(
