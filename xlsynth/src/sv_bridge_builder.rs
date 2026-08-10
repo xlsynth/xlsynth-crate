@@ -610,25 +610,29 @@ impl BridgeBuilder for SvBridgeBuilder {
         } else {
             name.to_string()
         };
-        if let Some((is_signed, bit_count)) = ty.is_bits_like() {
+        let declaration = if let Some((is_signed, bit_count)) = ty.is_bits_like() {
             let value_str = format_bits_constant(ir_value, is_signed, bit_count)?;
-            self.lines.push(format!(
+            Some(format!(
                 "localparam bit {signedness} [{}:0] {name} = {value_str};\n",
                 bit_count - 1,
                 name = sv_name,
                 signedness = if is_signed { "signed" } else { "unsigned" }
-            ));
-            Ok(())
+            ))
         } else if dslx_type_to_matchable(ty).is_ok() {
             let sv_type = convert_type(ty, None)?;
             let initializer = self.format_constant_value(ty, ir_value, None)?;
-            self.lines
-                .push(format!("localparam {sv_type} {sv_name} = {initializer};\n"));
-            Ok(())
+            Some(format!("localparam {sv_type} {sv_name} = {initializer};\n"))
         } else {
             log::warn!("Unsupported constant type: {ir_value:?}");
-            Ok(())
+            None
+        };
+
+        if let Some(declaration) = declaration {
+            let ctx = format!("DSLX constant `{name}`");
+            self.define_or_error(&sv_name, &ctx)?;
+            self.lines.push(declaration);
         }
+        Ok(())
     }
 }
 
@@ -1012,6 +1016,81 @@ const PAIRS = [(u8:1, u16:2), (u8:3, u16:4)];
         // We expect this caused a collision error on `A`.
         let err = result.expect_err("expect collision");
         assert!(err.to_string().contains("name collision detected for SV name in generated module namespace: `A` context: DSLX enum `MySecondEnum`"));
+    }
+
+    /// Rejects scalar constants that collide with an emitted enum member.
+    #[test]
+    fn test_convert_leaf_module_scalar_constant_with_enum_member_collision() {
+        let dslx = r#"
+enum Status: u8 { DEFAULT_RECORD = 0 }
+const DEFAULT_RECORD = u8:7;
+"#;
+        let err = simple_convert_for_test(dslx).expect_err("expect scalar constant collision");
+        assert_eq!(
+            err.0,
+            "Building SV; name collision detected for SV name in generated module namespace: `DefaultRecord` context: DSLX constant `DEFAULT_RECORD`"
+        );
+    }
+
+    /// Rejects aggregate constants that collide with an emitted enum member.
+    #[test]
+    fn test_convert_leaf_module_aggregate_constant_with_enum_member_collision() {
+        let dslx = r#"
+enum Status: u8 { DEFAULT_RECORD = 0 }
+struct Record { value: u8 }
+const DEFAULT_RECORD = Record { value: u8:7 };
+"#;
+        let err = simple_convert_for_test(dslx).expect_err("expect aggregate constant collision");
+        assert_eq!(
+            err.0,
+            "Building SV; name collision detected for SV name in generated module namespace: `DefaultRecord` context: DSLX constant `DEFAULT_RECORD`"
+        );
+    }
+
+    /// Rejects enum members that collide with a previously emitted constant.
+    #[test]
+    fn test_convert_leaf_module_enum_member_with_prior_constant_collision() {
+        let dslx = r#"
+const DEFAULT_RECORD = u8:7;
+enum Status: u8 { DEFAULT_RECORD = 0 }
+"#;
+        let err = simple_convert_for_test(dslx).expect_err("expect enum member collision");
+        assert_eq!(
+            err.0,
+            "Building SV; name collision detected for SV name in generated module namespace: `DefaultRecord` context: DSLX enum `Status`"
+        );
+    }
+
+    /// Rejects distinct DSLX constant names that normalize to the same SV name.
+    #[test]
+    fn test_convert_leaf_module_constants_with_normalized_name_collision() {
+        let dslx = r#"
+const DEFAULT_RECORD = u8:7;
+const DefaultRecord = u8:8;
+"#;
+        let err = simple_convert_for_test(dslx).expect_err("expect constant name collision");
+        assert_eq!(
+            err.0,
+            "Building SV; name collision detected for SV name in generated module namespace: `DefaultRecord` context: DSLX constant `DefaultRecord`"
+        );
+    }
+
+    /// Skipped tuple constants must not reserve names in the emitted namespace.
+    #[test]
+    fn test_convert_leaf_module_unsupported_constant_does_not_reserve_name() {
+        let dslx = r#"
+const DEFAULT_RECORD = (u8:1, u16:2);
+enum Status: u8 { DEFAULT_RECORD = 0 }
+"#;
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(
+            sv,
+            r#"typedef enum logic [7:0] {
+    DefaultRecord = 8'd0
+} status_t;
+"#
+        );
+        xlsynth_test_helpers::assert_valid_sv(&sv);
     }
 
     // Verifies: EnumQualified allows two DSLX enums to reuse member names
