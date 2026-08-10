@@ -119,3 +119,18 @@ type MyPoint = common_zoo::Point;
 struct HasExternalStructThroughLocalAlias {
     point: MyPoint,
 }
+
+const DEFAULT_CONTROL = Control { enable: false, reset: true };
+
+const DEFAULT_INTERFACE = Interface { control: DEFAULT_CONTROL, data: u32:42 };
+
+const SAMPLE_CONTROLS = [
+    Control { enable: false, reset: true },
+    Control { enable: true, reset: false },
+];
+
+const DEFAULT_TRANSACTION = Transaction {
+    address: u32:0,
+    data: u32:0,
+    ty: common_zoo::TransactionType::READ,
+};

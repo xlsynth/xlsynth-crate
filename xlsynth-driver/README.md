@@ -1201,8 +1201,59 @@ Additional flags:
 
 ### `dslx2sv-types`: DSLX type definitions to SystemVerilog
 
-Generates SystemVerilog type declarations for the definitions in a DSLX file.
-The output is written to **stdout**.
+Generates SystemVerilog type declarations and evaluated constants for the
+definitions in a DSLX file. Scalar constants retain their declared width and
+signedness. Enum, struct, nested struct, and array constants become typed
+`localparam` declarations; struct initializers use named fields, and packed-array
+initializers use explicit indices so DSLX element zero remains SystemVerilog
+element zero. Each struct field and array element is emitted on its own indented
+line. Tuple constants are not supported. The output is written to **stdout**.
+
+For example:
+
+```dslx
+struct Sample {
+    channel: u32,
+    value: u32,
+}
+
+const DEFAULT_SAMPLE = Sample { channel: 16, value: 7 };
+const SAMPLES = [
+    Sample { channel: 16, value: 7 },
+    Sample { channel: 4, value: 8 },
+];
+```
+
+produces:
+
+```systemverilog
+typedef struct packed {
+    logic [31:0] channel;
+    logic [31:0] value;
+} sample_t;
+
+localparam sample_t DefaultSample = '{
+    channel: 32'h00000010,
+    value: 32'h00000007
+};
+localparam sample_t [1:0] Samples = '{
+    0: '{
+        channel: 32'h00000010,
+        value: 32'h00000007
+    },
+    1: '{
+        channel: 32'h00000004,
+        value: 32'h00000008
+    }
+};
+```
+
+With the default `as_declared` struct-field ordering, these packed struct
+constants can be connected directly to the corresponding inputs of generated XLS
+modules: both representations place the first DSLX field in the high bits and
+the last field in the low bits. Array element zero likewise occupies the low
+bits. Selecting `reversed` changes the struct ABI and requires matching
+compensation when connecting to generated modules.
 
 Required flags:
 

@@ -17,3 +17,5 @@ pub struct Point {
     x: u16,
     y: u32,
 }
+
+pub const ORIGIN = Point { x: 0, y: 0 };
