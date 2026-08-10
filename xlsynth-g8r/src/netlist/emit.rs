@@ -396,6 +396,23 @@ endmodule
     }
 
     #[test]
+    fn emitter_round_trips_unknown_literal_assignments() {
+        let source = r#"
+module top(y);
+  output y;
+  assign y = 1'bx;
+endmodule
+"#;
+        let expected = r#"module top(y);
+  output y;
+  assign y = 1'hx;
+endmodule
+"#;
+
+        assert_emitted_golden_round_trip(source, expected);
+    }
+
+    #[test]
     fn emitter_round_trips_structural_expressions_and_packed_aliases() {
         let source = r#"
 module top(a, b, y, selected);

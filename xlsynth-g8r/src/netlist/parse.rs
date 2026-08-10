@@ -979,10 +979,21 @@ impl<R: Read + 'static> TokenScanner<R> {
                         break;
                     }
                 }
+                let limit = self.pos;
+                if base_and_value
+                    .chars()
+                    .skip(1)
+                    .any(|ch| matches!(ch, 'z' | 'Z' | '?'))
+                {
+                    return Err(self.error_with_context(
+                        "high-impedance literal digits ('z', 'Z', or '?') are not supported",
+                        Span { start, limit },
+                    ));
+                }
                 let has_unknown_digit = base_and_value
                     .chars()
                     .skip(1)
-                    .any(|ch| matches!(ch, 'x' | 'X' | 'z' | 'Z' | '?'));
+                    .any(|ch| matches!(ch, 'x' | 'X'));
                 // Convert Verilog base to Rust-style
                 let base_and_value = if let Some((_base, _rest)) = base_and_value
                     .split_once(|c: char| c == 'b' || c == 'h' || c == 'o' || c == 'd')
@@ -1004,7 +1015,6 @@ impl<R: Read + 'static> TokenScanner<R> {
                 } else {
                     base_and_value.clone()
                 };
-                let limit = self.pos;
                 if has_unknown_digit {
                     return Ok(Some(Token {
                         payload: TokenPayload::VerilogUnknownInt { width },
@@ -2927,6 +2937,33 @@ endmodule
     }
 
     #[test]
+    fn test_parse_module_rejects_high_impedance_literals_in_assigns() {
+        for rhs in ["1'bz", "1'bZ", "1'b?", "{1'b0, 1'bz}"] {
+            let src = format!(
+                r#"module m(y);
+  output [1:0] y;
+  assign y = {rhs};
+endmodule
+"#
+            );
+            let lines: Vec<String> = src.lines().map(str::to_string).collect();
+            let lookup = move |line: u32| lines.get((line - 1) as usize).cloned();
+            let scanner = TokenScanner::with_line_lookup(
+                std::io::Cursor::new(src.into_bytes()),
+                Box::new(lookup),
+            );
+            let mut parser = Parser::new(scanner);
+            let error = parser
+                .parse_file()
+                .expect_err("high-impedance literal assignments must be rejected");
+            assert_eq!(
+                error.message,
+                "high-impedance literal digits ('z', 'Z', or '?') are not supported"
+            );
+        }
+    }
+
+    #[test]
     fn test_instance_source_position_is_captured() {
         let src = r#"
 module m(a, b);
@@ -3599,6 +3636,36 @@ wire [255:0] a;"#;
             _ => panic!("Expected VerilogInt for 16'd42"),
         }
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_token_scanner_accepts_unknown_literals() {
+        for literal in ["1'bx", "1'bX", "1'hx", "1'hX"] {
+            let mut scanner = TokenScanner::from_str(literal);
+            let token = scanner
+                .popt()
+                .expect("unknown literals should scan successfully")
+                .expect("an unknown literal should produce a token");
+            assert!(matches!(
+                token.payload,
+                TokenPayload::VerilogUnknownInt { width: Some(1) }
+            ));
+            assert!(scanner.popt().expect("no scan error").is_none());
+        }
+    }
+
+    #[test]
+    fn test_token_scanner_rejects_high_impedance_literals() {
+        for literal in ["1'bz", "1'bZ", "1'b?", "4'b10z1", "4'b1?01", "4'hZ"] {
+            let mut scanner = TokenScanner::from_str(literal);
+            let error = scanner
+                .popt()
+                .expect_err("high-impedance literals must be rejected");
+            assert_eq!(
+                error.message,
+                "high-impedance literal digits ('z', 'Z', or '?') are not supported"
+            );
+        }
     }
 
     #[test]
