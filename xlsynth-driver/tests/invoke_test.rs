@@ -1275,9 +1275,21 @@ const SAMPLES = [
 
 localparam bit unsigned [7:0] FormatVersion = 8'h03;
 
-localparam sample_t DefaultSample = '{channel: 8'h10, value: 8'h07};
+localparam sample_t DefaultSample = '{
+    channel: 8'h10,
+    value: 8'h07
+};
 
-localparam sample_t [1:0] Samples = '{0: '{channel: 8'h10, value: 8'h07}, 1: '{channel: 8'h04, value: 8'h08}};"#
+localparam sample_t [1:0] Samples = '{
+    0: '{
+        channel: 8'h10,
+        value: 8'h07
+    },
+    1: '{
+        channel: 8'h04,
+        value: 8'h08
+    }
+};"#
     );
     xlsynth_test_helpers::assert_valid_sv(&stdout);
 }
@@ -1319,9 +1331,21 @@ pub fn consume(sample: Sample) -> u24 { sample.channel ++ sample.value }
     logic [15:0] value;
 } sample_t;
 
-localparam sample_t ExpectedSample = '{channel: 8'h12, value: 16'h3456};
+localparam sample_t ExpectedSample = '{
+    channel: 8'h12,
+    value: 16'h3456
+};
 
-localparam sample_t [1:0] Samples = '{0: '{channel: 8'h12, value: 16'h3456}, 1: '{channel: 8'hab, value: 16'hcdef}};"#
+localparam sample_t [1:0] Samples = '{
+    0: '{
+        channel: 8'h12,
+        value: 16'h3456
+    },
+    1: '{
+        channel: 8'hab,
+        value: 16'hcdef
+    }
+};"#
     );
 
     let pipeline_sv = String::from_utf8(run_driver_success(&[

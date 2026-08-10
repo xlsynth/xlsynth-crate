@@ -1206,8 +1206,8 @@ definitions in a DSLX file. Scalar constants retain their declared width and
 signedness. Enum, struct, nested struct, and array constants become typed
 `localparam` declarations; struct initializers use named fields, and packed-array
 initializers use explicit indices so DSLX element zero remains SystemVerilog
-element zero. Tuple constants are not supported. The output is written to
-**stdout**.
+element zero. Each struct field and array element is emitted on its own indented
+line. Tuple constants are not supported. The output is written to **stdout**.
 
 For example:
 
@@ -1232,10 +1232,19 @@ typedef struct packed {
     logic [31:0] value;
 } sample_t;
 
-localparam sample_t DefaultSample = '{channel: 32'h00000010, value: 32'h00000007};
+localparam sample_t DefaultSample = '{
+    channel: 32'h00000010,
+    value: 32'h00000007
+};
 localparam sample_t [1:0] Samples = '{
-    0: '{channel: 32'h00000010, value: 32'h00000007},
-    1: '{channel: 32'h00000004, value: 32'h00000008}
+    0: '{
+        channel: 32'h00000010,
+        value: 32'h00000007
+    },
+    1: '{
+        channel: 32'h00000004,
+        value: 32'h00000008
+    }
 };
 ```
 

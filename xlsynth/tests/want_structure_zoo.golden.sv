@@ -96,10 +96,32 @@ typedef struct packed {
     my_point_t point;
 } has_external_struct_through_local_alias_t;
 
-localparam control_t DefaultControl = '{enable: 1'h0, reset: 1'h1};
+localparam control_t DefaultControl = '{
+    enable: 1'h0,
+    reset: 1'h1
+};
 
-localparam interface_t DefaultInterface = '{control: '{enable: 1'h0, reset: 1'h1}, data: 32'h0000002a};
+localparam interface_t DefaultInterface = '{
+    control: '{
+        enable: 1'h0,
+        reset: 1'h1
+    },
+    data: 32'h0000002a
+};
 
-localparam control_t [1:0] SampleControls = '{0: '{enable: 1'h0, reset: 1'h1}, 1: '{enable: 1'h1, reset: 1'h0}};
+localparam control_t [1:0] SampleControls = '{
+    0: '{
+        enable: 1'h0,
+        reset: 1'h1
+    },
+    1: '{
+        enable: 1'h1,
+        reset: 1'h0
+    }
+};
 
-localparam transaction_t DefaultTransaction = '{address: 32'h00000000, data: 32'h00000000, ty: common_zoo_sv_pkg::transaction_type_t'(1'h0)};
+localparam transaction_t DefaultTransaction = '{
+    address: 32'h00000000,
+    data: 32'h00000000,
+    ty: common_zoo_sv_pkg::transaction_type_t'(1'h0)
+};

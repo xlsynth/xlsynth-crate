@@ -129,6 +129,22 @@ fn format_bits_constant(
     Ok(format!("{bit_count}'{hex_prefix}{hex_digits}"))
 }
 
+/// Formats assignment-pattern entries with one indented entry per line.
+fn format_assignment_pattern(entries: &[String], indent_level: usize) -> String {
+    if entries.is_empty() {
+        return "'{}".to_string();
+    }
+
+    let entry_indent = "    ".repeat(indent_level + 1);
+    let closing_indent = "    ".repeat(indent_level);
+    let lines = entries
+        .iter()
+        .map(|entry| format!("{entry_indent}{entry}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("'{{\n{lines}\n{closing_indent}}}")
+}
+
 fn make_bit_span_suffix(bit_count: usize) -> String {
     // More study required on how compatible
     assert!(bit_count > 0);
@@ -442,6 +458,7 @@ impl SvBridgeBuilder {
         ty: &dslx::Type,
         ir_value: &IrValue,
         type_annotation: Option<&dslx::TypeAnnotation>,
+        indent_level: usize,
     ) -> Result<String, XlsynthError> {
         let matchable_ty = dslx_type_to_matchable(ty)?;
         match matchable_ty.matchable_ty {
@@ -476,10 +493,11 @@ impl SvBridgeBuilder {
                         &member_type,
                         &member_value,
                         Some(&member_annotation),
+                        indent_level + 1,
                     )?;
                     fields.push(format!("{}: {initializer}", member.get_name()));
                 }
-                Ok(format!("'{{{}}}", fields.join(", ")))
+                Ok(format_assignment_pattern(&fields, indent_level))
             }
             MatchableDslxType::Array { element_ty, size } => {
                 let value_count = ir_value.get_element_count()?;
@@ -499,12 +517,13 @@ impl SvBridgeBuilder {
                         &element_ty.ty,
                         &element_value,
                         element_annotation.as_ref(),
+                        indent_level + 1,
                     )?;
                     // Explicit indices preserve DSLX indexing even though SV
                     // packed arrays are declared with descending ranges.
                     elements.push(format!("{index}: {initializer}"));
                 }
-                Ok(format!("'{{{}}}", elements.join(", ")))
+                Ok(format_assignment_pattern(&elements, indent_level))
             }
         }
     }
@@ -620,7 +639,7 @@ impl BridgeBuilder for SvBridgeBuilder {
             ))
         } else if dslx_type_to_matchable(ty).is_ok() {
             let sv_type = convert_type(ty, None)?;
-            let initializer = self.format_constant_value(ty, ir_value, None)?;
+            let initializer = self.format_constant_value(ty, ir_value, None, 0)?;
             Some(format!("localparam {sv_type} {sv_name} = {initializer};\n"))
         } else {
             log::warn!("Unsupported constant type: {ir_value:?}");
@@ -805,7 +824,10 @@ const DEFAULT_SAMPLE = Sample { channel: 16, value: 7 };
     logic [31:0] value;
 } sample_t;
 
-localparam sample_t DefaultSample = '{channel: 32'h00000010, value: 32'h00000007};
+localparam sample_t DefaultSample = '{
+    channel: 32'h00000010,
+    value: 32'h00000007
+};
 "#
         );
         xlsynth_test_helpers::assert_valid_sv(&sv);
@@ -844,7 +866,13 @@ typedef struct packed {
     logic [128:0] wide;
 } outer_t;
 
-localparam outer_t DefaultOuter = '{inner: '{delta: 8'shfd, enabled: 1'h1}, wide: 129'h100000000000000000000000000000000};
+localparam outer_t DefaultOuter = '{
+    inner: '{
+        delta: 8'shfd,
+        enabled: 1'h1
+    },
+    wide: 129'h100000000000000000000000000000000
+};
 "#
         );
         xlsynth_test_helpers::assert_valid_sv(&sv);
@@ -899,7 +927,40 @@ typedef struct packed {
     reading_t second;
 } report_t;
 
-localparam report_t [1:0] Reports = '{0: '{first: '{sample: '{channel: 32'h00000010, value: 32'h00000007}, timestamp: 32'h00000000}, second: '{sample: '{channel: 32'h00000002, value: 32'h00000008}, timestamp: 32'h00000070}}, 1: '{first: '{sample: '{channel: 32'h00000010, value: 32'h00000006}, timestamp: 32'h00000000}, second: '{sample: '{channel: 32'h00000004, value: 32'h00000008}, timestamp: 32'h00000060}}};
+localparam report_t [1:0] Reports = '{
+    0: '{
+        first: '{
+            sample: '{
+                channel: 32'h00000010,
+                value: 32'h00000007
+            },
+            timestamp: 32'h00000000
+        },
+        second: '{
+            sample: '{
+                channel: 32'h00000002,
+                value: 32'h00000008
+            },
+            timestamp: 32'h00000070
+        }
+    },
+    1: '{
+        first: '{
+            sample: '{
+                channel: 32'h00000010,
+                value: 32'h00000006
+            },
+            timestamp: 32'h00000000
+        },
+        second: '{
+            sample: '{
+                channel: 32'h00000004,
+                value: 32'h00000008
+            },
+            timestamp: 32'h00000060
+        }
+    }
+};
 "#
         );
         xlsynth_test_helpers::assert_valid_sv(&sv);
@@ -912,7 +973,17 @@ localparam report_t [1:0] Reports = '{0: '{first: '{sample: '{channel: 32'h00000
         let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(
             sv,
-            "localparam logic [1:0] [1:0] [7:0] Values = '{0: '{0: 8'h01, 1: 8'h02}, 1: '{0: 8'h03, 1: 8'h04}};\n"
+            r#"localparam logic [1:0] [1:0] [7:0] Values = '{
+    0: '{
+        0: 8'h01,
+        1: 8'h02
+    },
+    1: '{
+        0: 8'h03,
+        1: 8'h04
+    }
+};
+"#
         );
         xlsynth_test_helpers::assert_valid_sv(&sv);
     }
@@ -948,7 +1019,9 @@ typedef struct packed {
     state_t state;
 } record_t;
 
-localparam record_t DefaultRecord = '{state: state_t'(2'h1)};
+localparam record_t DefaultRecord = '{
+    state: state_t'(2'h1)
+};
 "#
         );
         xlsynth_test_helpers::assert_valid_sv(&sv);
@@ -979,7 +1052,10 @@ const DEFAULT_SAMPLE = Sample { channel: 16, value: 7 };
     logic [7:0] channel;
 } sample_t;
 
-localparam sample_t DefaultSample = '{channel: 8'h10, value: 16'h0007};
+localparam sample_t DefaultSample = '{
+    channel: 8'h10,
+    value: 16'h0007
+};
 "#
         );
         xlsynth_test_helpers::assert_valid_sv(&sv);
