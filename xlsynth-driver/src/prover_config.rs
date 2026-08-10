@@ -40,20 +40,22 @@ fn add_bool(cmd: &mut Command, name: &str, value: Option<bool>) {
     }
 }
 
-fn resolve_driver_exe() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("CARGO_BIN_EXE_xlsynth-driver") {
-        return std::path::PathBuf::from(p);
+fn driver_exe_from_current_exe(current_exe: &std::path::Path) -> PathBuf {
+    current_exe
+        .ancestors()
+        .skip(1)
+        .map(|directory| directory.join("xlsynth-driver"))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| current_exe.to_path_buf())
+}
+
+fn resolve_driver_exe() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_xlsynth-driver") {
+        PathBuf::from(path)
+    } else {
+        let current_exe = std::env::current_exe().expect("resolve current executable");
+        driver_exe_from_current_exe(&current_exe)
     }
-    let cur = std::env::current_exe().expect("resolve current exe");
-    if let Some(deps_dir) = cur.parent() {
-        if let Some(debug_dir) = deps_dir.parent() {
-            let candidate = debug_dir.join("xlsynth-driver");
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    cur
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -517,6 +519,38 @@ pub enum ProverPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_driver_exe_finds_legacy_cargo_layout() {
+        let temp_dir = tempfile::tempdir().expect("create temporary Cargo output directory");
+        let profile_dir = temp_dir.path().join("target/debug");
+        let current_exe = profile_dir.join("deps/test-binary");
+        std::fs::create_dir_all(current_exe.parent().unwrap()).expect("create test directory");
+        let driver_exe = profile_dir.join("xlsynth-driver");
+        std::fs::write(&driver_exe, []).expect("create driver executable");
+
+        assert_eq!(driver_exe_from_current_exe(&current_exe), driver_exe);
+    }
+
+    #[test]
+    fn resolve_driver_exe_finds_nested_cargo_layout() {
+        let temp_dir = tempfile::tempdir().expect("create temporary Cargo output directory");
+        let profile_dir = temp_dir.path().join("target/debug");
+        let current_exe = profile_dir.join("build/xlsynth-driver/hash/out/test-binary");
+        std::fs::create_dir_all(current_exe.parent().unwrap()).expect("create test directory");
+        let driver_exe = profile_dir.join("xlsynth-driver");
+        std::fs::write(&driver_exe, []).expect("create driver executable");
+
+        assert_eq!(driver_exe_from_current_exe(&current_exe), driver_exe);
+    }
+
+    #[test]
+    fn resolve_driver_exe_falls_back_to_current_executable() {
+        let temp_dir = tempfile::tempdir().expect("create temporary Cargo output directory");
+        let current_exe = temp_dir.path().join("target/debug/deps/test-binary");
+
+        assert_eq!(driver_exe_from_current_exe(&current_exe), current_exe);
+    }
 
     fn args_of(cmd: Command) -> Vec<String> {
         cmd.get_args()
