@@ -1230,6 +1230,165 @@ fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
     );
 }
 
+/// Verifies the CLI exports scalar, struct, and indexed struct-array constants.
+#[test]
+fn test_dslx2sv_types_subcommand_aggregate_constants() {
+    let dslx = r#"
+struct Sample {
+    channel: u8,
+    value: u8,
+}
+
+const FORMAT_VERSION = u8:3;
+const DEFAULT_SAMPLE = Sample { channel: 16, value: 7 };
+const SAMPLES = [
+    Sample { channel: 16, value: 7 },
+    Sample { channel: 4, value: 8 },
+];
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
+        .arg(&dslx_path)
+        .arg("--sv_enum_case_naming_policy")
+        .arg("unqualified")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout.trim(),
+        r#"typedef struct packed {
+    logic [7:0] channel;
+    logic [7:0] value;
+} sample_t;
+
+localparam bit unsigned [7:0] FormatVersion = 8'h03;
+
+localparam sample_t DefaultSample = '{channel: 8'h10, value: 8'h07};
+
+localparam sample_t [1:0] Samples = '{0: '{channel: 8'h10, value: 8'h07}, 1: '{channel: 8'h04, value: 8'h08}};"#
+    );
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+}
+
+/// Verifies emitted struct constants match the actual XLS-generated module ABI.
+#[test]
+fn test_dslx2sv_types_struct_constants_match_generated_pipeline_inputs() {
+    let dslx = r#"
+struct Sample {
+    channel: u8,
+    value: u16,
+}
+
+const EXPECTED_SAMPLE = Sample { channel: 0x12, value: 0x3456 };
+const SAMPLES = [
+    Sample { channel: 0x12, value: 0x3456 },
+    Sample { channel: 0xab, value: 0xcdef },
+];
+
+pub fn consume(sample: Sample) -> u24 { sample.channel ++ sample.value }
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("sample.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let dslx_path = dslx_path.to_str().unwrap();
+
+    let sv_types = String::from_utf8(run_driver_success(&[
+        "dslx2sv-types",
+        "--dslx_input_file",
+        dslx_path,
+        "--sv_enum_case_naming_policy",
+        "unqualified",
+    ]))
+    .unwrap();
+    assert_eq!(
+        sv_types.trim(),
+        r#"typedef struct packed {
+    logic [7:0] channel;
+    logic [15:0] value;
+} sample_t;
+
+localparam sample_t ExpectedSample = '{channel: 8'h12, value: 16'h3456};
+
+localparam sample_t [1:0] Samples = '{0: '{channel: 8'h12, value: 16'h3456}, 1: '{channel: 8'hab, value: 16'hcdef}};"#
+    );
+
+    let pipeline_sv = String::from_utf8(run_driver_success(&[
+        "dslx2pipeline",
+        "--dslx_input_file",
+        dslx_path,
+        "--dslx_top",
+        "consume",
+        "--delay_model",
+        "unit",
+        "--pipeline_stages",
+        "1",
+        "--module_name",
+        "sample_consumer",
+        "--flop_inputs=false",
+        "--flop_outputs=false",
+    ]))
+    .unwrap();
+
+    let package_sv = format!("package sample_sv_pkg;\n{sv_types}endpackage\n");
+    let top_sv = r#"module sample_constant_top;
+  logic [23:0] struct_result;
+  logic [23:0] array_result;
+
+  sample_consumer struct_consumer(
+    .clk(1'b0),
+    .sample(sample_sv_pkg::ExpectedSample),
+    .out(struct_result)
+  );
+
+  sample_consumer array_consumer(
+    .clk(1'b0),
+    .sample(sample_sv_pkg::Samples[1]),
+    .out(array_result)
+  );
+
+  if (sample_sv_pkg::ExpectedSample !== 24'h123456) begin : bad_struct_layout
+    nonexistent_module incorrect_struct_layout();
+  end
+  if (sample_sv_pkg::Samples[0] !== 24'h123456) begin : bad_first_element
+    nonexistent_module incorrect_first_array_element();
+  end
+  if (sample_sv_pkg::Samples[1] !== 24'habcdef) begin : bad_second_element
+    nonexistent_module incorrect_second_array_element();
+  end
+  if (sample_sv_pkg::Samples !== 48'habcdef123456) begin : bad_array_layout
+    nonexistent_module incorrect_packed_array_layout();
+  end
+endmodule
+"#;
+
+    xlsynth_test_helpers::assert_valid_sv_flist(&[
+        xlsynth_test_helpers::FlistEntry {
+            filename: "types.sv".to_string(),
+            contents: package_sv,
+        },
+        xlsynth_test_helpers::FlistEntry {
+            filename: "consumer.sv".to_string(),
+            contents: pipeline_sv,
+        },
+        xlsynth_test_helpers::FlistEntry {
+            filename: "top.sv".to_string(),
+            contents: top_sv.to_string(),
+        },
+    ]);
+}
+
 // Verifies: dslx2sv-types emits enum-qualified SV members when enum_qualified
 // policy is requested.
 // Catches: Regressions where the CLI accepts enum_qualified but the bridge

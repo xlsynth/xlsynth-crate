@@ -12,4 +12,6 @@ typedef struct packed {
     logic [15:0] x;
     logic [31:0] y;
 } point_t;
+
+localparam point_t Origin = '{x: 16'h0000, y: 32'h00000000};
 endpackage : common_zoo_sv_pkg

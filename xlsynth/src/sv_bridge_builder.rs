@@ -115,6 +115,20 @@ fn is_screaming_snake_case(name: &str) -> bool {
     })
 }
 
+/// Formats an evaluated bits value as a width- and signedness-preserving SV
+/// literal.
+fn format_bits_constant(
+    ir_value: &IrValue,
+    is_signed: bool,
+    bit_count: usize,
+) -> Result<String, XlsynthError> {
+    let hex_prefix = if is_signed { "sh" } else { "h" };
+    let hex_digits = ir_value
+        .to_string_fmt_no_prefix(IrFormatPreference::ZeroPaddedHex)?
+        .replace('_', "");
+    Ok(format!("{bit_count}'{hex_prefix}{hex_digits}"))
+}
+
 fn make_bit_span_suffix(bit_count: usize) -> String {
     // More study required on how compatible
     assert!(bit_count > 0);
@@ -421,6 +435,79 @@ impl SvBridgeBuilder {
             Ok(format!("    {member_sv_ty} {member_name};"))
         }
     }
+
+    /// Recursively renders an evaluated DSLX value as a typed SV initializer.
+    fn format_constant_value(
+        &self,
+        ty: &dslx::Type,
+        ir_value: &IrValue,
+        type_annotation: Option<&dslx::TypeAnnotation>,
+    ) -> Result<String, XlsynthError> {
+        let matchable_ty = dslx_type_to_matchable(ty)?;
+        match matchable_ty.matchable_ty {
+            MatchableDslxType::BitsLike {
+                is_signed,
+                bit_count,
+            } => format_bits_constant(ir_value, is_signed, bit_count),
+            MatchableDslxType::Enum(enum_def) => {
+                let enum_type = type_annotation
+                    .and_then(|annotation| get_extern_type_ref(annotation, ty))
+                    .unwrap_or_else(|| enum_name_to_sv(&enum_def.get_identifier()));
+                let literal = format_bits_constant(ir_value, false, ir_value.bit_count()?)?;
+                Ok(format!("{enum_type}'({literal})"))
+            }
+            MatchableDslxType::Struct(struct_def) => {
+                let member_count = struct_def.get_member_count();
+                let value_count = ir_value.get_element_count()?;
+                if member_count != value_count {
+                    return Err(XlsynthError(format!(
+                        "DSLX struct constant `{}` has {member_count} fields but its evaluated value has {value_count} elements",
+                        struct_def.get_identifier()
+                    )));
+                }
+
+                let mut fields = Vec::with_capacity(member_count);
+                for index in 0..member_count {
+                    let member = struct_def.get_member(index);
+                    let member_type = ty.get_struct_member_type(index);
+                    let member_annotation = member.get_type();
+                    let member_value = ir_value.get_element(index)?;
+                    let initializer = self.format_constant_value(
+                        &member_type,
+                        &member_value,
+                        Some(&member_annotation),
+                    )?;
+                    fields.push(format!("{}: {initializer}", member.get_name()));
+                }
+                Ok(format!("'{{{}}}", fields.join(", ")))
+            }
+            MatchableDslxType::Array { element_ty, size } => {
+                let value_count = ir_value.get_element_count()?;
+                if size != value_count {
+                    return Err(XlsynthError(format!(
+                        "DSLX array constant has {size} elements in its type but {value_count} evaluated values"
+                    )));
+                }
+
+                let element_annotation = type_annotation
+                    .and_then(dslx::TypeAnnotation::to_array_type_annotation)
+                    .map(|annotation| annotation.get_element_type());
+                let mut elements = Vec::with_capacity(size);
+                for index in 0..size {
+                    let element_value = ir_value.get_element(index)?;
+                    let initializer = self.format_constant_value(
+                        &element_ty.ty,
+                        &element_value,
+                        element_annotation.as_ref(),
+                    )?;
+                    // Explicit indices preserve DSLX indexing even though SV
+                    // packed arrays are declared with descending ranges.
+                    elements.push(format!("{index}: {initializer}"));
+                }
+                Ok(format!("'{{{}}}", elements.join(", ")))
+            }
+        }
+    }
 }
 
 impl BridgeBuilder for SvBridgeBuilder {
@@ -518,24 +605,25 @@ impl BridgeBuilder for SvBridgeBuilder {
         ty: &dslx::Type,
         ir_value: &IrValue,
     ) -> Result<(), XlsynthError> {
+        let sv_name = if is_screaming_snake_case(name) {
+            screaming_snake_to_upper_camel(name)
+        } else {
+            name.to_string()
+        };
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
-            let sv_name = if is_screaming_snake_case(name) {
-                screaming_snake_to_upper_camel(name)
-            } else {
-                name.to_string()
-            };
-            let hex_prefix = if is_signed { "sh" } else { "h" };
-            let hex_digits = ir_value
-                .to_string_fmt_no_prefix(IrFormatPreference::ZeroPaddedHex)?
-                .replace("_", "");
-
-            let value_str = format!("{bit_count}'{hex_prefix}{hex_digits}",);
+            let value_str = format_bits_constant(ir_value, is_signed, bit_count)?;
             self.lines.push(format!(
                 "localparam bit {signedness} [{}:0] {name} = {value_str};\n",
                 bit_count - 1,
                 name = sv_name,
                 signedness = if is_signed { "signed" } else { "unsigned" }
             ));
+            Ok(())
+        } else if dslx_type_to_matchable(ty).is_ok() {
+            let sv_type = convert_type(ty, None)?;
+            let initializer = self.format_constant_value(ty, ir_value, None)?;
+            self.lines
+                .push(format!("localparam {sv_type} {sv_name} = {initializer};\n"));
             Ok(())
         } else {
             log::warn!("Unsupported constant type: {ir_value:?}");
@@ -691,6 +779,216 @@ mod tests {
 } my_struct_t;
 "#
         );
+    }
+
+    /// Verifies that struct constants retain their nominal type and named
+    /// fields.
+    #[test]
+    fn test_convert_leaf_module_struct_constant() {
+        let dslx = r#"
+struct Sample {
+    channel: u32,
+    value: u32,
+}
+
+const DEFAULT_SAMPLE = Sample { channel: 16, value: 7 };
+"#;
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(
+            sv,
+            r#"typedef struct packed {
+    logic [31:0] channel;
+    logic [31:0] value;
+} sample_t;
+
+localparam sample_t DefaultSample = '{channel: 32'h00000010, value: 32'h00000007};
+"#
+        );
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+    }
+
+    /// Verifies nested structs, signed members, Boolean members, and wide
+    /// values.
+    #[test]
+    fn test_convert_leaf_module_nested_struct_constant() {
+        let dslx = r#"
+struct Inner {
+    delta: s8,
+    enabled: bool,
+}
+
+struct Outer {
+    inner: Inner,
+    wide: uN[129],
+}
+
+const DEFAULT_OUTER = Outer {
+    inner: Inner { delta: s8:-3, enabled: true },
+    wide: uN[129]:0x100000000000000000000000000000000,
+};
+"#;
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(
+            sv,
+            r#"typedef struct packed {
+    logic signed [7:0] delta;
+    logic enabled;
+} inner_t;
+
+typedef struct packed {
+    inner_t inner;
+    logic [128:0] wide;
+} outer_t;
+
+localparam outer_t DefaultOuter = '{inner: '{delta: 8'shfd, enabled: 1'h1}, wide: 129'h100000000000000000000000000000000};
+"#
+        );
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+    }
+
+    /// Verifies that indexed array patterns preserve DSLX array element
+    /// indices.
+    #[test]
+    fn test_convert_leaf_module_array_of_nested_struct_constants() {
+        let dslx = r#"
+struct Sample {
+    channel: u32,
+    value: u32,
+}
+
+struct Reading {
+    sample: Sample,
+    timestamp: u32,
+}
+
+struct Report {
+    first: Reading,
+    second: Reading,
+}
+
+const REPORTS = [
+    Report {
+        first: Reading { sample: Sample { channel: 16, value: 7 }, timestamp: 0 },
+        second: Reading { sample: Sample { channel: 2, value: 8 }, timestamp: 112 },
+    },
+    Report {
+        first: Reading { sample: Sample { channel: 16, value: 6 }, timestamp: 0 },
+        second: Reading { sample: Sample { channel: 4, value: 8 }, timestamp: 96 },
+    },
+];
+"#;
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(
+            sv,
+            r#"typedef struct packed {
+    logic [31:0] channel;
+    logic [31:0] value;
+} sample_t;
+
+typedef struct packed {
+    sample_t sample;
+    logic [31:0] timestamp;
+} reading_t;
+
+typedef struct packed {
+    reading_t first;
+    reading_t second;
+} report_t;
+
+localparam report_t [1:0] Reports = '{0: '{first: '{sample: '{channel: 32'h00000010, value: 32'h00000007}, timestamp: 32'h00000000}, second: '{sample: '{channel: 32'h00000002, value: 32'h00000008}, timestamp: 32'h00000070}}, 1: '{first: '{sample: '{channel: 32'h00000010, value: 32'h00000006}, timestamp: 32'h00000000}, second: '{sample: '{channel: 32'h00000004, value: 32'h00000008}, timestamp: 32'h00000060}}};
+"#
+        );
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+    }
+
+    /// Verifies that every packed dimension keeps its DSLX element indices.
+    #[test]
+    fn test_convert_leaf_module_multidimensional_array_constant() {
+        let dslx = "const VALUES = u8[2][2]:[[1, 2], [3, 4]];";
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(
+            sv,
+            "localparam logic [1:0] [1:0] [7:0] Values = '{0: '{0: 8'h01, 1: 8'h02}, 1: '{0: 8'h03, 1: 8'h04}};\n"
+        );
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+    }
+
+    /// Verifies typed enum casts for standalone and struct-member constants.
+    #[test]
+    fn test_convert_leaf_module_enum_constants() {
+        let dslx = r#"
+enum State : u2 {
+    IDLE = 0,
+    ACTIVE = 1,
+}
+
+const DEFAULT_STATE = State::ACTIVE;
+
+struct Record {
+    state: State,
+}
+
+const DEFAULT_RECORD = Record { state: State::ACTIVE };
+"#;
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(
+            sv,
+            r#"typedef enum logic [1:0] {
+    Idle = 2'd0,
+    Active = 2'd1
+} state_t;
+
+localparam state_t DefaultState = state_t'(2'h1);
+
+typedef struct packed {
+    state_t state;
+} record_t;
+
+localparam record_t DefaultRecord = '{state: state_t'(2'h1)};
+"#
+        );
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+    }
+
+    /// Verifies named struct fields stay correct when packed layout is
+    /// reversed.
+    #[test]
+    fn test_convert_leaf_module_struct_constant_reversed_field_order() {
+        let dslx = r#"
+struct Sample {
+    channel: u8,
+    value: u16,
+}
+
+const DEFAULT_SAMPLE = Sample { channel: 16, value: 7 };
+"#;
+        let sv = simple_convert_for_test_with_policies(
+            dslx,
+            SvEnumCaseNamingPolicy::Unqualified,
+            SvStructFieldOrderingPolicy::Reversed,
+        )
+        .unwrap();
+        assert_eq!(
+            sv,
+            r#"typedef struct packed {
+    logic [15:0] value;
+    logic [7:0] channel;
+} sample_t;
+
+localparam sample_t DefaultSample = '{channel: 8'h10, value: 16'h0007};
+"#
+        );
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+    }
+
+    /// Verifies unsupported tuple constants remain ignored for compatibility.
+    #[test]
+    fn test_convert_leaf_module_tuple_constants_remain_unsupported() {
+        let dslx = r#"
+const PAIR = (u8:1, u16:2);
+const PAIRS = [(u8:1, u16:2), (u8:3, u16:4)];
+"#;
+        assert_eq!(simple_convert_for_test(dslx).unwrap(), "");
     }
 
     #[test]
