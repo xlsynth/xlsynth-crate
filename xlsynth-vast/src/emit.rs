@@ -53,6 +53,11 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
         }
         ExprData::Binary { op, lhs, rhs } => {
             let current_precedence = binary_precedence(*op);
+            // IEEE 1800-2005 section 8.9, Table 8-3 specifies that binary
+            // exponentiation (`**`), like the other binary operators here,
+            // associates left-to-right; the ternary (`?:`) associates right.
+            // Equal-precedence left children need no parentheses, while right
+            // children must retain theirs.
             let lhs_text = parenthesize_if(
                 emit_expr(file, *lhs),
                 precedence(file, *lhs) < current_precedence || is_reduction(file, *lhs),
@@ -227,67 +232,81 @@ pub(crate) fn emit_type(file: &VastFile, data_type: VastDataType) -> String {
                 "unsigned".to_owned()
             }
         }
-        TypeData::PackedArray {
-            element,
-            dimensions,
+        TypeData::PackedArray { .. } => emit_packed_array_type(file, data_type),
+        TypeData::UnpackedArray { element, .. } => emit_type(file, *element),
+    }
+}
+
+/// Emits consecutive packed-array dimensions from the outermost wrapper inward.
+fn emit_packed_array_type(file: &VastFile, data_type: VastDataType) -> String {
+    let mut dimension_text = String::new();
+    let mut element = data_type;
+    while let TypeData::PackedArray {
+        element: nested_element,
+        dimensions,
+    } = &file.ast.data_types[element.0.index]
+    {
+        dimension_text.push_str(&packed_dimensions(dimensions));
+        element = *nested_element;
+    }
+
+    match &file.ast.data_types[element.0.index] {
+        TypeData::BitVector {
+            width,
+            width_value,
+            signed,
         } => {
-            let dimension_text = packed_dimensions(dimensions);
-            match &file.ast.data_types[element.0.index] {
-                TypeData::BitVector {
-                    width,
-                    width_value,
-                    signed,
-                } => {
-                    let signed_prefix = if *signed { "signed " } else { "" };
-                    format!(
-                        "{signed_prefix}{dimension_text}[{}:0]",
-                        width_limit(file, *width, *width_value)
-                    )
-                }
-                _ => {
-                    let element_type = emit_type(file, *element);
-                    if element_type.is_empty() {
-                        dimension_text
-                    } else {
-                        format!("{element_type} {dimension_text}")
-                    }
-                }
+            let signed_prefix = if *signed { "signed " } else { "" };
+            format!(
+                "{signed_prefix}{dimension_text}[{}:0]",
+                width_limit(file, *width, *width_value)
+            )
+        }
+        _ => {
+            let element_type = emit_type(file, element);
+            if element_type.is_empty() {
+                dimension_text
+            } else {
+                format!("{element_type} {dimension_text}")
             }
         }
-        TypeData::UnpackedArray { element, .. } => emit_type(file, *element),
     }
 }
 
 /// Emits a type around its identifier, placing unpacked dimensions afterwards.
 fn emit_type_with_identifier(file: &VastFile, data_type: VastDataType, name: &str) -> String {
-    match &file.ast.data_types[data_type.0.index] {
-        TypeData::UnpackedArray {
-            element,
-            dimensions,
-        } => {
-            let mut result = emit_type_with_identifier(file, *element, name);
-            for dimension in dimensions {
-                match file.file_type {
-                    VastFileType::SystemVerilog => {
-                        write!(result, "[{dimension}]").expect("writing to String cannot fail");
-                    }
-                    VastFileType::Verilog => {
-                        write!(result, "[0:{}]", dimension - 1)
-                            .expect("writing to String cannot fail");
-                    }
+    let mut base_type = data_type;
+    while let TypeData::UnpackedArray { element, .. } = &file.ast.data_types[base_type.0.index] {
+        base_type = *element;
+    }
+
+    let rendered_type = emit_type(file, base_type);
+    let mut result = if rendered_type.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{rendered_type} {name}")
+    };
+
+    let mut current_type = data_type;
+    while let TypeData::UnpackedArray {
+        element,
+        dimensions,
+    } = &file.ast.data_types[current_type.0.index]
+    {
+        for dimension in dimensions {
+            match file.file_type {
+                VastFileType::SystemVerilog => {
+                    write!(result, "[{dimension}]").expect("writing to String cannot fail");
+                }
+                VastFileType::Verilog => {
+                    write!(result, "[0:{}]", dimension - 1).expect("writing to String cannot fail");
                 }
             }
-            result
         }
-        _ => {
-            let rendered_type = emit_type(file, data_type);
-            if rendered_type.is_empty() {
-                name.to_owned()
-            } else {
-                format!("{rendered_type} {name}")
-            }
-        }
+        current_type = *element;
     }
+
+    result
 }
 
 /// Emits a module header and its ordered module members.
@@ -956,6 +975,45 @@ mod tests {
         assert_eq!(file.emit_expression(&outer_ternary), "(a ? b : c) ? b : c");
     }
 
+    /// Preserves IEEE Verilog's left-associative exponentiation semantics.
+    #[test]
+    fn exponentiation_associates_left_and_preserves_explicit_right_nesting() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("exponentiation");
+        let scalar = file.make_scalar_type();
+        let a = file.add_input(module, "a", &scalar).to_expr();
+        let b = file.add_input(module, "b", &scalar).to_expr();
+        let c = file.add_input(module, "c", &scalar).to_expr();
+        let d = file.add_input(module, "d", &scalar).to_expr();
+
+        let a_to_b = file.make_power(&a, &b);
+        let left_nested = file.make_power(&a_to_b, &c);
+        assert_eq!(file.emit_expression(&left_nested), "a ** b ** c");
+
+        let b_to_c = file.make_power(&b, &c);
+        let right_nested = file.make_power(&a, &b_to_c);
+        assert_eq!(file.emit_expression(&right_nested), "a ** (b ** c)");
+
+        let left_chain = file.make_power(&left_nested, &d);
+        assert_eq!(file.emit_expression(&left_chain), "a ** b ** c ** d");
+
+        let c_to_d = file.make_power(&c, &d);
+        let b_to_c_to_d = file.make_power(&b, &c_to_d);
+        let right_chain = file.make_power(&a, &b_to_c_to_d);
+        assert_eq!(file.emit_expression(&right_chain), "a ** (b ** (c ** d))");
+
+        let balanced = file.make_power(&a_to_b, &c_to_d);
+        assert_eq!(file.emit_expression(&balanced), "a ** b ** (c ** d)");
+
+        let multiplied = file.make_mul(&b, &c);
+        let mixed = file.make_power(&a, &multiplied);
+        assert_eq!(file.emit_expression(&mixed), "a ** (b * c)");
+
+        let reduced = file.make_or_reduce(&a);
+        let reduction_base = file.make_power(&reduced, &b);
+        assert_eq!(file.emit_expression(&reduction_base), "(|a) ** b");
+    }
+
     /// Eliminates illegal bit-selects and part-selects of scalar signals.
     #[test]
     fn scalar_zero_indices_are_elided() {
@@ -1171,6 +1229,119 @@ endmodule
             system_verilog.emit(),
             "module arrays;\n  wire [7:0] values[2][3];\nendmodule\n"
         );
+    }
+
+    /// Keeps nested unpacked-array wrappers in major-to-minor index order.
+    #[test]
+    fn nested_unpacked_array_dimensions_are_emitted_outermost_first() {
+        for (file_type, dimensions) in [
+            (VastFileType::Verilog, "[0:4][0:5][0:3][0:1][0:2]"),
+            (VastFileType::SystemVerilog, "[5][6][4][2][3]"),
+        ] {
+            let mut file = VastFile::new(file_type);
+            let module = file.add_module("nested_unpacked");
+            let byte = file.make_bit_vector_type(8, false);
+            let innermost = file.make_unpacked_array_type(byte, &[2, 3]);
+            let middle = file.make_unpacked_array_type(innermost, &[4]);
+            let outermost = file.make_unpacked_array_type(middle, &[5, 6]);
+            file.add_wire(module, "values", &outermost);
+
+            assert_eq!(
+                file.emit(),
+                format!("module nested_unpacked;\n  wire [7:0] values{dimensions};\nendmodule\n")
+            );
+        }
+    }
+
+    /// Flattens packed wrapper groups without losing their major dimensions.
+    #[test]
+    fn nested_packed_array_dimensions_are_contiguous_and_outermost_first() {
+        for file_type in [VastFileType::Verilog, VastFileType::SystemVerilog] {
+            let mut file = VastFile::new(file_type);
+            let module = file.add_module("nested_packed");
+            let unsigned_byte = file.make_bit_vector_type(8, false);
+            let signed_byte = file.make_bit_vector_type(8, true);
+            let unsigned_scalar = file.make_scalar_type();
+            let signed_scalar = file.make_bit_vector_type(1, true);
+
+            let inner_unsigned = file.make_packed_array_type(unsigned_byte, &[3, 4]);
+            let outer_unsigned = file.make_packed_array_type(inner_unsigned, &[2, 5]);
+            let inner_signed = file.make_packed_array_type(signed_byte, &[3, 4]);
+            let outer_signed = file.make_packed_array_type(inner_signed, &[2, 5]);
+            let inner_scalar = file.make_packed_array_type(unsigned_scalar, &[3]);
+            let outer_scalar = file.make_packed_array_type(inner_scalar, &[2]);
+            let inner_signed_scalar = file.make_packed_array_type(signed_scalar, &[3]);
+            let outer_signed_scalar = file.make_packed_array_type(inner_signed_scalar, &[2]);
+
+            file.add_wire(module, "unsigned_values", &outer_unsigned);
+            file.add_wire(module, "signed_values", &outer_signed);
+            file.add_wire(module, "scalar_values", &outer_scalar);
+            file.add_wire(module, "signed_scalar_values", &outer_signed_scalar);
+
+            assert_eq!(
+                file.emit(),
+                r#"module nested_packed;
+  wire [1:0][4:0][2:0][3:0][7:0] unsigned_values;
+  wire signed [1:0][4:0][2:0][3:0][7:0] signed_values;
+  wire [1:0][2:0] scalar_values;
+  wire signed [1:0][2:0] signed_scalar_values;
+endmodule
+"#
+            );
+        }
+    }
+
+    /// Retains external type spelling across nested packed ports and constants.
+    #[test]
+    fn nested_packed_external_types_keep_one_space_before_all_dimensions() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("nested_external");
+        let external = file.make_extern_package_type("pkg", "payload_t");
+        let inner = file.make_packed_array_type(external, &[3]);
+        let outer = file.make_packed_array_type(inner, &[2]);
+        let zero = file.make_unsized_decimal_literal(0);
+
+        file.add_typed_parameter_port(module, "Payload", &outer, &zero);
+        file.add_input(module, "request", &outer);
+        file.add_wire(module, "internal", &outer);
+
+        assert_eq!(
+            file.emit(),
+            r#"module nested_external #(
+  parameter pkg::payload_t [1:0][2:0] Payload = 0
+) (
+  input pkg::payload_t [1:0][2:0] request
+);
+  wire pkg::payload_t [1:0][2:0] internal;
+endmodule
+"#
+        );
+    }
+
+    /// Keeps packed and unpacked nesting independently ordered by major index.
+    #[test]
+    fn nested_unpacked_arrays_preserve_nested_packed_element_dimensions() {
+        for (file_type, unpacked_dimensions) in [
+            (VastFileType::Verilog, "[0:5][0:3][0:4]"),
+            (VastFileType::SystemVerilog, "[6][4][5]"),
+        ] {
+            let mut file = VastFile::new(file_type);
+            let module = file.add_module("mixed_arrays");
+            let signed_byte = file.make_bit_vector_type(8, true);
+            let inner_packed = file.make_packed_array_type(signed_byte, &[3]);
+            let outer_packed = file.make_packed_array_type(inner_packed, &[2]);
+            let inner_unpacked = file.make_unpacked_array_type(outer_packed, &[4, 5]);
+            let outer_unpacked = file.make_unpacked_array_type(inner_unpacked, &[6]);
+            file.add_wire(module, "values", &outer_unpacked);
+
+            assert_eq!(
+                file.emit(),
+                format!(
+                    "module mixed_arrays;\n  wire signed [1:0][2:0][7:0] \
+                     values{unpacked_dimensions};\nendmodule\n"
+                )
+            );
+        }
     }
 
     /// Emits external packed types without an incorrect wire/logic keyword.

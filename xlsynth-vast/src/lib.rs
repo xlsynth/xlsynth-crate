@@ -664,12 +664,29 @@ impl VastFile {
     }
 
     /// Creates a packed multidimensional array around its element type.
+    ///
+    /// Dimensions are ordered from outermost to innermost. Nesting packed
+    /// array types adds the new dimensions before the element's dimensions.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `packed arrays cannot contain unpacked array elements` when
+    /// the element contains any unpacked array dimensions. Also panics when
+    /// dimensions are empty or contain a nonpositive size.
     pub fn make_packed_array_type(
         &mut self,
         element: VastDataType,
         dimensions: &[i64],
     ) -> VastDataType {
-        self.check(element.0);
+        let element_index = self.check(element.0);
+        assert!(
+            !matches!(
+                &self.ast.data_types[element_index],
+                TypeData::UnpackedArray { .. }
+            ),
+            "packed arrays cannot contain unpacked array elements"
+        );
+
         assert!(
             !dimensions.is_empty(),
             "packed array requires at least one dimension"
@@ -685,6 +702,9 @@ impl VastFile {
     }
 
     /// Creates an unpacked multidimensional array around its element type.
+    ///
+    /// Dimensions are ordered from outermost to innermost. Nesting unpacked
+    /// array types adds the new dimensions before the element's dimensions.
     pub fn make_unpacked_array_type(
         &mut self,
         element: VastDataType,
@@ -1010,9 +1030,27 @@ impl VastFile {
     }
 
     /// Creates a SystemVerilog data-type cast.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `unpacked array types cannot be used in type casts` when
+    /// the target contains any unpacked array dimensions.
     pub fn make_type_cast(&mut self, data_type: &VastDataType, value: &Expr) -> Expr {
-        self.check(data_type.0);
+        let mut type_index = self.check(data_type.0);
         self.check(value.0);
+
+        loop {
+            let current_type = &self.ast.data_types[type_index];
+            assert!(
+                !matches!(current_type, TypeData::UnpackedArray { .. }),
+                "unpacked array types cannot be used in type casts"
+            );
+            match current_type {
+                TypeData::PackedArray { element, .. } => type_index = self.check(element.0),
+                _ => break,
+            }
+        }
+
         self.add_expression(ExprData::TypeCast {
             data_type: *data_type,
             value: *value,
