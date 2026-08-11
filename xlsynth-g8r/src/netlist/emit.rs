@@ -2,7 +2,9 @@
 
 //! Helpers for rendering parsed gate-level netlist structures as text.
 
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule, PortDirection};
+use crate::netlist::parse::{
+    AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistModule, PortDirection,
+};
 use anyhow::{Result, anyhow};
 use std::fmt::Write as FmtWrite;
 use string_interner::symbol::SymbolU32;
@@ -110,16 +112,38 @@ fn render_netref(
     }
 }
 
+/// Renders preserved structural logic with explicit precedence boundaries.
+fn render_assign_expr(
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    expression: &AssignExpr,
+) -> Result<String> {
+    match expression {
+        AssignExpr::Leaf(reference) => render_netref(nets, interner, reference),
+        AssignExpr::Not(inner) => Ok(format!("~({})", render_assign_expr(nets, interner, inner)?)),
+        AssignExpr::And(lhs, rhs) => Ok(format!(
+            "({} & {})",
+            render_assign_expr(nets, interner, lhs)?,
+            render_assign_expr(nets, interner, rhs)?
+        )),
+        AssignExpr::Or(lhs, rhs) => Ok(format!(
+            "({} | {})",
+            render_assign_expr(nets, interner, lhs)?,
+            render_assign_expr(nets, interner, rhs)?
+        )),
+        AssignExpr::Xor(lhs, rhs) => Ok(format!(
+            "({} ^ {})",
+            render_assign_expr(nets, interner, lhs)?,
+            render_assign_expr(nets, interner, rhs)?
+        )),
+    }
+}
+
 pub fn emit_module_as_netlist_text(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<String> {
-    if !module.assigns.is_empty() {
-        return Err(anyhow!(
-            "netlist emission does not support preserved continuous assigns"
-        ));
-    }
     let module_name = render_identifier(&resolve_symbol(interner, module.name, "module name")?);
     let mut out = String::new();
 
@@ -173,6 +197,35 @@ pub fn emit_module_as_netlist_text(
         writeln!(&mut out, "  wire {}{};", width_suffix(net.width), wire_name).unwrap();
     }
 
+    for assign in &module.assigns {
+        let lhs = render_netref(nets, interner, &assign.lhs)?;
+        match assign.kind {
+            NetlistAssignKind::Continuous => {
+                writeln!(
+                    &mut out,
+                    "  assign {} = {};",
+                    lhs,
+                    render_assign_expr(nets, interner, &assign.rhs)?
+                )
+                .unwrap();
+            }
+            NetlistAssignKind::Tran => {
+                let AssignExpr::Leaf(rhs) = &assign.rhs else {
+                    return Err(anyhow!(
+                        "netlist emission requires a net reference for tran terminals"
+                    ));
+                };
+                writeln!(
+                    &mut out,
+                    "  tran({}, {});",
+                    lhs,
+                    render_netref(nets, interner, rhs)?
+                )
+                .unwrap();
+            }
+        }
+    }
+
     for inst in &module.instances {
         let type_name =
             render_identifier(&resolve_symbol(interner, inst.type_name, "instance type")?);
@@ -211,6 +264,45 @@ mod tests {
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
     use crate::netlist::techmap::{StructuralTechMapOptions, map_gatefn_to_structural_netlist};
+
+    /// Checks exact emitted text and its stable parse/emit round trip.
+    fn assert_emitted_golden_round_trip(source: &str, expected: &str) {
+        let source_lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let source_lookup = move |line: u32| source_lines.get((line - 1) as usize).cloned();
+        let source_scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(source.as_bytes().to_vec()),
+            Box::new(source_lookup),
+        );
+        let mut source_parser = NetlistParser::new(source_scanner);
+        let mut source_modules = source_parser
+            .parse_file()
+            .expect("the original assignment-bearing netlist should parse");
+        assert_eq!(source_modules.len(), 1);
+        let module = source_modules.pop().expect("one source module is present");
+        let emitted =
+            emit_module_as_netlist_text(&module, &source_parser.nets, &source_parser.interner)
+                .expect("the assignment-bearing netlist should emit");
+        assert_eq!(emitted, expected);
+
+        let emitted_lines: Vec<String> = emitted.lines().map(str::to_string).collect();
+        let emitted_lookup = move |line: u32| emitted_lines.get((line - 1) as usize).cloned();
+        let emitted_scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(emitted.as_bytes().to_vec()),
+            Box::new(emitted_lookup),
+        );
+        let mut emitted_parser = NetlistParser::new(emitted_scanner);
+        let mut emitted_modules = emitted_parser
+            .parse_file()
+            .expect("the emitted assignment-bearing netlist should parse");
+        assert_eq!(emitted_modules.len(), 1);
+        let reparsed = emitted_modules
+            .pop()
+            .expect("one emitted module is present");
+        let reemitted =
+            emit_module_as_netlist_text(&reparsed, &emitted_parser.nets, &emitted_parser.interner)
+                .expect("the parsed emitted netlist should emit again");
+        assert_eq!(reemitted, expected);
+    }
 
     #[test]
     fn emitted_techmap_netlist_round_trips_through_parser() {
@@ -275,27 +367,125 @@ mod tests {
     }
 
     #[test]
-    fn emitter_rejects_preserved_continuous_assigns() {
-        let text = r#"
+    fn emitter_round_trips_signal_aliases_and_constant_assignments() {
+        let source = r#"
+module top(a, y, alias, tied);
+  input a;
+  output y, alias, tied;
+  wire internal;
+  assign internal = a;
+  assign y = internal;
+  assign alias = y;
+  assign tied = 1'b0;
+endmodule
+"#;
+        let expected = r#"module top(a, y, alias, tied);
+  input a;
+  output y;
+  output alias;
+  output tied;
+  wire internal;
+  assign internal = a;
+  assign y = internal;
+  assign alias = y;
+  assign tied = 1'b0;
+endmodule
+"#;
+
+        assert_emitted_golden_round_trip(source, expected);
+    }
+
+    #[test]
+    fn emitter_round_trips_unknown_literal_assignments() {
+        let source = r#"
+module top(y);
+  output y;
+  assign y = 1'bx;
+endmodule
+"#;
+        let expected = r#"module top(y);
+  output y;
+  assign y = 1'hx;
+endmodule
+"#;
+
+        assert_emitted_golden_round_trip(source, expected);
+    }
+
+    #[test]
+    fn emitter_round_trips_structural_expressions_and_packed_aliases() {
+        let source = r#"
+module top(a, b, y, selected);
+  input [3:0] a, b;
+  output [3:0] y;
+  output selected;
+  wire [3:0] combined;
+  assign combined = ~(a & b) ^ (a | b);
+  assign y = {combined[1:0], a[1], b[0]};
+  assign selected = y[0];
+endmodule
+"#;
+        let expected = r#"module top(a, b, y, selected);
+  input [3:0] a;
+  input [3:0] b;
+  output [3:0] y;
+  output selected;
+  wire [3:0] combined;
+  assign combined = (~((a & b)) ^ (a | b));
+  assign y = {combined[1:0], a[1], b[0]};
+  assign selected = y[0];
+endmodule
+"#;
+
+        assert_emitted_golden_round_trip(source, expected);
+    }
+
+    #[test]
+    fn emitter_round_trips_bidirectional_aliases() {
+        let source = r#"
 module top(a, y);
   input a;
   output y;
-  assign y = a;
+  tran bridge(y, a);
 endmodule
 "#;
-        let lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
-        let lookup = move |lineno: u32| lines.get((lineno - 1) as usize).cloned();
-        let scanner =
-            TokenScanner::with_line_lookup(std::io::Cursor::new(text.as_bytes()), Box::new(lookup));
-        let mut parser = NetlistParser::new(scanner);
-        let mut modules = parser.parse_file().expect("input netlist should parse");
-        let module = modules.pop().expect("one module expected");
+        let expected = r#"module top(a, y);
+  input a;
+  output y;
+  tran(y, a);
+endmodule
+"#;
 
-        let err = emit_module_as_netlist_text(&module, &parser.nets, &parser.interner)
-            .expect_err("assign-bearing modules should be rejected");
-        assert!(
-            err.to_string()
-                .contains("does not support preserved continuous assigns")
+        assert_emitted_golden_round_trip(source, expected);
+    }
+
+    #[test]
+    fn emitter_rejects_nonterminal_bidirectional_connections() {
+        let source = r#"
+module top(a, b, y);
+  input a, b;
+  output y;
+  assign y = a & b;
+endmodule
+"#;
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let lookup = move |line: u32| lines.get((line - 1) as usize).cloned();
+        let scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(source.as_bytes()),
+            Box::new(lookup),
+        );
+        let mut parser = NetlistParser::new(scanner);
+        let mut modules = parser
+            .parse_file()
+            .expect("a structural assignment should parse");
+        let module = modules.first_mut().expect("one module is present");
+        module.assigns[0].kind = NetlistAssignKind::Tran;
+
+        let error = emit_module_as_netlist_text(module, &parser.nets, &parser.interner)
+            .expect_err("bidirectional terminals must not contain structural logic");
+        assert_eq!(
+            error.to_string(),
+            "netlist emission requires a net reference for tran terminals"
         );
     }
 }
