@@ -5,18 +5,19 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use xlsynth::dslx::{self, MatchableModuleMember};
-use xlsynth::vast::VastDataType;
-use xlsynth::vast::VastFile;
-use xlsynth::vast::VastModule;
 use xlsynth::{
     DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
 };
+use xlsynth_vast::{ModulePortDirection, VastFile, VastFileType};
 
 mod common;
 use common::{PipelineCfg, Port, StageInfo};
 
 mod build_pipeline;
-use build_pipeline::{PipelineConfig as BuildPipelineConfig, build_pipeline as build_wrapper};
+use build_pipeline::{
+    PipelineConfig as BuildPipelineConfig, StageModuleInterface, StagePortInterface,
+    build_pipeline as build_wrapper,
+};
 
 pub mod g8r_pipeline;
 
@@ -41,46 +42,6 @@ pub struct StitchPipelineOptions<'a> {
     pub add_invariant_assertions: bool,
     pub array_index_bounds_checking: bool,
     pub output_module_name: &'a str,
-}
-
-/// Creates a VAST "stub" module from the given `StageInfo`.
-///
-/// XLS code-gen returns each combinational stage as a *string* of
-/// SystemVerilog; it does **not** give us a structured representation we can
-/// hand to `build_pipeline`. The wrapper generator, however, only needs each
-/// stage's *interface* (port names, directions, bit-widths) so it can declare
-/// nets and connect them.
-///
-/// We therefore synthesize a minimal `VastModule` that mirrors the port list of
-/// the real stage. The actual behavior of the design still comes from the
-/// original Verilog text that we concatenate onto the output – the stub exists
-/// solely to satisfy `build_pipeline`'s API.
-fn make_stub_module<'a>(
-    file: &'a mut VastFile,
-    stage_info: &StageInfo,
-    module_name: &str,
-    scalar_type: &VastDataType,
-    _dynamic_types: &mut Vec<VastDataType>,
-) -> VastModule {
-    let mut m: VastModule = file.add_module(module_name);
-
-    for port in &stage_info.ports {
-        let dt_ref = if port.width == 1 {
-            scalar_type.clone()
-        } else {
-            // Allocate a new type but do *not* keep ownership; this will drop at
-            // function exit and later lead to a panic when VAST tries to emit.
-            file.make_bit_vector_type(port.width as i64, false)
-        };
-
-        if port.is_input {
-            m.add_input(&port.name, &dt_ref);
-        } else {
-            m.add_output(&port.name, &dt_ref);
-        }
-    }
-
-    m
 }
 
 fn build_ports_from_ir(
@@ -480,39 +441,37 @@ pub fn stitch_pipeline<'a>(
         )?);
     }
 
-    // Prepare VAST stubs for the new build_pipeline implementation.
-    let file_type = match verilog_version {
-        VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
-        VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
-    };
-    let mut stub_file = xlsynth::vast::VastFile::new(file_type);
-    let scalar_type_stub = stub_file.make_scalar_type();
-    let mut dynamic_types_stub: Vec<xlsynth::vast::VastDataType> = Vec::new();
-    let mut stub_modules: Vec<xlsynth::vast::VastModule> = Vec::with_capacity(stage_infos.len());
-
-    for (idx, stage_info) in stage_infos.iter().enumerate() {
-        let module_name = &stages[idx].0;
-        let m = make_stub_module(
-            &mut stub_file,
-            stage_info,
-            module_name,
-            &scalar_type_stub,
-            &mut dynamic_types_stub,
-        );
-        stub_modules.push(m);
-    }
-
-    let stage_module_refs: Vec<&xlsynth::vast::VastModule> = stub_modules.iter().collect();
+    // The wrapper needs only stage interface metadata, not a second VAST file.
+    let stage_modules = stage_infos
+        .iter()
+        .zip(&stages)
+        .map(|(stage_info, (module_name, _))| StageModuleInterface {
+            name: module_name.clone(),
+            ports: stage_info
+                .ports
+                .iter()
+                .map(|port| StagePortInterface {
+                    name: port.name.clone(),
+                    direction: if port.is_input {
+                        ModulePortDirection::Input
+                    } else {
+                        ModulePortDirection::Output
+                    },
+                    width: i64::from(port.width),
+                })
+                .collect(),
+        })
+        .collect();
 
     // Generate wrapper using shared implementation.
-    let mut wrapper_file = xlsynth::vast::VastFile::new(match verilog_version {
-        VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
-        VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
+    let mut wrapper_file = VastFile::new(match verilog_version {
+        VerilogVersion::SystemVerilog => VastFileType::SystemVerilog,
+        VerilogVersion::Verilog => VastFileType::Verilog,
     });
     let pipeline_cfg = BuildPipelineConfig {
         top_module_name: opts.output_module_name.to_string(),
         clk_port_name: "clk".to_string(),
-        stage_modules: stage_module_refs,
+        stage_modules,
         flop_inputs,
         flop_outputs,
         input_valid_signal,

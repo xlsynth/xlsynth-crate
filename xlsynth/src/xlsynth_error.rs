@@ -10,3 +10,9 @@ impl std::fmt::Display for XlsynthError {
 }
 
 impl std::error::Error for XlsynthError {}
+
+impl From<xlsynth_vast::VastError> for XlsynthError {
+    fn from(error: xlsynth_vast::VastError) -> Self {
+        Self(error.to_string())
+    }
+}

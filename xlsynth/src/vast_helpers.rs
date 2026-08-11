@@ -1,30 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+//! Code-generation-option adapters for the native VAST helper library.
 
-use crate::{
-    XlsynthError,
-    ir_value::IrFormatPreference,
-    vast::{Expr, GenerateLoop, IndexableExpr, VastFile, VastModule},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
+use xlsynth_vast::{Expr, VastError, VastFile};
+
+use crate::XlsynthError;
 use crate::vast_helpers_options::{CodegenOptions, TemplateVariable};
 
-#[derive(Clone)]
-pub struct Reset {
-    pub signal: Expr,
-    pub active_low: bool,
-}
+pub use xlsynth_vast::helpers::{RegisterDefinition, RegisterScope, Reset};
 
-#[derive(Clone)]
-pub struct RegisterDefinition {
-    pub reg: Expr,
-    pub next: Expr,
-    pub reset_value: Option<Expr>,
-    pub enable: Option<Expr>,
-}
-
-fn emit_template(template: &str, keys: &HashMap<TemplateVariable, String>) -> String {
+/// Replaces normalized template placeholders with their rendered expressions.
+fn emit_template(template: &str, keys: &BTreeMap<TemplateVariable, String>) -> String {
     let mut template = template.to_string();
     for (key, value) in keys {
         let placeholder = format!("{{{{{key}}}}}");
@@ -33,65 +21,210 @@ fn emit_template(template: &str, keys: &HashMap<TemplateVariable, String>) -> St
     template
 }
 
+/// Validates and normalizes one template, including directly constructed
+/// options.
+fn normalize_register_template(
+    name: &str,
+    template: &str,
+    expected: &[TemplateVariable],
+) -> Result<String, XlsynthError> {
+    let expected = expected
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let mut found = BTreeSet::new();
+    let mut normalized = String::with_capacity(template.len());
+    let mut remaining = template;
+
+    while let Some(start) = remaining.find("{{") {
+        let prefix = &remaining[..start];
+        if prefix.contains("}}") {
+            return Err(XlsynthError(format!(
+                "register template `{name}` contains an unmatched closing placeholder"
+            )));
+        }
+        normalized.push_str(prefix);
+        let placeholder = &remaining[start + 2..];
+        let end = placeholder.find("}}").ok_or_else(|| {
+            XlsynthError(format!(
+                "register template `{name}` contains an unterminated placeholder"
+            ))
+        })?;
+        let variable = placeholder[..end].trim();
+        if variable.is_empty() || variable.contains('{') || variable.contains('}') {
+            return Err(XlsynthError(format!(
+                "register template `{name}` contains an invalid placeholder"
+            )));
+        }
+
+        found.insert(variable.to_owned());
+        normalized.push_str("{{");
+        normalized.push_str(variable);
+        normalized.push_str("}}");
+        remaining = &placeholder[end + 2..];
+    }
+    if remaining.contains("}}") {
+        return Err(XlsynthError(format!(
+            "register template `{name}` contains an unmatched closing placeholder"
+        )));
+    }
+    normalized.push_str(remaining);
+
+    if found != expected {
+        let expected = expected.into_iter().collect::<Vec<_>>().join(", ");
+        let found = found.into_iter().collect::<Vec<_>>().join(", ");
+        return Err(XlsynthError(format!(
+            "register template `{name}` variables mismatch: expected {{{expected}}} \
+             but found {{{found}}}"
+        )));
+    }
+
+    Ok(normalized)
+}
+
+/// Resolves every required register template before mutating the output file.
+fn prepare_register_templates(
+    registers: &[RegisterDefinition],
+    options: &CodegenOptions,
+) -> Result<Vec<String>, XlsynthError> {
+    registers
+        .iter()
+        .enumerate()
+        .map(|(index, register)| {
+            let (name, template, expected): (&str, Option<&String>, &[TemplateVariable]) =
+                match (register.reset_value.is_some(), register.enable.is_some()) {
+                    (true, true) => (
+                        "reg_with_reset_with_en_template",
+                        options.reg_with_reset_with_en_template.as_ref(),
+                        &[
+                            TemplateVariable::Reg,
+                            TemplateVariable::Next,
+                            TemplateVariable::Clock,
+                            TemplateVariable::Reset,
+                            TemplateVariable::ResetValue,
+                            TemplateVariable::Enable,
+                        ],
+                    ),
+                    (true, false) => (
+                        "reg_with_reset_template",
+                        options.reg_with_reset_template.as_ref(),
+                        &[
+                            TemplateVariable::Reg,
+                            TemplateVariable::Next,
+                            TemplateVariable::Clock,
+                            TemplateVariable::Reset,
+                            TemplateVariable::ResetValue,
+                        ],
+                    ),
+                    (false, true) => (
+                        "reg_with_en_template",
+                        options.reg_with_en_template.as_ref(),
+                        &[
+                            TemplateVariable::Reg,
+                            TemplateVariable::Next,
+                            TemplateVariable::Clock,
+                            TemplateVariable::Enable,
+                        ],
+                    ),
+                    (false, false) => (
+                        "reg_template",
+                        options.reg_template.as_ref(),
+                        &[
+                            TemplateVariable::Reg,
+                            TemplateVariable::Next,
+                            TemplateVariable::Clock,
+                        ],
+                    ),
+                };
+
+            let template = template.ok_or_else(|| {
+                XlsynthError(format!(
+                    "missing register template `{name}` required by register {index}"
+                ))
+            })?;
+            normalize_register_template(name, template, expected)
+        })
+        .collect()
+}
+
+/// Checks every input handle before configured templates modify the output.
+fn validate_register_handles(
+    clk: &Expr,
+    reset: Option<Reset>,
+    registers: &[RegisterDefinition],
+    scope: RegisterScope,
+    file: &VastFile,
+) {
+    file.emit_expression(clk);
+    match scope {
+        RegisterScope::Module(module) => {
+            file.module_name(module);
+        }
+        RegisterScope::GenerateLoop(generate_loop) => {
+            file.generate_genvar(generate_loop);
+        }
+    }
+    if let Some(reset) = reset {
+        file.emit_expression(&reset.signal);
+    }
+    for register in registers {
+        file.emit_expression(&register.reg);
+        file.emit_expression(&register.next);
+        if let Some(reset_value) = register.reset_value {
+            file.emit_expression(&reset_value);
+        }
+        if let Some(enable) = register.enable {
+            file.emit_expression(&enable);
+        }
+    }
+}
+
+/// Emits one configured inline-Verilog template for each register definition.
 fn emit_registers_with_templates(
     clk: &Expr,
     reset: Option<Reset>,
     registers: &[RegisterDefinition],
     file: &mut VastFile,
-    scope: &mut RegisterScope,
-    opts: &CodegenOptions,
-) -> Result<(), XlsynthError> {
-    for register in registers {
-        let mut keys: HashMap<TemplateVariable, String> = HashMap::new();
-        keys.insert(TemplateVariable::Clock, clk.emit());
-        if let Some(ref r) = reset {
-            keys.insert(TemplateVariable::Reset, r.signal.emit());
+    scope: RegisterScope,
+    templates: &[String],
+) {
+    for (register, template) in registers.iter().zip(templates) {
+        let mut keys: BTreeMap<TemplateVariable, String> = BTreeMap::new();
+        keys.insert(TemplateVariable::Clock, file.emit_expression(clk));
+        if let Some(reset) = reset {
+            keys.insert(TemplateVariable::Reset, file.emit_expression(&reset.signal));
         }
-        keys.insert(TemplateVariable::Reg, register.reg.emit());
-        keys.insert(TemplateVariable::Next, register.next.emit());
-        if let Some(reset_value) = &register.reset_value {
-            keys.insert(TemplateVariable::ResetValue, reset_value.emit());
+        keys.insert(TemplateVariable::Reg, file.emit_expression(&register.reg));
+        keys.insert(TemplateVariable::Next, file.emit_expression(&register.next));
+        if let Some(reset_value) = register.reset_value {
+            keys.insert(
+                TemplateVariable::ResetValue,
+                file.emit_expression(&reset_value),
+            );
         }
-        if let Some(enable) = &register.enable {
-            keys.insert(TemplateVariable::Enable, enable.emit());
+        if let Some(enable) = register.enable {
+            keys.insert(TemplateVariable::Enable, file.emit_expression(&enable));
         }
-        let inline_string = match (
-            keys.get(&TemplateVariable::ResetValue),
-            keys.get(&TemplateVariable::Enable),
-        ) {
-            // TODO(meheff): use a CodegenOptions verify method instead of these unwraps
-            (Some(_), Some(_)) => emit_template(
-                opts.reg_with_reset_with_en_template.as_ref().unwrap(),
-                &keys,
-            ),
-            (Some(_), None) => emit_template(opts.reg_with_reset_template.as_ref().unwrap(), &keys),
-            (None, Some(_)) => emit_template(opts.reg_with_en_template.as_ref().unwrap(), &keys),
-            (None, None) => emit_template(opts.reg_template.as_ref().unwrap(), &keys),
-        };
+
+        let inline_string = emit_template(template, &keys);
         let inline_statement = file.make_inline_verilog_statement(&format!("{inline_string};"));
         match scope {
             RegisterScope::Module(module) => {
-                module.add_member_inline_statement(inline_statement);
+                file.add_member_inline_statement(module, inline_statement);
             }
             RegisterScope::GenerateLoop(generate_loop) => {
-                generate_loop.add_inline_statement(&inline_statement);
+                file.generate_add_inline_statement(generate_loop, &inline_statement);
             }
         }
     }
-    Ok(())
 }
 
-pub enum RegisterScope<'a> {
-    Module(&'a mut VastModule),
-    GenerateLoop(&'a mut GenerateLoop),
-}
-
-// Defines an always_ff block for the given registers.
-pub fn add_registers<'a>(
+/// Adds registers through configured templates or the native VAST helper.
+pub fn add_registers(
     clk: &Expr,
     reset: Option<Reset>,
     registers: &[RegisterDefinition],
-    scope: &mut RegisterScope<'a>,
+    scope: RegisterScope,
     file: &mut VastFile,
     options: Option<&CodegenOptions>,
 ) -> Result<(), XlsynthError> {
@@ -99,11 +232,13 @@ pub fn add_registers<'a>(
         return Ok(());
     }
 
-    let any_with_reset = registers.iter().any(|r| r.reset_value.is_some());
-    if any_with_reset {
-        assert!(
-            reset.is_some(),
-            "Reset must be provided when any register has a reset value"
+    if reset.is_none()
+        && registers
+            .iter()
+            .any(|register| register.reset_value.is_some())
+    {
+        return Err(
+            VastError("reset signal is required when a register has a reset value".into()).into(),
         );
     }
 
@@ -115,586 +250,436 @@ pub fn add_registers<'a>(
             &opts.reg_with_reset_with_en_template,
         ]
         .iter()
-        .any(|t| t.is_some())
+        .any(|template| template.is_some())
     {
-        return emit_registers_with_templates(clk, reset, registers, file, scope, opts);
+        let templates = prepare_register_templates(registers, opts)?;
+        validate_register_handles(clk, reset, registers, scope, file);
+        emit_registers_with_templates(clk, reset, registers, file, scope, &templates);
+        return Ok(());
     }
 
-    // Build a single always_ff block for all registers
-    let posedge_clk = file.make_pos_edge(clk);
-    let mut always_ff = match scope {
-        RegisterScope::Module(module) => {
-            module.add_always_ff(&[&posedge_clk])?.get_statement_block()
-        }
-        RegisterScope::GenerateLoop(generate_loop) => generate_loop
-            .add_always_ff(&[&posedge_clk])?
-            .get_statement_block(),
-    };
-
-    // Precompute assigned values (with enable ternary when provided)
-    let mut assigned_values: Vec<Expr> = Vec::with_capacity(registers.len());
-    for r in registers.iter() {
-        let val: Expr = match &r.enable {
-            Some(en) => file.make_ternary(en, &r.next, &r.reg),
-            None => r.next.clone(),
-        };
-        assigned_values.push(val);
-    }
-
-    // Unconditionally assign registers without reset values
-    for (i, r) in registers.iter().enumerate() {
-        if r.reset_value.is_none() {
-            always_ff.add_nonblocking_assignment(&r.reg, &assigned_values[i]);
-        }
-    }
-
-    // Conditionally assign registers with reset values
-    if any_with_reset {
-        let rst = reset.expect("reset must be provided when registers have reset values");
-        let cond_expr = if rst.active_low {
-            file.make_logical_not(&rst.signal)
-        } else {
-            rst.signal.clone()
-        };
-        let cond = always_ff.add_cond(&cond_expr);
-        let mut then_blk = cond.then_block();
-        let mut else_blk = cond.add_else();
-        for (i, r) in registers.iter().enumerate() {
-            if let Some(ref rv) = r.reset_value {
-                then_blk.add_nonblocking_assignment(&r.reg, rv);
-                else_blk.add_nonblocking_assignment(&r.reg, &assigned_values[i]);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// Internal helper to fold a list of expressions using a binary reducer.
-// - inputs: slice of expressions to reduce
-// - identity: expression used when inputs is empty
-// - combine: function that combines two expressions into one (e.g., a || b)
-fn reduce_with<F>(
-    inputs: &[Expr],
-    identity: Expr,
-    mut combine: F,
-    file: &mut VastFile,
-) -> Result<Expr, XlsynthError>
-where
-    F: FnMut(&mut VastFile, &Expr, &Expr) -> Expr,
-{
-    if inputs.is_empty() {
-        return Ok(identity);
-    }
-    if inputs.len() == 1 {
-        return Ok(inputs[0].clone());
-    }
-    let mut temps: Vec<Expr> = Vec::new();
-    let mut accum: &Expr = &inputs[0];
-    for input in inputs[1..].iter() {
-        temps.push(combine(file, accum, input));
-        accum = temps.last().unwrap();
-    }
-    Ok(accum.clone())
-}
-
-pub fn logical_or_reduce(
-    inputs: &[Expr],
-    invert: bool,
-    file: &mut VastFile,
-) -> Result<Expr, XlsynthError> {
-    if inputs.is_empty() && invert {
-        // Special case to avoid emitting !1'h0.
-        return file.make_literal("bits[1]:1", &IrFormatPreference::Hex);
-    }
-    let id0 = file.make_literal("bits[1]:0", &IrFormatPreference::Hex)?;
-    let reduced = reduce_with(inputs, id0, |f, a, b| f.make_logical_or(a, b), file)?;
-    if invert {
-        Ok(file.make_logical_not(&reduced))
-    } else {
-        Ok(reduced)
-    }
-}
-
-pub fn logical_and_reduce(
-    inputs: &[Expr],
-    invert: bool,
-    file: &mut VastFile,
-) -> Result<Expr, XlsynthError> {
-    if inputs.is_empty() && invert {
-        // Special case to avoid emitting !1'h1.
-        return file.make_literal("bits[1]:0", &IrFormatPreference::Hex);
-    };
-    let id1 = file.make_literal("bits[1]:1", &IrFormatPreference::Hex)?;
-    let reduced = reduce_with(inputs, id1, |f, a, b| f.make_logical_and(a, b), file)?;
-    if invert {
-        Ok(file.make_logical_not(&reduced))
-    } else {
-        Ok(reduced)
-    }
-}
-
-pub fn bitwise_or_reduce(inputs: &[Expr], file: &mut VastFile) -> Result<Expr, XlsynthError> {
-    let id = file.make_unsized_zero_literal();
-    reduce_with(inputs, id, |f, a, b| f.make_bitwise_or(a, b), file)
-}
-
-// Gathers all of the elements of the packed array given by `expr` into
-// `elements`. `expr` should be a packed array with dimensions matching
-// `dimensions` (major dimension first). Elements are created by making Verilog
-// index expressions.
-fn gather_elements(
-    expr: &IndexableExpr,
-    dimensions: &[i64],
-    elements: &mut Vec<Expr>,
-    file: &mut VastFile,
-) {
-    if dimensions.is_empty() {
-        elements.push(expr.to_expr());
-    } else {
-        for i in 0..dimensions[0] {
-            let index_literal = file.make_plain_literal(i as i32, &IrFormatPreference::Default);
-            let index_expr = file
-                .make_index_expr(expr, &index_literal)
-                .to_indexable_expr();
-            gather_elements(&index_expr, &dimensions[1..], elements, file);
-        }
-    }
-}
-
-/// Returns an expression which is the bitwise OR of all of the elements of the
-/// packed array given by `expr`. `expr` should be a packed array with
-/// dimensions matching `dimensions` (major dimension first).
-pub fn bitwise_or_reduce_array_elements(
-    expr: &IndexableExpr,
-    dimensions: &[i64],
-    file: &mut VastFile,
-) -> Result<Expr, XlsynthError> {
-    let mut elements: Vec<Expr> = Vec::new();
-    gather_elements(expr, dimensions, &mut elements, file);
-    bitwise_or_reduce(&elements, file)
+    xlsynth_vast::helpers::add_registers(clk, reset, registers, scope, file).map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::vast::{VastFile, VastFileType};
-    use pretty_assertions::assert_eq;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use xlsynth_vast::{LiteralFormat, VastFileType};
 
     use super::*;
 
     #[test]
-    fn test_logical_or_reduce_various_arity() {
+    fn options_free_register_generation_delegates_to_native_helpers() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let mut module = file.add_module("lor");
-
-        // Inputs: scalar logic signals
+        let module = file.add_module("delegated_register");
         let scalar = file.make_scalar_type();
-        let a = module.add_input("a", &scalar);
-        let b = module.add_input("b", &scalar);
-        let c = module.add_input("c", &scalar);
-
-        // Outputs
-        let o0 = module.add_output("o0", &scalar);
-        let o1 = module.add_output("o1", &scalar);
-        let o2 = module.add_output("o2", &scalar);
-        let o3 = module.add_output("o3", &scalar);
-
-        // 0 inputs -> 0
-        let e0 = logical_or_reduce(&[], false, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o0.to_expr(), &e0));
-
-        // 1 input -> a
-        let e1 = logical_or_reduce(&[a.to_expr()], false, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o1.to_expr(), &e1));
-
-        // 2 inputs -> a || b
-        let e2 = logical_or_reduce(&[a.to_expr(), b.to_expr()], false, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o2.to_expr(), &e2));
-
-        // 3 inputs -> a || b || c
-        let e3 =
-            logical_or_reduce(&[a.to_expr(), b.to_expr(), c.to_expr()], false, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o3.to_expr(), &e3));
-
-        let verilog = file.emit();
-        let want = r#"module lor(
-  input wire a,
-  input wire b,
-  input wire c,
-  output wire o0,
-  output wire o1,
-  output wire o2,
-  output wire o3
-);
-  assign o0 = 1'h0;
-  assign o1 = a;
-  assign o2 = a || b;
-  assign o3 = a || b || c;
-endmodule
-"#;
-        assert_eq!(verilog, want);
-    }
-
-    #[test]
-    fn test_add_registers_with_reset_and_enable() {
-        let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let mut module = file.add_module("regs_rst_en");
-
-        let bit1 = file.make_bit_vector_type(1, false);
-        let u8 = file.make_bit_vector_type(8, false);
-
-        let clk = module.add_input("clk", &bit1);
-        let clk_expr = clk.to_expr();
-        let rst = module.add_input("rst", &bit1);
-        let en = module.add_input("en", &bit1);
-        let r = module.add_logic("r", &u8).expect("add_logic r");
-        let r_next = module.add_logic("r_next", &u8).expect("add_logic r_next");
-        let r2 = module.add_logic("r2", &u8).expect("add_logic r2");
-        let r2_next = module.add_logic("r2_next", &u8).expect("add_logic r2_next");
-
-        let reset_val = file
-            .make_literal("bits[8]:0xAA", &IrFormatPreference::Hex)
-            .expect("literal ok");
-        let reset_val_r2 = file
-            .make_literal("bits[8]:0x55", &IrFormatPreference::Hex)
-            .expect("literal ok");
-
-        let regs = [
-            RegisterDefinition {
-                reg: r.to_expr(),
-                next: r_next.to_expr(),
-                reset_value: Some(reset_val),
-                enable: Some(en.to_expr()),
-            },
-            RegisterDefinition {
-                reg: r2.to_expr(),
-                next: r2_next.to_expr(),
-                reset_value: Some(reset_val_r2),
-                enable: None,
-            },
-        ];
+        let clock = file.add_input(module, "clock", &scalar);
+        let reset = file.add_input(module, "reset", &scalar);
+        let enable = file.add_input(module, "enable", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let register = file
+            .add_logic(module, "state", &scalar)
+            .expect("register name is unique");
+        let reset_value = file
+            .make_literal("bits[1]:0", &LiteralFormat::Hex)
+            .expect("valid reset literal");
 
         add_registers(
-            &clk_expr,
+            &clock.to_expr(),
             Some(Reset {
-                signal: rst.to_expr(),
-                active_low: true,
+                signal: reset.to_expr(),
+                active_low: false,
             }),
-            &regs,
-            &mut RegisterScope::Module(&mut module),
+            &[RegisterDefinition {
+                reg: register.to_expr(),
+                next: data.to_expr(),
+                reset_value: Some(reset_value),
+                enable: Some(enable.to_expr()),
+            }],
+            RegisterScope::Module(module),
             &mut file,
             None,
         )
-        .expect("add_registers ok");
+        .expect("native register helper succeeds");
 
-        let sv = file.emit();
-        let want = r#"module regs_rst_en(
-  input wire clk,
-  input wire rst,
-  input wire en
+        let expected = r#"module delegated_register(
+  input wire clock,
+  input wire reset,
+  input wire enable,
+  input wire data
 );
-  logic [7:0] r;
-  logic [7:0] r_next;
-  logic [7:0] r2;
-  logic [7:0] r2_next;
-  always_ff @ (posedge clk) begin
-    if (!rst) begin
-      r <= 8'haa;
-      r2 <= 8'h55;
+  logic state;
+  always_ff @ (posedge clock) begin
+    if (reset) begin
+      state <= 1'h0;
     end else begin
-      r <= en ? r_next : r;
-      r2 <= r2_next;
+      state <= enable ? data : state;
     end
   end
 endmodule
 "#;
-        assert_eq!(sv, want);
+        assert_eq!(file.emit(), expected);
     }
 
     #[test]
-    fn test_add_registers_no_reset_path() {
+    fn configured_templates_cover_plain_enabled_reset_and_reset_enabled_registers() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let mut module = file.add_module("regs_no_rst");
+        let module = file.add_module("templated_registers");
+        let scalar = file.make_scalar_type();
+        let clock = file.add_input(module, "clock", &scalar);
+        let reset = file.add_input(module, "reset", &scalar);
+        let enable = file.add_input(module, "enable", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let plain = file.add_logic(module, "plain", &scalar).unwrap();
+        let enabled = file.add_logic(module, "enabled", &scalar).unwrap();
+        let resetting = file.add_logic(module, "resetting", &scalar).unwrap();
+        let resetting_enabled = file
+            .add_logic(module, "resetting_enabled", &scalar)
+            .unwrap();
+        let zero = file.make_literal("bits[1]:0", &LiteralFormat::Hex).unwrap();
 
-        let bit1 = file.make_bit_vector_type(1, false);
-        let u8 = file.make_bit_vector_type(8, false);
-
-        let clk = module.add_input("clk", &bit1);
-        let clk_expr = clk.to_expr();
-        let en = module.add_input("en", &bit1);
-        let r = module.add_logic("r", &u8).expect("add_logic r");
-        let r_next = module.add_logic("r_next", &u8).expect("add_logic r_next");
-        let r2 = module.add_logic("r2", &u8).expect("add_logic r2");
-        let r2_next = module.add_logic("r2_next", &u8).expect("add_logic r2_next");
-
-        let regs = [
+        let options = CodegenOptions {
+            reg_template: Some("PLAIN({{clock}}, {{reg}}, {{next}})".into()),
+            reg_with_en_template: Some("EN({{clock}}, {{reg}}, {{next}}, {{en}})".into()),
+            reg_with_reset_template: Some(
+                "RESET({{clock}}, {{reset}}, {{reg}}, {{next}}, {{reset_value}})".into(),
+            ),
+            reg_with_reset_with_en_template: Some(
+                "RESET_EN({{clock}}, {{reset}}, {{reg}}, {{next}}, {{reset_value}}, {{en}})".into(),
+            ),
+            ..CodegenOptions::default()
+        };
+        let registers = [
             RegisterDefinition {
-                reg: r.to_expr(),
-                next: r_next.to_expr(),
-                reset_value: None,
-                enable: Some(en.to_expr()),
-            },
-            RegisterDefinition {
-                reg: r2.to_expr(),
-                next: r2_next.to_expr(),
+                reg: plain.to_expr(),
+                next: data.to_expr(),
                 reset_value: None,
                 enable: None,
+            },
+            RegisterDefinition {
+                reg: enabled.to_expr(),
+                next: data.to_expr(),
+                reset_value: None,
+                enable: Some(enable.to_expr()),
+            },
+            RegisterDefinition {
+                reg: resetting.to_expr(),
+                next: data.to_expr(),
+                reset_value: Some(zero),
+                enable: None,
+            },
+            RegisterDefinition {
+                reg: resetting_enabled.to_expr(),
+                next: data.to_expr(),
+                reset_value: Some(zero),
+                enable: Some(enable.to_expr()),
             },
         ];
 
         add_registers(
-            &clk_expr,
-            None,
-            &regs,
-            &mut RegisterScope::Module(&mut module),
-            &mut file,
-            None,
-        )
-        .expect("add_registers ok");
-
-        let sv = file.emit();
-        let want = r#"module regs_no_rst(
-  input wire clk,
-  input wire en
-);
-  logic [7:0] r;
-  logic [7:0] r_next;
-  logic [7:0] r2;
-  logic [7:0] r2_next;
-  always_ff @ (posedge clk) begin
-    r <= en ? r_next : r;
-    r2 <= r2_next;
-  end
-endmodule
-"#;
-        assert_eq!(sv, want);
-    }
-
-    #[test]
-    fn test_add_registers_mixed_resets_panics() {
-        // Mixed resets are now supported; verify generated output
-        let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let mut module = file.add_module("regs_mixed");
-
-        let bit1 = file.make_bit_vector_type(1, false);
-        let u8 = file.make_bit_vector_type(8, false);
-
-        let clk = module.add_input("clk", &bit1);
-        let clk_expr = clk.to_expr();
-        let rst = module.add_input("rst", &bit1);
-        let en = module.add_input("en", &bit1);
-        let r1 = module.add_logic("r1", &u8).expect("r1");
-        let n1 = module.add_logic("n1", &u8).expect("n1");
-        let r2 = module.add_logic("r2", &u8).expect("r2");
-        let n2 = module.add_logic("n2", &u8).expect("n2");
-
-        let reset_val = file
-            .make_literal("bits[8]:0xAA", &IrFormatPreference::Hex)
-            .expect("literal ok");
-
-        let regs = [
-            RegisterDefinition {
-                reg: r1.to_expr(),
-                next: n1.to_expr(),
-                reset_value: Some(reset_val),
-                enable: Some(en.to_expr()),
-            },
-            RegisterDefinition {
-                reg: r2.to_expr(),
-                next: n2.to_expr(),
-                reset_value: None,
-                enable: None,
-            },
-        ];
-
-        add_registers(
-            &clk_expr,
+            &clock.to_expr(),
             Some(Reset {
-                signal: rst.to_expr(),
-                active_low: true,
+                signal: reset.to_expr(),
+                active_low: false,
             }),
-            &regs,
-            &mut RegisterScope::Module(&mut module),
+            &registers,
+            RegisterScope::Module(module),
             &mut file,
-            None,
+            Some(&options),
         )
-        .expect("add_registers ok");
+        .expect("all configured register templates render");
 
-        let sv = file.emit();
-        let want = r#"module regs_mixed(
-  input wire clk,
-  input wire rst,
-  input wire en
+        let expected = r#"module templated_registers(
+  input wire clock,
+  input wire reset,
+  input wire enable,
+  input wire data
 );
-  logic [7:0] r1;
-  logic [7:0] n1;
-  logic [7:0] r2;
-  logic [7:0] n2;
-  always_ff @ (posedge clk) begin
-    r2 <= n2;
-    if (!rst) begin
-      r1 <= 8'haa;
-    end else begin
-      r1 <= en ? n1 : r1;
-    end
-  end
+  logic plain;
+  logic enabled;
+  logic resetting;
+  logic resetting_enabled;
+  PLAIN(clock, plain, data);
+  EN(clock, enabled, data, enable);
+  RESET(clock, reset, resetting, data, 1'h0);
+  RESET_EN(clock, reset, resetting_enabled, data, 1'h0, enable);
 endmodule
 "#;
-        assert_eq!(sv, want);
+        assert_eq!(file.emit(), expected);
     }
 
     #[test]
-    fn test_add_registers_missing_reset_panics() {
-        let res = std::panic::catch_unwind(|| {
-            let mut file = VastFile::new(VastFileType::SystemVerilog);
-            let mut module = file.add_module("regs_missing_rst");
+    fn configured_register_templates_can_be_emitted_inside_generate_loops() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("templated_generate");
+        let scalar = file.make_scalar_type();
+        let clock = file.add_input(module, "clock", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let register = file.add_logic(module, "state", &scalar).unwrap();
+        let zero = file.make_plain_literal(0, &LiteralFormat::Default);
+        let one = file.make_plain_literal(1, &LiteralFormat::Default);
+        let generate = file.add_generate_loop(module, "index", &zero, &one, Some("lanes"));
+        let options = CodegenOptions {
+            reg_template: Some("REGISTER({{clock}}, {{reg}}, {{next}})".into()),
+            ..CodegenOptions::default()
+        };
 
-            let bit1 = file.make_bit_vector_type(1, false);
-            let u8 = file.make_bit_vector_type(8, false);
-
-            let clk = module.add_input("clk", &bit1);
-            let clk_expr = clk.to_expr();
-            let r = module.add_logic("r", &u8).expect("r");
-            let n = module.add_logic("n", &u8).expect("n");
-            let reset_val = file
-                .make_literal("bits[8]:0xAA", &IrFormatPreference::Hex)
-                .expect("literal ok");
-
-            let regs = [RegisterDefinition {
-                reg: r.to_expr(),
-                next: n.to_expr(),
-                reset_value: Some(reset_val),
+        add_registers(
+            &clock.to_expr(),
+            None,
+            &[RegisterDefinition {
+                reg: register.to_expr(),
+                next: data.to_expr(),
+                reset_value: None,
                 enable: None,
-            }];
+            }],
+            RegisterScope::GenerateLoop(generate),
+            &mut file,
+            Some(&options),
+        )
+        .expect("generate-scope register template renders");
 
-            let _ = add_registers(
-                &clk_expr,
-                None,
-                &regs,
-                &mut RegisterScope::Module(&mut module),
-                &mut file,
-                None,
-            );
-        });
-        assert!(
-            res.is_err(),
-            "expected panic when reset not provided but required"
+        let expected = r#"module templated_generate(
+  input wire clock,
+  input wire data
+);
+  logic state;
+  for (genvar index = 0; index < 1; index = index + 1) begin : lanes
+    REGISTER(clock, state, data);
+  end
+endmodule
+"#;
+        assert_eq!(file.emit(), expected);
+    }
+
+    #[test]
+    fn missing_template_variant_is_rejected_before_any_register_is_emitted() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("partial_templates");
+        let scalar = file.make_scalar_type();
+        let clock = file.add_input(module, "clock", &scalar);
+        let enable = file.add_input(module, "enable", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let plain = file.add_logic(module, "plain", &scalar).unwrap();
+        let enabled = file.add_logic(module, "enabled", &scalar).unwrap();
+        let options = CodegenOptions {
+            reg_template: Some("REGISTER({{clock}}, {{reg}}, {{next}})".into()),
+            ..CodegenOptions::default()
+        };
+        let registers = [
+            RegisterDefinition {
+                reg: plain.to_expr(),
+                next: data.to_expr(),
+                reset_value: None,
+                enable: None,
+            },
+            RegisterDefinition {
+                reg: enabled.to_expr(),
+                next: data.to_expr(),
+                reset_value: None,
+                enable: Some(enable.to_expr()),
+            },
+        ];
+        let before = file.emit();
+
+        let error = add_registers(
+            &clock.to_expr(),
+            None,
+            &registers,
+            RegisterScope::Module(module),
+            &mut file,
+            Some(&options),
+        )
+        .expect_err("each register shape requires a matching configured template");
+
+        assert_eq!(
+            error.0,
+            "missing register template `reg_with_en_template` required by register 1"
         );
+        assert_eq!(file.emit(), before);
     }
-    #[test]
-    fn test_logical_or_reduce_inverted() {
-        let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let mut module = file.add_module("lori");
 
-        // Inputs: scalar logic signals
+    #[test]
+    fn directly_constructed_malformed_templates_are_rejected_without_mutation() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("malformed_templates");
         let scalar = file.make_scalar_type();
-        let a = module.add_input("a", &scalar);
-        let b = module.add_input("b", &scalar);
-        let c = module.add_input("c", &scalar);
+        let clock = file.add_input(module, "clock", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let register = file.add_logic(module, "state", &scalar).unwrap();
+        let definition = RegisterDefinition {
+            reg: register.to_expr(),
+            next: data.to_expr(),
+            reset_value: None,
+            enable: None,
+        };
+        let cases = [
+            (
+                "REGISTER({{clock}}, {{reg}})",
+                "register template `reg_template` variables mismatch: expected \
+                 {clock, next, reg} but found {clock, reg}",
+            ),
+            (
+                "REGISTER({{clock}}, {{reg}}, {{unknown}})",
+                "register template `reg_template` variables mismatch: expected \
+                 {clock, next, reg} but found {clock, reg, unknown}",
+            ),
+            (
+                "REGISTER({{clock}}, {{reg}}, {{next)",
+                "register template `reg_template` contains an unterminated placeholder",
+            ),
+            (
+                "REGISTER({{clock}}, {{reg}}, {{next}}}})",
+                "register template `reg_template` contains an unmatched closing placeholder",
+            ),
+        ];
+        let before = file.emit();
 
-        // Outputs
-        let o0 = module.add_output("o0", &scalar);
-        let o1 = module.add_output("o1", &scalar);
-        let o2 = module.add_output("o2", &scalar);
-        let o3 = module.add_output("o3", &scalar);
+        for (template, expected) in cases {
+            let options = CodegenOptions {
+                reg_template: Some(template.into()),
+                ..CodegenOptions::default()
+            };
+            let error = add_registers(
+                &clock.to_expr(),
+                None,
+                &[definition],
+                RegisterScope::Module(module),
+                &mut file,
+                Some(&options),
+            )
+            .expect_err("invalid register templates are rejected");
 
-        // 0 inputs -> 1
-        let e0 = logical_or_reduce(&[], true, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o0.to_expr(), &e0));
-
-        // 1 input -> !a
-        let e1 = logical_or_reduce(&[a.to_expr()], true, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o1.to_expr(), &e1));
-
-        // 2 inputs -> !(a || b)
-        let e2 = logical_or_reduce(&[a.to_expr(), b.to_expr()], true, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o2.to_expr(), &e2));
-
-        // 3 inputs -> !(a || b || c)
-        let e3 =
-            logical_or_reduce(&[a.to_expr(), b.to_expr(), c.to_expr()], true, &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o3.to_expr(), &e3));
-
-        let verilog = file.emit();
-        let want = r#"module lori(
-  input wire a,
-  input wire b,
-  input wire c,
-  output wire o0,
-  output wire o1,
-  output wire o2,
-  output wire o3
-);
-  assign o0 = 1'h1;
-  assign o1 = !a;
-  assign o2 = !(a || b);
-  assign o3 = !(a || b || c);
-endmodule
-"#;
-        assert_eq!(verilog, want);
+            assert_eq!(error.0, expected);
+            assert_eq!(file.emit(), before);
+        }
     }
 
     #[test]
-    fn test_bitwise_or_reduce_various_arity() {
+    fn directly_constructed_templates_normalize_placeholder_whitespace() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let mut module = file.add_module("bor");
+        let module = file.add_module("normalized_template");
+        let scalar = file.make_scalar_type();
+        let clock = file.add_input(module, "clock", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let register = file.add_logic(module, "state", &scalar).unwrap();
+        let options = CodegenOptions {
+            reg_template: Some("REGISTER({{ clock }}, {{ reg }}, {{ next }})".into()),
+            ..CodegenOptions::default()
+        };
 
-        // Inputs: 8-bit vectors
-        let u8 = file.make_bit_vector_type(8, false);
-        let a = module.add_input("a", &u8);
-        let b = module.add_input("b", &u8);
-        let c = module.add_input("c", &u8);
+        add_registers(
+            &clock.to_expr(),
+            None,
+            &[RegisterDefinition {
+                reg: register.to_expr(),
+                next: data.to_expr(),
+                reset_value: None,
+                enable: None,
+            }],
+            RegisterScope::Module(module),
+            &mut file,
+            Some(&options),
+        )
+        .expect("directly constructed placeholders are normalized");
 
-        // Outputs
-        let o0 = module.add_output("o0", &u8);
-        let o1 = module.add_output("o1", &u8);
-        let o2 = module.add_output("o2", &u8);
-        let o3 = module.add_output("o3", &u8);
-
-        // 0 inputs -> '0
-        let e0 = bitwise_or_reduce(&[], &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o0.to_expr(), &e0));
-
-        // 1 input -> a
-        let e1 = bitwise_or_reduce(&[a.to_expr()], &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o1.to_expr(), &e1));
-
-        // 2 inputs -> a | b
-        let e2 = bitwise_or_reduce(&[a.to_expr(), b.to_expr()], &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o2.to_expr(), &e2));
-
-        // 3 inputs -> a | b | c
-        let e3 = bitwise_or_reduce(&[a.to_expr(), b.to_expr(), c.to_expr()], &mut file).unwrap();
-        module
-            .add_member_continuous_assignment(file.make_continuous_assignment(&o3.to_expr(), &e3));
-
-        let verilog = file.emit();
-        let want = r#"module bor(
-  input wire [7:0] a,
-  input wire [7:0] b,
-  input wire [7:0] c,
-  output wire [7:0] o0,
-  output wire [7:0] o1,
-  output wire [7:0] o2,
-  output wire [7:0] o3
+        let expected = r#"module normalized_template(
+  input wire clock,
+  input wire data
 );
-  assign o0 = '0;
-  assign o1 = a;
-  assign o2 = a | b;
-  assign o3 = a | b | c;
+  logic state;
+  REGISTER(clock, state, data);
 endmodule
 "#;
-        assert_eq!(verilog, want);
+        assert_eq!(file.emit(), expected);
+    }
+
+    #[test]
+    fn missing_reset_returns_an_error_in_native_and_template_adapter_paths() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("missing_reset");
+        let scalar = file.make_scalar_type();
+        let clock = file.add_input(module, "clock", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let register = file.add_logic(module, "state", &scalar).unwrap();
+        let reset_value = file.make_literal("bits[1]:0", &LiteralFormat::Hex).unwrap();
+        let definition = RegisterDefinition {
+            reg: register.to_expr(),
+            next: data.to_expr(),
+            reset_value: Some(reset_value),
+            enable: None,
+        };
+        let options = CodegenOptions {
+            reg_with_reset_template: Some(
+                "RESET({{clock}}, {{reset}}, {{reg}}, {{next}}, {{reset_value}})".into(),
+            ),
+            ..CodegenOptions::default()
+        };
+        let before = file.emit();
+
+        for options in [None, Some(&options)] {
+            let error = add_registers(
+                &clock.to_expr(),
+                None,
+                &[definition],
+                RegisterScope::Module(module),
+                &mut file,
+                options,
+            )
+            .expect_err("register reset values require a reset signal");
+
+            assert_eq!(
+                error.0,
+                "reset signal is required when a register has a reset value"
+            );
+            assert_eq!(file.emit(), before);
+        }
+    }
+
+    #[test]
+    fn foreign_later_register_is_rejected_before_templates_mutate_the_module() {
+        let mut foreign_file = VastFile::new(VastFileType::SystemVerilog);
+        let foreign_value = foreign_file.make_plain_literal(1, &LiteralFormat::Default);
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("foreign_template");
+        let scalar = file.make_scalar_type();
+        let clock = file.add_input(module, "clock", &scalar);
+        let data = file.add_input(module, "data", &scalar);
+        let first = file.add_logic(module, "first", &scalar).unwrap();
+        let second = file.add_logic(module, "second", &scalar).unwrap();
+        let options = CodegenOptions {
+            reg_template: Some("REGISTER({{clock}}, {{reg}}, {{next}})".into()),
+            ..CodegenOptions::default()
+        };
+        let registers = [
+            RegisterDefinition {
+                reg: first.to_expr(),
+                next: data.to_expr(),
+                reset_value: None,
+                enable: None,
+            },
+            RegisterDefinition {
+                reg: second.to_expr(),
+                next: foreign_value,
+                reset_value: None,
+                enable: None,
+            },
+        ];
+        let before = file.emit();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            add_registers(
+                &clock.to_expr(),
+                None,
+                &registers,
+                RegisterScope::Module(module),
+                &mut file,
+                Some(&options),
+            )
+        }));
+
+        assert!(result.is_err(), "foreign handles are rejected");
+        assert_eq!(file.emit(), before);
     }
 }
