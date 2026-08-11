@@ -66,7 +66,7 @@ fn maximum_width_zero_and_small_positive_literals_remain_compact() {
 #[should_panic(expected = "bit-vector width must be greater than zero")]
 fn expression_based_vector_types_reject_zero_literal_widths() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let zero = file.make_plain_literal(0, &LiteralFormat::Default);
+    let zero = file.make_unsized_decimal_literal(0);
 
     file.make_bit_vector_type_expr(&zero, false);
 }
@@ -75,7 +75,7 @@ fn expression_based_vector_types_reject_zero_literal_widths() {
 #[should_panic(expected = "bit-vector width must be greater than zero")]
 fn expression_based_vector_types_reject_negative_literal_widths() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let negative = file.make_plain_literal(-1, &LiteralFormat::Default);
+    let negative = file.make_unsized_decimal_literal(-1);
 
     file.make_bit_vector_type_expr(&negative, false);
 }
@@ -84,7 +84,7 @@ fn expression_based_vector_types_reject_negative_literal_widths() {
 fn expression_based_single_bit_vectors_preserve_explicit_ranges() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("explicit_one_bit");
-    let one = file.make_plain_literal(1, &LiteralFormat::Default);
+    let one = file.make_unsized_decimal_literal(1);
     let vector = file.make_bit_vector_type_expr(&one, false);
     file.add_input(module, "data", &vector);
 
@@ -109,7 +109,7 @@ fn typed_parameter_ports_preserve_builtin_and_user_defined_type_identity() {
     let unsigned_int = file.make_int_type(false);
     let local_type = file.make_extern_type("payload_t");
     let package_type = file.make_extern_package_type("bus_pkg", "payload_t");
-    let one = file.make_plain_literal(1, &LiteralFormat::Default);
+    let one = file.make_unsized_decimal_literal(1);
 
     for (name, data_type) in [
         ("Flag", scalar),
@@ -178,9 +178,9 @@ fn builtin_and_external_type_casts_preserve_type_and_signedness() {
 fn vector_type_casts_preserve_symbolic_width_expressions() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("symbolic_cast");
-    let default_width = file.make_plain_literal(8, &LiteralFormat::Default);
+    let default_width = file.make_unsized_decimal_literal(8);
     let width = file.add_parameter_port(module, "WIDTH", &default_width);
-    let one = file.make_plain_literal(1, &LiteralFormat::Default);
+    let one = file.make_unsized_decimal_literal(1);
     let width_plus_one = file.make_add(&width.to_expr(), &one);
     let signed_width = file.make_bit_vector_type_expr(&width.to_expr(), true);
     let unsigned_width_plus_one = file.make_bit_vector_type_expr(&width_plus_one, false);

@@ -33,18 +33,22 @@ pub use model::{
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Controls how an arbitrary-width integer appears in generated Verilog.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LiteralFormat {
-    #[default]
-    Default,
+    /// A sized, zero-padded unsigned binary literal, such as `8'b0000_0011`.
     Binary,
-    SignedDecimal,
-    UnsignedDecimal,
+    /// A sized, zero-padded unsigned hexadecimal literal, such as `8'h03`.
     Hex,
-    PlainBinary,
-    ZeroPaddedBinary,
-    PlainHex,
-    ZeroPaddedHex,
+    /// A sized, signed two's-complement decimal literal, such as `-8'sd1`.
+    SignedDecimal,
+    /// A sized unsigned decimal literal, such as `8'd255`.
+    UnsignedDecimal,
+    /// An unsized unsigned binary literal, such as `'b11`.
+    UnsizedBinary,
+    /// An unsized decimal literal in the signed 32-bit range, such as `255`.
+    UnsizedDecimal,
+    /// An unsized unsigned hexadecimal literal, such as `'hff`.
+    UnsizedHex,
 }
 
 /// Describes an invalid literal, unavailable width, or unsupported declaration.
@@ -554,8 +558,12 @@ impl VastFile {
     /// Creates a width-annotated, arbitrary-precision integer literal.
     ///
     /// Literal widths must be between one and 1,048,576 bits.
+    /// Unsized decimal magnitudes must fit in [`i32::MAX`]; unsized binary and
+    /// hexadecimal magnitudes must fit in [`u32::MAX`]. These portable bounds
+    /// apply to the value, regardless of its declared source width.
     pub fn make_literal(&mut self, text: &str, format: &LiteralFormat) -> Result<Expr, VastError> {
         let literal = Literal::parse(text)?;
+        literal.validate_format(*format)?;
         let value = literal.value.to_str_radix(10).parse::<i64>().ok();
         Ok(self.add_expression(ExprData::Literal {
             text: literal.format(*format),
@@ -563,9 +571,11 @@ impl VastFile {
         }))
     }
 
-    /// Creates an unsized decimal literal; the format is retained for API
-    /// parity.
-    pub fn make_plain_literal(&mut self, value: i32, _format: &LiteralFormat) -> Expr {
+    /// Creates an unsized decimal literal from any signed 32-bit value.
+    ///
+    /// Negative values, including [`i32::MIN`], are emitted with their leading
+    /// minus sign; nonnegative values are emitted without a size or radix.
+    pub fn make_unsized_decimal_literal(&mut self, value: i32) -> Expr {
         self.add_expression(ExprData::Literal {
             text: value.to_string(),
             value: Some(i64::from(value)),

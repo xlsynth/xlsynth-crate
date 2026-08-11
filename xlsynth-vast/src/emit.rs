@@ -833,8 +833,8 @@ mod tests {
     fn cross_file_compound_expressions_are_rejected() {
         let mut first = VastFile::new(VastFileType::Verilog);
         let mut second = VastFile::new(VastFileType::Verilog);
-        let local = first.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
-        let foreign = second.make_plain_literal(2, &LiteralFormat::UnsignedDecimal);
+        let local = first.make_unsized_decimal_literal(1);
+        let foreign = second.make_unsized_decimal_literal(2);
 
         first.make_concat(&[&local, &foreign]);
     }
@@ -896,7 +896,7 @@ mod tests {
     fn duplicate_parameters_remain_permitted() {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("parameters");
-        let value = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
+        let value = file.make_unsized_decimal_literal(1);
         file.add_parameter(module, "P", &value);
         file.add_parameter(module, "P", &value);
 
@@ -990,7 +990,7 @@ mod tests {
     #[should_panic(expected = "bit-vector width must be greater than zero")]
     fn zero_expression_vector_widths_are_rejected() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let zero = file.make_plain_literal(0, &LiteralFormat::Default);
+        let zero = file.make_unsized_decimal_literal(0);
 
         file.make_bit_vector_type_expr(&zero, false);
     }
@@ -1000,7 +1000,7 @@ mod tests {
     #[should_panic(expected = "bit-vector width must be greater than zero")]
     fn negative_expression_vector_widths_are_rejected() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
-        let negative = file.make_plain_literal(-1, &LiteralFormat::Default);
+        let negative = file.make_unsized_decimal_literal(-1);
 
         file.make_bit_vector_type_expr(&negative, true);
     }
@@ -1010,7 +1010,7 @@ mod tests {
     fn one_bit_expression_vector_widths_preserve_their_explicit_range() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("one_bit_vector");
-        let one = file.make_plain_literal(1, &LiteralFormat::Default);
+        let one = file.make_unsized_decimal_literal(1);
         let vector = file.make_bit_vector_type_expr(&one, false);
         file.add_wire(module, "value", &vector);
 
@@ -1034,7 +1034,7 @@ mod tests {
         let external = file.make_extern_type("payload_t");
         let packaged = file.make_extern_package_type("bus_pkg", "word_t");
         let packed_external = file.make_packed_array_type(packaged, &[2]);
-        let value = file.make_plain_literal(7, &LiteralFormat::Default);
+        let value = file.make_unsized_decimal_literal(7);
 
         for (name, data_type) in [
             ("Scalar", scalar),
@@ -1098,7 +1098,7 @@ endmodule
             assert_eq!(file.emit_expression(&cast), expected);
         }
 
-        let default_width = file.make_plain_literal(8, &LiteralFormat::Default);
+        let default_width = file.make_unsized_decimal_literal(8);
         let width = file
             .add_parameter_port(module, "WIDTH", &default_width)
             .to_expr();
@@ -1106,7 +1106,7 @@ endmodule
         let cast = file.make_type_cast(&symbolic, &value);
         assert_eq!(file.emit_expression(&cast), "signed'(WIDTH'(value))");
 
-        let one = file.make_plain_literal(1, &LiteralFormat::Default);
+        let one = file.make_unsized_decimal_literal(1);
         let incremented_width = file.make_add(&width, &one);
         let compound = file.make_bit_vector_type_expr(&incremented_width, false);
         let compound_cast = file.make_type_cast(&compound, &value);
@@ -1132,7 +1132,7 @@ endmodule
         );
 
         let plain_hex = file
-            .make_literal("bits[80]:0x10000", &LiteralFormat::PlainHex)
+            .make_literal("bits[80]:0x10000", &LiteralFormat::UnsizedHex)
             .expect("valid unsized hexadecimal literal");
         assert_eq!(file.emit_expression(&plain_hex), "'h1_0000");
 

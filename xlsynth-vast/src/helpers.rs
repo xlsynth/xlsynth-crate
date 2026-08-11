@@ -800,8 +800,8 @@ endmodule
         let state = file
             .add_logic(module, "state", &scalar)
             .expect("register name is unique");
-        let zero = file.make_plain_literal(0, &LiteralFormat::Default);
-        let one = file.make_plain_literal(1, &LiteralFormat::Default);
+        let zero = file.make_unsized_decimal_literal(0);
+        let one = file.make_unsized_decimal_literal(1);
         let generate = file.add_generate_loop(module, "index", &zero, &one, Some("lanes"));
 
         add_registers(
@@ -837,7 +837,7 @@ endmodule
     #[should_panic(expected = "VAST handle belongs to a different file")]
     fn logical_or_reduction_rejects_a_foreign_singleton() {
         let mut original = VastFile::new(VastFileType::SystemVerilog);
-        let foreign = original.make_plain_literal(1, &LiteralFormat::Default);
+        let foreign = original.make_unsized_decimal_literal(1);
         let mut destination = VastFile::new(VastFileType::SystemVerilog);
 
         let _ = logical_or_reduce(&[foreign], false, &mut destination);
@@ -847,7 +847,7 @@ endmodule
     #[should_panic(expected = "VAST handle belongs to a different file")]
     fn logical_and_reduction_rejects_a_foreign_singleton() {
         let mut original = VastFile::new(VastFileType::SystemVerilog);
-        let foreign = original.make_plain_literal(1, &LiteralFormat::Default);
+        let foreign = original.make_unsized_decimal_literal(1);
         let mut destination = VastFile::new(VastFileType::SystemVerilog);
 
         let _ = logical_and_reduce(&[foreign], false, &mut destination);
@@ -857,7 +857,7 @@ endmodule
     #[should_panic(expected = "VAST handle belongs to a different file")]
     fn bitwise_or_reduction_rejects_a_foreign_singleton() {
         let mut original = VastFile::new(VastFileType::SystemVerilog);
-        let foreign = original.make_plain_literal(1, &LiteralFormat::Default);
+        let foreign = original.make_unsized_decimal_literal(1);
         let mut destination = VastFile::new(VastFileType::SystemVerilog);
 
         let _ = bitwise_or_reduce(&[foreign], &mut destination);

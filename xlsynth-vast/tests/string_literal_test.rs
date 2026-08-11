@@ -2,7 +2,7 @@
 
 //! Golden tests for Verilog strings and string-valued parameter expressions.
 
-use xlsynth_vast::{DataKind, LiteralFormat, VastFile, VastFileType};
+use xlsynth_vast::{DataKind, VastFile, VastFileType};
 
 #[test]
 fn simple_and_empty_strings_are_quoted_in_both_verilog_dialects() {
@@ -90,7 +90,7 @@ fn mixed_string_and_numeric_instance_parameters_preserve_insertion_order() {
     let scalar = file.make_scalar_type();
     let clock = file.add_input(module, "clock", &scalar).to_expr();
     let label = file.make_string_literal("example");
-    let width = file.make_plain_literal(64, &LiteralFormat::UnsignedDecimal);
+    let width = file.make_unsized_decimal_literal(64);
     let path = file.make_string_literal(r"nested\value");
     let instance = file.make_instantiation(
         "example_module",

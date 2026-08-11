@@ -6,7 +6,7 @@ use xlsynth_vast::{DataKind, Expr, LiteralFormat, ModulePortDirection, VastFile,
 
 /// Creates the unsized decimal literals used throughout upstream VAST tests.
 fn plain(file: &mut VastFile, value: i32) -> Expr {
-    file.make_plain_literal(value, &LiteralFormat::UnsignedDecimal)
+    file.make_unsized_decimal_literal(value)
 }
 
 /// Creates a width-preserving hexadecimal literal without relying on XLS.

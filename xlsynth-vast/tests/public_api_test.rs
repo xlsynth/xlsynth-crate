@@ -62,11 +62,11 @@ fn literals_support_values_wider_than_rust_primitive_integers() {
 }
 
 #[test]
-fn wide_default_literals_do_not_lose_their_declared_bit_width() {
+fn wide_sized_decimal_literals_preserve_their_declared_bit_width() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let literal = file
-        .make_literal("bits[96]:42", &LiteralFormat::Default)
-        .expect("wide default literals remain representable");
+        .make_literal("bits[96]:42", &LiteralFormat::UnsignedDecimal)
+        .expect("wide sized decimal literals remain representable");
 
     assert_eq!(file.emit_expression(&literal), "96'd42");
 }

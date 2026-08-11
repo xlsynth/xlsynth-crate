@@ -97,27 +97,50 @@ impl Literal {
         Ok(Self { width, value })
     }
 
+    /// Rejects unsized values whose magnitude is not portable across tools.
+    pub(crate) fn validate_format(&self, format: LiteralFormat) -> Result<(), VastError> {
+        match format {
+            LiteralFormat::UnsizedDecimal if self.value > BigUint::from(i32::MAX as u32) => {
+                Err(VastError(format!(
+                    "unsized decimal literal magnitude {} exceeds maximum {}",
+                    self.value,
+                    i32::MAX
+                )))
+            }
+            LiteralFormat::UnsizedBinary | LiteralFormat::UnsizedHex
+                if self.value > BigUint::from(u32::MAX) =>
+            {
+                let radix = if matches!(format, LiteralFormat::UnsizedBinary) {
+                    "binary"
+                } else {
+                    "hexadecimal"
+                };
+                Err(VastError(format!(
+                    "unsized {radix} literal magnitude {} exceeds maximum {}",
+                    self.value,
+                    u32::MAX
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Emits a literal with the same width and grouping conventions as XLS
     /// VAST.
     pub(crate) fn format(&self, format: LiteralFormat) -> String {
-        if self.width > 1024 && self.value == BigUint::from(0u8) {
-            let specifier = match format {
-                LiteralFormat::Binary | LiteralFormat::ZeroPaddedBinary => "b",
-                LiteralFormat::Hex | LiteralFormat::ZeroPaddedHex => "h",
-                LiteralFormat::Default
-                | LiteralFormat::PlainBinary
-                | LiteralFormat::PlainHex
-                | LiteralFormat::SignedDecimal
-                | LiteralFormat::UnsignedDecimal => "d",
+        if self.width > 1024
+            && self.value == BigUint::from(0u8)
+            && matches!(format, LiteralFormat::Binary | LiteralFormat::Hex)
+        {
+            let specifier = if matches!(format, LiteralFormat::Binary) {
+                "b"
+            } else {
+                "h"
             };
             return format!("{}'{}0", self.width, specifier);
         }
 
         match format {
-            LiteralFormat::Default if self.width > 32 => {
-                format!("{}'d{}", self.width, self.value.to_str_radix(10))
-            }
-            LiteralFormat::Default => self.value.to_str_radix(10),
             LiteralFormat::UnsignedDecimal => {
                 format!("{}'d{}", self.width, self.value.to_str_radix(10))
             }
@@ -135,19 +158,20 @@ impl Literal {
                     format!("{}'sd{digits}", self.width)
                 }
             }
-            LiteralFormat::Binary | LiteralFormat::ZeroPaddedBinary => {
+            LiteralFormat::Binary => {
                 let digits = pad_digits(self.value.to_str_radix(2), self.width.max(1));
                 format!("{}'b{}", self.width, group_digits(&digits))
             }
-            LiteralFormat::PlainBinary => {
+            LiteralFormat::UnsizedBinary => {
                 format!("'b{}", self.value.to_str_radix(2))
             }
-            LiteralFormat::Hex | LiteralFormat::ZeroPaddedHex => {
+            LiteralFormat::Hex => {
                 let digit_count = self.width.div_ceil(4).max(1);
                 let digits = pad_digits(self.value.to_str_radix(16), digit_count);
                 format!("{}'h{}", self.width, group_digits(&digits))
             }
-            LiteralFormat::PlainHex => {
+            LiteralFormat::UnsizedDecimal => self.value.to_str_radix(10),
+            LiteralFormat::UnsizedHex => {
                 format!("'h{}", group_digits(&self.value.to_str_radix(16)))
             }
         }
@@ -178,7 +202,7 @@ fn group_digits(digits: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Literal, MAX_LITERAL_BIT_WIDTH};
-    use crate::LiteralFormat;
+    use crate::{LiteralFormat, VastFile, VastFileType};
 
     #[test]
     fn wide_hex_literals_keep_leading_zeroes_and_groups() {
@@ -191,16 +215,16 @@ mod tests {
     }
 
     #[test]
-    fn plain_hex_literals_keep_grouping_without_a_width() {
+    fn unsized_hex_literals_keep_grouping_without_a_width() {
         let literal = Literal::parse("bits[32]:0x10000").expect("valid literal");
-        assert_eq!(literal.format(LiteralFormat::PlainHex), "'h1_0000");
+        assert_eq!(literal.format(LiteralFormat::UnsizedHex), "'h1_0000");
     }
 
     #[test]
     fn binary_literals_are_padded_and_grouped() {
         let literal = Literal::parse("bits[9]:0b11").expect("valid literal");
         assert_eq!(literal.format(LiteralFormat::Binary), "9'b0_0000_0011");
-        assert_eq!(literal.format(LiteralFormat::PlainBinary), "'b11");
+        assert_eq!(literal.format(LiteralFormat::UnsizedBinary), "'b11");
     }
 
     #[test]
@@ -273,22 +297,26 @@ mod tests {
     }
 
     #[test]
-    fn huge_zero_literals_are_compact() {
+    fn huge_zero_literals_preserve_each_format_sizing_and_signedness() {
         let literal = Literal::parse("bits[4096]:0").expect("valid literal");
         assert_eq!(literal.format(LiteralFormat::Hex), "4096'h0");
         assert_eq!(literal.format(LiteralFormat::Binary), "4096'b0");
-        assert_eq!(literal.format(LiteralFormat::PlainBinary), "4096'd0");
-        assert_eq!(literal.format(LiteralFormat::PlainHex), "4096'd0");
-        assert_eq!(literal.format(LiteralFormat::SignedDecimal), "4096'd0");
+        assert_eq!(literal.format(LiteralFormat::SignedDecimal), "4096'sd0");
+        assert_eq!(literal.format(LiteralFormat::UnsignedDecimal), "4096'd0");
+        assert_eq!(literal.format(LiteralFormat::UnsizedBinary), "'b0");
+        assert_eq!(literal.format(LiteralFormat::UnsizedDecimal), "0");
+        assert_eq!(literal.format(LiteralFormat::UnsizedHex), "'h0");
     }
 
     #[test]
-    fn wide_default_literals_preserve_their_declared_width() {
+    fn decimal_formats_explicitly_choose_sized_or_unsized_emission() {
         let narrow = Literal::parse("bits[32]:42").expect("valid narrow literal");
         let wide = Literal::parse("bits[96]:42").expect("valid wide literal");
 
-        assert_eq!(narrow.format(LiteralFormat::Default), "42");
-        assert_eq!(wide.format(LiteralFormat::Default), "96'd42");
+        assert_eq!(narrow.format(LiteralFormat::UnsizedDecimal), "42");
+        assert_eq!(narrow.format(LiteralFormat::UnsignedDecimal), "32'd42");
+        assert_eq!(wide.format(LiteralFormat::UnsizedDecimal), "42");
+        assert_eq!(wide.format(LiteralFormat::UnsignedDecimal), "96'd42");
     }
 
     #[test]
@@ -307,5 +335,158 @@ mod tests {
         assert_eq!(negative.format(LiteralFormat::SignedDecimal), "-8'sd1");
         assert_eq!(minimum.format(LiteralFormat::SignedDecimal), "-8'sd128");
         assert_eq!(positive.format(LiteralFormat::SignedDecimal), "8'sd127");
+    }
+
+    #[test]
+    fn every_format_emits_its_explicit_sizing_and_radix() {
+        let literal = Literal::parse("bits[8]:0xa5").expect("valid literal");
+
+        for (format, expected) in [
+            (LiteralFormat::Binary, "8'b1010_0101"),
+            (LiteralFormat::Hex, "8'ha5"),
+            (LiteralFormat::SignedDecimal, "-8'sd91"),
+            (LiteralFormat::UnsignedDecimal, "8'd165"),
+            (LiteralFormat::UnsizedBinary, "'b10100101"),
+            (LiteralFormat::UnsizedDecimal, "165"),
+            (LiteralFormat::UnsizedHex, "'ha5"),
+        ] {
+            assert_eq!(literal.format(format), expected);
+        }
+    }
+
+    #[test]
+    fn unsized_decimal_validation_accepts_the_signed_32_bit_maximum() {
+        let maximum = Literal::parse(&format!("bits[1025]:{}", i32::MAX))
+            .expect("a small magnitude fits a wide source type");
+        maximum
+            .validate_format(LiteralFormat::UnsizedDecimal)
+            .expect("the maximum portable decimal magnitude is valid");
+        assert_eq!(
+            maximum.format(LiteralFormat::UnsizedDecimal),
+            i32::MAX.to_string()
+        );
+
+        let excessive =
+            Literal::parse("bits[32]:2147483648").expect("the magnitude fits its source bit width");
+        assert_eq!(
+            excessive
+                .validate_format(LiteralFormat::UnsizedDecimal)
+                .expect_err("decimal literals must fit in a signed 32-bit value")
+                .to_string(),
+            "unsized decimal literal magnitude 2147483648 exceeds maximum 2147483647"
+        );
+        excessive
+            .validate_format(LiteralFormat::UnsignedDecimal)
+            .expect("sized decimal literals retain arbitrary precision");
+    }
+
+    #[test]
+    fn unsized_based_validation_accepts_the_unsigned_32_bit_maximum() {
+        let maximum = Literal::parse("bits[4096]:0xffff_ffff")
+            .expect("a 32-bit magnitude fits a wide source type");
+        for format in [LiteralFormat::UnsizedBinary, LiteralFormat::UnsizedHex] {
+            maximum
+                .validate_format(format)
+                .expect("all unsigned 32-bit magnitudes are portable");
+        }
+        assert_eq!(
+            maximum.format(LiteralFormat::UnsizedBinary),
+            "'b11111111111111111111111111111111"
+        );
+        assert_eq!(maximum.format(LiteralFormat::UnsizedHex), "'hffff_ffff");
+
+        let excessive =
+            Literal::parse("bits[33]:4294967296").expect("the magnitude fits its source bit width");
+        assert_eq!(
+            excessive
+                .validate_format(LiteralFormat::UnsizedBinary)
+                .expect_err("unsized binary magnitudes must fit in 32 bits")
+                .to_string(),
+            "unsized binary literal magnitude 4294967296 exceeds maximum 4294967295"
+        );
+        assert_eq!(
+            excessive
+                .validate_format(LiteralFormat::UnsizedHex)
+                .expect_err("unsized hexadecimal magnitudes must fit in 32 bits")
+                .to_string(),
+            "unsized hexadecimal literal magnitude 4294967296 exceeds maximum 4294967295"
+        );
+        excessive
+            .validate_format(LiteralFormat::Binary)
+            .expect("sized binary literals retain arbitrary precision");
+        excessive
+            .validate_format(LiteralFormat::Hex)
+            .expect("sized hexadecimal literals retain arbitrary precision");
+    }
+
+    #[test]
+    fn typed_negative_literals_are_validated_by_their_unsigned_bit_pattern() {
+        let small = Literal::parse("bits[8]:-1").expect("valid two's-complement literal");
+        small
+            .validate_format(LiteralFormat::UnsizedDecimal)
+            .expect("the eight-bit unsigned magnitude is portable");
+        assert_eq!(small.format(LiteralFormat::UnsizedDecimal), "255");
+
+        let wide = Literal::parse("bits[33]:-1").expect("valid wide two's-complement literal");
+        assert!(wide.validate_format(LiteralFormat::UnsizedBinary).is_err());
+        assert!(wide.validate_format(LiteralFormat::UnsizedHex).is_err());
+        assert!(wide.validate_format(LiteralFormat::UnsizedDecimal).is_err());
+    }
+
+    #[test]
+    fn public_literal_builder_rejects_nonportable_unsized_magnitudes() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let before = file.ast.expressions.len();
+
+        assert!(
+            file.make_literal("bits[32]:2147483648", &LiteralFormat::UnsizedDecimal)
+                .is_err()
+        );
+        assert!(
+            file.make_literal("bits[64]:4294967296", &LiteralFormat::UnsizedBinary)
+                .is_err()
+        );
+        assert!(
+            file.make_literal("bits[64]:4294967296", &LiteralFormat::UnsizedHex)
+                .is_err()
+        );
+        assert_eq!(file.ast.expressions.len(), before);
+
+        let decimal = file
+            .make_literal("bits[4096]:42", &LiteralFormat::UnsizedDecimal)
+            .expect("wide source widths do not restrict small unsized magnitudes");
+        assert_eq!(file.emit_expression(&decimal), "42");
+    }
+
+    #[test]
+    fn dedicated_unsized_decimal_builder_accepts_the_complete_i32_range() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+
+        for (value, expected) in [
+            (i32::MIN, "-2147483648"),
+            (-1, "-1"),
+            (0, "0"),
+            (1, "1"),
+            (i32::MAX, "2147483647"),
+        ] {
+            let literal = file.make_unsized_decimal_literal(value);
+            assert_eq!(file.emit_expression(&literal), expected);
+        }
+    }
+
+    #[test]
+    fn compact_zero_optimization_starts_above_1024_bits() {
+        let threshold = Literal::parse("bits[1024]:0").expect("valid threshold literal");
+        let padded_hex = threshold.format(LiteralFormat::Hex);
+        assert_eq!(padded_hex, format!("1024'h{}", "0000_".repeat(63) + "0000"));
+
+        let compact = Literal::parse("bits[1025]:0").expect("valid compact literal");
+        assert_eq!(compact.format(LiteralFormat::Binary), "1025'b0");
+        assert_eq!(compact.format(LiteralFormat::Hex), "1025'h0");
+        assert_eq!(compact.format(LiteralFormat::SignedDecimal), "1025'sd0");
+        assert_eq!(compact.format(LiteralFormat::UnsignedDecimal), "1025'd0");
+        assert_eq!(compact.format(LiteralFormat::UnsizedBinary), "'b0");
+        assert_eq!(compact.format(LiteralFormat::UnsizedDecimal), "0");
+        assert_eq!(compact.format(LiteralFormat::UnsizedHex), "'h0");
     }
 }

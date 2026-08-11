@@ -146,8 +146,8 @@ fn unpacked_arrays_with_packed_elements_match_both_upstream_dialects() {
 fn symbolic_width_expression_matches_upstream_multiplication_example() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("symbolic");
-    let ten = file.make_plain_literal(10, &LiteralFormat::UnsignedDecimal);
-    let five = file.make_plain_literal(5, &LiteralFormat::UnsignedDecimal);
+    let ten = file.make_unsized_decimal_literal(10);
+    let five = file.make_unsized_decimal_literal(5);
     let width = file.make_mul(&ten, &five);
     let data_type = file.make_bit_vector_type_expr(&width, false);
     file.add_wire(module, "foo", &data_type);
@@ -201,7 +201,7 @@ fn literal_matrix_matches_upstream_values_and_grouping() {
         ("bits[1]:0", LiteralFormat::UnsignedDecimal, "1'd0"),
         ("bits[3]:2", LiteralFormat::Hex, "3'h2"),
         ("bits[3]:2", LiteralFormat::Binary, "3'b010"),
-        ("bits[32]:55", LiteralFormat::Default, "55"),
+        ("bits[32]:55", LiteralFormat::UnsizedDecimal, "55"),
         (
             "bits[32]:55",
             LiteralFormat::Binary,
@@ -248,10 +248,11 @@ fn huge_zero_literals_switch_to_compact_upstream_spelling() {
     let cases = [
         (LiteralFormat::Binary, "1025'b0"),
         (LiteralFormat::Hex, "1025'h0"),
-        (LiteralFormat::Default, "1025'd0"),
+        (LiteralFormat::SignedDecimal, "1025'sd0"),
         (LiteralFormat::UnsignedDecimal, "1025'd0"),
-        (LiteralFormat::PlainBinary, "1025'd0"),
-        (LiteralFormat::PlainHex, "1025'd0"),
+        (LiteralFormat::UnsizedBinary, "'b0"),
+        (LiteralFormat::UnsizedDecimal, "0"),
+        (LiteralFormat::UnsizedHex, "'h0"),
     ];
 
     for (format, expected) in cases {
@@ -269,25 +270,25 @@ fn huge_zero_literals_switch_to_compact_upstream_spelling() {
 }
 
 #[test]
-fn plain_radix_formats_keep_upstream_width_and_separator_rules() {
+fn unsized_and_sized_radix_formats_preserve_width_and_separator_rules() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let plain_hex = file
-        .make_literal("bits[32]:0x10000", &LiteralFormat::PlainHex)
-        .expect("valid plain hexadecimal value");
-    let plain_binary = file
-        .make_literal("bits[32]:0b10100101", &LiteralFormat::PlainBinary)
-        .expect("valid plain binary value");
-    let padded_hex = file
-        .make_literal("bits[17]:0x55", &LiteralFormat::ZeroPaddedHex)
-        .expect("valid padded hexadecimal value");
-    let padded_binary = file
-        .make_literal("bits[9]:3", &LiteralFormat::ZeroPaddedBinary)
-        .expect("valid padded binary value");
+    let unsized_hex = file
+        .make_literal("bits[32]:0x10000", &LiteralFormat::UnsizedHex)
+        .expect("valid unsized hexadecimal value");
+    let unsized_binary = file
+        .make_literal("bits[32]:0b10100101", &LiteralFormat::UnsizedBinary)
+        .expect("valid unsized binary value");
+    let sized_hex = file
+        .make_literal("bits[17]:0x55", &LiteralFormat::Hex)
+        .expect("valid sized hexadecimal value");
+    let sized_binary = file
+        .make_literal("bits[9]:3", &LiteralFormat::Binary)
+        .expect("valid sized binary value");
 
-    assert_eq!(file.emit_expression(&plain_hex), "'h1_0000");
-    assert_eq!(file.emit_expression(&plain_binary), "'b10100101");
-    assert_eq!(file.emit_expression(&padded_hex), "17'h0_0055");
-    assert_eq!(file.emit_expression(&padded_binary), "9'b0_0000_0011");
+    assert_eq!(file.emit_expression(&unsized_hex), "'h1_0000");
+    assert_eq!(file.emit_expression(&unsized_binary), "'b10100101");
+    assert_eq!(file.emit_expression(&sized_hex), "17'h0_0055");
+    assert_eq!(file.emit_expression(&sized_binary), "9'b0_0000_0011");
 }
 
 #[test]
@@ -473,7 +474,7 @@ fn replicated_concatenations_preserve_expression_and_constant_counts() {
     let one_twenty_three = file
         .make_literal("bits[8]:123", &LiteralFormat::Hex)
         .expect("valid concatenation literal");
-    let forty_two = file.make_plain_literal(42, &LiteralFormat::UnsignedDecimal);
+    let forty_two = file.make_unsized_decimal_literal(42);
     let by_expression = file.make_replicated_concat(&forty_two, &[&a, &one_twenty_three, &b]);
     let by_constant = file.make_replicated_concat_i64(42, &[&a, &one_twenty_three, &b]);
 
@@ -516,11 +517,11 @@ fn upstream_width_cast_module_covers_literal_parameter_and_expression_widths() {
     let out_literal = file.add_output(module, "out_literal", &byte);
     let out_param = file.add_output(module, "out_param", &twelve_bits);
     let out_expr = file.add_output(module, "out_expr", &sixteen_bits);
-    let twelve = file.make_plain_literal(12, &LiteralFormat::UnsignedDecimal);
+    let twelve = file.make_unsized_decimal_literal(12);
     let width_param = file.add_parameter(module, "WidthParam", &twelve);
 
-    let eight = file.make_plain_literal(8, &LiteralFormat::UnsignedDecimal);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
+    let eight = file.make_unsized_decimal_literal(8);
+    let one = file.make_unsized_decimal_literal(1);
     let plus_one = file.make_add(&a.to_expr(), &one);
     let cast_literal = file.make_width_cast(&eight, &plus_one);
     assign(&mut file, module, &out_literal.to_expr(), &cast_literal);
@@ -529,7 +530,7 @@ fn upstream_width_cast_module_covers_literal_parameter_and_expression_widths() {
     let cast_param = file.make_width_cast(&width_param.to_expr(), &concatenation);
     assign(&mut file, module, &out_param.to_expr(), &cast_param);
 
-    let four = file.make_plain_literal(4, &LiteralFormat::UnsignedDecimal);
+    let four = file.make_unsized_decimal_literal(4);
     let complex_width = file.make_add(&width_param.to_expr(), &four);
     let three = file
         .make_literal("bits[2]:3", &LiteralFormat::Hex)
@@ -561,7 +562,7 @@ fn width_cast_identifier_rules_match_upstream_digits_and_dollar_identifiers() {
     let module = file.add_module("casts");
     let scalar = file.make_scalar_type();
     let value = file.add_input(module, "value", &scalar).to_expr();
-    let parameter_value = file.make_plain_literal(4, &LiteralFormat::UnsignedDecimal);
+    let parameter_value = file.make_unsized_decimal_literal(4);
     let identifier = file.add_parameter(module, "WIDTH$value", &parameter_value);
     let from_identifier = file.make_width_cast(&identifier.to_expr(), &value);
     let from_digits = file.make_width_cast(&parameter_value, &value);
@@ -583,7 +584,7 @@ fn upstream_type_cast_module_handles_local_and_package_qualified_types() {
     let input = file.add_input(module, "a", &byte);
     let out_local = file.add_output(module, "out_foo", &local);
     let out_package = file.add_output(module, "out_pkg", &qualified);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
     let incremented = file.make_add(&input.to_expr(), &one);
     let local_cast = file.make_type_cast(&local, &incremented);
     let package_cast = file.make_type_cast(&qualified, &input.to_expr());
@@ -620,7 +621,7 @@ fn integer_and_int_types_preserve_signedness_and_fixed_flat_width() {
     let unsigned_integer = file.make_integer_type(false);
     let signed_int = file.make_int_type(true);
     let unsigned_int = file.make_int_type(false);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
     let definitions = [
         ("SI", DataKind::Integer, signed_integer),
         ("UI", DataKind::Integer, unsigned_integer),
@@ -698,7 +699,7 @@ fn large_constant_indices_switch_representation_at_the_i32_boundary() {
 fn expression_based_indices_and_slices_keep_arithmetic_expressions() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let (_, a, b, c) = named_operands(&mut file);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
     let hi = file.make_add(&b, &one);
     let lo = file.make_sub(&c, &one);
     let index = file.make_mul(&b, &c);
@@ -788,12 +789,12 @@ endmodule
 fn upstream_localparams_cover_plain_decimal_hexadecimal_and_binary() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("top");
-    let decimal = file.make_plain_literal(42, &LiteralFormat::UnsignedDecimal);
+    let decimal = file.make_unsized_decimal_literal(42);
     let hex = file
-        .make_literal("bits[32]:0x42", &LiteralFormat::PlainHex)
+        .make_literal("bits[32]:0x42", &LiteralFormat::UnsizedHex)
         .expect("valid hexadecimal localparam");
     let binary = file
-        .make_literal("bits[32]:0b1010", &LiteralFormat::PlainBinary)
+        .make_literal("bits[32]:0b1010", &LiteralFormat::UnsizedBinary)
         .expect("valid binary localparam");
     file.add_localparam(module, "PlainDecimal", &decimal);
     file.add_localparam(module, "PlainHex", &hex);
@@ -814,12 +815,12 @@ fn upstream_array_parameter_patterns_preserve_nested_types_and_dimensions() {
     let module = file.add_module("top");
     let scalar = file.make_scalar_type();
     let byte = file.make_bit_vector_type(8, false);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &LiteralFormat::UnsignedDecimal);
-    let three = file.make_plain_literal(3, &LiteralFormat::UnsignedDecimal);
-    let four = file.make_plain_literal(4, &LiteralFormat::UnsignedDecimal);
-    let five = file.make_plain_literal(5, &LiteralFormat::UnsignedDecimal);
-    let six = file.make_plain_literal(6, &LiteralFormat::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
+    let two = file.make_unsized_decimal_literal(2);
+    let three = file.make_unsized_decimal_literal(3);
+    let four = file.make_unsized_decimal_literal(4);
+    let five = file.make_unsized_decimal_literal(5);
+    let six = file.make_unsized_decimal_literal(6);
 
     let p1_type = file.make_unpacked_array_type(scalar, &[3]);
     let p1_definition = file.make_def("P1", DataKind::Int, &p1_type);
@@ -858,8 +859,8 @@ fn parameter_ports_without_io_match_the_upstream_complete_header() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("top");
     let byte = file.make_bit_vector_type(8, false);
-    let five = file.make_plain_literal(5, &LiteralFormat::UnsignedDecimal);
-    let seven = file.make_plain_literal(7, &LiteralFormat::UnsignedDecimal);
+    let five = file.make_unsized_decimal_literal(5);
+    let seven = file.make_unsized_decimal_literal(7);
     file.add_typed_parameter_port(module, "TypedParam", &byte, &five);
     file.add_parameter_port(module, "UntypedParam", &seven);
 
@@ -922,8 +923,8 @@ fn macro_references_distinguish_missing_and_empty_argument_lists() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let absent = file.make_macro_ref("NO_ARGS");
     let empty = file.make_macro_ref_with_args("EMPTY_ARGS", &[]);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &LiteralFormat::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
+    let two = file.make_unsized_decimal_literal(2);
     let populated = file.make_macro_ref_with_args("VALUES", &[&one, &two]);
 
     assert_eq!(file.emit_expression(&absent.to_expr()), "`NO_ARGS");

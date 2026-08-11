@@ -30,3 +30,15 @@ assert_eq!(
 Reusable register-building and expression-reduction utilities are available
 through `xlsynth_vast::helpers`. Configuration-specific register templates are
 provided separately by `xlsynth::vast_helpers`.
+
+## Integer literals
+
+`VastFile::make_literal` parses typed values such as `bits[8]:42` and renders
+them according to `LiteralFormat`. `Binary`, `Hex`, `SignedDecimal`, and
+`UnsignedDecimal` preserve the source bit width; `UnsizedBinary`,
+`UnsizedDecimal`, and `UnsizedHex` omit it. Unsized decimal values must fit in
+`i32::MAX`, while unsized binary and hexadecimal values must fit in `u32::MAX`.
+These bounds apply to the represented value, not the declared source width.
+
+Use `VastFile::make_unsized_decimal_literal` for signed decimal values across
+the complete `i32` range, including negative values.

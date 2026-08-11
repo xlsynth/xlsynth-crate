@@ -469,13 +469,13 @@ fn test_nested_generate_loops_with_assignment() {
     let b = file.add_output(module, "b", &scalar);
 
     // for (genvar i = 0; i < 2; ++i) begin: outer
-    let zero = file.make_plain_literal(0, &LiteralFormat::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &LiteralFormat::UnsignedDecimal);
+    let zero = file.make_unsized_decimal_literal(0);
+    let two = file.make_unsized_decimal_literal(2);
     let outer = file.add_generate_loop(module, "i", &zero, &two, Some("outer"));
 
     //   for (genvar j = 1; j < 3; ++j) begin: inner
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
-    let three = file.make_plain_literal(3, &LiteralFormat::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
+    let three = file.make_unsized_decimal_literal(3);
     let inner = file.generate_add_generate_loop(outer, "j", &one, &three, Some("inner"));
 
     //     assign b = a;
@@ -506,7 +506,7 @@ fn test_width_cast_basic() {
     let x = file.add_input(module, "x", &u16);
     let y = file.add_output(module, "y", &u8);
 
-    let width8 = file.make_plain_literal(8, &LiteralFormat::UnsignedDecimal);
+    let width8 = file.make_unsized_decimal_literal(8);
     let cast = file.make_width_cast(&width8, &x.to_expr());
     let assign = file.make_continuous_assignment(&y.to_expr(), &cast);
     file.add_member_continuous_assignment(module, assign);
@@ -527,11 +527,11 @@ fn test_generate_loop_with_localparam_and_empty_always_blocks() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("gen_empty_blocks");
 
-    let zero = file.make_plain_literal(0, &LiteralFormat::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &LiteralFormat::UnsignedDecimal);
+    let zero = file.make_unsized_decimal_literal(0);
+    let two = file.make_unsized_decimal_literal(2);
     let gen_loop = file.add_generate_loop(module, "i", &zero, &two, Some("G"));
 
-    let five = file.make_plain_literal(5, &LiteralFormat::UnsignedDecimal);
+    let five = file.make_unsized_decimal_literal(5);
     file.generate_add_localparam(gen_loop, "LP", &five);
 
     file.generate_add_always_comb(gen_loop).unwrap();
@@ -733,16 +733,16 @@ fn test_module_localparams_various_types() {
     let module = file.add_module("LM");
 
     // localparam int Foo = 42;
-    let forty_two = file.make_plain_literal(42, &LiteralFormat::UnsignedDecimal);
+    let forty_two = file.make_unsized_decimal_literal(42);
     file.add_int_localparam(module, "Foo", &forty_two);
 
     // localparam Bar = 100;
-    let one_hundred = file.make_plain_literal(100, &LiteralFormat::UnsignedDecimal);
+    let one_hundred = file.make_unsized_decimal_literal(100);
     file.add_localparam(module, "Bar", &one_hundred);
 
     // localparam Qux = 'h10000;
     let qux = file
-        .make_literal("bits[32]:0x10000", &LiteralFormat::PlainHex)
+        .make_literal("bits[32]:0x10000", &LiteralFormat::UnsizedHex)
         .unwrap();
     file.add_localparam(module, "Bar", &qux);
 
@@ -1119,7 +1119,7 @@ fn module_with_parameters() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("C");
     let bit = file.make_scalar_type();
-    let n_default = file.make_plain_literal(42, &LiteralFormat::UnsignedDecimal);
+    let n_default = file.make_unsized_decimal_literal(42);
     let n = file.add_parameter_port(module, "N", &n_default);
     let foo_type = file.make_bit_vector_type(16, false);
     let foo_default = file
@@ -1196,8 +1196,8 @@ fn test_generate_loop_with_inline_and_macro() {
     let module = file.add_module("gen_with_macros");
 
     // for (genvar i = 0; i < 1; ++i) begin : G
-    let zero = file.make_plain_literal(0, &LiteralFormat::UnsignedDecimal);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
+    let zero = file.make_unsized_decimal_literal(0);
+    let one = file.make_unsized_decimal_literal(1);
     let gen_loop = file.add_generate_loop(module, "i", &zero, &one, Some("G"));
 
     // Comment, blank line, and macro statements inside the loop.
@@ -1208,7 +1208,7 @@ fn test_generate_loop_with_inline_and_macro() {
     let mstmt = file.make_macro_statement(&mref, true);
     file.generate_add_macro_statement(gen_loop, &mstmt);
     // Macro with arguments.
-    let three = file.make_plain_literal(3, &LiteralFormat::UnsignedDecimal);
+    let three = file.make_unsized_decimal_literal(3);
     let mref_args = file.make_macro_ref_with_args("DO_THING", &[&three]);
     let mstmt_args = file.make_macro_statement(&mref_args, false);
     file.generate_add_macro_statement(gen_loop, &mstmt_args);
@@ -1229,7 +1229,7 @@ endmodule
 #[test]
 fn test_expression_emit_plain_literal() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let three = file.make_plain_literal(3, &LiteralFormat::UnsignedDecimal);
+    let three = file.make_unsized_decimal_literal(3);
     let s = file.emit_expression(&three);
     assert_eq!(s, "3");
 }
@@ -1271,12 +1271,12 @@ fn test_array_parameters_with_def_and_assignment_pattern() {
     // P1: parameter int P1[3] = '{1, 2, 3};
     let p1_type = file.make_unpacked_array_type(scalar.clone(), &[3]);
     let p1_def = file.make_def("P1", DataKind::Int, &p1_type);
-    let one = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &LiteralFormat::UnsignedDecimal);
-    let three = file.make_plain_literal(3, &LiteralFormat::UnsignedDecimal);
-    let four = file.make_plain_literal(4, &LiteralFormat::UnsignedDecimal);
-    let five = file.make_plain_literal(5, &LiteralFormat::UnsignedDecimal);
-    let six = file.make_plain_literal(6, &LiteralFormat::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
+    let two = file.make_unsized_decimal_literal(2);
+    let three = file.make_unsized_decimal_literal(3);
+    let four = file.make_unsized_decimal_literal(4);
+    let five = file.make_unsized_decimal_literal(5);
+    let six = file.make_unsized_decimal_literal(6);
     let p1_rhs = file.make_array_assignment_pattern(&[&one, &two, &three]);
     file.add_parameter_with_def(module, &p1_def, &p1_rhs);
 
@@ -1327,8 +1327,8 @@ fn test_module_level_conditional() {
 
     // parameter A = 1;
     // parameter B = 2;
-    let one_param = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
-    let two_param = file.make_plain_literal(2, &LiteralFormat::UnsignedDecimal);
+    let one_param = file.make_unsized_decimal_literal(1);
+    let two_param = file.make_unsized_decimal_literal(2);
     let a = file.add_parameter(module, "A", &one_param);
     let b = file.add_parameter(module, "B", &two_param);
 
@@ -1379,14 +1379,14 @@ fn test_generate_loop_conditional_assignments() {
     let out = file.add_wire(module, "out", &out_type);
 
     // for (genvar i = 0; i < 3; i = i + 1) begin : g
-    let zero = file.make_plain_literal(0, &LiteralFormat::UnsignedDecimal);
-    let three = file.make_plain_literal(3, &LiteralFormat::UnsignedDecimal);
+    let zero = file.make_unsized_decimal_literal(0);
+    let three = file.make_unsized_decimal_literal(3);
     let gen_loop = file.add_generate_loop(module, "i", &zero, &three, Some("g"));
 
     let i_ref = file.generate_genvar(gen_loop);
     let i_expr = i_ref.to_expr();
-    let zero_cond = file.make_plain_literal(0, &LiteralFormat::UnsignedDecimal);
-    let one_cond = file.make_plain_literal(1, &LiteralFormat::UnsignedDecimal);
+    let zero_cond = file.make_unsized_decimal_literal(0);
+    let one_cond = file.make_unsized_decimal_literal(1);
 
     let cond0 = file.make_eq(&i_expr, &zero_cond);
     let cond1 = file.make_eq(&i_expr, &one_cond);

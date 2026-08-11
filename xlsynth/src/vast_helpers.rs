@@ -417,8 +417,8 @@ endmodule
         let clock = file.add_input(module, "clock", &scalar);
         let data = file.add_input(module, "data", &scalar);
         let register = file.add_logic(module, "state", &scalar).unwrap();
-        let zero = file.make_plain_literal(0, &LiteralFormat::Default);
-        let one = file.make_plain_literal(1, &LiteralFormat::Default);
+        let zero = file.make_unsized_decimal_literal(0);
+        let one = file.make_unsized_decimal_literal(1);
         let generate = file.add_generate_loop(module, "index", &zero, &one, Some("lanes"));
         let options = CodegenOptions {
             reg_template: Some("REGISTER({{clock}}, {{reg}}, {{next}})".into()),
@@ -640,7 +640,7 @@ endmodule
     #[test]
     fn foreign_later_register_is_rejected_before_templates_mutate_the_module() {
         let mut foreign_file = VastFile::new(VastFileType::SystemVerilog);
-        let foreign_value = foreign_file.make_plain_literal(1, &LiteralFormat::Default);
+        let foreign_value = foreign_file.make_unsized_decimal_literal(1);
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("foreign_template");
         let scalar = file.make_scalar_type();

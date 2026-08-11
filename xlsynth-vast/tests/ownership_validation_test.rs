@@ -115,7 +115,7 @@ endmodule
 fn symbolic_widths_report_unavailable_integer_and_port_widths() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("symbolic");
-    let four = file.make_plain_literal(4, &LiteralFormat::UnsignedDecimal);
+    let four = file.make_unsized_decimal_literal(4);
     let width = file.add_parameter_port(module, "WIDTH", &four);
     let symbolic = file.make_bit_vector_type_expr(&width.to_expr(), false);
     file.add_input(module, "data", &symbolic);
@@ -271,8 +271,8 @@ fn invalid_always_sensitivity_is_rejected_without_adding_a_block() {
 fn invalid_generate_sensitivity_is_rejected_without_adding_a_block() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("generated_events");
-    let zero = file.make_plain_literal(0, &LiteralFormat::Default);
-    let two = file.make_plain_literal(2, &LiteralFormat::Default);
+    let zero = file.make_unsized_decimal_literal(0);
+    let two = file.make_unsized_decimal_literal(2);
     let generate = file.add_generate_loop(module, "i", &zero, &two, None);
 
     assert!(file.generate_add_always_ff(generate, &[&two]).is_err());
@@ -402,7 +402,7 @@ fn module_instantiations_reject_mismatched_connection_lists() {
 fn expression_emission_rejects_handles_from_another_file() {
     let file = VastFile::new(VastFileType::Verilog);
     let mut other = VastFile::new(VastFileType::Verilog);
-    let expression = other.make_plain_literal(1, &LiteralFormat::Default);
+    let expression = other.make_unsized_decimal_literal(1);
 
     file.emit_expression(&expression);
 }
@@ -445,7 +445,7 @@ fn declarations_reject_data_types_from_another_file() {
 fn instantiations_reject_connection_expressions_from_another_file() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let mut other = VastFile::new(VastFileType::Verilog);
-    let foreign = other.make_plain_literal(1, &LiteralFormat::Default);
+    let foreign = other.make_unsized_decimal_literal(1);
 
     file.make_instantiation("child", "instance", &[], &[], &["input"], &[Some(&foreign)]);
 }
@@ -461,7 +461,7 @@ fn case_statements_reject_patterns_from_another_file() {
     let case = file.block_add_case(file.statement_block(always), &selector);
 
     let mut other = VastFile::new(VastFileType::SystemVerilog);
-    let foreign = other.make_plain_literal(1, &LiteralFormat::Default);
+    let foreign = other.make_unsized_decimal_literal(1);
     file.case_add_item(case, &foreign);
 }
 
@@ -470,9 +470,9 @@ fn case_statements_reject_patterns_from_another_file() {
 fn generate_loops_reject_bounds_from_another_file() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("generate");
-    let start = file.make_plain_literal(0, &LiteralFormat::Default);
+    let start = file.make_unsized_decimal_literal(0);
     let mut other = VastFile::new(VastFileType::SystemVerilog);
-    let foreign_end = other.make_plain_literal(2, &LiteralFormat::Default);
+    let foreign_end = other.make_unsized_decimal_literal(2);
 
     file.add_generate_loop(module, "i", &start, &foreign_end, None);
 }
