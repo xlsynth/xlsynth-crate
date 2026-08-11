@@ -349,6 +349,37 @@ fn rejected_unpacked_scalar_and_vector_casts_leave_the_file_unchanged() {
 }
 
 #[test]
+fn rejected_packed_scalar_vector_nested_and_external_casts_leave_the_file_unchanged() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("unchanged_after_invalid_packed_cast");
+    let scalar = file.make_scalar_type();
+    file.add_wire(module, "data", &scalar);
+    let signed_byte = file.make_bit_vector_type(8, true);
+    let external = file.make_extern_package_type("bus_pkg", "payload_t");
+    let packed_scalar = file.make_packed_array_type(scalar, &[2]);
+    let packed_vector = file.make_packed_array_type(signed_byte, &[3]);
+    let nested_packed = file.make_packed_array_type(packed_vector, &[4]);
+    let packed_external = file.make_packed_array_type(external, &[5]);
+    let value = file.make_unsized_decimal_literal(7);
+    let before = file.emit();
+
+    for target in [packed_scalar, packed_vector, nested_packed, packed_external] {
+        let panic = catch_unwind(AssertUnwindSafe(|| file.make_type_cast(&target, &value)))
+            .expect_err("anonymous packed arrays cannot be expression-cast target types");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .expect("cast rejection contains a panic message");
+        assert_eq!(
+            message,
+            "packed array types cannot be used in type casts; use a named typedef instead"
+        );
+        assert_eq!(file.emit(), before);
+    }
+}
+
+#[test]
 #[should_panic(expected = "unpacked array types cannot be used in type casts")]
 fn nested_unpacked_array_casts_are_rejected() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
@@ -371,6 +402,81 @@ fn packed_array_constructors_reject_unpacked_element_types() {
 }
 
 #[test]
+fn packed_array_constructors_reject_integer_and_int_elements_without_mutation() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("unchanged_after_invalid_integer_array");
+    let scalar = file.make_scalar_type();
+    file.add_wire(module, "data", &scalar);
+    let signed_integer = file.make_integer_type(true);
+    let unsigned_integer = file.make_integer_type(false);
+    let signed_int = file.make_int_type(true);
+    let unsigned_int = file.make_int_type(false);
+    let before = file.emit();
+
+    for element in [signed_integer, unsigned_integer, signed_int, unsigned_int] {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            file.make_packed_array_type(element, &[2])
+        }))
+        .expect_err("integer atom types cannot have packed dimensions");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .expect("constructor rejection contains a panic message");
+        assert_eq!(
+            message,
+            "packed arrays cannot contain integer or int elements"
+        );
+        assert_eq!(file.emit(), before);
+    }
+}
+
+#[test]
+fn integer_and_int_elements_remain_valid_for_unpacked_array_types() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("integer_arrays");
+    let signed_integer = file.make_integer_type(true);
+    let unsigned_integer = file.make_integer_type(false);
+    let signed_int = file.make_int_type(true);
+    let unsigned_int = file.make_int_type(false);
+    let signed_integer_array = file.make_unpacked_array_type(signed_integer, &[2]);
+    let unsigned_integer_array = file.make_unpacked_array_type(unsigned_integer, &[2]);
+    let signed_int_array = file.make_unpacked_array_type(signed_int, &[3]);
+    let unsigned_int_array = file.make_unpacked_array_type(unsigned_int, &[3]);
+    let zero = file.make_unsized_decimal_literal(0);
+
+    file.add_typed_parameter_port(module, "SignedInteger", &signed_integer_array, &zero);
+    file.add_typed_parameter_port(module, "UnsignedInteger", &unsigned_integer_array, &zero);
+    file.add_typed_parameter_port(module, "SignedInt", &signed_int_array, &zero);
+    file.add_typed_parameter_port(module, "UnsignedInt", &unsigned_int_array, &zero);
+
+    assert_eq!(
+        file.type_flat_bit_count_as_int64(signed_integer_array),
+        Ok(64)
+    );
+    assert_eq!(
+        file.type_flat_bit_count_as_int64(unsigned_integer_array),
+        Ok(64)
+    );
+    assert_eq!(file.type_flat_bit_count_as_int64(signed_int_array), Ok(96));
+    assert_eq!(
+        file.type_flat_bit_count_as_int64(unsigned_int_array),
+        Ok(96)
+    );
+
+    let expected = r#"module integer_arrays #(
+  parameter integer SignedInteger[2] = 0,
+  parameter integer unsigned UnsignedInteger[2] = 0,
+  parameter int SignedInt[3] = 0,
+  parameter int unsigned UnsignedInt[3] = 0
+);
+
+endmodule
+"#;
+    assert_eq!(file.emit(), expected);
+}
+
+#[test]
 #[should_panic(expected = "VAST handle belongs to a different file")]
 fn packed_array_constructors_check_foreign_elements_before_array_validity() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
@@ -379,6 +485,16 @@ fn packed_array_constructors_check_foreign_elements_before_array_validity() {
     let foreign_unpacked = other.make_unpacked_array_type(foreign_scalar, &[2]);
 
     file.make_packed_array_type(foreign_unpacked, &[3]);
+}
+
+#[test]
+#[should_panic(expected = "VAST handle belongs to a different file")]
+fn packed_array_constructors_check_foreign_integers_before_element_validity() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut other = VastFile::new(VastFileType::SystemVerilog);
+    let foreign_integer = other.make_integer_type(true);
+
+    file.make_packed_array_type(foreign_integer, &[3]);
 }
 
 #[test]
@@ -395,6 +511,18 @@ fn unpacked_cast_target_ownership_is_checked_before_array_validity() {
 
 #[test]
 #[should_panic(expected = "VAST handle belongs to a different file")]
+fn packed_cast_target_ownership_is_checked_before_array_validity() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut other = VastFile::new(VastFileType::SystemVerilog);
+    let foreign_byte = other.make_bit_vector_type(8, false);
+    let foreign_packed = other.make_packed_array_type(foreign_byte, &[2]);
+    let local_value = file.make_unsized_decimal_literal(7);
+
+    file.make_type_cast(&foreign_packed, &local_value);
+}
+
+#[test]
+#[should_panic(expected = "VAST handle belongs to a different file")]
 fn cast_value_ownership_is_checked_before_unpacking_the_local_target_type() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut other = VastFile::new(VastFileType::SystemVerilog);
@@ -403,4 +531,16 @@ fn cast_value_ownership_is_checked_before_unpacking_the_local_target_type() {
     let foreign_value = other.make_unsized_decimal_literal(7);
 
     file.make_type_cast(&unpacked, &foreign_value);
+}
+
+#[test]
+#[should_panic(expected = "VAST handle belongs to a different file")]
+fn cast_value_ownership_is_checked_before_rejecting_the_local_packed_target() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut other = VastFile::new(VastFileType::SystemVerilog);
+    let scalar = file.make_scalar_type();
+    let packed = file.make_packed_array_type(scalar, &[2]);
+    let foreign_value = other.make_unsized_decimal_literal(7);
+
+    file.make_type_cast(&packed, &foreign_value);
 }

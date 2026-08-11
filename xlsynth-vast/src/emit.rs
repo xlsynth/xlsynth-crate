@@ -190,12 +190,15 @@ fn emit_data_type_cast(file: &VastFile, data_type: VastDataType, value: Expr) ->
                 format!("unsigned'({cast})")
             }
         }
-        TypeData::Extern { .. } | TypeData::PackedArray { .. } | TypeData::UnpackedArray { .. } => {
+        TypeData::Extern { .. } => {
             format!(
                 "{}'({})",
                 emit_type(file, data_type),
                 emit_expr(file, value)
             )
+        }
+        TypeData::PackedArray { .. } | TypeData::UnpackedArray { .. } => {
+            unreachable!("array types must be rejected when constructing casts")
         }
     }
 }
