@@ -40,6 +40,7 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
     match &file.ast.expressions[expr.0.index] {
         ExprData::Name { name, .. } => name.clone(),
         ExprData::Literal { text, .. } => text.clone(),
+        ExprData::StringLiteral { value } => emit_string_literal(value),
         ExprData::Unary { op, arg } => {
             let operand = emit_expr(file, *arg);
             let needs_parentheses = precedence(file, *arg) < 12
@@ -125,6 +126,27 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
             None => format!("`{name}"),
         },
     }
+}
+
+/// Quotes and escapes a decoded string as a Verilog string literal.
+fn emit_string_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if control.is_ascii_control() => {
+                write!(escaped, "\\{:03o}", control as u32).expect("writing to String cannot fail");
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 /// Emits an expression-width cast, preserving the upstream parenthesis rules.

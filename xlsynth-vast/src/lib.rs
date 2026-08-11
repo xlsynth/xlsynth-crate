@@ -572,6 +572,16 @@ impl VastFile {
         })
     }
 
+    /// Creates a quoted Verilog string literal from decoded Rust text.
+    ///
+    /// The value is stored without Verilog quotes or escapes. Emission adds the
+    /// surrounding quotes and escapes special characters as needed.
+    pub fn make_string_literal(&mut self, value: &str) -> Expr {
+        self.add_expression(ExprData::StringLiteral {
+            value: value.to_owned(),
+        })
+    }
+
     /// Creates an unsigned one-bit scalar type.
     pub fn make_scalar_type(&mut self) -> VastDataType {
         self.add_data_type(TypeData::Scalar { signed: false })

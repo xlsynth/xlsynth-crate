@@ -241,6 +241,9 @@ pub(crate) enum ExprData {
         text: String,
         value: Option<i64>,
     },
+    StringLiteral {
+        value: String,
+    },
     Unary {
         op: UnaryOp,
         arg: Expr,
