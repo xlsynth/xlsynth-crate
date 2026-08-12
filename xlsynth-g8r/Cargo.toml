@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.65.0" }
+xlsynth-vast = { path = "../xlsynth-vast", version = "0.65.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.65.0" }
 xlsynth-prover = { path = "../xlsynth-prover", version = "0.65.0" }
 xlsynth-mcmc = { path = "../xlsynth-mcmc", version = "0.65.0" }

@@ -3,9 +3,8 @@
 //! Emits a Verilog-like RTL netlist for a synchronous gate-level design.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
-use xlsynth::vast;
+use xlsynth_vast as vast;
 
 use crate::aig::gate;
 use crate::aig::{SequentialGateFn, TransitionInputId};
@@ -17,7 +16,7 @@ pub enum NetlistPortStyle {
     PackedBits,
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 struct SignalRef {
     logic_ref: vast::LogicRef,
 }
@@ -25,15 +24,15 @@ struct SignalRef {
 #[derive(Clone)]
 struct DirectAssignment {
     sort_key: String,
-    lhs_expr: Rc<vast::Expr>,
-    rhs_expr: Rc<vast::Expr>,
+    lhs_expr: vast::Expr,
+    rhs_expr: vast::Expr,
 }
 
 #[derive(Clone)]
 struct ProceduralAssignment {
     sort_key: String,
-    lhs_expr: Rc<vast::Expr>,
-    rhs_expr: Rc<vast::Expr>,
+    lhs_expr: vast::Expr,
+    rhs_expr: vast::Expr,
 }
 
 struct NetlistEmitConfig<'a> {
@@ -42,10 +41,10 @@ struct NetlistEmitConfig<'a> {
 }
 
 struct NetlistEmitState {
-    gate_ref_to_vast_expr: BTreeMap<gate::AigRef, Rc<vast::Expr>>,
-    transition_output_bit_targets: BTreeMap<(usize, usize), Rc<vast::Expr>>,
+    gate_ref_to_vast_expr: BTreeMap<gate::AigRef, vast::Expr>,
+    transition_output_bit_targets: BTreeMap<(usize, usize), vast::Expr>,
     packed_external_inputs: BTreeMap<usize, SignalRef>,
-    register_bit_exprs: BTreeMap<(usize, usize), Rc<vast::Expr>>,
+    register_bit_exprs: BTreeMap<(usize, usize), vast::Expr>,
     packed_registers: BTreeMap<usize, SignalRef>,
     packed_next_state_wires: BTreeMap<usize, SignalRef>,
     internal_wire_assignments: Vec<DirectAssignment>,
@@ -78,7 +77,7 @@ fn port_data_type(
 ) -> Result<vast::VastDataType, String> {
     match bit_count {
         0 => Err("emit_netlist: packed ports cannot have zero width".to_string()),
-        1 => Ok(bit_type.clone()),
+        1 => Ok(*bit_type),
         width => Ok(file.make_bit_vector_type(width as i64, false)),
     }
 }
@@ -88,14 +87,12 @@ fn packed_bit_expr(
     logic_ref: &vast::LogicRef,
     bit_count: usize,
     bit_index: usize,
-) -> Rc<vast::Expr> {
+) -> vast::Expr {
     if bit_count == 1 {
-        return Rc::new(logic_ref.to_expr());
+        return logic_ref.to_expr();
     }
-    Rc::new(
-        file.make_index(&logic_ref.to_indexable_expr(), bit_index as i64)
-            .to_expr(),
-    )
+    file.make_index(&logic_ref.to_indexable_expr(), bit_index as i64)
+        .to_expr()
 }
 
 fn scalar_bit_name(name: &str, bit_count: usize, bit_index: usize) -> String {
@@ -172,7 +169,7 @@ fn generate_external_input_ports(
     config: &NetlistEmitConfig,
     state: &mut NetlistEmitState,
     file: &mut vast::VastFile,
-    module: &mut vast::VastModule,
+    module: vast::VastModule,
     bit_type: &vast::VastDataType,
 ) -> Result<(), String> {
     for input_id in &config.design.inputs {
@@ -182,15 +179,15 @@ fn generate_external_input_ports(
             NetlistPortStyle::ScalarBits => {
                 for (bit_index, aig_bit) in input.bit_vector.iter_lsb_to_msb().enumerate() {
                     let name = scalar_bit_name(&input.name, bit_count, bit_index);
-                    let logic_ref = module.add_input(&name, bit_type);
+                    let logic_ref = file.add_input(module, &name, bit_type);
                     state
                         .gate_ref_to_vast_expr
-                        .insert(aig_bit.node, Rc::new(logic_ref.to_expr()));
+                        .insert(aig_bit.node, logic_ref.to_expr());
                 }
             }
             NetlistPortStyle::PackedBits => {
                 let data_type = port_data_type(file, bit_type, bit_count)?;
-                let logic_ref = module.add_input(&input.name, &data_type);
+                let logic_ref = file.add_input(module, &input.name, &data_type);
                 for (bit_index, aig_bit) in input.bit_vector.iter_lsb_to_msb().enumerate() {
                     state.gate_ref_to_vast_expr.insert(
                         aig_bit.node,
@@ -210,7 +207,7 @@ fn generate_registers_and_next_state_wires(
     config: &NetlistEmitConfig,
     state: &mut NetlistEmitState,
     file: &mut vast::VastFile,
-    module: &mut vast::VastModule,
+    module: vast::VastModule,
     bit_type: &vast::VastDataType,
 ) -> Result<(), String> {
     for (register_index, register) in config.design.registers.iter().enumerate() {
@@ -224,19 +221,17 @@ fn generate_registers_and_next_state_wires(
                 if !d_is_external_input {
                     for bit_index in 0..bit_count {
                         let d_name = scalar_next_state_name(&d_output.name, bit_count, bit_index);
-                        let wire_ref = module.add_wire(&d_name, bit_type);
+                        let wire_ref = file.add_wire(module, &d_name, bit_type);
                         state
                             .transition_output_bit_targets
-                            .insert((register.d.index(), bit_index), Rc::new(wire_ref.to_expr()));
+                            .insert((register.d.index(), bit_index), wire_ref.to_expr());
                     }
                 }
                 for (bit_index, aig_bit) in q_input.bit_vector.iter_lsb_to_msb().enumerate() {
                     let reg_name = scalar_bit_name(&register.name, bit_count, bit_index);
-                    let reg_ref = module.add_reg(&reg_name, bit_type).unwrap();
-                    let expr = Rc::new(reg_ref.to_expr());
-                    state
-                        .gate_ref_to_vast_expr
-                        .insert(aig_bit.node, expr.clone());
+                    let reg_ref = file.add_reg(module, &reg_name, bit_type).unwrap();
+                    let expr = reg_ref.to_expr();
+                    state.gate_ref_to_vast_expr.insert(aig_bit.node, expr);
                     state
                         .register_bit_exprs
                         .insert((register_index, bit_index), expr);
@@ -245,7 +240,7 @@ fn generate_registers_and_next_state_wires(
             NetlistPortStyle::PackedBits => {
                 let data_type = port_data_type(file, bit_type, bit_count)?;
                 if !d_is_external_input {
-                    let wire_ref = module.add_wire(&d_output.name, &data_type);
+                    let wire_ref = file.add_wire(module, &d_output.name, &data_type);
                     for bit_index in 0..bit_count {
                         state.transition_output_bit_targets.insert(
                             (register.d.index(), bit_index),
@@ -259,12 +254,10 @@ fn generate_registers_and_next_state_wires(
                         },
                     );
                 }
-                let reg_ref = module.add_reg(&register.name, &data_type).unwrap();
+                let reg_ref = file.add_reg(module, &register.name, &data_type).unwrap();
                 for (bit_index, aig_bit) in q_input.bit_vector.iter_lsb_to_msb().enumerate() {
                     let expr = packed_bit_expr(file, &reg_ref, bit_count, bit_index);
-                    state
-                        .gate_ref_to_vast_expr
-                        .insert(aig_bit.node, expr.clone());
+                    state.gate_ref_to_vast_expr.insert(aig_bit.node, expr);
                     state
                         .register_bit_exprs
                         .insert((register_index, bit_index), expr);
@@ -282,7 +275,7 @@ fn generate_external_output_ports(
     config: &NetlistEmitConfig,
     state: &mut NetlistEmitState,
     file: &mut vast::VastFile,
-    module: &mut vast::VastModule,
+    module: vast::VastModule,
     bit_type: &vast::VastDataType,
 ) -> Result<(), String> {
     let mut outputs = config
@@ -302,28 +295,28 @@ fn generate_external_output_ports(
             NetlistPortStyle::ScalarBits => {
                 for bit_index in 0..bit_count {
                     let name = scalar_bit_name(&output.name, bit_count, bit_index);
-                    let output_ref = module.add_output(&name, bit_type);
+                    let output_ref = file.add_output(module, &name, bit_type);
                     if let Some(register_index) = q_register_index {
                         let rhs_expr = state
                             .register_bit_exprs
                             .get(&(register_index, bit_index))
-                            .expect("register Q expression was generated")
-                            .clone();
+                            .copied()
+                            .expect("register Q expression was generated");
                         state.final_output_assignments.push(DirectAssignment {
                             sort_key: name,
-                            lhs_expr: Rc::new(output_ref.to_expr()),
+                            lhs_expr: output_ref.to_expr(),
                             rhs_expr,
                         });
                     } else {
                         state
                             .transition_output_bit_targets
-                            .insert((output_index, bit_index), Rc::new(output_ref.to_expr()));
+                            .insert((output_index, bit_index), output_ref.to_expr());
                     }
                 }
             }
             NetlistPortStyle::PackedBits => {
                 let data_type = port_data_type(file, bit_type, bit_count)?;
-                let output_ref = module.add_output(&output.name, &data_type);
+                let output_ref = file.add_output(module, &output.name, &data_type);
                 if let Some(register_index) = q_register_index {
                     let register_ref = state
                         .packed_registers
@@ -331,8 +324,8 @@ fn generate_external_output_ports(
                         .expect("register Q declaration was generated");
                     state.final_output_assignments.push(DirectAssignment {
                         sort_key: output.name.clone(),
-                        lhs_expr: Rc::new(output_ref.to_expr()),
-                        rhs_expr: Rc::new(register_ref.logic_ref.to_expr()),
+                        lhs_expr: output_ref.to_expr(),
+                        rhs_expr: register_ref.logic_ref.to_expr(),
                     });
                 } else {
                     for bit_index in 0..bit_count {
@@ -352,7 +345,7 @@ fn generate_internal_combinational_logic(
     config: &NetlistEmitConfig,
     state: &mut NetlistEmitState,
     file: &mut vast::VastFile,
-    module: &mut vast::VastModule,
+    module: vast::VastModule,
     bit_type: &vast::VastDataType,
 ) {
     for (index, gate_node) in config.design.transition.gates.iter().enumerate() {
@@ -361,33 +354,32 @@ fn generate_internal_combinational_logic(
             gate::AigNode::Input { .. } => {}
             gate::AigNode::Literal { value, .. } => {
                 let name = format!("G{index}");
-                let wire_ref = module.add_wire(&name, bit_type);
+                let wire_ref = file.add_wire(module, &name, bit_type);
                 state
                     .gate_ref_to_vast_expr
-                    .insert(aig_ref, Rc::new(wire_ref.to_expr()));
+                    .insert(aig_ref, wire_ref.to_expr());
                 let value_str = if *value { "bits[1]:1" } else { "bits[1]:0" };
-                let rhs_expr = Rc::new(
-                    file.make_literal(value_str, &xlsynth::ir_value::IrFormatPreference::Binary)
-                        .unwrap(),
-                );
+                let rhs_expr = file
+                    .make_literal(value_str, &vast::LiteralFormat::Binary)
+                    .unwrap();
                 state.internal_wire_assignments.push(DirectAssignment {
                     sort_key: name,
-                    lhs_expr: Rc::new(wire_ref.to_expr()),
+                    lhs_expr: wire_ref.to_expr(),
                     rhs_expr,
                 });
             }
             gate::AigNode::And2 { a, b, .. } => {
                 let name = format!("G{index}");
-                let wire_ref = module.add_wire(&name, bit_type);
+                let wire_ref = file.add_wire(module, &name, bit_type);
                 state
                     .gate_ref_to_vast_expr
-                    .insert(aig_ref, Rc::new(wire_ref.to_expr()));
+                    .insert(aig_ref, wire_ref.to_expr());
                 let a_expr = operand_expr(file, state, a);
                 let b_expr = operand_expr(file, state, b);
                 state.internal_wire_assignments.push(DirectAssignment {
                     sort_key: name,
-                    lhs_expr: Rc::new(wire_ref.to_expr()),
-                    rhs_expr: Rc::new(file.make_bitwise_and(&a_expr, &b_expr)),
+                    lhs_expr: wire_ref.to_expr(),
+                    rhs_expr: file.make_bitwise_and(&a_expr, &b_expr),
                 });
             }
         }
@@ -406,7 +398,7 @@ fn operand_expr(
     if operand.negated {
         file.make_not(base)
     } else {
-        (**base).clone()
+        *base
     }
 }
 
@@ -425,8 +417,8 @@ fn connect_transition_output_targets(
             };
             state.direct_output_assignments.push(DirectAssignment {
                 sort_key: format!("{}[{bit_index:020}]", output.name),
-                lhs_expr: target_expr.clone(),
-                rhs_expr: Rc::new(operand_expr(file, state, operand)),
+                lhs_expr: *target_expr,
+                rhs_expr: operand_expr(file, state, operand),
             });
         }
     }
@@ -445,20 +437,20 @@ fn generate_register_assignments(
             NetlistPortStyle::ScalarBits => {
                 for (bit_index, operand) in d_output.bit_vector.iter_lsb_to_msb().enumerate() {
                     let rhs_expr = match direct_input {
-                        Some(_) => Rc::new(operand_expr(file, state, operand)),
+                        Some(_) => operand_expr(file, state, operand),
                         None => state
                             .transition_output_bit_targets
                             .get(&(register.d.index(), bit_index))
-                            .expect("register D wire expression was generated")
-                            .clone(),
+                            .copied()
+                            .expect("register D wire expression was generated"),
                     };
                     state.procedural_assignments.push(ProceduralAssignment {
                         sort_key: scalar_bit_name(&register.name, bit_count, bit_index),
                         lhs_expr: state
                             .register_bit_exprs
                             .get(&(register_index, bit_index))
-                            .expect("register Q expression was generated")
-                            .clone(),
+                            .copied()
+                            .expect("register Q expression was generated"),
                         rhs_expr,
                     });
                 }
@@ -469,26 +461,22 @@ fn generate_register_assignments(
                     .get(&register_index)
                     .expect("register declaration was generated");
                 let rhs_expr = match direct_input {
-                    Some(input_id) => Rc::new(
-                        state
-                            .packed_external_inputs
-                            .get(&input_id.index())
-                            .expect("external input declaration was generated")
-                            .logic_ref
-                            .to_expr(),
-                    ),
-                    None => Rc::new(
-                        state
-                            .packed_next_state_wires
-                            .get(&register_index)
-                            .expect("register D wire declaration was generated")
-                            .logic_ref
-                            .to_expr(),
-                    ),
+                    Some(input_id) => state
+                        .packed_external_inputs
+                        .get(&input_id.index())
+                        .expect("external input declaration was generated")
+                        .logic_ref
+                        .to_expr(),
+                    None => state
+                        .packed_next_state_wires
+                        .get(&register_index)
+                        .expect("register D wire declaration was generated")
+                        .logic_ref
+                        .to_expr(),
                 };
                 state.procedural_assignments.push(ProceduralAssignment {
                     sort_key: register.name.clone(),
-                    lhs_expr: Rc::new(lhs.logic_ref.to_expr()),
+                    lhs_expr: lhs.logic_ref.to_expr(),
                     rhs_expr,
                 });
             }
@@ -499,13 +487,12 @@ fn generate_register_assignments(
 fn emit_assignments(
     assignments: &mut [DirectAssignment],
     file: &mut vast::VastFile,
-    module: &mut vast::VastModule,
+    module: vast::VastModule,
 ) {
     assignments.sort_by(|lhs, rhs| lhs.sort_key.cmp(&rhs.sort_key));
     for assignment in assignments {
-        module.add_member_continuous_assignment(
-            file.make_continuous_assignment(&assignment.lhs_expr, &assignment.rhs_expr),
-        );
+        let member = file.make_continuous_assignment(&assignment.lhs_expr, &assignment.rhs_expr);
+        file.add_member_continuous_assignment(module, member);
     }
 }
 
@@ -513,7 +500,7 @@ fn generate_sequential_block(
     design: &SequentialGateFn,
     state: &mut NetlistEmitState,
     file: &mut vast::VastFile,
-    module: &mut vast::VastModule,
+    module: vast::VastModule,
     clock_ref: Option<&vast::LogicRef>,
 ) {
     if state.procedural_assignments.is_empty() {
@@ -524,12 +511,10 @@ fn generate_sequential_block(
         .procedural_assignments
         .sort_by(|lhs, rhs| lhs.sort_key.cmp(&rhs.sort_key));
     let posedge_clock = file.make_pos_edge(&clock_ref.to_expr());
-    let mut block = module
-        .add_always_ff(&[&posedge_clock])
-        .unwrap()
-        .get_statement_block();
+    let always = file.add_always_ff(module, &[&posedge_clock]).unwrap();
+    let block = file.statement_block(always);
     for assignment in &state.procedural_assignments {
-        block.add_nonblocking_assignment(&assignment.lhs_expr, &assignment.rhs_expr);
+        file.block_add_nonblocking_assignment(block, &assignment.lhs_expr, &assignment.rhs_expr);
     }
     debug_assert!(!design.registers.is_empty());
 }
@@ -572,7 +557,7 @@ pub fn emit_netlist_with_version_and_port_style(
         vast::VastFileType::Verilog
     };
     let mut file = vast::VastFile::new(file_type);
-    let mut module = file.add_module(&design.name);
+    let module = file.add_module(&design.name);
     let bit_type = file.make_bit_vector_type(1, false);
     let config = NetlistEmitConfig { design, port_style };
     let mut state = NetlistEmitState::new();
@@ -580,30 +565,18 @@ pub fn emit_netlist_with_version_and_port_style(
     let clock_ref = design
         .clock
         .as_ref()
-        .map(|clock| module.add_input(&clock.name, &bit_type));
-    generate_external_input_ports(&config, &mut state, &mut file, &mut module, &bit_type)?;
-    generate_registers_and_next_state_wires(
-        &config,
-        &mut state,
-        &mut file,
-        &mut module,
-        &bit_type,
-    )?;
-    generate_external_output_ports(&config, &mut state, &mut file, &mut module, &bit_type)?;
-    generate_internal_combinational_logic(&config, &mut state, &mut file, &mut module, &bit_type);
+        .map(|clock| file.add_input(module, &clock.name, &bit_type));
+    generate_external_input_ports(&config, &mut state, &mut file, module, &bit_type)?;
+    generate_registers_and_next_state_wires(&config, &mut state, &mut file, module, &bit_type)?;
+    generate_external_output_ports(&config, &mut state, &mut file, module, &bit_type)?;
+    generate_internal_combinational_logic(&config, &mut state, &mut file, module, &bit_type);
     connect_transition_output_targets(&config, &mut state, &mut file);
     generate_register_assignments(&config, &mut state, &mut file);
 
-    emit_assignments(&mut state.internal_wire_assignments, &mut file, &mut module);
-    emit_assignments(&mut state.direct_output_assignments, &mut file, &mut module);
-    generate_sequential_block(
-        design,
-        &mut state,
-        &mut file,
-        &mut module,
-        clock_ref.as_ref(),
-    );
-    emit_assignments(&mut state.final_output_assignments, &mut file, &mut module);
+    emit_assignments(&mut state.internal_wire_assignments, &mut file, module);
+    emit_assignments(&mut state.direct_output_assignments, &mut file, module);
+    generate_sequential_block(design, &mut state, &mut file, module, clock_ref.as_ref());
+    emit_assignments(&mut state.final_output_assignments, &mut file, module);
     Ok(file.emit())
 }
 

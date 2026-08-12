@@ -52,8 +52,40 @@ fn parse_rust_sys_binding_names(sys_lib_rs_source: &str) -> BTreeSet<String> {
     names
 }
 
+/// Returns whether an exported libxls symbol still requires a Rust FFI binding.
+fn requires_rust_sys_binding(symbol: &str) -> bool {
+    symbol.starts_with("xls_") && !symbol.starts_with("xls_vast_")
+}
+
 #[test]
-fn all_dso_xls_symbols_are_bound_in_sys() {
+fn native_vast_exports_do_not_require_rust_sys_bindings() {
+    assert!(!requires_rust_sys_binding("xls_vast_make_verilog_file"));
+    assert!(!requires_rust_sys_binding(
+        "xls_vast_verilog_module_add_always_ff"
+    ));
+    assert!(requires_rust_sys_binding("xls_parse_typed_value"));
+    assert!(requires_rust_sys_binding("xls_dslx_parse_and_typecheck"));
+    assert!(requires_rust_sys_binding("xls_vastly_reference_symbol"));
+    assert!(!requires_rust_sys_binding("unrelated_symbol"));
+}
+
+#[test]
+fn rust_sys_bindings_do_not_include_native_vast_symbols() {
+    let binding_names = parse_rust_sys_binding_names(include_str!("../src/lib.rs"));
+    assert!(!binding_names.is_empty(), "expected non-VAST XLS bindings");
+
+    let vast_bindings = binding_names
+        .iter()
+        .filter(|name| name.starts_with("xls_vast_"))
+        .collect::<Vec<_>>();
+    assert!(
+        vast_bindings.is_empty(),
+        "VAST is implemented natively and must not have FFI bindings: {vast_bindings:?}"
+    );
+}
+
+#[test]
+fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
     // Only implemented/validated on Linux for now.
     if !cfg!(target_os = "linux") {
         eprintln!("Skipping DSO symbol coverage test on non-Linux target.");
@@ -107,14 +139,16 @@ fn all_dso_xls_symbols_are_bound_in_sys() {
         // Format: "<addr> <type> <name>" or variations; take last field.
         let maybe_name = line.split_whitespace().last();
         if let Some(name) = maybe_name {
-            if name.starts_with("xls_") {
+            // The DSO still exports VAST, but xlsynth-vast implements it entirely
+            // in Rust, so those legacy symbols intentionally have no FFI bindings.
+            if requires_rust_sys_binding(name) {
                 dso_symbols.insert(name.to_string());
             }
         }
     }
     assert!(
         !dso_symbols.is_empty(),
-        "No xls_* symbols found in DSO {}; nm output was:\n{}",
+        "No non-VAST xls_* symbols found in DSO {}; nm output was:\n{}",
         dso_path.display(),
         nm_stdout
     );
@@ -127,7 +161,7 @@ fn all_dso_xls_symbols_are_bound_in_sys() {
         "No xls_* pub fn bindings found in xlsynth-sys/src/lib.rs"
     );
 
-    // Compute difference: symbols present in DSO but not declared in Rust externs.
+    // Compute difference: required DSO symbols that lack Rust extern declarations.
     let missing: Vec<&String> = dso_symbols
         .iter()
         .filter(|name| !binding_names.contains(*name))
@@ -135,7 +169,8 @@ fn all_dso_xls_symbols_are_bound_in_sys() {
 
     if !missing.is_empty() {
         let mut report = String::new();
-        report.push_str("Missing xls_* symbols (present in DSO, absent in Rust externs):\n");
+        report
+            .push_str("Missing non-VAST xls_* symbols (present in DSO, absent in Rust externs):\n");
         for name in &missing {
             report.push_str("  ");
             report.push_str(name);

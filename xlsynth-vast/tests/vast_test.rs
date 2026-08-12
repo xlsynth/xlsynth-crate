@@ -1,21 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use pretty_assertions::assert_eq;
-use xlsynth::{
-    ir_value::IrFormatPreference,
-    vast::{DataKind, Expr, VastDataType, VastFile, VastFileType},
-};
+use xlsynth_vast::{DataKind, Expr, LiteralFormat, VastDataType, VastFile, VastFileType};
 
 type VastBinOp = fn(&mut VastFile, &Expr, &Expr) -> Expr;
 
 #[test]
 fn test_vast() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("main");
+    let module = file.add_module("main");
     let input_type = file.make_bit_vector_type(32, false);
     let output_type = file.make_scalar_type();
-    module.add_input("in", &input_type);
-    module.add_output("out", &output_type);
+    file.add_input(module, "in", &input_type);
+    file.add_output(module, "out", &output_type);
     let verilog = file.emit();
     let want = r#"module main(
   input wire [31:0] in,
@@ -30,14 +26,14 @@ endmodule
 #[test]
 fn test_continuous_assignment_of_slice() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
+    let module = file.add_module("my_module");
     let input_type = file.make_bit_vector_type(8, false);
     let output_type = file.make_bit_vector_type(4, false);
-    let input = module.add_input("my_input", &input_type);
-    let output = module.add_output("my_output", &output_type);
+    let input = file.add_input(module, "my_input", &input_type);
+    let output = file.add_output(module, "my_output", &output_type);
     let slice = file.make_slice(&input.to_indexable_expr(), 3, 0);
     let assignment = file.make_continuous_assignment(&output.to_expr(), &slice.to_expr());
-    module.add_member_continuous_assignment(assignment);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module(
   input wire [7:0] my_input,
@@ -55,24 +51,25 @@ fn test_instantiation() {
 
     let data_type = file.make_bit_vector_type(8, false);
 
-    let mut a_module = file.add_module("A");
-    a_module.add_output("bus", &data_type);
+    let a_module = file.add_module("A");
+    file.add_output(a_module, "bus", &data_type);
 
-    let mut b_module = file.add_module("B");
-    let bus = b_module.add_wire("bus", &data_type);
+    let b_module = file.add_module("B");
+    let bus = file.add_wire(b_module, "bus", &data_type);
 
     let param_value = file
-        .make_literal("bits[32]:42", &IrFormatPreference::UnsignedDecimal)
+        .make_literal("bits[32]:42", &LiteralFormat::UnsignedDecimal)
         .unwrap();
 
-    b_module.add_member_instantiation(file.make_instantiation(
+    let instantiation = file.make_instantiation(
         "A",
         "a_i",
         &["a_param"],
         &[&param_value],
         &["bus", "empty_thing"],
         &[Some(&bus.to_expr()), None],
-    ));
+    );
+    file.add_member_instantiation(b_module, instantiation);
 
     let verilog = file.emit();
     let want = r#"module A(
@@ -96,11 +93,11 @@ endmodule
 #[test]
 fn test_main_module() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("main");
+    let module = file.add_module("main");
     let input_type = file.make_bit_vector_type(32, false);
     let output_type = file.make_scalar_type();
-    module.add_input("in", &input_type);
-    module.add_output("out", &output_type);
+    file.add_input(module, "in", &input_type);
+    file.add_output(module, "out", &output_type);
     let verilog = file.emit();
     let want = r#"module main(
   input wire [31:0] in,
@@ -115,16 +112,17 @@ endmodule
 #[test]
 fn test_literal() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
-    let wire = module.add_wire("bus", &file.make_bit_vector_type(128, false));
+    let module = file.add_module("my_module");
+    let wire_data_type = file.make_bit_vector_type(128, false);
+    let wire = file.add_wire(module, "bus", &wire_data_type);
     let literal = file
         .make_literal(
             "bits[128]:0xFFEEDDCCBBAA99887766554433221100",
-            &IrFormatPreference::Hex,
+            &LiteralFormat::Hex,
         )
         .unwrap();
     let assignment = file.make_continuous_assignment(&wire.to_expr(), &literal);
-    module.add_member_continuous_assignment(assignment);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module;
   wire [127:0] bus;
@@ -139,10 +137,10 @@ endmodule
 #[test]
 fn test_port_with_external_package_struct() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
+    let module = file.add_module("my_module");
     let my_struct = file.make_extern_package_type("mypack", "mystruct_t");
     let input_type = file.make_packed_array_type(my_struct, &[2, 3, 4]);
-    module.add_input("my_input", &input_type);
+    file.add_input(module, "my_input", &input_type);
     let want = r#"module my_module(
   input mypack::mystruct_t [1:0][2:0][3:0] my_input
 );
@@ -156,14 +154,14 @@ endmodule
 #[test]
 fn test_simple_concat() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
+    let module = file.add_module("my_module");
     let input_type = file.make_bit_vector_type(8, false);
     let output_type = file.make_bit_vector_type(16, false);
-    let input = module.add_input("my_input", &input_type);
-    let output = module.add_output("my_output", &output_type);
+    let input = file.add_input(module, "my_input", &input_type);
+    let output = file.add_output(module, "my_output", &output_type);
     let concat = file.make_concat(&[&input.to_expr(), &input.to_expr()]);
     let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
-    module.add_member_continuous_assignment(assignment);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module(
   input wire [7:0] my_input,
@@ -189,14 +187,14 @@ endmodule
 "#;
 
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
+    let module = file.add_module("my_module");
     let u2 = file.make_bit_vector_type(2, false);
     let a_type = file.make_packed_array_type(u2, &[3, 5]);
     let b_type = file.make_bit_vector_type(2, false);
     let c_type = file.make_bit_vector_type(3, false);
-    let a = module.add_wire("a", &a_type);
-    let b = module.add_wire("b", &b_type);
-    let c = module.add_wire("c", &c_type);
+    let a = file.add_wire(module, "a", &a_type);
+    let b = file.add_wire(module, "b", &b_type);
+    let c = file.add_wire(module, "c", &c_type);
 
     // First assignment.
     {
@@ -205,7 +203,7 @@ endmodule
         let a_lhs = file.make_slice(&a_2.to_indexable_expr(), 3, 4);
         let b_slice = file.make_slice(&b.to_indexable_expr(), 1, 0);
         let assignment = file.make_continuous_assignment(&a_lhs.to_expr(), &b_slice.to_expr());
-        module.add_member_continuous_assignment(assignment);
+        file.add_member_continuous_assignment(module, assignment);
     }
 
     // Second assignment.
@@ -213,7 +211,7 @@ endmodule
         let a_lhs = file.make_slice(&a.to_indexable_expr(), 3, 4);
         let c_slice = file.make_slice(&c.to_indexable_expr(), 2, 1);
         let assignment = file.make_continuous_assignment(&a_lhs.to_expr(), &c_slice.to_expr());
-        module.add_member_continuous_assignment(assignment);
+        file.add_member_continuous_assignment(module, assignment);
     }
 
     let verilog = file.emit();
@@ -223,11 +221,13 @@ endmodule
 #[test]
 fn test_index_then_add_constant_uses_indexable_to_expr() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("idx_add");
+    let module = file.add_module("idx_add");
 
     // Create a 3-bit wire `x` and a 1-bit wire `y`.
-    let x = module.add_wire("x", &file.make_bit_vector_type(3, false));
-    let y = module.add_wire("y", &file.make_scalar_type());
+    let x_data_type = file.make_bit_vector_type(3, false);
+    let x = file.add_wire(module, "x", &x_data_type);
+    let y_data_type = file.make_scalar_type();
+    let y = file.add_wire(module, "y", &y_data_type);
 
     // Build (x[2]) using index -> indexable -> expr to exercise the new API.
     let idx = file.make_index(&x.to_indexable_expr(), 2);
@@ -235,13 +235,13 @@ fn test_index_then_add_constant_uses_indexable_to_expr() {
 
     // Add a 1-bit constant to the indexed bit.
     let one = file
-        .make_literal("bits[1]:1", &IrFormatPreference::UnsignedDecimal)
+        .make_literal("bits[1]:1", &LiteralFormat::UnsignedDecimal)
         .unwrap();
     let sum = file.make_add(&idx_expr, &one);
 
     // Emit as a continuous assignment so it appears in the module body.
     let assign = file.make_continuous_assignment(&y.to_expr(), &sum);
-    module.add_member_continuous_assignment(assign);
+    file.add_member_continuous_assignment(module, assign);
 
     let verilog = file.emit();
     let want = r#"module idx_add;
@@ -256,14 +256,18 @@ endmodule
 #[test]
 fn test_slice_and_index_with_expressions() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
+    let module = file.add_module("my_module");
     let element_type = file.make_bit_vector_type(8, false);
-    let arr = module.add_wire("arr", &element_type);
-    let hi = module.add_wire("hi", &file.make_bit_vector_type(4, false));
-    let lo = module.add_wire("lo", &file.make_bit_vector_type(4, false));
-    let idx = module.add_wire("idx", &file.make_bit_vector_type(3, false));
-    let slice_out = module.add_wire("slice_out", &element_type);
-    let index_out = module.add_wire("index_out", &file.make_scalar_type());
+    let arr = file.add_wire(module, "arr", &element_type);
+    let hi_data_type = file.make_bit_vector_type(4, false);
+    let hi = file.add_wire(module, "hi", &hi_data_type);
+    let lo_data_type = file.make_bit_vector_type(4, false);
+    let lo = file.add_wire(module, "lo", &lo_data_type);
+    let idx_data_type = file.make_bit_vector_type(3, false);
+    let idx = file.add_wire(module, "idx", &idx_data_type);
+    let slice_out = file.add_wire(module, "slice_out", &element_type);
+    let index_out_data_type = file.make_scalar_type();
+    let index_out = file.add_wire(module, "index_out", &index_out_data_type);
 
     let arr_indexable = arr.to_indexable_expr();
     let hi_expr = hi.to_expr();
@@ -274,9 +278,9 @@ fn test_slice_and_index_with_expressions() {
     let index = file.make_index_expr(&arr_indexable, &idx_expr);
 
     let slice_assign = file.make_continuous_assignment(&slice_out.to_expr(), &slice.to_expr());
-    module.add_member_continuous_assignment(slice_assign);
+    file.add_member_continuous_assignment(module, slice_assign);
     let index_assign = file.make_continuous_assignment(&index_out.to_expr(), &index.to_expr());
-    module.add_member_continuous_assignment(index_assign);
+    file.add_member_continuous_assignment(module, index_assign);
 
     let verilog = file.emit();
     let want = r#"module my_module;
@@ -296,15 +300,17 @@ endmodule
 #[test]
 fn test_concat_various_expressions() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
-    let input = module.add_input("my_input", &file.make_bit_vector_type(8, false));
-    let output = module.add_output("my_output", &file.make_bit_vector_type(9, false));
+    let module = file.add_module("my_module");
+    let input_data_type = file.make_bit_vector_type(8, false);
+    let input = file.add_input(module, "my_input", &input_data_type);
+    let output_data_type = file.make_bit_vector_type(9, false);
+    let output = file.add_output(module, "my_output", &output_data_type);
     let input_indexable = input.to_indexable_expr();
     let index = file.make_index(&input_indexable, 0);
     let slice = file.make_slice(&input_indexable, 7, 0);
     let concat = file.make_concat(&[&index.to_expr(), &slice.to_expr()]);
     let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
-    module.add_member_continuous_assignment(assignment);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module(
   input wire [7:0] my_input,
@@ -319,8 +325,9 @@ endmodule
 #[test]
 fn test_unary_ops() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
-    let input = module.add_input("my_input", &file.make_bit_vector_type(8, false));
+    let module = file.add_module("my_module");
+    let input_data_type = file.make_bit_vector_type(8, false);
+    let input = file.add_input(module, "my_input", &input_data_type);
     let not_input = file.make_not(&input.to_expr());
     let negate_input = file.make_negate(&input.to_expr());
     let bitwise_not_input = file.make_bitwise_not(&input.to_expr());
@@ -338,9 +345,9 @@ fn test_unary_ops() {
         &xor_reduce_input,  // 1 bit
     ]);
     let concat_type = file.make_bit_vector_type(8 + 8 + 8 + 1 + 1 + 1 + 1, false);
-    let output = module.add_output("my_output", &concat_type);
+    let output = file.add_output(module, "my_output", &concat_type);
     let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
-    module.add_member_continuous_assignment(assignment);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module(
   input wire [7:0] my_input,
@@ -355,11 +362,11 @@ endmodule
 #[test]
 fn test_binary_ops() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
+    let module = file.add_module("my_module");
     let u8 = file.make_bit_vector_type(8, false);
     let u1 = file.make_bit_vector_type(1, false);
-    let lhs = module.add_input("lhs", &u8);
-    let rhs = module.add_input("rhs", &u8);
+    let lhs = file.add_input(module, "lhs", &u8);
+    let rhs = file.add_input(module, "rhs", &u8);
     let functions: Vec<(&str, VastBinOp, &VastDataType)> = vec![
         ("add", VastFile::make_add, &u8),
         ("logical_and", VastFile::make_logical_and, &u1),
@@ -387,10 +394,10 @@ fn test_binary_ops() {
         ("eq_x", VastFile::make_eq_x, &u1),
     ];
     for (name, f, output_type) in functions {
-        let wire = module.add_wire(name, output_type);
+        let wire = file.add_wire(module, name, output_type);
         let rhs_expr = f(&mut file, &lhs.to_expr(), &rhs.to_expr());
         let assignment = file.make_continuous_assignment(&wire.to_expr(), &rhs_expr);
-        module.add_member_continuous_assignment(assignment);
+        file.add_member_continuous_assignment(module, assignment);
     }
 
     // Now emit the VAST as text.
@@ -455,24 +462,24 @@ endmodule
 #[test]
 fn test_nested_generate_loops_with_assignment() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("gen_nested");
+    let module = file.add_module("gen_nested");
     let scalar = file.make_scalar_type();
 
-    let a = module.add_input("a", &scalar);
-    let b = module.add_output("b", &scalar);
+    let a = file.add_input(module, "a", &scalar);
+    let b = file.add_output(module, "b", &scalar);
 
     // for (genvar i = 0; i < 2; ++i) begin: outer
-    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
-    let mut outer = module.add_generate_loop("i", &zero, &two, Some("outer"));
+    let zero = file.make_unsized_decimal_literal(0);
+    let two = file.make_unsized_decimal_literal(2);
+    let outer = file.add_generate_loop(module, "i", &zero, &two, Some("outer"));
 
     //   for (genvar j = 1; j < 3; ++j) begin: inner
-    let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
-    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
-    let mut inner = outer.add_generate_loop("j", &one, &three, Some("inner"));
+    let one = file.make_unsized_decimal_literal(1);
+    let three = file.make_unsized_decimal_literal(3);
+    let inner = file.generate_add_generate_loop(outer, "j", &one, &three, Some("inner"));
 
     //     assign b = a;
-    inner.add_continuous_assignment(&b.to_expr(), &a.to_expr());
+    file.generate_add_continuous_assignment(inner, &b.to_expr(), &a.to_expr());
 
     let verilog = file.emit();
     let want = r#"module gen_nested(
@@ -492,17 +499,17 @@ endmodule
 #[test]
 fn test_width_cast_basic() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("width_cast");
+    let module = file.add_module("width_cast");
     let u16 = file.make_bit_vector_type(16, false);
     let u8 = file.make_bit_vector_type(8, false);
 
-    let x = module.add_input("x", &u16);
-    let y = module.add_output("y", &u8);
+    let x = file.add_input(module, "x", &u16);
+    let y = file.add_output(module, "y", &u8);
 
-    let width8 = file.make_plain_literal(8, &IrFormatPreference::UnsignedDecimal);
+    let width8 = file.make_unsized_decimal_literal(8);
     let cast = file.make_width_cast(&width8, &x.to_expr());
     let assign = file.make_continuous_assignment(&y.to_expr(), &cast);
-    module.add_member_continuous_assignment(assign);
+    file.add_member_continuous_assignment(module, assign);
 
     let verilog = file.emit();
     let want = r#"module width_cast(
@@ -518,17 +525,17 @@ endmodule
 #[test]
 fn test_generate_loop_with_localparam_and_empty_always_blocks() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("gen_empty_blocks");
+    let module = file.add_module("gen_empty_blocks");
 
-    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
-    let mut gen_loop = module.add_generate_loop("i", &zero, &two, Some("G"));
+    let zero = file.make_unsized_decimal_literal(0);
+    let two = file.make_unsized_decimal_literal(2);
+    let gen_loop = file.add_generate_loop(module, "i", &zero, &two, Some("G"));
 
-    let five = file.make_plain_literal(5, &IrFormatPreference::UnsignedDecimal);
-    gen_loop.add_localparam("LP", &five);
+    let five = file.make_unsized_decimal_literal(5);
+    file.generate_add_localparam(gen_loop, "LP", &five);
 
-    gen_loop.add_always_comb().unwrap();
-    gen_loop.add_always_ff(&[]).unwrap();
+    file.generate_add_always_comb(gen_loop).unwrap();
+    file.generate_add_always_ff(gen_loop, &[]).unwrap();
 
     let verilog = file.emit();
     let want = r#"module gen_empty_blocks;
@@ -545,15 +552,15 @@ endmodule
 #[test]
 fn test_type_cast_basic() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("type_cast");
+    let module = file.add_module("type_cast");
     let u8 = file.make_bit_vector_type(8, false);
-    let x = module.add_input("x", &u8);
-    let y = module.add_output("y", &u8);
+    let x = file.add_input(module, "x", &u8);
+    let y = file.add_output(module, "y", &u8);
 
     let user_t = file.make_extern_package_type("", "my_type_t");
     let cast = file.make_type_cast(&user_t, &x.to_expr());
     let assign = file.make_continuous_assignment(&y.to_expr(), &cast);
-    module.add_member_continuous_assignment(assign);
+    file.add_member_continuous_assignment(module, assign);
 
     let verilog = file.emit();
     let want = r#"module type_cast(
@@ -569,9 +576,9 @@ endmodule
 #[test]
 fn test_add_inout_port() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("with_inout");
+    let module = file.add_module("with_inout");
     let scalar = file.make_scalar_type();
-    module.add_inout("io", &scalar);
+    file.add_inout(module, "io", &scalar);
     let verilog = file.emit();
     let want = r#"module with_inout(
   inout wire io
@@ -585,14 +592,18 @@ endmodule
 #[test]
 fn test_ternary() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
-    let selector = module.add_input("selector", &file.make_bit_vector_type(8, false));
-    let on_true = module.add_input("on_true", &file.make_bit_vector_type(8, false));
-    let on_false = module.add_input("on_false", &file.make_bit_vector_type(8, false));
+    let module = file.add_module("my_module");
+    let selector_data_type = file.make_bit_vector_type(8, false);
+    let selector = file.add_input(module, "selector", &selector_data_type);
+    let on_true_data_type = file.make_bit_vector_type(8, false);
+    let on_true = file.add_input(module, "on_true", &on_true_data_type);
+    let on_false_data_type = file.make_bit_vector_type(8, false);
+    let on_false = file.add_input(module, "on_false", &on_false_data_type);
     let ternary = file.make_ternary(&selector.to_expr(), &on_true.to_expr(), &on_false.to_expr());
-    let output = module.add_output("my_output", &file.make_bit_vector_type(8, false));
+    let output_data_type = file.make_bit_vector_type(8, false);
+    let output = file.add_output(module, "my_output", &output_data_type);
     let assignment = file.make_continuous_assignment(&output.to_expr(), &ternary);
-    module.add_member_continuous_assignment(assignment);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module(
   input wire [7:0] selector,
@@ -609,12 +620,16 @@ endmodule
 #[test]
 fn test_replicated_concat_i64() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
-    let a = module.add_input("a", &file.make_scalar_type());
-    let b = module.add_input("b", &file.make_scalar_type());
-    let w = module.add_wire("w", &file.make_bit_vector_type(6, false));
+    let module = file.add_module("my_module");
+    let a_data_type = file.make_scalar_type();
+    let a = file.add_input(module, "a", &a_data_type);
+    let b_data_type = file.make_scalar_type();
+    let b = file.add_input(module, "b", &b_data_type);
+    let w_data_type = file.make_bit_vector_type(6, false);
+    let w = file.add_wire(module, "w", &w_data_type);
     let expr = file.make_replicated_concat_i64(3, &[&a.to_expr(), &b.to_expr()]);
-    module.add_member_continuous_assignment(file.make_continuous_assignment(&w.to_expr(), &expr));
+    let assignment = file.make_continuous_assignment(&w.to_expr(), &expr);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module(
   input wire a,
@@ -630,15 +645,19 @@ endmodule
 #[test]
 fn test_replicated_concat_expr() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("my_module");
-    let a = module.add_input("a", &file.make_scalar_type());
-    let b = module.add_input("b", &file.make_scalar_type());
-    let w = module.add_wire("w", &file.make_bit_vector_type(6, false));
+    let module = file.add_module("my_module");
+    let a_data_type = file.make_scalar_type();
+    let a = file.add_input(module, "a", &a_data_type);
+    let b_data_type = file.make_scalar_type();
+    let b = file.add_input(module, "b", &b_data_type);
+    let w_data_type = file.make_bit_vector_type(6, false);
+    let w = file.add_wire(module, "w", &w_data_type);
     let rep = file
-        .make_literal("bits[32]:3", &IrFormatPreference::UnsignedDecimal)
+        .make_literal("bits[32]:3", &LiteralFormat::UnsignedDecimal)
         .unwrap();
     let expr = file.make_replicated_concat(&rep, &[&a.to_expr(), &b.to_expr()]);
-    module.add_member_continuous_assignment(file.make_continuous_assignment(&w.to_expr(), &expr));
+    let assignment = file.make_continuous_assignment(&w.to_expr(), &expr);
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module my_module(
   input wire a,
@@ -654,9 +673,9 @@ endmodule
 #[test]
 fn test_integer_type_port() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("m");
+    let module = file.add_module("m");
     let int_t = file.make_integer_type(true);
-    module.add_input("i", &int_t);
+    file.add_input(module, "i", &int_t);
     let verilog = file.emit();
     let want = r#"module m(
   input wire i
@@ -670,15 +689,15 @@ endmodule
 #[test]
 fn test_module_parameter_and_use_in_assignment() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("P");
+    let module = file.add_module("P");
     let lit = file
-        .make_literal("bits[32]:4", &IrFormatPreference::UnsignedDecimal)
+        .make_literal("bits[32]:4", &LiteralFormat::UnsignedDecimal)
         .unwrap();
-    let pref = module.add_parameter("N", &lit);
-    let out = module.add_output("o", &file.make_bit_vector_type(32, false));
-    module.add_member_continuous_assignment(
-        file.make_continuous_assignment(&out.to_expr(), &pref.to_expr()),
-    );
+    let pref = file.add_parameter(module, "N", &lit);
+    let out_data_type = file.make_bit_vector_type(32, false);
+    let out = file.add_output(module, "o", &out_data_type);
+    let assignment = file.make_continuous_assignment(&out.to_expr(), &pref.to_expr());
+    file.add_member_continuous_assignment(module, assignment);
     let verilog = file.emit();
     let want = r#"module P(
   output wire [31:0] o
@@ -693,13 +712,13 @@ endmodule
 #[test]
 fn test_module_parameter_with_def_integer() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("P2");
+    let module = file.add_module("P2");
     let int_t = file.make_integer_type(true);
     let def = file.make_def("N2", DataKind::Integer, &int_t);
     let lit = file
-        .make_literal("bits[32]:7", &IrFormatPreference::UnsignedDecimal)
+        .make_literal("bits[32]:7", &LiteralFormat::UnsignedDecimal)
         .unwrap();
-    let _pref = module.add_parameter_with_def(&def, &lit);
+    let _pref = file.add_parameter_with_def(module, &def, &lit);
     let verilog = file.emit();
     let want = r#"module P2;
   parameter integer N2 = 32'd7;
@@ -711,39 +730,39 @@ endmodule
 #[test]
 fn test_module_localparams_various_types() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("LM");
+    let module = file.add_module("LM");
 
     // localparam int Foo = 42;
-    let forty_two = file.make_plain_literal(42, &IrFormatPreference::UnsignedDecimal);
-    module.add_int_localparam("Foo", &forty_two);
+    let forty_two = file.make_unsized_decimal_literal(42);
+    file.add_int_localparam(module, "Foo", &forty_two);
 
     // localparam Bar = 100;
-    let one_hundred = file.make_plain_literal(100, &IrFormatPreference::UnsignedDecimal);
-    module.add_localparam("Bar", &one_hundred);
+    let one_hundred = file.make_unsized_decimal_literal(100);
+    file.add_localparam(module, "Bar", &one_hundred);
 
     // localparam Qux = 'h10000;
     let qux = file
-        .make_literal("bits[32]:0x10000", &IrFormatPreference::PlainHex)
+        .make_literal("bits[32]:0x10000", &LiteralFormat::UnsizedHex)
         .unwrap();
-    module.add_localparam("Bar", &qux);
+    file.add_localparam(module, "Bar", &qux);
 
     // localparam logic [7:0] Baz = 8'h44;
     let logic8 = file.make_bit_vector_type(8, false);
     let baz_def = file.make_def("Baz", DataKind::Logic, &logic8);
     let hex_44 = file
-        .make_literal("bits[8]:0x44", &IrFormatPreference::Hex)
+        .make_literal("bits[8]:0x44", &LiteralFormat::Hex)
         .unwrap();
-    module.add_typed_localparam(&baz_def, &hex_44);
+    file.add_typed_localparam(module, &baz_def, &hex_44);
 
     // localparam logic [7:0] Zero = '0;
     let zero_def = file.make_def("Zero", DataKind::Logic, &logic8);
     let unsized_zero = file.make_unsized_zero_literal();
-    module.add_typed_localparam(&zero_def, &unsized_zero);
+    file.add_typed_localparam(module, &zero_def, &unsized_zero);
 
     // localparam logic [7:0] Ones = '1;
     let ones_def = file.make_def("Ones", DataKind::Logic, &logic8);
     let unsized_one = file.make_unsized_one_literal();
-    module.add_typed_localparam(&ones_def, &unsized_one);
+    file.add_typed_localparam(module, &ones_def, &unsized_one);
 
     let verilog = file.emit();
     let want = r#"module LM;
@@ -761,11 +780,15 @@ endmodule
 #[test]
 fn test_inline_blank_comment_module_members() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("M");
-    module.add_member_inline_statement(file.make_inline_verilog_statement("/* first */"));
-    module.add_member_blank_line(file.make_blank_line());
-    module.add_member_comment(file.make_comment("Single line comment"));
-    module.add_member_inline_statement(file.make_inline_verilog_statement("/* second */"));
+    let module = file.add_module("M");
+    let member = file.make_inline_verilog_statement("/* first */");
+    file.add_member_inline_statement(module, member);
+    let member = file.make_blank_line();
+    file.add_member_blank_line(module, member);
+    let member = file.make_comment("Single line comment");
+    file.add_member_comment(module, member);
+    let member = file.make_inline_verilog_statement("/* second */");
+    file.add_member_inline_statement(module, member);
     let verilog = file.emit();
     let want = r#"module M;
   /* first */
@@ -780,29 +803,29 @@ endmodule
 #[test]
 fn test_sequential_logic_system_verilog() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("test_module");
+    let module = file.add_module("test_module");
 
     let scalar_type = file.make_scalar_type();
 
-    let clk = module.add_input("clk", &scalar_type);
-    let pred = module.add_input("pred", &scalar_type);
-    let x = module.add_input("x", &scalar_type);
-    module.add_output("out", &scalar_type);
+    let clk = file.add_input(module, "clk", &scalar_type);
+    let pred = file.add_input(module, "pred", &scalar_type);
+    let x = file.add_input(module, "x", &scalar_type);
+    file.add_output(module, "out", &scalar_type);
 
-    let p0_pred_reg = module.add_reg("p0_pred", &scalar_type).unwrap();
-    let p0_x_reg = module.add_reg("p0_x", &scalar_type).unwrap();
+    let p0_pred_reg = file.add_reg(module, "p0_pred", &scalar_type).unwrap();
+    let p0_x_reg = file.add_reg(module, "p0_x", &scalar_type).unwrap();
 
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
 
-    let always_block = module.add_always_ff(&[&posedge_clk]).unwrap();
+    let always_block = file.add_always_ff(module, &[&posedge_clk]).unwrap();
 
-    let mut stmt_block = always_block.get_statement_block();
+    let stmt_block = file.statement_block(always_block);
 
-    stmt_block.add_nonblocking_assignment(&p0_pred_reg.to_expr(), &pred.to_expr());
-    stmt_block.add_comment_text("capture pred");
-    stmt_block.add_blank_line();
-    stmt_block.add_inline_text("/* combo capture */");
-    stmt_block.add_nonblocking_assignment(&p0_x_reg.to_expr(), &x.to_expr());
+    file.block_add_nonblocking_assignment(stmt_block, &p0_pred_reg.to_expr(), &pred.to_expr());
+    file.block_add_comment_text(stmt_block, "capture pred");
+    file.block_add_blank_line(stmt_block);
+    file.block_add_inline_text(stmt_block, "/* combo capture */");
+    file.block_add_nonblocking_assignment(stmt_block, &p0_x_reg.to_expr(), &x.to_expr());
 
     let verilog = file.emit();
 
@@ -830,15 +853,15 @@ endmodule
 #[test]
 fn blocking_assignment_emits_system_verilog() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("test_module");
+    let module = file.add_module("test_module");
     let scalar_type = file.make_scalar_type();
-    let _clk = module.add_input("clk", &scalar_type);
-    let x = module.add_input("x", &scalar_type);
-    let r = module.add_reg("r", &scalar_type).unwrap();
+    let _clk = file.add_input(module, "clk", &scalar_type);
+    let x = file.add_input(module, "x", &scalar_type);
+    let r = file.add_reg(module, "r", &scalar_type).unwrap();
 
-    let always_block = module.add_always_comb().unwrap();
-    let mut sb = always_block.get_statement_block();
-    sb.add_blocking_assignment(&r.to_expr(), &x.to_expr());
+    let always_block = file.add_always_comb(module).unwrap();
+    let sb = file.statement_block(always_block);
+    file.block_add_blocking_assignment(sb, &r.to_expr(), &x.to_expr());
 
     let verilog = file.emit();
     let want = r#"module test_module(
@@ -857,16 +880,16 @@ endmodule
 #[test]
 fn blocking_assignment_emits_verilog() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("test_module");
+    let module = file.add_module("test_module");
     let scalar_type = file.make_scalar_type();
-    let clk = module.add_input("clk", &scalar_type);
-    let x = module.add_input("x", &scalar_type);
-    let r = module.add_reg("r", &scalar_type).unwrap();
+    let clk = file.add_input(module, "clk", &scalar_type);
+    let x = file.add_input(module, "x", &scalar_type);
+    let r = file.add_reg(module, "r", &scalar_type).unwrap();
 
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always_block = module.add_always_at(&[&posedge_clk]).unwrap();
-    let mut sb = always_block.get_statement_block();
-    sb.add_blocking_assignment(&r.to_expr(), &x.to_expr());
+    let always_block = file.add_always_at(module, &[&posedge_clk]).unwrap();
+    let sb = file.statement_block(always_block);
+    file.block_add_blocking_assignment(sb, &r.to_expr(), &x.to_expr());
 
     let verilog = file.emit();
     let want = r#"module test_module(
@@ -884,23 +907,23 @@ endmodule
 
 #[test]
 fn conditional_emits_system_verilog() {
-    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
-    let mut module = file.add_module("M");
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("M");
     let bit = file.make_scalar_type();
-    let clk = module.add_input("clk", &bit);
-    let a = module.add_input("a", &bit);
-    let b = module.add_input("b", &bit);
-    let r = module.add_reg("r", &bit).unwrap();
+    let clk = file.add_input(module, "clk", &bit);
+    let a = file.add_input(module, "a", &bit);
+    let b = file.add_input(module, "b", &bit);
+    let r = file.add_reg(module, "r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always = module.add_always_ff(&[&posedge_clk]).unwrap();
-    let mut sb = always.get_statement_block();
-    let cond = sb.add_cond(&a.to_expr());
-    let mut then_block = cond.then_block();
-    then_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
-    let mut else_if_block = cond.add_else_if(&b.to_expr());
-    else_if_block.add_nonblocking_assignment(&r.to_expr(), &b.to_expr());
-    let mut else_block = cond.add_else();
-    else_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let always = file.add_always_ff(module, &[&posedge_clk]).unwrap();
+    let sb = file.statement_block(always);
+    let cond = file.block_add_cond(sb, &a.to_expr());
+    let then_block = file.conditional_then_block(cond);
+    file.block_add_nonblocking_assignment(then_block, &r.to_expr(), &a.to_expr());
+    let else_if_block = file.conditional_add_else_if(cond, &b.to_expr());
+    file.block_add_nonblocking_assignment(else_if_block, &r.to_expr(), &b.to_expr());
+    let else_block = file.conditional_add_else(cond);
+    file.block_add_nonblocking_assignment(else_block, &r.to_expr(), &a.to_expr());
     let verilog = file.emit();
     let want = r#"module M(
   input wire clk,
@@ -924,23 +947,23 @@ endmodule
 
 #[test]
 fn conditional_emits_verilog() {
-    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::Verilog);
-    let mut module = file.add_module("M");
+    let mut file = VastFile::new(VastFileType::Verilog);
+    let module = file.add_module("M");
     let bit = file.make_scalar_type();
-    let clk = module.add_input("clk", &bit);
-    let a = module.add_input("a", &bit);
-    let b = module.add_input("b", &bit);
-    let r = module.add_reg("r", &bit).unwrap();
+    let clk = file.add_input(module, "clk", &bit);
+    let a = file.add_input(module, "a", &bit);
+    let b = file.add_input(module, "b", &bit);
+    let r = file.add_reg(module, "r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always = module.add_always_at(&[&posedge_clk]).unwrap();
-    let mut sb = always.get_statement_block();
-    let cond = sb.add_cond(&a.to_expr());
-    let mut then_block = cond.then_block();
-    then_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
-    let mut else_if_block = cond.add_else_if(&b.to_expr());
-    else_if_block.add_nonblocking_assignment(&r.to_expr(), &b.to_expr());
-    let mut else_block = cond.add_else();
-    else_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let always = file.add_always_at(module, &[&posedge_clk]).unwrap();
+    let sb = file.statement_block(always);
+    let cond = file.block_add_cond(sb, &a.to_expr());
+    let then_block = file.conditional_then_block(cond);
+    file.block_add_nonblocking_assignment(then_block, &r.to_expr(), &a.to_expr());
+    let else_if_block = file.conditional_add_else_if(cond, &b.to_expr());
+    file.block_add_nonblocking_assignment(else_if_block, &r.to_expr(), &b.to_expr());
+    let else_block = file.conditional_add_else(cond);
+    file.block_add_nonblocking_assignment(else_block, &r.to_expr(), &a.to_expr());
     let verilog = file.emit();
     let want = r#"module M(
   input wire clk,
@@ -964,24 +987,24 @@ endmodule
 
 #[test]
 fn case_emits_system_verilog() {
-    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
-    let mut module = file.add_module("C");
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("C");
     let bit = file.make_scalar_type();
-    let clk = module.add_logic_input("clk", &bit);
-    let sel = module.add_logic_input("sel", &bit);
-    let a = module.add_logic_input("a", &bit);
-    let b = module.add_logic_input("b", &bit);
-    let r = module.add_logic("r", &bit).unwrap();
+    let clk = file.add_logic_input(module, "clk", &bit);
+    let sel = file.add_logic_input(module, "sel", &bit);
+    let a = file.add_logic_input(module, "a", &bit);
+    let b = file.add_logic_input(module, "b", &bit);
+    let r = file.add_logic(module, "r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always = module.add_always_ff(&[&posedge_clk]).unwrap();
-    let mut sb = always.get_statement_block();
-    let case_stmt = sb.add_case(&sel.to_expr());
-    let mut item_a = case_stmt.add_item(&a.to_expr());
-    item_a.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
-    let mut item_b = case_stmt.add_item(&b.to_expr());
-    item_b.add_nonblocking_assignment(&r.to_expr(), &b.to_expr());
-    let mut default_block = case_stmt.add_default();
-    default_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let always = file.add_always_ff(module, &[&posedge_clk]).unwrap();
+    let sb = file.statement_block(always);
+    let case_stmt = file.block_add_case(sb, &sel.to_expr());
+    let item_a = file.case_add_item(case_stmt, &a.to_expr());
+    file.block_add_nonblocking_assignment(item_a, &r.to_expr(), &a.to_expr());
+    let item_b = file.case_add_item(case_stmt, &b.to_expr());
+    file.block_add_nonblocking_assignment(item_b, &r.to_expr(), &b.to_expr());
+    let default_block = file.case_add_default(case_stmt);
+    file.block_add_nonblocking_assignment(default_block, &r.to_expr(), &a.to_expr());
     let verilog = file.emit();
     let want = r#"module C(
   input logic clk,
@@ -1011,23 +1034,23 @@ endmodule
 #[test]
 fn case_emits_verilog() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("C");
+    let module = file.add_module("C");
     let bit = file.make_scalar_type();
-    let clk = module.add_input("clk", &bit);
-    let sel = module.add_input("sel", &bit);
-    let a = module.add_input("a", &bit);
-    let b = module.add_input("b", &bit);
-    let r = module.add_reg("r", &bit).unwrap();
+    let clk = file.add_input(module, "clk", &bit);
+    let sel = file.add_input(module, "sel", &bit);
+    let a = file.add_input(module, "a", &bit);
+    let b = file.add_input(module, "b", &bit);
+    let r = file.add_reg(module, "r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always = module.add_always_ff(&[&posedge_clk]).unwrap();
-    let mut sb = always.get_statement_block();
-    let case_stmt = sb.add_case(&sel.to_expr());
-    let mut item_a = case_stmt.add_item(&a.to_expr());
-    item_a.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
-    let mut item_b = case_stmt.add_item(&b.to_expr());
-    item_b.add_nonblocking_assignment(&r.to_expr(), &b.to_expr());
-    let mut default_block = case_stmt.add_default();
-    default_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let always = file.add_always_ff(module, &[&posedge_clk]).unwrap();
+    let sb = file.statement_block(always);
+    let case_stmt = file.block_add_case(sb, &sel.to_expr());
+    let item_a = file.case_add_item(case_stmt, &a.to_expr());
+    file.block_add_nonblocking_assignment(item_a, &r.to_expr(), &a.to_expr());
+    let item_b = file.case_add_item(case_stmt, &b.to_expr());
+    file.block_add_nonblocking_assignment(item_b, &r.to_expr(), &b.to_expr());
+    let default_block = file.case_add_default(case_stmt);
+    file.block_add_nonblocking_assignment(default_block, &r.to_expr(), &a.to_expr());
     let verilog = file.emit();
     let want = r#"module C(
   input wire clk,
@@ -1057,13 +1080,13 @@ endmodule
 #[test]
 fn bit_vector_type_expr_with_parameter_port() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("P");
+    let module = file.add_module("P");
     let lit = file
-        .make_literal("bits[32]:4", &IrFormatPreference::UnsignedDecimal)
+        .make_literal("bits[32]:4", &LiteralFormat::UnsignedDecimal)
         .unwrap();
-    let n = module.add_parameter("N", &lit);
+    let n = file.add_parameter(module, "N", &lit);
     let dt = file.make_bit_vector_type_expr(&n.to_expr(), false);
-    module.add_output("o", &dt);
+    file.add_output(module, "o", &dt);
     let verilog = file.emit();
     let want = r#"module P(
   output wire [N - 1:0] o
@@ -1077,12 +1100,12 @@ endmodule
 #[test]
 fn bit_vector_type_expr_with_literal() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("M");
+    let module = file.add_module("M");
     let lit = file
-        .make_literal("bits[32]:5", &IrFormatPreference::UnsignedDecimal)
+        .make_literal("bits[32]:5", &LiteralFormat::UnsignedDecimal)
         .unwrap();
     let dt = file.make_bit_vector_type_expr(&lit, false);
-    module.add_wire("w", &dt);
+    file.add_wire(module, "w", &dt);
     let verilog = file.emit();
     let want = r#"module M;
   wire [4:0] w;
@@ -1093,22 +1116,19 @@ endmodule
 
 #[test]
 fn module_with_parameters() {
-    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
-    let mut module = file.add_module("C");
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("C");
     let bit = file.make_scalar_type();
-    let n = module.add_parameter_port(
-        "N",
-        &file.make_plain_literal(42, &IrFormatPreference::UnsignedDecimal),
-    );
-    module.add_typed_parameter_port(
-        "Foo",
-        &file.make_bit_vector_type(16, false),
-        &file
-            .make_literal("bits[16]:5", &IrFormatPreference::UnsignedDecimal)
-            .unwrap(),
-    );
-    module.add_logic_input("clk", &bit);
-    module.add_logic_input("a", &file.make_bit_vector_type_expr(&n.to_expr(), false));
+    let n_default = file.make_unsized_decimal_literal(42);
+    let n = file.add_parameter_port(module, "N", &n_default);
+    let foo_type = file.make_bit_vector_type(16, false);
+    let foo_default = file
+        .make_literal("bits[16]:5", &LiteralFormat::UnsignedDecimal)
+        .unwrap();
+    file.add_typed_parameter_port(module, "Foo", &foo_type, &foo_default);
+    file.add_logic_input(module, "clk", &bit);
+    let a_type = file.make_bit_vector_type_expr(&n.to_expr(), false);
+    file.add_logic_input(module, "a", &a_type);
     let verilog = file.emit();
     let want = r#"module C #(
   parameter N = 42,
@@ -1126,16 +1146,16 @@ endmodule
 #[test]
 fn test_type_cast_to_unqualified_user_type() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("type_cast2");
+    let module = file.add_module("type_cast2");
     let u8 = file.make_bit_vector_type(8, false);
-    let x = module.add_input("x", &u8);
-    let y = module.add_output("y", &u8);
+    let x = file.add_input(module, "x", &u8);
+    let y = file.add_output(module, "y", &u8);
 
     // Use an unqualified user type via extern_type.
     let user_t = file.make_extern_type("my_type_t");
     let cast = file.make_type_cast(&user_t, &x.to_expr());
     let assign = file.make_continuous_assignment(&y.to_expr(), &cast);
-    module.add_member_continuous_assignment(assign);
+    file.add_member_continuous_assignment(module, assign);
 
     let verilog = file.emit();
     let want = r#"module type_cast2(
@@ -1151,15 +1171,15 @@ endmodule
 #[test]
 fn test_module_macro_statement_simple() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("macro_mod");
+    let module = file.add_module("macro_mod");
 
     // Add a simple macro statement: `MY_MACRO;
     let mref1 = file.make_macro_ref("MY_MACRO1");
     let mstmt1 = file.make_macro_statement(&mref1, true);
     let mref2 = file.make_macro_ref("MY_MACRO2");
     let mstmt2 = file.make_macro_statement(&mref2, false);
-    module.add_member_macro_statement(mstmt1);
-    module.add_member_macro_statement(mstmt2);
+    file.add_member_macro_statement(module, mstmt1);
+    file.add_member_macro_statement(module, mstmt2);
 
     let verilog = file.emit();
     let want = r#"module macro_mod;
@@ -1173,25 +1193,25 @@ endmodule
 #[test]
 fn test_generate_loop_with_inline_and_macro() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("gen_with_macros");
+    let module = file.add_module("gen_with_macros");
 
     // for (genvar i = 0; i < 1; ++i) begin : G
-    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
-    let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
-    let mut gen_loop = module.add_generate_loop("i", &zero, &one, Some("G"));
+    let zero = file.make_unsized_decimal_literal(0);
+    let one = file.make_unsized_decimal_literal(1);
+    let gen_loop = file.add_generate_loop(module, "i", &zero, &one, Some("G"));
 
     // Comment, blank line, and macro statements inside the loop.
     let comment = file.make_comment("inside");
-    gen_loop.add_comment(&comment);
-    gen_loop.add_blank_line();
+    file.generate_add_comment(gen_loop, &comment);
+    file.generate_add_blank_line(gen_loop);
     let mref = file.make_macro_ref("DO_SOMETHING");
     let mstmt = file.make_macro_statement(&mref, true);
-    gen_loop.add_macro_statement(&mstmt);
+    file.generate_add_macro_statement(gen_loop, &mstmt);
     // Macro with arguments.
-    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
+    let three = file.make_unsized_decimal_literal(3);
     let mref_args = file.make_macro_ref_with_args("DO_THING", &[&three]);
     let mstmt_args = file.make_macro_statement(&mref_args, false);
-    gen_loop.add_macro_statement(&mstmt_args);
+    file.generate_add_macro_statement(gen_loop, &mstmt_args);
 
     let verilog = file.emit();
     let want = r#"module gen_with_macros;
@@ -1209,8 +1229,8 @@ endmodule
 #[test]
 fn test_expression_emit_plain_literal() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
-    let s = three.emit();
+    let three = file.make_unsized_decimal_literal(3);
+    let s = file.emit_expression(&three);
     assert_eq!(s, "3");
 }
 
@@ -1220,9 +1240,9 @@ fn test_file_level_comment_and_blank_line() {
     file.add_comment_text("top-level comment");
     let blank = file.make_blank_line();
     file.add_blank_line(blank);
-    let mut module = file.add_module("M");
+    let module = file.add_module("M");
     let scalar = file.make_scalar_type();
-    module.add_wire("w", &scalar);
+    file.add_wire(module, "w", &scalar);
     let verilog = file.emit();
     let want = r#"// top-level comment
 
@@ -1236,7 +1256,7 @@ endmodule
 #[test]
 fn test_array_parameters_with_def_and_assignment_pattern() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("top");
+    let module = file.add_module("top");
 
     // Common scalar type: 1-bit element for several unpacked arrays.
     let scalar = file.make_scalar_type();
@@ -1246,39 +1266,39 @@ fn test_array_parameters_with_def_and_assignment_pattern() {
     let p0_def = file.make_def("P0", DataKind::User, &p0_type);
     let tick0 = file.make_unsized_zero_literal();
     let p0_rhs = file.make_array_assignment_pattern(&[&tick0, &tick0]);
-    module.add_parameter_with_def(&p0_def, &p0_rhs);
+    file.add_parameter_with_def(module, &p0_def, &p0_rhs);
 
     // P1: parameter int P1[3] = '{1, 2, 3};
     let p1_type = file.make_unpacked_array_type(scalar.clone(), &[3]);
     let p1_def = file.make_def("P1", DataKind::Int, &p1_type);
-    let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
-    let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
-    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
-    let four = file.make_plain_literal(4, &IrFormatPreference::UnsignedDecimal);
-    let five = file.make_plain_literal(5, &IrFormatPreference::UnsignedDecimal);
-    let six = file.make_plain_literal(6, &IrFormatPreference::UnsignedDecimal);
+    let one = file.make_unsized_decimal_literal(1);
+    let two = file.make_unsized_decimal_literal(2);
+    let three = file.make_unsized_decimal_literal(3);
+    let four = file.make_unsized_decimal_literal(4);
+    let five = file.make_unsized_decimal_literal(5);
+    let six = file.make_unsized_decimal_literal(6);
     let p1_rhs = file.make_array_assignment_pattern(&[&one, &two, &three]);
-    module.add_parameter_with_def(&p1_def, &p1_rhs);
+    file.add_parameter_with_def(module, &p1_def, &p1_rhs);
 
     // P2: parameter logic [7:0] P2[2] = '{8'h42, 8'h43};
     let u8 = file.make_bit_vector_type(8, false);
     let p2_type = file.make_unpacked_array_type(u8, &[2]);
     let p2_def = file.make_def("P2", DataKind::Logic, &p2_type);
     let lit_42 = file
-        .make_literal("bits[8]:0x42", &IrFormatPreference::Hex)
+        .make_literal("bits[8]:0x42", &LiteralFormat::Hex)
         .unwrap();
     let lit_43 = file
-        .make_literal("bits[8]:0x43", &IrFormatPreference::Hex)
+        .make_literal("bits[8]:0x43", &LiteralFormat::Hex)
         .unwrap();
     let p2_rhs = file.make_array_assignment_pattern(&[&lit_42, &lit_43]);
-    module.add_parameter_with_def(&p2_def, &p2_rhs);
+    file.add_parameter_with_def(module, &p2_def, &p2_rhs);
 
     // P3: parameter integer P3[1][4] = '{'{1, 2, 3, 4}};
     let p3_type = file.make_unpacked_array_type(scalar.clone(), &[1, 4]);
     let p3_def = file.make_def("P3", DataKind::Integer, &p3_type);
     let inner_1234 = file.make_array_assignment_pattern(&[&one, &two, &three, &four]);
     let p3_rhs = file.make_array_assignment_pattern(&[&inner_1234]);
-    module.add_parameter_with_def(&p3_def, &p3_rhs);
+    file.add_parameter_with_def(module, &p3_def, &p3_rhs);
 
     // P4: parameter int P4[2][3] = '{'{1, 2, 3}, '{4, 5, 6}};
     let p4_type = file.make_unpacked_array_type(scalar, &[2, 3]);
@@ -1286,7 +1306,7 @@ fn test_array_parameters_with_def_and_assignment_pattern() {
     let row_123 = file.make_array_assignment_pattern(&[&one, &two, &three]);
     let row_456 = file.make_array_assignment_pattern(&[&four, &five, &six]);
     let p4_rhs = file.make_array_assignment_pattern(&[&row_123, &row_456]);
-    module.add_parameter_with_def(&p4_def, &p4_rhs);
+    file.add_parameter_with_def(module, &p4_def, &p4_rhs);
 
     let verilog = file.emit();
     let want = r#"module top;
@@ -1303,18 +1323,18 @@ endmodule
 #[test]
 fn test_module_level_conditional() {
     let mut file = VastFile::new(VastFileType::Verilog);
-    let mut module = file.add_module("top");
+    let module = file.add_module("top");
 
     // parameter A = 1;
     // parameter B = 2;
-    let one_param = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
-    let two_param = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
-    let a = module.add_parameter("A", &one_param);
-    let b = module.add_parameter("B", &two_param);
+    let one_param = file.make_unsized_decimal_literal(1);
+    let two_param = file.make_unsized_decimal_literal(2);
+    let a = file.add_parameter(module, "A", &one_param);
+    let b = file.add_parameter(module, "B", &two_param);
 
     // wire out;
     let scalar = file.make_scalar_type();
-    let out = module.add_wire("out", &scalar);
+    let out = file.add_wire(module, "out", &scalar);
 
     // if (A == B) begin
     //   assign out = 1'h1;
@@ -1322,17 +1342,17 @@ fn test_module_level_conditional() {
     //   assign out = 1'h0;
     // end
     let cond_expr = file.make_eq(&a.to_expr(), &b.to_expr());
-    let cond = module.add_conditional(&cond_expr);
-    let mut then_block = cond.then_block();
+    let cond = file.add_conditional(module, &cond_expr);
+    let then_block = file.conditional_then_block(cond);
     let one = file
-        .make_literal("bits[1]:0x1", &IrFormatPreference::Hex)
+        .make_literal("bits[1]:0x1", &LiteralFormat::Hex)
         .unwrap();
     let zero = file
-        .make_literal("bits[1]:0x0", &IrFormatPreference::Hex)
+        .make_literal("bits[1]:0x0", &LiteralFormat::Hex)
         .unwrap();
-    then_block.add_continuous_assignment(&out.to_expr(), &one);
-    let mut else_block = cond.add_else();
-    else_block.add_continuous_assignment(&out.to_expr(), &zero);
+    file.block_add_continuous_assignment(then_block, &out.to_expr(), &one);
+    let else_block = file.conditional_add_else(cond);
+    file.block_add_continuous_assignment(else_block, &out.to_expr(), &zero);
 
     let verilog = file.emit();
     let want = r#"module top;
@@ -1352,46 +1372,46 @@ endmodule
 #[test]
 fn test_generate_loop_conditional_assignments() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("top");
+    let module = file.add_module("top");
 
     // wire [2:0] out;
     let out_type = file.make_bit_vector_type(3, false);
-    let out = module.add_wire("out", &out_type);
+    let out = file.add_wire(module, "out", &out_type);
 
     // for (genvar i = 0; i < 3; i = i + 1) begin : g
-    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
-    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
-    let mut gen_loop = module.add_generate_loop("i", &zero, &three, Some("g"));
+    let zero = file.make_unsized_decimal_literal(0);
+    let three = file.make_unsized_decimal_literal(3);
+    let gen_loop = file.add_generate_loop(module, "i", &zero, &three, Some("g"));
 
-    let i_ref = gen_loop.get_genvar();
+    let i_ref = file.generate_genvar(gen_loop);
     let i_expr = i_ref.to_expr();
-    let zero_cond = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
-    let one_cond = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
+    let zero_cond = file.make_unsized_decimal_literal(0);
+    let one_cond = file.make_unsized_decimal_literal(1);
 
     let cond0 = file.make_eq(&i_expr, &zero_cond);
     let cond1 = file.make_eq(&i_expr, &one_cond);
-    let cond = gen_loop.add_conditional(&cond0);
-    let mut then_block = cond.then_block();
+    let cond = file.generate_add_conditional(gen_loop, &cond0);
+    let then_block = file.conditional_then_block(cond);
 
     let out_indexable = out.to_indexable_expr();
     let idx = file.make_index_expr(&out_indexable, &i_expr);
     let lhs = idx.to_expr();
 
     let zero_val = file
-        .make_literal("bits[1]:0x0", &IrFormatPreference::Hex)
+        .make_literal("bits[1]:0x0", &LiteralFormat::Hex)
         .unwrap();
     let one_val = file
-        .make_literal("bits[1]:0x1", &IrFormatPreference::Hex)
+        .make_literal("bits[1]:0x1", &LiteralFormat::Hex)
         .unwrap();
     let x_val = file.make_unsized_x_literal();
 
-    then_block.add_continuous_assignment(&lhs, &zero_val);
+    file.block_add_continuous_assignment(then_block, &lhs, &zero_val);
 
-    let mut else_if_block = cond.add_else_if(&cond1);
-    else_if_block.add_continuous_assignment(&lhs, &one_val);
+    let else_if_block = file.conditional_add_else_if(cond, &cond1);
+    file.block_add_continuous_assignment(else_if_block, &lhs, &one_val);
 
-    let mut else_block = cond.add_else();
-    else_block.add_continuous_assignment(&lhs, &x_val);
+    let else_block = file.conditional_add_else(cond);
+    file.block_add_continuous_assignment(else_block, &lhs, &x_val);
 
     let verilog = file.emit();
     let want = r#"module top;
@@ -1412,7 +1432,7 @@ endmodule
 #[test]
 fn test_index_unpacked_array_parameter() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    let mut module = file.add_module("top");
+    let module = file.add_module("top");
 
     // parameter P0[2] = '{'0, '1};
     let scalar = file.make_scalar_type();
@@ -1421,17 +1441,17 @@ fn test_index_unpacked_array_parameter() {
     let tick0 = file.make_unsized_zero_literal();
     let tick1 = file.make_unsized_one_literal();
     let p0_rhs = file.make_array_assignment_pattern(&[&tick0, &tick1]);
-    let p0_param = module.add_parameter_with_def(&p0_def, &p0_rhs);
+    let p0_param = file.add_parameter_with_def(module, &p0_def, &p0_rhs);
 
     // wire w;
-    let w = module.add_wire("w", &scalar);
+    let w = file.add_wire(module, "w", &scalar);
 
     // assign w = P0[0];
     let p0_indexable = p0_param.to_indexable_expr();
     let p0_0 = file.make_index(&p0_indexable, 0);
     let rhs = p0_0.to_expr();
     let assign = file.make_continuous_assignment(&w.to_expr(), &rhs);
-    module.add_member_continuous_assignment(assign);
+    file.add_member_continuous_assignment(module, assign);
 
     let verilog = file.emit();
     let want = r#"module top;
