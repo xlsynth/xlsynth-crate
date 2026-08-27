@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exercises Codex preparation with fake tools and no downloads or system writes."""
+"""Exercises Docker workspace preparation with fake tools and no system writes."""
 
 import json
 import os
@@ -23,9 +23,9 @@ import sys
 
 program = Path(sys.argv[0]).name
 args = sys.argv[1:]
-with open(os.environ["CODEX_TEST_LOG"], "a") as stream:
+with open(os.environ["DOCKER_TEST_LOG"], "a") as stream:
     stream.write(json.dumps([program, args, os.environ.get("CARGO_NET_OFFLINE")]) + "\n")
-if program == "cargo" and args[0] == "fetch" and os.environ.get("CODEX_TEST_FAIL_FETCH"):
+if program == "cargo" and args[0] == "fetch" and os.environ.get("DOCKER_TEST_FAIL_FETCH"):
     sys.exit(42)
 """
 
@@ -44,21 +44,21 @@ tools = Path(args.o)
 """
 
 
-class CodexMaintenanceTest(unittest.TestCase):
+class DockerPrepareTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="xlsynth-codex-test-")
+        temporary = tempfile.TemporaryDirectory(prefix="xlsynth-docker-test-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.repo = self.root / "repo with spaces"
         self.test_home = self.root / "home with spaces"
         self.test_home.mkdir()
-        (self.repo / "codex").mkdir(parents=True)
+        (self.repo / "docker").mkdir(parents=True)
         (self.repo / "scripts").mkdir()
         (self.repo / "xlsynth-sys").mkdir()
         shutil.copy2(
-            REPO_ROOT / "codex/sample_codex_maintenance_script.sh", self.repo / "codex"
+            REPO_ROOT / "docker/prepare_workspace.sh", self.repo / "docker"
         )
-        shutil.copy2(REPO_ROOT / "codex/check_offline.sh", self.repo / "codex")
+        shutil.copy2(REPO_ROOT / "docker/check_offline.sh", self.repo / "docker")
         shutil.copy2(
             REPO_ROOT / "scripts/get_required_libxls_dso_and_tools_release_tag.py",
             self.repo / "scripts",
@@ -77,18 +77,18 @@ class CodexMaintenanceTest(unittest.TestCase):
         self.log = self.root / "commands.jsonl"
         self.env = dict(os.environ)
         self.env.pop("CARGO_NET_OFFLINE", None)
-        self.env.pop("CODEX_TEST_FAIL_FETCH", None)
+        self.env.pop("DOCKER_TEST_FAIL_FETCH", None)
         self.env.update(
             HOME=str(self.test_home),
             PATH=str(fake_bin) + os.pathsep + self.env["PATH"],
             LD_LIBRARY_PATH="/previous/library/path",
-            CODEX_TEST_LOG=str(self.log),
+            DOCKER_TEST_LOG=str(self.log),
             CARGO_BUILD_JOBS="2",
         )
 
-    def run_maintenance(self):
+    def run_prepare(self):
         return subprocess.run(
-            ["bash", str(self.repo / "codex/sample_codex_maintenance_script.sh")],
+            ["bash", str(self.repo / "docker/prepare_workspace.sh")],
             env=self.env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -142,18 +142,18 @@ class CodexMaintenanceTest(unittest.TestCase):
         self.assertEqual(self.commands(), expected)
 
     def test_fresh_cache_prefetches_before_offline_hooks(self):
-        result = self.run_maintenance()
+        result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_preparation_order()
 
-    def test_cached_offline_session_can_refresh(self):
+    def test_inherited_offline_environment_can_refresh(self):
         self.env["CARGO_NET_OFFLINE"] = "true"
-        result = self.run_maintenance()
+        result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_preparation_order()
 
     def test_fuzz_smoke_target_is_registered_without_required_features(self):
-        result = self.run_maintenance()
+        result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
         fuzz_args = next(
             args
@@ -173,8 +173,8 @@ class CodexMaintenanceTest(unittest.TestCase):
         )
 
     def test_fetch_failure_stops_before_hooks(self):
-        self.env["CODEX_TEST_FAIL_FETCH"] = "1"
-        result = self.run_maintenance()
+        self.env["DOCKER_TEST_FAIL_FETCH"] = "1"
+        result = self.run_prepare()
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(
             self.commands(),
@@ -182,13 +182,13 @@ class CodexMaintenanceTest(unittest.TestCase):
         )
 
     def test_offline_checks_keep_the_prepared_solver_feature_and_resolution(self):
-        prepared = self.run_maintenance()
+        prepared = self.run_prepare()
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
         self.log.unlink()
         (self.test_home / ".cargo").mkdir()
         (self.test_home / ".cargo/env").touch()
         result = subprocess.run(
-            ["bash", str(self.repo / "codex/check_offline.sh")],
+            ["bash", str(self.repo / "docker/check_offline.sh")],
             env=self.env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -221,15 +221,15 @@ class CodexMaintenanceTest(unittest.TestCase):
         )
 
     def test_persisted_environment_quotes_paths_and_keeps_loader_path(self):
-        result = self.run_maintenance()
+        result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
-        result = self.run_maintenance()
+        result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
         for name in (".bashrc", ".bash_profile", ".profile"):
             self.assertEqual(len((self.test_home / name).read_text().splitlines()), 1)
         (self.test_home / ".cargo").mkdir()
         (self.test_home / ".cargo/env").write_text(
-            "export CODEX_TEST_RUST_ENV_LOADED=1\n"
+            "export DOCKER_TEST_RUST_ENV_LOADED=1\n"
         )
         probe = subprocess.run(
             [
@@ -237,7 +237,7 @@ class CodexMaintenanceTest(unittest.TestCase):
                 "-c",
                 'source "$1"; printf "%s\\n" "$XLSYNTH_TOOLS" "$XLS_DSO_PATH" '
                 '"$DSLX_STDLIB_PATH" "$LD_LIBRARY_PATH" "$CARGO_NET_OFFLINE" '
-                '"${CODEX_TEST_RUST_ENV_LOADED:-missing}"',
+                '"${DOCKER_TEST_RUST_ENV_LOADED:-missing}"',
                 "probe",
                 str(self.test_home / ".bash_profile"),
             ],
@@ -257,11 +257,11 @@ class CodexMaintenanceTest(unittest.TestCase):
         self.assertEqual(offline, "true")
         self.assertEqual(rust_env, "1")
 
-    def test_setup_rejects_unknown_arguments_before_installing(self):
+    def test_install_tools_rejects_unknown_arguments_before_installing(self):
         result = subprocess.run(
             [
                 "bash",
-                str(REPO_ROOT / "codex/sample_codex_setup_script.sh"),
+                str(REPO_ROOT / "docker/install_tools.sh"),
                 "--unknown",
             ],
             env=self.env,

@@ -8,7 +8,7 @@ cd "${repo_root}"
 
 # Source explicitly: non-interactive shells need not read any shell rc file.
 source "$HOME/.cargo/env"
-source "$HOME/.xlsynth_codex_env.sh"
+source "$HOME/.xlsynth_container_env.sh"
 export CARGO_NET_OFFLINE=true
 
 # --frozen checks both network independence and the dependency resolution saved

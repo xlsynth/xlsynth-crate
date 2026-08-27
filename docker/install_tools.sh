@@ -3,24 +3,21 @@
 
 set -euo pipefail
 
-tools_only=false
-if [[ "$#" -eq 1 && "$1" == "--tools-only" ]]; then
-  tools_only=true
-elif [[ "$#" -ne 0 ]]; then
-  echo "Usage: $0 [--tools-only]" >&2
+if [[ "$#" -ne 0 ]]; then
+  echo "Usage: $0" >&2
   exit 2
 fi
 
 if [[ "$(uname -m)" != "x86_64" ]]; then
-  echo "This setup requires Linux x86-64; build the container with --platform linux/amd64." >&2
+  echo "This Docker image requires Linux x86-64; build it with --platform linux/amd64." >&2
   exit 1
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-# Setup and maintenance are the online preparation phases, including after a
-# cached Codex session has sourced the persisted offline environment.
+# Tool installation is an online build phase, even if the invoking shell
+# inherited an offline Cargo environment.
 unset CARGO_NET_OFFLINE
 
 as_root() {
@@ -82,14 +79,4 @@ for library in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
 done
 as_root ldconfig
 
-if [[ "${tools_only}" == true ]]; then
-  echo "==> Tool installation complete"
-  exit 0
-fi
-
-# Note: originally I thought that the maintenance script was always run by codex web after setup,
-# but it seems as though the maintenance script /only/ runs when the setup has been cached.
-echo "✅ Base setup complete — running maintenance script..."
-"${repo_root}/codex/sample_codex_maintenance_script.sh"
-
-echo "✅ Maintenance script complete"
+echo "✅ Tool installation complete"

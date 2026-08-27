@@ -162,7 +162,7 @@ jobs:
       - name: Build container and run offline checks
         env:
           DOCKER_BUILDKIT: "1"
-        run: docker build --platform linux/amd64 --progress=plain -f codex/Dockerfile -t xlsynth-codex-offline .
+        run: docker build --platform linux/amd64 --progress=plain -f docker/Dockerfile -t xlsynth-dev-offline .
 
   # -----------------------------------------------------------
   # 2) xlsynth-vastly reference simulator lane (currently Icarus)

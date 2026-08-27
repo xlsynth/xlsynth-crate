@@ -1,11 +1,12 @@
-# Container build and test reference
+# Reference Docker image
 
-From the repository root, build the Linux x86-64 reference environment with Docker
-BuildKit (the default in current Docker):
+This directory defines the Linux x86-64 contributor image used for local development
+and CI. From the repository root, build it with Docker BuildKit (the default in
+current Docker):
 
 ```shell
 docker build --platform linux/amd64 --progress=plain \
-  -f codex/Dockerfile -t xlsynth-codex-offline .
+  -f docker/Dockerfile -t xlsynth-dev-offline .
 ```
 
 A successful build includes workspace `cargo check`, nextest tests, doctests, and
@@ -20,9 +21,15 @@ DSO/DSLX standard library, and tool caches. Repeat its checks or open a shell wi
 mounting host caches or source:
 
 ```shell
-docker run --rm --network=none xlsynth-codex-offline bash codex/check_offline.sh
-docker run --rm -it --network=none xlsynth-codex-offline
+docker run --rm --network=none xlsynth-dev-offline bash docker/check_offline.sh
+docker run --rm -it --network=none xlsynth-dev-offline
 ```
+
+The Dockerfile has two online preparation phases. `install_tools.sh` installs the
+system packages, Rust toolchain, Cargo extensions, and solver DSOs in a reusable
+layer. `prepare_workspace.sh` resolves the repository-specific XLS artifacts,
+Cargo dependencies, and pre-commit environments, then writes
+`~/.xlsynth_container_env.sh` for the offline check and interactive shells.
 
 Inside the shell, use the same explicit solver feature:
 
@@ -65,19 +72,3 @@ Cargo lockfiles, apt/Python package repositories can change, and the Slang `ci`
 release is mutable. To reproduce a particular prepared environment, retain and
 reuse that image by image ID/digest (or save it with `docker save`), rather than
 rebuilding a mutable tag. The Cargo lockfiles remain in the image for inspection.
-
-## Codex Web setup
-
-The scripts also support Codex Web. Run `sample_codex_setup_script.sh` for initial
-setup on Ubuntu 24.04 x86-64; it installs tools and calls maintenance once.
-`--tools-only` installs tools without maintenance and is used for Docker layer
-caching. Outside Docker, `RUSTUP_TOOLCHAIN` may select a dated nightly; otherwise
-setup follows the repository's nightly toolchain.
-
-Run `sample_codex_maintenance_script.sh` when refreshing a cached session. Both
-scripts require network access during preparation, even if a previous session
-enabled offline mode. Maintenance persists the artifact environment and
-`CARGO_NET_OFFLINE=true` in `~/.xlsynth_codex_env.sh` and sources it from common
-shell startup files. `check_offline.sh` sources it explicitly for non-interactive
-shells. Changing the XLS release selects a new artifact directory rather than
-reusing a stale decompressed DSO.
