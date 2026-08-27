@@ -6,9 +6,8 @@
 //! all equivalent or a counterexample that demonstrates a case in which they
 //! are not equivalent.
 //!
-//! The default backend is CaDiCaL. Varisat remains available for comparison and
-//! context-reuse testing; Z3 and IR backends are dispatched through the common
-//! gate-formal backend API where supported.
+//! The default backend is CaDiCaL; Z3 and IR backends are dispatched through
+//! the common gate-formal backend API where supported.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
@@ -20,25 +19,7 @@ use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::topo::extract_cone;
 use crate::propose_equiv::EquivNode;
 pub use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
-use varisat::ExtendFormula;
 use xlsynth::IrBits;
-
-/// Context holding a SAT solver so clause memory can be reused across calls.
-pub struct VarisatCtx<'a> {
-    pub(crate) solver: varisat::Solver<'a>,
-}
-
-impl<'a> VarisatCtx<'a> {
-    pub fn new() -> Self {
-        Self {
-            solver: varisat::Solver::new(),
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.solver = varisat::Solver::new();
-    }
-}
 
 pub struct ValidationResult {
     /// Sets that were proven equivalent, i.e. any value in set i can be
@@ -98,7 +79,6 @@ pub(crate) struct FullGraphFraigValidationResult {
 
 #[derive(Debug)]
 pub enum ValidationError {
-    VarisatSolverError(varisat::solver::SolverError),
     CadicalConfigError(String),
     CadicalSolveInterrupted,
     ModelUnavailable,
@@ -147,7 +127,6 @@ fn resolve_equivalence_class_backend(
 ) -> Result<GateFormalBackend, ValidationError> {
     match backend {
         GateFormalBackend::Cadical => Ok(GateFormalBackend::Cadical),
-        GateFormalBackend::Varisat => Ok(GateFormalBackend::Varisat),
         GateFormalBackend::Z3 | GateFormalBackend::Ir => Ok(backend),
     }
 }
@@ -173,53 +152,6 @@ pub(crate) trait IncrementalSat {
         assumptions: &[Self::Lit],
     ) -> Result<SatSolveResult, ValidationError>;
     fn sat_model(&self) -> Result<Self::Model, ValidationError>;
-}
-
-#[derive(Clone)]
-pub(crate) struct VarisatModel {
-    true_lits: HashSet<varisat::Lit>,
-}
-
-impl SatModel<varisat::Lit> for VarisatModel {
-    fn lit_value(&self, lit: varisat::Lit) -> bool {
-        self.true_lits.contains(&lit)
-    }
-}
-
-impl<'a> IncrementalSat for varisat::Solver<'a> {
-    type Lit = varisat::Lit;
-    type Model = VarisatModel;
-
-    fn sat_new_lit(&mut self) -> Self::Lit {
-        self.new_lit()
-    }
-
-    fn sat_add_clause(&mut self, clause: &[Self::Lit]) {
-        self.add_clause(clause);
-    }
-
-    fn sat_solve_assuming(
-        &mut self,
-        assumptions: &[Self::Lit],
-    ) -> Result<SatSolveResult, ValidationError> {
-        self.assume(assumptions);
-        self.solve()
-            .map(|sat| {
-                if sat {
-                    SatSolveResult::Sat
-                } else {
-                    SatSolveResult::Unsat
-                }
-            })
-            .map_err(ValidationError::VarisatSolverError)
-    }
-
-    fn sat_model(&self) -> Result<Self::Model, ValidationError> {
-        let model = self.model().ok_or(ValidationError::ModelUnavailable)?;
-        Ok(VarisatModel {
-            true_lits: model.into_iter().collect(),
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1089,10 +1021,6 @@ pub fn prove_gate_fn_equiv_with_backend_and_options(
             let mut solver = CadicalSat::new_with_options(options)?;
             prove_gate_fn_equiv_with_solver(a, b, &mut solver)
         }
-        GateFormalBackend::Varisat => {
-            let mut solver = varisat::Solver::new();
-            prove_gate_fn_equiv_with_solver(a, b, &mut solver)
-        }
         GateFormalBackend::Z3 => {
             #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
             {
@@ -1120,15 +1048,6 @@ pub fn prove_gate_fn_equiv_with_backend_and_options(
             }
         }
     }
-}
-
-/// Checks equivalence of two gate functions using a Varisat context.
-pub fn prove_gate_fn_equiv_varisat<'a>(
-    a: &GateFn,
-    b: &GateFn,
-    ctx: &mut VarisatCtx<'a>,
-) -> EquivResult {
-    prove_gate_fn_equiv_with_solver(a, b, &mut ctx.solver).expect("solver error")
 }
 
 pub fn validate_equivalence_classes(
@@ -1172,16 +1091,6 @@ pub fn validate_equivalence_classes_with_backend_and_options(
     options: GateFormalOptions,
 ) -> Result<ValidationResult, ValidationError> {
     match resolve_equivalence_class_backend(backend)? {
-        GateFormalBackend::Varisat => {
-            let mut solver = varisat::Solver::new();
-            validate_equivalence_classes_with_solver(
-                gate_fn,
-                equiv_classes,
-                &mut solver,
-                /* classes_are_depth_sorted= */ false,
-                /* use_virtual_rewrite= */ false,
-            )
-        }
         GateFormalBackend::Cadical => {
             let mut solver = CadicalSat::new_with_options(options)?;
             validate_equivalence_classes_with_solver(
@@ -1225,16 +1134,6 @@ pub fn validate_equivalence_classes_presorted_with_backend_and_options(
     options: GateFormalOptions,
 ) -> Result<ValidationResult, ValidationError> {
     match resolve_equivalence_class_backend(backend)? {
-        GateFormalBackend::Varisat => {
-            let mut solver = varisat::Solver::new();
-            validate_equivalence_classes_with_solver(
-                gate_fn,
-                equiv_classes,
-                &mut solver,
-                /* classes_are_depth_sorted= */ true,
-                /* use_virtual_rewrite= */ false,
-            )
-        }
         GateFormalBackend::Cadical => {
             let mut solver = CadicalSat::new_with_options(options)?;
             validate_equivalence_classes_with_solver(
@@ -1266,16 +1165,6 @@ pub fn validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
     options: GateFormalOptions,
 ) -> Result<ValidationResult, ValidationError> {
     match resolve_equivalence_class_backend(backend)? {
-        GateFormalBackend::Varisat => {
-            let mut solver = varisat::Solver::new();
-            validate_equivalence_classes_with_solver(
-                gate_fn,
-                equiv_classes,
-                &mut solver,
-                /* classes_are_depth_sorted= */ true,
-                /* use_virtual_rewrite= */ true,
-            )
-        }
         GateFormalBackend::Cadical => {
             let mut solver = CadicalSat::new_with_options(options)?;
             validate_equivalence_classes_with_solver(
@@ -1598,7 +1487,7 @@ mod tests {
         prove_fraig_equivalence_classes_with_backend_and_options,
         prove_fraig_equivalence_classes_with_solver, validate_equivalence_classes,
         validate_equivalence_classes_presorted_with_virtual_rewrite_and_options,
-        validate_equivalence_classes_with_backend, validate_equivalence_classes_with_solver,
+        validate_equivalence_classes_with_solver,
     };
     #[allow(unused_imports)]
     use crate::assert_within;
@@ -1717,12 +1606,12 @@ mod tests {
     }
 
     #[test]
-    fn fraig_equivalence_class_proof_requires_cadical() {
+    fn fraig_equivalence_class_proof_rejects_non_cadical_backend() {
         let setup = setup_graph_with_redundancies();
         let error = match prove_fraig_equivalence_classes_with_backend_and_options(
             &setup.g,
             &[],
-            GateFormalBackend::Varisat,
+            GateFormalBackend::Ir,
             GateFormalOptions::default(),
         ) {
             Ok(_) => panic!("non-CaDiCaL FRAIG proof should fail"),
@@ -1732,7 +1621,7 @@ mod tests {
         assert!(matches!(
             error,
             ValidationError::UnsupportedBackend {
-                backend: GateFormalBackend::Varisat,
+                backend: GateFormalBackend::Ir,
                 operation: "FRAIG equivalence-class proof; CaDiCaL is required",
             }
         ));
@@ -1810,38 +1699,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cadical_matches_varisat_on_redundant_graph() {
-        let setup = setup_graph_with_redundancies();
-        let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let counterexamples = Vec::new();
-        let equiv_classes =
-            propose_equivalence_classes(&setup.g, 16, &mut seeded_rng, &counterexamples);
-        let classes: Vec<&[EquivNode]> = equiv_classes
-            .values()
-            .map(|nodes| nodes.as_slice())
-            .collect();
-
-        let varisat = validate_equivalence_classes_with_backend(
-            &setup.g,
-            &classes,
-            GateFormalBackend::Varisat,
-        )
-        .unwrap();
-        let cadical = validate_equivalence_classes_with_backend(
-            &setup.g,
-            &classes,
-            GateFormalBackend::Cadical,
-        )
-        .unwrap();
-
-        assert_eq!(
-            canonical_proven_sets(&cadical),
-            canonical_proven_sets(&varisat)
-        );
-        assert_eq!(cadical.cex_inputs.len(), varisat.cex_inputs.len());
-    }
-
-    #[test]
     fn test_validate_partial_equivalence() {
         let setup = setup_partially_equiv_graph();
 
@@ -1885,35 +1742,6 @@ mod tests {
             1,
             "Should find exactly one counterexample"
         );
-    }
-
-    #[test]
-    fn test_cadical_matches_varisat_on_partial_equivalence() {
-        let setup = setup_partially_equiv_graph();
-        let proposed_class = &[
-            EquivNode::Normal(setup.a.node),
-            EquivNode::Normal(setup.b.node),
-            EquivNode::Normal(setup.c.node),
-        ];
-
-        let varisat = validate_equivalence_classes_with_backend(
-            &setup.g,
-            &[proposed_class],
-            GateFormalBackend::Varisat,
-        )
-        .unwrap();
-        let cadical = validate_equivalence_classes_with_backend(
-            &setup.g,
-            &[proposed_class],
-            GateFormalBackend::Cadical,
-        )
-        .unwrap();
-
-        assert_eq!(
-            canonical_proven_sets(&cadical),
-            canonical_proven_sets(&varisat)
-        );
-        assert_eq!(cadical.cex_inputs.len(), varisat.cex_inputs.len());
     }
 
     #[test]
@@ -1963,7 +1791,7 @@ mod tests {
         let result = validate_equivalence_classes_presorted_with_virtual_rewrite_and_options(
             &gate_fn,
             &[&x_class, &y_class],
-            GateFormalBackend::Varisat,
+            GateFormalBackend::Cadical,
             GateFormalOptions::default(),
         )
         .unwrap();

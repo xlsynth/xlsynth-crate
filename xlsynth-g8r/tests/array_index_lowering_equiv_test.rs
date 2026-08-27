@@ -4,7 +4,9 @@ use xlsynth_g8r::aig::AigNode;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{ArrayIndexLoweringStrategy, GatifyOptions, gatify};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{EquivResult, VarisatCtx, prove_gate_fn_equiv_varisat};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{
+    EquivResult, GateFormalBackend, prove_gate_fn_equiv_with_backend,
+};
 use xlsynth_pir::ir_parser;
 
 fn build_direct_array_index_ir_text(
@@ -102,9 +104,9 @@ fn assert_strategies_are_equivalent(
 ) {
     let lhs_gate = gatify_ir_text_with_strategy(ir_text, lhs);
     let rhs_gate = gatify_ir_text_with_strategy(ir_text, rhs);
-    let mut ctx = VarisatCtx::new();
     assert_eq!(
-        prove_gate_fn_equiv_varisat(&lhs_gate, &rhs_gate, &mut ctx),
+        prove_gate_fn_equiv_with_backend(&lhs_gate, &rhs_gate, GateFormalBackend::Cadical)
+            .expect("CaDiCaL gate equivalence proof"),
         EquivResult::Proved,
         "lowerings should be equivalent for IR:\n{}",
         ir_text

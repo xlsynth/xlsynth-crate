@@ -4,7 +4,9 @@ use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{EquivResult, VarisatCtx, prove_gate_fn_equiv_varisat};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{
+    EquivResult, GateFormalBackend, prove_gate_fn_equiv_with_backend,
+};
 use xlsynth_pir::ir::{
     ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
     PackageMember, Param, ParamId, Type,
@@ -226,13 +228,13 @@ fn assert_lowered_ir_texts_are_equivalent(
 ) {
     let lhs = lower_ir_to_gates_output(lhs_ir_text, fold, hash);
     let rhs = lower_ir_to_gates_output(rhs_ir_text, fold, hash);
-    let mut ctx = VarisatCtx::new();
     assert_eq!(
-        prove_gate_fn_equiv_varisat(
+        prove_gate_fn_equiv_with_backend(
             &lhs.gatify_output.gate_fn,
             &rhs.gatify_output.gate_fn,
-            &mut ctx
-        ),
+            GateFormalBackend::Cadical,
+        )
+        .expect("CaDiCaL gate equivalence proof"),
         EquivResult::Proved,
         "expected lowered gate functions to be equivalent:\nleft IR:\n{}\nright IR:\n{}",
         lhs_ir_text,

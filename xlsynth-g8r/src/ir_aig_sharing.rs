@@ -34,7 +34,6 @@ use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use crate::prove_gate_fn_equiv_sat::{
     CadicalSat, IncrementalSat, SatModel, SatSolveResult, prove_gate_fn_equiv_with_backend,
 };
-use varisat::Solver;
 
 #[derive(Debug, Clone)]
 pub struct IrAigSharingOptions {
@@ -371,26 +370,6 @@ pub fn confirm_or_deny_candidate_equivalence_with_backend(
     }
 }
 
-/// Proves (or disproves) equivalence for all provided candidates using Varisat.
-///
-/// This is intended to be the "bulk" confirmation step after simulation-based
-/// candidate discovery: we encode both circuits once under shared inputs, then
-/// query each candidate via an XOR miter under an assumption.
-pub fn prove_equivalence_candidates_varisat(
-    pir_fn: &ir::Fn,
-    gate_fn: &GateFn,
-    candidates: &[IrAigEquivalenceCandidate],
-    gatify_options: &GatifyOptions,
-) -> Result<Vec<CandidateProof>, String> {
-    prove_equivalence_candidates_varisat_streaming(
-        pir_fn,
-        gate_fn,
-        candidates,
-        gatify_options,
-        |_p| {},
-    )
-}
-
 /// Proves (or disproves) equivalence for all candidates using CaDiCaL.
 pub fn prove_equivalence_candidates_cadical(
     pir_fn: &ir::Fn,
@@ -420,13 +399,6 @@ where
     F: FnMut(&CandidateProof),
 {
     match backend {
-        GateFormalBackend::Varisat => prove_equivalence_candidates_varisat_streaming(
-            pir_fn,
-            gate_fn,
-            candidates,
-            gatify_options,
-            on_proof,
-        ),
         GateFormalBackend::Cadical => prove_equivalence_candidates_cadical_streaming(
             pir_fn,
             gate_fn,
@@ -568,32 +540,6 @@ where
     }
 
     Ok(results)
-}
-
-/// Streaming variant of `prove_equivalence_candidates_varisat`.
-///
-/// Calls `on_proof` as each candidate is proved/disproved/skipped, in the same
-/// order as `candidates`.
-pub fn prove_equivalence_candidates_varisat_streaming<F>(
-    pir_fn: &ir::Fn,
-    gate_fn: &GateFn,
-    candidates: &[IrAigEquivalenceCandidate],
-    gatify_options: &GatifyOptions,
-    on_proof: F,
-) -> Result<Vec<CandidateProof>, String>
-where
-    F: FnMut(&CandidateProof),
-{
-    let mut solver = Solver::new();
-    prove_equivalence_candidates_incremental_sat_streaming(
-        pir_fn,
-        gate_fn,
-        candidates,
-        gatify_options,
-        &mut solver,
-        "varisat",
-        on_proof,
-    )
 }
 
 /// Streaming variant of `prove_equivalence_candidates_cadical`.

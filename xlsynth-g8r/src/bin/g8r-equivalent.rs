@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Compare two `.g8r` GateFn descriptions for equivalence using all available
-//! equivalence checkers (CaDiCaL, Varisat, and an XLS IR-based checker).
+//! equivalence checkers (CaDiCaL and an XLS IR-based checker).
 //!
 //! Exit status:
 //!   0 – all checkers agree the GateFns are equivalent
@@ -15,7 +15,6 @@ use clap::Parser;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_g8r::mcmc_logic::oracle_equiv_sat;
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{self, EquivResult};
 
 /// Simple CLI to compare two GateFns.
 #[derive(Parser, Debug)]
@@ -70,17 +69,7 @@ fn main() {
         };
     println!("IR checker: {}", ir_equiv);
 
-    // Checker 3: Varisat-based SAT prover (structural)
-    let varisat_equiv = {
-        let mut ctx = prove_gate_fn_equiv_sat::VarisatCtx::new();
-        matches!(
-            prove_gate_fn_equiv_sat::prove_gate_fn_equiv_varisat(&lhs, &rhs, &mut ctx),
-            EquivResult::Proved
-        )
-    };
-    println!("Varisat checker: {}", varisat_equiv);
-
-    if sat_equiv && ir_equiv && varisat_equiv {
+    if sat_equiv && ir_equiv {
         println!("All checkers agree – equivalent.");
         exit(0);
     } else {

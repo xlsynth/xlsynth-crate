@@ -384,7 +384,7 @@ impl AppExt for clap::Command {
                     .long("gate-formal-backend")
                     .value_name("BACKEND")
                     .help("Formal backend for gate-level proof steps; FRAIG requires cadical (default: cadical)")
-                    .value_parser(["cadical", "varisat", "z3", "ir"])
+                    .value_parser(["cadical", "z3", "ir"])
                     .default_value("cadical")
                     .action(clap::ArgAction::Set),
             )
@@ -3059,7 +3059,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .long("gate-formal-backend")
                         .value_name("BACKEND")
                         .help("Formal backend for gate-level proof steps (default: cadical)")
-                        .value_parser(["cadical", "varisat", "z3", "ir"])
+                        .value_parser(["cadical", "z3", "ir"])
                         .default_value("cadical")
                         .action(clap::ArgAction::Set),
                 )

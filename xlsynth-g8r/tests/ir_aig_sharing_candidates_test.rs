@@ -6,7 +6,6 @@ use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir_aig_sharing::{
     CandidateProofResult, IrAigCandidateRhs, IrAigSharingOptions,
     confirm_or_deny_candidate_equivalence, get_equivalences, prove_equivalence_candidates_cadical,
-    prove_equivalence_candidates_varisat,
 };
 use xlsynth_pir::ir_parser::Parser as PirParser;
 
@@ -58,24 +57,12 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     );
 
     let gatify_opts = GatifyOptions::all_opts_disabled();
-    let proofs = prove_equivalence_candidates_varisat(pir_fn, &gate_fn, &hits, &gatify_opts)
-        .expect("prove equivalence candidates");
+    let proofs = prove_equivalence_candidates_cadical(pir_fn, &gate_fn, &hits, &gatify_opts)
+        .expect("prove equivalence candidates with CaDiCaL");
     assert!(
         proofs
             .iter()
             .any(|p| matches!(p.result, CandidateProofResult::Proved)),
         "expected at least one candidate to be proven equivalent"
     );
-
-    let cadical_proofs =
-        prove_equivalence_candidates_cadical(pir_fn, &gate_fn, &hits, &gatify_opts)
-            .expect("prove equivalence candidates with cadical");
-    assert_eq!(cadical_proofs.len(), proofs.len());
-    for (cadical, varisat) in cadical_proofs.iter().zip(proofs.iter()) {
-        assert_eq!(cadical.candidate, varisat.candidate);
-        assert_eq!(
-            std::mem::discriminant(&cadical.result),
-            std::mem::discriminant(&varisat.result)
-        );
-    }
 }
