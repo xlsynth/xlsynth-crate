@@ -8,21 +8,19 @@ use xlsynth::IrBits;
 #[serde(rename_all = "lowercase")]
 pub enum GateFormalBackend {
     Cadical,
-    Varisat,
     Z3,
     /// Lower both sides through XLS IR and use the IR equivalence checker.
     Ir,
 }
 
 impl GateFormalBackend {
-    pub const CLI_VALUES: [&'static str; 4] = ["cadical", "varisat", "z3", "ir"];
+    pub const CLI_VALUES: [&'static str; 3] = ["cadical", "z3", "ir"];
     pub const DEFAULT_CLI_VALUE: &'static str = "cadical";
 
     /// Parses a user-facing backend name.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value.to_ascii_lowercase().as_str() {
             "cadical" => Ok(Self::Cadical),
-            "varisat" => Ok(Self::Varisat),
             "z3" => Ok(Self::Z3),
             "ir" => Ok(Self::Ir),
             _ => Err(value.to_string()),
@@ -33,7 +31,6 @@ impl GateFormalBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cadical => "cadical",
-            Self::Varisat => "varisat",
             Self::Z3 => "z3",
             Self::Ir => "ir",
         }

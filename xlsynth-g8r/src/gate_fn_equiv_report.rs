@@ -62,15 +62,6 @@ pub fn prove_gate_fn_equiv_report(lhs: &GateFn, rhs: &GateFn) -> EquivReport {
     };
     results.insert("cadical".to_string(), cadical);
 
-    let varisat = {
-        let mut ctx = prove_gate_fn_equiv_sat::VarisatCtx::new();
-        match prove_gate_fn_equiv_sat::prove_gate_fn_equiv_varisat(lhs, rhs, &mut ctx) {
-            EquivResult::Proved => EngineResult::Equiv,
-            EquivResult::Disproved(cex) => EngineResult::NotEquiv(Some(format!("{:?}", cex))),
-        }
-    };
-    results.insert("varisat".to_string(), varisat);
-
     let all_agree = {
         let mut iter = results.values();
         if let Some(first) = iter.next() {

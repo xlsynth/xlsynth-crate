@@ -2160,7 +2160,7 @@ Supported flags include the common gate-optimization controls:
 - `--max-fraig-sim-samples=<N>` – maximum number of random simulation samples
   used for FRAIG candidate discovery. The uncapped count is scaled from the
   live node count and rounded to a SIMD batch boundary; default `8192`.
-- `--gate-formal-backend=<cadical|varisat|z3|ir>` – formal backend for
+- `--gate-formal-backend=<cadical|z3|ir>` – formal backend for
   gate-level proof steps (default `cadical`). FRAIG requires `cadical` and
   returns an error when another backend is selected.
 - `--cadical-terminate-limit=<N>` – deterministic CaDiCaL internal
@@ -2622,8 +2622,8 @@ The flow is:
 
 - Simulate PIR and AIG over random inputs to propose candidate correspondences.
 - Use the selected gate formal backend to prove or refute each candidate.
-  `cadical` and `varisat` use the bulk incremental SAT path; `z3` and `ir` use
-  a pairwise proof path.
+  `cadical` uses the bulk incremental SAT path; `z3` and `ir` use a pairwise
+  proof path.
 
 Example:
 

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{EquivResult, VarisatCtx, prove_gate_fn_equiv_varisat};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{
+    EquivResult, GateFormalBackend, prove_gate_fn_equiv_with_backend,
+};
 
 #[test]
 fn test_simple_equivalence() {
@@ -12,9 +14,9 @@ fn test_simple_equivalence() {
     gb.add_output("out".to_string(), x.into());
     let g1 = gb.build();
 
-    let mut ctx = VarisatCtx::new();
     assert_eq!(
-        prove_gate_fn_equiv_varisat(&g1, &g1, &mut ctx),
+        prove_gate_fn_equiv_with_backend(&g1, &g1, GateFormalBackend::Cadical)
+            .expect("CaDiCaL gate equivalence proof"),
         EquivResult::Proved
     );
 }
@@ -35,8 +37,9 @@ fn test_simple_inequivalence() {
     gb2.add_output("out".to_string(), y.into());
     let g2 = gb2.build();
 
-    let mut ctx = VarisatCtx::new();
-    match prove_gate_fn_equiv_varisat(&g1, &g2, &mut ctx) {
+    match prove_gate_fn_equiv_with_backend(&g1, &g2, GateFormalBackend::Cadical)
+        .expect("CaDiCaL gate equivalence proof")
+    {
         EquivResult::Proved => panic!("Expected inequivalent"),
         EquivResult::Disproved(_) => (),
     }

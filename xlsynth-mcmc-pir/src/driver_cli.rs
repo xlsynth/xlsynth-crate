@@ -289,7 +289,7 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .long("gate-formal-backend")
                 .value_name("BACKEND")
                 .help("Formal backend for gate-level proof steps.")
-                .value_parser(["cadical", "varisat", "z3", "ir"])
+                .value_parser(["cadical", "z3", "ir"])
                 .action(ArgAction::Set),
         )
         .arg(

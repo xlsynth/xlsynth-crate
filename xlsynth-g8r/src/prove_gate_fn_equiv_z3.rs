@@ -4,7 +4,7 @@
 //!
 //! This implementation mirrors the SAT‐based checker in
 //! `prove_gate_fn_equiv_sat.rs`, but uses the Z3 SMT solver instead of
-//! Varisat.  By sharing the same public interface we can swap solvers by
+//! CaDiCaL. By sharing the same public interface we can swap solvers by
 //! choosing the appropriate module at the call-site.
 
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ use xlsynth::IrBits;
 /// calls.  Currently this is a light-weight placeholder – we allocate a fresh
 /// Z3 context/solver per invocation because Z3 does not support resetting a
 /// solver to an empty state.  The struct is kept so the public signature is
-/// identical to the Varisat implementation.
+/// identical to the SAT implementation.
 #[derive(Default)]
 pub struct Ctx;
 

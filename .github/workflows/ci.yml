@@ -71,7 +71,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -248,7 +248,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -399,7 +399,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           mv protoc/bin/protoc /usr/local/bin/protoc
           mv protoc /tmp/
@@ -566,7 +566,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-osx-aarch_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-osx-aarch_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
           unzip protoc-29.1-osx-aarch_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/
@@ -679,7 +679,7 @@ jobs:
       - name: Install protobuf compiler
         run: |
           yum install -y curl unzip
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           mv protoc/bin/protoc /usr/local/bin/protoc
           mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -825,7 +825,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           mv protoc/bin/protoc /usr/local/bin/protoc
           mv protoc /tmp/
@@ -891,7 +891,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -1101,7 +1101,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/
@@ -1181,7 +1181,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/
