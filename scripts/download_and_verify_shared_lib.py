@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -164,7 +165,7 @@ def validate_zip(path: Path) -> str:
             if bad_member is not None:
                 return f"CRC validation failed for archive member {bad_member}"
         return ""
-    except (zipfile.BadZipFile, OSError) as exc:
+    except (zipfile.BadZipFile, zlib.error, OSError) as exc:
         return str(exc)
 
 
