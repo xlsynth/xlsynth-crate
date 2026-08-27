@@ -97,6 +97,9 @@ TOML file containing `dso_path` and `dslx_stdlib_path`.
 
 ## Development Notes
 
+For a containerized contributor build, see the [container build and test reference](codex/README.md).
+The same Dockerfile is exercised in CI and runs workspace checks, tests, and pre-commit with networking disabled after preparation.
+
 The `xlsynth` Rust crate leverages a dynamic library with XLS' core functionality (i.e. `libxls.so`
 / `libxls.dylib`).
 

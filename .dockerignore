@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Do not import host Git configuration, linked-worktree pointers, or caches.
+**/.git
+**/target
+**/Cargo.lock
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.venv
+**/.venv-*
+**/.env
+**/.env.*
+**/.vscode
+**/.idea
+**/.cursor
+**/.spr.yml
+**/fuzz/corpus
+**/fuzz/artifacts
+xlsynth_tools
+slang
