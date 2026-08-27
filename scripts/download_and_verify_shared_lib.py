@@ -20,6 +20,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +39,7 @@ MACH_O_MAGICS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("kind", choices=("elf", "dylib", "tar-gz"))
+    parser.add_argument("kind", choices=("elf", "dylib", "tar-gz", "zip"))
     parser.add_argument("output")
     parser.add_argument("url")
     parser.add_argument("--sha256-url")
@@ -156,6 +157,17 @@ def validate_tar_gz(path: Path) -> str:
         return str(exc)
 
 
+def validate_zip(path: Path) -> str:
+    try:
+        with zipfile.ZipFile(str(path), "r") as archive:
+            bad_member = archive.testzip()
+            if bad_member is not None:
+                return f"CRC validation failed for archive member {bad_member}"
+        return ""
+    except (zipfile.BadZipFile, OSError) as exc:
+        return str(exc)
+
+
 def describe_binary(path: Path) -> str:
     try:
         import subprocess
@@ -182,6 +194,8 @@ def expected_description(kind: str) -> str:
         return "ELF binary"
     if kind == "dylib":
         return "Mach-O dynamic library"
+    if kind == "zip":
+        return "ZIP archive"
     return "gzip-compressed tar archive"
 
 
@@ -191,6 +205,14 @@ def validate_artifact(path: Path, kind: str):
 
     if kind == "tar-gz":
         error = validate_tar_gz(path)
+        if not error:
+            return None
+        return (
+            f"Expected {expected_description(kind)}, got '{description}' "
+            f"from {path}: {error}"
+        )
+    if kind == "zip":
+        error = validate_zip(path)
         if not error:
             return None
         return (
