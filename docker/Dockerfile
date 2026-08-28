@@ -17,7 +17,7 @@ WORKDIR /workspace/xlsynth-crate
 
 # Cache tool installation separately from source changes.
 COPY docker/install_tools.sh docker/
-COPY scripts/ci_apt_retry.sh scripts/ci_install_rustup.py scripts/download_and_verify.py scripts/
+COPY scripts/ci_apt_retry.sh scripts/ci_install_rustup.py scripts/download_and_verify.py scripts/slang_rocky8.sha256 scripts/
 RUN bash docker/install_tools.sh
 
 # Keep this after the expensive tool layer: changing validation mode should not

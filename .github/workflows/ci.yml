@@ -256,7 +256,10 @@ jobs:
         run: |
           # We use the rocky8 binary for these systems since it has an easier requirements for glibc
           # version that works for ubuntu 22.04.
-          python3 scripts/download_and_verify.py elf slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
+          python3 scripts/download_and_verify.py elf slang \
+            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
+            --sha256 "${slang_sha256}"
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
@@ -754,7 +757,10 @@ jobs:
 
       - name: Download Slang
         run: |
-          python3 scripts/download_and_verify.py elf slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
+          python3 scripts/download_and_verify.py elf slang \
+            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
+            --sha256 "${slang_sha256}"
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
@@ -983,7 +989,10 @@ jobs:
 
       - name: Download Slang
         run: |
-          python3 scripts/download_and_verify.py elf slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
+          python3 scripts/download_and_verify.py elf slang \
+            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
+            --sha256 "${slang_sha256}"
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH

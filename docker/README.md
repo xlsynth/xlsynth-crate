@@ -78,13 +78,28 @@ Docker's emulation support; the release binaries used here are not Linux ARM bui
 
 ## Preparation and reproducibility
 
-The image pins Ubuntu by digest, Rust by nightly date, and cargo-nextest/cargo-fuzz
-by version. Full online preparation fetches all Cargo workspaces used by hooks
-before any offline hook runs; build-only fetches only the main workspace needed for
-its offline compilation. XLS artifacts are resolved using
+The image pins Ubuntu by digest, Rust by nightly date, cargo-nextest/cargo-fuzz by
+version, and the Linux Slang binary by GitHub asset ID plus a checked-in SHA-256.
+Full online preparation fetches all Cargo workspaces used by hooks before any
+offline hook runs; build-only fetches only the main workspace needed for its
+offline compilation. XLS artifacts are resolved using
 `scripts/get_required_libxls_dso_and_tools_release_tag.py`, stored under a
 release/platform-specific directory, and supplied through `XLS_DSO_PATH`,
 `DSLX_STDLIB_PATH`, and `LD_LIBRARY_PATH`. No globally installed XLS DSO is needed.
+
+The Slang pin lives in `scripts/slang_rocky8.sha256`. The downloader fetches asset
+ID `220397578` from
+`https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578` with
+GitHub's binary-asset `Accept` header and rejects any payload whose complete-file
+hash differs. To update it, choose the intended asset ID, download that exact
+asset without credentials, verify the resulting ELF and SHA-256, then update the
+caller URL and digest together. The current digest,
+`7f6dbe2d7b8d86adf982675eea428397a22467a3ead7590b5de95b6e3a63aa36`, was
+bootstrapped on 2026-08-27 by matching an unauthenticated asset download against
+`/usr/local/bin/slang` from the already validated `ea1f97d3` image
+`cec8471522de8839bcb78c9a1a1c252767b18515a98c844489ca203d5ddd2433`. This
+freezes an existing trusted input; it is not independent source/build provenance,
+and deleting the upstream asset can still make the pin unavailable.
 
 `.dockerignore` excludes host Git metadata, build outputs, Cargo lockfiles, and
 downloaded artifacts. The image creates a local Git index solely for pre-commit,
@@ -93,7 +108,8 @@ so linked worktrees work too and host Git credentials are not copied.
 The offline checks are hermetic with respect to networking, and `--frozen` preserves
 the Cargo resolution captured during preparation. Rebuilding an image from the
 same commit is **not yet bit-for-bit reproducible**: this repository does not commit
-Cargo lockfiles, apt/Python package repositories can change, and the Slang `ci`
-release is mutable. To reproduce a particular prepared environment, retain and
-reuse that image by image ID/digest (or save it with `docker save`), rather than
-rebuilding a mutable tag. The Cargo lockfiles remain in the image for inspection.
+Cargo lockfiles, and apt/Python package repositories can change. The pinned Slang
+asset fails closed on content changes, but its upstream availability is not
+guaranteed. To reproduce a particular prepared environment, retain and reuse that
+image by image ID/digest (or save it with `docker save`), rather than rebuilding
+from live package sources. The Cargo lockfiles remain in the image for inspection.
