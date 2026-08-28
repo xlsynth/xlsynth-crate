@@ -55,9 +55,7 @@ class DockerPrepareTest(unittest.TestCase):
         (self.repo / "docker").mkdir(parents=True)
         (self.repo / "scripts").mkdir()
         (self.repo / "xlsynth-sys").mkdir()
-        shutil.copy2(
-            REPO_ROOT / "docker/prepare_workspace.sh", self.repo / "docker"
-        )
+        shutil.copy2(REPO_ROOT / "docker/prepare_workspace.sh", self.repo / "docker")
         shutil.copy2(REPO_ROOT / "docker/check_offline.sh", self.repo / "docker")
         shutil.copy2(
             REPO_ROOT / "scripts/get_required_libxls_dso_and_tools_release_tag.py",
