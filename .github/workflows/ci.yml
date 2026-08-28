@@ -256,7 +256,7 @@ jobs:
         run: |
           # We use the rocky8 binary for these systems since it has an easier requirements for glibc
           # version that works for ubuntu 22.04.
-          slang_sha256="$(grep -E '^[0-9a-f]{64}$' scripts/slang_rocky8.sha256)"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
           python3 scripts/download_and_verify.py elf slang \
             "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
             --sha256 "${slang_sha256}"
@@ -757,7 +757,7 @@ jobs:
 
       - name: Download Slang
         run: |
-          slang_sha256="$(grep -E '^[0-9a-f]{64}$' scripts/slang_rocky8.sha256)"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
           python3 scripts/download_and_verify.py elf slang \
             "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
             --sha256 "${slang_sha256}"
@@ -989,7 +989,7 @@ jobs:
 
       - name: Download Slang
         run: |
-          slang_sha256="$(grep -E '^[0-9a-f]{64}$' scripts/slang_rocky8.sha256)"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
           python3 scripts/download_and_verify.py elf slang \
             "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
             --sha256 "${slang_sha256}"

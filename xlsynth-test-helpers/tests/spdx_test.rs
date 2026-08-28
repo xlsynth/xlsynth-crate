@@ -155,6 +155,8 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                     || extension == "lock"
                     || extension == "toml"
                     || extension == "supp"
+                    // Checksum sidecars are data, not maintained source files.
+                    || extension == "sha256"
                 {
                     continue;
                 }
@@ -184,6 +186,22 @@ fn test_finds_rust_file_missing_spdx_in_tempdir() {
     let missing_spdx_files = find_missing_spdx_files(temp_dir_path);
     assert_eq!(missing_spdx_files.len(), 1);
     assert!(missing_spdx_files.contains(&missing_spdx_file));
+}
+
+#[test]
+fn test_exempts_plain_sha256_data_but_checks_ordinary_source() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let checksum_file = temp_dir.path().join("artifact.sha256");
+    fs::write(
+        checksum_file,
+        "7f6dbe2d7b8d86adf982675eea428397a22467a3ead7590b5de95b6e3a63aa36\n",
+    )
+    .unwrap();
+    let missing_source = temp_dir.path().join("missing.rs");
+    fs::write(missing_source.clone(), "fn main() {}\n").unwrap();
+
+    let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
+    assert_eq!(missing_spdx_files, vec![missing_source]);
 }
 
 #[test]
