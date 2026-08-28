@@ -60,7 +60,7 @@ as_root install -m 0755 "${downloads_dir}/protoc/bin/protoc" /usr/local/bin/prot
 protoc --version
 
 echo "==> Downloading Slang binary"
-slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
+slang_sha256="$(grep -E '^[0-9a-f]{64}$' scripts/slang_rocky8.sha256)"
 python3 scripts/download_and_verify.py elf "${downloads_dir}/slang" \
   https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578 \
   --sha256 "${slang_sha256}"

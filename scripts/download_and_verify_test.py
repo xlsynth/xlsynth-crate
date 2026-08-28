@@ -320,7 +320,11 @@ def test_sha256_url_callers_remain_supported(tmp_path, monkeypatch):
 def test_slang_callers_share_asset_id_and_checked_in_digest():
     repo_root = Path(__file__).resolve().parent.parent
     digest_text = (repo_root / "scripts/slang_rocky8.sha256").read_text()
-    assert re.fullmatch(r"[0-9a-f]{64}\n", digest_text)
+    digest_lines = [
+        line for line in digest_text.splitlines() if re.fullmatch(r"[0-9a-f]{64}", line)
+    ]
+    assert digest_text.startswith("// SPDX-License-Identifier: Apache-2.0\n")
+    assert len(digest_lines) == 1
 
     asset_url = (
         "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578"
@@ -334,9 +338,11 @@ def test_slang_callers_share_asset_id_and_checked_in_digest():
 
     assert workflow_text.count(asset_url) == 3
     assert workflow_text.count("scripts/slang_rocky8.sha256") == 3
+    assert workflow_text.count("grep -E '^[0-9a-f]{64}$'") == 3
     assert workflow_text.count('--sha256 "${slang_sha256}"') == 3
     assert asset_url in install_text
     assert "scripts/slang_rocky8.sha256" in install_text
+    assert "grep -E '^[0-9a-f]{64}$'" in install_text
     assert '--sha256 "${slang_sha256}"' in install_text
     assert mutable_url not in workflow_text
     assert mutable_url not in install_text
