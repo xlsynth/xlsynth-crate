@@ -2,7 +2,8 @@
 
 use super::types::{
     AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckRunResult, UfRegistry,
+    QuickCheckAssertionSemantics, QuickCheckEvent, QuickCheckOptions, QuickCheckRunResult,
+    UfRegistry,
 };
 use super::{
     assertion_filter,
@@ -262,6 +263,8 @@ pub(crate) fn prove_dslx_quickcheck<SConfig>(
     assertion_semantics: QuickCheckAssertionSemantics,
     assert_label_filter: Option<&str>,
     uf_map: &HashMap<String, String>,
+    options: QuickCheckOptions,
+    on_event: &mut dyn FnMut(QuickCheckEvent<'_>),
 ) -> Vec<QuickCheckRunResult>
 where
     SConfig: SolverConfig,
@@ -277,14 +280,14 @@ where
         return Vec::new();
     }
 
-    let options = xlsynth::DslxConvertOptions {
+    let conversion_options = xlsynth::DslxConvertOptions {
         dslx_stdlib_path,
         additional_search_paths: additional_search_paths.iter().copied().collect(),
         enable_warnings: None,
         disable_warnings: None,
         ..Default::default()
     };
-    let ir_text = xlsynth::convert_dslx_to_ir_text(&dslx_contents, entry_file, &options)
+    let ir_text = xlsynth::convert_dslx_to_ir_text(&dslx_contents, entry_file, &conversion_options)
         .expect("DSLX->IR conversion failed for quickcheck")
         .ir;
 
@@ -298,61 +301,116 @@ where
 
     let mut results = Vec::with_capacity(quickchecks.len());
     for (quickcheck_name, requires_itok) in quickchecks {
+        on_event(QuickCheckEvent::Started {
+            name: &quickcheck_name,
+        });
         let start_time = std::time::Instant::now();
-        let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
-            module_name,
-            quickcheck_name.as_str(),
-            xlsynth::DslxCallingConvention::ImplicitToken,
-        )
-        .expect("mangle itok");
-        let mangled_normal = xlsynth::mangle_dslx_name_with_calling_convention(
-            module_name,
-            quickcheck_name.as_str(),
-            xlsynth::DslxCallingConvention::Typical,
-        )
-        .expect("mangle normal");
-
-        let (fn_ref, fixed_implicit_activation) = if requires_itok {
-            if let Some(f) = pkg.get_fn(&mangled_itok) {
-                (f, true)
-            } else if let Some(f) = pkg.get_fn(&mangled_normal) {
-                (f, false)
-            } else {
-                panic!(
-                    "quickcheck function '{}' not found (module '{}')",
-                    quickcheck_name, module_name
-                );
+        let mut implicit_token = false;
+        let result = (|| -> Result<BoolPropertyResult, String> {
+            if options.optimize && !uf_map.is_empty() {
+                return Err("XLS IR optimization cannot be combined with uninterpreted functions: inlining would erase UF boundaries; set optimize=false".into());
             }
-        } else if let Some(f) = pkg.get_fn(&mangled_normal) {
-            (f, false)
-        } else if let Some(f) = pkg.get_fn(&mangled_itok) {
-            (f, true)
-        } else {
-            panic!(
-                "quickcheck function '{}' not found (module '{}')",
-                quickcheck_name, module_name
-            );
-        };
+            let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
+                module_name,
+                &quickcheck_name,
+                xlsynth::DslxCallingConvention::ImplicitToken,
+            )
+            .map_err(|e| e.to_string())?;
+            let mangled_normal = xlsynth::mangle_dslx_name_with_calling_convention(
+                module_name,
+                &quickcheck_name,
+                xlsynth::DslxCallingConvention::Typical,
+            )
+            .map_err(|e| e.to_string())?;
+            let candidates = if requires_itok {
+                [(&mangled_itok, true), (&mangled_normal, false)]
+            } else {
+                [(&mangled_normal, false), (&mangled_itok, true)]
+            };
+            let (top, fixed_implicit_activation) = candidates
+                .into_iter()
+                .find(|(name, _)| pkg.get_fn(name).is_some())
+                .ok_or_else(|| {
+                    format!(
+                        "quickcheck function '{quickcheck_name}' not found (module '{module_name}')"
+                    )
+                })?;
 
-        let prover_fn = ProverFn::new(fn_ref, Some(&pkg))
-            .with_fixed_implicit_activation(fixed_implicit_activation)
-            .with_uf_map(uf_map.clone());
-
-        let result = prove_ir_quickcheck::<SConfig::Solver>(
-            solver_config,
-            &prover_fn,
-            assertion_semantics,
-            assert_label_regex.as_ref(),
-        );
-
-        results.push(QuickCheckRunResult {
+            implicit_token = fixed_implicit_activation;
+            let optimized_pkg;
+            let proof_pkg = if options.optimize {
+                optimized_pkg = optimize_quickcheck_ir(&ir_text, top, assert_label_regex.as_ref())?;
+                &optimized_pkg
+            } else {
+                &pkg
+            };
+            let fn_ref = proof_pkg
+                .get_fn(top)
+                .ok_or_else(|| format!("quickcheck top '{top}' missing after preparation"))?;
+            let prover_fn = ProverFn::new(fn_ref, Some(proof_pkg))
+                .with_fixed_implicit_activation(fixed_implicit_activation)
+                .with_uf_map(uf_map.clone());
+            Ok(prove_ir_quickcheck::<SConfig::Solver>(
+                solver_config,
+                &prover_fn,
+                assertion_semantics,
+                // Inlining renames labels; the optimized path has already
+                // selected assertions using their original DSLX labels.
+                if options.optimize { None } else { assert_label_regex.as_ref() },
+            ))
+        })()
+        .unwrap_or_else(BoolPropertyResult::Error);
+        let run = QuickCheckRunResult {
             name: quickcheck_name,
+            implicit_token,
             duration: start_time.elapsed(),
             result,
-        });
+        };
+        on_event(QuickCheckEvent::Finished(&run));
+        results.push(run);
     }
 
     results
+}
+
+/// Optimizes each property's own package so dead-function elimination cannot
+/// remove properties that still need to be proved. Assertion-bearing functions
+/// remain implicit-token tops, retaining their assertion side effects.
+fn optimize_quickcheck_ir(
+    ir_text: &str,
+    top: &str,
+    assert_label_filter: Option<&Regex>,
+) -> Result<ir::Package, String> {
+    let filtered_ir;
+    let ir_text = if let Some(filter) = assert_label_filter {
+        let mut package = Parser::new(ir_text)
+            .parse_package()
+            .map_err(|e| format!("Failed to parse QuickCheck IR for assertion filtering: {e}"))?;
+        for member in &mut package.members {
+            if let ir::PackageMember::Function(function) = member {
+                for node in &mut function.nodes {
+                    if let ir::NodePayload::Assert { token, label, .. } = &node.payload {
+                        if !filter.is_match(label) {
+                            // Bypass only the excluded assertion, preserving
+                            // its input token and all value-producing logic.
+                            node.payload = ir::NodePayload::Unop(ir::Unop::Identity, *token);
+                        }
+                    }
+                }
+            }
+        }
+        filtered_ir = package.to_string();
+        &filtered_ir
+    } else {
+        ir_text
+    };
+    let package = xlsynth::IrPackage::parse_ir(ir_text, None)
+        .map_err(|e| format!("Failed to parse QuickCheck IR for optimization: {e}"))?;
+    let optimized = xlsynth::optimize_ir(&package, top)
+        .map_err(|e| format!("Failed to optimize QuickCheck IR: {e}"))?;
+    Parser::new(&optimized.to_string())
+        .parse_package()
+        .map_err(|e| format!("Failed to parse optimized QuickCheck IR: {e}"))
 }
 
 pub fn discover_quickcheck_tests(
@@ -899,3 +957,46 @@ quickcheck_test_with_solver!(
     crate::solver::bitwuzla::Bitwuzla,
     &crate::solver::bitwuzla::BitwuzlaOptions::new()
 );
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+
+    #[test]
+    fn quickcheck_optimization_inlines_and_folds_ir() {
+        let source = r#"package qc
+fn helper(x: bits[8] id=1) -> bits[8] {
+    ret add.2: bits[8] = add(x, x, id=2)
+}
+fn property(x: bits[8] id=3) -> bits[1] {
+    invoke.4: bits[8] = invoke(x, to_apply=helper, id=4)
+    add.5: bits[8] = add(x, x, id=5)
+    ret eq.6: bits[1] = eq(invoke.4, add.5, id=6)
+}
+"#;
+        let unoptimized = Parser::new(source).parse_package().unwrap();
+        assert!(
+            unoptimized
+                .get_fn("property")
+                .unwrap()
+                .nodes
+                .iter()
+                .any(|n| matches!(n.payload, ir::NodePayload::Invoke { .. }))
+        );
+        let optimized = optimize_quickcheck_ir(source, "property", None).unwrap();
+        assert!(optimized.get_fn("helper").is_none());
+        let property = optimized.get_fn("property").unwrap();
+        assert!(
+            !property
+                .nodes
+                .iter()
+                .any(|n| matches!(n.payload, ir::NodePayload::Invoke { .. }))
+        );
+        let ir::NodePayload::Literal(value) =
+            &property.get_node(property.ret_node_ref.unwrap()).payload
+        else {
+            panic!("optimization should fold the property to a literal");
+        };
+        assert!(value.bits_equals_u64_value(1));
+    }
+}

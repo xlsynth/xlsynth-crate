@@ -8,7 +8,7 @@ use super::Prover;
 use super::quickcheck::load_quickcheck_context;
 use super::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckRunResult,
+    QuickCheckAssertionSemantics, QuickCheckEvent, QuickCheckOptions, QuickCheckRunResult,
 };
 use crate::toolchain_shim::run_prove_quickcheck_main;
 use regex::escape;
@@ -189,7 +189,7 @@ impl Prover for ExternalProver {
         )
     }
 
-    fn prove_dslx_quickcheck(
+    fn prove_dslx_quickcheck_with_options(
         &self,
         entry_file: &Path,
         dslx_stdlib_path: Option<&Path>,
@@ -198,6 +198,8 @@ impl Prover for ExternalProver {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
+        options: QuickCheckOptions,
+        on_event: &mut dyn FnMut(QuickCheckEvent<'_>),
     ) -> Vec<QuickCheckRunResult> {
         let (_, quickchecks) = load_quickcheck_context(
             entry_file,
@@ -209,83 +211,47 @@ impl Prover for ExternalProver {
             return Vec::new();
         }
 
-        if assertion_semantics != QuickCheckAssertionSemantics::Never {
-            let err = BoolPropertyResult::Error(
-                "External quickcheck requires assertion_semantics=never".to_string(),
-            );
-            return quickchecks
-                .into_iter()
-                .map(|(name, _)| QuickCheckRunResult {
-                    name,
-                    duration: std::time::Duration::default(),
-                    result: err.clone(),
-                })
-                .collect();
-        }
-        if assert_label_filter.is_some() {
-            return quickchecks
-                .into_iter()
-                .map(|(name, _)| QuickCheckRunResult {
-                    name,
-                    duration: std::time::Duration::default(),
-                    result: BoolPropertyResult::Error(
-                        "External quickcheck does not support assertion label filters".to_string(),
-                    ),
-                })
-                .collect();
-        }
-        if !uf_map.is_empty() {
-            return quickchecks
-                .into_iter()
-                .map(|(name, _)| QuickCheckRunResult {
-                    name,
-                    duration: std::time::Duration::default(),
-                    result: BoolPropertyResult::Error(
-                        "External quickcheck does not support uninterpreted functions".to_string(),
-                    ),
-                })
-                .collect();
-        }
-
-        let mut results = Vec::with_capacity(quickchecks.len());
-        let exe = match resolve_tool_path(self, "prove_quickcheck_main") {
-            Ok(path) => path,
-            Err(msg) => {
-                let err = BoolPropertyResult::Error(msg);
-                return quickchecks
-                    .into_iter()
-                    .map(|(name, _)| QuickCheckRunResult {
-                        name,
-                        duration: std::time::Duration::default(),
-                        result: err.clone(),
-                    })
-                    .collect();
-            }
+        let setup = if assertion_semantics != QuickCheckAssertionSemantics::Never {
+            Err("External quickcheck requires assertion_semantics=never".to_string())
+        } else if assert_label_filter.is_some() {
+            Err("External quickcheck does not support assertion label filters".to_string())
+        } else if !uf_map.is_empty() {
+            Err("External quickcheck does not support uninterpreted functions".to_string())
+        } else if !options.optimize {
+            Err("The XLS toolchain always optimizes QuickCheck IR; use an in-process solver to disable optimization".to_string())
+        } else {
+            resolve_tool_path(self, "prove_quickcheck_main")
         };
-
+        let mut results = Vec::with_capacity(quickchecks.len());
         let limit = |msg: &str| msg.chars().take(MAX_TOOLCHAIN_MESSAGE).collect::<String>();
         for (quickcheck_name, _) in quickchecks {
+            on_event(QuickCheckEvent::Started {
+                name: &quickcheck_name,
+            });
             let start_time = std::time::Instant::now();
             let filter = format!("^{}$", escape(quickcheck_name.as_str()));
-            let result = match run_prove_quickcheck_main(
-                &exe,
-                entry_file,
-                dslx_stdlib_path,
-                additional_search_paths,
-                filter.as_str(),
-            ) {
-                Ok(_) => BoolPropertyResult::Proved,
-                Err(msg) => BoolPropertyResult::ToolchainDisproved(limit(&msg)),
+            let result = match &setup {
+                Err(msg) => BoolPropertyResult::Error(msg.clone()),
+                Ok(exe) => match run_prove_quickcheck_main(
+                    exe,
+                    entry_file,
+                    dslx_stdlib_path,
+                    additional_search_paths,
+                    filter.as_str(),
+                ) {
+                    Ok(_) => BoolPropertyResult::Proved,
+                    Err(msg) => BoolPropertyResult::ToolchainDisproved(limit(&msg)),
+                },
             };
-
-            results.push(QuickCheckRunResult {
+            let run = QuickCheckRunResult {
                 name: quickcheck_name,
+                implicit_token: false,
                 duration: start_time.elapsed(),
                 result,
-            });
+            };
+            on_event(QuickCheckEvent::Finished(&run));
+            results.push(run);
         }
-
-        let _ = assertion_semantics;
 
         results
     }

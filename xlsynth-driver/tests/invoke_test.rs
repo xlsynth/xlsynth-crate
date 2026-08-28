@@ -8648,7 +8648,7 @@ fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
             solver
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Failure: Some QuickChecks disproved"));
+        assert!(stdout.contains("Failure: Some QuickChecks did not succeed"));
     }
 }
 
@@ -9390,7 +9390,7 @@ fn qc_always_fails() -> bool {
         stderr
     );
     assert!(
-        stdout.contains("Failure: Some QuickChecks disproved"),
+        stdout.contains("Failure: Some QuickChecks did not succeed"),
         "expected failure messaging in stdout: {}",
         stdout
     );
@@ -11870,6 +11870,7 @@ fn test_prove_quickcheck_uninterpreted_functions_solver_param(solver: &str) {
         .arg("qc_equiv")
         .arg("--solver")
         .arg(solver)
+        .arg("--opt=false")
         .arg("--uf")
         .arg(&"g:F")
         .arg("--uf")

@@ -20,7 +20,7 @@ pub use quickcheck::discover_quickcheck_tests;
 use self::quickcheck::build_assert_label_regex;
 use self::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckRunResult,
+    QuickCheckAssertionSemantics, QuickCheckEvent, QuickCheckOptions, QuickCheckRunResult,
 };
 use crate::solver::SolverConfig;
 use std::str::FromStr;
@@ -150,6 +150,9 @@ pub trait Prover {
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult;
 
+    /// Collects all selected proof results with default-on XLS optimization.
+    /// Use `prove_dslx_quickcheck_with_options` to disable optimization or
+    /// observe progress.
     fn prove_dslx_quickcheck(
         &self,
         entry_file: &std::path::Path,
@@ -159,6 +162,32 @@ pub trait Prover {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
+    ) -> Vec<QuickCheckRunResult> {
+        self.prove_dslx_quickcheck_with_options(
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            test_filter,
+            assertion_semantics,
+            assert_label_filter,
+            uf_map,
+            QuickCheckOptions::default(),
+            &mut |_| {},
+        )
+    }
+
+    /// Proves selected properties and reports each start/result synchronously.
+    fn prove_dslx_quickcheck_with_options(
+        &self,
+        entry_file: &std::path::Path,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
+        test_filter: Option<&str>,
+        assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
+        uf_map: &HashMap<String, String>,
+        options: QuickCheckOptions,
+        on_event: &mut dyn FnMut(QuickCheckEvent<'_>),
     ) -> Vec<QuickCheckRunResult>;
 }
 
@@ -211,7 +240,7 @@ impl Prover for UnavailableProver {
         BoolPropertyResult::Error(self.message.clone())
     }
 
-    fn prove_dslx_quickcheck(
+    fn prove_dslx_quickcheck_with_options(
         &self,
         _entry_file: &std::path::Path,
         _dslx_stdlib_path: Option<&std::path::Path>,
@@ -220,12 +249,20 @@ impl Prover for UnavailableProver {
         _assertion_semantics: QuickCheckAssertionSemantics,
         _assert_label_filter: Option<&str>,
         _uf_map: &HashMap<String, String>,
+        _options: QuickCheckOptions,
+        on_event: &mut dyn FnMut(QuickCheckEvent<'_>),
     ) -> Vec<QuickCheckRunResult> {
-        vec![QuickCheckRunResult {
+        on_event(QuickCheckEvent::Started {
+            name: "solver-selection",
+        });
+        let run = QuickCheckRunResult {
             name: "solver-selection".to_string(),
+            implicit_token: false,
             duration: std::time::Duration::ZERO,
             result: BoolPropertyResult::Error(self.message.clone()),
-        }]
+        };
+        on_event(QuickCheckEvent::Finished(&run));
+        vec![run]
     }
 }
 
@@ -341,7 +378,7 @@ impl<S: SolverConfig> Prover for S {
         )
     }
 
-    fn prove_dslx_quickcheck(
+    fn prove_dslx_quickcheck_with_options(
         &self,
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
@@ -350,6 +387,8 @@ impl<S: SolverConfig> Prover for S {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
+        options: QuickCheckOptions,
+        on_event: &mut dyn FnMut(QuickCheckEvent<'_>),
     ) -> Vec<QuickCheckRunResult> {
         quickcheck::prove_dslx_quickcheck::<S>(
             self,
@@ -360,6 +399,8 @@ impl<S: SolverConfig> Prover for S {
             assertion_semantics,
             assert_label_filter,
             uf_map,
+            options,
+            on_event,
         )
     }
 }

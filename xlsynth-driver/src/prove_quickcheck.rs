@@ -17,8 +17,11 @@ use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_pa
 
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use xlsynth_prover::prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use xlsynth_prover::prover::types::{
+    BoolPropertyResult, QuickCheckAssertionSemantics, QuickCheckEvent, QuickCheckOptions,
+};
 use xlsynth_prover::prover::{Prover, SolverChoice, discover_quickcheck_tests};
 
 const SUBCOMMAND: &str = "prove-quickcheck";
@@ -35,6 +38,83 @@ pub struct QuickCheckTestOutcome {
 pub struct QuickCheckOutcome {
     pub success: bool,
     pub tests: Vec<QuickCheckTestOutcome>,
+}
+
+/// Renders progress immediately without coupling the prover to terminal output.
+fn write_quickcheck_event(
+    writer: &mut impl Write,
+    source: &Path,
+    event: QuickCheckEvent<'_>,
+) -> io::Result<()> {
+    match event {
+        QuickCheckEvent::Started { name } => {
+            writeln!(writer, "[ RUN QUICKCHECK        ] {name}")?;
+        }
+        QuickCheckEvent::Finished(run) => {
+            if matches!(run.result, BoolPropertyResult::Proved) {
+                writeln!(writer, "[                    OK ] {}", run.name)?;
+            } else {
+                let description = match &run.result {
+                    BoolPropertyResult::Disproved { .. } => "has a counterexample",
+                    BoolPropertyResult::Inconclusive(_) => "could not be proved",
+                    BoolPropertyResult::Error(_) => "failed to run",
+                    BoolPropertyResult::ToolchainDisproved(_) => "external proof failed",
+                    BoolPropertyResult::Proved => unreachable!("success handled above"),
+                };
+                writeln!(writer, "error: QuickCheck `{}` {description}", run.name)?;
+                writeln!(writer, "  --> {}", source.display())?;
+                writeln!(writer)?;
+                match &run.result {
+                    BoolPropertyResult::Disproved { inputs, output } => {
+                        let inputs = if run.implicit_token {
+                            &inputs[2..]
+                        } else {
+                            inputs.as_slice()
+                        };
+                        let return_value = if run.implicit_token {
+                            output
+                                .value
+                                .get_element(1)
+                                .expect("implicit-token QuickCheck result")
+                        } else {
+                            output.value.clone()
+                        };
+                        for input in inputs {
+                            writeln!(writer, "  {} = {}", input.name, input.value)?;
+                        }
+                        if !inputs.is_empty() {
+                            writeln!(writer)?;
+                        }
+                        // A QuickCheck return is a boolean; retain IR formatting
+                        // as a fallback if a backend violates that contract.
+                        if return_value.bits_equals_u64_value(0) {
+                            writeln!(writer, "  returned false")?;
+                        } else if return_value.bits_equals_u64_value(1) {
+                            writeln!(writer, "  returned true")?;
+                        } else {
+                            writeln!(writer, "  returned {}", return_value)?;
+                        }
+                        if let Some(violation) = &output.assertion_violation {
+                            for line in violation.message.lines() {
+                                writeln!(writer, "  assertion failed: {line}")?;
+                            }
+                            writeln!(writer, "  assertion label: {}", violation.label)?;
+                        }
+                    }
+                    BoolPropertyResult::Inconclusive(message)
+                    | BoolPropertyResult::ToolchainDisproved(message)
+                    | BoolPropertyResult::Error(message) => {
+                        for line in message.lines() {
+                            writeln!(writer, "  {line}")?;
+                        }
+                    }
+                    BoolPropertyResult::Proved => unreachable!("success handled above"),
+                }
+                writeln!(writer, "[                FAILED ] {}", run.name)?;
+            }
+        }
+    }
+    writer.flush()
 }
 
 /// Implements the `prove-quickcheck` sub-command.
@@ -183,6 +263,14 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             std::process::exit(1);
         }
     }
+    let optimize = *matches.get_one::<bool>("opt").expect("opt default");
+    if optimize && !uf_map.is_empty() {
+        report_cli_error_and_exit(
+            "--uf cannot be combined with --opt=true\n  XLS optimization inlines calls and would erase UF boundaries.\n  Use --opt=false to preserve uninterpreted functions.",
+            Some(SUBCOMMAND),
+            vec![],
+        );
+    }
     // UF semantics: functions mapped to the same <uf_name> are treated as the
     // same uninterpreted symbol (assumed equivalent) and assertions inside them
     // are ignored during proving.
@@ -197,8 +285,10 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
         test_filter: Option<&str>,
+        options: QuickCheckOptions,
     ) -> Vec<QuickCheckTestOutcome> {
-        let runs = prover.prove_dslx_quickcheck(
+        let mut stderr = io::stderr().lock();
+        let runs = prover.prove_dslx_quickcheck_with_options(
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,
@@ -206,6 +296,16 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             semantics,
             assert_label_filter,
             uf_map,
+            options,
+            &mut |event| {
+                if let Err(error) = write_quickcheck_event(&mut stderr, entry_file, event) {
+                    report_cli_error_and_exit(
+                        &format!("Failed to write proof progress: {error}"),
+                        Some(SUBCOMMAND),
+                        vec![],
+                    );
+                }
+            },
         );
 
         runs.into_iter()
@@ -246,6 +346,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         dslx_stdlib_path_buf.as_deref(),
         &additional_search_paths_refs,
         test_filter.as_deref(),
+        QuickCheckOptions { optimize },
     );
 
     if results.is_empty() {
@@ -256,18 +357,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         );
     }
 
-    let mut all_passed = true;
-    for r in &results {
-        if r.success {
-            println!("QuickCheck '{}' proved", r.name);
-        } else {
-            all_passed = false;
-            println!("QuickCheck '{}' disproved", r.name);
-            if let Some(ref cex) = r.counterexample {
-                println!("  {}", cex);
-            }
-        }
-    }
+    let all_passed = results.iter().all(|r| r.success);
 
     let outcome = QuickCheckOutcome {
         success: all_passed,
@@ -282,7 +372,211 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         println!("Success: All QuickChecks proved");
         std::process::exit(0);
     } else {
-        println!("Failure: Some QuickChecks disproved");
+        println!("Failure: Some QuickChecks did not succeed");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use xlsynth::IrValue;
+    use xlsynth_prover::prover::types::{
+        AssertionViolation, FnInput, FnOutput, QuickCheckRunResult,
+    };
+
+    /// Golden output covers all result kinds without solver-dependent models.
+    #[test]
+    fn quickcheck_diagnostic_goldens() {
+        let results = [
+            ("passing", BoolPropertyResult::Proved),
+            (
+                "always_fail",
+                BoolPropertyResult::Disproved {
+                    inputs: vec![
+                        FnInput {
+                            name: "a".into(),
+                            value: IrValue::parse_typed("bits[1]:0").unwrap(),
+                        },
+                        FnInput {
+                            name: "b".into(),
+                            value: IrValue::parse_typed("bits[2]:0").unwrap(),
+                        },
+                    ],
+                    output: FnOutput {
+                        value: IrValue::make_ubits(1, 0).unwrap(),
+                        assertion_violation: None,
+                    },
+                },
+            ),
+            (
+                "assertion_failure",
+                BoolPropertyResult::Disproved {
+                    inputs: vec![],
+                    output: FnOutput {
+                        value: IrValue::make_ubits(1, 1).unwrap(),
+                        assertion_violation: Some(AssertionViolation {
+                            message: "expected nonzero input".into(),
+                            label: "nonzero".into(),
+                        }),
+                    },
+                },
+            ),
+            (
+                "aggregate_failure",
+                BoolPropertyResult::Disproved {
+                    inputs: vec![
+                        FnInput {
+                            name: "pair".into(),
+                            value: IrValue::parse_typed(
+                                "(bits[8]:7, bits[129]:0x100000000000000000000000000000001)",
+                            )
+                            .unwrap(),
+                        },
+                        FnInput {
+                            name: "values".into(),
+                            value: IrValue::parse_typed("[bits[4]:2, bits[4]:3]").unwrap(),
+                        },
+                    ],
+                    output: FnOutput {
+                        value: IrValue::make_ubits(1, 0).unwrap(),
+                        assertion_violation: None,
+                    },
+                },
+            ),
+            (
+                "unknown",
+                BoolPropertyResult::Inconclusive("solver returned unknown".into()),
+            ),
+            (
+                "broken",
+                BoolPropertyResult::Error("solver unavailable\nrebuild with solver support".into()),
+            ),
+            (
+                "external_failure",
+                BoolPropertyResult::ToolchainDisproved("external tool exited with status 1".into()),
+            ),
+        ];
+        let mut output = Vec::new();
+        for (name, result) in results {
+            let run = QuickCheckRunResult {
+                name: name.into(),
+                implicit_token: false,
+                duration: Duration::ZERO,
+                result,
+            };
+            write_quickcheck_event(
+                &mut output,
+                Path::new("qc.x"),
+                QuickCheckEvent::Started { name },
+            )
+            .unwrap();
+            write_quickcheck_event(
+                &mut output,
+                Path::new("qc.x"),
+                QuickCheckEvent::Finished(&run),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            include_str!("testdata/quickcheck/diagnostics.golden.txt")
+        );
+    }
+
+    #[test]
+    fn quickcheck_diagnostic_hides_implicit_ir_plumbing() {
+        let run = QuickCheckRunResult {
+            name: "assertion_failure".into(),
+            implicit_token: true,
+            duration: Duration::ZERO,
+            result: BoolPropertyResult::Disproved {
+                inputs: vec![
+                    FnInput {
+                        name: "__token".into(),
+                        value: IrValue::make_token(),
+                    },
+                    FnInput {
+                        name: "__activated".into(),
+                        value: IrValue::make_ubits(1, 1).unwrap(),
+                    },
+                    FnInput {
+                        name: "x".into(),
+                        value: IrValue::make_ubits(8, 0).unwrap(),
+                    },
+                ],
+                output: FnOutput {
+                    value: IrValue::make_tuple(&[
+                        IrValue::make_token(),
+                        IrValue::make_ubits(1, 1).unwrap(),
+                    ]),
+                    assertion_violation: Some(AssertionViolation {
+                        message: "expected nonzero input".into(),
+                        label: "nonzero".into(),
+                    }),
+                },
+            },
+        };
+        let mut output = Vec::new();
+        write_quickcheck_event(
+            &mut output,
+            Path::new("qc.x"),
+            QuickCheckEvent::Started { name: &run.name },
+        )
+        .unwrap();
+        write_quickcheck_event(
+            &mut output,
+            Path::new("qc.x"),
+            QuickCheckEvent::Finished(&run),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            include_str!("testdata/quickcheck/implicit_token.golden.txt")
+        );
+    }
+
+    #[derive(Default)]
+    struct FlushRecorder {
+        bytes: Vec<u8>,
+        flushed: Vec<usize>,
+    }
+
+    impl Write for FlushRecorder {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushed.push(self.bytes.len());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn quickcheck_progress_flushes_each_event() {
+        let mut writer = FlushRecorder::default();
+        let run = QuickCheckRunResult {
+            name: "p".into(),
+            implicit_token: false,
+            duration: Duration::ZERO,
+            result: BoolPropertyResult::Proved,
+        };
+        write_quickcheck_event(
+            &mut writer,
+            Path::new("qc.x"),
+            QuickCheckEvent::Started { name: "p" },
+        )
+        .unwrap();
+        let first_length = writer.bytes.len();
+        assert_eq!(writer.flushed, [first_length]);
+        write_quickcheck_event(
+            &mut writer,
+            Path::new("qc.x"),
+            QuickCheckEvent::Finished(&run),
+        )
+        .unwrap();
+        assert_eq!(writer.flushed, [first_length, writer.bytes.len()]);
     }
 }

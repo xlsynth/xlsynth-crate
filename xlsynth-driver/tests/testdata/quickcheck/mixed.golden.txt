@@ -1,0 +1,13 @@
+[ RUN QUICKCHECK        ] passing
+[                    OK ] passing
+[ RUN QUICKCHECK        ] zero_is_forbidden
+error: QuickCheck `zero_is_forbidden` has a counterexample
+  --> qc.x
+
+  a = bits[1]:0
+  b = bits[2]:0
+
+  returned false
+[                FAILED ] zero_is_forbidden
+[ RUN QUICKCHECK        ] passing_after_failure
+[                    OK ] passing_after_failure
