@@ -60,12 +60,12 @@ as_root install -m 0755 "${downloads_dir}/protoc/bin/protoc" /usr/local/bin/prot
 protoc --version
 
 echo "==> Downloading Slang binary"
-python3 scripts/download_and_verify_shared_lib.py elf "${downloads_dir}/slang" \
+python3 scripts/download_and_verify.py elf "${downloads_dir}/slang" \
   https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8
 as_root install -m 0755 "${downloads_dir}/slang" /usr/local/bin/slang
 
 echo "==> Installing boolector DSO"
-python3 scripts/download_and_verify_shared_lib.py elf "${downloads_dir}/libboolector.so" \
+python3 scripts/download_and_verify.py elf "${downloads_dir}/libboolector.so" \
   https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
 as_root install -m 0644 "${downloads_dir}/libboolector.so" /usr/lib/libboolector.so
 
@@ -73,7 +73,7 @@ echo "==> Installing Bitwuzla DSOs (matches CI)"
 bitwuzla_release="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
 for library in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
   artifact="lib${library}-rocky8.so"
-  python3 scripts/download_and_verify_shared_lib.py elf "${downloads_dir}/${artifact}" \
+  python3 scripts/download_and_verify.py elf "${downloads_dir}/${artifact}" \
     "${bitwuzla_release}/${artifact}"
   as_root install -m 0644 "${downloads_dir}/${artifact}" "/usr/lib/lib${library}.so"
 done

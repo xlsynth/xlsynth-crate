@@ -8,7 +8,7 @@ import struct
 import urllib.error
 import zipfile
 
-import download_and_verify_shared_lib
+import download_and_verify
 import pytest
 
 
@@ -30,14 +30,14 @@ def test_validate_artifact_accepts_zip_archive(tmp_path):
     with zipfile.ZipFile(str(artifact), "w") as archive:
         archive.writestr("bin/protoc", "placeholder")
 
-    assert download_and_verify_shared_lib.validate_artifact(artifact, "zip") is None
+    assert download_and_verify.validate_artifact(artifact, "zip") is None
 
 
 def test_validate_artifact_rejects_non_zip_payload(tmp_path):
     artifact = tmp_path / "protoc.zip"
     artifact.write_text("upstream error page")
 
-    error = download_and_verify_shared_lib.validate_artifact(artifact, "zip")
+    error = download_and_verify.validate_artifact(artifact, "zip")
 
     assert error is not None
     assert "Expected ZIP archive" in error
@@ -56,15 +56,13 @@ def test_zip_download_retries_connection_reset(tmp_path, monkeypatch):
             archive.writestr("bin/protoc", "placeholder")
 
     monkeypatch.setattr(
-        download_and_verify_shared_lib,
+        download_and_verify,
         "download_with_retry",
         fake_download,
     )
-    monkeypatch.setattr(
-        download_and_verify_shared_lib.time, "sleep", lambda _delay: None
-    )
+    monkeypatch.setattr(download_and_verify.time, "sleep", lambda _delay: None)
 
-    download_and_verify_shared_lib.download_and_verify_with_retry(
+    download_and_verify.download_and_verify_with_retry(
         "zip",
         "https://example.invalid/protoc.zip",
         artifact,
@@ -89,15 +87,13 @@ def test_zip_download_retries_corrupt_deflate_stream(tmp_path, monkeypatch):
             archive.writestr("bin/protoc", "placeholder")
 
     monkeypatch.setattr(
-        download_and_verify_shared_lib,
+        download_and_verify,
         "download_with_retry",
         fake_download,
     )
-    monkeypatch.setattr(
-        download_and_verify_shared_lib.time, "sleep", lambda _delay: None
-    )
+    monkeypatch.setattr(download_and_verify.time, "sleep", lambda _delay: None)
 
-    download_and_verify_shared_lib.download_and_verify_with_retry(
+    download_and_verify.download_and_verify_with_retry(
         "zip",
         "https://example.invalid/protoc.zip",
         artifact,
@@ -150,18 +146,16 @@ def test_elf_download_retries_tls_reset_cleans_partial_temp_and_rejects_non_elf(
             assert not first_temp_path[0].exists()
             assert len(list(tmp_path.glob("slang.*.tmp"))) == 1
             return FakeResponse(b"\x7fEL")
-        return FakeResponse(download_and_verify_shared_lib.ELF_MAGIC + b"slang")
+        return FakeResponse(download_and_verify.ELF_MAGIC + b"slang")
 
     monkeypatch.setattr(
-        download_and_verify_shared_lib.urllib.request,
+        download_and_verify.urllib.request,
         "urlopen",
         fake_urlopen,
     )
-    monkeypatch.setattr(
-        download_and_verify_shared_lib.time, "sleep", lambda _delay: None
-    )
+    monkeypatch.setattr(download_and_verify.time, "sleep", lambda _delay: None)
 
-    download_and_verify_shared_lib.download_and_verify_with_retry(
+    download_and_verify.download_and_verify_with_retry(
         "elf",
         "https://example.invalid/slang",
         artifact,
@@ -170,7 +164,7 @@ def test_elf_download_retries_tls_reset_cleans_partial_temp_and_rejects_non_elf(
     )
 
     assert len(download_attempts) == 3
-    assert artifact.read_bytes().startswith(download_and_verify_shared_lib.ELF_MAGIC)
+    assert artifact.read_bytes().startswith(download_and_verify.ELF_MAGIC)
 
 
 def test_elf_download_stops_after_bounded_tls_reset_retries(tmp_path, monkeypatch):
@@ -183,16 +177,14 @@ def test_elf_download_stops_after_bounded_tls_reset_retries(tmp_path, monkeypatc
         raise urllib.error.URLError("connection reset by peer")
 
     monkeypatch.setattr(
-        download_and_verify_shared_lib.urllib.request,
+        download_and_verify.urllib.request,
         "urlopen",
         fake_urlopen,
     )
-    monkeypatch.setattr(
-        download_and_verify_shared_lib.time, "sleep", lambda _delay: None
-    )
+    monkeypatch.setattr(download_and_verify.time, "sleep", lambda _delay: None)
 
     with pytest.raises(urllib.error.URLError):
-        download_and_verify_shared_lib.download_and_verify_with_retry(
+        download_and_verify.download_and_verify_with_retry(
             "elf",
             "https://example.invalid/slang",
             artifact,

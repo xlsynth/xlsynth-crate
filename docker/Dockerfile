@@ -17,7 +17,7 @@ WORKDIR /workspace/xlsynth-crate
 
 # Cache tool installation separately from source changes.
 COPY docker/install_tools.sh docker/
-COPY scripts/ci_apt_retry.sh scripts/ci_install_rustup.py scripts/download_and_verify_shared_lib.py scripts/
+COPY scripts/ci_apt_retry.sh scripts/ci_install_rustup.py scripts/download_and_verify.py scripts/
 RUN bash docker/install_tools.sh
 
 COPY . .

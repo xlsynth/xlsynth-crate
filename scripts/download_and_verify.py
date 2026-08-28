@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_request(url: str) -> urllib.request.Request:
-    headers = {"User-Agent": "xlsynth-ci-shared-lib-fetcher"}
+    headers = {"User-Agent": "xlsynth-ci-artifact-fetcher"}
     gh_pat = os.getenv("GH_PAT")
     if gh_pat:
         headers["Authorization"] = f"token {gh_pat}"
