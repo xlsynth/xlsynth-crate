@@ -282,7 +282,7 @@ cargo test --features with-boolector-built --workspace
 
 ## Offline environments (web IDEs, sandboxed runners)
 
-When building or running tools in an offline environment (e.g., Codex Web, remote sandboxes, `CARGO_NET_OFFLINE=1`):
+When building or running tools in an offline environment (e.g., remote sandboxes, `CARGO_NET_OFFLINE=1`):
 
 - Ensure pre-fetched XLS artifacts are available via environment variables:
   - `XLS_DSO_PATH`: directory/path to the XLS dynamic library used for linking and rpath.

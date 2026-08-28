@@ -38,19 +38,37 @@ MACH_O_MAGICS = {
 }
 
 
+def normalize_sha256(value: str) -> str:
+    if len(value) != 64 or not all(c in "0123456789abcdefABCDEF" for c in value):
+        raise ValueError("SHA-256 must be exactly 64 hexadecimal characters")
+    return value.lower()
+
+
+def parse_sha256_argument(value: str) -> str:
+    try:
+        return normalize_sha256(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("kind", choices=("elf", "dylib", "tar-gz", "zip"))
     parser.add_argument("output")
     parser.add_argument("url")
-    parser.add_argument("--sha256-url")
+    checksum_group = parser.add_mutually_exclusive_group()
+    checksum_group.add_argument("--sha256", type=parse_sha256_argument)
+    checksum_group.add_argument("--sha256-url")
     parser.add_argument("--attempts", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=int, default=60)
     return parser.parse_args()
 
 
 def build_request(url: str) -> urllib.request.Request:
-    headers = {"User-Agent": "xlsynth-ci-shared-lib-fetcher"}
+    headers = {
+        "Accept": "application/octet-stream",
+        "User-Agent": "xlsynth-ci-artifact-fetcher",
+    }
     gh_pat = os.getenv("GH_PAT")
     if gh_pat:
         headers["Authorization"] = f"token {gh_pat}"
@@ -104,8 +122,13 @@ def download_and_verify_with_retry(
     destination: Path,
     attempts: int,
     timeout_seconds: int,
+    sha256: Optional[str] = None,
     sha256_url: Optional[str] = None,
 ) -> None:
+    if sha256 is not None and sha256_url is not None:
+        raise ValueError("--sha256 and --sha256-url are mutually exclusive")
+    expected_sha256 = normalize_sha256(sha256) if sha256 is not None else None
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     delay_seconds = 2
     last_error = None
@@ -116,11 +139,16 @@ def download_and_verify_with_retry(
             )
             validation_error = validate_artifact(destination, kind)
             if validation_error is None:
-                validation_error = validate_sha256_url(
-                    destination, sha256_url, timeout_seconds
-                )
+                if expected_sha256 is not None:
+                    validation_error = validate_sha256(destination, expected_sha256)
+                else:
+                    validation_error = validate_sha256_url(
+                        destination, sha256_url, timeout_seconds
+                    )
             if validation_error is None:
                 return
+            if expected_sha256 is not None or sha256_url is not None:
+                destination.unlink()
             last_error = RuntimeError(validation_error)
         except (urllib.error.URLError, OSError, RuntimeError) as exc:
             last_error = exc
@@ -242,6 +270,14 @@ def sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def validate_sha256(path: Path, expected: str):
+    actual = sha256_file(path)
+    if actual == expected:
+        print(f"{path}: sha256 verified {actual}")
+        return None
+    return f"SHA-256 mismatch for {path}: expected {expected}, got {actual}"
+
+
 def validate_sha256_url(path: Path, sha256_url: Optional[str], timeout_seconds: int):
     if not sha256_url:
         return None
@@ -254,11 +290,7 @@ def validate_sha256_url(path: Path, sha256_url: Optional[str], timeout_seconds: 
     except (urllib.error.URLError, OSError, UnicodeError, ValueError) as exc:
         return f"could not fetch or parse checksum {sha256_url}: {exc}"
 
-    actual = sha256_file(path)
-    if actual == expected:
-        print(f"{path}: sha256 verified {actual}")
-        return None
-    return f"SHA-256 mismatch for {path}: expected {expected}, got {actual}"
+    return validate_sha256(path, expected)
 
 
 def main() -> int:
@@ -271,9 +303,10 @@ def main() -> int:
             output,
             args.attempts,
             args.timeout_seconds,
-            args.sha256_url,
+            sha256=args.sha256,
+            sha256_url=args.sha256_url,
         )
-    except (urllib.error.URLError, OSError, RuntimeError) as exc:
+    except (urllib.error.URLError, OSError, RuntimeError, ValueError) as exc:
         print(
             f"Failed to download valid {expected_description(args.kind)} "
             f"from {args.url}: {exc}",

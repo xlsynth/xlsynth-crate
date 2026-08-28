@@ -71,7 +71,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -148,6 +148,21 @@ jobs:
 
       - name: Run version check test
         run: cargo test --test version_test
+
+  # Build the offline reference environment from a fresh checkout, but keep the
+  # PR lane to a network-disabled workspace compilation rather than full tests.
+  container-build-and-test:
+    needs: [lint-check-ubuntu]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build container and compile workspace offline
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build --build-arg VALIDATION_MODE=build-only --platform linux/amd64 --progress=plain -f docker/Dockerfile -t xlsynth-dev-offline .
 
   # -----------------------------------------------------------
   # 2) xlsynth-vastly reference simulator lane (currently Icarus)
@@ -241,14 +256,17 @@ jobs:
         run: |
           # We use the rocky8 binary for these systems since it has an easier requirements for glibc
           # version that works for ubuntu 22.04.
-          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
+          python3 scripts/download_and_verify.py elf slang \
+            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
+            --sha256 "${slang_sha256}"
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -261,7 +279,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true
@@ -271,9 +289,9 @@ jobs:
         run: |
           mkdir -p artifacts
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           sudo mkdir -p /usr/local/bin /usr/local/lib
           sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
@@ -311,7 +329,7 @@ jobs:
       - name: Download and set up Boolector
         run: |
           mkdir -p boolector_libs
-          python3 scripts/download_and_verify_shared_lib.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
+          python3 scripts/download_and_verify.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
           sudo install -m 0644 boolector_libs/libboolector.so /usr/lib/libboolector.so
           sudo ldconfig
           echo "Listing /usr/lib for libboolector.so:"
@@ -399,7 +417,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           mv protoc/bin/protoc /usr/local/bin/protoc
           mv protoc /tmp/
@@ -410,9 +428,9 @@ jobs:
         run: |
           mkdir -p artifacts
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           sudo mkdir -p /usr/local/bin /usr/local/lib
           sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
@@ -439,7 +457,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify.py elf "${src}" "${BASE_URL}/${src}"
             install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           ldconfig || true
@@ -547,7 +565,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-osx-arm64.dylib"
-            python3 scripts/download_and_verify_shared_lib.py dylib "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify.py dylib "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/local/lib/lib${lib}.dylib"
             sudo install_name_tool -id "@rpath/lib${lib}.dylib" "/usr/local/lib/lib${lib}.dylib"
             sudo rm -f "${src}"
@@ -559,14 +577,14 @@ jobs:
       - name: Download Boolector dylib (macOS arm64)
         run: |
           sudo mkdir -p /usr/local/lib
-          python3 scripts/download_and_verify_shared_lib.py dylib libboolector-osx-arm64.dylib https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-osx-arm64.dylib
+          python3 scripts/download_and_verify.py dylib libboolector-osx-arm64.dylib https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-osx-arm64.dylib
           sudo install -m 0644 libboolector-osx-arm64.dylib /usr/local/lib/libboolector.dylib
           sudo install_name_tool -id "@rpath/libboolector.dylib" /usr/local/lib/libboolector.dylib
           rm -f libboolector-osx-arm64.dylib
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-osx-aarch_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-osx-aarch_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
           unzip protoc-29.1-osx-aarch_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/
@@ -679,7 +697,7 @@ jobs:
       - name: Install protobuf compiler
         run: |
           yum install -y curl unzip
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           mv protoc/bin/protoc /usr/local/bin/protoc
           mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -691,9 +709,9 @@ jobs:
         run: |
           mkdir -p artifacts
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           install -m 0755 artifacts/iverilog-rocky8 /usr/bin/iverilog
           install -m 0755 artifacts/vvp-rocky8 /usr/bin/vvp
           mkdir -p /usr/local/lib
@@ -715,7 +733,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify.py elf "${src}" "${BASE_URL}/${src}"
             install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           ldconfig
@@ -739,7 +757,10 @@ jobs:
 
       - name: Download Slang
         run: |
-          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
+          python3 scripts/download_and_verify.py elf slang \
+            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
+            --sha256 "${slang_sha256}"
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
@@ -825,7 +846,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           mv protoc/bin/protoc /usr/local/bin/protoc
           mv protoc /tmp/
@@ -891,7 +912,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
@@ -904,7 +925,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true
@@ -913,7 +934,7 @@ jobs:
       - name: Download and set up Boolector
         run: |
           mkdir -p boolector_libs
-          python3 scripts/download_and_verify_shared_lib.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          python3 scripts/download_and_verify.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
           sudo install -m 0644 boolector_libs/libboolector.so /usr/lib/libboolector.so
           sudo ldconfig
           echo "Listing /usr/lib for libboolector.so:"
@@ -931,9 +952,9 @@ jobs:
         run: |
           mkdir -p artifacts
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
-          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           sudo mkdir -p /usr/local/bin /usr/local/lib
           sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
@@ -968,7 +989,10 @@ jobs:
 
       - name: Download Slang
         run: |
-          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
+          python3 scripts/download_and_verify.py elf slang \
+            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
+            --sha256 "${slang_sha256}"
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
@@ -1101,7 +1125,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/
@@ -1111,7 +1135,7 @@ jobs:
       - name: Download and set up Boolector
         run: |
           mkdir -p boolector_libs
-          python3 scripts/download_and_verify_shared_lib.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
+          python3 scripts/download_and_verify.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
           sudo install -m 0644 boolector_libs/libboolector.so /usr/lib/libboolector.so
           sudo ldconfig
 
@@ -1125,7 +1149,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true
@@ -1181,7 +1205,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          python3 scripts/download_and_verify_shared_lib.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          python3 scripts/download_and_verify.py zip protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/
@@ -1222,7 +1246,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true

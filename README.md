@@ -97,6 +97,12 @@ TOML file containing `dso_path` and `dslx_stdlib_path`.
 
 ## Development Notes
 
+For a containerized contributor build, see the [container build and test reference](docker/README.md).
+Full validation is the contributor default and runs workspace checks, tests, and
+pre-commit with networking disabled after preparation. The same Dockerfile is
+exercised in CI, where the container lane explicitly selects build-only and only
+compiles the workspace offline.
+
 The `xlsynth` Rust crate leverages a dynamic library with XLS' core functionality (i.e. `libxls.so`
 / `libxls.dylib`).
 

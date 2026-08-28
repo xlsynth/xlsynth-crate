@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+# SPDX-License-Identifier: Apache-2.0
+#
+# Run via: `docker build --platform linux/amd64 -f docker/Dockerfile -t xlsynth-dev-offline .`
+
+# Ubuntu 24.04, Linux amd64. The downloaded XLS/protoc/Slang binaries are x86-64.
+FROM ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+
+ARG BUILD_JOBS=4
+ENV RUSTUP_TOOLCHAIN=nightly-2026-08-27 \
+    CARGO_BUILD_JOBS=${BUILD_JOBS} \
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_DEV_DEBUG=0 \
+    CARGO_PROFILE_TEST_DEBUG=0
+
+WORKDIR /workspace/xlsynth-crate
+
+# Cache tool installation separately from source changes.
+COPY docker/install_tools.sh docker/
+COPY scripts/ci_apt_retry.sh scripts/ci_install_rustup.py scripts/download_and_verify.py scripts/slang_rocky8.sha256 scripts/
+RUN bash docker/install_tools.sh
+
+# Keep this after the expensive tool layer: changing validation mode should not
+# invalidate tool installation in the Docker cache.
+ARG VALIDATION_MODE=full
+
+COPY . .
+# Host Git metadata is deliberately excluded (including linked-worktree paths
+# and credentials). Hooks need only an index of the source files in the image.
+RUN git init -q && git add . && bash docker/prepare_workspace.sh --mode "${VALIDATION_MODE}"
+
+ENV CARGO_NET_OFFLINE=true
+
+# These commands cannot use the network, even from build scripts or tests.
+RUN --network=none bash docker/check_offline.sh --mode "${VALIDATION_MODE}"
+
+CMD ["bash", "-l"]
