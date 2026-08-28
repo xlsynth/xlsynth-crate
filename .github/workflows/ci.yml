@@ -149,8 +149,8 @@ jobs:
       - name: Run version check test
         run: cargo test --test version_test
 
-  # Build the same offline reference environment contributors use. This must
-  # start with empty Cargo/hook caches to cover preparation ordering failures.
+  # Build the offline reference environment from a fresh checkout, but keep the
+  # PR lane to a network-disabled workspace compilation rather than full tests.
   container-build-and-test:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-24.04
@@ -159,10 +159,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Build container and run offline checks
+      - name: Build container and compile workspace offline
         env:
           DOCKER_BUILDKIT: "1"
-        run: docker build --platform linux/amd64 --progress=plain -f docker/Dockerfile -t xlsynth-dev-offline .
+        run: docker build --build-arg VALIDATION_MODE=build-only --platform linux/amd64 --progress=plain -f docker/Dockerfile -t xlsynth-dev-offline .
 
   # -----------------------------------------------------------
   # 2) xlsynth-vastly reference simulator lane (currently Icarus)

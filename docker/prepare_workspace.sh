@@ -3,6 +3,21 @@
 
 set -euo pipefail
 
+mode="full"
+if [[ "$#" -eq 2 && "$1" == "--mode" ]]; then
+  mode="$2"
+elif [[ "$#" -ne 0 ]]; then
+  echo "Usage: $0 [--mode full|build-only]" >&2
+  exit 2
+fi
+case "${mode}" in
+  full | build-only) ;;
+  *)
+    echo "Usage: $0 [--mode full|build-only]" >&2
+    exit 2
+    ;;
+esac
+
 # Preparation is the online phase. It must be allowed to fetch new dependencies
 # before the resulting image enables offline mode.
 unset CARGO_NET_OFFLINE
@@ -85,9 +100,18 @@ append_source_if_missing "${HOME}/.bash_profile"
 append_source_if_missing "${HOME}/.profile"
 
 echo "==> Prefetching all Cargo dependencies"
-for manifest in Cargo.toml xlsynth-g8r/fuzz/Cargo.toml xlsynth-vastly/fuzz/Cargo.toml; do
+manifests=(Cargo.toml)
+if [[ "${mode}" == "full" ]]; then
+  manifests+=(xlsynth-g8r/fuzz/Cargo.toml xlsynth-vastly/fuzz/Cargo.toml)
+fi
+for manifest in "${manifests[@]}"; do
   cargo fetch --manifest-path "${manifest}" --quiet
 done
+
+if [[ "${mode}" == "build-only" ]]; then
+  echo "✅ Build-only preparation complete — offline workspace compilation is next"
+  exit 0
+fi
 
 echo "==> Preparing pre-commit environments"
 pre-commit install

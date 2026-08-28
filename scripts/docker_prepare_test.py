@@ -27,6 +27,8 @@ with open(os.environ["DOCKER_TEST_LOG"], "a") as stream:
     stream.write(json.dumps([program, args, os.environ.get("CARGO_NET_OFFLINE")]) + "\n")
 if program == "cargo" and args[0] == "fetch" and os.environ.get("DOCKER_TEST_FAIL_FETCH"):
     sys.exit(42)
+if program == "cargo" and args[0] == "build" and os.environ.get("DOCKER_TEST_FAIL_BUILD"):
+    sys.exit(43)
 """
 
 FAKE_DOWNLOAD = r"""# SPDX-License-Identifier: Apache-2.0
@@ -76,6 +78,7 @@ class DockerPrepareTest(unittest.TestCase):
         self.env = dict(os.environ)
         self.env.pop("CARGO_NET_OFFLINE", None)
         self.env.pop("DOCKER_TEST_FAIL_FETCH", None)
+        self.env.pop("DOCKER_TEST_FAIL_BUILD", None)
         self.env.update(
             HOME=str(self.test_home),
             PATH=str(fake_bin) + os.pathsep + self.env["PATH"],
@@ -84,9 +87,18 @@ class DockerPrepareTest(unittest.TestCase):
             CARGO_BUILD_JOBS="2",
         )
 
-    def run_prepare(self):
+    def run_prepare(self, *args):
         return subprocess.run(
-            ["bash", str(self.repo / "docker/prepare_workspace.sh")],
+            ["bash", str(self.repo / "docker/prepare_workspace.sh")] + list(args),
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+
+    def run_check(self, *args):
+        return subprocess.run(
+            ["bash", str(self.repo / "docker/check_offline.sh")] + list(args),
             env=self.env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -96,7 +108,7 @@ class DockerPrepareTest(unittest.TestCase):
     def commands(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
-    def assert_preparation_order(self):
+    def assert_full_preparation_order(self):
         expected = [
             ["cargo", ["fetch", "--manifest-path", manifest, "--quiet"], None]
             for manifest in (
@@ -139,16 +151,38 @@ class DockerPrepareTest(unittest.TestCase):
         )
         self.assertEqual(self.commands(), expected)
 
+    def assert_build_only_preparation_order(self):
+        self.assertEqual(
+            self.commands(),
+            [["cargo", ["fetch", "--manifest-path", "Cargo.toml", "--quiet"], None]],
+        )
+
     def test_fresh_cache_prefetches_before_offline_hooks(self):
         result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assert_preparation_order()
+        self.assert_full_preparation_order()
+
+    def test_explicit_full_mode_matches_default(self):
+        result = self.run_prepare("--mode", "full")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_full_preparation_order()
+
+    def test_build_only_prefetches_workspace_without_hooks_fuzz_or_compile(self):
+        result = self.run_prepare("--mode", "build-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_build_only_preparation_order()
+
+    def test_build_only_can_refresh_inherited_offline_environment(self):
+        self.env["CARGO_NET_OFFLINE"] = "true"
+        result = self.run_prepare("--mode", "build-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_build_only_preparation_order()
 
     def test_inherited_offline_environment_can_refresh(self):
         self.env["CARGO_NET_OFFLINE"] = "true"
         result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assert_preparation_order()
+        self.assert_full_preparation_order()
 
     def test_fuzz_smoke_target_is_registered_without_required_features(self):
         result = self.run_prepare()
@@ -185,13 +219,7 @@ class DockerPrepareTest(unittest.TestCase):
         self.log.unlink()
         (self.test_home / ".cargo").mkdir()
         (self.test_home / ".cargo/env").touch()
-        result = subprocess.run(
-            ["bash", str(self.repo / "docker/check_offline.sh")],
-            env=self.env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-        )
+        result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
         features = ["--features", "with-bitwuzla-system"]
         self.assertEqual(
@@ -215,6 +243,59 @@ class DockerPrepareTest(unittest.TestCase):
                     "true",
                 ],
                 ["pre-commit", ["run", "--all-files"], "true"],
+            ],
+        )
+
+    def test_build_only_check_compiles_workspace_without_tests_or_hooks(self):
+        prepared = self.run_prepare("--mode", "build-only")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.log.unlink()
+        (self.test_home / ".cargo").mkdir()
+        (self.test_home / ".cargo/env").touch()
+
+        result = self.run_check("--mode", "build-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.commands(),
+            [
+                [
+                    "cargo",
+                    [
+                        "build",
+                        "--workspace",
+                        "--frozen",
+                        "--features",
+                        "with-bitwuzla-system",
+                    ],
+                    "true",
+                ]
+            ],
+        )
+
+    def test_build_only_check_propagates_workspace_build_failure(self):
+        prepared = self.run_prepare("--mode", "build-only")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.log.unlink()
+        (self.test_home / ".cargo").mkdir()
+        (self.test_home / ".cargo/env").touch()
+        self.env["DOCKER_TEST_FAIL_BUILD"] = "1"
+
+        result = self.run_check("--mode", "build-only")
+        self.assertEqual(result.returncode, 43, result.stderr)
+        self.assertEqual(
+            self.commands(),
+            [
+                [
+                    "cargo",
+                    [
+                        "build",
+                        "--workspace",
+                        "--frozen",
+                        "--features",
+                        "with-bitwuzla-system",
+                    ],
+                    "true",
+                ]
             ],
         )
 
@@ -268,6 +349,30 @@ class DockerPrepareTest(unittest.TestCase):
             universal_newlines=True,
         )
         self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_mode_arguments_are_strictly_validated_before_commands(self):
+        script_paths = (
+            self.repo / "docker/prepare_workspace.sh",
+            self.repo / "docker/check_offline.sh",
+        )
+        invalid_arguments = (
+            ("--mode", "unknown"),
+            ("--mode", ""),
+            ("--mode",),
+            ("--mode", "full", "extra"),
+            ("--unknown",),
+        )
+        for script_path in script_paths:
+            for arguments in invalid_arguments:
+                result = subprocess.run(
+                    ["bash", str(script_path)] + list(arguments),
+                    env=self.env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
         self.assertFalse(self.log.exists())
 
 

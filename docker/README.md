@@ -1,35 +1,59 @@
 # Reference Docker image
 
 This directory defines the Linux x86-64 contributor image used for local development
-and CI. From the repository root, build it with Docker BuildKit (the default in
-current Docker):
+and CI. `VALIDATION_MODE` accepts exactly `full` or `build-only`; `full` is the
+default. From the repository root, build the complete reference image with Docker
+BuildKit (the default in current Docker):
 
 ```shell
 docker build --platform linux/amd64 --progress=plain \
   -f docker/Dockerfile -t xlsynth-dev-offline .
 ```
 
-A successful build includes workspace `cargo check`, nextest tests, doctests, and
-pre-commit, all with the container network disabled. Workspace checks and tests
-enable `with-bitwuzla-system`, using the same pinned Bitwuzla binaries as CI.
-The `container-build-and-test` CI job builds this same Dockerfile from a fresh checkout.
-Preparation also compile-checks the solver-independent `fuzz_gate_fn_roundtrip`
-target and the `xlsynth-vastly` fuzz targets used by pre-commit, with sanitizers disabled.
+The default full build includes workspace `cargo check`, nextest tests, doctests,
+and pre-commit, all with the container network disabled. Full preparation also
+compile-checks the solver-independent `fuzz_gate_fn_roundtrip` target and the
+`xlsynth-vastly` fuzz targets used by pre-commit, with sanitizers disabled.
+Workspace commands enable `with-bitwuzla-system`, using the same pinned Bitwuzla
+binaries as CI.
 
-The image contains the source, resolved Cargo lockfiles, dependencies, matching XLS
-DSO/DSLX standard library, and tool caches. Repeat its checks or open a shell without
-mounting host caches or source:
+For a faster workspace-build sanity check, select build-only explicitly:
+
+```shell
+docker build --build-arg VALIDATION_MODE=build-only \
+  --platform linux/amd64 --progress=plain \
+  -f docker/Dockerfile -t xlsynth-dev-build-only .
+```
+
+Build-only fetches the main Cargo workspace online, then performs a real
+network-disabled `cargo build --workspace --frozen --features with-bitwuzla-system`.
+It omits pre-commit environment setup and execution, fuzz compilation, nextest,
+tests, and doctests. The `container-build-and-test` CI job uses this mode from a
+fresh checkout; full mode remains the contributor default.
+
+Both modes contain the source, resolved main-workspace Cargo lockfile and
+dependencies, matching XLS DSO/DSLX standard library, and tool caches. Full mode
+also contains fuzz-workspace and pre-commit hook caches. Repeat full checks or open a
+shell without mounting host caches or source:
 
 ```shell
 docker run --rm --network=none xlsynth-dev-offline bash docker/check_offline.sh
 docker run --rm -it --network=none xlsynth-dev-offline
 ```
 
+A build-only image can rerun its narrower command explicitly:
+
+```shell
+docker run --rm --network=none \
+  xlsynth-dev-build-only bash docker/check_offline.sh --mode build-only
+```
+
 The Dockerfile has two online preparation phases. `install_tools.sh` installs the
 system packages, Rust toolchain, Cargo extensions, and solver DSOs in a reusable
-layer. `prepare_workspace.sh` resolves the repository-specific XLS artifacts,
-Cargo dependencies, and pre-commit environments, then writes
-`~/.xlsynth_container_env.sh` for the offline check and interactive shells.
+layer. `prepare_workspace.sh` resolves the repository-specific XLS artifacts and
+Cargo dependencies, then writes `~/.xlsynth_container_env.sh` for the offline check
+and interactive shells. Full mode additionally prepares pre-commit environments and
+fuzz workspaces.
 
 Inside the shell, use the same explicit solver feature:
 
@@ -55,8 +79,9 @@ Docker's emulation support; the release binaries used here are not Linux ARM bui
 ## Preparation and reproducibility
 
 The image pins Ubuntu by digest, Rust by nightly date, and cargo-nextest/cargo-fuzz
-by version. Online preparation fetches all Cargo workspaces used by hooks before
-any offline hook runs. XLS artifacts are resolved using
+by version. Full online preparation fetches all Cargo workspaces used by hooks
+before any offline hook runs; build-only fetches only the main workspace needed for
+its offline compilation. XLS artifacts are resolved using
 `scripts/get_required_libxls_dso_and_tools_release_tag.py`, stored under a
 release/platform-specific directory, and supplied through `XLS_DSO_PATH`,
 `DSLX_STDLIB_PATH`, and `LD_LIBRARY_PATH`. No globally installed XLS DSO is needed.

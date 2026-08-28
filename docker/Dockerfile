@@ -20,14 +20,18 @@ COPY docker/install_tools.sh docker/
 COPY scripts/ci_apt_retry.sh scripts/ci_install_rustup.py scripts/download_and_verify.py scripts/
 RUN bash docker/install_tools.sh
 
+# Keep this after the expensive tool layer: changing validation mode should not
+# invalidate tool installation in the Docker cache.
+ARG VALIDATION_MODE=full
+
 COPY . .
 # Host Git metadata is deliberately excluded (including linked-worktree paths
 # and credentials). Hooks need only an index of the source files in the image.
-RUN git init -q && git add . && bash docker/prepare_workspace.sh
+RUN git init -q && git add . && bash docker/prepare_workspace.sh --mode "${VALIDATION_MODE}"
 
 ENV CARGO_NET_OFFLINE=true
 
 # These commands cannot use the network, even from build scripts or tests.
-RUN --network=none bash docker/check_offline.sh
+RUN --network=none bash docker/check_offline.sh --mode "${VALIDATION_MODE}"
 
 CMD ["bash", "-l"]
