@@ -1,0 +1,6 @@
+error: Could not prepare QuickCheck proofs
+ --> qc.x
+  = note: invalid regular expression in quickcheck test filter: regex parse error:
+              [
+              ^
+          error: unclosed character class

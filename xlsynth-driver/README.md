@@ -2918,6 +2918,9 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
 - UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
 - Output: `--output_json <PATH>` to write results as JSON.
+- Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Each selected property is optimized with the XLS IR pipeline before solving. Use `--opt=false` to prove unoptimized IR. `--uf` requires explicit `--opt=false`: optimization would inline calls and erase UF abstraction boundaries. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
+- Progress: direct proofs write `[ RUN QUICKCHECK ... ]` before each property's optimization/solving and `[ OK ... ]` or `[ FAILED ... ]` immediately afterward to stderr. Failures use rustc-style diagnostics, highlighting the QuickCheck function name when it can be located reliably (otherwise showing just the filename). Notes include named counterexample inputs, the return value, and any violated assertion; implicit IR token/activation arguments are hidden. Diagnostics use color on terminals unless `NO_COLOR` is set; redirected output is plain text. Inconclusive results and execution errors are distinguished from counterexamples. Shared parsing/conversion precedes these boundaries; preparation failures are reported separately before any property starts; tactic-script reporting is unchanged.
+- JSON compatibility: the existing `--output_json` schema and counterexample string format are unchanged; the file is written after all selected properties finish.
 
 UF semantics:
 

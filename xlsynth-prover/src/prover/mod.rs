@@ -15,12 +15,15 @@ pub mod types;
 pub mod uf;
 
 pub use external_prover::ExternalProver;
-pub use quickcheck::discover_quickcheck_tests;
+pub use quickcheck::{
+    PreparedQuickCheckSuite, QuickCheckError, QuickCheckErrorKind, QuickCheckProperty,
+    discover_quickcheck_tests,
+};
 
 use self::quickcheck::build_assert_label_regex;
 use self::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckRunResult,
+    QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult,
 };
 use crate::solver::SolverConfig;
 use std::str::FromStr;
@@ -150,6 +153,9 @@ pub trait Prover {
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult;
 
+    /// Collects all selected proof results with default-on XLS optimization.
+    /// Use `prepare_dslx_quickchecks` for caller-controlled per-property
+    /// execution.
     fn prove_dslx_quickcheck(
         &self,
         entry_file: &std::path::Path,
@@ -159,7 +165,86 @@ pub trait Prover {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
-    ) -> Vec<QuickCheckRunResult>;
+    ) -> Vec<QuickCheckRunResult> {
+        self.prove_dslx_quickcheck_with_options(
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            test_filter,
+            assertion_semantics,
+            assert_label_filter,
+            uf_map,
+            QuickCheckOptions::default(),
+        )
+    }
+
+    /// Collects results with explicit options. Preparation failures are
+    /// returned as one synthetic error result; use
+    /// `prepare_dslx_quickchecks` to handle setup errors separately from
+    /// property results.
+    fn prove_dslx_quickcheck_with_options(
+        &self,
+        entry_file: &Path,
+        dslx_stdlib_path: Option<&Path>,
+        additional_search_paths: &[&Path],
+        test_filter: Option<&str>,
+        assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
+        uf_map: &HashMap<String, String>,
+        options: QuickCheckOptions,
+    ) -> Vec<QuickCheckRunResult> {
+        match self.prepare_dslx_quickchecks(
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            test_filter,
+            assertion_semantics,
+            assert_label_filter,
+            uf_map,
+            options,
+        ) {
+            Ok(suite) => suite.prove_all(),
+            Err(error) => vec![QuickCheckRunResult {
+                name: "quickcheck-preparation".into(),
+                implicit_token: false,
+                duration: std::time::Duration::ZERO,
+                result: BoolPropertyResult::Error(error.to_string()),
+            }],
+        }
+    }
+
+    /// Discovers properties and prepares shared state, without proving them.
+    /// The caller can report progress around each `suite.prove(property.id)`.
+    ///
+    /// ```no_run
+    /// use std::{collections::HashMap, path::Path};
+    /// use xlsynth_prover::prover::default_prover;
+    /// use xlsynth_prover::prover::types::{QuickCheckAssertionSemantics, QuickCheckOptions};
+    ///
+    /// let prover = default_prover();
+    /// let suite = prover.prepare_dslx_quickchecks(
+    ///     Path::new("properties.x"), None, &[], None,
+    ///     QuickCheckAssertionSemantics::Never, None, &HashMap::new(),
+    ///     QuickCheckOptions::default(),
+    /// )?;
+    /// for property in suite.properties() {
+    ///     eprintln!("Starting {}", property.name);
+    ///     let run = suite.prove(property.id)?;
+    ///     eprintln!("{}: {:?}", run.name, run.result);
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    fn prepare_dslx_quickchecks(
+        &self,
+        entry_file: &Path,
+        dslx_stdlib_path: Option<&Path>,
+        additional_search_paths: &[&Path],
+        test_filter: Option<&str>,
+        assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
+        uf_map: &HashMap<String, String>,
+        options: QuickCheckOptions,
+    ) -> Result<PreparedQuickCheckSuite<'_>, QuickCheckError>;
 }
 
 #[cfg(not(feature = "has-bitwuzla"))]
@@ -211,7 +296,7 @@ impl Prover for UnavailableProver {
         BoolPropertyResult::Error(self.message.clone())
     }
 
-    fn prove_dslx_quickcheck(
+    fn prepare_dslx_quickchecks(
         &self,
         _entry_file: &std::path::Path,
         _dslx_stdlib_path: Option<&std::path::Path>,
@@ -220,12 +305,12 @@ impl Prover for UnavailableProver {
         _assertion_semantics: QuickCheckAssertionSemantics,
         _assert_label_filter: Option<&str>,
         _uf_map: &HashMap<String, String>,
-    ) -> Vec<QuickCheckRunResult> {
-        vec![QuickCheckRunResult {
-            name: "solver-selection".to_string(),
-            duration: std::time::Duration::ZERO,
-            result: BoolPropertyResult::Error(self.message.clone()),
-        }]
+        _options: QuickCheckOptions,
+    ) -> Result<PreparedQuickCheckSuite<'_>, QuickCheckError> {
+        Err(QuickCheckError::new(
+            QuickCheckErrorKind::Configuration,
+            self.message.clone(),
+        ))
     }
 }
 
@@ -341,7 +426,7 @@ impl<S: SolverConfig> Prover for S {
         )
     }
 
-    fn prove_dslx_quickcheck(
+    fn prepare_dslx_quickchecks(
         &self,
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
@@ -350,8 +435,9 @@ impl<S: SolverConfig> Prover for S {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
-    ) -> Vec<QuickCheckRunResult> {
-        quickcheck::prove_dslx_quickcheck::<S>(
+        options: QuickCheckOptions,
+    ) -> Result<PreparedQuickCheckSuite<'_>, QuickCheckError> {
+        quickcheck::prepare_dslx_quickchecks::<S>(
             self,
             entry_file,
             dslx_stdlib_path,
@@ -360,6 +446,7 @@ impl<S: SolverConfig> Prover for S {
             assertion_semantics,
             assert_label_filter,
             uf_map,
+            options,
         )
     }
 }

@@ -1,0 +1,3 @@
+error: Could not prepare QuickCheck proofs
+ --> missing.x
+  = note: Failed to read DSLX input file: <I/O error>

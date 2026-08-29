@@ -432,6 +432,23 @@ pub enum BoolPropertyResult {
 #[derive(Debug, Clone)]
 pub struct QuickCheckRunResult {
     pub name: String,
+    /// Whether the raw IR counterexample includes implicit token/activation
+    /// inputs and a `(token, bool)` result. These are not DSLX user arguments.
+    pub implicit_token: bool,
     pub duration: std::time::Duration,
     pub result: BoolPropertyResult,
+}
+
+/// Preparation options for DSLX QuickCheck proofs.
+#[derive(Debug, Clone, Copy)]
+pub struct QuickCheckOptions {
+    /// Run XLS IR optimization before each proof (default: true).
+    /// Must be disabled for UF proofs so inlining cannot erase UF boundaries.
+    pub optimize: bool,
+}
+
+impl Default for QuickCheckOptions {
+    fn default() -> Self {
+        Self { optimize: true }
+    }
 }

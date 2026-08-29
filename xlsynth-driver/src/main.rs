@@ -3533,6 +3533,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 )
                 .arg(solver_arg("Select solver backend"))
                 .arg(
+                    clap::Arg::new("opt")
+                        .long("opt")
+                        .value_parser(clap::value_parser!(bool))
+                        .default_value("true")
+                        .action(clap::ArgAction::Set)
+                        .conflicts_with_all(["tactic_json", "tactic_jsonl"])
+                        .help("Run XLS IR optimization before direct proofs. Use --opt=false to disable (required with --uf); external toolchain proofs always optimize."),
+                )
+                .arg(
                     clap::Arg::new("assertion_semantics")
                         .long("assertion-semantics")
                         .value_name("SEM")

@@ -1,0 +1,39 @@
+[ RUN QUICKCHECK        ] passing
+[                    OK ] passing
+[ RUN QUICKCHECK        ] always_fail
+error: QuickCheck `always_fail` has a counterexample
+ --> qc.x
+  = note: a = bits[1]:0
+          b = bits[2]:0
+  = note: returned false
+[                FAILED ] always_fail
+[ RUN QUICKCHECK        ] assertion_failure
+error: QuickCheck `assertion_failure` can fail an assertion
+ --> qc.x
+  = note: returned true
+  = note: assertion failed: expected nonzero input
+  = note: assertion label: nonzero
+[                FAILED ] assertion_failure
+[ RUN QUICKCHECK        ] aggregate_failure
+error: QuickCheck `aggregate_failure` has a counterexample
+ --> qc.x
+  = note: pair = (bits[8]:7, bits[129]:0x1_0000_0000_0000_0000_0000_0000_0000_0001)
+          values = [bits[4]:2, bits[4]:3]
+  = note: returned false
+[                FAILED ] aggregate_failure
+[ RUN QUICKCHECK        ] unknown
+error: QuickCheck `unknown` could not be proved
+ --> qc.x
+  = note: solver returned unknown
+[                FAILED ] unknown
+[ RUN QUICKCHECK        ] broken
+error: QuickCheck `broken` failed to run
+ --> qc.x
+  = note: solver unavailable
+          rebuild with solver support
+[                FAILED ] broken
+[ RUN QUICKCHECK        ] external_failure
+error: QuickCheck `external_failure` external proof failed
+ --> qc.x
+  = note: external tool exited with status 1
+[                FAILED ] external_failure

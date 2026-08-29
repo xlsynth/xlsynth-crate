@@ -1,0 +1,3 @@
+xlsynth-driver: prove-quickcheck: --uf cannot be combined with --opt=true
+  XLS optimization inlines calls and would erase UF boundaries.
+  Use --opt=false to preserve uninterpreted functions.

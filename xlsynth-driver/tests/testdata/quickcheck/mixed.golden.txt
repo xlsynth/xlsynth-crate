@@ -1,0 +1,15 @@
+[ RUN QUICKCHECK        ] passing
+[                    OK ] passing
+[ RUN QUICKCHECK        ] zero_is_forbidden
+error: QuickCheck `zero_is_forbidden` has a counterexample
+ --> qc.x:3:18
+  |
+3 | #[quickcheck] fn zero_is_forbidden(a: u1, b: u2) -> bool {
+  |                  ^^^^^^^^^^^^^^^^^ property fails for these inputs
+  |
+  = note: a = bits[1]:0
+          b = bits[2]:0
+  = note: returned false
+[                FAILED ] zero_is_forbidden
+[ RUN QUICKCHECK        ] passing_after_failure
+[                    OK ] passing_after_failure

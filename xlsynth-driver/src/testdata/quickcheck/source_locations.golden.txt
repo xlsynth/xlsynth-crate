@@ -1,0 +1,19 @@
+[ RUN QUICKCHECK        ] property
+error: QuickCheck `property` could not be proved
+ --> qc.x:3:4
+  |
+3 | fn property(
+  |    ^^^^^^^^ proof is inconclusive
+  |
+  = note: solver returned unknown
+[                FAILED ] property
+[ RUN QUICKCHECK        ] property
+error: QuickCheck `property` could not be proved
+ --> qc.x
+  = note: solver returned unknown
+[                FAILED ] property
+[ RUN QUICKCHECK        ] property
+error: QuickCheck `property` could not be proved
+ --> qc.x
+  = note: solver returned unknown
+[                FAILED ] property

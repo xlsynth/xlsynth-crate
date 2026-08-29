@@ -14,6 +14,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 workspace = true
 
 [dependencies]
+annotate-snippets = "0.12.16"
 xlsynth = { path = "../xlsynth", version = "0.67.0", features = ["clap"] }
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.67.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.67.0" }
