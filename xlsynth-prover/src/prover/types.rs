@@ -452,15 +452,3 @@ impl Default for QuickCheckOptions {
         Self { optimize: true }
     }
 }
-
-/// Synchronous per-property progress, delivered before and after proving.
-///
-/// Callbacks run on the caller's thread. Shared DSLX parsing/conversion happens
-/// before the first event; `Started` precedes per-property
-/// optimization/solving. Libraries do not print these events; callers choose
-/// how to report them.
-#[derive(Debug)]
-pub enum QuickCheckEvent<'a> {
-    Started { name: &'a str },
-    Finished(&'a QuickCheckRunResult),
-}

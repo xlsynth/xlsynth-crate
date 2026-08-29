@@ -2,8 +2,7 @@
 
 use super::types::{
     AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckEvent, QuickCheckOptions, QuickCheckRunResult,
-    UfRegistry,
+    QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult, UfRegistry,
 };
 use super::{
     assertion_filter,
@@ -15,7 +14,10 @@ use crate::solver::{BitVec, Response, Solver, SolverConfig};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+
+mod source_index;
 use xlsynth::dslx::{ImportData, MatchableModuleMember};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
@@ -67,7 +69,14 @@ where
         "Function must return a single-bit value"
     );
 
-    let mut solver = S::new(solver_config).unwrap();
+    let mut solver = match S::new(solver_config) {
+        Ok(solver) => solver,
+        Err(error) => {
+            return BoolPropertyResult::Error(format!(
+                "Failed to create QuickCheck solver: {error}"
+            ));
+        }
+    };
 
     // Generate SMT representation with UF mapping/registry.
     let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
@@ -152,7 +161,13 @@ where
     // Ask solver for a model that satisfies the *negation* of the property.
     solver.assert(&condition).unwrap();
 
-    match solver.check().unwrap() {
+    let response = match solver.check() {
+        Ok(response) => response,
+        Err(error) => {
+            return BoolPropertyResult::Error(format!("QuickCheck solver failed: {error}"));
+        }
+    };
+    match response {
         Response::Unsat => BoolPropertyResult::Proved,
         Response::Sat => {
             // Extract counter-example values.
@@ -204,58 +219,288 @@ pub(crate) fn build_assert_label_regex(filter: Option<&str>) -> Option<Regex> {
     })
 }
 
+/// The stage at which preparing or selecting a QuickCheck failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickCheckErrorKind {
+    Configuration,
+    Read,
+    Discovery,
+    Conversion,
+    InvalidProperty,
+}
+
+/// A recoverable setup error, separate from a property's proof outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickCheckError {
+    pub kind: QuickCheckErrorKind,
+    pub message: String,
+}
+
+impl QuickCheckError {
+    pub(crate) fn new(kind: QuickCheckErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for QuickCheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for QuickCheckError {}
+
+/// A discovered property. The optional span highlights only its function name,
+/// not a failing expression. Byte offsets refer to the suite's source snapshot.
+#[derive(Debug, Clone)]
+pub struct QuickCheckProperty {
+    /// Source-order index, local to the prepared suite.
+    pub id: usize,
+    pub name: String,
+    pub name_span: Option<Range<usize>>,
+    pub(crate) requires_implicit_token: bool,
+}
+
+pub(crate) struct QuickCheckContext {
+    pub path: PathBuf,
+    pub source: String,
+    pub properties: Vec<QuickCheckProperty>,
+}
+
+pub(crate) struct QuickCheckProofResult {
+    pub implicit_token: bool,
+    pub result: BoolPropertyResult,
+}
+
+pub(crate) trait PreparedQuickCheckBackend {
+    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult;
+}
+
+/// A parsed suite whose properties are proved only when requested.
+///
+/// Preparation does shared discovery/conversion, but never optimizes a property
+/// or invokes a solver. Callers own the progress loop: report a start, call
+/// `prove(property.id)`, then report its result. Properties may be selected,
+/// reordered, or retried without reparsing the in-process IR. The external XLS
+/// adapter invokes its tool once per proof and checks that the entry source has
+/// not changed since discovery; imported files must remain unchanged as well.
+pub struct PreparedQuickCheckSuite<'a> {
+    context: QuickCheckContext,
+    backend: Box<dyn PreparedQuickCheckBackend + 'a>,
+}
+
+impl<'a> PreparedQuickCheckSuite<'a> {
+    pub(crate) fn new(
+        context: QuickCheckContext,
+        backend: Box<dyn PreparedQuickCheckBackend + 'a>,
+    ) -> Self {
+        Self { context, backend }
+    }
+
+    pub fn properties(&self) -> &[QuickCheckProperty] {
+        &self.context.properties
+    }
+    pub fn source(&self) -> &str {
+        &self.context.source
+    }
+    pub fn path(&self) -> &Path {
+        &self.context.path
+    }
+
+    /// Optimizes (if enabled) and proves exactly one property, timing that
+    /// work.
+    pub fn prove(&self, id: usize) -> Result<QuickCheckRunResult, QuickCheckError> {
+        let property = self.properties().get(id).ok_or_else(|| {
+            QuickCheckError::new(
+                QuickCheckErrorKind::InvalidProperty,
+                format!("No QuickCheck property with id {id}"),
+            )
+        })?;
+        Ok(self.prove_property(property))
+    }
+
+    fn prove_property(&self, property: &QuickCheckProperty) -> QuickCheckRunResult {
+        let start = std::time::Instant::now();
+        let proof = self.backend.prove(property);
+        QuickCheckRunResult {
+            name: property.name.clone(),
+            implicit_token: proof.implicit_token,
+            duration: start.elapsed(),
+            result: proof.result,
+        }
+    }
+
+    /// Collects proof results in source order, continuing after failures.
+    pub fn prove_all(&self) -> Vec<QuickCheckRunResult> {
+        self.properties()
+            .iter()
+            .map(|property| self.prove_property(property))
+            .collect()
+    }
+}
+
+/// Reads one source snapshot and asks XLS to discover the selected properties.
 pub(crate) fn load_quickcheck_context(
     entry_file: &Path,
     dslx_stdlib_path: Option<&Path>,
     additional_search_paths: &[&Path],
     test_filter: Option<&str>,
-) -> (String, Vec<(String, bool)>) {
-    let dslx_contents = fs::read_to_string(entry_file)
-        .expect("Failed to read DSLX input file for quickcheck discovery");
+) -> Result<QuickCheckContext, QuickCheckError> {
+    let test_regex = test_filter
+        .map(|pattern| {
+            Regex::new(pattern).map_err(|e| {
+                QuickCheckError::new(
+                    QuickCheckErrorKind::Configuration,
+                    format!("invalid regular expression in quickcheck test filter: {e}"),
+                )
+            })
+        })
+        .transpose()?;
+    let source = fs::read_to_string(entry_file).map_err(|e| {
+        QuickCheckError::new(
+            QuickCheckErrorKind::Read,
+            format!("Failed to read DSLX input file: {e}"),
+        )
+    })?;
     let module_name = entry_file
         .file_stem()
         .and_then(|s| s.to_str())
-        .expect("valid module name");
-
+        .ok_or_else(|| {
+            QuickCheckError::new(
+                QuickCheckErrorKind::Configuration,
+                "Invalid DSLX module name",
+            )
+        })?;
+    let path_str = entry_file.to_str().ok_or_else(|| {
+        QuickCheckError::new(
+            QuickCheckErrorKind::Configuration,
+            "DSLX quickcheck entry file must be valid UTF-8",
+        )
+    })?;
     let mut import_data = ImportData::new(dslx_stdlib_path, additional_search_paths);
-    let type_checked = xlsynth::dslx::parse_and_typecheck(
-        &dslx_contents,
-        entry_file
-            .to_str()
-            .expect("DSLX quickcheck entry file must be valid UTF-8"),
-        module_name,
-        &mut import_data,
-    )
-    .expect("DSLX parse/type-check failed for quickcheck discovery");
-
+    let type_checked =
+        xlsynth::dslx::parse_and_typecheck(&source, path_str, module_name, &mut import_data)
+            .map_err(|e| {
+                QuickCheckError::new(
+                    QuickCheckErrorKind::Discovery,
+                    format!("DSLX parse/type-check failed for quickcheck discovery: {e}"),
+                )
+            })?;
     let module = type_checked.get_module();
     let type_info = type_checked.get_type_info();
-    let test_regex = test_filter.map(|pattern| {
-        Regex::new(pattern).expect("invalid regular expression in quickcheck test filter")
-    });
-    let mut quickchecks = Vec::new();
+    let spans = source_index::function_name_spans(&source);
+    let mut properties = Vec::new();
     for idx in 0..module.get_member_count() {
         if let Some(MatchableModuleMember::Quickcheck(qc)) = module.get_member(idx).to_matchable() {
             let function = qc.get_function();
-            let fn_ident = function.get_identifier().to_string();
-            if test_regex
-                .as_ref()
-                .map(|re| re.is_match(fn_ident.as_str()))
-                .unwrap_or(true)
-            {
-                let requires_itok = type_info
-                    .requires_implicit_token(&function)
-                    .expect("requires_implicit_token query");
-                quickchecks.push((fn_ident, requires_itok));
+            let name = function.get_identifier().to_string();
+            if test_regex.as_ref().is_none_or(|re| re.is_match(&name)) {
+                let requires_implicit_token =
+                    type_info.requires_implicit_token(&function).map_err(|e| {
+                        QuickCheckError::new(
+                            QuickCheckErrorKind::Discovery,
+                            format!("Failed to query QuickCheck calling convention: {e}"),
+                        )
+                    })?;
+                properties.push(QuickCheckProperty {
+                    id: properties.len(),
+                    name_span: spans.get(&name).cloned(),
+                    name,
+                    requires_implicit_token,
+                });
             }
         }
     }
-
-    (dslx_contents, quickchecks)
+    Ok(QuickCheckContext {
+        path: entry_file.into(),
+        source,
+        properties,
+    })
 }
 
-pub(crate) fn prove_dslx_quickcheck<SConfig>(
-    solver_config: &SConfig,
+struct InProcessQuickChecks<'a, S> {
+    solver_config: &'a S,
+    module_name: String,
+    ir_text: String,
+    package: ir::Package,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_regex: Option<Regex>,
+    uf_map: HashMap<String, String>,
+    options: QuickCheckOptions,
+}
+
+impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> {
+    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult {
+        let mut implicit_token = false;
+        let result = (|| -> Result<BoolPropertyResult, String> {
+            let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
+                &self.module_name,
+                &property.name,
+                xlsynth::DslxCallingConvention::ImplicitToken,
+            )
+            .map_err(|e| e.to_string())?;
+            let mangled_normal = xlsynth::mangle_dslx_name_with_calling_convention(
+                &self.module_name,
+                &property.name,
+                xlsynth::DslxCallingConvention::Typical,
+            )
+            .map_err(|e| e.to_string())?;
+            let candidates = if property.requires_implicit_token {
+                [(&mangled_itok, true), (&mangled_normal, false)]
+            } else {
+                [(&mangled_normal, false), (&mangled_itok, true)]
+            };
+            let (top, fixed_implicit_activation) = candidates
+                .into_iter()
+                .find(|(name, _)| self.package.get_fn(name).is_some())
+                .ok_or_else(|| {
+                    format!(
+                        "quickcheck function '{}' not found (module '{}')",
+                        property.name, self.module_name
+                    )
+                })?;
+            implicit_token = fixed_implicit_activation;
+            let optimized_pkg;
+            let proof_pkg = if self.options.optimize {
+                optimized_pkg =
+                    optimize_quickcheck_ir(&self.ir_text, top, self.assert_label_regex.as_ref())?;
+                &optimized_pkg
+            } else {
+                &self.package
+            };
+            let fn_ref = proof_pkg
+                .get_fn(top)
+                .ok_or_else(|| format!("quickcheck top '{top}' missing after preparation"))?;
+            let prover_fn = ProverFn::new(fn_ref, Some(proof_pkg))
+                .with_fixed_implicit_activation(fixed_implicit_activation)
+                .with_uf_map(self.uf_map.clone());
+            Ok(prove_ir_quickcheck::<S::Solver>(
+                self.solver_config,
+                &prover_fn,
+                self.assertion_semantics,
+                // Inlining renames labels; optimization has already selected
+                // assertions using their original DSLX labels.
+                if self.options.optimize {
+                    None
+                } else {
+                    self.assert_label_regex.as_ref()
+                },
+            ))
+        })()
+        .unwrap_or_else(BoolPropertyResult::Error);
+        QuickCheckProofResult {
+            implicit_token,
+            result,
+        }
+    }
+}
+
+/// Prepares shared DSLX/IR state without optimizing or proving any property.
+pub(crate) fn prepare_dslx_quickchecks<'a, S: SolverConfig>(
+    solver_config: &'a S,
     entry_file: &Path,
     dslx_stdlib_path: Option<&Path>,
     additional_search_paths: &[&Path],
@@ -264,113 +509,64 @@ pub(crate) fn prove_dslx_quickcheck<SConfig>(
     assert_label_filter: Option<&str>,
     uf_map: &HashMap<String, String>,
     options: QuickCheckOptions,
-    on_event: &mut dyn FnMut(QuickCheckEvent<'_>),
-) -> Vec<QuickCheckRunResult>
-where
-    SConfig: SolverConfig,
-{
-    let assert_label_regex = build_assert_label_regex(assert_label_filter);
-    let (dslx_contents, quickchecks) = load_quickcheck_context(
+) -> Result<PreparedQuickCheckSuite<'a>, QuickCheckError> {
+    if options.optimize && !uf_map.is_empty() {
+        return Err(QuickCheckError::new(
+            QuickCheckErrorKind::Configuration,
+            "XLS IR optimization cannot be combined with uninterpreted functions: inlining would erase UF boundaries; set optimize=false",
+        ));
+    }
+    let assert_label_regex = assert_label_filter
+        .map(|pattern| {
+            Regex::new(pattern).map_err(|e| {
+                QuickCheckError::new(
+                    QuickCheckErrorKind::Configuration,
+                    format!("invalid regular expression in assert label filter: {e}"),
+                )
+            })
+        })
+        .transpose()?;
+    let context = load_quickcheck_context(
         entry_file,
         dslx_stdlib_path,
         additional_search_paths,
         test_filter,
-    );
-    if quickchecks.is_empty() {
-        return Vec::new();
-    }
-
+    )?;
     let conversion_options = xlsynth::DslxConvertOptions {
         dslx_stdlib_path,
-        additional_search_paths: additional_search_paths.iter().copied().collect(),
-        enable_warnings: None,
-        disable_warnings: None,
+        additional_search_paths: additional_search_paths.to_vec(),
         ..Default::default()
     };
-    let ir_text = xlsynth::convert_dslx_to_ir_text(&dslx_contents, entry_file, &conversion_options)
-        .expect("DSLX->IR conversion failed for quickcheck")
-        .ir;
-
-    let pkg = Parser::new(&ir_text)
-        .parse_package()
-        .expect("Failed to parse IR package for quickcheck");
-    let module_name = entry_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .expect("valid module name");
-
-    let mut results = Vec::with_capacity(quickchecks.len());
-    for (quickcheck_name, requires_itok) in quickchecks {
-        on_event(QuickCheckEvent::Started {
-            name: &quickcheck_name,
-        });
-        let start_time = std::time::Instant::now();
-        let mut implicit_token = false;
-        let result = (|| -> Result<BoolPropertyResult, String> {
-            if options.optimize && !uf_map.is_empty() {
-                return Err("XLS IR optimization cannot be combined with uninterpreted functions: inlining would erase UF boundaries; set optimize=false".into());
-            }
-            let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
-                module_name,
-                &quickcheck_name,
-                xlsynth::DslxCallingConvention::ImplicitToken,
-            )
-            .map_err(|e| e.to_string())?;
-            let mangled_normal = xlsynth::mangle_dslx_name_with_calling_convention(
-                module_name,
-                &quickcheck_name,
-                xlsynth::DslxCallingConvention::Typical,
-            )
-            .map_err(|e| e.to_string())?;
-            let candidates = if requires_itok {
-                [(&mangled_itok, true), (&mangled_normal, false)]
-            } else {
-                [(&mangled_normal, false), (&mangled_itok, true)]
-            };
-            let (top, fixed_implicit_activation) = candidates
-                .into_iter()
-                .find(|(name, _)| pkg.get_fn(name).is_some())
-                .ok_or_else(|| {
-                    format!(
-                        "quickcheck function '{quickcheck_name}' not found (module '{module_name}')"
-                    )
-                })?;
-
-            implicit_token = fixed_implicit_activation;
-            let optimized_pkg;
-            let proof_pkg = if options.optimize {
-                optimized_pkg = optimize_quickcheck_ir(&ir_text, top, assert_label_regex.as_ref())?;
-                &optimized_pkg
-            } else {
-                &pkg
-            };
-            let fn_ref = proof_pkg
-                .get_fn(top)
-                .ok_or_else(|| format!("quickcheck top '{top}' missing after preparation"))?;
-            let prover_fn = ProverFn::new(fn_ref, Some(proof_pkg))
-                .with_fixed_implicit_activation(fixed_implicit_activation)
-                .with_uf_map(uf_map.clone());
-            Ok(prove_ir_quickcheck::<SConfig::Solver>(
-                solver_config,
-                &prover_fn,
-                assertion_semantics,
-                // Inlining renames labels; the optimized path has already
-                // selected assertions using their original DSLX labels.
-                if options.optimize { None } else { assert_label_regex.as_ref() },
-            ))
-        })()
-        .unwrap_or_else(BoolPropertyResult::Error);
-        let run = QuickCheckRunResult {
-            name: quickcheck_name,
-            implicit_token,
-            duration: start_time.elapsed(),
-            result,
-        };
-        on_event(QuickCheckEvent::Finished(&run));
-        results.push(run);
-    }
-
-    results
+    let ir_text =
+        xlsynth::convert_dslx_to_ir_text(&context.source, entry_file, &conversion_options)
+            .map_err(|e| {
+                QuickCheckError::new(
+                    QuickCheckErrorKind::Conversion,
+                    format!("DSLX->IR conversion failed for quickcheck: {e}"),
+                )
+            })?
+            .ir;
+    let package = Parser::new(&ir_text).parse_package().map_err(|e| {
+        QuickCheckError::new(
+            QuickCheckErrorKind::Conversion,
+            format!("Failed to parse QuickCheck IR: {e}"),
+        )
+    })?;
+    // Validated by discovery above.
+    let module_name = entry_file.file_stem().unwrap().to_str().unwrap().to_owned();
+    Ok(PreparedQuickCheckSuite::new(
+        context,
+        Box::new(InProcessQuickChecks {
+            solver_config,
+            module_name,
+            ir_text,
+            package,
+            assertion_semantics,
+            assert_label_regex,
+            uf_map: uf_map.clone(),
+            options,
+        }),
+    ))
 }
 
 /// Optimizes each property's own package so dead-function elimination cannot
@@ -419,43 +615,17 @@ pub fn discover_quickcheck_tests(
     additional_search_paths: &[&Path],
     test_filter: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let mut import_data = ImportData::new(dslx_stdlib_path, additional_search_paths);
-    let contents = fs::read_to_string(entry_file)
-        .map_err(|e| format!("failed to read DSLX file {}: {}", entry_file.display(), e))?;
-    let module_name = entry_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("invalid module name for {}", entry_file.display()))?;
-    let path_str = entry_file
-        .to_str()
-        .ok_or_else(|| "DSLX quickcheck entry file must be valid UTF-8".to_string())?;
-    let type_checked =
-        xlsynth::dslx::parse_and_typecheck(&contents, path_str, module_name, &mut import_data)
-            .map_err(|e| format!("DSLX parse/type-check failed for quickcheck discovery: {e}"))?;
-
-    let module = type_checked.get_module();
-    let regex = test_filter
-        .map(|pattern| {
-            Regex::new(pattern)
-                .map_err(|e| format!("invalid regular expression in quickcheck test filter: {e}"))
-        })
-        .transpose()?;
-
-    let mut tests = Vec::new();
-    for idx in 0..module.get_member_count() {
-        if let Some(MatchableModuleMember::Quickcheck(qc)) = module.get_member(idx).to_matchable() {
-            let function = qc.get_function();
-            let fn_ident = function.get_identifier().to_string();
-            if regex
-                .as_ref()
-                .map(|re| re.is_match(fn_ident.as_str()))
-                .unwrap_or(true)
-            {
-                tests.push(fn_ident);
-            }
-        }
-    }
-    Ok(tests)
+    Ok(load_quickcheck_context(
+        entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
+        test_filter,
+    )
+    .map_err(|e| e.to_string())?
+    .properties
+    .into_iter()
+    .map(|property| property.name)
+    .collect())
 }
 
 #[cfg(all(

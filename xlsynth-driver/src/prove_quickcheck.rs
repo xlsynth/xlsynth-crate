@@ -15,12 +15,14 @@ use crate::proofs::script::{
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
 
+use annotate_snippets::{AnnotationKind, Group, Level, Origin, Renderer, Snippet};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use xlsynth_prover::prover::types::{
-    BoolPropertyResult, QuickCheckAssertionSemantics, QuickCheckEvent, QuickCheckOptions,
+    BoolPropertyResult, QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult,
 };
 use xlsynth_prover::prover::{Prover, SolverChoice, discover_quickcheck_tests};
 
@@ -40,80 +42,125 @@ pub struct QuickCheckOutcome {
     pub tests: Vec<QuickCheckTestOutcome>,
 }
 
-/// Renders progress immediately without coupling the prover to terminal output.
-fn write_quickcheck_event(
+/// Flushes the start boundary before the caller begins optimization/solving.
+fn write_quickcheck_started(writer: &mut impl Write, name: &str) -> io::Result<()> {
+    writeln!(writer, "[ RUN QUICKCHECK        ] {name}")?;
+    writer.flush()
+}
+
+/// Renders a proof result; only the optional function-name span is highlighted.
+fn write_quickcheck_finished(
     writer: &mut impl Write,
-    source: &Path,
-    event: QuickCheckEvent<'_>,
+    path: &Path,
+    location: Option<(&str, Range<usize>)>,
+    run: &QuickCheckRunResult,
+    renderer: &Renderer,
 ) -> io::Result<()> {
-    match event {
-        QuickCheckEvent::Started { name } => {
-            writeln!(writer, "[ RUN QUICKCHECK        ] {name}")?;
-        }
-        QuickCheckEvent::Finished(run) => {
-            if matches!(run.result, BoolPropertyResult::Proved) {
-                writeln!(writer, "[                    OK ] {}", run.name)?;
-            } else {
-                let description = match &run.result {
-                    BoolPropertyResult::Disproved { .. } => "has a counterexample",
-                    BoolPropertyResult::Inconclusive(_) => "could not be proved",
-                    BoolPropertyResult::Error(_) => "failed to run",
-                    BoolPropertyResult::ToolchainDisproved(_) => "external proof failed",
-                    BoolPropertyResult::Proved => unreachable!("success handled above"),
-                };
-                writeln!(writer, "error: QuickCheck `{}` {description}", run.name)?;
-                writeln!(writer, "  --> {}", source.display())?;
-                writeln!(writer)?;
-                match &run.result {
-                    BoolPropertyResult::Disproved { inputs, output } => {
-                        let inputs = if run.implicit_token {
-                            &inputs[2..]
-                        } else {
-                            inputs.as_slice()
-                        };
-                        let return_value = if run.implicit_token {
-                            output
-                                .value
-                                .get_element(1)
-                                .expect("implicit-token QuickCheck result")
-                        } else {
-                            output.value.clone()
-                        };
-                        for input in inputs {
-                            writeln!(writer, "  {} = {}", input.name, input.value)?;
-                        }
-                        if !inputs.is_empty() {
-                            writeln!(writer)?;
-                        }
-                        // A QuickCheck return is a boolean; retain IR formatting
-                        // as a fallback if a backend violates that contract.
-                        if return_value.bits_equals_u64_value(0) {
-                            writeln!(writer, "  returned false")?;
-                        } else if return_value.bits_equals_u64_value(1) {
-                            writeln!(writer, "  returned true")?;
-                        } else {
-                            writeln!(writer, "  returned {}", return_value)?;
-                        }
-                        if let Some(violation) = &output.assertion_violation {
-                            for line in violation.message.lines() {
-                                writeln!(writer, "  assertion failed: {line}")?;
-                            }
-                            writeln!(writer, "  assertion label: {}", violation.label)?;
-                        }
-                    }
-                    BoolPropertyResult::Inconclusive(message)
-                    | BoolPropertyResult::ToolchainDisproved(message)
-                    | BoolPropertyResult::Error(message) => {
-                        for line in message.lines() {
-                            writeln!(writer, "  {line}")?;
-                        }
-                    }
-                    BoolPropertyResult::Proved => unreachable!("success handled above"),
-                }
-                writeln!(writer, "[                FAILED ] {}", run.name)?;
+    if matches!(run.result, BoolPropertyResult::Proved) {
+        writeln!(writer, "[                    OK ] {}", run.name)?;
+    } else {
+        let (description, label) = match &run.result {
+            BoolPropertyResult::Disproved { output, .. }
+                if output.assertion_violation.is_some() =>
+            {
+                ("can fail an assertion", "property fails for these inputs")
             }
+            BoolPropertyResult::Disproved { .. } => {
+                ("has a counterexample", "property fails for these inputs")
+            }
+            BoolPropertyResult::Inconclusive(_) => ("could not be proved", "proof is inconclusive"),
+            BoolPropertyResult::Error(_) => ("failed to run", "proof could not be completed"),
+            BoolPropertyResult::ToolchainDisproved(_) => {
+                ("external proof failed", "external tool reported failure")
+            }
+            BoolPropertyResult::Proved => unreachable!("success handled above"),
+        };
+        let title = format!("QuickCheck `{}` {description}", run.name);
+        let mut report = Group::with_title(Level::ERROR.primary_title(title));
+        let path = path.to_string_lossy();
+        // Never guess a span. Validate even library-supplied ranges so the
+        // renderer cannot panic if location metadata is absent or inconsistent.
+        if let Some((source, span)) =
+            location.filter(|(source, span)| source.get(span.clone()) == Some(run.name.as_str()))
+        {
+            report = report.element(
+                Snippet::source(source)
+                    .path(path)
+                    .fold(true)
+                    .annotation(AnnotationKind::Primary.span(span).label(label)),
+            );
+        } else {
+            report = report.element(Origin::path(path));
         }
+        match &run.result {
+            BoolPropertyResult::Disproved { inputs, output } => {
+                let inputs = if run.implicit_token {
+                    inputs.get(2..).unwrap_or_default()
+                } else {
+                    inputs.as_slice()
+                };
+                if !inputs.is_empty() {
+                    report = report.element(
+                        Level::NOTE.message(
+                            inputs
+                                .iter()
+                                .map(|input| format!("{} = {}", input.name, input.value))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                    );
+                }
+                let return_value = if run.implicit_token {
+                    output
+                        .value
+                        .get_element(1)
+                        .unwrap_or_else(|_| output.value.clone())
+                } else {
+                    output.value.clone()
+                };
+                let returned = if return_value.bits_equals_u64_value(0) {
+                    "false".into()
+                } else if return_value.bits_equals_u64_value(1) {
+                    "true".into()
+                } else {
+                    return_value.to_string()
+                };
+                report = report.element(Level::NOTE.message(format!("returned {returned}")));
+                if let Some(violation) = &output.assertion_violation {
+                    report = report
+                        .element(
+                            Level::NOTE.message(format!("assertion failed: {}", violation.message)),
+                        )
+                        .element(
+                            Level::NOTE.message(format!("assertion label: {}", violation.label)),
+                        );
+                }
+            }
+            BoolPropertyResult::Inconclusive(message)
+            | BoolPropertyResult::ToolchainDisproved(message)
+            | BoolPropertyResult::Error(message) => {
+                report = report.element(Level::NOTE.message(message));
+            }
+            BoolPropertyResult::Proved => unreachable!("success handled above"),
+        }
+        writeln!(writer, "{}", renderer.render(&[report]))?;
+        writeln!(writer, "[                FAILED ] {}", run.name)?;
     }
+    writer.flush()
+}
+
+/// Reports setup errors separately because no property has started yet.
+fn write_quickcheck_preparation_error(
+    writer: &mut impl Write,
+    path: &Path,
+    message: &str,
+    renderer: &Renderer,
+) -> io::Result<()> {
+    let report = Level::ERROR
+        .primary_title("Could not prepare QuickCheck proofs")
+        .element(Origin::path(path.to_string_lossy()))
+        .element(Level::NOTE.message(message));
+    writeln!(writer, "{}", renderer.render(&[report]))?;
     writer.flush()
 }
 
@@ -288,7 +335,12 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         options: QuickCheckOptions,
     ) -> Vec<QuickCheckTestOutcome> {
         let mut stderr = io::stderr().lock();
-        let runs = prover.prove_dslx_quickcheck_with_options(
+        let renderer = if stderr.is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+            Renderer::styled()
+        } else {
+            Renderer::plain()
+        };
+        let suite = match prover.prepare_dslx_quickchecks(
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,
@@ -297,16 +349,50 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             assert_label_filter,
             uf_map,
             options,
-            &mut |event| {
-                if let Err(error) = write_quickcheck_event(&mut stderr, entry_file, event) {
+        ) {
+            Ok(suite) => suite,
+            Err(error) => {
+                if let Err(write_error) = write_quickcheck_preparation_error(
+                    &mut stderr,
+                    entry_file,
+                    &error.to_string(),
+                    &renderer,
+                ) {
                     report_cli_error_and_exit(
-                        &format!("Failed to write proof progress: {error}"),
+                        &format!("Failed to write proof diagnostic: {write_error}"),
                         Some(SUBCOMMAND),
                         vec![],
                     );
                 }
-            },
-        );
+                std::process::exit(1);
+            }
+        };
+        let mut runs = Vec::with_capacity(suite.properties().len());
+        for property in suite.properties() {
+            let run = (|| -> io::Result<QuickCheckRunResult> {
+                write_quickcheck_started(&mut stderr, &property.name)?;
+                let run = suite.prove(property.id).map_err(io::Error::other)?;
+                write_quickcheck_finished(
+                    &mut stderr,
+                    suite.path(),
+                    property
+                        .name_span
+                        .clone()
+                        .map(|span| (suite.source(), span)),
+                    &run,
+                    &renderer,
+                )?;
+                Ok(run)
+            })()
+            .unwrap_or_else(|error| {
+                report_cli_error_and_exit(
+                    &format!("Failed to report QuickCheck proof: {error}"),
+                    Some(SUBCOMMAND),
+                    vec![],
+                )
+            });
+            runs.push(run);
+        }
 
         runs.into_iter()
             .map(|run| {
@@ -385,6 +471,7 @@ mod tests {
     use xlsynth_prover::prover::types::{
         AssertionViolation, FnInput, FnOutput, QuickCheckRunResult,
     };
+    use xlsynth_test_helpers::compare_golden_text;
 
     /// Golden output covers all result kinds without solver-dependent models.
     #[test]
@@ -466,22 +553,19 @@ mod tests {
                 duration: Duration::ZERO,
                 result,
             };
-            write_quickcheck_event(
+            write_quickcheck_started(&mut output, name).unwrap();
+            write_quickcheck_finished(
                 &mut output,
                 Path::new("qc.x"),
-                QuickCheckEvent::Started { name },
-            )
-            .unwrap();
-            write_quickcheck_event(
-                &mut output,
-                Path::new("qc.x"),
-                QuickCheckEvent::Finished(&run),
+                None,
+                &run,
+                &Renderer::plain(),
             )
             .unwrap();
         }
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            include_str!("testdata/quickcheck/diagnostics.golden.txt")
+        compare_golden_text(
+            &String::from_utf8(output).unwrap(),
+            "src/testdata/quickcheck/diagnostics.golden.txt",
         );
     }
 
@@ -519,21 +603,61 @@ mod tests {
             },
         };
         let mut output = Vec::new();
-        write_quickcheck_event(
+        write_quickcheck_started(&mut output, &run.name).unwrap();
+        write_quickcheck_finished(
             &mut output,
             Path::new("qc.x"),
-            QuickCheckEvent::Started { name: &run.name },
+            None,
+            &run,
+            &Renderer::plain(),
         )
         .unwrap();
-        write_quickcheck_event(
-            &mut output,
-            Path::new("qc.x"),
-            QuickCheckEvent::Finished(&run),
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            include_str!("testdata/quickcheck/implicit_token.golden.txt")
+        compare_golden_text(
+            &String::from_utf8(output).unwrap(),
+            "src/testdata/quickcheck/implicit_token.golden.txt",
+        );
+    }
+
+    /// Unicode/CRLF and multiline signatures preserve byte-based locations;
+    /// invalid metadata deliberately falls back to a filename-only diagnostic.
+    #[test]
+    fn quickcheck_source_location_goldens() {
+        let source =
+            "// λ🌍\r\n#[quickcheck]\r\nfn property(\r\n    x: u8,\r\n) -> bool { false }\r\n";
+        let run = QuickCheckRunResult {
+            name: "property".into(),
+            implicit_token: false,
+            duration: Duration::ZERO,
+            result: BoolPropertyResult::Inconclusive("solver returned unknown".into()),
+        };
+        let start = source.find("property(").unwrap();
+        let mut output = Vec::new();
+        for span in [start..start + run.name.len(), 1..2, 5..usize::MAX] {
+            write_quickcheck_started(&mut output, &run.name).unwrap();
+            write_quickcheck_finished(
+                &mut output,
+                Path::new("qc.x"),
+                Some((source, span)),
+                &run,
+                &Renderer::plain(),
+            )
+            .unwrap();
+        }
+        compare_golden_text(
+            &String::from_utf8(output).unwrap(),
+            "src/testdata/quickcheck/source_locations.golden.txt",
+        );
+    }
+
+    #[test]
+    fn quickcheck_preparation_error_golden() {
+        let mut output = Vec::new();
+        write_quickcheck_preparation_error(&mut output, Path::new("qc.x"),
+            "invalid regular expression in quickcheck test filter: regex parse error:\n    [\n    ^\nerror: unclosed character class",
+            &Renderer::plain()).unwrap();
+        compare_golden_text(
+            &String::from_utf8(output).unwrap(),
+            "src/testdata/quickcheck/preparation.golden.txt",
         );
     }
 
@@ -555,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn quickcheck_progress_flushes_each_event() {
+    fn quickcheck_progress_flushes_each_boundary() {
         let mut writer = FlushRecorder::default();
         let run = QuickCheckRunResult {
             name: "p".into(),
@@ -563,18 +687,15 @@ mod tests {
             duration: Duration::ZERO,
             result: BoolPropertyResult::Proved,
         };
-        write_quickcheck_event(
-            &mut writer,
-            Path::new("qc.x"),
-            QuickCheckEvent::Started { name: "p" },
-        )
-        .unwrap();
+        write_quickcheck_started(&mut writer, "p").unwrap();
         let first_length = writer.bytes.len();
         assert_eq!(writer.flushed, [first_length]);
-        write_quickcheck_event(
+        write_quickcheck_finished(
             &mut writer,
             Path::new("qc.x"),
-            QuickCheckEvent::Finished(&run),
+            None,
+            &run,
+            &Renderer::plain(),
         )
         .unwrap();
         assert_eq!(writer.flushed, [first_length, writer.bytes.len()]);

@@ -5,10 +5,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::Prover;
-use super::quickcheck::load_quickcheck_context;
+use super::quickcheck::{
+    PreparedQuickCheckBackend, PreparedQuickCheckSuite, QuickCheckError, QuickCheckErrorKind,
+    QuickCheckProofResult, QuickCheckProperty, load_quickcheck_context,
+};
 use super::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckEvent, QuickCheckOptions, QuickCheckRunResult,
+    QuickCheckAssertionSemantics, QuickCheckOptions,
 };
 use crate::toolchain_shim::run_prove_quickcheck_main;
 use regex::escape;
@@ -189,7 +192,7 @@ impl Prover for ExternalProver {
         )
     }
 
-    fn prove_dslx_quickcheck_with_options(
+    fn prepare_dslx_quickchecks(
         &self,
         entry_file: &Path,
         dslx_stdlib_path: Option<&Path>,
@@ -199,19 +202,8 @@ impl Prover for ExternalProver {
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
         options: QuickCheckOptions,
-        on_event: &mut dyn FnMut(QuickCheckEvent<'_>),
-    ) -> Vec<QuickCheckRunResult> {
-        let (_, quickchecks) = load_quickcheck_context(
-            entry_file,
-            dslx_stdlib_path,
-            additional_search_paths,
-            test_filter,
-        );
-        if quickchecks.is_empty() {
-            return Vec::new();
-        }
-
-        let setup = if assertion_semantics != QuickCheckAssertionSemantics::Never {
+    ) -> Result<PreparedQuickCheckSuite<'_>, QuickCheckError> {
+        let exe = if assertion_semantics != QuickCheckAssertionSemantics::Never {
             Err("External quickcheck requires assertion_semantics=never".to_string())
         } else if assert_label_filter.is_some() {
             Err("External quickcheck does not support assertion label filters".to_string())
@@ -221,39 +213,65 @@ impl Prover for ExternalProver {
             Err("The XLS toolchain always optimizes QuickCheck IR; use an in-process solver to disable optimization".to_string())
         } else {
             resolve_tool_path(self, "prove_quickcheck_main")
+        }.map_err(|message| QuickCheckError::new(QuickCheckErrorKind::Configuration, message))?;
+        let context = load_quickcheck_context(
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            test_filter,
+        )?;
+        let backend = ExternalQuickChecks {
+            exe,
+            entry_file: entry_file.into(),
+            source: context.source.clone(),
+            stdlib: dslx_stdlib_path.map(Path::to_path_buf),
+            search_paths: additional_search_paths
+                .iter()
+                .map(|p| p.to_path_buf())
+                .collect(),
         };
-        let mut results = Vec::with_capacity(quickchecks.len());
-        let limit = |msg: &str| msg.chars().take(MAX_TOOLCHAIN_MESSAGE).collect::<String>();
-        for (quickcheck_name, _) in quickchecks {
-            on_event(QuickCheckEvent::Started {
-                name: &quickcheck_name,
-            });
-            let start_time = std::time::Instant::now();
-            let filter = format!("^{}$", escape(quickcheck_name.as_str()));
-            let result = match &setup {
-                Err(msg) => BoolPropertyResult::Error(msg.clone()),
-                Ok(exe) => match run_prove_quickcheck_main(
-                    exe,
-                    entry_file,
-                    dslx_stdlib_path,
-                    additional_search_paths,
-                    filter.as_str(),
+        Ok(PreparedQuickCheckSuite::new(context, Box::new(backend)))
+    }
+}
+
+struct ExternalQuickChecks {
+    exe: PathBuf,
+    entry_file: PathBuf,
+    source: String,
+    stdlib: Option<PathBuf>,
+    search_paths: Vec<PathBuf>,
+}
+
+impl PreparedQuickCheckBackend for ExternalQuickChecks {
+    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult {
+        let result = match std::fs::read_to_string(&self.entry_file) {
+            Ok(source) if source == self.source => {
+                let filter = format!("^{}$", escape(&property.name));
+                let paths: Vec<_> = self.search_paths.iter().map(PathBuf::as_path).collect();
+                match run_prove_quickcheck_main(
+                    &self.exe,
+                    &self.entry_file,
+                    self.stdlib.as_deref(),
+                    &paths,
+                    &filter,
                 ) {
                     Ok(_) => BoolPropertyResult::Proved,
-                    Err(msg) => BoolPropertyResult::ToolchainDisproved(limit(&msg)),
-                },
-            };
-            let run = QuickCheckRunResult {
-                name: quickcheck_name,
-                implicit_token: false,
-                duration: start_time.elapsed(),
-                result,
-            };
-            on_event(QuickCheckEvent::Finished(&run));
-            results.push(run);
+                    Err(message) => BoolPropertyResult::ToolchainDisproved(
+                        message.chars().take(MAX_TOOLCHAIN_MESSAGE).collect(),
+                    ),
+                }
+            }
+            Ok(_) => BoolPropertyResult::Error(
+                "DSLX input changed after QuickCheck preparation; prepare the suite again".into(),
+            ),
+            Err(error) => {
+                BoolPropertyResult::Error(format!("Failed to read prepared DSLX input: {error}"))
+            }
+        };
+        QuickCheckProofResult {
+            implicit_token: false,
+            result,
         }
-
-        results
     }
 }
 

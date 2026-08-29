@@ -1,10 +1,8 @@
 [ RUN QUICKCHECK        ] assertion_failure
-error: QuickCheck `assertion_failure` has a counterexample
-  --> qc.x
-
-  x = bits[8]:0
-
-  returned true
-  assertion failed: expected nonzero input
-  assertion label: nonzero
+error: QuickCheck `assertion_failure` can fail an assertion
+ --> qc.x
+  = note: x = bits[8]:0
+  = note: returned true
+  = note: assertion failed: expected nonzero input
+  = note: assertion label: nonzero
 [                FAILED ] assertion_failure

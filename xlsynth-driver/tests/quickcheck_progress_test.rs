@@ -59,10 +59,9 @@ fn quickcheck_progress_and_counterexample_goldens() {
         }
         let output = command.output().unwrap();
         assert_eq!(output.status.code(), Some(1));
-        assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
-            include_str!("testdata/quickcheck/mixed.golden.txt"),
-            "opt={opt:?}"
+        xlsynth_test_helpers::compare_golden_text(
+            &String::from_utf8(output.stderr).unwrap(),
+            "tests/testdata/quickcheck/mixed.golden.txt",
         );
         assert_eq!(
             output.stdout,
@@ -126,4 +125,49 @@ fn h(x: u8) -> u8 { x + u8:2 }
     );
     assert_eq!(output.stderr, b"[ RUN QUICKCHECK        ] abstract_equivalence\n[                    OK ] abstract_equivalence\n");
     assert_eq!(output.stdout, b"Success: All QuickChecks proved\n");
+}
+
+/// Invalid input and filters produce actionable diagnostics before any RUN
+/// boundary, never a Rust panic or a spurious failed property.
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn quickcheck_preparation_cli_goldens() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("qc.x"),
+        "#[quickcheck] fn check(x: u8) -> bool { true }",
+    )
+    .unwrap();
+    for (input, filter, golden) in [
+        ("missing.x", None, "missing_file"),
+        ("qc.x", Some("["), "bad_filter"),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        command.current_dir(dir.path()).env("NO_COLOR", "1").args([
+            "prove-quickcheck",
+            "--dslx_input_file",
+            input,
+            "--solver=bitwuzla",
+        ]);
+        if let Some(filter) = filter {
+            command.args(["--test_filter", filter]);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, b"");
+        // OS error numbers/text differ by platform. Keep that detail covered
+        // by the typed library error test; normalize it for the CLI golden.
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let stderr = if golden == "missing_file" {
+            let prefix = "Failed to read DSLX input file: ";
+            let start = stderr.find(prefix).unwrap() + prefix.len();
+            format!("{}<I/O error>\n", &stderr[..start])
+        } else {
+            stderr
+        };
+        xlsynth_test_helpers::compare_golden_text(
+            &stderr,
+            &format!("tests/testdata/quickcheck/{golden}.golden.txt"),
+        );
+    }
 }
