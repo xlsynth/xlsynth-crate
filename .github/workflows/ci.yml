@@ -348,20 +348,8 @@ jobs:
           sudo ldconfig || true
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
-      - name: Install Icarus Verilog (prebuilt for rocky8)
-        run: |
-          mkdir -p artifacts
-          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
-          python3 scripts/download_and_verify.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
-          python3 scripts/download_and_verify.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
-          python3 scripts/download_and_verify.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
-          sudo mkdir -p /usr/local/bin /usr/local/lib
-          sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
-          sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
-          sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
-          sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
-          rm -rf artifacts
-          iverilog -V
+      - name: Install pinned iverilog and vvp
+        run: python3 scripts/install_ci_iverilog.py
 
       - name: Set up Rust
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
@@ -515,21 +503,8 @@ jobs:
           mv protoc-*.zip /tmp/
           protoc --version
 
-      - name: Install Icarus Verilog (prebuilt for rocky8)
-        run: |
-          mkdir -p artifacts
-          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
-          python3 scripts/download_and_verify.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
-          python3 scripts/download_and_verify.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
-          python3 scripts/download_and_verify.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
-          sudo mkdir -p /usr/local/bin /usr/local/lib
-          sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
-          sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
-          sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
-          sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
-          rm -rf artifacts
-          which iverilog
-          iverilog -V
+      - name: Install pinned iverilog and vvp
+        run: python3 scripts/install_ci_iverilog.py
 
       - name: Install libc++ from llvm-18
         run: |
@@ -1249,6 +1224,9 @@ jobs:
       - name: Install Z3 binary
         run: |
           sudo apt-get install -y z3
+
+      - name: Install pinned iverilog and vvp
+        run: python3 scripts/install_ci_iverilog.py
 
       - name: Download xlsynth tools for fuzzing
         run: |

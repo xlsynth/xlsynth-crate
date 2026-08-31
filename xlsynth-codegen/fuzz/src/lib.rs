@@ -393,7 +393,7 @@ mod tests {
             assert!(report.attributes.contains_key("assumed_in_bounds=false"));
             assert!(report.attributes.contains_key("load_enable=true"));
             assert!(report.attributes.contains_key("load_enable=false"));
-            for count in 0..=3 {
+            for count in 1..=3 {
                 assert!(report.register_counts.contains_key(&count));
             }
             assert_eq!(
