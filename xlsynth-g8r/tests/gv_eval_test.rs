@@ -103,6 +103,125 @@ endmodule
 }
 
 #[test]
+fn labeled_netlist_aig_checks_only_required_undriven_assign_bits() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
+}
+interned_strings: ["A", "Y"]
+"#;
+    for (consumer, requires_missing_bit) in [
+        ("assign y = bus[0];", false),
+        ("BUF live (.A(bus[0]), .Y(y));", false),
+        ("assign y = chain;", true),
+        ("BUF live (.A(chain), .Y(y));", true),
+        ("BUF dead (.A(chain), .Y(unused)); assign y = a;", true),
+    ] {
+        let netlist = format!(
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  wire [5:0] bus;
+  wire chain;
+  wire unused;
+  assign bus[0] = a;
+  assign bus[5:3] = {{bus[2], bus[2], bus[0]}};
+  assign chain = bus[5];
+  {consumer}
+endmodule
+"#
+        );
+        let (_temp_dir, netlist_path, liberty_path) = write_fixture(&netlist, liberty);
+        let result =
+            load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default());
+        if requires_missing_bit {
+            let error = result.expect_err("a consumed alias must have a driver");
+            assert!(format!("{error:#}").contains("net bit 'bus[2]'"));
+        } else {
+            let model = result.expect("dead alias bits do not need drivers");
+            for value in [false, true] {
+                assert_eq!(
+                    model.evaluate_bits(&[IrBits::bool(value)]).unwrap(),
+                    vec![IrBits::bool(value)]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sequential_netlist_checks_undriven_assigns_feeding_next_state() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+"#;
+    for (data, requires_missing_bit) in [("bus[0]", false), ("chain", true)] {
+        let netlist = format!(
+            r#"
+module top (d, clk, q);
+  input d;
+  input clk;
+  output q;
+  wire [5:0] bus;
+  wire chain;
+  assign bus[0] = d;
+  assign bus[5:3] = {{bus[2], bus[2], bus[0]}};
+  assign chain = bus[5];
+  DFF state (.D({data}), .CLK(clk), .Q(q));
+endmodule
+"#
+        );
+        let (_temp_dir, netlist_path, liberty_path) = write_fixture(&netlist, liberty);
+        let result = load_labeled_sequential_netlist_aig(
+            &netlist_path,
+            &liberty_path,
+            &GvEvalOptions::default(),
+        );
+        if requires_missing_bit {
+            let error = result.expect_err("next-state aliases must have drivers");
+            assert!(format!("{error:#}").contains("net bit 'bus[2]'"));
+        } else {
+            let model = result.expect("dead alias bits do not affect state");
+            let design = &model.sequential_gate_fn;
+            let trace = sequential::simulate(
+                design,
+                &[
+                    vec![IrBits::bool(true)],
+                    vec![IrBits::bool(false)],
+                    vec![IrBits::bool(false)],
+                ],
+                SequentialState::all_zeros(design),
+            )
+            .unwrap();
+            assert_eq!(
+                trace.external_outputs(),
+                &[
+                    vec![IrBits::bool(false)],
+                    vec![IrBits::bool(true)],
+                    vec![IrBits::bool(false)],
+                ]
+            );
+        }
+    }
+}
+
+#[test]
 fn labeled_netlist_aig_evaluates_and_preserves_external_pin_labels() {
     let liberty = r#"
 format_magic: 5496997758177923663

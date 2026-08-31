@@ -482,12 +482,6 @@ impl ResolvedBitValues {
     }
 }
 
-fn collect_expr_source_bits(expr: &BitExpr, out: &mut HashSet<BitIndex>) {
-    let mut bits = Vec::new();
-    expr.collect_source_bits(&mut bits);
-    out.extend(bits);
-}
-
 fn output_target_bits(connection: &NormalizedConnection) -> Result<Vec<BitIndex>, String> {
     connection
         .bits
@@ -1727,8 +1721,8 @@ fn sequential_output_operand(
         })
 }
 
-/// Collects net bits used as cell inputs and driven by ports, assigns, or
-/// cells.
+/// Collects required source bits transitively through assignments and all
+/// bits driven by ports, assignments, or cells.
 fn collect_netlist_bit_usage<F>(
     normalized: &NormalizedNetlistModule<'_>,
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -1740,6 +1734,7 @@ where
 {
     let mut used_as_input = HashSet::new();
     let mut driven = HashSet::new();
+    let mut assign_sources = HashMap::<BitIndex, Vec<BitIndex>>::new();
     for port in &normalized.ports {
         if port.direction == PortDirection::Input {
             driven.extend(port.bits.iter().copied());
@@ -1747,8 +1742,8 @@ where
     }
     for assign in &normalized.assigns {
         driven.extend(assign.lhs_bits.iter().copied());
-        for rhs in &assign.rhs_bits {
-            collect_expr_source_bits(rhs, &mut used_as_input);
+        for (target, rhs) in assign.lhs_bits.iter().copied().zip(&assign.rhs_bits) {
+            rhs.collect_source_bits(assign_sources.entry(target).or_default());
         }
     }
     for (instance_index, inst) in normalized.instances.iter().enumerate() {
@@ -1771,6 +1766,19 @@ where
                     BitSource::Bit(bit_idx) => Some(*bit_idx),
                     BitSource::Literal(_) | BitSource::Unknown => None,
                 }));
+            }
+        }
+    }
+    // Partially live buses can retain dead aliases to undriven bits. Only
+    // assignments feeding module outputs or cell inputs require those sources.
+    let mut pending = used_as_input.iter().copied().collect::<Vec<_>>();
+    pending.extend(collect_module_output_bits(normalized));
+    while let Some(target) = pending.pop() {
+        if let Some(sources) = assign_sources.get(&target) {
+            for &source in sources {
+                if used_as_input.insert(source) {
+                    pending.push(source);
+                }
             }
         }
     }

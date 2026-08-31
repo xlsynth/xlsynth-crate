@@ -879,6 +879,8 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         let mut generator = FunctionGenerator::new(&self.options.function_options);
         let mut metadata = BlockMetadata {
             clock_port_name: None,
+            port_order: Vec::new(),
+            port_sv_types: std::collections::BTreeMap::new(),
             input_port_ids: HashMap::new(),
             output_port_ids: HashMap::new(),
             output_names: Vec::new(),

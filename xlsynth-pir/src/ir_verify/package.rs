@@ -5,7 +5,8 @@
 use std::collections::HashSet;
 
 use crate::ir::{
-    Binop, BlockMetadata, Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type,
+    Binop, BlockMetadata, Fn, InstantiationKind, MemberType, NaryOp, NodePayload, NodeRef, Package,
+    PackageMember, Type,
 };
 use crate::ir_deduce::deduce_result_type_with_registers;
 use crate::ir_utils::operands;
@@ -94,6 +95,35 @@ pub enum ValidationError {
         node_index: usize,
         actual: Type,
     },
+    /// A block's reset metadata does not identify a bits[1] input port.
+    InvalidBlockResetPort { block: String, port: String },
+    /// A declared register does not have exactly one register_read operation.
+    RegisterReadCountMismatch {
+        block: String,
+        register: String,
+        actual: usize,
+    },
+    /// Register reset values and write reset operands must either both exist or
+    /// both be absent.
+    RegisterWriteResetPresenceMismatch {
+        func: String,
+        node_index: usize,
+        register: String,
+        register_has_reset_value: bool,
+        write_has_reset: bool,
+    },
+    /// Every write to a multiply written register requires a load enable.
+    MultipleRegisterWritesRequireLoadEnable {
+        block: String,
+        node_index: usize,
+        register: String,
+    },
+    /// Every write to a multiply written register must use the same reset.
+    MultipleRegisterWritesResetMismatch {
+        block: String,
+        node_index: usize,
+        register: String,
+    },
     /// An instantiation op references an unknown instantiation.
     UnknownInstantiation {
         func: String,
@@ -105,6 +135,12 @@ pub enum ValidationError {
         func: String,
         instantiation: String,
         block: String,
+    },
+    /// An external instantiation references a function absent from the package.
+    InstantiationForeignFunctionNotFound {
+        func: String,
+        instantiation: String,
+        foreign_function: String,
     },
     /// An instantiation op appears in a function (not a block).
     InstantiationOpInFunction { func: String, node_index: usize },
@@ -373,6 +409,59 @@ impl std::fmt::Display for ValidationError {
                     func, node_index, actual
                 )
             }
+            ValidationError::InvalidBlockResetPort { block, port } => {
+                write!(
+                    f,
+                    "block '{}' reset port '{}' must be a declared bits[1] input",
+                    block, port
+                )
+            }
+            ValidationError::RegisterReadCountMismatch {
+                block,
+                register,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "block '{}' register '{}' requires exactly one register_read, found {}",
+                    block, register, actual
+                )
+            }
+            ValidationError::RegisterWriteResetPresenceMismatch {
+                func,
+                node_index,
+                register,
+                register_has_reset_value,
+                write_has_reset,
+            } => {
+                write!(
+                    f,
+                    "block '{}' node {} register '{}' reset value presence ({}) does not match register_write reset operand presence ({})",
+                    func, node_index, register, register_has_reset_value, write_has_reset
+                )
+            }
+            ValidationError::MultipleRegisterWritesRequireLoadEnable {
+                block,
+                node_index,
+                register,
+            } => {
+                write!(
+                    f,
+                    "block '{}' node {} register '{}' has multiple writes but this register_write has no load_enable",
+                    block, node_index, register
+                )
+            }
+            ValidationError::MultipleRegisterWritesResetMismatch {
+                block,
+                node_index,
+                register,
+            } => {
+                write!(
+                    f,
+                    "block '{}' node {} register '{}' has multiple writes with different reset operands",
+                    block, node_index, register
+                )
+            }
             ValidationError::UnknownInstantiation {
                 func,
                 node_index,
@@ -393,6 +482,17 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "function '{}' instantiation '{}' references missing block '{}'",
                     func, instantiation, block
+                )
+            }
+            ValidationError::InstantiationForeignFunctionNotFound {
+                func,
+                instantiation,
+                foreign_function,
+            } => {
+                write!(
+                    f,
+                    "function '{}' external instantiation '{}' references missing foreign function '{}'",
+                    func, instantiation, foreign_function
                 )
             }
             ValidationError::InstantiationOpInFunction { func, node_index } => {
@@ -612,6 +712,7 @@ impl std::error::Error for ValidationError {}
 pub(crate) struct InstantiationInfo {
     input_types: std::collections::HashMap<String, Type>,
     output_types: std::collections::HashMap<String, Type>,
+    require_complete_mapping: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -773,15 +874,28 @@ pub fn validate_block(
 ) -> Result<(), ValidationError> {
     let prior_blocks = collect_prior_blocks(parent, member_index);
     for inst in metadata.instantiations.iter() {
-        if !prior_blocks.contains_key(&inst.block) {
-            return Err(ValidationError::InstantiationBlockNotFound {
-                func: f.name.clone(),
-                instantiation: inst.name.clone(),
-                block: inst.block.clone(),
-            });
+        match inst.kind {
+            InstantiationKind::Block if !prior_blocks.contains_key(&inst.block) => {
+                return Err(ValidationError::InstantiationBlockNotFound {
+                    func: f.name.clone(),
+                    instantiation: inst.name.clone(),
+                    block: inst.block.clone(),
+                });
+            }
+            InstantiationKind::Extern if parent.get_fn(&inst.block).is_none() => {
+                return Err(ValidationError::InstantiationForeignFunctionNotFound {
+                    func: f.name.clone(),
+                    instantiation: inst.name.clone(),
+                    foreign_function: inst.block.clone(),
+                });
+            }
+            _ => {
+                // The declared target exists with the kind required by this
+                // instance.
+            }
         }
     }
-    let instantiation_info = build_instantiation_info(metadata, &prior_blocks)?;
+    let instantiation_info = build_instantiation_info(metadata, &prior_blocks, parent)?;
     validate_fn_with(
         f,
         Some(parent),
@@ -795,7 +909,98 @@ pub fn validate_block(
         },
         Some(&instantiation_info),
         true,
-    )
+    )?;
+    validate_block_registers(f, metadata)
+}
+
+/// Applies the reset and register-write invariants required by XLS blocks.
+fn validate_block_registers(f: &Fn, metadata: &BlockMetadata) -> Result<(), ValidationError> {
+    if let Some(reset) = &metadata.reset {
+        let valid_reset = f
+            .params
+            .iter()
+            .any(|param| param.name == reset.port_name && param.ty == Type::Bits(1));
+        if !valid_reset {
+            return Err(ValidationError::InvalidBlockResetPort {
+                block: f.name.clone(),
+                port: reset.port_name.clone(),
+            });
+        }
+    }
+
+    let definitions = metadata
+        .registers
+        .iter()
+        .map(|register| (register.name.as_str(), register))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut reads = std::collections::HashMap::<&str, usize>::new();
+    let mut writes =
+        std::collections::HashMap::<&str, Vec<(usize, Option<NodeRef>, Option<NodeRef>)>>::new();
+    for (index, node) in f.nodes.iter().enumerate() {
+        match &node.payload {
+            NodePayload::RegisterRead { register } => {
+                *reads.entry(register).or_default() += 1;
+            }
+            NodePayload::RegisterWrite {
+                register,
+                load_enable,
+                reset,
+                ..
+            } => {
+                let definition = definitions[register.as_str()];
+                if definition.reset_value.is_some() != reset.is_some() {
+                    return Err(ValidationError::RegisterWriteResetPresenceMismatch {
+                        func: f.name.clone(),
+                        node_index: index,
+                        register: register.clone(),
+                        register_has_reset_value: definition.reset_value.is_some(),
+                        write_has_reset: reset.is_some(),
+                    });
+                }
+                writes
+                    .entry(register)
+                    .or_default()
+                    .push((index, *load_enable, *reset));
+            }
+            _ => {
+                // Other operations do not access block register state.
+            }
+        }
+    }
+
+    for register in &metadata.registers {
+        let read_count = reads.get(register.name.as_str()).copied().unwrap_or(0);
+        if read_count != 1 {
+            return Err(ValidationError::RegisterReadCountMismatch {
+                block: f.name.clone(),
+                register: register.name.clone(),
+                actual: read_count,
+            });
+        }
+        let Some(register_writes) = writes.get(register.name.as_str()) else {
+            continue;
+        };
+        if register_writes.len() > 1 {
+            let first_reset = register_writes[0].2;
+            for &(node_index, load_enable, reset) in register_writes {
+                if load_enable.is_none() {
+                    return Err(ValidationError::MultipleRegisterWritesRequireLoadEnable {
+                        block: f.name.clone(),
+                        node_index,
+                        register: register.name.clone(),
+                    });
+                }
+                if reset != first_reset {
+                    return Err(ValidationError::MultipleRegisterWritesResetMismatch {
+                        block: f.name.clone(),
+                        node_index,
+                        register: register.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validates a function within the context of its parent package, using a
@@ -1402,6 +1607,9 @@ where
 
     if let Some(info_map) = instantiation_info {
         for (inst_name, inst_info) in info_map.iter() {
+            if !inst_info.require_complete_mapping {
+                continue;
+            }
             let used_inputs = used_instantiation_inputs
                 .get(inst_name)
                 .cloned()
@@ -1483,9 +1691,30 @@ fn collect_prior_blocks<'a>(
 fn build_instantiation_info(
     metadata: &BlockMetadata,
     prior_blocks: &std::collections::HashMap<String, (&Fn, &BlockMetadata)>,
+    parent: &Package,
 ) -> Result<std::collections::HashMap<String, InstantiationInfo>, ValidationError> {
     let mut info_map = std::collections::HashMap::new();
     for inst in metadata.instantiations.iter() {
+        if inst.kind == InstantiationKind::Extern {
+            let foreign_function = parent
+                .get_fn(&inst.block)
+                .expect("foreign function missing after target validation");
+            let mut input_types = std::collections::HashMap::new();
+            for param in &foreign_function.params {
+                collect_external_port_types(&param.name, &param.ty, &mut input_types);
+            }
+            let mut output_types = std::collections::HashMap::new();
+            collect_external_port_types("return", &foreign_function.ret_ty, &mut output_types);
+            info_map.insert(
+                inst.name.clone(),
+                InstantiationInfo {
+                    input_types,
+                    output_types,
+                    require_complete_mapping: false,
+                },
+            );
+            continue;
+        }
         let (callee_fn, callee_meta) = prior_blocks
             .get(&inst.block)
             .expect("prior block missing after check");
@@ -1529,10 +1758,25 @@ fn build_instantiation_info(
             InstantiationInfo {
                 input_types,
                 output_types,
+                require_complete_mapping: true,
             },
         );
     }
     Ok(info_map)
+}
+
+/// Records aggregate external ports and each addressable tuple component.
+fn collect_external_port_types(
+    name: &str,
+    ty: &Type,
+    port_types: &mut std::collections::HashMap<String, Type>,
+) {
+    port_types.insert(name.to_string(), ty.clone());
+    if let Type::Tuple(elements) = ty {
+        for (index, element) in elements.iter().enumerate() {
+            collect_external_port_types(&format!("{}.{}", name, index), element, port_types);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1540,6 +1784,158 @@ mod tests {
     use super::*;
     use crate::ir;
     use crate::ir_parser::Parser;
+
+    const VALID_REGISTER_BLOCK: &str = r#"package public_register_validation
+
+top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8], result: bits[8]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  reg state(bits[8], reset_value=7)
+  rst: bits[1] = input_port(name=rst, id=1)
+  enable: bits[1] = input_port(name=enable, id=2)
+  data: bits[8] = input_port(name=data, id=3)
+  current: bits[8] = register_read(register=state, id=4)
+  written: () = register_write(data, register=state, load_enable=enable, reset=rst, id=5)
+  result: () = output_port(current, name=result, id=6)
+}
+"#;
+
+    #[test]
+    fn valid_resettable_register_passes_structural_validation() {
+        let package = Parser::new(VALID_REGISTER_BLOCK).parse_package().unwrap();
+        assert_eq!(validate_package(&package), Ok(()));
+    }
+
+    #[test]
+    fn duplicate_register_reads_are_rejected() {
+        let duplicated = VALID_REGISTER_BLOCK.replace(
+            "  result: () = output_port",
+            "  duplicate: bits[8] = register_read(register=state, id=7)\n  result: () = output_port",
+        );
+        let package = Parser::new(&duplicated).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::RegisterReadCountMismatch {
+                block: "register_block".to_owned(),
+                register: "state".to_owned(),
+                actual: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn missing_register_reads_are_rejected() {
+        let missing = VALID_REGISTER_BLOCK
+            .replace(
+                r#"  current: bits[8] = register_read(register=state, id=4)
+"#,
+                "",
+            )
+            .replace("output_port(current", "output_port(data");
+        let package = Parser::new(&missing).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::RegisterReadCountMismatch {
+                block: "register_block".to_owned(),
+                register: "state".to_owned(),
+                actual: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn resettable_register_write_requires_a_reset_operand() {
+        let ir = VALID_REGISTER_BLOCK.replace(", reset=rst, id=5", ", id=5");
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::RegisterWriteResetPresenceMismatch {
+                register_has_reset_value: true,
+                write_has_reset: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn register_write_reset_requires_a_declared_reset_value() {
+        let ir = VALID_REGISTER_BLOCK.replace("state(bits[8], reset_value=7)", "state(bits[8])");
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::RegisterWriteResetPresenceMismatch {
+                register_has_reset_value: false,
+                write_has_reset: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn resettable_register_without_block_metadata_is_allowed_before_lowering() {
+        let ir = VALID_REGISTER_BLOCK.replace(
+            "  #![reset(port=\"rst\", asynchronous=false, active_low=false)]\n",
+            "",
+        );
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert_eq!(validate_package(&package), Ok(()));
+    }
+
+    #[test]
+    fn block_reset_metadata_requires_a_single_bit_input() {
+        let missing = VALID_REGISTER_BLOCK.replace("port=\"rst\"", "port=\"missing\"");
+        let package = Parser::new(&missing).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::InvalidBlockResetPort {
+                block: "register_block".to_owned(),
+                port: "missing".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn multiple_enabled_writes_to_one_register_are_valid() {
+        let ir = VALID_REGISTER_BLOCK.replace(
+            "  result: () = output_port",
+            "  disabled: bits[1] = not(enable, id=7)\n  second_write: () = register_write(data, register=state, load_enable=disabled, reset=rst, id=8)\n  result: () = output_port",
+        );
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert_eq!(validate_package(&package), Ok(()));
+    }
+
+    #[test]
+    fn multiple_register_writes_all_require_load_enables() {
+        let ir = VALID_REGISTER_BLOCK.replace(
+            "  result: () = output_port",
+            "  second_write: () = register_write(data, register=state, reset=rst, id=7)\n  result: () = output_port",
+        );
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::MultipleRegisterWritesRequireLoadEnable { register, .. })
+                if register == "state"
+        ));
+    }
+
+    #[test]
+    fn multiple_register_writes_must_share_the_same_reset_operand() {
+        let ir = VALID_REGISTER_BLOCK
+            .replace("rst: bits[1], enable:", "rst: bits[1], other_reset: bits[1], enable:")
+            .replace(
+                "  enable: bits[1] = input_port",
+                "  other_reset: bits[1] = input_port(name=other_reset, id=7)\n  enable: bits[1] = input_port",
+            )
+            .replace(
+                "  result: () = output_port",
+                "  second_write: () = register_write(data, register=state, load_enable=enable, reset=other_reset, id=8)\n  result: () = output_port",
+            );
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::MultipleRegisterWritesResetMismatch { register, .. })
+                if register == "state"
+        ));
+    }
 
     #[test]
     fn validate_package_ok() {
@@ -1953,6 +2349,108 @@ block add_block(a: bits[32], b: bits[32], x: bits[32], y: bits[32]) {
             validate_package(&pkg),
             Err(ValidationError::InstantiationBlockNotFound { .. })
         ));
+    }
+
+    #[test]
+    fn external_instantiation_requires_existing_foreign_function() {
+        let ir = r#"package external_test
+
+top block wrapper(value: bits[8], result: bits[8]) {
+  instantiation external_instance(foreign_function=missing, kind=extern)
+  value: bits[8] = input_port(name=value, id=1)
+  instantiation_input.2: () = instantiation_input(value, instantiation=external_instance, port_name=value, id=2)
+  instantiation_output.3: bits[8] = instantiation_output(instantiation=external_instance, port_name=return, id=3)
+  result: () = output_port(instantiation_output.3, name=result, id=4)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let package = parser.parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::InstantiationForeignFunctionNotFound {
+                func: "wrapper".to_string(),
+                instantiation: "external_instance".to_string(),
+                foreign_function: "missing".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn external_instantiation_rejects_unknown_tuple_component() {
+        let ir = r#"package external_test
+
+fn external_pair(value: (bits[8], bits[16]) id=1) -> (bits[8], bits[16]) {
+  ret value: (bits[8], bits[16]) = param(name=value, id=1)
+}
+
+top block wrapper(input: bits[8], result: bits[8]) {
+  instantiation external_instance(foreign_function=external_pair, kind=extern)
+  input: bits[8] = input_port(name=input, id=2)
+  instantiation_input.3: () = instantiation_input(input, instantiation=external_instance, port_name=value.2, id=3)
+  instantiation_output.4: bits[8] = instantiation_output(instantiation=external_instance, port_name=return.0, id=4)
+  result: () = output_port(instantiation_output.4, name=result, id=5)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let package = parser.parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::UnknownInstantiationPort {
+                direction: InstantiationPortDirection::Input,
+                port_name,
+                ..
+            }) if port_name == "value.2"
+        ));
+    }
+
+    #[test]
+    fn external_instantiation_rejects_tuple_component_type_mismatch() {
+        let ir = r#"package external_test
+
+fn external_pair(value: (bits[8], bits[16]) id=1) -> (bits[8], bits[16]) {
+  ret value: (bits[8], bits[16]) = param(name=value, id=1)
+}
+
+top block wrapper(input: bits[8], result: bits[8]) {
+  instantiation external_instance(foreign_function=external_pair, kind=extern)
+  input: bits[8] = input_port(name=input, id=2)
+  instantiation_input.3: () = instantiation_input(input, instantiation=external_instance, port_name=value.1, id=3)
+  instantiation_output.4: bits[8] = instantiation_output(instantiation=external_instance, port_name=return.0, id=4)
+  result: () = output_port(instantiation_output.4, name=result, id=5)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let package = parser.parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::InstantiationPortTypeMismatch {
+                direction: InstantiationPortDirection::Input,
+                expected: Type::Bits(16),
+                actual: Type::Bits(8),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn external_instantiation_accepts_aggregate_and_component_ports() {
+        let ir = r#"package external_test
+
+fn external_pair(value: (bits[8], bits[16]) id=1) -> (bits[8], bits[16]) {
+  ret value: (bits[8], bits[16]) = param(name=value, id=1)
+}
+
+top block wrapper(value: (bits[8], bits[16]), result: bits[8]) {
+  instantiation external_instance(foreign_function=external_pair, kind=extern)
+  value: (bits[8], bits[16]) = input_port(name=value, id=2)
+  instantiation_input.3: () = instantiation_input(value, instantiation=external_instance, port_name=value, id=3)
+  instantiation_output.4: bits[8] = instantiation_output(instantiation=external_instance, port_name=return.0, id=4)
+  result: () = output_port(instantiation_output.4, name=result, id=5)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let package = parser.parse_package().unwrap();
+        assert_eq!(validate_package(&package), Ok(()));
     }
 
     #[test]

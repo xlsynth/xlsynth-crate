@@ -602,6 +602,8 @@ top block top(a: bits[1], y: bits[1]) {
   instantiation_output.12: bits[1] = instantiation_output(instantiation=u0, port_name=y, id=12)
   instantiation_input.13: () = instantiation_input(a, instantiation=u0, port_name=a, id=13)
   y: () = output_port(instantiation_output.12, name=y, id=14)
+  existing_q: bits[1] = register_read(register=u0__r, id=15)
+  existing_d: () = register_write(a, register=u0__r, id=16)
 }
 "#;
         let mut pkg = parse_pkg(pkg_text);
