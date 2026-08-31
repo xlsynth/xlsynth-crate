@@ -198,7 +198,7 @@ impl<'a> LexerSpanned<'a> {
     fn lex_ident(&mut self) -> String {
         let start = self.idx;
         while let Some(c) = self.peek_char() {
-            if c == '_' || c.is_ascii_alphanumeric() {
+            if c == '_' || c == '$' || c.is_ascii_alphanumeric() {
                 self.idx += c.len_utf8();
             } else {
                 break;

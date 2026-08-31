@@ -128,8 +128,8 @@ pub enum ModuleItem {
         func: FunctionDecl,
         span: Span,
         body_span: Span,
-        begin_span: Span,
-        end_span: Span,
+        begin_span: Option<Span>,
+        end_span: Option<Span>,
     },
     AlwaysFf {
         always_ff: AlwaysFf,

@@ -59,6 +59,10 @@ define_handle!(
     "Identifies a module owned by a [`crate::VastFile`]."
 );
 define_handle!(
+    VastFunction,
+    "Identifies a SystemVerilog function owned by a [`crate::VastFile`]."
+);
+define_handle!(
     ModulePort,
     "Identifies a module port owned by a [`crate::VastFile`]."
 );
@@ -184,6 +188,7 @@ impl MacroRef {
 pub(crate) struct Ast {
     pub(crate) file_items: Vec<FileItem>,
     pub(crate) modules: Vec<ModuleData>,
+    pub(crate) functions: Vec<FunctionData>,
     pub(crate) expressions: Vec<ExprData>,
     pub(crate) data_types: Vec<TypeData>,
     pub(crate) ports: Vec<PortData>,
@@ -232,6 +237,31 @@ pub(crate) struct PortData {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct FunctionData {
+    pub(crate) name: String,
+    pub(crate) result_type: VastDataType,
+    pub(crate) result_ref: LogicRef,
+    pub(crate) inputs: Vec<FunctionInputData>,
+    pub(crate) locals: Vec<FunctionLocalData>,
+    pub(crate) body: VastStatementBlock,
+    pub(crate) defined_names: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FunctionInputData {
+    pub(crate) kind: DataKind,
+    pub(crate) name: String,
+    pub(crate) data_type: VastDataType,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FunctionLocalData {
+    pub(crate) kind: DataKind,
+    pub(crate) name: String,
+    pub(crate) data_type: VastDataType,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum ExprData {
     Name {
         name: String,
@@ -267,6 +297,11 @@ pub(crate) enum ExprData {
         hi: Expr,
         lo: Expr,
     },
+    IndexedPartSelect {
+        subject: Expr,
+        start: Expr,
+        width: i64,
+    },
     Concat {
         replication: Option<Expr>,
         elements: Vec<Expr>,
@@ -285,6 +320,10 @@ pub(crate) enum ExprData {
     Macro {
         name: String,
         args: Option<Vec<Expr>>,
+    },
+    FunctionCall {
+        name: String,
+        args: Vec<Expr>,
     },
 }
 
@@ -373,6 +412,7 @@ pub(crate) enum MemberData {
         rhs: Expr,
     },
     Instantiation(Instantiation),
+    Function(VastFunction),
     Always(VastAlwaysBase),
     Generate(GenerateLoop),
     Parameter {
@@ -418,6 +458,8 @@ pub(crate) struct ConditionalData {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CaseData {
+    pub(crate) wildcard_z: bool,
+    pub(crate) unique: bool,
     pub(crate) selector: Expr,
     pub(crate) arms: Vec<(Option<Expr>, VastStatementBlock)>,
 }

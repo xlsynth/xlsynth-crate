@@ -7,9 +7,9 @@ use std::fmt::Write;
 use crate::VastFile;
 use crate::model::{
     AlwaysKind, BinaryOp, CaseStatement, Conditional, DataKind, Expr, ExprData, FileItem,
-    GenerateLoop, Instantiation, IntegerTypeKind, MemberData, ModuleData, ModulePortDirection,
-    StatementData, TypeData, UnaryOp, VastAlwaysBase, VastDataType, VastFileType,
-    VastStatementBlock,
+    FunctionData, GenerateLoop, Instantiation, IntegerTypeKind, MemberData, ModuleData,
+    ModulePortDirection, StatementData, TypeData, UnaryOp, VastAlwaysBase, VastDataType,
+    VastFileType, VastFunction, VastStatementBlock,
 };
 
 /// Emits all file members in insertion order, with one terminating newline
@@ -43,8 +43,12 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
         ExprData::StringLiteral { value } => emit_string_literal(value),
         ExprData::Unary { op, arg } => {
             let operand = emit_expr(file, *arg);
+            // Keep unary operators out of a size cast's constant expression.
             let needs_parentheses = precedence(file, *arg) < 12
-                || matches!(file.ast.expressions[arg.0.index], ExprData::Unary { .. });
+                || matches!(
+                    file.ast.expressions[arg.0.index],
+                    ExprData::Unary { .. } | ExprData::WidthCast { .. }
+                );
             format!(
                 "{}{}",
                 unary_spelling(*op),
@@ -90,7 +94,11 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
                 );
                 emit_expr(file, *subject)
             } else {
-                format!("{}[{}]", emit_expr(file, *subject), emit_expr(file, *index))
+                format!(
+                    "{}[{}]",
+                    parenthesize_if(emit_expr(file, *subject), precedence(file, *subject) < 13),
+                    emit_expr(file, *index)
+                )
             }
         }
         ExprData::Slice { subject, hi, lo } => {
@@ -103,12 +111,21 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
             } else {
                 format!(
                     "{}[{}:{}]",
-                    emit_expr(file, *subject),
+                    parenthesize_if(emit_expr(file, *subject), precedence(file, *subject) < 13),
                     emit_expr(file, *hi),
                     emit_expr(file, *lo)
                 )
             }
         }
+        ExprData::IndexedPartSelect {
+            subject,
+            start,
+            width,
+        } => format!(
+            "{}[{} +: {width}]",
+            parenthesize_if(emit_expr(file, *subject), precedence(file, *subject) < 13),
+            emit_expr(file, *start)
+        ),
         ExprData::Concat {
             replication,
             elements,
@@ -130,6 +147,9 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
             Some(expressions) => format!("`{name}({})", join_expressions(file, expressions)),
             None => format!("`{name}"),
         },
+        ExprData::FunctionCall { name, args } => {
+            format!("{name}({})", join_expressions(file, args))
+        }
     }
 }
 
@@ -416,6 +436,7 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
             )
         }
         MemberData::Instantiation(handle) => emit_instantiation(file, *handle),
+        MemberData::Function(handle) => emit_function(file, *handle),
         MemberData::Always(handle) => emit_always(file, *handle),
         MemberData::Generate(handle) => emit_generate(file, *handle),
         MemberData::Parameter {
@@ -449,6 +470,76 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
             let suffix = if *semicolon { ";" } else { "" };
             format!("{}{suffix}", emit_expr(file, *expr))
         }
+    }
+}
+
+/// Emits an automatic function with typed arguments and ordered local state.
+fn emit_function(file: &VastFile, handle: VastFunction) -> String {
+    let function = &file.ast.functions[handle.0.index];
+    let result = function_result_declaration(file, function);
+    let arguments = function
+        .inputs
+        .iter()
+        .map(|input| {
+            let kind = if is_user_defined(file, input.data_type) {
+                DataKind::User
+            } else {
+                input.kind
+            };
+            format!(
+                "input {}",
+                emit_declaration_without_semicolon(file, kind, input.data_type, &input.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut output = format!("function automatic {result} ({arguments});");
+    for local in &function.locals {
+        output.push('\n');
+        output.push_str(&indent(&format!(
+            "{};",
+            emit_declaration_without_semicolon(file, local.kind, local.data_type, &local.name)
+        )));
+    }
+    output.push('\n');
+    let body = &file.ast.blocks[function.body.0.index];
+    if let [StatementData::Case(case)] = body.statements.as_slice()
+        && file.ast.cases[case.0.index].wildcard_z
+    {
+        output.push_str(&indent(&emit_case(file, *case)));
+    } else {
+        output.push_str(&indent(&emit_statement_block(file, function.body)));
+    }
+    output.push_str("\nendfunction");
+    output
+}
+
+/// Formats a function result with an explicit SystemVerilog storage type.
+fn function_result_declaration(file: &VastFile, function: &FunctionData) -> String {
+    match &file.ast.data_types[function.result_type.0.index] {
+        TypeData::Integer { kind, .. } => {
+            let declaration_kind = match kind {
+                IntegerTypeKind::Integer => DataKind::Integer,
+                IntegerTypeKind::Int => DataKind::Int,
+            };
+            emit_declaration_without_semicolon(
+                file,
+                declaration_kind,
+                function.result_type,
+                &function.name,
+            )
+        }
+        _ if file.file_type == VastFileType::SystemVerilog
+            && !is_user_defined(file, function.result_type) =>
+        {
+            emit_declaration_without_semicolon(
+                file,
+                DataKind::Logic,
+                function.result_type,
+                &function.name,
+            )
+        }
+        _ => emit_type_with_identifier(file, function.result_type, &function.name),
     }
 }
 
@@ -585,17 +676,24 @@ fn emit_conditional(file: &VastFile, handle: Conditional) -> String {
     result
 }
 
-/// Emits an ordinary case statement and its case/default arms.
+/// Emits an ordinary or wildcard case statement and its case/default arms.
 fn emit_case(file: &VastFile, handle: CaseStatement) -> String {
     let case = &file.ast.cases[handle.0.index];
-    let mut result = format!("case ({})", emit_expr(file, case.selector));
+    let keyword = if case.wildcard_z { "casez" } else { "case" };
+    let qualifier = if case.unique { "unique " } else { "" };
+    let mut result = format!("{qualifier}{keyword} ({})", emit_expr(file, case.selector));
     for (pattern, block) in &case.arms {
         let label = pattern.map_or_else(|| "default".to_owned(), |expr| emit_expr(file, expr));
+        let statements = &file.ast.blocks[block.0.index].statements;
+        let body = match statements.as_slice() {
+            [
+                statement @ (StatementData::BlockingAssignment { .. }
+                | StatementData::NonblockingAssignment { .. }),
+            ] if case.wildcard_z => emit_statement(file, statement),
+            _ => emit_statement_block(file, *block),
+        };
         result.push('\n');
-        result.push_str(&indent(&format!(
-            "{label}: {}",
-            emit_statement_block(file, *block)
-        )));
+        result.push_str(&indent(&format!("{label}: {body}")));
     }
     result.push_str("\nendcase");
     result

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-
 use xlsynth_vastly::CoverageCounters;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
@@ -11,6 +10,33 @@ use xlsynth_vastly::compile_combo_module;
 use xlsynth_vastly::eval_combo;
 use xlsynth_vastly::eval_combo_seeded_with_coverage;
 use xlsynth_vastly::plan_combo_eval;
+
+#[test]
+fn zero_based_unpacked_dimensions_preserve_numeric_indexing() {
+    for dimension in ["[2]", "[0:1]", "[1:0]"] {
+        let source = format!(
+            r#"module dims(input wire [7:0] x, output wire [7:0] out);
+  wire [3:0] values{dimension};
+  assign values[0] = x[3:0];
+  assign values[1] = x[7:4];
+  assign out = {{values[1], values[0]}};
+endmodule
+"#
+        );
+        let module = compile_combo_module(&source).unwrap();
+        let plan = plan_combo_eval(&module).unwrap();
+        for value in [0, 0x2a, 0x85, 0xff] {
+            let input = Value4::from_u64(8, Signedness::Unsigned, value);
+            let outputs = eval_combo(
+                &module,
+                &plan,
+                &BTreeMap::from([("x".into(), input.clone())]),
+            )
+            .unwrap();
+            assert_eq!(outputs["out"], input);
+        }
+    }
+}
 
 fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
     assert_eq!(msb.len(), width as usize);
@@ -74,6 +100,98 @@ endmodule
     // Assigns and functions should be present.
     assert!(m.assigns.len() >= 2);
     assert!(m.functions.contains_key("pick"));
+}
+
+#[test]
+fn wire_initializers_are_continuous_assignments_in_both_module_flows() {
+    let source = r#"module initialized(input logic clk, input logic [7:0] data, output logic [7:0] out);
+  wire [7:0] reset_value = {4'ha, 4'h5};
+  wire [7:0] mixed = data ^ reset_value;
+  assign out = mixed;
+endmodule
+"#;
+    let combo = compile_combo_module(source).unwrap();
+    let pipeline = xlsynth_vastly::compile_pipeline_module(source).unwrap();
+    for module in [&combo, &pipeline.combo] {
+        let plan = plan_combo_eval(module).unwrap();
+        for value in [0, 1, 0xa5, 255] {
+            let inputs = BTreeMap::from([
+                (
+                    "clk".to_owned(),
+                    Value4::from_u64(1, Signedness::Unsigned, 0),
+                ),
+                (
+                    "data".to_owned(),
+                    Value4::from_u64(8, Signedness::Unsigned, value),
+                ),
+            ]);
+            let actual = eval_combo(module, &plan, &inputs).unwrap();
+            assert_eq!(
+                actual["out"],
+                Value4::from_u64(8, Signedness::Unsigned, value ^ 0xa5)
+            );
+        }
+    }
+    let variable_initializer = source.replace("wire [7:0] mixed", "logic [7:0] mixed");
+    assert!(compile_combo_module(&variable_initializer).is_err());
+}
+
+#[test]
+fn casez_functions_evaluate_with_optional_body_and_arm_wrappers() {
+    for wrap_function in [false, true] {
+        for wrap_arms in [false, true] {
+            for qualifier in ["", "unique "] {
+                let function_begin = if wrap_function { "begin" } else { "" };
+                let function_end = if wrap_function { "end" } else { "" };
+                let arm_begin = if wrap_arms { "begin" } else { "" };
+                let arm_end = if wrap_arms { "end" } else { "" };
+                let dut = format!(
+                    r#"module m(input logic clk, input logic [1:0] sel, output logic [1:0] out);
+  function automatic [1:0] leading (input logic [1:0] value);
+    {function_begin}
+    {qualifier}casez (value)
+      2'b1?: {arm_begin} leading = 2'h0; {arm_end}
+      2'b01: {arm_begin} leading = 2'h1; {arm_end}
+      default: {arm_begin} leading = 2'h2; {arm_end}
+    endcase
+    {function_end}
+  endfunction
+  assign out = leading(sel);
+endmodule
+"#
+                );
+                let module = compile_combo_module(&dut).unwrap();
+                let plan = plan_combo_eval(&module).unwrap();
+                let pipeline = xlsynth_vastly::compile_pipeline_module(&dut).unwrap();
+                let meta = &pipeline.fn_meta["leading"];
+                let body = &dut[meta.body_span.start..meta.body_span.end];
+                let expected_start = if wrap_function {
+                    "begin".to_owned()
+                } else {
+                    format!("{qualifier}casez")
+                };
+                assert!(body.starts_with(&expected_start));
+                assert!(body.ends_with(if wrap_function { "end" } else { "endcase" }));
+                assert!(meta.scaffold_spans.iter().all(|span| span.start < span.end));
+                for (input, expected) in [(0, 2), (1, 1), (2, 0), (3, 0)] {
+                    let inputs = [
+                        (
+                            "clk".to_owned(),
+                            Value4::from_u64(1, Signedness::Unsigned, 0),
+                        ),
+                        (
+                            "sel".to_owned(),
+                            Value4::from_u64(2, Signedness::Unsigned, input),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect();
+                    let outputs = eval_combo(&module, &plan, &inputs).unwrap();
+                    assert_eq!(outputs["out"].to_u64_if_known(), Some(expected), "{dut}");
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -353,10 +471,10 @@ module bad_unpacked_decl_v(
   input wire [1:0] in_data,
   output wire [1:0] out
 );
-  wire [1:0] lanes[0:1];
-  assign lanes[0] = in_data;
+  wire [1:0] lanes[1:2];
   assign lanes[1] = in_data;
-  assign out = lanes[0];
+  assign lanes[2] = in_data;
+  assign out = lanes[1];
 endmodule
 "#;
     let err = compile_combo_module(bad_unpacked).unwrap_err();

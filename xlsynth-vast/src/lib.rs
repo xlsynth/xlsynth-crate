@@ -18,19 +18,278 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use literal::Literal;
 use model::{
     AlwaysData, Artifact, AssignmentData, Ast, BinaryOp, BlockData, CaseData, ConditionalData,
-    DefData, ExprData, FileItem, GenerateData, Id, InstantiationData, IntegerTypeKind, MemberData,
-    ModuleData, ParameterPortData, PortData, StatementData, TypeData, UnaryOp,
+    DefData, ExprData, FileItem, FunctionData, FunctionInputData, FunctionLocalData, GenerateData,
+    Id, InstantiationData, IntegerTypeKind, MemberData, ModuleData, ParameterPortData, PortData,
+    StatementData, TypeData, UnaryOp,
 };
 
 pub use model::{
     AlwaysKind, BlankLine, CaseStatement, Comment, Conditional, ContinuousAssignment, DataKind,
     Def, Expr, GenerateLoop, Index, IndexableExpr, InlineVerilogStatement, Instantiation,
     LocalparamRef, LogicRef, MacroRef, MacroStatement, ModulePort, ModulePortDirection,
-    ParameterRef, Slice, VastAlwaysBase, VastDataType, VastFileType, VastModule, VastStatement,
-    VastStatementBlock,
+    ParameterRef, Slice, VastAlwaysBase, VastDataType, VastFileType, VastFunction, VastModule,
+    VastStatement, VastStatementBlock,
 };
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Reports whether `identifier` is reserved in Verilog or SystemVerilog.
+///
+/// Keywords are case-sensitive. This includes the complete Verilog keyword
+/// set together with the SystemVerilog additions through IEEE 1800-2012.
+pub fn is_system_verilog_keyword(identifier: &str) -> bool {
+    matches!(
+        identifier,
+        "accept_on"
+            | "alias"
+            | "always"
+            | "always_comb"
+            | "always_ff"
+            | "always_latch"
+            | "and"
+            | "assert"
+            | "assign"
+            | "assume"
+            | "automatic"
+            | "before"
+            | "begin"
+            | "bind"
+            | "bins"
+            | "binsof"
+            | "bit"
+            | "break"
+            | "buf"
+            | "bufif0"
+            | "bufif1"
+            | "byte"
+            | "case"
+            | "casex"
+            | "casez"
+            | "cell"
+            | "chandle"
+            | "checker"
+            | "class"
+            | "clocking"
+            | "cmos"
+            | "config"
+            | "const"
+            | "constraint"
+            | "context"
+            | "continue"
+            | "cover"
+            | "covergroup"
+            | "coverpoint"
+            | "cross"
+            | "deassign"
+            | "default"
+            | "defparam"
+            | "design"
+            | "disable"
+            | "dist"
+            | "do"
+            | "edge"
+            | "else"
+            | "end"
+            | "endcase"
+            | "endchecker"
+            | "endclass"
+            | "endclocking"
+            | "endconfig"
+            | "endfunction"
+            | "endgenerate"
+            | "endgroup"
+            | "endinterface"
+            | "endmodule"
+            | "endpackage"
+            | "endprimitive"
+            | "endprogram"
+            | "endproperty"
+            | "endsequence"
+            | "endspecify"
+            | "endtable"
+            | "endtask"
+            | "enum"
+            | "event"
+            | "eventually"
+            | "expect"
+            | "export"
+            | "extends"
+            | "extern"
+            | "final"
+            | "first_match"
+            | "for"
+            | "force"
+            | "foreach"
+            | "forever"
+            | "fork"
+            | "forkjoin"
+            | "function"
+            | "generate"
+            | "genvar"
+            | "global"
+            | "highz0"
+            | "highz1"
+            | "if"
+            | "iff"
+            | "ifnone"
+            | "ignore_bins"
+            | "illegal_bins"
+            | "implements"
+            | "implies"
+            | "import"
+            | "incdir"
+            | "include"
+            | "initial"
+            | "inout"
+            | "input"
+            | "inside"
+            | "instance"
+            | "int"
+            | "integer"
+            | "interconnect"
+            | "interface"
+            | "intersect"
+            | "join"
+            | "join_any"
+            | "join_none"
+            | "large"
+            | "let"
+            | "liblist"
+            | "library"
+            | "local"
+            | "localparam"
+            | "logic"
+            | "longint"
+            | "macromodule"
+            | "matches"
+            | "medium"
+            | "modport"
+            | "module"
+            | "nand"
+            | "negedge"
+            | "nettype"
+            | "new"
+            | "nexttime"
+            | "nmos"
+            | "nor"
+            | "noshowcancelled"
+            | "not"
+            | "notif0"
+            | "notif1"
+            | "null"
+            | "or"
+            | "output"
+            | "package"
+            | "packed"
+            | "parameter"
+            | "pmos"
+            | "posedge"
+            | "primitive"
+            | "priority"
+            | "program"
+            | "property"
+            | "protected"
+            | "pull0"
+            | "pull1"
+            | "pulldown"
+            | "pullup"
+            | "pulsestyle_ondetect"
+            | "pulsestyle_onevent"
+            | "pure"
+            | "rand"
+            | "randc"
+            | "randcase"
+            | "randsequence"
+            | "rcmos"
+            | "real"
+            | "realtime"
+            | "ref"
+            | "reg"
+            | "reject_on"
+            | "release"
+            | "repeat"
+            | "restrict"
+            | "return"
+            | "rnmos"
+            | "rpmos"
+            | "rtran"
+            | "rtranif0"
+            | "rtranif1"
+            | "s_always"
+            | "s_eventually"
+            | "s_nexttime"
+            | "s_until"
+            | "s_until_with"
+            | "scalared"
+            | "sequence"
+            | "shortint"
+            | "shortreal"
+            | "showcancelled"
+            | "signed"
+            | "small"
+            | "soft"
+            | "solve"
+            | "specify"
+            | "specparam"
+            | "static"
+            | "string"
+            | "strong"
+            | "strong0"
+            | "strong1"
+            | "struct"
+            | "super"
+            | "supply0"
+            | "supply1"
+            | "sync_accept_on"
+            | "sync_reject_on"
+            | "table"
+            | "tagged"
+            | "task"
+            | "this"
+            | "throughout"
+            | "time"
+            | "timeprecision"
+            | "timeunit"
+            | "tran"
+            | "tranif0"
+            | "tranif1"
+            | "tri"
+            | "tri0"
+            | "tri1"
+            | "triand"
+            | "trior"
+            | "trireg"
+            | "type"
+            | "typedef"
+            | "union"
+            | "unique"
+            | "unique0"
+            | "unsigned"
+            | "until"
+            | "until_with"
+            | "untyped"
+            | "use"
+            | "uwire"
+            | "var"
+            | "vectored"
+            | "virtual"
+            | "void"
+            | "wait"
+            | "wait_order"
+            | "wand"
+            | "weak"
+            | "weak0"
+            | "weak1"
+            | "while"
+            | "wildcard"
+            | "wire"
+            | "with"
+            | "within"
+            | "wor"
+            | "xnor"
+            | "xor"
+    )
+}
 
 /// Controls how an arbitrary-width integer appears in generated Verilog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -249,6 +508,189 @@ impl VastFile {
     /// Returns the name of a module belonging to this file.
     pub fn module_name(&self, module: VastModule) -> String {
         self.ast.modules[self.check(module.0)].name.clone()
+    }
+
+    /// Returns the insertion position for the next module member.
+    pub fn module_member_count(&self, module: VastModule) -> usize {
+        self.ast.modules[self.check(module.0)].members.len()
+    }
+
+    /// Moves signal declarations ahead of statements in the suffix starting at
+    /// `start`, preserving order within both groups and leaving nested scopes
+    /// and earlier members untouched.
+    pub fn hoist_module_declarations(&mut self, module: VastModule, start: usize) {
+        let module_index = self.check(module.0);
+        self.ast.modules[module_index].members[start..]
+            .sort_by_key(|member| !matches!(member, MemberData::Declaration { .. }));
+    }
+
+    /// Adds an automatic, typed function at the current module-member position.
+    pub fn add_function(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        result_type: &VastDataType,
+    ) -> Result<VastFunction, VastError> {
+        let module_index = self.check(module.0);
+        self.check(result_type.0);
+        if matches!(
+            self.ast.data_types[self.check(result_type.0)],
+            TypeData::UnpackedArray { .. }
+        ) {
+            return Err(VastError(
+                concat!(
+                    "FAILED_PRECONDITION: function result type must not be an anonymous ",
+                    "unpacked array; use a named typedef"
+                )
+                .to_owned(),
+            ));
+        }
+        self.check_unique_module_name(module, name, "function")?;
+
+        let result_ref = self.make_named_ref(name, Some(*result_type));
+        let body = self.make_statement_block();
+        let handle = VastFunction(self.id(self.ast.functions.len()));
+        let mut defined_names = std::collections::BTreeSet::new();
+        defined_names.insert(name.to_owned());
+        self.ast.functions.push(FunctionData {
+            name: name.to_owned(),
+            result_type: *result_type,
+            result_ref,
+            inputs: Vec::new(),
+            locals: Vec::new(),
+            body,
+            defined_names,
+        });
+        self.ast.modules[module_index]
+            .defined_names
+            .insert(name.to_owned());
+        self.push_member(module, MemberData::Function(handle));
+        Ok(handle)
+    }
+
+    /// Adds an ordered, typed input to an existing function.
+    pub fn function_add_input(
+        &mut self,
+        function: VastFunction,
+        name: &str,
+        data_type: &VastDataType,
+    ) -> Result<LogicRef, VastError> {
+        self.add_function_input(function, name, data_type, DataKind::Reg)
+    }
+
+    /// Adds a function input explicitly declared with the `logic` keyword.
+    pub fn function_add_logic_input(
+        &mut self,
+        function: VastFunction,
+        name: &str,
+        data_type: &VastDataType,
+    ) -> Result<LogicRef, VastError> {
+        self.add_function_input(function, name, data_type, DataKind::Logic)
+    }
+
+    /// Adds a typed function input with its requested declaration keyword.
+    fn add_function_input(
+        &mut self,
+        function: VastFunction,
+        name: &str,
+        data_type: &VastDataType,
+        kind: DataKind,
+    ) -> Result<LogicRef, VastError> {
+        let function_index = self.check(function.0);
+        self.check(data_type.0);
+        self.check_unique_function_name(function, name, "input")?;
+
+        let reference = self.make_named_ref(name, Some(*data_type));
+        let function = &mut self.ast.functions[function_index];
+        function.inputs.push(FunctionInputData {
+            kind,
+            name: name.to_owned(),
+            data_type: *data_type,
+        });
+        function.defined_names.insert(name.to_owned());
+        Ok(reference)
+    }
+
+    /// Adds a register declaration local to a function.
+    pub fn function_add_reg(
+        &mut self,
+        function: VastFunction,
+        name: &str,
+        data_type: &VastDataType,
+    ) -> Result<LogicRef, VastError> {
+        self.add_function_local(function, name, data_type, DataKind::Reg)
+    }
+
+    /// Adds a SystemVerilog logic declaration local to a function.
+    pub fn function_add_logic(
+        &mut self,
+        function: VastFunction,
+        name: &str,
+        data_type: &VastDataType,
+    ) -> Result<LogicRef, VastError> {
+        self.add_function_local(function, name, data_type, DataKind::Logic)
+    }
+
+    /// Returns the procedural statement block belonging to a function.
+    pub fn function_body(&self, function: VastFunction) -> VastStatementBlock {
+        self.ast.functions[self.check(function.0)].body
+    }
+
+    /// Returns the implicit function-result variable used for assignments.
+    pub fn function_result(&self, function: VastFunction) -> LogicRef {
+        self.ast.functions[self.check(function.0)].result_ref
+    }
+
+    /// Appends a checked, uniquely named declaration to a function.
+    fn add_function_local(
+        &mut self,
+        function: VastFunction,
+        name: &str,
+        data_type: &VastDataType,
+        kind: DataKind,
+    ) -> Result<LogicRef, VastError> {
+        let function_index = self.check(function.0);
+        self.check(data_type.0);
+        let kind_name = match kind {
+            DataKind::Reg => "reg",
+            DataKind::Logic => "logic",
+            _ => unreachable!("function locals only use reg or logic declarations"),
+        };
+        self.check_unique_function_name(function, name, kind_name)?;
+
+        let reference = self.make_named_ref(name, Some(*data_type));
+        let function = &mut self.ast.functions[function_index];
+        function.locals.push(FunctionLocalData {
+            kind,
+            name: name.to_owned(),
+            data_type: *data_type,
+        });
+        function.defined_names.insert(name.to_owned());
+        Ok(reference)
+    }
+
+    /// Enforces the namespace shared by a function result, inputs, and locals.
+    fn check_unique_function_name(
+        &self,
+        function: VastFunction,
+        name: &str,
+        kind: &str,
+    ) -> Result<(), VastError> {
+        let function = &self.ast.functions[self.check(function.0)];
+        if !function.defined_names.contains(name) {
+            return Ok(());
+        }
+        let names = function
+            .defined_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        Err(VastError(format!(
+            "FAILED_PRECONDITION: Attempted to declare {kind} with name '{name}' multiple times \
+             in function '{}'. Already defined: [{}]",
+            function.name,
+            names.join(", ")
+        )))
     }
 
     /// Returns all of a module's ports in declaration order.
@@ -571,6 +1013,24 @@ impl VastFile {
         }))
     }
 
+    /// Creates a sized binary pattern from MSB-first `0`, `1`, and `?` digits.
+    pub fn make_binary_pattern(&mut self, bits_msb: &str) -> Result<Expr, VastError> {
+        if bits_msb.is_empty()
+            || bits_msb.len() > (1 << 20)
+            || !bits_msb
+                .bytes()
+                .all(|bit| matches!(bit, b'0' | b'1' | b'?'))
+        {
+            return Err(VastError(
+                "binary patterns require 1 to 1048576 MSB-first 0, 1, or ? digits".to_owned(),
+            ));
+        }
+        Ok(self.add_expression(ExprData::Literal {
+            text: format!("{}'b{bits_msb}", bits_msb.len()),
+            value: None,
+        }))
+    }
+
     /// Creates an unsized decimal literal from any signed 32-bit value.
     ///
     /// Negative values, including [`i32::MIN`], are emitted with their leading
@@ -753,6 +1213,18 @@ impl VastFile {
         })
     }
 
+    /// Treats an owned expression as an indexable SystemVerilog expression.
+    ///
+    /// Named signals and arrays are portable index subjects. Common parsers
+    /// reject selects applied directly to literals, concatenations, casts, or
+    /// other compound expressions even when those expressions are enclosed in
+    /// parentheses. Materialize such values first, or lower the selection to a
+    /// shift and width cast when targeting multiple SystemVerilog tools.
+    pub fn make_indexable_expression(&self, expression: &Expr) -> IndexableExpr {
+        self.check(expression.0);
+        IndexableExpr(expression.0)
+    }
+
     /// Creates a fixed-index part select.
     pub fn make_slice(&mut self, subject: &IndexableExpr, hi: i64, lo: i64) -> Slice {
         self.check(subject.0);
@@ -774,6 +1246,25 @@ impl VastFile {
             })
             .0,
         )
+    }
+
+    /// Creates an ascending indexed part select: `subject[start +: width]`.
+    ///
+    /// The subject must be a packed vector, and the width must be positive.
+    pub fn make_indexed_part_select(
+        &mut self,
+        subject: &IndexableExpr,
+        start: &Expr,
+        width: i64,
+    ) -> Expr {
+        self.check(subject.0);
+        self.check(start.0);
+        assert!(width > 0, "indexed part-select width must be positive");
+        self.add_expression(ExprData::IndexedPartSelect {
+            subject: subject.to_expr(),
+            start: *start,
+            width,
+        })
     }
 
     /// Creates a constant-index bit select.
@@ -805,6 +1296,16 @@ impl VastFile {
                 **expression
             })
             .collect()
+    }
+
+    /// Calls an ordinary or system function with ordered, owned arguments.
+    pub fn make_function_call(&mut self, name: &str, arguments: &[&Expr]) -> Expr {
+        assert!(!name.is_empty(), "function call name must not be empty");
+        let arguments = self.checked_expressions(arguments);
+        self.add_expression(ExprData::FunctionCall {
+            name: name.to_owned(),
+            args: arguments,
+        })
     }
 
     /// Creates an ordinary concatenation expression.
@@ -1638,9 +2139,25 @@ impl VastFile {
 
     /// Adds a case statement to a procedural block.
     pub fn block_add_case(&mut self, block: VastStatementBlock, selector: &Expr) -> CaseStatement {
+        self.add_case(block, selector, false)
+    }
+
+    /// Adds a `casez` statement, treating `z` and `?` bits as wildcards.
+    pub fn block_add_casez(&mut self, block: VastStatementBlock, selector: &Expr) -> CaseStatement {
+        self.add_case(block, selector, true)
+    }
+
+    fn add_case(
+        &mut self,
+        block: VastStatementBlock,
+        selector: &Expr,
+        wildcard_z: bool,
+    ) -> CaseStatement {
         self.check(selector.0);
         let case = CaseStatement(self.id(self.ast.cases.len()));
         self.ast.cases.push(CaseData {
+            wildcard_z,
+            unique: false,
             selector: *selector,
             arms: Vec::new(),
         });
@@ -1657,6 +2174,16 @@ impl VastFile {
             .arms
             .push((Some(*pattern), block));
         block
+    }
+
+    /// Requests SystemVerilog's uniqueness check for disjoint case patterns.
+    pub fn case_set_unique(&mut self, case: CaseStatement, unique: bool) -> Result<(), VastError> {
+        let index = self.check(case.0);
+        if unique && self.file_type != VastFileType::SystemVerilog {
+            return Err(VastError("unique case requires SystemVerilog".to_owned()));
+        }
+        self.ast.cases[index].unique = unique;
+        Ok(())
     }
 
     /// Adds a default case arm and returns its procedural statement block.

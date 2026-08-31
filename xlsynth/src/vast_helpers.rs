@@ -206,8 +206,11 @@ fn emit_registers_with_templates(
             keys.insert(TemplateVariable::Enable, file.emit_expression(&enable));
         }
 
-        let inline_string = emit_template(template, &keys);
-        let inline_statement = file.make_inline_verilog_statement(&format!("{inline_string};"));
+        let mut inline_string = emit_template(template, &keys);
+        if !inline_string.trim_end().ends_with(';') {
+            inline_string.push(';');
+        }
+        let inline_statement = file.make_inline_verilog_statement(&inline_string);
         match scope {
             RegisterScope::Module(module) => {
                 file.add_member_inline_statement(module, inline_statement);
@@ -340,7 +343,7 @@ endmodule
         let zero = file.make_literal("bits[1]:0", &LiteralFormat::Hex).unwrap();
 
         let options = CodegenOptions {
-            reg_template: Some("PLAIN({{clock}}, {{reg}}, {{next}})".into()),
+            reg_template: Some("PLAIN({{clock}}, {{reg}}, {{next}});".into()),
             reg_with_en_template: Some("EN({{clock}}, {{reg}}, {{next}}, {{en}})".into()),
             reg_with_reset_template: Some(
                 "RESET({{clock}}, {{reset}}, {{reg}}, {{next}}, {{reset_value}})".into(),

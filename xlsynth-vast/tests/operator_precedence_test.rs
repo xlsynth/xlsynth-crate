@@ -36,6 +36,24 @@ fn add_output_assignment(file: &mut VastFile, module: VastModule, name: &str, va
 }
 
 #[test]
+fn unary_operators_apply_to_cast_values_not_cast_widths() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let Operands { a, .. } = named_operands(&mut file);
+    let width = file.make_unsized_decimal_literal(4);
+    let cast = file.make_width_cast(&width, &a);
+    for (expression, expected) in [
+        (file.make_negate(&cast), "-(4'(a))"),
+        (file.make_bitwise_not(&cast), "~(4'(a))"),
+        (file.make_logical_not(&cast), "!(4'(a))"),
+        (file.make_and_reduce(&cast), "&(4'(a))"),
+        (file.make_or_reduce(&cast), "|(4'(a))"),
+        (file.make_xor_reduce(&cast), "^(4'(a))"),
+    ] {
+        assert_eq!(file.emit_expression(&expression), expected);
+    }
+}
+
+#[test]
 fn exponentiation_is_left_associative_in_both_verilog_dialects() {
     for file_type in [VastFileType::Verilog, VastFileType::SystemVerilog] {
         let mut file = VastFile::new(file_type);

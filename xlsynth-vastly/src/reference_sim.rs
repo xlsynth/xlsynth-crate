@@ -24,7 +24,6 @@ pub enum ValueDomain {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ReferenceSimKind {
     Iverilog,
-    YosysCxxrtl,
 }
 
 /// Describes the semantic/value-domain surface a reference implementation
@@ -44,11 +43,6 @@ impl ReferenceSimKind {
             Self::Iverilog => ReferenceSimCapabilities {
                 value_domain: ValueDomain::FourValue,
                 supports_expr_diff: true,
-                supports_module_diff: true,
-            },
-            Self::YosysCxxrtl => ReferenceSimCapabilities {
-                value_domain: ValueDomain::TwoValue,
-                supports_expr_diff: false,
                 supports_module_diff: true,
             },
         }
@@ -143,16 +137,11 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_distinguish_two_value_and_four_value_backends() {
+    fn capabilities_describe_iverilog() {
         let four_value = ReferenceSimKind::Iverilog.capabilities();
         assert_eq!(four_value.value_domain, ValueDomain::FourValue);
         assert!(four_value.supports_expr_diff);
         assert!(four_value.supports_module_diff);
-
-        let two_value = ReferenceSimKind::YosysCxxrtl.capabilities();
-        assert_eq!(two_value.value_domain, ValueDomain::TwoValue);
-        assert!(!two_value.supports_expr_diff);
-        assert!(two_value.supports_module_diff);
     }
 
     #[test]
