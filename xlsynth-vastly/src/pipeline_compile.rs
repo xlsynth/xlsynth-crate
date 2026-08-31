@@ -155,10 +155,10 @@ fn compile_pipeline_module_with_options(
                         arms,
                         ..
                     } => {
-                        scaffold_spans.push(*begin_span);
+                        scaffold_spans.extend(*begin_span);
                         scaffold_spans.push(*casez_span);
                         scaffold_spans.push(*endcase_span);
-                        scaffold_spans.push(*end_span);
+                        scaffold_spans.extend(*end_span);
                         for a in arms {
                             arms_meta.push(FunctionArmMeta {
                                 arm_span: a.arm_span,
@@ -167,13 +167,13 @@ fn compile_pipeline_module_with_options(
                         }
                     }
                     crate::sv_ast::FunctionBody::Assign { value_span, .. } => {
-                        scaffold_spans.push(*begin_span);
-                        scaffold_spans.push(*end_span);
+                        scaffold_spans.extend(*begin_span);
+                        scaffold_spans.extend(*end_span);
                         assign_expr_span = Some(*value_span);
                     }
                     crate::sv_ast::FunctionBody::Procedure { .. } => {
-                        scaffold_spans.push(*begin_span);
-                        scaffold_spans.push(*end_span);
+                        scaffold_spans.extend(*begin_span);
+                        scaffold_spans.extend(*end_span);
                     }
                 }
                 fn_meta.insert(

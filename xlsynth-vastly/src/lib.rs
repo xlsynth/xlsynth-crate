@@ -39,7 +39,6 @@ mod value;
 mod vcd;
 mod vcd_diff;
 mod vcd_writer;
-mod yosys_cxxrtl_combo;
 
 pub use crate::ast_spanned::SpannedExpr;
 pub use crate::ast_spanned::SpannedExprKind;
@@ -108,8 +107,6 @@ pub use crate::value::Value4;
 pub use crate::vcd::Vcd;
 pub use crate::vcd_diff::VcdDiffOptions;
 pub use crate::vcd_diff::diff_vcd_exact;
-pub use crate::yosys_cxxrtl_combo::eval_yosys_cxxrtl_combo;
-pub use crate::yosys_cxxrtl_combo::has_yosys_cxxrtl_toolchain;
 
 use std::collections::BTreeMap;
 

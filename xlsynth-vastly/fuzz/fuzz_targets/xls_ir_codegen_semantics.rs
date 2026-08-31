@@ -288,59 +288,6 @@ fuzz_target!(|data: &[u8]| {
                 &stimulus_ordinal,
             );
         }
-        if include_yosys_cxxrtl_reference_sim() && input_map_is_two_value_safe(&input_map) {
-            let got_cxxrtl_v = match eval_codegen_with_yosys_cxxrtl_verilog(
-                &verilog_src,
-                "fuzz_codegen_v",
-                &input_map,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    unsupported(
-                        "yosys/cxxrtl could not compile/eval generated Verilog",
-                        &ir_text,
-                        Some(&verilog_src),
-                        Some(&format!(
-                            "{e} {}",
-                            summarize_stimulus_with_index(stimulus, &stimulus_ordinal)
-                        )),
-                        data,
-                    );
-                    return;
-                }
-            };
-
-            assert_same_bits(
-                "yosys_cxxrtl_verilog",
-                &want_bits,
-                &got_cxxrtl_v,
-                &ir_text,
-                &verilog_src,
-                data,
-                stimulus,
-                &stimulus_ordinal,
-            );
-            assert_same_bits(
-                "yosys_cxxrtl_v_vs_vastly_v",
-                &got_cxxrtl_v,
-                &got_v,
-                &ir_text,
-                &verilog_src,
-                data,
-                stimulus,
-                &stimulus_ordinal,
-            );
-            assert_same_bits(
-                "yosys_cxxrtl_v_vs_vastly_sv",
-                &got_cxxrtl_v,
-                &got_sv,
-                &ir_text,
-                &sv_src,
-                data,
-                stimulus,
-                &stimulus_ordinal,
-            );
-        }
     }
 
     let mut stage1_retired: Option<(String, Vec<Value4>)> = None;
@@ -680,28 +627,6 @@ fn eval_codegen_with_iverilog_verilog(
     result
 }
 
-fn eval_codegen_with_yosys_cxxrtl_verilog(
-    src: &str,
-    module_name: &str,
-    inputs: &BTreeMap<String, Value4>,
-) -> Result<Value4, String> {
-    let m = xlsynth_vastly::compile_combo_module(src)
-        .map_err(|e| format!("compile_combo_module failed before Yosys/CXXRTL run: {e:?}"))?;
-    if m.output_ports.len() != 1 {
-        return Err(format!(
-            "expected exactly one output port, got {}",
-            m.output_ports.len()
-        ));
-    }
-    let out_name = m.output_ports[0].name.clone();
-    let outputs = xlsynth_vastly::eval_yosys_cxxrtl_combo(src, module_name, inputs)
-        .map_err(|e| format!("eval_yosys_cxxrtl_combo failed: {e:?}"))?;
-    outputs
-        .get(&out_name)
-        .cloned()
-        .ok_or_else(|| format!("output `{out_name}` missing from Yosys/CXXRTL result"))
-}
-
 fn eval_pipeline_with_vastly(
     src: &str,
     pipeline_stages: usize,
@@ -908,10 +833,6 @@ fn include_iverilog_reference_sim() -> bool {
         || env_truthy("VASTLY_FUZZ_INCLUDE_IVERILOG_ORACLE")
 }
 
-fn include_yosys_cxxrtl_reference_sim() -> bool {
-    env_truthy("VASTLY_FUZZ_INCLUDE_YOSYS_CXXRTL_REFERENCE_SIM")
-}
-
 fn include_stage1_pipeline_oracle() -> bool {
     env_bool_or("VASTLY_FUZZ_INCLUDE_PIPELINE_STAGE1_ORACLE", true)
 }
@@ -922,14 +843,6 @@ fn include_stage2_pipeline_oracle() -> bool {
 
 fn use_autocov_stimuli() -> bool {
     env_truthy("VASTLY_FUZZ_USE_AUTOCOV")
-}
-
-fn input_map_is_two_value_safe(input_map: &BTreeMap<String, Value4>) -> bool {
-    let mut env = xlsynth_vastly::Env::new();
-    for (name, value) in input_map {
-        env.insert(name.clone(), value.clone());
-    }
-    xlsynth_vastly::env_is_two_value_safe(&env)
 }
 
 fn unsupported(

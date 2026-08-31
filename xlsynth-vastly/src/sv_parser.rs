@@ -345,7 +345,7 @@ impl<'a> Parser<'a> {
                 TokKind::Semi => {
                     self.bump();
                 }
-                _ => items.push(self.parse_combo_item()?),
+                _ => items.extend(self.parse_combo_item()?),
             }
         };
 
@@ -359,11 +359,10 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_combo_item(&mut self) -> Result<ModuleItem> {
-        match self.cur().clone() {
+    fn parse_combo_item(&mut self) -> Result<Vec<ModuleItem>> {
+        let item = match self.cur().clone() {
             TokKind::KwWire => {
-                let (d, span) = self.parse_wire_decl_with_span()?;
-                Ok(ModuleItem::Decl { decl: d, span })
+                return self.parse_wire_decl_with_span();
             }
             TokKind::KwLogic | TokKind::KwReg => {
                 let (d, span) = self.parse_logic_decl_with_span()?;
@@ -389,7 +388,8 @@ impl<'a> Parser<'a> {
                 "unsupported combo module item token: {:?}",
                 other
             ))),
-        }
+        }?;
+        Ok(vec![item])
     }
 
     fn parse_combo_generate_for_item(&mut self) -> Result<ModuleItem> {
@@ -537,7 +537,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 continue;
             }
-            items.push(self.parse_combo_item()?);
+            items.extend(self.parse_combo_item()?);
         }
         self.expect(TokKind::KwEnd)?;
         Ok(items)
@@ -600,7 +600,7 @@ impl<'a> Parser<'a> {
                         "unexpected EOF (missing endmodule)".to_string(),
                     ));
                 }
-                _ => items.push(self.parse_pipeline_item()?),
+                _ => items.extend(self.parse_pipeline_item()?),
             }
         };
 
@@ -614,11 +614,10 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_pipeline_item(&mut self) -> Result<ModuleItem> {
-        match self.cur().clone() {
+    fn parse_pipeline_item(&mut self) -> Result<Vec<ModuleItem>> {
+        let item = match self.cur().clone() {
             TokKind::KwWire => {
-                let (d, span) = self.parse_wire_decl_with_span()?;
-                Ok(ModuleItem::Decl { decl: d, span })
+                return self.parse_wire_decl_with_span();
             }
             TokKind::KwLogic | TokKind::KwReg => {
                 let (d, span) = self.parse_logic_decl_with_span()?;
@@ -675,7 +674,8 @@ impl<'a> Parser<'a> {
                 "unsupported pipeline module item token: {:?}",
                 other
             ))),
-        }
+        }?;
+        Ok(vec![item])
     }
 
     fn parse_generate_for_item(&mut self) -> Result<ModuleItem> {
@@ -823,7 +823,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 continue;
             }
-            items.push(self.parse_pipeline_item()?);
+            items.extend(self.parse_pipeline_item()?);
         }
         self.expect(TokKind::KwEnd)?;
         Ok(items)
@@ -948,12 +948,16 @@ impl<'a> Parser<'a> {
                 let second = self.parse_expr_until(&[TokKind::RBracket])?;
                 let first_u = self.eval_const_u32(&first)?;
                 let second_u = self.eval_const_u32(&second)?;
-                if second_u != 0 {
+                if first_u != 0 && second_u != 0 {
                     return Err(Error::Parse(
-                        "unpacked declaration ranges must be zero-based `[N:0]`".to_string(),
+                        "unpacked declaration ranges must be zero-based `[N:0]` or `[0:N]`"
+                            .to_string(),
                     ));
                 }
-                first_u + 1
+                first_u
+                    .max(second_u)
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Parse("unpacked dimension overflows u32".into()))?
             } else {
                 self.eval_const_u32(&first)?
             };
@@ -968,7 +972,9 @@ impl<'a> Parser<'a> {
         Ok(dims)
     }
 
-    fn parse_wire_decl_with_span(&mut self) -> Result<(Decl, Span)> {
+    /// A wire initializer is a continuous assignment, not variable
+    /// initialization.
+    fn parse_wire_decl_with_span(&mut self) -> Result<Vec<ModuleItem>> {
         let start = self.toks[self.idx].start;
         self.expect(TokKind::KwWire)?;
 
@@ -991,18 +997,35 @@ impl<'a> Parser<'a> {
         };
         let unpacked_dims = self.parse_unpacked_dims()?;
         let width = dims_total_width(width, &unpacked_dims)?;
+        let initializer = if *self.cur() == TokKind::Eq {
+            self.bump();
+            Some(self.parse_expr_and_spanned_with_span_until_semi()?)
+        } else {
+            None
+        };
         self.expect(TokKind::Semi)?;
         let end = self.toks[self.idx - 1].end;
-        Ok((
-            Decl {
-                name,
+        let span = Span { start, end };
+        let mut items = vec![ModuleItem::Decl {
+            decl: Decl {
+                name: name.clone(),
                 signed,
                 width,
                 packed_dims,
                 unpacked_dims,
             },
-            Span { start, end },
-        ))
+            span,
+        }];
+        if let Some((rhs, rhs_spanned, rhs_span)) = initializer {
+            items.push(ModuleItem::Assign {
+                lhs: Lhs::Ident(name),
+                rhs,
+                rhs_spanned,
+                rhs_span,
+                span,
+            });
+        }
+        Ok(items)
     }
 
     fn parse_logic_decl_with_span(&mut self) -> Result<(Decl, Span)> {
@@ -1032,7 +1055,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_combo_function_with_spans(&mut self) -> Result<(FunctionDecl, Span, Span, Span)> {
+    fn parse_combo_function_with_spans(
+        &mut self,
+    ) -> Result<(FunctionDecl, Span, Option<Span>, Option<Span>)> {
         self.expect(TokKind::KwFunction)?;
         if *self.cur() == TokKind::KwAutomatic {
             self.bump();
@@ -1085,12 +1110,25 @@ impl<'a> Parser<'a> {
         self.expect(TokKind::Semi)?;
         let locals = self.parse_function_local_decls()?;
 
-        let begin_start = self.toks[self.idx].start;
-        let begin_end = self.toks[self.idx].end;
-        self.expect(TokKind::KwBegin)?;
+        let body_start = self.toks[self.idx].start;
+        let begin_span = if *self.cur() == TokKind::KwBegin {
+            let span = Span {
+                start: body_start,
+                end: self.toks[self.idx].end,
+            };
+            self.bump();
+            Some(span)
+        } else {
+            None
+        };
         let body = match self.cur().clone() {
             TokKind::KwUnique | TokKind::KwCasez => self.parse_unique_casez_body(&name)?,
             _ => {
+                if begin_span.is_none() {
+                    return Err(Error::Parse(
+                        "expected begin or casez in function body".to_owned(),
+                    ));
+                }
                 let assigns = self.parse_procedural_function_body()?;
                 if assigns.len() == 1 && assigns[0].lhs == name {
                     FunctionBody::Assign {
@@ -1102,23 +1140,21 @@ impl<'a> Parser<'a> {
                 }
             }
         };
-        let end_start = self.toks[self.idx].start;
-        let end_tok_end = self.toks[self.idx].end;
-        self.expect(TokKind::KwEnd)?;
-        let end_end = self.toks[self.idx - 1].end;
-        self.expect(TokKind::KwEndfunction)?;
+        let end_span = if begin_span.is_some() {
+            let span = Span {
+                start: self.toks[self.idx].start,
+                end: self.toks[self.idx].end,
+            };
+            self.expect(TokKind::KwEnd)?;
+            Some(span)
+        } else {
+            None
+        };
         let body_span = Span {
-            start: begin_start,
-            end: end_end,
+            start: body_start,
+            end: self.toks[self.idx - 1].end,
         };
-        let begin_span = Span {
-            start: begin_start,
-            end: begin_end,
-        };
-        let end_span = Span {
-            start: end_start,
-            end: end_tok_end,
-        };
+        self.expect(TokKind::KwEndfunction)?;
 
         Ok((
             FunctionDecl {
@@ -1312,9 +1348,13 @@ impl<'a> Parser<'a> {
                 .1
                 .map(|s| s.start)
                 .unwrap_or(self.toks[self.idx - 1].start);
-            self.expect(TokKind::KwBegin)?;
+            let wrapped = *self.cur() == TokKind::KwBegin;
+            if wrapped {
+                self.bump();
+            }
 
-            // Expect `<fn_name> = <expr>;` then `end`
+            // Each arm assigns the function result, optionally inside
+            // begin/end.
             let lhs = match self.toks[self.idx].kind.clone() {
                 TokKind::Ident(s) => {
                     self.bump();
@@ -1330,7 +1370,9 @@ impl<'a> Parser<'a> {
             self.expect(TokKind::Eq)?;
             let (value, value_span) = self.parse_expr_with_span_until_semi()?;
             self.expect(TokKind::Semi)?;
-            self.expect(TokKind::KwEnd)?;
+            if wrapped {
+                self.expect(TokKind::KwEnd)?;
+            }
             let arm_end = self.toks[self.idx - 1].end;
 
             arms.push(CasezArm {

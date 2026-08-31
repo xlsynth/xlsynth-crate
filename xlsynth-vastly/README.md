@@ -78,8 +78,7 @@ cargo test -p xlsynth-vastly --features iverilog-tests
   tool-independent while still providing an explicit opt-in lane for
   differential checks against external implementations.
 - The reference-simulator layer is intentionally pluggable so additional
-  implementations can be slotted in later, including backends with only
-  two-value semantics such as Yosys/CXXRTL.
+  implementations can be slotted in later.
 
 ## Stimulus Format
 

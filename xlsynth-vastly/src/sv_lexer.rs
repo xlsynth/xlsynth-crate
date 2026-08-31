@@ -220,7 +220,7 @@ impl<'a> Lexer<'a> {
         let start = self.idx;
         while self.idx < self.s.len() {
             let c = self.s[self.idx..].chars().next().unwrap();
-            if c == '_' || c.is_ascii_alphanumeric() {
+            if c == '_' || c == '$' || c.is_ascii_alphanumeric() {
                 self.idx += c.len_utf8();
             } else {
                 break;
