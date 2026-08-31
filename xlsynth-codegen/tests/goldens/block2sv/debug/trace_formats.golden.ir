@@ -1,0 +1,26 @@
+package trace_formats_package
+
+top block trace_formats(clk: clock, flag: bits[1], data: bits[8], signed_value: bits[8], out: bits[8]) {
+  flag: bits[1] = input_port(name=flag, id=1)
+  data: bits[8] = input_port(name=data, id=2)
+  signed_value: bits[8] = input_port(name=signed_value, id=3)
+  token: token = after_all(id=4)
+  traced: token = trace(token, flag, format="plain={} hex={:x} padded={:0x} prefixed={:#x} binary={:b} padded_binary={:0b} prefixed_binary={:#b} signed={:d} unsigned={:u}", data_operands=[data, data, data, data, data, data, data, signed_value, data], verbosity=0, id=5)
+  out: () = output_port(data, name=out, id=6)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module trace_formats(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic flag,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   input logic [7:0] signed_value,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   `ifndef SYNTHESIS
+// EXPECT-SV:   always @(posedge clk) begin
+// EXPECT-SV:     if (flag) $display("plain=%0d hex=%0h padded=%h prefixed=0x%h binary=%0b padded_binary=%b prefixed_binary=0b%b signed=%0d unsigned=%0d", data, data, data, data, data, data, data, $signed(signed_value), data);
+// EXPECT-SV:   end
+// EXPECT-SV:   `endif
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule

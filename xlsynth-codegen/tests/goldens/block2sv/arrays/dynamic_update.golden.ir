@@ -1,0 +1,23 @@
+package array_update_package
+
+top block update_array(data: bits[8][4], index: bits[3], value: bits[8], out: bits[8][4]) {
+  data: bits[8][4] = input_port(name=data, id=1)
+  index: bits[3] = input_port(name=index, id=2)
+  value: bits[8] = input_port(name=value, id=3)
+  updated: bits[8][4] = array_update(data, value, indices=[index], id=4)
+  out: () = output_port(updated, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module update_array(
+// EXPECT-SV:   input logic [3:0][7:0] data,
+// EXPECT-SV:   input logic [2:0] index,
+// EXPECT-SV:   input logic [7:0] value,
+// EXPECT-SV:   output logic [3:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [3:0][7:0] updated;
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 4; __i0 = __i0 + 1) begin : gen__updated_0
+// EXPECT-SV:     assign updated[__i0] = index == __i0 ? value : data[__i0];
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = updated;
+// EXPECT-SV: endmodule

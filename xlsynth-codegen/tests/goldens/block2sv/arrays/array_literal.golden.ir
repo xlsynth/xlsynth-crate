@@ -1,0 +1,20 @@
+package array_literal_package
+
+top block literal_array(index: bits[2], out: bits[8]) {
+  index: bits[2] = input_port(name=index, id=1)
+  values: bits[8][3] = literal(value=[5, 11, 23], id=2)
+  selected: bits[8] = array_index(values, indices=[index], id=3)
+  out: () = output_port(selected, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module literal_array(
+// EXPECT-SV:   input logic [1:0] index,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [2:0][7:0] values;
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign values = {8'h17, 8'h0b, 8'h05};
+// EXPECT-SV:   assign selected = values[index < 2'h3 ? index : 2'h2];
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package slice_function_composition
+
+top block slice_functions(data: bits[3], start: bits[3], dynamic_bit_slice_w1_3b_3b: bits[1], result: bits[5], repeated: bits[1]) {
+  data: bits[3] = input_port(name=data, id=1)
+  start: bits[3] = input_port(name=start, id=2)
+  dynamic_bit_slice_w1_3b_3b: bits[1] = input_port(name=dynamic_bit_slice_w1_3b_3b, id=3)
+  decode.4: bits[2] = decode(start, width=2, id=4)
+  dynamic_bit_slice.5: bits[1] = dynamic_bit_slice(data, start, width=1, id=5)
+  bit_slice_update.6: bits[3] = bit_slice_update(data, decode.4, dynamic_bit_slice.5, id=6)
+  concat.7: bits[5] = concat(decode.4, bit_slice_update.6, id=7)
+  dynamic_bit_slice.8: bits[1] = dynamic_bit_slice(data, start, width=1, id=8)
+  xor.9: bits[1] = xor(dynamic_bit_slice.8, dynamic_bit_slice_w1_3b_3b, id=9)
+  result: () = output_port(concat.7, name=result, id=10)
+  repeated: () = output_port(xor.9, name=repeated, id=11)
+}
+
+// OPTIONS: max_inline_depth = 100
+// EXPECT-SV: module slice_functions(
+// EXPECT-SV:   input logic [2:0] data,
+// EXPECT-SV:   input logic [2:0] start,
+// EXPECT-SV:   input logic dynamic_bit_slice_w1_3b_3b,
+// EXPECT-SV:   output logic [4:0] result,
+// EXPECT-SV:   output logic repeated
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic dynamic_bit_slice_w1_3b_3b__1 (input logic [2:0] operand, input logic [2:0] start);
+// EXPECT-SV:     logic [3:0] extended_operand;
+// EXPECT-SV:     begin
+// EXPECT-SV:       extended_operand = {1'h0, operand};
+// EXPECT-SV:       dynamic_bit_slice_w1_3b_3b__1 = start >= 3'h3 ? 1'h0 : extended_operand[start +: 1];
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic [2:0] bit_slice_update_w3_2b_1b (input logic [2:0] to_update, input logic [1:0] start, input logic update_value);
+// EXPECT-SV:     begin
+// EXPECT-SV:       bit_slice_update_w3_2b_1b = start >= 2'h3 ? to_update : {2'h0, update_value} << start | ~(3'h1 << start) & to_update;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [1:0] decode_4;
+// EXPECT-SV:   assign decode_4 = 2'h1 << start;
+// EXPECT-SV:   assign result = {decode_4, bit_slice_update_w3_2b_1b(data, decode_4, dynamic_bit_slice_w1_3b_3b__1(data, start))};
+// EXPECT-SV:   assign repeated = dynamic_bit_slice_w1_3b_3b__1(data, start) ^ dynamic_bit_slice_w1_3b_3b;
+// EXPECT-SV: endmodule

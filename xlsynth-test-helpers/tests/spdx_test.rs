@@ -29,6 +29,8 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
         || filename == "requirements.txt"
     {
         "#"
+    } else if filename.ends_with(".lib") {
+        "/*"
     } else if filename.ends_with(".vim") {
         "\""
     } else {
@@ -227,6 +229,24 @@ fn test_accepts_textproto_spdx_comment() {
     fs::write(
         textproto_file,
         "# SPDX-License-Identifier: Apache-2.0\nfield: 42\n",
+    )
+    .unwrap();
+
+    let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
+    assert!(
+        missing_spdx_files.is_empty(),
+        "unexpected missing SPDX files: {:?}",
+        missing_spdx_files
+    );
+}
+
+#[test]
+fn test_accepts_liberty_spdx_block_comment() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let liberty_file = temp_dir.path().join("cells.lib");
+    fs::write(
+        liberty_file,
+        "/* SPDX-License-Identifier: Apache-2.0 */\nlibrary(cells) {}\n",
     )
     .unwrap();
 

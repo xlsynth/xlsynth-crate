@@ -1,0 +1,38 @@
+package packed_array_ports_package
+
+block array_child(data: bits[8][2], out: bits[8][2]) {
+  data: bits[8][2] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+top block array_parent(data: bits[8][2], index: bits[2], out: bits[8]) {
+  instantiation child(block=array_child, kind=block)
+  data: bits[8][2] = input_port(name=data, id=3)
+  index: bits[2] = input_port(name=index, id=4)
+  child_input: () = instantiation_input(data, instantiation=child, port_name=data, id=5)
+  child_output: bits[8][2] = instantiation_output(instantiation=child, port_name=out, id=6)
+  selected: bits[8] = array_index(child_output, indices=[index], id=7)
+  out: () = output_port(selected, name=out, id=8)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module array_child(
+// EXPECT-SV:   input logic [1:0][7:0] data,
+// EXPECT-SV:   output logic [1:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module array_parent(
+// EXPECT-SV:   input logic [1:0][7:0] data,
+// EXPECT-SV:   input logic [1:0] index,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0][7:0] child_output;
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign selected = child_output[index < 2'h2 ? index : 2'h1];
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV:   array_child child (
+// EXPECT-SV:     .data(data),
+// EXPECT-SV:     .out(child_output)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

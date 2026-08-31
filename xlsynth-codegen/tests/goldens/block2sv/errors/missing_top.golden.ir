@@ -1,0 +1,9 @@
+package missing_top_package
+
+top block present(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+// OPTIONS: top = "missing"
+// EXPECT-ERROR: requested top block `missing` does not exist

@@ -1,0 +1,23 @@
+package extended_leading_scalar_package
+
+top block extended_leading_scalar(data: bits[1], out: bits[1]) {
+  data: bits[1] = input_port(name=data, id=1)
+  result: bits[1] = ext_clz(data, offset=1, new_bit_count=1, id=2)
+  out: () = output_port(result, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module extended_leading_scalar(
+// EXPECT-SV:   input logic data,
+// EXPECT-SV:   output logic out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic clz_1_1_offset_1 (input logic value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       1'b1: clz_1_1_offset_1 = 1'h1;
+// EXPECT-SV:       default: clz_1_1_offset_1 = 1'h0;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic result;
+// EXPECT-SV:   assign result = clz_1_1_offset_1(data);
+// EXPECT-SV:   assign out = result;
+// EXPECT-SV: endmodule

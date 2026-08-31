@@ -1,0 +1,19 @@
+package gating_package
+
+top block gating(enable: bits[1], data: bits[8], out: bits[8]) {
+  enable: bits[1] = input_port(name=enable, id=1)
+  data: bits[8] = input_port(name=data, id=2)
+  gated: bits[8] = gate(enable, data, id=3)
+  out: () = output_port(gated, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module gating(
+// EXPECT-SV:   input logic enable,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] gated;
+// EXPECT-SV:   assign gated = enable ? data : 8'h00;
+// EXPECT-SV:   assign out = gated;
+// EXPECT-SV: endmodule

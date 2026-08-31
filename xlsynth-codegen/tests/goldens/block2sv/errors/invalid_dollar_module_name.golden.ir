@@ -1,0 +1,9 @@
+package invalid_dollar_module_package
+
+top block valid_name(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+// OPTIONS: module_name = "$bad"
+// EXPECT-ERROR: invalid SystemVerilog module identifier `$bad`: identifier is reserved, malformed, or requires escaping

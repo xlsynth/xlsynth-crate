@@ -1,0 +1,26 @@
+package dynamic_slice_package
+
+top block dynamic_slice(data: bits[24], start: bits[5], out: bits[8]) {
+  data: bits[24] = input_port(name=data, id=1)
+  start: bits[5] = input_port(name=start, id=2)
+  selected: bits[8] = dynamic_bit_slice(data, start, width=8, id=3)
+  out: () = output_port(selected, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module dynamic_slice(
+// EXPECT-SV:   input logic [23:0] data,
+// EXPECT-SV:   input logic [4:0] start,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [7:0] dynamic_bit_slice_w8_24b_5b (input logic [23:0] operand, input logic [4:0] start);
+// EXPECT-SV:     logic [31:0] extended_operand;
+// EXPECT-SV:     begin
+// EXPECT-SV:       extended_operand = {8'h00, operand};
+// EXPECT-SV:       dynamic_bit_slice_w8_24b_5b = start >= 5'h18 ? 8'h00 : extended_operand[start +: 8];
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign selected = dynamic_bit_slice_w8_24b_5b(data, start);
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

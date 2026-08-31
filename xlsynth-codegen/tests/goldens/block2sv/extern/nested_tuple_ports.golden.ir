@@ -1,0 +1,28 @@
+package external_tuple_package
+
+#[ffi_proto("""code_template: "external_pair {fn} (.low({pair.0}), .high({pair.1.0}), .result({return.1.0}));"
+""")]
+fn external_pair(pair: (bits[8], (bits[16])) id=1) -> (bits[8], (bits[16])) {
+  ret pair: (bits[8], (bits[16])) = param(name=pair, id=1)
+}
+
+top block external_tuple(low: bits[8], high: bits[16], result: bits[16]) {
+  instantiation external_instance(foreign_function=external_pair, kind=extern)
+  low: bits[8] = input_port(name=low, id=2)
+  high: bits[16] = input_port(name=high, id=3)
+  connected_low: () = instantiation_input(low, instantiation=external_instance, port_name=pair.0, id=4)
+  connected_high: () = instantiation_input(high, instantiation=external_instance, port_name=pair.1.0, id=5)
+  connected_output: bits[16] = instantiation_output(instantiation=external_instance, port_name=return.1.0, id=6)
+  result: () = output_port(connected_output, name=result, id=7)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module external_tuple(
+// EXPECT-SV:   input logic [7:0] low,
+// EXPECT-SV:   input logic [15:0] high,
+// EXPECT-SV:   output logic [15:0] result
+// EXPECT-SV: );
+// EXPECT-SV:   logic [15:0] connected_output;
+// EXPECT-SV:   assign result = connected_output;
+// EXPECT-SV:   external_pair external_instance (.low(low), .high(high), .result(connected_output));
+// EXPECT-SV: endmodule

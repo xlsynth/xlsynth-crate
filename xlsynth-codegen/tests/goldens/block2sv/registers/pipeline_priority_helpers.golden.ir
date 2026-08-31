@@ -1,0 +1,49 @@
+package pipeline_priority_helpers_package
+
+top block pipeline_priority_helpers(clk: clock, clz_8_4_offset_0: bits[8], out: bits[4]) {
+  reg state(bits[8])
+  clz_8_4_offset_0: bits[8] = input_port(name=clz_8_4_offset_0, id=3)
+  state_write: () = register_write(clz_8_4_offset_0, register=state, id=4)
+  state_read: bits[8] = register_read(register=state, id=5)
+  called: bits[4] = ext_clz(state_read, offset=0, new_bit_count=4, id=6)
+  direct: bits[4] = ext_clz(state_read, offset=0, new_bit_count=4, id=7)
+  result: bits[4] = add(called, direct, id=8)
+  out: () = output_port(result, name=out, id=9)
+}
+
+// OPTIONS: layout = "pipeline"
+// EXPECT-SV: module pipeline_priority_helpers(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] clz_8_4_offset_0,
+// EXPECT-SV:   output logic [3:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [3:0] clz_8_4_offset_0__1 (input logic [7:0] value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       8'b1???????: clz_8_4_offset_0__1 = 4'h0;
+// EXPECT-SV:       8'b01??????: clz_8_4_offset_0__1 = 4'h1;
+// EXPECT-SV:       8'b001?????: clz_8_4_offset_0__1 = 4'h2;
+// EXPECT-SV:       8'b0001????: clz_8_4_offset_0__1 = 4'h3;
+// EXPECT-SV:       8'b00001???: clz_8_4_offset_0__1 = 4'h4;
+// EXPECT-SV:       8'b000001??: clz_8_4_offset_0__1 = 4'h5;
+// EXPECT-SV:       8'b0000001?: clz_8_4_offset_0__1 = 4'h6;
+// EXPECT-SV:       8'b00000001: clz_8_4_offset_0__1 = 4'h7;
+// EXPECT-SV:       default: clz_8_4_offset_0__1 = 4'h8;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 0:
+// EXPECT-SV:   logic [7:0] state;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     state <= clz_8_4_offset_0;
+// EXPECT-SV:   end
+// EXPECT-SV:
+// EXPECT-SV:   // ===== Pipe stage 1:
+// EXPECT-SV:   logic [3:0] p1_called_comb;
+// EXPECT-SV:   logic [3:0] p1_direct_comb;
+// EXPECT-SV:   logic [3:0] p1_result_comb;
+// EXPECT-SV:   assign p1_called_comb = clz_8_4_offset_0__1(state);
+// EXPECT-SV:   assign p1_direct_comb = clz_8_4_offset_0__1(state);
+// EXPECT-SV:   assign p1_result_comb = p1_called_comb + p1_direct_comb;
+// EXPECT-SV:   assign out = p1_result_comb;
+// EXPECT-SV: endmodule

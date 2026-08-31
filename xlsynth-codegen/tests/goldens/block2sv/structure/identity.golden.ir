@@ -1,0 +1,14 @@
+package identity_package
+
+top block identity(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module identity(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule

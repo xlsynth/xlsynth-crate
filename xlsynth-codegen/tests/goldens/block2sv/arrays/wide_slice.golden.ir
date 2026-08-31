@@ -1,0 +1,21 @@
+package wide_array_slice_package
+
+top block wide_slice(data: bits[8][3], start: bits[3], out: bits[8][8]) {
+  data: bits[8][3] = input_port(name=data, id=1)
+  start: bits[3] = input_port(name=start, id=2)
+  selected: bits[8][8] = array_slice(data, start, width=8, id=3)
+  out: () = output_port(selected, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module wide_slice(
+// EXPECT-SV:   input logic [2:0][7:0] data,
+// EXPECT-SV:   input logic [2:0] start,
+// EXPECT-SV:   output logic [7:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0][7:0] selected;
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 8; __i0 = __i0 + 1) begin : gen__selected_0
+// EXPECT-SV:     assign selected[__i0] = data[6'({3'h0, start} + 6'(__i0)) < 6'h03 ? 6'({3'h0, start} + 6'(__i0)) : 6'h02];
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

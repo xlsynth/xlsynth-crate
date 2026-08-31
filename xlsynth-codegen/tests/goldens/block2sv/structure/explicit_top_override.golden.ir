@@ -1,0 +1,22 @@
+package explicit_top_package
+
+top block original(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+block selected(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=3)
+  inverted: bits[8] = not(data, id=4)
+  out: () = output_port(inverted, name=out, id=5)
+}
+
+// OPTIONS: top = "selected"
+// EXPECT-SV: module selected(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] inverted;
+// EXPECT-SV:   assign inverted = ~data;
+// EXPECT-SV:   assign out = inverted;
+// EXPECT-SV: endmodule

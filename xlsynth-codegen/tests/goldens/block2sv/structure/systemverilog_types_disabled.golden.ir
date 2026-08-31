@@ -1,0 +1,14 @@
+package untyped_port_package
+
+top block untyped_ports(input_data: bits[8], output_data: bits[8]) {
+  input_data: bits[8] = input_port(name=input_data, sv_type="types::input_t", id=1)
+  output_data: () = output_port(input_data, name=output_data, sv_type="types::output_t", id=2)
+}
+
+// OPTIONS: emit_sv_types = false
+// EXPECT-SV: module untyped_ports(
+// EXPECT-SV:   input logic [7:0] input_data,
+// EXPECT-SV:   output logic [7:0] output_data
+// EXPECT-SV: );
+// EXPECT-SV:   assign output_data = input_data;
+// EXPECT-SV: endmodule

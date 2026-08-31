@@ -1,0 +1,25 @@
+package bitwise_package
+
+top block bitwise(lhs: bits[16], rhs: bits[16], out: bits[16]) {
+  lhs: bits[16] = input_port(name=lhs, id=1)
+  rhs: bits[16] = input_port(name=rhs, id=2)
+  masked: bits[16] = and(lhs, rhs, id=3)
+  toggled: bits[16] = xor(masked, lhs, id=4)
+  inverted: bits[16] = not(toggled, id=5)
+  out: () = output_port(inverted, name=out, id=6)
+}
+
+// OPTIONS: separate_lines = true
+// EXPECT-SV: module bitwise(
+// EXPECT-SV:   input logic [15:0] lhs,
+// EXPECT-SV:   input logic [15:0] rhs,
+// EXPECT-SV:   output logic [15:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [15:0] masked;
+// EXPECT-SV:   logic [15:0] toggled;
+// EXPECT-SV:   logic [15:0] inverted;
+// EXPECT-SV:   assign masked = lhs & rhs;
+// EXPECT-SV:   assign toggled = masked ^ lhs;
+// EXPECT-SV:   assign inverted = ~toggled;
+// EXPECT-SV:   assign out = inverted;
+// EXPECT-SV: endmodule

@@ -1,0 +1,24 @@
+package unsigned_multiply_package
+
+top block unsigned_multiply(lhs: bits[9], rhs: bits[11], out: bits[20]) {
+  lhs: bits[9] = input_port(name=lhs, id=1)
+  rhs: bits[11] = input_port(name=rhs, id=2)
+  product: bits[20] = umul(lhs, rhs, id=3)
+  out: () = output_port(product, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module unsigned_multiply(
+// EXPECT-SV:   input logic [8:0] lhs,
+// EXPECT-SV:   input logic [10:0] rhs,
+// EXPECT-SV:   output logic [19:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [19:0] umul20b_9b_x_11b (input logic [8:0] lhs, input logic [10:0] rhs);
+// EXPECT-SV:     begin
+// EXPECT-SV:       umul20b_9b_x_11b = lhs * rhs;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [19:0] product;
+// EXPECT-SV:   assign product = umul20b_9b_x_11b(lhs, rhs);
+// EXPECT-SV:   assign out = product;
+// EXPECT-SV: endmodule

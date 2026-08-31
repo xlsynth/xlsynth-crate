@@ -1,0 +1,24 @@
+package constructed_array_package
+
+top block construct_array(first: bits[8], second: bits[8], index: bits[1], out: bits[8]) {
+  first: bits[8] = input_port(name=first, id=1)
+  second: bits[8] = input_port(name=second, id=2)
+  index: bits[1] = input_port(name=index, id=3)
+  values: bits[8][2] = array(first, second, id=4)
+  selected: bits[8] = array_index(values, indices=[index], id=5)
+  out: () = output_port(selected, name=out, id=6)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module construct_array(
+// EXPECT-SV:   input logic [7:0] first,
+// EXPECT-SV:   input logic [7:0] second,
+// EXPECT-SV:   input logic index,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0][7:0] values;
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign values = {second, first};
+// EXPECT-SV:   assign selected = values[index];
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

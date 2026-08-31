@@ -1,0 +1,21 @@
+package aggregate_selection_package
+
+top block select_array(selector: bits[1], first: bits[8][3], second: bits[8][3], out: bits[8][3]) {
+  selector: bits[1] = input_port(name=selector, id=1)
+  first: bits[8][3] = input_port(name=first, id=2)
+  second: bits[8][3] = input_port(name=second, id=3)
+  selected: bits[8][3] = sel(selector, cases=[first, second], id=4)
+  out: () = output_port(selected, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module select_array(
+// EXPECT-SV:   input logic selector,
+// EXPECT-SV:   input logic [2:0][7:0] first,
+// EXPECT-SV:   input logic [2:0][7:0] second,
+// EXPECT-SV:   output logic [2:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [2:0][7:0] selected;
+// EXPECT-SV:   assign selected = selector == 1'h0 ? first : (selector == 1'h1 ? second : second);
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

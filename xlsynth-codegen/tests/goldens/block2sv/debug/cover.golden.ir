@@ -1,0 +1,19 @@
+package coverage_package
+
+top block coverage(clk: clock, flag: bits[1], out: bits[1]) {
+  flag: bits[1] = input_port(name=flag, id=1)
+  covered: () = cover(flag, label="flag_was_set", id=2)
+  out: () = output_port(flag, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module coverage(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic flag,
+// EXPECT-SV:   output logic out
+// EXPECT-SV: );
+// EXPECT-SV:   `ifndef SYNTHESIS
+// EXPECT-SV:   flag_was_set: cover property (@(posedge clk) flag);
+// EXPECT-SV:   `endif
+// EXPECT-SV:   assign out = flag;
+// EXPECT-SV: endmodule

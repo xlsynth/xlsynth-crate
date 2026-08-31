@@ -1,0 +1,47 @@
+package repeated_instance_package
+
+block increment(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  one: bits[8] = literal(value=1, id=2)
+  sum: bits[8] = add(data, one, id=3)
+  out: () = output_port(sum, name=out, id=4)
+}
+
+top block repeated(data: bits[8], out: bits[8]) {
+  instantiation first(block=increment, kind=block)
+  instantiation second(block=increment, kind=block)
+  data: bits[8] = input_port(name=data, id=5)
+  first_input: () = instantiation_input(data, instantiation=first, port_name=data, id=6)
+  first_output: bits[8] = instantiation_output(instantiation=first, port_name=out, id=7)
+  second_input: () = instantiation_input(first_output, instantiation=second, port_name=data, id=8)
+  second_output: bits[8] = instantiation_output(instantiation=second, port_name=out, id=9)
+  out: () = output_port(second_output, name=out, id=10)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module increment(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] one;
+// EXPECT-SV:   logic [7:0] sum;
+// EXPECT-SV:   assign one = 8'h01;
+// EXPECT-SV:   assign sum = data + one;
+// EXPECT-SV:   assign out = sum;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module repeated(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] first_output;
+// EXPECT-SV:   logic [7:0] second_output;
+// EXPECT-SV:   assign out = second_output;
+// EXPECT-SV:   increment first (
+// EXPECT-SV:     .data(data),
+// EXPECT-SV:     .out(first_output)
+// EXPECT-SV:   );
+// EXPECT-SV:   increment second (
+// EXPECT-SV:     .data(first_output),
+// EXPECT-SV:     .out(second_output)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

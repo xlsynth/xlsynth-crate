@@ -1,0 +1,44 @@
+package nested_one_hot_package
+
+top block nested_one_hot(data: bits[4], out: bits[3]) {
+  data: bits[4] = input_port(name=data, id=1)
+  one_hot.2: bits[5] = one_hot(data, lsb_prio=false, id=2)
+  one_hot.3: bits[6] = one_hot(one_hot.2, lsb_prio=true, id=3)
+  result: bits[3] = encode(one_hot.3, id=4)
+  out: () = output_port(result, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module nested_one_hot(
+// EXPECT-SV:   input logic [3:0] data,
+// EXPECT-SV:   output logic [2:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [4:0] one_hot_msb_4 (input logic [3:0] value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       4'b1???: one_hot_msb_4 = 5'h08;
+// EXPECT-SV:       4'b01??: one_hot_msb_4 = 5'h04;
+// EXPECT-SV:       4'b001?: one_hot_msb_4 = 5'h02;
+// EXPECT-SV:       4'b0001: one_hot_msb_4 = 5'h01;
+// EXPECT-SV:       4'b0000: one_hot_msb_4 = 5'h10;
+// EXPECT-SV:       default: one_hot_msb_4 = 'X;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic [5:0] one_hot_lsb_5 (input logic [4:0] value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       5'b????1: one_hot_lsb_5 = 6'h01;
+// EXPECT-SV:       5'b???10: one_hot_lsb_5 = 6'h02;
+// EXPECT-SV:       5'b??100: one_hot_lsb_5 = 6'h04;
+// EXPECT-SV:       5'b?1000: one_hot_lsb_5 = 6'h08;
+// EXPECT-SV:       5'b10000: one_hot_lsb_5 = 6'h10;
+// EXPECT-SV:       5'b00000: one_hot_lsb_5 = 6'h20;
+// EXPECT-SV:       default: one_hot_lsb_5 = 'X;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [4:0] one_hot_2;
+// EXPECT-SV:   logic [5:0] one_hot_3;
+// EXPECT-SV:   logic [2:0] result;
+// EXPECT-SV:   assign one_hot_2 = one_hot_msb_4(data);
+// EXPECT-SV:   assign one_hot_3 = one_hot_lsb_5(one_hot_2);
+// EXPECT-SV:   assign result = {one_hot_3[4] | one_hot_3[5], one_hot_3[2] | one_hot_3[3], one_hot_3[1] | one_hot_3[3] | one_hot_3[5]};
+// EXPECT-SV:   assign out = result;
+// EXPECT-SV: endmodule

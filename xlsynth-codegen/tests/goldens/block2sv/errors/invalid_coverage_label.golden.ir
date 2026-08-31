@@ -1,0 +1,10 @@
+package invalid_coverage_label_package
+
+top block invalid_coverage_label(clk: clock, valid: bits[1], out: bits[1]) {
+  valid: bits[1] = input_port(name=valid, id=1)
+  covered: () = cover(valid, label="always", id=2)
+  out: () = output_port(valid, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: invalid SystemVerilog coverage label identifier `always`: identifier is reserved, malformed, or requires escaping

@@ -1,0 +1,14 @@
+package ambiguous_top_package
+
+block first(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+block second(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=3)
+  out: () = output_port(data, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: package contains multiple blocks (first, second) without a block top; specify --top

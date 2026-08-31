@@ -1,0 +1,19 @@
+package checked_array_package
+
+top block checked_index(data: bits[8][4], index: bits[3], out: bits[8]) {
+  data: bits[8][4] = input_port(name=data, id=1)
+  index: bits[3] = input_port(name=index, id=2)
+  selected: bits[8] = array_index(data, indices=[index], id=3)
+  out: () = output_port(selected, name=out, id=4)
+}
+
+// OPTIONS: array_index_bounds_checking = true
+// EXPECT-SV: module checked_index(
+// EXPECT-SV:   input logic [3:0][7:0] data,
+// EXPECT-SV:   input logic [2:0] index,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign selected = data[index < 3'h4 ? index : 3'h3];
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

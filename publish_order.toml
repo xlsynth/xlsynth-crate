@@ -11,6 +11,7 @@ crates = [
     "xlsynth-mcmc",
     "xlsynth-prover",
     "xlsynth-test-helpers",
+    "xlsynth-codegen",
     "xlsynth-g8r",
     "xlsynth-estimator",
     "xlsynth-mcmc-pir",

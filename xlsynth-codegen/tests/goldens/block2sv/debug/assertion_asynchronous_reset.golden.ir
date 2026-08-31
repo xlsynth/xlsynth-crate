@@ -1,0 +1,23 @@
+package asynchronous_reset_assertion_package
+
+top block asynchronous_reset_assertion(clk: clock, rst_n: bits[1], valid: bits[1], out: bits[1]) {
+  #![reset(port="rst_n", asynchronous=true, active_low=true)]
+  rst_n: bits[1] = input_port(name=rst_n, id=1)
+  valid: bits[1] = input_port(name=valid, id=2)
+  token: token = after_all(id=3)
+  checked: token = assert(token, valid, message="valid outside reset", id=4)
+  out: () = output_port(valid, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module asynchronous_reset_assertion(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic rst_n,
+// EXPECT-SV:   input logic valid,
+// EXPECT-SV:   output logic out
+// EXPECT-SV: );
+// EXPECT-SV:   `ifndef SYNTHESIS
+// EXPECT-SV:   assert property (@(posedge clk) disable iff (rst_n !== 1'b1 || $isunknown(valid)) valid) else $error("valid outside reset");
+// EXPECT-SV:   `endif
+// EXPECT-SV:   assign out = valid;
+// EXPECT-SV: endmodule

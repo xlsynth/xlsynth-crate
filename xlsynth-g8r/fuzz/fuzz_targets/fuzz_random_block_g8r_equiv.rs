@@ -11,29 +11,21 @@ use xlsynth::IrValue;
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
-use xlsynth_g8r_fuzz::random_block::{
-    block_output_types, evaluate_block_cycle, flatten_value,
-};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
 use xlsynth_pir::ir::{BlockMetadata, Fn};
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions, RandomOperation,
-    RandomBlockResetTiming, StopPolicy, generate_block_package,
+    DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
+    RandomOperation, StopPolicy, generate_block_package,
 };
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 
 const CYCLE_COUNT: usize = 32;
 
 fn fuzz_block_options() -> RandomBlockOptions {
-    let operations = OperationSet::new(
-        OperationSet::all_supported()
-            .iter()
-            .filter(|operation| {
-                !matches!(
-                    operation,
-                    RandomOperation::Umulp | RandomOperation::Smulp
-                )
-            }),
-    );
+    let operations =
+        OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+            !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
+        }));
     RandomBlockOptions {
         max_input_ports: 6,
         max_output_ports: 4,
@@ -119,11 +111,11 @@ fuzz_target!(|data: &[u8]| {
         panic!("synchronous-only block generation emitted an asynchronous reset:\n{block_ir}");
     }
 
-    let design = block_package_to_sequential_gate_fn(
-        &generated.package,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .unwrap_or_else(|error| panic!("random block G8R lowering failed:\n{block_ir}\n{error}"));
+    let design =
+        block_package_to_sequential_gate_fn(&generated.package, GatifyOptions::all_opts_disabled())
+            .unwrap_or_else(|error| {
+                panic!("random block G8R lowering failed:\n{block_ir}\n{error}")
+            });
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(blake3::hash(block_ir.as_bytes()).as_bytes());
     let mut rng = StdRng::from_seed(seed);
@@ -151,8 +143,10 @@ fuzz_target!(|data: &[u8]| {
             .zip(&output_types)
             .map(|(value, ty)| flatten_value(value, ty))
             .collect::<Vec<_>>();
-        let trace = sequential::simulate(&design, &[g8r_inputs], g8r_state)
-            .unwrap_or_else(|error| panic!("random block G8R simulation failed:\n{block_ir}\n{error}"));
+        let trace =
+            sequential::simulate(&design, &[g8r_inputs], g8r_state).unwrap_or_else(|error| {
+                panic!("random block G8R simulation failed:\n{block_ir}\n{error}")
+            });
         assert_eq!(
             trace.external_outputs()[0],
             expected_output_bits,

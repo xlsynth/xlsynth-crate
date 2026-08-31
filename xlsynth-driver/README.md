@@ -251,6 +251,61 @@ xlsynth-driver block2fn \
   --drop-output-ports "unused_out" > ~/my_netlist.fn.ir
 ```
 
+### `block2sv`: Block IR to SystemVerilog
+
+Emits an XLS block IR package as synthesizable SystemVerilog using the native
+Rust block emitter. Existing registers, resets, load enables, and hierarchy are
+preserved; the command does not schedule or repipeline its input. Each register
+must have exactly one write node; ambiguous multiple-write graphs are rejected.
+`invoke` and `counted_for` nodes are also rejected; inline calls and unroll loops
+before emission. Leading-zero counts, priority encoders, normalization, and
+priority selects use explicit `casez` helper functions. Arithmetic helpers retain
+the original operand widths, and name collisions use `__1`, `__2`, etc.
+Arrays retain descending packed dimensions on ports, signals, and registers;
+for example, `bits[8][3][2]` becomes `logic [1:0][2:0][7:0]`. Tuples remain flat
+packed vectors. Element-zero packing, bounds behavior, and explicit `sv_type`
+port overrides are preserved.
+
+```shell
+xlsynth-driver block2sv input.block.ir --top=my_block > output.sv
+xlsynth-driver block2sv input.block.ir --layout=pipeline > pipeline.sv
+```
+
+Flags:
+
+- `--top <BLOCK>` selects a block and overrides the package top. If omitted, the
+  package top is used; a package with exactly one block also selects that block.
+- `--layout <none|pipeline>` controls only the emitted source organization. The
+  default is `none`; `pipeline` groups logic and registers by pipeline stage and
+  rejects register graphs that cannot be layered.
+- `--module_name <NAME>` overrides the generated top module name.
+- `--array_index_bounds_checking <BOOL>` controls out-of-range array indexing
+  (default: `true`).
+- `--separate_lines <BOOL>` emits combinational nodes as separate assignments
+  (default: `false`).
+- `--max_inline_depth <DEPTH>` controls combinational expression inlining
+  (default: `5`).
+- `--emit_sv_types <BOOL>` controls emission of SystemVerilog port types
+  (default: `true`).
+- `--add_invariant_assertions <BOOL>` controls generated invariant assertions
+  (default: `true`).
+- `--register_codegen_options <TOML>` loads optional custom register-emission
+  templates from a TOML file. Templates must preserve the block's reset and
+  enable behavior; incompatible asynchronous-reset templates are rejected.
+
+The underscore-separated flags also accept their hyphen-separated spellings.
+
+For example, a custom register template can be configured as:
+
+```toml
+reg_template = "always_ff @(posedge {{clock}}) {{reg}} <= {{next}};"
+```
+
+```shell
+xlsynth-driver block2sv input.block.ir \
+  --register_codegen_options=registers.toml > output.sv
+```
+
 ### `gv2aig`: gate-level netlist to AIGER
 
 Converts a gate-level netlist into an AIGER file.

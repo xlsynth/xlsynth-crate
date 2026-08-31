@@ -1,0 +1,14 @@
+package implicit_top_package
+
+block implicit_top(data: bits[4], out: bits[4]) {
+  data: bits[4] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module implicit_top(
+// EXPECT-SV:   input logic [3:0] data,
+// EXPECT-SV:   output logic [3:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule

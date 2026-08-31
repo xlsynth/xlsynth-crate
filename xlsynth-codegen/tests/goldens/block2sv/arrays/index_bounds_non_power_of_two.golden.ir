@@ -1,0 +1,46 @@
+package index_bounds_non_power_of_two_package
+
+top block index_bounds_non_power_of_two(data: bits[8][3], index: bits[4], selected: bits[8], first: bits[8], last: bits[8], past_end: bits[8]) {
+  data: bits[8][3] = input_port(name=data, id=1)
+  index: bits[4] = input_port(name=index, id=2)
+  zero: bits[4] = literal(value=0, id=3)
+  last_index: bits[4] = literal(value=2, id=4)
+  first_invalid_index: bits[4] = literal(value=3, id=5)
+  dynamic_value: bits[8] = array_index(data, indices=[index], id=6)
+  first_value: bits[8] = array_index(data, indices=[zero], id=7)
+  last_value: bits[8] = array_index(data, indices=[last_index], id=8)
+  past_end_value: bits[8] = array_index(data, indices=[first_invalid_index], id=9)
+  selected: () = output_port(dynamic_value, name=selected, id=10)
+  first: () = output_port(first_value, name=first, id=11)
+  last: () = output_port(last_value, name=last, id=12)
+  past_end: () = output_port(past_end_value, name=past_end, id=13)
+}
+
+// OPTIONS: array_index_bounds_checking = true
+// EXPECT-SV: module index_bounds_non_power_of_two(
+// EXPECT-SV:   input logic [2:0][7:0] data,
+// EXPECT-SV:   input logic [3:0] index,
+// EXPECT-SV:   output logic [7:0] selected,
+// EXPECT-SV:   output logic [7:0] first,
+// EXPECT-SV:   output logic [7:0] last,
+// EXPECT-SV:   output logic [7:0] past_end
+// EXPECT-SV: );
+// EXPECT-SV:   logic [3:0] zero;
+// EXPECT-SV:   logic [3:0] last_index;
+// EXPECT-SV:   logic [3:0] first_invalid_index;
+// EXPECT-SV:   logic [7:0] dynamic_value;
+// EXPECT-SV:   logic [7:0] first_value;
+// EXPECT-SV:   logic [7:0] last_value;
+// EXPECT-SV:   logic [7:0] past_end_value;
+// EXPECT-SV:   assign zero = 4'h0;
+// EXPECT-SV:   assign last_index = 4'h2;
+// EXPECT-SV:   assign first_invalid_index = 4'h3;
+// EXPECT-SV:   assign dynamic_value = data[index < 4'h3 ? index : 4'h2];
+// EXPECT-SV:   assign first_value = data[zero < 4'h3 ? zero : 4'h2];
+// EXPECT-SV:   assign last_value = data[last_index < 4'h3 ? last_index : 4'h2];
+// EXPECT-SV:   assign past_end_value = data[first_invalid_index < 4'h3 ? first_invalid_index : 4'h2];
+// EXPECT-SV:   assign selected = dynamic_value;
+// EXPECT-SV:   assign first = first_value;
+// EXPECT-SV:   assign last = last_value;
+// EXPECT-SV:   assign past_end = past_end_value;
+// EXPECT-SV: endmodule

@@ -1,0 +1,44 @@
+package two_stage_package
+
+top block two_stage(clk: clock, lhs: bits[8], rhs: bits[8], out: bits[8]) {
+  reg first(bits[8])
+  reg second(bits[8])
+  lhs: bits[8] = input_port(name=lhs, id=1)
+  rhs: bits[8] = input_port(name=rhs, id=2)
+  sum: bits[8] = add(lhs, rhs, id=3)
+  first_q: bits[8] = register_read(register=first, id=4)
+  first_d: () = register_write(sum, register=first, id=5)
+  inverted: bits[8] = not(first_q, id=6)
+  second_q: bits[8] = register_read(register=second, id=7)
+  second_d: () = register_write(inverted, register=second, id=8)
+  out: () = output_port(second_q, name=out, id=9)
+}
+
+// OPTIONS: layout = "pipeline"
+// EXPECT-SV: module two_stage(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] lhs,
+// EXPECT-SV:   input logic [7:0] rhs,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:   logic [7:0] p0_sum_comb;
+// EXPECT-SV:   assign p0_sum_comb = lhs + rhs;
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 0:
+// EXPECT-SV:   logic [7:0] first;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     first <= p0_sum_comb;
+// EXPECT-SV:   end
+// EXPECT-SV:
+// EXPECT-SV:   // ===== Pipe stage 1:
+// EXPECT-SV:   logic [7:0] p1_inverted_comb;
+// EXPECT-SV:   assign p1_inverted_comb = ~first;
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 1:
+// EXPECT-SV:   logic [7:0] second;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     second <= p1_inverted_comb;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = second;
+// EXPECT-SV: endmodule

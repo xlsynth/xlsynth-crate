@@ -13,7 +13,7 @@ use xlsynth_g8r::process_ir_path::{
 use xlsynth_g8r::prove_gate_fn_equiv_sat::GateFormalOptions;
 use xlsynth_pir::ir::Package;
 use xlsynth_pir::ir_random::{
-    generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
+    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
 };
 use xlsynth_prover::prover::SolverLimits;
 #[cfg(feature = "has-bitwuzla")]

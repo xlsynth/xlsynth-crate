@@ -1,0 +1,40 @@
+package arithmetic_intermediates_package
+
+top block arithmetic_intermediates(lhs: bits[8], rhs: bits[8], divisor: bits[8], out: bits[8]) {
+  lhs: bits[8] = input_port(name=lhs, id=1)
+  rhs: bits[8] = input_port(name=rhs, id=2)
+  divisor: bits[8] = input_port(name=divisor, id=3)
+  add.4: bits[8] = add(lhs, rhs, id=4)
+  sub.5: bits[8] = sub(add.4, rhs, id=5)
+  umul.6: bits[8] = umul(sub.5, rhs, id=6)
+  udiv.7: bits[8] = udiv(umul.6, divisor, id=7)
+  out: () = output_port(udiv.7, name=out, id=8)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module arithmetic_intermediates(
+// EXPECT-SV:   input logic [7:0] lhs,
+// EXPECT-SV:   input logic [7:0] rhs,
+// EXPECT-SV:   input logic [7:0] divisor,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [7:0] umul8b_8b_x_8b (input logic [7:0] lhs, input logic [7:0] rhs);
+// EXPECT-SV:     begin
+// EXPECT-SV:       umul8b_8b_x_8b = lhs * rhs;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic [7:0] udiv_8b (input logic [7:0] lhs, input logic [7:0] rhs);
+// EXPECT-SV:     begin
+// EXPECT-SV:       udiv_8b = rhs == 8'h00 ? '1 : lhs / rhs;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [7:0] add_4;
+// EXPECT-SV:   logic [7:0] sub_5;
+// EXPECT-SV:   logic [7:0] umul_6;
+// EXPECT-SV:   logic [7:0] udiv_7;
+// EXPECT-SV:   assign add_4 = lhs + rhs;
+// EXPECT-SV:   assign sub_5 = add_4 - rhs;
+// EXPECT-SV:   assign umul_6 = umul8b_8b_x_8b(sub_5, rhs);
+// EXPECT-SV:   assign udiv_7 = udiv_8b(umul_6, divisor);
+// EXPECT-SV:   assign out = udiv_7;
+// EXPECT-SV: endmodule

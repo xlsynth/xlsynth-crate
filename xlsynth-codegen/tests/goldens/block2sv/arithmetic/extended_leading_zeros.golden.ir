@@ -1,0 +1,30 @@
+package extended_leading_zeros_package
+
+top block extended_leading_zeros(data: bits[8], out: bits[4]) {
+  data: bits[8] = input_port(name=data, id=1)
+  result: bits[4] = ext_clz(data, offset=1, new_bit_count=4, id=2)
+  out: () = output_port(result, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module extended_leading_zeros(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [3:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [3:0] clz_8_4_offset_1 (input logic [7:0] value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       8'b1???????: clz_8_4_offset_1 = 4'h1;
+// EXPECT-SV:       8'b01??????: clz_8_4_offset_1 = 4'h2;
+// EXPECT-SV:       8'b001?????: clz_8_4_offset_1 = 4'h3;
+// EXPECT-SV:       8'b0001????: clz_8_4_offset_1 = 4'h4;
+// EXPECT-SV:       8'b00001???: clz_8_4_offset_1 = 4'h5;
+// EXPECT-SV:       8'b000001??: clz_8_4_offset_1 = 4'h6;
+// EXPECT-SV:       8'b0000001?: clz_8_4_offset_1 = 4'h7;
+// EXPECT-SV:       8'b00000001: clz_8_4_offset_1 = 4'h8;
+// EXPECT-SV:       default: clz_8_4_offset_1 = 4'h9;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [3:0] result;
+// EXPECT-SV:   assign result = clz_8_4_offset_1(data);
+// EXPECT-SV:   assign out = result;
+// EXPECT-SV: endmodule

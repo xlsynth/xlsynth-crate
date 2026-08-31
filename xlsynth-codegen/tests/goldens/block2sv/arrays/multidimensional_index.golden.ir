@@ -1,0 +1,23 @@
+package multidimensional_array_package
+
+top block nested_index(data: bits[8][3][2], row: bits[2], column: bits[2], out: bits[8]) {
+  data: bits[8][3][2] = input_port(name=data, id=1)
+  row: bits[2] = input_port(name=row, id=2)
+  column: bits[2] = input_port(name=column, id=3)
+  selected: bits[8] = array_index(data, indices=[row, column], id=4)
+  out: () = output_port(selected, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module nested_index(
+// EXPECT-SV:   input logic [1:0][2:0][7:0] data,
+// EXPECT-SV:   input logic [1:0] row,
+// EXPECT-SV:   input logic [1:0] column,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [2:0][7:0] selected__dim0;
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign selected__dim0 = data[row < 2'h2 ? row : 2'h1];
+// EXPECT-SV:   assign selected = selected__dim0[column < 2'h3 ? column : 2'h2];
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

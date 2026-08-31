@@ -1,0 +1,47 @@
+package mixed_width_partial_products_package
+
+top block mixed_width_partial_products(lhs: bits[3], rhs: bits[5], signed_parts: (bits[4], bits[4]), unsigned_parts: (bits[4], bits[4])) {
+  lhs: bits[3] = input_port(name=lhs, id=1)
+  rhs: bits[5] = input_port(name=rhs, id=2)
+  signed_result: (bits[4], bits[4]) = smulp(lhs, rhs, id=3)
+  unsigned_result: (bits[4], bits[4]) = umulp(lhs, rhs, id=4)
+  signed_parts: () = output_port(signed_result, name=signed_parts, id=5)
+  unsigned_parts: () = output_port(unsigned_result, name=unsigned_parts, id=6)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module mixed_width_partial_products(
+// EXPECT-SV:   input logic [2:0] lhs,
+// EXPECT-SV:   input logic [4:0] rhs,
+// EXPECT-SV:   output logic [7:0] signed_parts,
+// EXPECT-SV:   output logic [7:0] unsigned_parts
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [7:0] smulp4b_3b_x_5b (input logic [2:0] lhs, input logic [4:0] rhs);
+// EXPECT-SV:     logic signed [2:0] signed_lhs;
+// EXPECT-SV:     logic signed [4:0] signed_rhs;
+// EXPECT-SV:     logic signed [3:0] signed_result;
+// EXPECT-SV:     logic [3:0] unsigned_result;
+// EXPECT-SV:     logic [3:0] offset_result;
+// EXPECT-SV:     begin
+// EXPECT-SV:       signed_lhs = $signed(lhs);
+// EXPECT-SV:       signed_rhs = $signed(rhs);
+// EXPECT-SV:       signed_result = signed_lhs * signed_rhs;
+// EXPECT-SV:       unsigned_result = $unsigned(signed_result);
+// EXPECT-SV:       offset_result = unsigned_result - 4'h5;
+// EXPECT-SV:       smulp4b_3b_x_5b = {4'h5, offset_result};
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic [7:0] umulp4b_3b_x_5b (input logic [2:0] lhs, input logic [4:0] rhs);
+// EXPECT-SV:     logic [3:0] result;
+// EXPECT-SV:     begin
+// EXPECT-SV:       result = lhs * rhs;
+// EXPECT-SV:       umulp4b_3b_x_5b = {4'h5, result - 4'h5};
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [7:0] signed_result;
+// EXPECT-SV:   logic [7:0] unsigned_result;
+// EXPECT-SV:   assign signed_result = smulp4b_3b_x_5b(lhs, rhs);
+// EXPECT-SV:   assign unsigned_result = umulp4b_3b_x_5b(lhs, rhs);
+// EXPECT-SV:   assign signed_parts = signed_result;
+// EXPECT-SV:   assign unsigned_parts = unsigned_result;
+// EXPECT-SV: endmodule

@@ -1,0 +1,25 @@
+package external_scalar_package
+
+#[ffi_proto("""code_template: "external_adder {fn} (.a({value}), .y({return}));"
+""")]
+fn external_adder(value: bits[8] id=1) -> bits[8] {
+  ret value: bits[8] = param(name=value, id=1)
+}
+
+top block external_wrapper(data: bits[8], out: bits[8]) {
+  instantiation external_instance(foreign_function=external_adder, kind=extern)
+  data: bits[8] = input_port(name=data, id=2)
+  connected_input: () = instantiation_input(data, instantiation=external_instance, port_name=value, id=3)
+  connected_output: bits[8] = instantiation_output(instantiation=external_instance, port_name=return, id=4)
+  out: () = output_port(connected_output, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module external_wrapper(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] connected_output;
+// EXPECT-SV:   assign out = connected_output;
+// EXPECT-SV:   external_adder external_instance (.a(data), .y(connected_output));
+// EXPECT-SV: endmodule

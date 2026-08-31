@@ -1,0 +1,32 @@
+package nested_tuple_leaf_package
+
+top block nested_tuple_leaf(data: (bits[0], bits[4], bits[8][2])[3], index: bits[2], out: bits[3]) {
+  data: (bits[0], bits[4], bits[8][2])[3] = input_port(name=data, id=1)
+  index: bits[2] = input_port(name=index, id=2)
+  array_index.3: (bits[0], bits[4], bits[8][2]) = array_index(data, indices=[index], id=3)
+  tuple_index.4: bits[8][2] = tuple_index(array_index.3, index=2, id=4)
+  one: bits[1] = literal(value=1, id=5)
+  array_index.6: bits[8] = array_index(tuple_index.4, indices=[one], id=6)
+  bit_slice.7: bits[4] = bit_slice(array_index.6, start=2, width=4, id=7)
+  bit_slice.8: bits[3] = bit_slice(bit_slice.7, start=1, width=3, id=8)
+  out: () = output_port(bit_slice.8, name=out, id=9)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module nested_tuple_leaf(
+// EXPECT-SV:   input logic [2:0][19:0] data,
+// EXPECT-SV:   input logic [1:0] index,
+// EXPECT-SV:   output logic [2:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [19:0] array_index_3;
+// EXPECT-SV:   logic [1:0][7:0] tuple_index_4;
+// EXPECT-SV:   logic one;
+// EXPECT-SV:   logic [7:0] array_index_6;
+// EXPECT-SV:   logic [3:0] bit_slice_7;
+// EXPECT-SV:   assign array_index_3 = data[index < 2'h3 ? index : 2'h2];
+// EXPECT-SV:   assign tuple_index_4 = array_index_3[15:0];
+// EXPECT-SV:   assign one = 1'h1;
+// EXPECT-SV:   assign array_index_6 = tuple_index_4[one];
+// EXPECT-SV:   assign bit_slice_7 = array_index_6[5:2];
+// EXPECT-SV:   assign out = bit_slice_7[3:1];
+// EXPECT-SV: endmodule

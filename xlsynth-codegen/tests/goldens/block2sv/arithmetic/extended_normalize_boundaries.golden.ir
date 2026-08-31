@@ -1,0 +1,27 @@
+package extended_normalize_boundaries_package
+
+top block extended_normalize_boundaries(data: bits[5], out: (bits[3], bits[2])) {
+  data: bits[5] = input_port(name=data, id=1)
+  result: (bits[3], bits[2]) = ext_normalize_left(data, shift_offset=1, normalized_bit_count=3, clz_bit_count=2, id=2)
+  out: () = output_port(result, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module extended_normalize_boundaries(
+// EXPECT-SV:   input logic [4:0] data,
+// EXPECT-SV:   output logic [4:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [4:0] normalize_left_5_3_offset_1_clz_2 (input logic [4:0] value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       5'b1????: normalize_left_5_3_offset_1_clz_2 = {value[1:0], 1'h0, 2'h0};
+// EXPECT-SV:       5'b01???: normalize_left_5_3_offset_1_clz_2 = {value[0], 2'h0, 2'h1};
+// EXPECT-SV:       5'b001??: normalize_left_5_3_offset_1_clz_2 = {3'h0, 2'h2};
+// EXPECT-SV:       5'b0001?: normalize_left_5_3_offset_1_clz_2 = {3'h0, 2'h3};
+// EXPECT-SV:       5'b00001: normalize_left_5_3_offset_1_clz_2 = {3'h0, 2'h0};
+// EXPECT-SV:       default: normalize_left_5_3_offset_1_clz_2 = {3'h0, 2'h1};
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [4:0] result;
+// EXPECT-SV:   assign result = normalize_left_5_3_offset_1_clz_2(data);
+// EXPECT-SV:   assign out = result;
+// EXPECT-SV: endmodule

@@ -1,0 +1,12 @@
+package missing_clock_package
+
+top block missing_clock(data: bits[8], out: bits[8]) {
+  reg state(bits[8])
+  data: bits[8] = input_port(name=data, id=1)
+  state_q: bits[8] = register_read(register=state, id=2)
+  state_d: () = register_write(data, register=state, id=3)
+  out: () = output_port(state_q, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: block `missing_clock` has registers but no clock port

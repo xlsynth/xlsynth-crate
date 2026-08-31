@@ -1,0 +1,35 @@
+package division_package
+
+top block division(lhs: bits[16], rhs: bits[16], quotient: bits[16], remainder: bits[16]) {
+  lhs: bits[16] = input_port(name=lhs, id=1)
+  rhs: bits[16] = input_port(name=rhs, id=2)
+  divided: bits[16] = udiv(lhs, rhs, id=3)
+  residue: bits[16] = umod(lhs, rhs, id=4)
+  quotient: () = output_port(divided, name=quotient, id=5)
+  remainder: () = output_port(residue, name=remainder, id=6)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module division(
+// EXPECT-SV:   input logic [15:0] lhs,
+// EXPECT-SV:   input logic [15:0] rhs,
+// EXPECT-SV:   output logic [15:0] quotient,
+// EXPECT-SV:   output logic [15:0] remainder
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [15:0] udiv_16b (input logic [15:0] lhs, input logic [15:0] rhs);
+// EXPECT-SV:     begin
+// EXPECT-SV:       udiv_16b = rhs == 16'h0000 ? '1 : lhs / rhs;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic [15:0] umod_16b (input logic [15:0] lhs, input logic [15:0] rhs);
+// EXPECT-SV:     begin
+// EXPECT-SV:       umod_16b = rhs == 16'h0000 ? 16'h0000 : lhs % rhs;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [15:0] divided;
+// EXPECT-SV:   logic [15:0] residue;
+// EXPECT-SV:   assign divided = udiv_16b(lhs, rhs);
+// EXPECT-SV:   assign residue = umod_16b(lhs, rhs);
+// EXPECT-SV:   assign quotient = divided;
+// EXPECT-SV:   assign remainder = residue;
+// EXPECT-SV: endmodule

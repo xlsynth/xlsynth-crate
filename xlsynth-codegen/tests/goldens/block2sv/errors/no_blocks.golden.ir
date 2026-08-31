@@ -1,0 +1,8 @@
+package function_only_package
+
+top fn identity(value: bits[8] id=1) -> bits[8] {
+  ret value: bits[8] = param(name=value, id=1)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: package contains no block suitable for SystemVerilog generation

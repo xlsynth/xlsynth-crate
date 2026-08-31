@@ -1,0 +1,30 @@
+package signed_multiply_package
+
+top block signed_multiply(lhs: bits[8], rhs: bits[12], out: bits[20]) {
+  lhs: bits[8] = input_port(name=lhs, id=1)
+  rhs: bits[12] = input_port(name=rhs, id=2)
+  product: bits[20] = smul(lhs, rhs, id=3)
+  out: () = output_port(product, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module signed_multiply(
+// EXPECT-SV:   input logic [7:0] lhs,
+// EXPECT-SV:   input logic [11:0] rhs,
+// EXPECT-SV:   output logic [19:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [19:0] smul20b_8b_x_12b (input logic [7:0] lhs, input logic [11:0] rhs);
+// EXPECT-SV:     logic signed [7:0] signed_lhs;
+// EXPECT-SV:     logic signed [11:0] signed_rhs;
+// EXPECT-SV:     logic signed [19:0] signed_result;
+// EXPECT-SV:     begin
+// EXPECT-SV:       signed_lhs = $signed(lhs);
+// EXPECT-SV:       signed_rhs = $signed(rhs);
+// EXPECT-SV:       signed_result = signed_lhs * signed_rhs;
+// EXPECT-SV:       smul20b_8b_x_12b = $unsigned(signed_result);
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [19:0] product;
+// EXPECT-SV:   assign product = smul20b_8b_x_12b(lhs, rhs);
+// EXPECT-SV:   assign out = product;
+// EXPECT-SV: endmodule

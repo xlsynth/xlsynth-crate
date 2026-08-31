@@ -1,0 +1,35 @@
+package reduction_package
+
+top block reductions(data: bits[8], and_out: bits[1], or_out: bits[1], xor_out: bits[1], reverse_out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  all_set: bits[1] = and_reduce(data, id=2)
+  any_set: bits[1] = or_reduce(data, id=3)
+  parity: bits[1] = xor_reduce(data, id=4)
+  reversed: bits[8] = reverse(data, id=5)
+  and_out: () = output_port(all_set, name=and_out, id=6)
+  or_out: () = output_port(any_set, name=or_out, id=7)
+  xor_out: () = output_port(parity, name=xor_out, id=8)
+  reverse_out: () = output_port(reversed, name=reverse_out, id=9)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module reductions(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic and_out,
+// EXPECT-SV:   output logic or_out,
+// EXPECT-SV:   output logic xor_out,
+// EXPECT-SV:   output logic [7:0] reverse_out
+// EXPECT-SV: );
+// EXPECT-SV:   logic all_set;
+// EXPECT-SV:   logic any_set;
+// EXPECT-SV:   logic parity;
+// EXPECT-SV:   logic [7:0] reversed;
+// EXPECT-SV:   assign all_set = &data;
+// EXPECT-SV:   assign any_set = |data;
+// EXPECT-SV:   assign parity = ^data;
+// EXPECT-SV:   assign reversed = {data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]};
+// EXPECT-SV:   assign and_out = all_set;
+// EXPECT-SV:   assign or_out = any_set;
+// EXPECT-SV:   assign xor_out = parity;
+// EXPECT-SV:   assign reverse_out = reversed;
+// EXPECT-SV: endmodule

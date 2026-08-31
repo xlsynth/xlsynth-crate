@@ -1,0 +1,21 @@
+package array_slice_package
+
+top block slice_array(data: bits[8][4], start: bits[3], out: bits[8][2]) {
+  data: bits[8][4] = input_port(name=data, id=1)
+  start: bits[3] = input_port(name=start, id=2)
+  selected: bits[8][2] = array_slice(data, start, width=2, id=3)
+  out: () = output_port(selected, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module slice_array(
+// EXPECT-SV:   input logic [3:0][7:0] data,
+// EXPECT-SV:   input logic [2:0] start,
+// EXPECT-SV:   output logic [1:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0][7:0] selected;
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 2; __i0 = __i0 + 1) begin : gen__selected_0
+// EXPECT-SV:     assign selected[__i0] = data[4'({1'h0, start} + 4'(__i0)) < 4'h4 ? 4'({1'h0, start} + 4'(__i0)) : 4'h3];
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

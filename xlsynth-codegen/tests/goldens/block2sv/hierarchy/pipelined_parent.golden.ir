@@ -1,0 +1,64 @@
+package pipelined_parent_package
+
+block increment(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  one: bits[8] = literal(value=1, id=2)
+  result: bits[8] = add(data, one, id=3)
+  out: () = output_port(result, name=out, id=4)
+}
+
+top block pipelined_parent(clk: clock, data: bits[8], out: bits[8]) {
+  instantiation child(block=increment, kind=block)
+  reg input_stage(bits[8])
+  reg output_stage(bits[8])
+  data: bits[8] = input_port(name=data, id=5)
+  input_q: bits[8] = register_read(register=input_stage, id=6)
+  input_d: () = register_write(data, register=input_stage, id=7)
+  child_input: () = instantiation_input(input_q, instantiation=child, port_name=data, id=8)
+  child_output: bits[8] = instantiation_output(instantiation=child, port_name=out, id=9)
+  output_q: bits[8] = register_read(register=output_stage, id=10)
+  output_d: () = register_write(child_output, register=output_stage, id=11)
+  out: () = output_port(output_q, name=out, id=12)
+}
+
+// OPTIONS: layout = "pipeline"
+// EXPECT-SV: module increment(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:   logic [7:0] p0_one_comb;
+// EXPECT-SV:   logic [7:0] p0_result_comb;
+// EXPECT-SV:   assign p0_one_comb = 8'h01;
+// EXPECT-SV:   assign p0_result_comb = data + p0_one_comb;
+// EXPECT-SV:   assign out = p0_result_comb;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module pipelined_parent(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 0:
+// EXPECT-SV:   logic [7:0] input_stage;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     input_stage <= data;
+// EXPECT-SV:   end
+// EXPECT-SV:
+// EXPECT-SV:   // ===== Pipe stage 1:
+// EXPECT-SV:   logic [7:0] child_output;
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 1:
+// EXPECT-SV:   logic [7:0] output_stage;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     output_stage <= child_output;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = output_stage;
+// EXPECT-SV:
+// EXPECT-SV:   // ===== Instantiations
+// EXPECT-SV:   increment child (
+// EXPECT-SV:     .data(input_stage),
+// EXPECT-SV:     .out(child_output)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

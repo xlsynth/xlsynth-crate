@@ -1,0 +1,30 @@
+package extended_normalize_package
+
+top block extended_normalize(data: bits[8], out: bits[16]) {
+  data: bits[8] = input_port(name=data, id=1)
+  result: bits[16] = ext_normalize_left(data, shift_offset=1, normalized_bit_count=16, id=2)
+  out: () = output_port(result, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module extended_normalize(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [15:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [15:0] normalize_left_8_16_offset_1_clz_none (input logic [7:0] value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       8'b1???????: normalize_left_8_16_offset_1_clz_none = {7'h00, value, 1'h0};
+// EXPECT-SV:       8'b01??????: normalize_left_8_16_offset_1_clz_none = {6'h00, value, 2'h0};
+// EXPECT-SV:       8'b001?????: normalize_left_8_16_offset_1_clz_none = {5'h00, value, 3'h0};
+// EXPECT-SV:       8'b0001????: normalize_left_8_16_offset_1_clz_none = {4'h0, value, 4'h0};
+// EXPECT-SV:       8'b00001???: normalize_left_8_16_offset_1_clz_none = {3'h0, value, 5'h00};
+// EXPECT-SV:       8'b000001??: normalize_left_8_16_offset_1_clz_none = {2'h0, value, 6'h00};
+// EXPECT-SV:       8'b0000001?: normalize_left_8_16_offset_1_clz_none = {1'h0, value, 7'h00};
+// EXPECT-SV:       8'b00000001: normalize_left_8_16_offset_1_clz_none = {value, 8'h00};
+// EXPECT-SV:       default: normalize_left_8_16_offset_1_clz_none = 16'h0000;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [15:0] result;
+// EXPECT-SV:   assign result = normalize_left_8_16_offset_1_clz_none(data);
+// EXPECT-SV:   assign out = result;
+// EXPECT-SV: endmodule

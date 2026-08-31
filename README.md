@@ -41,6 +41,9 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
 - `xlsynth-vast`: standalone, Rust-native Verilog/SystemVerilog AST construction,
   register-building and expression-reduction helpers, and deterministic
   emission; does not require `libxls`
+- `xlsynth-codegen`: Rust-native lowering of XLS block IR to deterministic
+  SystemVerilog, including state, aggregate values, block hierarchy, foreign
+  instantiations, and optional pipeline-stage formatting
 - `xlsynth`: provides Rust objects for interacting with core facilities; this includes:
   - DSLX parsing/typechecking, conversion to XLS IR
   - IR building
@@ -52,6 +55,27 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
   methodology
 - `xlsynth-g8r`: _experimental_ XLS IR to gate mapping library
 - `xlsynth-vastly`: Verilog/SystemVerilog simulation and VCD comparison utilities
+
+## External-tool tests
+
+`cargo test --workspace` does not select tests that run Icarus or Yosys.
+Select those suites explicitly:
+
+```sh
+cargo test --workspace --features iverilog-tests,yosys-tests
+```
+
+`iverilog-tests` selects RTL simulation in codegen, driver, g8r, test-helpers,
+and vastly. `yosys-tests` selects codegen synthesis-equivalence and
+SystemVerilog-consumption tests; these do not require Liberty files or a PDK.
+Mapped-netlist fuzz checks additionally require `XLSYNTH_LIBERTY_FILES`.
+Missing or unusable tools are failures in
+selected suites, never successful skips. In vastly, `reference-sim-tests`
+remains an alias for `iverilog-tests`. These flags select tests, not public
+runtime APIs. Existing prerequisites such as XLS tools, Slang (including for
+`run-verilog-pipeline` tests), protoc, and enabled solver backends are unchanged.
+See [codegen validation](xlsynth-codegen/README.md#validation) for tool paths
+and [codegen fuzzing](xlsynth-codegen/fuzz/FUZZ.md) for Yosys/Liberty configuration.
 
 ## Example Use
 

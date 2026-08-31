@@ -1,0 +1,48 @@
+[package]
+name = "xlsynth-codegen"
+version = "0.69.0"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "Rust-native SystemVerilog generation for XLS block IR"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth-codegen"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+iverilog-tests = []
+yosys-tests = []
+
+[[test]]
+name = "block_codegen_iverilog_test"
+required-features = ["iverilog-tests"]
+
+[[test]]
+name = "block_codegen_yosys_test"
+required-features = ["yosys-tests"]
+
+[[test]]
+name = "block2sv_iverilog"
+required-features = ["iverilog-tests"]
+
+[[test]]
+name = "block2sv_yosys"
+required-features = ["yosys-tests"]
+
+[dependencies]
+xlsynth = { path = "../xlsynth", version = "0.69.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.69.0" }
+xlsynth-vast = { path = "../xlsynth-vast", version = "0.69.0" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+toml = "0.8.19"
+pretty_assertions = "1.4.1"
+tempfile = "3.20"
+regex = "1.11.1"
+xlsynth-test-helpers = { path = "../xlsynth-test-helpers", version = "0.69.0" }

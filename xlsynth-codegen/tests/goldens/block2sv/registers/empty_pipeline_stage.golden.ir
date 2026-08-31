@@ -1,0 +1,36 @@
+package empty_stage_package
+
+top block empty_stage(clk: clock, data: bits[8], out: bits[8]) {
+  reg first(bits[8])
+  reg second(bits[8])
+  data: bits[8] = input_port(name=data, id=1)
+  first_q: bits[8] = register_read(register=first, id=2)
+  first_d: () = register_write(data, register=first, id=3)
+  second_q: bits[8] = register_read(register=second, id=4)
+  second_d: () = register_write(first_q, register=second, id=5)
+  out: () = output_port(second_q, name=out, id=6)
+}
+
+// OPTIONS: layout = "pipeline"
+// EXPECT-SV: module empty_stage(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 0:
+// EXPECT-SV:   logic [7:0] first;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     first <= data;
+// EXPECT-SV:   end
+// EXPECT-SV:
+// EXPECT-SV:   // ===== Pipe stage 1:
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 1:
+// EXPECT-SV:   logic [7:0] second;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     second <= first;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = second;
+// EXPECT-SV: endmodule

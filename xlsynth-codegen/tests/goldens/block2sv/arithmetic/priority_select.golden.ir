@@ -1,0 +1,31 @@
+package priority_package
+
+top block priority_choice(selector: bits[2], first: bits[8], second: bits[8], fallback: bits[8], out: bits[8]) {
+  selector: bits[2] = input_port(name=selector, id=1)
+  first: bits[8] = input_port(name=first, id=2)
+  second: bits[8] = input_port(name=second, id=3)
+  fallback: bits[8] = input_port(name=fallback, id=4)
+  selected: bits[8] = priority_sel(selector, cases=[first, second], default=fallback, id=5)
+  out: () = output_port(selected, name=out, id=6)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module priority_choice(
+// EXPECT-SV:   input logic [1:0] selector,
+// EXPECT-SV:   input logic [7:0] first,
+// EXPECT-SV:   input logic [7:0] second,
+// EXPECT-SV:   input logic [7:0] fallback,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [7:0] priority_sel_8b_2way (input logic [1:0] sel, input logic [7:0] case0, input logic [7:0] case1, input logic [7:0] default_value);
+// EXPECT-SV:     unique casez (sel)
+// EXPECT-SV:       2'b?1: priority_sel_8b_2way = case0;
+// EXPECT-SV:       2'b10: priority_sel_8b_2way = case1;
+// EXPECT-SV:       2'b00: priority_sel_8b_2way = default_value;
+// EXPECT-SV:       default: priority_sel_8b_2way = 'X;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign selected = priority_sel_8b_2way(selector, first, second, fallback);
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

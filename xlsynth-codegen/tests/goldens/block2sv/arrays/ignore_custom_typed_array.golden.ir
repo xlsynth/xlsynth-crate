@@ -1,0 +1,14 @@
+package ignore_custom_typed_array_package
+
+top block ignore_custom_typed_array(data: bits[4][2], out: bits[4][2]) {
+  data: bits[4][2] = input_port(name=data, sv_type="types::input_t", id=1)
+  out: () = output_port(data, name=out, sv_type="types::output_t", id=2)
+}
+
+// OPTIONS: emit_sv_types = false
+// EXPECT-SV: module ignore_custom_typed_array(
+// EXPECT-SV:   input logic [1:0][3:0] data,
+// EXPECT-SV:   output logic [1:0][3:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule

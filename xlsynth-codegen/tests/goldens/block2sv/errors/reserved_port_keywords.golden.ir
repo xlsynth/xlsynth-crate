@@ -1,0 +1,9 @@
+package reserved_keyword_package
+
+top block keyword_ports(module: bits[8], wire: bits[8]) {
+  module: bits[8] = input_port(name=module, id=1)
+  wire: () = output_port(module, name=wire, id=2)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: invalid SystemVerilog port identifier `module`: identifier is reserved, malformed, or requires escaping

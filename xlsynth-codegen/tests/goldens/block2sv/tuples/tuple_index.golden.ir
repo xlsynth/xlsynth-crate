@@ -1,0 +1,17 @@
+package tuple_index_package
+
+top block select_tuple(data: (bits[8], bits[12]), out: bits[12]) {
+  data: (bits[8], bits[12]) = input_port(name=data, id=1)
+  selected: bits[12] = tuple_index(data, index=1, id=2)
+  out: () = output_port(selected, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module select_tuple(
+// EXPECT-SV:   input logic [19:0] data,
+// EXPECT-SV:   output logic [11:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [11:0] selected;
+// EXPECT-SV:   assign selected = data[11:0];
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

@@ -1,0 +1,34 @@
+package pipeline_array_update_package
+
+top block array_pipeline(clk: clock, data: bits[8][3], index: bits[2], value: bits[8], out: bits[8][3]) {
+  reg state(bits[8][3])
+  data: bits[8][3] = input_port(name=data, id=1)
+  index: bits[2] = input_port(name=index, id=2)
+  value: bits[8] = input_port(name=value, id=3)
+  updated: bits[8][3] = array_update(data, value, indices=[index], id=4)
+  state_d: () = register_write(updated, register=state, id=5)
+  state_q: bits[8][3] = register_read(register=state, id=6)
+  out: () = output_port(state_q, name=out, id=7)
+}
+
+// OPTIONS: layout = "pipeline"
+// EXPECT-SV: module array_pipeline(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [2:0][7:0] data,
+// EXPECT-SV:   input logic [1:0] index,
+// EXPECT-SV:   input logic [7:0] value,
+// EXPECT-SV:   output logic [2:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:   logic [2:0][7:0] p0_updated_comb;
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 3; __i0 = __i0 + 1) begin : gen__p0_updated_comb_0
+// EXPECT-SV:     assign p0_updated_comb[__i0] = index == __i0 ? value : data[__i0];
+// EXPECT-SV:   end
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 0:
+// EXPECT-SV:   logic [2:0][7:0] state;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     state <= p0_updated_comb;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = state;
+// EXPECT-SV: endmodule

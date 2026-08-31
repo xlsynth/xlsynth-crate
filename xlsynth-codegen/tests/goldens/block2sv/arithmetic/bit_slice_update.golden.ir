@@ -1,0 +1,26 @@
+package bit_update_package
+
+top block update_bits(data: bits[16], start: bits[5], replacement: bits[6], out: bits[16]) {
+  data: bits[16] = input_port(name=data, id=1)
+  start: bits[5] = input_port(name=start, id=2)
+  replacement: bits[6] = input_port(name=replacement, id=3)
+  updated: bits[16] = bit_slice_update(data, start, replacement, id=4)
+  out: () = output_port(updated, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module update_bits(
+// EXPECT-SV:   input logic [15:0] data,
+// EXPECT-SV:   input logic [4:0] start,
+// EXPECT-SV:   input logic [5:0] replacement,
+// EXPECT-SV:   output logic [15:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [15:0] bit_slice_update_w16_5b_6b (input logic [15:0] to_update, input logic [4:0] start, input logic [5:0] update_value);
+// EXPECT-SV:     begin
+// EXPECT-SV:       bit_slice_update_w16_5b_6b = start >= 5'h10 ? to_update : {10'h000, update_value} << start | ~(16'h003f << start) & to_update;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [15:0] updated;
+// EXPECT-SV:   assign updated = bit_slice_update_w16_5b_6b(data, start, replacement);
+// EXPECT-SV:   assign out = updated;
+// EXPECT-SV: endmodule

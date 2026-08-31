@@ -1,0 +1,20 @@
+package internal_keyword_package
+
+top block internal_keywords(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  module: bits[8] = not(data, id=2)
+  wire: bits[8] = not(module, id=3)
+  out: () = output_port(wire, name=out, id=4)
+}
+
+// OPTIONS: separate_lines = true
+// EXPECT-SV: module internal_keywords(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] module_;
+// EXPECT-SV:   logic [7:0] wire_;
+// EXPECT-SV:   assign module_ = ~data;
+// EXPECT-SV:   assign wire_ = ~module_;
+// EXPECT-SV:   assign out = wire_;
+// EXPECT-SV: endmodule

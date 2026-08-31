@@ -1,0 +1,36 @@
+package child_block_package
+
+block invert(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  inverted: bits[8] = not(data, id=2)
+  out: () = output_port(inverted, name=out, id=3)
+}
+
+top block parent(data: bits[8], out: bits[8]) {
+  instantiation child(block=invert, kind=block)
+  data: bits[8] = input_port(name=data, id=4)
+  child_input: () = instantiation_input(data, instantiation=child, port_name=data, id=5)
+  child_output: bits[8] = instantiation_output(instantiation=child, port_name=out, id=6)
+  out: () = output_port(child_output, name=out, id=7)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module invert(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] inverted;
+// EXPECT-SV:   assign inverted = ~data;
+// EXPECT-SV:   assign out = inverted;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module parent(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] child_output;
+// EXPECT-SV:   assign out = child_output;
+// EXPECT-SV:   invert child (
+// EXPECT-SV:     .data(data),
+// EXPECT-SV:     .out(child_output)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

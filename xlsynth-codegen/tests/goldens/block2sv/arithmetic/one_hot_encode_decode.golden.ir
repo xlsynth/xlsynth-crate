@@ -1,0 +1,39 @@
+package encoding_package
+
+top block encoding(data: bits[4], encoded_out: bits[2], decoded_out: bits[4], hot_out: bits[5]) {
+  data: bits[4] = input_port(name=data, id=1)
+  encoded: bits[2] = encode(data, id=2)
+  decoded: bits[4] = decode(encoded, width=4, id=3)
+  hot: bits[5] = one_hot(data, lsb_prio=true, id=4)
+  encoded_out: () = output_port(encoded, name=encoded_out, id=5)
+  decoded_out: () = output_port(decoded, name=decoded_out, id=6)
+  hot_out: () = output_port(hot, name=hot_out, id=7)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module encoding(
+// EXPECT-SV:   input logic [3:0] data,
+// EXPECT-SV:   output logic [1:0] encoded_out,
+// EXPECT-SV:   output logic [3:0] decoded_out,
+// EXPECT-SV:   output logic [4:0] hot_out
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [4:0] one_hot_lsb_4 (input logic [3:0] value);
+// EXPECT-SV:     unique casez (value)
+// EXPECT-SV:       4'b???1: one_hot_lsb_4 = 5'h01;
+// EXPECT-SV:       4'b??10: one_hot_lsb_4 = 5'h02;
+// EXPECT-SV:       4'b?100: one_hot_lsb_4 = 5'h04;
+// EXPECT-SV:       4'b1000: one_hot_lsb_4 = 5'h08;
+// EXPECT-SV:       4'b0000: one_hot_lsb_4 = 5'h10;
+// EXPECT-SV:       default: one_hot_lsb_4 = 'X;
+// EXPECT-SV:     endcase
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [1:0] encoded;
+// EXPECT-SV:   logic [3:0] decoded;
+// EXPECT-SV:   logic [4:0] hot;
+// EXPECT-SV:   assign encoded = {data[2] | data[3], data[1] | data[3]};
+// EXPECT-SV:   assign decoded = 4'h1 << encoded;
+// EXPECT-SV:   assign hot = one_hot_lsb_4(data);
+// EXPECT-SV:   assign encoded_out = encoded;
+// EXPECT-SV:   assign decoded_out = decoded;
+// EXPECT-SV:   assign hot_out = hot;
+// EXPECT-SV: endmodule

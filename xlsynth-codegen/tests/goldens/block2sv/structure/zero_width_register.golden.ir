@@ -1,0 +1,19 @@
+package zero_width_register_package
+
+top block zero_width_register(clk: clock, data: bits[8], out: bits[8]) {
+  reg empty_state(bits[0])
+  data: bits[8] = input_port(name=data, id=1)
+  empty: bits[0] = literal(value=0, id=2)
+  state_q: bits[0] = register_read(register=empty_state, id=3)
+  state_d: () = register_write(empty, register=empty_state, id=4)
+  out: () = output_port(data, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module zero_width_register(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule

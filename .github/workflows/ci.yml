@@ -409,6 +409,20 @@ jobs:
           echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
+      - name: Install pinned Yosys and select external-tool tests
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          python3 scripts/install_ci_yosys.py "$RUNNER_TEMP/codegen-eda"
+          echo "XLSYNTH_YOSYS_PATH=$RUNNER_TEMP/codegen-eda/oss-cad-suite/bin/yosys" >> "$GITHUB_ENV"
+          echo "EXTERNAL_TEST_FEATURES=iverilog-tests,yosys-tests" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/codegen-eda/oss-cad-suite/bin/yosys" -V
+          iverilog -V
+          vvp -V
+
+      - name: Test codegen goldens through the standalone library
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo test -p xlsynth-codegen --test block2sv_goldens
+
       - name: Test crate
         env:
           BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
@@ -423,7 +437,21 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace --exclude sample-usage
+          cargo test --features "with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test${EXTERNAL_TEST_FEATURES:+,$EXTERNAL_TEST_FEATURES}" --workspace --exclude sample-usage
+
+      - name: Check codegen fuzz oracles, including mapped-netlist evaluation
+        if: matrix.os == 'ubuntu-24.04'
+        env:
+          # Ordinary yosys-tests need no cell library. This small library is
+          # only the mapping harness's CI input; real-library runs can supply
+          # a compatible Liberty set such as ASAP7 RVT/SS NLDM.
+          XLSYNTH_LIBERTY_FILES: ${{ github.workspace }}/xlsynth-codegen/fuzz/testdata/public_cells.lib
+        run: |
+          export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
+          cargo check --manifest-path xlsynth-codegen/fuzz/Cargo.toml --all-targets --features external-yosys
+          cargo test --manifest-path xlsynth-codegen/fuzz/Cargo.toml --lib --features external-yosys
+          cargo test --manifest-path xlsynth-codegen/fuzz/Cargo.toml --test preflight_test --features external-yosys
+          cargo run --manifest-path xlsynth-codegen/fuzz/Cargo.toml --example coverage -- --profile stock-xls --samples 8 --bytes 256 --seed 1 --check
 
 
   # -----------------------------------------------------------

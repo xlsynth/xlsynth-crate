@@ -1,0 +1,9 @@
+package no_port_package
+
+top block no_ports() {
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module no_ports;
+// EXPECT-SV:
+// EXPECT-SV: endmodule

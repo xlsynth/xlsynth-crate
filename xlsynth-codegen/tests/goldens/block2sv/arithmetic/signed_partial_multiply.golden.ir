@@ -1,0 +1,43 @@
+package signed_partial_package
+
+top block signed_partial(lhs: bits[8], rhs: bits[8], first: bits[16], second: bits[16]) {
+  lhs: bits[8] = input_port(name=lhs, id=1)
+  rhs: bits[8] = input_port(name=rhs, id=2)
+  partials: (bits[16], bits[16]) = smulp(lhs, rhs, id=3)
+  first_part: bits[16] = tuple_index(partials, index=0, id=4)
+  second_part: bits[16] = tuple_index(partials, index=1, id=5)
+  first: () = output_port(first_part, name=first, id=6)
+  second: () = output_port(second_part, name=second, id=7)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module signed_partial(
+// EXPECT-SV:   input logic [7:0] lhs,
+// EXPECT-SV:   input logic [7:0] rhs,
+// EXPECT-SV:   output logic [15:0] first,
+// EXPECT-SV:   output logic [15:0] second
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [31:0] smulp16b_8b_x_8b (input logic [7:0] lhs, input logic [7:0] rhs);
+// EXPECT-SV:     logic signed [7:0] signed_lhs;
+// EXPECT-SV:     logic signed [7:0] signed_rhs;
+// EXPECT-SV:     logic signed [15:0] signed_result;
+// EXPECT-SV:     logic [15:0] unsigned_result;
+// EXPECT-SV:     logic [15:0] offset_result;
+// EXPECT-SV:     begin
+// EXPECT-SV:       signed_lhs = $signed(lhs);
+// EXPECT-SV:       signed_rhs = $signed(rhs);
+// EXPECT-SV:       signed_result = signed_lhs * signed_rhs;
+// EXPECT-SV:       unsigned_result = $unsigned(signed_result);
+// EXPECT-SV:       offset_result = unsigned_result - 16'h43ff;
+// EXPECT-SV:       smulp16b_8b_x_8b = {16'h43ff, offset_result};
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [31:0] partials;
+// EXPECT-SV:   logic [15:0] first_part;
+// EXPECT-SV:   logic [15:0] second_part;
+// EXPECT-SV:   assign partials = smulp16b_8b_x_8b(lhs, rhs);
+// EXPECT-SV:   assign first_part = partials[31:16];
+// EXPECT-SV:   assign second_part = partials[15:0];
+// EXPECT-SV:   assign first = first_part;
+// EXPECT-SV:   assign second = second_part;
+// EXPECT-SV: endmodule

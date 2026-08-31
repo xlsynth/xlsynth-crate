@@ -1,0 +1,19 @@
+package multiple_register_writes_package
+
+top block multiple_register_writes(clk: clock, valid: bits[1], choice: bits[1], first: bits[8], second: bits[8], out: bits[8]) {
+  reg state(bits[8])
+  valid: bits[1] = input_port(name=valid, id=1)
+  choice: bits[1] = input_port(name=choice, id=2)
+  first: bits[8] = input_port(name=first, id=3)
+  second: bits[8] = input_port(name=second, id=4)
+  not_choice: bits[1] = not(choice, id=5)
+  first_enable: bits[1] = and(valid, not_choice, id=6)
+  second_enable: bits[1] = and(valid, choice, id=7)
+  state_q: bits[8] = register_read(register=state, id=8)
+  first_write: () = register_write(first, register=state, load_enable=first_enable, id=9)
+  second_write: () = register_write(second, register=state, load_enable=second_enable, id=10)
+  out: () = output_port(state_q, name=out, id=11)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: register `state` in block `multiple_register_writes` requires exactly one write, found 2

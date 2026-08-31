@@ -1,0 +1,10 @@
+package register_missing_write_package
+
+top block register_missing_write(clk: clock, out: bits[8]) {
+  reg state(bits[8])
+  state_q: bits[8] = register_read(register=state, id=1)
+  out: () = output_port(state_q, name=out, id=2)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: register `state` in block `register_missing_write` has no write

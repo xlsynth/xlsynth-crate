@@ -1,0 +1,19 @@
+package addition_package
+
+top block addition(lhs: bits[32], rhs: bits[32], out: bits[32]) {
+  lhs: bits[32] = input_port(name=lhs, id=1)
+  rhs: bits[32] = input_port(name=rhs, id=2)
+  sum: bits[32] = add(lhs, rhs, id=3)
+  out: () = output_port(sum, name=out, id=4)
+}
+
+// OPTIONS: top = "addition"
+// EXPECT-SV: module addition(
+// EXPECT-SV:   input logic [31:0] lhs,
+// EXPECT-SV:   input logic [31:0] rhs,
+// EXPECT-SV:   output logic [31:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [31:0] sum;
+// EXPECT-SV:   assign sum = lhs + rhs;
+// EXPECT-SV:   assign out = sum;
+// EXPECT-SV: endmodule

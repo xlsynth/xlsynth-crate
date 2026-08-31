@@ -45,6 +45,7 @@ mod aig_stats;
 mod aig_tech_map;
 mod blif2g8r;
 mod block2fn;
+mod block2sv;
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
@@ -1968,6 +1969,94 @@ fn main() {
                         .long("drop-output-ports")
                         .help("Comma-separated output port names to drop")
                         .required(false)
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("block2sv")
+                .about("Converts an XLS block IR package to SystemVerilog")
+                .arg(
+                    Arg::new("input_file")
+                        .value_name("INPUT_FILE")
+                        .help("Input package-form block IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("BLOCK")
+                        .help("Top block; overrides the package top")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("layout")
+                        .long("layout")
+                        .value_name("LAYOUT")
+                        .help("SystemVerilog layout; does not change circuit behavior")
+                        .value_parser(["none", "pipeline"])
+                        .default_value("none")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .visible_alias("module-name")
+                        .value_name("NAME")
+                        .help("Override the generated top module name")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("array_index_bounds_checking")
+                        .long("array_index_bounds_checking")
+                        .visible_alias("array-index-bounds-checking")
+                        .value_name("BOOL")
+                        .help("Clamp out-of-range array indexes")
+                        .value_parser(clap::value_parser!(bool))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("separate_lines")
+                        .long("separate_lines")
+                        .visible_alias("separate-lines")
+                        .value_name("BOOL")
+                        .help("Emit combinational nodes as separate assignments")
+                        .value_parser(clap::value_parser!(bool))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_inline_depth")
+                        .long("max_inline_depth")
+                        .visible_alias("max-inline-depth")
+                        .value_name("DEPTH")
+                        .help("Maximum nested combinational expression depth")
+                        .value_parser(clap::value_parser!(usize))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("emit_sv_types")
+                        .long("emit_sv_types")
+                        .visible_alias("emit-sv-types")
+                        .value_name("BOOL")
+                        .help("Preserve SystemVerilog type annotations on ports")
+                        .value_parser(clap::value_parser!(bool))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("add_invariant_assertions")
+                        .long("add_invariant_assertions")
+                        .visible_alias("add-invariant-assertions")
+                        .value_name("BOOL")
+                        .help("Emit assertions for generated invariants")
+                        .value_parser(clap::value_parser!(bool))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("register_codegen_options")
+                        .long("register_codegen_options")
+                        .visible_alias("register-codegen-options")
+                        .value_name("TOML")
+                        .help("TOML file containing custom register-emission templates")
                         .action(ArgAction::Set),
                 ),
         )
@@ -3979,6 +4068,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("block2fn", subm)) => {
             block2fn::handle_block2fn(subm, &config);
+        }
+        Some(("block2sv", subm)) => {
+            if let Err(error) = block2sv::handle_block2sv(subm) {
+                eprintln!("error: {error:#}");
+                std::process::exit(1);
+            }
         }
         Some(("gv2block", subm)) => {
             gv2block::handle_gv2block(subm);

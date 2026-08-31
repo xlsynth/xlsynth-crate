@@ -1,0 +1,23 @@
+package synchronous_reset_assertion_package
+
+top block synchronous_reset_assertion(clk: clock, reset: bits[1], valid: bits[1], out: bits[1]) {
+  #![reset(port="reset", asynchronous=false, active_low=false)]
+  reset: bits[1] = input_port(name=reset, id=1)
+  valid: bits[1] = input_port(name=valid, id=2)
+  token: token = after_all(id=3)
+  checked: token = assert(token, valid, message="valid outside reset", label="valid_after_reset", id=4)
+  out: () = output_port(valid, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module synchronous_reset_assertion(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic reset,
+// EXPECT-SV:   input logic valid,
+// EXPECT-SV:   output logic out
+// EXPECT-SV: );
+// EXPECT-SV:   `ifndef SYNTHESIS
+// EXPECT-SV:   valid_after_reset: assert property (@(posedge clk) disable iff ($sampled(reset !== 1'b0 || $isunknown(valid))) valid) else $error("valid outside reset");
+// EXPECT-SV:   `endif
+// EXPECT-SV:   assign out = valid;
+// EXPECT-SV: endmodule

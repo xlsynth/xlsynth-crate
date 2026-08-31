@@ -1,0 +1,37 @@
+package chained_array_updates_package
+
+top block chained_array_updates(data: bits[8][4], index: bits[2], first: bits[8], second: bits[8], third: bits[8], out: bits[8][4]) {
+  data: bits[8][4] = input_port(name=data, id=1)
+  index: bits[2] = input_port(name=index, id=2)
+  first: bits[8] = input_port(name=first, id=3)
+  second: bits[8] = input_port(name=second, id=4)
+  third: bits[8] = input_port(name=third, id=5)
+  array_update.6: bits[8][4] = array_update(data, first, indices=[index], id=6)
+  array_update.7: bits[8][4] = array_update(array_update.6, second, indices=[index], id=7)
+  array_update.8: bits[8][4] = array_update(array_update.7, third, indices=[index], id=8)
+  out: () = output_port(array_update.8, name=out, id=9)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module chained_array_updates(
+// EXPECT-SV:   input logic [3:0][7:0] data,
+// EXPECT-SV:   input logic [1:0] index,
+// EXPECT-SV:   input logic [7:0] first,
+// EXPECT-SV:   input logic [7:0] second,
+// EXPECT-SV:   input logic [7:0] third,
+// EXPECT-SV:   output logic [3:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [3:0][7:0] array_update_6;
+// EXPECT-SV:   logic [3:0][7:0] array_update_7;
+// EXPECT-SV:   logic [3:0][7:0] array_update_8;
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 4; __i0 = __i0 + 1) begin : gen__array_update_6_0
+// EXPECT-SV:     assign array_update_6[__i0] = index == __i0 ? first : data[__i0];
+// EXPECT-SV:   end
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 4; __i0 = __i0 + 1) begin : gen__array_update_7_0
+// EXPECT-SV:     assign array_update_7[__i0] = index == __i0 ? second : array_update_6[__i0];
+// EXPECT-SV:   end
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 4; __i0 = __i0 + 1) begin : gen__array_update_8_0
+// EXPECT-SV:     assign array_update_8[__i0] = index == __i0 ? third : array_update_7[__i0];
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = array_update_8;
+// EXPECT-SV: endmodule

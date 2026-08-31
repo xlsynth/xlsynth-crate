@@ -1,0 +1,9 @@
+package initial_keyword_package
+
+top block keyword_input(initial: bits[8], out: bits[8]) {
+  initial: bits[8] = input_port(name=initial, id=1)
+  out: () = output_port(initial, name=out, id=2)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: invalid SystemVerilog port identifier `initial`: identifier is reserved, malformed, or requires escaping

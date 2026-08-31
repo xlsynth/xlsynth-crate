@@ -1,0 +1,26 @@
+package custom_typed_array_package
+
+top block custom_typed_array(data: bits[4][2], index: bits[2], replacement: bits[4], out: bits[4][2]) {
+  data: bits[4][2] = input_port(name=data, sv_type="types::input_t", id=1)
+  index: bits[2] = input_port(name=index, id=2)
+  replacement: bits[4] = input_port(name=replacement, id=3)
+  updated: bits[4][2] = array_update(data, replacement, indices=[index], id=4)
+  out: () = output_port(updated, name=out, sv_type="types::output_t", id=5)
+}
+
+// OPTIONS: layout = "pipeline"
+// EXPECT-SV: module custom_typed_array(
+// EXPECT-SV:   input types::input_t data,
+// EXPECT-SV:   input logic [1:0] index,
+// EXPECT-SV:   input logic [3:0] replacement,
+// EXPECT-SV:   output types::output_t out
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:   logic [1:0][3:0] p0_data_comb;
+// EXPECT-SV:   logic [1:0][3:0] p0_updated_comb;
+// EXPECT-SV:   assign p0_data_comb = data;
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 2; __i0 = __i0 + 1) begin : gen__p0_updated_comb_0
+// EXPECT-SV:     assign p0_updated_comb[__i0] = index == __i0 ? replacement : p0_data_comb[__i0];
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = p0_updated_comb;
+// EXPECT-SV: endmodule

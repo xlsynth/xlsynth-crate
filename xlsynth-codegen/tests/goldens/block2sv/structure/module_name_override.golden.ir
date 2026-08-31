@@ -1,0 +1,14 @@
+package renamed_module_package
+
+top block internal_name(data: bits[16], out: bits[16]) {
+  data: bits[16] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+// OPTIONS: module_name = "public_name"
+// EXPECT-SV: module public_name(
+// EXPECT-SV:   input logic [15:0] data,
+// EXPECT-SV:   output logic [15:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule

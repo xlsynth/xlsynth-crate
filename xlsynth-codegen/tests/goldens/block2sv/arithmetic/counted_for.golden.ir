@@ -1,0 +1,15 @@
+package counted_loop_package
+
+fn loop_body(index: bits[3] id=1, value: bits[8] id=2, increment: bits[8] id=3) -> bits[8] {
+  ret updated: bits[8] = add(value, increment, id=4)
+}
+
+top block counted_loop(seed: bits[8], step: bits[8], out: bits[8]) {
+  seed: bits[8] = input_port(name=seed, id=5)
+  step: bits[8] = input_port(name=step, id=6)
+  result: bits[8] = counted_for(seed, trip_count=4, stride=1, body=loop_body, invariant_args=[step], id=7)
+  out: () = output_port(result, name=out, id=8)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-ERROR: counted_for is not supported in `counted_loop`; unroll loops before block2sv code generation

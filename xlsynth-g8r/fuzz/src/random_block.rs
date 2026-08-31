@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{BlockMetadata, Fn, NodePayload, NodeRef, Type};
-use xlsynth_pir::ir_eval::{self, FnEvalResult};
+use xlsynth_pir::ir_eval::{self, EvalObserver, FnEvalResult, SelectEvent};
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
 #[derive(Debug, Clone, Copy)]
@@ -14,6 +14,101 @@ struct RegisterWriteRefs {
     arg: NodeRef,
     load_enable: Option<NodeRef>,
     reset: Option<NodeRef>,
+}
+
+pub struct ObservedBlockCycle {
+    pub outputs: Vec<IrValue>,
+    pub next_state: Vec<IrValue>,
+    pub node_values: Vec<Option<IrValue>>,
+}
+
+struct NodeValues(Vec<Option<IrValue>>);
+
+impl EvalObserver for NodeValues {
+    fn on_select(&mut self, _event: SelectEvent) {
+        // Consumers classify events from node values and original block
+        // metadata.
+    }
+
+    fn on_node_value(&mut self, node_ref: NodeRef, _id: usize, value: &IrValue) {
+        self.0[node_ref.index] = Some(value.clone());
+    }
+}
+
+/// Evaluates a cycle once, retaining operand values for behavioral coverage.
+/// Register Q is substituted with explicit state; reset/enable priority follows
+/// the block semantics independently of either RTL or gate lowering.
+pub fn evaluate_block_cycle_observed(
+    block: &Fn,
+    metadata: &BlockMetadata,
+    inputs: &[IrValue],
+    state: &[IrValue],
+) -> ObservedBlockCycle {
+    let cycle_fn = cycle_eval_fn(block, metadata, state);
+    let mut observer = NodeValues(vec![None; block.nodes.len()]);
+    // EvalObserver reports computed values, not parameter and unit nodes.
+    for (index, node) in cycle_fn.nodes.iter().enumerate() {
+        match &node.payload {
+            NodePayload::GetParam(id) => {
+                let position = block
+                    .params
+                    .iter()
+                    .position(|param| param.id == *id)
+                    .unwrap();
+                observer.0[index] = Some(inputs[position].clone());
+            }
+            NodePayload::Nil => observer.0[index] = Some(IrValue::make_tuple(&[])),
+            _ => { /* Computed values arrive through the observer. */ }
+        }
+    }
+    let result = ir_eval::eval_fn_with_observer(&cycle_fn, inputs, Some(&mut observer));
+    assert!(
+        matches!(result, FnEvalResult::Success(_)),
+        "block evaluation failed: {result:?}\n{block}"
+    );
+    let value = |node: NodeRef| {
+        observer.0[node.index]
+            .as_ref()
+            .expect("all block nodes evaluated")
+    };
+    let outputs = block_output_refs(block, metadata)
+        .iter()
+        .map(|node| value(*node).clone())
+        .collect();
+    let writes = collect_register_writes(block);
+    let next_state = metadata
+        .registers
+        .iter()
+        .enumerate()
+        .map(|(index, register)| {
+            let Some(write) = writes.get(&register.name) else {
+                // A register with no write holds its state.
+                return state[index].clone();
+            };
+            let mut next = value(write.arg).clone();
+            if write
+                .load_enable
+                .is_some_and(|enable| !bool_value(value(enable)))
+            {
+                next = state[index].clone();
+            }
+            if let (Some(reset), Some(reset_value), Some(reset_metadata)) = (
+                write.reset,
+                register.reset_value.as_ref(),
+                metadata.reset.as_ref(),
+            ) {
+                if bool_value(value(reset)) ^ reset_metadata.active_low {
+                    next = reset_value.clone();
+                }
+            }
+            next
+        })
+        .collect();
+    ObservedBlockCycle {
+        outputs,
+        next_state,
+        node_values: observer.0,
+    }
 }
 
 /// Returns visible block output node references in metadata order.
@@ -103,18 +198,15 @@ pub fn evaluate_block_cycle(
         };
         let mut next_value = eval_ref(&mut cycle_fn, write.arg, inputs, ir_text);
         if let Some(load_enable_ref) = write.load_enable
-            && !bool_value(&eval_ref(
-                &mut cycle_fn,
-                load_enable_ref,
-                inputs,
-                ir_text,
-            ))
+            && !bool_value(&eval_ref(&mut cycle_fn, load_enable_ref, inputs, ir_text))
         {
             next_value = state[register_index].clone();
         }
-        if let (Some(reset_ref), Some(reset_value), Some(reset_metadata)) =
-            (write.reset, register.reset_value.as_ref(), metadata.reset.as_ref())
-        {
+        if let (Some(reset_ref), Some(reset_value), Some(reset_metadata)) = (
+            write.reset,
+            register.reset_value.as_ref(),
+            metadata.reset.as_ref(),
+        ) {
             let reset_signal = bool_value(&eval_ref(&mut cycle_fn, reset_ref, inputs, ir_text));
             let reset_asserted = if reset_metadata.active_low {
                 !reset_signal

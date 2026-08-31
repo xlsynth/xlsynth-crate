@@ -1,0 +1,22 @@
+package shifting_package
+
+top block shifts(data: bits[8], amount: bits[4], out: bits[16]) {
+  data: bits[8] = input_port(name=data, id=1)
+  amount: bits[4] = input_port(name=amount, id=2)
+  shifted: bits[8] = shra(data, amount, id=3)
+  extended: bits[16] = sign_ext(shifted, new_bit_count=16, id=4)
+  out: () = output_port(extended, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module shifts(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   input logic [3:0] amount,
+// EXPECT-SV:   output logic [15:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] shifted;
+// EXPECT-SV:   logic [15:0] extended;
+// EXPECT-SV:   assign shifted = $unsigned($signed(data) >>> amount);
+// EXPECT-SV:   assign extended = {{8{shifted[7]}}, shifted};
+// EXPECT-SV:   assign out = extended;
+// EXPECT-SV: endmodule

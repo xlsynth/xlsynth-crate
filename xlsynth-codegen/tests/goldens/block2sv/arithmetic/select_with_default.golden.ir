@@ -1,0 +1,23 @@
+package selection_package
+
+top block selection(selector: bits[2], first: bits[8], second: bits[8], fallback: bits[8], out: bits[8]) {
+  selector: bits[2] = input_port(name=selector, id=1)
+  first: bits[8] = input_port(name=first, id=2)
+  second: bits[8] = input_port(name=second, id=3)
+  fallback: bits[8] = input_port(name=fallback, id=4)
+  selected: bits[8] = sel(selector, cases=[first, second], default=fallback, id=5)
+  out: () = output_port(selected, name=out, id=6)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module selection(
+// EXPECT-SV:   input logic [1:0] selector,
+// EXPECT-SV:   input logic [7:0] first,
+// EXPECT-SV:   input logic [7:0] second,
+// EXPECT-SV:   input logic [7:0] fallback,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign selected = selector == 2'h0 ? first : (selector == 2'h1 ? second : fallback);
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

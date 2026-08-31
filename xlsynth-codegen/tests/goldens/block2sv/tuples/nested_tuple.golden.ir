@@ -1,0 +1,20 @@
+package nested_tuple_package
+
+top block nested_tuple(data: (bits[4], (bits[8], bits[3])), out: bits[8]) {
+  data: (bits[4], (bits[8], bits[3])) = input_port(name=data, id=1)
+  inner: (bits[8], bits[3]) = tuple_index(data, index=1, id=2)
+  selected: bits[8] = tuple_index(inner, index=0, id=3)
+  out: () = output_port(selected, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module nested_tuple(
+// EXPECT-SV:   input logic [14:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [10:0] inner;
+// EXPECT-SV:   logic [7:0] selected;
+// EXPECT-SV:   assign inner = data[10:0];
+// EXPECT-SV:   assign selected = inner[10:3];
+// EXPECT-SV:   assign out = selected;
+// EXPECT-SV: endmodule

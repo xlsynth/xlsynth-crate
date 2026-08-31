@@ -14,12 +14,7 @@ use xlsynth_prover::prover::types::EquivResult;
 
 /// Proves source-vs-g8r equivalence, returning false for a bounded timeout.
 #[cfg(feature = "has-bitwuzla")]
-fn prove_equivalence(
-    source_ir: &str,
-    source_top: &str,
-    gate_ir: &str,
-    gate_top: &str,
-) -> bool {
+fn prove_equivalence(source_ir: &str, source_top: &str, gate_ir: &str, gate_top: &str) -> bool {
     let request = IrEquivRequest::new(
         IrModule::new(source_ir).with_top(Some(source_top)),
         IrModule::new(gate_ir).with_top(Some(gate_top)),
@@ -52,12 +47,7 @@ fn prove_equivalence(
 }
 
 #[cfg(not(feature = "has-bitwuzla"))]
-fn prove_equivalence(
-    _source_ir: &str,
-    _source_top: &str,
-    _gate_ir: &str,
-    _gate_top: &str,
-) -> bool {
+fn prove_equivalence(_source_ir: &str, _source_top: &str, _gate_ir: &str, _gate_top: &str) -> bool {
     panic!(
         "fuzz_g8r_formal requires an in-process solver; build with \
          --features=with-bitwuzla-system (or with-bitwuzla-built)"

@@ -1,0 +1,17 @@
+package extended_mask_package
+
+top block extended_mask(count: bits[5], out: bits[16]) {
+  count: bits[5] = input_port(name=count, id=1)
+  result: bits[16] = ext_mask_low(count, id=2)
+  out: () = output_port(result, name=out, id=3)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module extended_mask(
+// EXPECT-SV:   input logic [4:0] count,
+// EXPECT-SV:   output logic [15:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [15:0] result;
+// EXPECT-SV:   assign result = count >= 5'h10 ? '1 : (16'h0001 << count) - 16'h0001;
+// EXPECT-SV:   assign out = result;
+// EXPECT-SV: endmodule

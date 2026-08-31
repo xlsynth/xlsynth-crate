@@ -4,12 +4,17 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+use xlsynth::external_tool::{ToolError, resolve_executable, run_checked, run_checked_detailed};
 
 /// Environment variable naming the Yosys executable used for external mapping.
 pub const YOSYS_PATH_ENV: &str = "XLSYNTH_YOSYS_PATH";
 
 /// Environment variable containing comma-separated Liberty paths for Yosys.
 pub const LIBERTY_FILES_ENV: &str = "XLSYNTH_LIBERTY_FILES";
+
+const LIBERTY_FILES_HELP: &str = "Set XLSYNTH_LIBERTY_FILES=/path/to/combo.lib,/path/to/seq.lib to comma-separated installed Liberty files from one compatible library/corner; include flip-flop cells for sequential mapping.";
 
 /// Validated external Yosys executable and Liberty-library configuration.
 pub struct YosysEnvironment {
@@ -23,8 +28,16 @@ impl YosysEnvironment {
         yosys_path: P,
         liberty_files: YosysLibertyFileSet,
     ) -> Result<Self, String> {
-        let yosys_path = yosys_path.as_ref().to_path_buf();
-        validate_yosys_executable_path(&yosys_path)?;
+        let path = yosys_path.as_ref();
+        // Resolve before synthesis switches to a temporary working directory.
+        let yosys_path = resolve_executable(path).map_err(|error| format!("Yosys {error}"))?;
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        run_checked(
+            Command::new(&yosys_path).arg("-V"),
+            directory.path(),
+            "yosys-version",
+            Duration::from_secs(10),
+        )?;
         Ok(Self {
             yosys_path,
             liberty_files,
@@ -52,6 +65,17 @@ impl YosysEnvironment {
         verilog: &str,
         top_module: &str,
     ) -> Result<String, String> {
+        self.synthesize_verilog_to_gv_detailed(verilog, top_module)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Maps combinational RTL while preserving external resource-failure
+    /// categories.
+    pub fn synthesize_verilog_to_gv_detailed(
+        &self,
+        verilog: &str,
+        top_module: &str,
+    ) -> Result<String, ToolError> {
         synthesize_verilog_to_gv_with_yosys(
             &self.yosys_path,
             verilog,
@@ -69,6 +93,17 @@ impl YosysEnvironment {
         verilog: &str,
         top_module: &str,
     ) -> Result<String, String> {
+        self.synthesize_sequential_verilog_to_gv_detailed(verilog, top_module)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Maps sequential RTL while preserving external resource-failure
+    /// categories.
+    pub fn synthesize_sequential_verilog_to_gv_detailed(
+        &self,
+        verilog: &str,
+        top_module: &str,
+    ) -> Result<String, ToolError> {
         synthesize_sequential_verilog_to_gv_with_yosys(
             &self.yosys_path,
             verilog,
@@ -86,9 +121,15 @@ pub struct YosysLibertyFileSet {
 impl YosysLibertyFileSet {
     /// Reads comma-separated source Liberty paths from the environment.
     pub fn from_env() -> Result<Self, String> {
-        let raw_paths = std::env::var(LIBERTY_FILES_ENV)
-            .map_err(|_| format!("{LIBERTY_FILES_ENV} is not set"))?;
-        Self::from_comma_separated_paths(&raw_paths)
+        std::env::var(LIBERTY_FILES_ENV)
+            .map_err(|error| match error {
+                std::env::VarError::NotPresent => format!("{LIBERTY_FILES_ENV} is not set"),
+                std::env::VarError::NotUnicode(_) => {
+                    format!("{LIBERTY_FILES_ENV} must contain UTF-8 paths")
+                }
+            })
+            .and_then(|raw_paths| Self::from_comma_separated_paths(&raw_paths))
+            .map_err(|error| format!("{error}. {LIBERTY_FILES_HELP}"))
     }
 
     /// Validates and canonicalizes source Liberty files while preserving order.
@@ -103,6 +144,12 @@ impl YosysLibertyFileSet {
             if !path.is_file() {
                 return Err(format!(
                     "Yosys Liberty input is not a file: {}",
+                    path.display()
+                ));
+            }
+            if path.extension().is_some_and(|extension| extension == "7z") {
+                return Err(format!(
+                    "Yosys Liberty input is an archive; provide installed .lib files: {}",
                     path.display()
                 ));
             }
@@ -121,6 +168,9 @@ impl YosysLibertyFileSet {
     }
 
     fn from_comma_separated_paths(raw_paths: &str) -> Result<Self, String> {
+        if raw_paths.trim().is_empty() {
+            return Err(format!("{LIBERTY_FILES_ENV} is empty"));
+        }
         let mut paths = Vec::new();
         for raw_path in raw_paths.split(',') {
             let path = raw_path.trim();
@@ -131,9 +181,6 @@ impl YosysLibertyFileSet {
             }
             paths.push(PathBuf::from(path));
         }
-        if paths.is_empty() {
-            return Err(format!("{LIBERTY_FILES_ENV} is empty"));
-        }
         Self::new(&paths)
     }
 }
@@ -141,27 +188,9 @@ impl YosysLibertyFileSet {
 fn yosys_path_from_env() -> Result<PathBuf, String> {
     std::env::var_os(YOSYS_PATH_ENV)
         .map(PathBuf::from)
-        .ok_or_else(|| format!("{YOSYS_PATH_ENV} is not set"))
-}
-
-fn validate_yosys_executable_path(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Err(format!(
-            "Yosys executable is not a file: {}",
-            path.display()
-        ));
-    }
-    let output = Command::new(path)
-        .arg("-V")
-        .output()
-        .map_err(|e| format!("run Yosys executable '{}': {e}", path.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Yosys executable did not run successfully: {}",
-            path.display()
-        ));
-    }
-    Ok(())
+        .ok_or_else(|| {
+            format!("{YOSYS_PATH_ENV} is not set. Set XLSYNTH_YOSYS_PATH=/path/to/yosys; mapping also requires {LIBERTY_FILES_ENV}.")
+        })
 }
 
 /// Maps one combinational Verilog module through Yosys and its default ABC
@@ -171,7 +200,7 @@ fn synthesize_verilog_to_gv_with_yosys(
     verilog: &str,
     top_module: &str,
     liberty_files: &YosysLibertyFileSet,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let yosys_program = render_combo_synthesis_program(top_module, liberty_files.paths());
     run_yosys_synthesis_program(
         yosys_path,
@@ -189,7 +218,7 @@ fn synthesize_sequential_verilog_to_gv_with_yosys(
     verilog: &str,
     top_module: &str,
     liberty_files: &YosysLibertyFileSet,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let yosys_program = render_sequential_synthesis_program(top_module, liberty_files.paths());
     run_yosys_synthesis_program(
         yosys_path,
@@ -206,11 +235,9 @@ fn run_yosys_synthesis_program(
     top_module: &str,
     yosys_program: &str,
     mapping_kind: &str,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     if !is_simple_yosys_identifier(top_module) {
-        return Err(format!(
-            "Yosys top module must be a simple identifier: '{top_module}'"
-        ));
+        return Err(format!("Yosys top module must be a simple identifier: '{top_module}'").into());
     }
 
     let temp_dir =
@@ -221,26 +248,25 @@ fn run_yosys_synthesis_program(
         .map_err(|e| format!("write temporary Yosys input Verilog: {e}"))?;
     let invocation_context = format_yosys_invocation_context(yosys_path, yosys_program);
 
-    let output = Command::new(yosys_path)
-        .current_dir(temp_dir.path())
-        .arg("-Q")
-        .arg("-p")
-        .arg(yosys_program)
-        .output()
-        .map_err(|e| format!("run Yosys: {e}\n{invocation_context}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Yosys {mapping_kind} technology mapping failed\n{invocation_context}\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        ));
-    }
+    run_checked_detailed(
+        Command::new(yosys_path)
+            .current_dir(temp_dir.path())
+            .args(["-Q", "-p", yosys_program]),
+        temp_dir.path(),
+        "yosys",
+        Duration::from_secs(120),
+    )
+    .map_err(|error| {
+        error.with_context(format!(
+            "Yosys {mapping_kind} technology mapping\n{invocation_context}"
+        ))
+    })?;
 
     std::fs::read_to_string(&output_path).map_err(|e| {
-        format!(
+        ToolError::failure(format!(
             "read Yosys mapped netlist '{}': {e}\n{invocation_context}",
             output_path.display()
-        )
+        ))
     })
 }
 
@@ -327,6 +353,36 @@ fn is_simple_yosys_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_yosys_path_survives_synthesis_working_directory_change() {
+        let cwd = std::env::current_dir().unwrap();
+        let directory = tempfile::tempdir_in(&cwd).unwrap();
+        let executable = directory.path().join("yosys");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then exit 0; fi\nprintf 'mapped\\n' > mapped.gv\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let liberty = directory.path().join("cells.lib");
+        std::fs::write(&liberty, "library (cells) {}\n").unwrap();
+        let environment = YosysEnvironment::new(
+            executable.strip_prefix(&cwd).unwrap(),
+            YosysLibertyFileSet::new(&[liberty]).unwrap(),
+        )
+        .unwrap();
+        assert!(environment.yosys_path().is_absolute());
+        assert_eq!(
+            environment
+                .synthesize_verilog_to_gv("module top; endmodule", "top")
+                .unwrap(),
+            "mapped\n"
+        );
+    }
 
     #[test]
     fn liberty_file_set_preserves_files_in_order() {
@@ -446,6 +502,31 @@ mod tests {
         assert_eq!(
             error,
             "XLSYNTH_LIBERTY_FILES contains an empty comma-separated entry"
+        );
+    }
+
+    #[test]
+    fn liberty_file_set_rejects_empty_environment_values() {
+        for raw_paths in ["", "  "] {
+            let error = YosysLibertyFileSet::from_comma_separated_paths(raw_paths)
+                .err()
+                .unwrap();
+            assert_eq!(error, "XLSYNTH_LIBERTY_FILES is empty");
+        }
+    }
+
+    #[test]
+    fn liberty_file_set_requires_installed_files_instead_of_archives() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let archive = source_dir.path().join("cells.lib.7z");
+        std::fs::write(&archive, []).unwrap();
+        let error = YosysLibertyFileSet::new(&[&archive]).err().unwrap();
+        assert_eq!(
+            error,
+            format!(
+                "Yosys Liberty input is an archive; provide installed .lib files: {}",
+                archive.display()
+            )
         );
     }
 

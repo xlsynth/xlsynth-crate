@@ -1,0 +1,19 @@
+package array_concat_package
+
+top block concat_arrays(first: bits[8][2], second: bits[8][3], out: bits[8][5]) {
+  first: bits[8][2] = input_port(name=first, id=1)
+  second: bits[8][3] = input_port(name=second, id=2)
+  combined: bits[8][5] = array_concat(first, second, id=3)
+  out: () = output_port(combined, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module concat_arrays(
+// EXPECT-SV:   input logic [1:0][7:0] first,
+// EXPECT-SV:   input logic [2:0][7:0] second,
+// EXPECT-SV:   output logic [4:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [4:0][7:0] combined;
+// EXPECT-SV:   assign combined = {second, first};
+// EXPECT-SV:   assign out = combined;
+// EXPECT-SV: endmodule

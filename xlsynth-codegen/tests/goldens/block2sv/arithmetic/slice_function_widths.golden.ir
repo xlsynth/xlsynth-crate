@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package slice_function_widths
+
+top block slice_widths(data: bits[8], index: bits[3], bit_value: bits[1], wide: bits[13], slice: bits[8], padded: bits[8], truncated: bits[1], equal: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  index: bits[3] = input_port(name=index, id=2)
+  bit_value: bits[1] = input_port(name=bit_value, id=3)
+  wide: bits[13] = input_port(name=wide, id=4)
+  dynamic_bit_slice.5: bits[8] = dynamic_bit_slice(data, index, width=8, id=5)
+  bit_slice_update.6: bits[8] = bit_slice_update(data, index, bit_value, id=6)
+  bit_slice_update.7: bits[1] = bit_slice_update(bit_value, index, wide, id=7)
+  bit_slice_update.8: bits[8] = bit_slice_update(data, index, data, id=8)
+  slice: () = output_port(dynamic_bit_slice.5, name=slice, id=9)
+  padded: () = output_port(bit_slice_update.6, name=padded, id=10)
+  truncated: () = output_port(bit_slice_update.7, name=truncated, id=11)
+  equal: () = output_port(bit_slice_update.8, name=equal, id=12)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module slice_widths(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   input logic [2:0] index,
+// EXPECT-SV:   input logic bit_value,
+// EXPECT-SV:   input logic [12:0] wide,
+// EXPECT-SV:   output logic [7:0] slice,
+// EXPECT-SV:   output logic [7:0] padded,
+// EXPECT-SV:   output logic truncated,
+// EXPECT-SV:   output logic [7:0] equal
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [7:0] dynamic_bit_slice_w8_8b_3b (input logic [7:0] operand, input logic [2:0] start);
+// EXPECT-SV:     logic [15:0] extended_operand;
+// EXPECT-SV:     begin
+// EXPECT-SV:       extended_operand = {8'h00, operand};
+// EXPECT-SV:       dynamic_bit_slice_w8_8b_3b = extended_operand[start +: 8];
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic [7:0] bit_slice_update_w8_3b_1b (input logic [7:0] to_update, input logic [2:0] start, input logic update_value);
+// EXPECT-SV:     begin
+// EXPECT-SV:       bit_slice_update_w8_3b_1b = {7'h00, update_value} << start | ~(8'h01 << start) & to_update;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic bit_slice_update_w1_3b_13b (input logic to_update, input logic [2:0] start, input logic [12:0] update_value);
+// EXPECT-SV:     begin
+// EXPECT-SV:       bit_slice_update_w1_3b_13b = start >= 3'h1 ? to_update : update_value[0] << start | ~(1'h1 << start) & to_update;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   function automatic logic [7:0] bit_slice_update_w8_3b_8b (input logic [7:0] to_update, input logic [2:0] start, input logic [7:0] update_value);
+// EXPECT-SV:     begin
+// EXPECT-SV:       bit_slice_update_w8_3b_8b = update_value << start | ~(8'hff << start) & to_update;
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   assign slice = dynamic_bit_slice_w8_8b_3b(data, index);
+// EXPECT-SV:   assign padded = bit_slice_update_w8_3b_1b(data, index, bit_value);
+// EXPECT-SV:   assign truncated = bit_slice_update_w1_3b_13b(bit_value, index, wide);
+// EXPECT-SV:   assign equal = bit_slice_update_w8_3b_8b(data, index, data);
+// EXPECT-SV: endmodule
