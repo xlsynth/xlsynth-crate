@@ -6,7 +6,8 @@ use libfuzzer_sys::fuzz_target;
 use pretty_assertions::assert_eq;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_random::{
-    DepletableBytes, RandomBlockOptions, RandomFnOptions, StopPolicy, generate_block_package,
+    ArrayAssumptionMode, DepletableBytes, RandomBlockOptions, RandomFnOptions, StopPolicy,
+    generate_block_package,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -20,7 +21,7 @@ fuzz_target!(|data: &[u8]| {
             max_bit_width: 16,
             allow_arbitrary_width_multiply: true,
             allow_gate: true,
-            allow_assumed_in_bounds: true,
+            array_assumption_mode: ArrayAssumptionMode::Unrestricted,
             ..RandomFnOptions::default()
         },
         ..RandomBlockOptions::default()

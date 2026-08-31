@@ -5,8 +5,8 @@
 
 use xlsynth_pir::ir::{Fn as IrFn, Package};
 use xlsynth_pir::ir_random::{
-    generate_fn, generate_package, generate_same_signature_pair, DepletableBytes, OperationSet,
-    RandomFnOptions, RandomOperation, StopPolicy,
+    ArrayAssumptionMode, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation,
+    StopPolicy, generate_fn, generate_package, generate_same_signature_pair,
 };
 use xlsynth_prover::prover::SolverLimits;
 #[cfg(feature = "has-bitwuzla")]
@@ -116,7 +116,7 @@ pub fn generate_full_random_pir_pair(data: &[u8]) -> (IrFn, IrFn) {
         allow_gate: true,
         allow_extension_ops: true,
         allow_events: true,
-        allow_assumed_in_bounds: true,
+        array_assumption_mode: ArrayAssumptionMode::Unrestricted,
         ..RandomFnOptions::default()
     };
     let (mut first_entropy, mut second_entropy) = DepletableBytes::split(data);

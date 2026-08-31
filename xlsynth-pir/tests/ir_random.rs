@@ -11,10 +11,10 @@ use xlsynth_pir::ir::{
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_random::{
-    DepletableBytes, FunctionSignature, GenerationError, OperationSet, RandomBlockOptions,
-    RandomBlockResetTiming, RandomFnOptions, RandomOperation, RngEntropy, StopPolicy,
-    generate_block, generate_block_package, generate_fn, generate_fn_with_signature,
-    generate_package, generate_same_signature_pair,
+    ArrayAssumptionMode, BlockTopology, DepletableBytes, FunctionSignature, GenerationError,
+    OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions, RandomOperation,
+    RngEntropy, StopPolicy, generate_block, generate_block_package, generate_fn,
+    generate_fn_with_signature, generate_package, generate_same_signature_pair,
 };
 use xlsynth_pir::ir_utils::operands;
 use xlsynth_pir::ir_verify::verify_package;
@@ -308,10 +308,38 @@ fn depleted_entropy_constructs_a_minimal_deterministic_function() {
 }
 
 #[test]
+fn depleted_entropy_constructs_a_minimal_deterministic_package() {
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 32,
+        ..RandomFnOptions::default()
+    };
+    let mut first_source = DepletableBytes::new(&[]);
+    let mut second_source = DepletableBytes::new(&[]);
+    let first =
+        generate_package(&mut first_source, &options, StopPolicy::WhenEntropyDepleted).unwrap();
+    let second = generate_package(
+        &mut second_source,
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .unwrap();
+
+    verify_package(&first.package).unwrap();
+    verify_package(&second.package).unwrap();
+    assert_eq!(first.package.to_string(), second.package.to_string());
+    assert_eq!(first.function_stats[0].emitted_node_count, 1);
+    let top = first.package.get_top_fn().unwrap();
+    assert!(top.params.is_empty());
+    assert!(matches!(top.nodes[1].payload, NodePayload::Literal(_)));
+}
+
+#[test]
 fn depleted_entropy_constructs_a_minimal_deterministic_block() {
     let options = RandomBlockOptions {
         max_input_ports: 0,
         max_output_ports: 0,
+        topology: BlockTopology::Combinational,
         max_registers: 0,
         function_options: RandomFnOptions {
             max_nodes: 1,
@@ -350,10 +378,595 @@ fn depleted_entropy_constructs_a_minimal_deterministic_block() {
 }
 
 #[test]
+fn empty_tuple_values_can_supply_required_block_outputs() {
+    for (inputs, registers, pipeline) in [(0, 0, false), (1, 0, false), (1, 2, true)] {
+        for output_count in [1, 2] {
+            let max_nodes =
+                inputs + 2 * registers + usize::from(inputs == 0) + usize::from(output_count != 1);
+            let options = RandomBlockOptions {
+                min_input_ports: inputs,
+                max_input_ports: inputs,
+                min_output_ports: output_count,
+                max_output_ports: output_count,
+                topology: if pipeline {
+                    BlockTopology::FeedForwardPipeline
+                } else {
+                    BlockTopology::Combinational
+                },
+                max_registers: registers,
+                allow_zero_width_ports_and_registers: true,
+                allow_reset: false,
+                function_options: RandomFnOptions {
+                    max_nodes,
+                    max_tuple_length: 0,
+                    allow_arrays: false,
+                    ..RandomFnOptions::default()
+                },
+                ..RandomBlockOptions::default()
+            };
+            let mut data = vec![0; options.wiring_header_byte_count().unwrap()];
+            // Select the empty-tuple type, then exhaust body entropy.
+            data.extend_from_slice(&1u64.to_le_bytes());
+            let generated = generate_block_package(
+                &mut DepletableBytes::new(&data),
+                &options,
+                StopPolicy::WhenEntropyDepleted,
+            )
+            .unwrap();
+            validate_generated_block_package(&generated.package);
+            let PackageMember::Block { func, metadata } =
+                generated.package.get_top_block().unwrap()
+            else {
+                unreachable!()
+            };
+            assert_eq!(metadata.output_names.len(), output_count);
+            assert!(
+                block_output_types(func, output_count)
+                    .iter()
+                    .all(|ty| ty.is_nil())
+            );
+            assert!(func.nodes.len() - 1 <= max_nodes);
+            assert!(func.ret_node_ref.unwrap().index > 0);
+            for node in func.nodes.iter().skip(1) {
+                assert!(!matches!(node.payload, NodePayload::Nil));
+                assert!(
+                    operands(&node.payload)
+                        .iter()
+                        .all(|operand| operand.index > 0)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn reserved_wiring_header_mutates_connections_without_changing_the_body() {
+    for topology in [
+        BlockTopology::GeneralSequential,
+        BlockTopology::FeedForwardPipeline,
+    ] {
+        let options = RandomBlockOptions {
+            topology,
+            min_input_ports: 3,
+            max_input_ports: 3,
+            min_output_ports: 3,
+            max_output_ports: 3,
+            max_registers: 2,
+            allow_reset: false,
+            function_options: RandomFnOptions {
+                max_bit_width: 1,
+                allow_arrays: false,
+                allow_tuples: false,
+                enabled_operations: OperationSet::new([
+                    RandomOperation::Literal,
+                    RandomOperation::Not,
+                ]),
+                ..RandomFnOptions::default()
+            },
+            ..RandomBlockOptions::default()
+        };
+        let header = options.wiring_header_byte_count().unwrap();
+        assert_eq!(header, 8 * (3 + 2 * 2));
+        let mut data = vec![0; header];
+        data.extend_from_slice(&[17; 512]);
+        let base = generate_block(
+            &mut DepletableBytes::new(&data),
+            &options,
+            StopPolicy::WhenEntropyDepleted,
+        )
+        .unwrap();
+        let body = |block: &xlsynth_pir::ir_random::GeneratedBlock| {
+            format!(
+                "{:?}",
+                block
+                    .function
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(
+                        |(index, node)| *index != block.function.ret_node_ref.unwrap().index
+                            && !matches!(node.payload, NodePayload::RegisterWrite { .. })
+                    )
+                    .collect::<Vec<_>>()
+            )
+        };
+        for slot in 0..header / 8 {
+            let mut changed = data.clone();
+            changed[slot * 8] = 1;
+            let variant = generate_block(
+                &mut DepletableBytes::new(&changed),
+                &options,
+                StopPolicy::WhenEntropyDepleted,
+            )
+            .unwrap();
+            assert_eq!(
+                body(&base),
+                body(&variant),
+                "wiring slot {slot} changed body nodes"
+            );
+            assert_eq!(base.metadata.port_order, variant.metadata.port_order);
+            assert_eq!(base.metadata.output_names, variant.metadata.output_names);
+            assert_ne!(
+                base.function.to_string(),
+                variant.function.to_string(),
+                "wiring slot {slot} did not change a connection"
+            );
+            assert_generated_block_register_wiring(&variant.function, &variant.metadata);
+            validate_generated_block_package(&variant.into_top_package("test"));
+        }
+    }
+}
+
+#[test]
+fn promised_in_bounds_indices_preserve_feed_forward_register_dependencies() {
+    let options = RandomBlockOptions {
+        topology: BlockTopology::FeedForwardPipeline,
+        min_input_ports: 3,
+        max_input_ports: 3,
+        max_registers: 3,
+        allow_zero_width_ports_and_registers: true,
+        function_options: RandomFnOptions {
+            max_nodes: 64,
+            max_bit_width: 16,
+            max_type_depth: 2,
+            allow_zero_width_bits: true,
+            array_assumption_mode: ArrayAssumptionMode::ProvenSafe,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut saw_promised_index = false;
+    for seed in 0..256 {
+        let mut rng = Pcg64Mcg::new(seed);
+        let generated = generate_block(
+            &mut RngEntropy::new(&mut rng),
+            &options,
+            StopPolicy::ExactBodyNodes(48),
+        )
+        .unwrap();
+        let function = &generated.function;
+        for node in &function.nodes {
+            saw_promised_index |= matches!(
+                node.payload,
+                NodePayload::ArrayIndex {
+                    assumed_in_bounds: true,
+                    ..
+                }
+            );
+            let NodePayload::RegisterWrite {
+                register,
+                arg,
+                load_enable,
+                ..
+            } = &node.payload
+            else {
+                continue;
+            };
+            let position = generated
+                .metadata
+                .registers
+                .iter()
+                .position(|item| &item.name == register)
+                .unwrap();
+            for later in &generated.metadata.registers[position..] {
+                let read = function.nodes.iter().position(|node| matches!(&node.payload, NodePayload::RegisterRead { register } if register == &later.name)).unwrap();
+                for operand in std::iter::once(arg).chain(load_enable.iter()) {
+                    assert!(
+                        !node_depends_on(function, *operand, NodeRef { index: read }),
+                        "seed={seed}: {register} depends on its own or later stage {}\n{}",
+                        later.name,
+                        generated.function
+                    );
+                }
+            }
+        }
+    }
+    assert!(saw_promised_index);
+}
+
+#[test]
+fn short_wiring_headers_are_zero_padded_and_unused_slots_stay_reserved() {
+    let options = RandomBlockOptions {
+        min_input_ports: 2,
+        max_input_ports: 2,
+        min_output_ports: 1,
+        max_output_ports: 3,
+        max_registers: 2,
+        allow_reset: false,
+        function_options: RandomFnOptions {
+            max_bit_width: 1,
+            allow_arrays: false,
+            allow_tuples: false,
+            ..RandomFnOptions::default()
+        },
+        ..RandomBlockOptions::default()
+    };
+    let header = options.wiring_header_byte_count().unwrap();
+    for size in 0..header {
+        let short = vec![1; size];
+        let mut padded = short.clone();
+        padded.resize(header, 0);
+        let a = generate_block_package(
+            &mut DepletableBytes::new(&short),
+            &options,
+            StopPolicy::WhenEntropyDepleted,
+        )
+        .unwrap();
+        let b = generate_block_package(
+            &mut DepletableBytes::new(&padded),
+            &options,
+            StopPolicy::WhenEntropyDepleted,
+        )
+        .unwrap();
+        assert_eq!(
+            a.package.to_string(),
+            b.package.to_string(),
+            "short header length {size}"
+        );
+    }
+    let data = vec![0; header];
+    let base = generate_block_package(
+        &mut DepletableBytes::new(&data),
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .unwrap();
+    // Empty body entropy selects one output and one register. Their siblings'
+    // header slots cannot change those counts or any body-generation choices.
+    for slot in [1, 2, 5, 6] {
+        let mut changed = data.clone();
+        changed[slot * 8..slot * 8 + 8].fill(255);
+        let variant = generate_block_package(
+            &mut DepletableBytes::new(&changed),
+            &options,
+            StopPolicy::WhenEntropyDepleted,
+        )
+        .unwrap();
+        assert_eq!(base.package.to_string(), variant.package.to_string());
+    }
+}
+
+#[test]
+fn div_mod_width_limit_does_not_narrow_other_operations() {
+    for limit in [Some(1), Some(7), Some(16), Some(256), None] {
+        let options = RandomFnOptions {
+            max_nodes: 48,
+            max_bit_width: 128,
+            max_div_mod_bit_width: limit,
+            allow_arrays: false,
+            allow_tuples: false,
+            enabled_operations: OperationSet::new([
+                RandomOperation::Literal,
+                RandomOperation::Add,
+                RandomOperation::Udiv,
+                RandomOperation::Sdiv,
+                RandomOperation::Umod,
+                RandomOperation::Smod,
+            ]),
+            ..RandomFnOptions::default()
+        };
+        let signature = FunctionSignature {
+            params: vec![
+                Type::Bits(1),
+                Type::Bits(7),
+                Type::Bits(16),
+                Type::Bits(128),
+            ],
+            return_type: Type::Bits(128),
+        };
+        let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xd1_16));
+        let mut divisions = BTreeSet::new();
+        let mut saw_wide_add = false;
+        let mut saw_wide_div_mod = false;
+        for _ in 0..64 {
+            let generated = generate_fn_with_signature(
+                &mut entropy,
+                &options,
+                StopPolicy::ExactBodyNodes(40),
+                &signature,
+            )
+            .unwrap();
+            let function = &generated.function;
+            validate_generated(function);
+            for node in &function.nodes {
+                match node.payload {
+                    NodePayload::Binop(
+                        Binop::Udiv | Binop::Sdiv | Binop::Umod | Binop::Smod,
+                        lhs,
+                        rhs,
+                    ) => {
+                        let width = node.ty.bit_count();
+                        assert!(width > 0 && width <= limit.unwrap_or(128));
+                        assert_eq!(function.get_node_ty(lhs), &node.ty);
+                        assert_eq!(function.get_node_ty(rhs), &node.ty);
+                        divisions.insert(node.payload.get_operator().to_string());
+                        saw_wide_div_mod |= width > 64;
+                    }
+                    NodePayload::Binop(Binop::Add, _, _) => {
+                        saw_wide_add |= node.ty.bit_count() == 128
+                    }
+                    _ => { /* Literals and parameters supply operands. */ }
+                }
+            }
+        }
+        assert_eq!(
+            divisions,
+            BTreeSet::from(["udiv", "sdiv", "umod", "smod"].map(str::to_string))
+        );
+        assert!(saw_wide_add);
+        assert_eq!(saw_wide_div_mod, limit.is_none_or(|limit| limit > 64));
+    }
+}
+
+#[test]
+fn zero_div_mod_width_limit_is_rejected() {
+    let options = RandomFnOptions {
+        max_div_mod_bit_width: Some(0),
+        ..RandomFnOptions::default()
+    };
+    let error = generate_fn(
+        &mut DepletableBytes::new(&[]),
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        GenerationError::InvalidOptions(
+            "max_div_mod_bit_width must be nonzero when specified".into()
+        )
+    );
+}
+
+#[test]
+fn multiply_operand_limit_preserves_mixed_widths_and_wide_other_operations() {
+    for limit in [Some(1), Some(7), Some(64), Some(256), None] {
+        for arbitrary_widths in [false, true] {
+            let options = RandomFnOptions {
+                max_nodes: 48,
+                max_bit_width: 256,
+                max_multiply_operand_bit_width: limit,
+                allow_arrays: false,
+                allow_arbitrary_width_multiply: arbitrary_widths,
+                enabled_operations: OperationSet::new([
+                    RandomOperation::Literal,
+                    RandomOperation::Add,
+                    RandomOperation::Umul,
+                    RandomOperation::Smul,
+                    RandomOperation::Umulp,
+                    RandomOperation::Smulp,
+                ]),
+                ..RandomFnOptions::default()
+            };
+            let signature = FunctionSignature {
+                params: [1, 7, 64, 128, 256].map(Type::Bits).to_vec(),
+                return_type: Type::Bits(256),
+            };
+            let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x64_7_128));
+            let mut operations = BTreeSet::new();
+            let mut saw_mixed_operands = false;
+            let mut saw_wide_operand = false;
+            let mut saw_wide_result = false;
+            let mut saw_wide_add = false;
+            for _ in 0..64 {
+                let generated = generate_fn_with_signature(
+                    &mut entropy,
+                    &options,
+                    StopPolicy::ExactBodyNodes(40),
+                    &signature,
+                )
+                .unwrap();
+                let function = &generated.function;
+                validate_generated(function);
+                for node in &function.nodes {
+                    match node.payload {
+                        NodePayload::Binop(
+                            op @ (Binop::Umul | Binop::Smul | Binop::Umulp | Binop::Smulp),
+                            lhs,
+                            rhs,
+                        ) => {
+                            let lhs_width = function.get_node_ty(lhs).bit_count();
+                            let rhs_width = function.get_node_ty(rhs).bit_count();
+                            let cap = limit.unwrap_or(256);
+                            assert!(lhs_width > 0 && lhs_width <= cap);
+                            assert!(rhs_width > 0 && rhs_width <= cap);
+                            operations.insert(node.payload.get_operator().to_string());
+                            saw_wide_operand |= lhs_width > 64 || rhs_width > 64;
+                            if matches!(op, Binop::Umul | Binop::Smul) {
+                                saw_mixed_operands |= lhs_width != rhs_width;
+                                saw_wide_result |= node.ty.bit_count() > cap;
+                                if !arbitrary_widths {
+                                    assert_eq!(lhs_width, rhs_width);
+                                    assert_eq!(node.ty, Type::Bits(lhs_width));
+                                }
+                            }
+                        }
+                        NodePayload::Binop(Binop::Add, _, _) => {
+                            saw_wide_add |= node.ty == Type::Bits(256);
+                        }
+                        _ => { /* Literals and parameters supply operands. */ }
+                    }
+                }
+            }
+            assert_eq!(
+                operations,
+                BTreeSet::from(["umul", "smul", "umulp", "smulp"].map(str::to_string))
+            );
+            assert!(saw_wide_add);
+            assert_eq!(saw_wide_operand, limit.is_none_or(|width| width > 64));
+            assert_eq!(saw_mixed_operands, arbitrary_widths && limit != Some(1));
+            if arbitrary_widths && limit.is_some_and(|width| width <= 64) {
+                assert!(saw_wide_result);
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_multiply_operand_limit_is_rejected() {
+    let options = RandomFnOptions {
+        max_multiply_operand_bit_width: Some(0),
+        ..RandomFnOptions::default()
+    };
+    let error = generate_fn(
+        &mut DepletableBytes::new(&[]),
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        GenerationError::InvalidOptions(
+            "max_multiply_operand_bit_width must be nonzero when specified".into()
+        )
+    );
+}
+
+#[test]
+fn wide_selectors_use_builtin_bounded_case_counts() {
+    let options = RandomFnOptions {
+        max_nodes: 24,
+        max_bit_width: 256,
+        allow_arrays: false,
+        allow_tuples: false,
+        enabled_operations: OperationSet::new([
+            RandomOperation::Literal,
+            RandomOperation::Sel,
+            RandomOperation::PrioritySel,
+            RandomOperation::OneHotSel,
+        ]),
+        ..RandomFnOptions::default()
+    };
+    let signature = FunctionSignature {
+        params: vec![Type::Bits(128), Type::Bits(8)],
+        return_type: Type::Bits(8),
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x5e1ec7));
+    let mut saw = BTreeSet::new();
+    for _ in 0..64 {
+        let generated = generate_fn_with_signature(
+            &mut entropy,
+            &options,
+            StopPolicy::ExactBodyNodes(20),
+            &signature,
+        )
+        .unwrap();
+        validate_generated(&generated.function);
+        for node in &generated.function.nodes {
+            match &node.payload {
+                NodePayload::Sel {
+                    selector,
+                    cases,
+                    default,
+                } => {
+                    assert!(cases.len() <= 16);
+                    if generated.function.get_node_ty(*selector).bit_count() == 128 {
+                        assert!(default.is_some());
+                        saw.insert("sel".to_string());
+                    }
+                }
+                NodePayload::PrioritySel {
+                    selector, cases, ..
+                }
+                | NodePayload::OneHotSel { selector, cases } => {
+                    if generated.function.get_node_ty(*selector).bit_count() == 128 {
+                        assert_eq!(cases.len(), 128);
+                        saw.insert(node.payload.get_operator().to_string());
+                    }
+                }
+                _ => { /* Other nodes establish typed operands. */ }
+            }
+        }
+    }
+    assert_eq!(
+        saw,
+        BTreeSet::from(["sel", "priority_sel", "one_hot_sel"].map(str::to_string))
+    );
+}
+
+#[test]
+fn safe_array_assumptions_hold_for_arbitrary_inputs() {
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 40,
+        max_bit_width: 80,
+        allow_zero_width_bits: true,
+        array_assumption_mode: ArrayAssumptionMode::ProvenSafe,
+        enabled_operations: OperationSet::new([
+            RandomOperation::Literal,
+            RandomOperation::Array,
+            RandomOperation::ArrayIndex,
+            RandomOperation::ArrayUpdate,
+            RandomOperation::ZeroExt,
+        ]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xb0a0_d5));
+    let mut assumed_count = 0;
+    for _ in 0..120 {
+        let generated =
+            generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(32)).unwrap();
+        assumed_count += generated
+            .function
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.payload,
+                    NodePayload::ArrayIndex {
+                        assumed_in_bounds: true,
+                        ..
+                    } | NodePayload::ArrayUpdate {
+                        assumed_in_bounds: true,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let package = generated.into_top_package("safe");
+        let function = package.get_top_fn().unwrap();
+        for _ in 0..4 {
+            let inputs = function
+                .params
+                .iter()
+                .map(|param| generate_uniform_value(&mut entropy, &param.ty))
+                .collect::<Vec<_>>();
+            assert!(
+                matches!(
+                    eval_fn_in_package(&package, function, &inputs),
+                    FnEvalResult::Success(_)
+                ),
+                "{package}"
+            );
+        }
+    }
+    assert!(assumed_count > 0);
+}
+
+#[test]
 fn generated_zero_output_block_does_not_write_synthetic_return() {
     let options = RandomBlockOptions {
         max_input_ports: 0,
-        min_registers: 1,
         max_registers: 1,
         max_output_ports: 0,
         allow_zero_width_ports_and_registers: true,
@@ -366,14 +979,16 @@ fn generated_zero_output_block_does_not_write_synthetic_return() {
         },
         ..RandomBlockOptions::default()
     };
-    // Select an empty-tuple register, then entropy that would select the
-    // same-typed synthetic zero-output return if it were a D-value candidate.
-    let entropy_bytes: Vec<u8> = [1_u64, 0, 1, 1]
+    // The header would select the synthetic return if it were a D candidate;
+    // the body selects an empty-tuple register with the same type as that
+    // return.
+    let entropy_bytes: Vec<u8> = [1_u64, 0, 1, 0]
         .into_iter()
         .flat_map(u64::to_le_bytes)
         .collect();
     let mut entropy = DepletableBytes::new(&entropy_bytes);
     let generated = generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
+    assert_eq!(generated.metadata.registers[0].ty, Type::Tuple(vec![]));
     let ret_ref = generated.function.ret_node_ref.unwrap();
     let write_arg = generated
         .function
@@ -396,6 +1011,7 @@ fn generated_block_populates_multi_output_metadata() {
         max_input_ports: 1,
         min_output_ports: 3,
         max_output_ports: 3,
+        topology: BlockTopology::Combinational,
         max_registers: 0,
         function_options: RandomFnOptions {
             max_nodes: 3,
@@ -442,7 +1058,6 @@ fn random_block_reset_timing_option_controls_generated_metadata() {
         let options = RandomBlockOptions {
             min_input_ports: 0,
             max_input_ports: 0,
-            min_registers: 1,
             max_registers: 1,
             min_output_ports: 1,
             max_output_ports: 1,
@@ -487,7 +1102,6 @@ fn random_block_required_register_resets_option_controls_samples() {
     let options = RandomBlockOptions {
         min_input_ports: 0,
         max_input_ports: 3,
-        min_registers: 1,
         max_registers: 3,
         require_reset_on_all_registers: true,
         reset_timing: RandomBlockResetTiming::Synchronous,
@@ -560,7 +1174,6 @@ fn random_block_zero_width_interface_option_controls_samples() {
             max_input_ports: 1,
             min_output_ports: 0,
             max_output_ports: 1,
-            min_registers: 1,
             max_registers: 1,
             allow_zero_width_ports_and_registers: allow_zero_width,
             allow_load_enable: false,
@@ -604,10 +1217,10 @@ fn random_block_zero_width_interface_option_controls_samples() {
 }
 
 #[test]
-fn probabilistic_default_block_generation_covers_shapes_state_and_types() {
+fn probabilistic_default_sequential_block_generation_covers_shapes_state_and_types() {
     let options = RandomBlockOptions::default();
     let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xb10c_5eed));
-    let mut saw_zero_registers = false;
+    let mut saw_min_registers = false;
     let mut saw_max_registers = false;
     let mut saw_feedback = false;
     let mut saw_no_feedback = false;
@@ -636,7 +1249,7 @@ fn probabilistic_default_block_generation_covers_shapes_state_and_types() {
         let data_input_count = function.params.len() - reset_port_count;
         let output_count = metadata.output_names.len();
 
-        saw_zero_registers |= metadata.registers.is_empty();
+        saw_min_registers |= metadata.registers.len() == 1;
         saw_max_registers |= metadata.registers.len() == options.max_registers;
         saw_min_inputs |= data_input_count == options.min_input_ports;
         saw_max_inputs |= data_input_count == options.max_input_ports;
@@ -743,7 +1356,7 @@ fn probabilistic_default_block_generation_covers_shapes_state_and_types() {
         assert!(generated.stats.emitted_node_count <= options.function_options.max_nodes);
     }
 
-    assert!(saw_zero_registers);
+    assert!(saw_min_registers);
     assert!(saw_max_registers);
     assert!(saw_feedback);
     assert!(saw_no_feedback);
@@ -769,7 +1382,6 @@ fn registered_block_feedback_can_feed_next_state() {
     let options = RandomBlockOptions {
         min_input_ports: 0,
         max_input_ports: 0,
-        min_registers: 1,
         max_registers: 1,
         min_output_ports: 1,
         max_output_ports: 1,
@@ -1481,7 +2093,7 @@ fn probabilistic_aggregate_options_generate_arrays_and_tuples() {
         max_tuple_length: 4,
         allow_arrays: true,
         allow_tuples: true,
-        allow_assumed_in_bounds: true,
+        array_assumption_mode: ArrayAssumptionMode::Unrestricted,
         ..RandomFnOptions::default()
     };
     let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xf0a5_a731));
@@ -1613,7 +2225,7 @@ fn probabilistic_assumed_in_bounds_option_controls_array_attributes() {
     }
 
     let enabled = RandomFnOptions {
-        allow_assumed_in_bounds: true,
+        array_assumption_mode: ArrayAssumptionMode::Unrestricted,
         ..options
     };
     let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x481b_00de));
