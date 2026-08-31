@@ -18,9 +18,9 @@ top fn main(x: bits[8] id=1, y: bits[16] id=2) -> bits[16] {
     let pkg = parser.parse_and_validate_package().unwrap();
     let f = pkg.get_top_fn().unwrap();
 
-    // `$width(x: bits[8])` is a reference-time assertion: x must already be bound
-    // to a bits[8] node, otherwise the `$width(...)` expression evaluates to no
-    // solution and matching fails.
+    // `$width(x: bits[8])` is a reference-time assertion: x must already be
+    // bound to a bits[8] node, otherwise the `$width(...)` expression
+    // evaluates to no solution and matching fails.
     let query = ir_query::parse_query("bit_slice(x, start=0, width=$width(x: bits[8]))").unwrap();
     let matches = ir_query::find_matching_nodes(f, &query);
     assert_eq!(matches.len(), 1);

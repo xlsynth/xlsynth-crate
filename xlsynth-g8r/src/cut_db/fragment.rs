@@ -180,7 +180,8 @@ impl GateFnFragment {
                 let neg = lit.negated ^ flip;
                 Lit::new(out_input as u16, neg)
             } else {
-                // const0 and internal nodes are unchanged by input permutations/negations.
+                // const0 and internal nodes are unchanged by input
+                // permutations/negations.
                 lit
             }
         };

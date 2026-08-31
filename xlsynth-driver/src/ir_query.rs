@@ -22,8 +22,8 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         .get_one::<String>("query")
         .expect("query is required");
 
-    // Parse the query up-front so malformed queries fail fast (before we do any IR
-    // I/O).
+    // Parse the query up-front so malformed queries fail fast (before we do any
+    // IR I/O).
     let query = match ir_query::parse_query(query_text) {
         Ok(query) => query,
         Err(e) => {

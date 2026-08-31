@@ -228,14 +228,16 @@ fn test_cmp_gatify_proof_sweep_small_widths() {
     for bit_count in 1usize..=4 {
         for &binop in CMP_BINOPS {
             for rhs_spec in RhsSpec::all_for_bit_count(bit_count) {
-                // Normal form: lhs is a param; rhs is param or literal depending on rhs_spec.
+                // Normal form: lhs is a param; rhs is param or literal
+                // depending on rhs_spec.
                 let built =
                     build_cmp_ir_text(bit_count, binop, rhs_spec, /* swap_const= */ false);
                 assert_ir_gate_equivalent_for_built(
                     &built, bit_count, rhs_spec, /* swap_const= */ false,
                 );
 
-                // Swapped literal: exercise literal-on-LHS normalization/commutation paths.
+                // Swapped literal: exercise literal-on-LHS
+                // normalization/commutation paths.
                 if rhs_spec.is_literal() {
                     let built =
                         build_cmp_ir_text(bit_count, binop, rhs_spec, /* swap_const= */ true);

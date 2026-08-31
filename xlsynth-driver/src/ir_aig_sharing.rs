@@ -414,7 +414,8 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
                 return;
             }
 
-            // If we moved to a new node in the candidate stream, flush the previous.
+            // If we moved to a new node in the candidate stream, flush the
+            // previous.
             if current_node.map(|x| x.index) != Some(nr.index) {
                 flush_current_node(
                     &pir_fn,

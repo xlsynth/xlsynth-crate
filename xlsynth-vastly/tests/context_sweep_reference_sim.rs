@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "reference-sim-tests")]
+#![cfg(feature = "iverilog-tests")]
 
 // This file provides deterministic, oracle-backed "context sweep" coverage for
 // expression semantics that frequently break under width/signedness inference.
@@ -132,7 +132,8 @@ fn arithmetic_context_sweep_matches_oracle() {
                     for &rhs_signed in &[false, true] {
                         for &parent_w in &parent_widths {
                             ordinal = ordinal.wrapping_add(1);
-                            // Bound runtime while still sampling a wide cartesian surface.
+                            // Bound runtime while still sampling a wide
+                            // cartesian surface.
                             if ordinal % 5 != 0 {
                                 continue;
                             }

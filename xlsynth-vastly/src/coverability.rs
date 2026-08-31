@@ -105,11 +105,13 @@ pub fn compute_coverability_with_defines(
             ModuleItem::Function {
                 span, body_span, ..
             } => {
-                // The signature/definition is structural; the body is executable when invoked.
+                // The signature/definition is structural; the body is
+                // executable when invoked.
                 //
-                // We classify by line ranges (vs raw byte spans) so indentation on the
-                // `begin`/`end` lines does not get incorrectly swept into the
-                // structural signature span.
+                // We classify by line ranges (vs raw byte spans) so indentation
+                // on the `begin`/`end` lines does not get
+                // incorrectly swept into the structural
+                // signature span.
                 let def_start_line = src.line_of_offset(span.start);
                 let def_end_line = src.line_of_offset(span.end.saturating_sub(1));
                 let body_start_line = src.line_of_offset(body_span.start);

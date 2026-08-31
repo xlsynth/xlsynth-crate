@@ -180,7 +180,8 @@ impl ShowBoolsAccumulator {
                 all_by_node,
                 corpus_value_strs,
             } => {
-                // Always store every sample string so `corpus:N` is a stable index space.
+                // Always store every sample string so `corpus:N` is a stable
+                // index space.
                 corpus_value_strs.push(v.to_string());
                 for ev in bool_events.iter() {
                     if !bool_nodes.contains(&ev.node_text_id) {

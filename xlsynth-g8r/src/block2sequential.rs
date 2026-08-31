@@ -716,7 +716,8 @@ fn set_transition_return(
 
     // Keep a real return node even for a stateless block with no outputs.
     // Gatify represents the empty tuple as one zero-width packed output, which
-    // split_transition_outputs removes to recover an empty transition interface.
+    // split_transition_outputs removes to recover an empty transition
+    // interface.
     *max_text_id += 1;
     let ret_ty = Type::Tuple(
         endpoints

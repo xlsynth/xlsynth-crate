@@ -255,8 +255,8 @@ impl PirTransform for CarrySplitAddTransform {
                     return Err("CarrySplitAddTransform: x/y must be bits[w]".to_string());
                 }
 
-                // Carry must come from bit_slice(sum_lo_ext, start=k, width=1), and be
-                // zero-extended.
+                // Carry must come from bit_slice(sum_lo_ext, start=k, width=1),
+                // and be zero-extended.
                 let NodePayload::Binop(Binop::Add, sum_hi0, carry_ext) = f.get_node(sum_hi).payload
                 else {
                     return Err("CarrySplitAddTransform: expected sum_hi to be add".to_string());

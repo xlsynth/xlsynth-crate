@@ -59,6 +59,7 @@ glob = "0.3"
 
 [features]
 default = []
+iverilog-tests = []
 unstable-dslx-specialize = ["xlsynth-prover/unstable-dslx-specialize"]
 has-boolector = ["xlsynth-prover/has-boolector", "xlsynth-autocov/has-boolector"]
 has-easy-smt = ["xlsynth-prover/has-easy-smt", "xlsynth-autocov/has-easy-smt"]

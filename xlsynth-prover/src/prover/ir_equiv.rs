@@ -161,7 +161,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     let rhs_asserts =
         super::assertion_filter::filter_assertions(&rhs.assertions, assert_label_include);
 
-    // Build a flag that is true iff ALL assertions are active (i.e., no violation).
+    // Build a flag that is true iff ALL assertions are active (i.e., no
+    // violation).
     let mk_success_flag = |solver: &mut S, asserts: &[&Assertion<'_, S::Term>]| {
         if asserts.is_empty() {
             // No assertions → always succeed (true)
@@ -238,7 +239,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
                 ),
             };
 
-            // Now we can safely create a helper closure that borrows `solver` again
+            // Now we can safely create a helper closure that borrows `solver`
+            // again
             let get_value = |solver: &mut S, i: &IrTypedBitVec<'a, S::Term>| -> IrValue {
                 solver.get_value(&i.bitvec, &i.ir_type).unwrap()
             };
@@ -414,8 +416,8 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
         "Return widths must match"
     );
     if width == 0 {
-        // Zero-width values – fall back to the standard equivalence prover because
-        // there is no bit to split on.
+        // Zero-width values – fall back to the standard equivalence prover
+        // because there is no bit to split on.
         return prove_ir_fn_equiv::<S>(
             solver_config,
             lhs,
@@ -534,7 +536,8 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
 
     for bit_val in 0..=1u64 {
         let mut solver = S::new(solver_config).unwrap();
-        // Build aligned SMT representations first so we can assert the bit-constraint.
+        // Build aligned SMT representations first so we can assert the
+        // bit-constraint.
         let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
         let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"));
         let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
@@ -672,7 +675,8 @@ pub mod test_utils {
         );
         assert!(matches!(res_no_uf, super::EquivResult::Disproved { .. }));
 
-        // 2) With UF mapping: map g (LHS) and h (RHS) to the same UF symbol "F".
+        // 2) With UF mapping: map g (LHS) and h (RHS) to the same UF symbol
+        //    "F".
         let mut lhs_uf_map: HashMap<String, String> = HashMap::new();
         lhs_uf_map.insert("g".to_string(), "F".to_string());
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
@@ -895,8 +899,9 @@ pub mod test_utils {
     }
 
     pub fn test_counted_for_basic<S: Solver>(solver_config: &S::Config) {
-        // Package with a simple body that accumulates the induction variable into acc.
-        // Loop it three times; compare to a manually unrolled implementation.
+        // Package with a simple body that accumulates the induction variable
+        // into acc. Loop it three times; compare to a manually unrolled
+        // implementation.
         let ir_pkg_text = r#"
             package p_cf
 
@@ -1017,8 +1022,8 @@ pub mod test_utils {
     }
 
     pub fn test_counted_for_invariant_args<S: Solver>(solver_config: &S::Config) {
-        // Body uses an invariant offset 'k' added to the induction variable each
-        // iteration. Compare counted_for vs inline unrolling.
+        // Body uses an invariant offset 'k' added to the induction variable
+        // each iteration. Compare counted_for vs inline unrolling.
         let ir_pkg_text = r#"
             package p_cf_inv
 
@@ -1376,7 +1381,8 @@ pub mod test_utils {
             }"#,
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
                 // Piecewise expected for width=3 on N=4:
-                // (1) in-bounds start<=1, (2) cross-bound start==2, (3) OOB start>=3.
+                // (1) in-bounds start<=1, (2) cross-bound start==2, (3) OOB
+                // start>=3.
                 let input_bv = inputs.inputs.get("input").unwrap().bitvec.clone();
                 let start_bv = inputs.inputs.get("start").unwrap().bitvec.clone();
                 let width = start_bv.get_width();
@@ -2591,8 +2597,8 @@ pub mod test_utils {
     }
 
     pub fn test_counterexample_input_order<S: Solver>(solver_config: &S::Config) {
-        // IR pair intentionally inequivalent: returns different parameters to force a
-        // counterexample.
+        // IR pair intentionally inequivalent: returns different parameters to
+        // force a counterexample.
         let lhs_ir = r#"fn lhs(a: bits[8], b: bits[8]) -> bits[8] {
                 ret identity.1: bits[8] = identity(a, id=1)
             }"#;

@@ -30,8 +30,8 @@ pub fn fanout_histogram(gate_fn: &GateFn) -> HashMap<usize, usize> {
             output_node_ids.insert(operand.node.id);
         }
     }
-    // Now, build the histogram: map from fanout count to number of nodes with that
-    // fanout, excluding primary outputs and AigRef 0 (literal zero)
+    // Now, build the histogram: map from fanout count to number of nodes with
+    // that fanout, excluding primary outputs and AigRef 0 (literal zero)
     let mut histogram: HashMap<usize, usize> = HashMap::new();
     for id in 0..gate_fn.gates.len() {
         if id == 0 {
@@ -75,8 +75,8 @@ mod tests {
     fn test_fanout_histogram_graph_with_redundancies() {
         let g = setup_graph_with_redundancies();
         let hist = fanout_histogram(&g.g);
-        // Check that the histogram is well-formed (all non-output, non-AigRef 0 nodes
-        // counted)
+        // Check that the histogram is well-formed (all non-output, non-AigRef 0
+        // nodes counted)
         let output_node_ids: std::collections::HashSet<_> =
             g.g.outputs
                 .iter()
@@ -94,8 +94,8 @@ mod tests {
     fn test_fanout_histogram_graph_with_more_redundancies() {
         let g = setup_graph_with_more_redundancies();
         let hist = fanout_histogram(&g.g);
-        // Check that the histogram is well-formed (all non-output, non-AigRef 0 nodes
-        // counted)
+        // Check that the histogram is well-formed (all non-output, non-AigRef 0
+        // nodes counted)
         let output_node_ids: std::collections::HashSet<_> =
             g.g.outputs
                 .iter()

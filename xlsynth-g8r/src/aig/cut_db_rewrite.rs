@@ -2716,8 +2716,8 @@ mod tests {
 
     #[test]
     fn test_cut_db_rewrite_reduces_unbalanced_and4_depth() {
-        // Function: a & b & c & d. Truth table is 1 only at assignment 0b1111 => bit
-        // 15.
+        // Function: a & b & c & d. Truth table is 1 only at assignment 0b1111
+        // => bit 15.
         let and4_tt = TruthTable16(0x8000);
         let frag = make_balanced_and4_frag();
         assert_eq!(frag.eval_tt16(), and4_tt);
@@ -2755,7 +2755,8 @@ mod tests {
         };
         let db = CutDb::from_raw_for_test(canon_entries, dense);
 
-        // Build a deep (unbalanced) AND4 to give the rewriter something to improve.
+        // Build a deep (unbalanced) AND4 to give the rewriter something to
+        // improve.
         let mut gb = GateBuilder::new("t".to_string(), GateBuilderOptions::opt());
         let a = gb.add_input("a".to_string(), 1);
         let b = gb.add_input("b".to_string(), 1);

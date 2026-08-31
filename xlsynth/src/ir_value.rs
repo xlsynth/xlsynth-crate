@@ -259,8 +259,8 @@ impl IrBits {
         if w == 0 {
             return value == 0;
         }
-        // If the width of this bits object is smaller than the value needs, it cannot
-        // be represented, and so cannot be equal.
+        // If the width of this bits object is smaller than the value needs, it
+        // cannot be represented, and so cannot be equal.
         if w < 64 && (value >> w) != 0 {
             return false;
         }
@@ -409,8 +409,8 @@ impl IrBits {
 
 impl Clone for IrBits {
     fn clone(&self) -> Self {
-        // TODO(cdleary): 2025-04-14 Right now we don't have a direct clone API for
-        // IrBits. Adding one would make this more efficient.
+        // TODO(cdleary): 2025-04-14 Right now we don't have a direct clone API
+        // for IrBits. Adding one would make this more efficient.
         let value = IrValue::from_bits(self);
         let clone = value.clone();
         clone.to_bits().unwrap()
@@ -606,7 +606,8 @@ impl IrValue {
     }
 
     pub fn bit_count(&self) -> Result<usize, XlsynthError> {
-        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this from libxls.so
+        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this from
+        // libxls.so
         let bits = self.to_bits()?;
         Ok(bits.get_bit_count())
     }

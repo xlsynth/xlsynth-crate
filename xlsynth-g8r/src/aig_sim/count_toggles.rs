@@ -645,10 +645,11 @@ mod tests {
         ];
         let stats = count_toggles(&gate_fn, &batch_inputs);
         // gate_output_toggles: toggles at all gate outputs (AND2 nodes only)
-        // gate_input_toggles: toggles at all gate input pins (inputs to AND2 nodes)
-        //   Note: In this test, gate input toggles and primary input toggles are equal
-        // because each AND2 input is directly wired to a primary input bit.
-        //   Not every input bit toggles every transition, so the count is 8, not 12.
+        // gate_input_toggles: toggles at all gate input pins (inputs to AND2
+        // nodes)   Note: In this test, gate input toggles and primary
+        // input toggles are equal because each AND2 input is directly
+        // wired to a primary input bit.   Not every input bit toggles
+        // every transition, so the count is 8, not 12.
         assert_eq!(
             stats.gate_output_toggles, 4,
             "Expected 4 gate output toggles (AND2 nodes only)"
@@ -695,8 +696,9 @@ mod tests {
             stats.primary_output_toggles
         );
 
-        // Note: The AND function masks many toggles — a toggle on one input does not
-        // propagate if the other input is 0. These values are observed from simulation.
+        // Note: The AND function masks many toggles — a toggle on one input
+        // does not propagate if the other input is 0. These values are
+        // observed from simulation.
         assert_eq!(
             stats.primary_input_toggles, 26,
             "Expected 26 toggles for 4 input bits across 16 binary patterns"

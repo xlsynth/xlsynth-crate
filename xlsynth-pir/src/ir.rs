@@ -2054,8 +2054,9 @@ mod tests {
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_fn = parser.parse_fn().unwrap();
 
-        // With de-duplication of GetParam nodes, only the reserved zero node and
-        // a single GetParam remain; the return refers to that same node.
+        // With de-duplication of GetParam nodes, only the reserved zero node
+        // and a single GetParam remain; the return refers to that same
+        // node.
         assert_eq!(ir_fn.nodes.len(), 2);
         assert_eq!(ir_fn.ret_node_ref, Some(NodeRef { index: 1 }));
 

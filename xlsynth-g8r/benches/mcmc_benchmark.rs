@@ -43,7 +43,8 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                 let best_cost_cloned = current_cost_cloned;
                 let all_transforms = get_all_transforms();
 
-                // Prepare SIMD batch and baseline outputs once for this iteration.
+                // Prepare SIMD batch and baseline outputs once for this
+                // iteration.
                 let simd_inputs = {
                     let total_bits: usize =
                         start_gfn.inputs.iter().map(|i| i.get_bit_count()).sum();

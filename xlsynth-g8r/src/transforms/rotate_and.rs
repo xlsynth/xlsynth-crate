@@ -102,7 +102,8 @@ pub fn rotate_and_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
         _ => return Err("rotate_and_left_primitive: inner (right op of outer) is not And2"),
     };
 
-    // Ensure that `left_op_of_outer` does NOT (transitively) depend on `inner_ref`.
+    // Ensure that `left_op_of_outer` does NOT (transitively) depend on
+    // `inner_ref`.
     if node_reaches_target(&g.gates, left_op_of_outer.node, inner_ref) {
         return Err(
             "rotate_and_left_primitive: left operand depends on inner; rotation would create a cycle",

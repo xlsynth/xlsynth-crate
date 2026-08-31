@@ -106,9 +106,10 @@ pub fn handle_ir_bool_cones(matches: &ArgMatches, _config: &Option<ToolchainConf
         if is_trivial_literal_return_cone(&extracted) {
             continue;
         }
-        // Also skip “structural-only” functions like bit_slice/tuple_index over a
-        // single input param; these are effectively zero-cost in downstream gate
-        // metrics and are typically uninteresting cones.
+        // Also skip “structural-only” functions like bit_slice/tuple_index over
+        // a single input param; these are effectively zero-cost in
+        // downstream gate metrics and are typically uninteresting
+        // cones.
         if extracted.package.members.len() == 1 {
             match &extracted.package.members[0] {
                 xlsynth_pir::ir::PackageMember::Function(f) => {

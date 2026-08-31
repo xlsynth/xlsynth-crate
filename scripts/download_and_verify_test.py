@@ -332,9 +332,9 @@ def test_slang_callers_share_asset_id_and_checked_in_digest():
     install_text = (repo_root / "docker/install_tools.sh").read_text()
     dockerfile_text = (repo_root / "docker/Dockerfile").read_text()
 
-    assert workflow_text.count(asset_url) == 3
-    assert workflow_text.count("scripts/slang_rocky8.sha256") == 3
-    assert workflow_text.count('--sha256 "${slang_sha256}"') == 3
+    assert workflow_text.count(asset_url) == 4
+    assert workflow_text.count("scripts/slang_rocky8.sha256") == 4
+    assert workflow_text.count('--sha256 "${slang_sha256}"') == 4
     assert asset_url in install_text
     assert "scripts/slang_rocky8.sha256" in install_text
     assert '--sha256 "${slang_sha256}"' in install_text

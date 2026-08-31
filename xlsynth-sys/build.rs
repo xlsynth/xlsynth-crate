@@ -885,12 +885,13 @@ fn main() {
         return;
     }
 
-    // If the user is trying to provide pre-fetched artifacts, they need to provide
-    // both the DSO and stdlib paths together.
+    // If the user is trying to provide pre-fetched artifacts, they need to
+    // provide both the DSO and stdlib paths together.
     //
-    // Note: we intentionally do *not* hard-fail when only one is set, since some
-    // environments export XLS_DSO_PATH globally (e.g. for runtime use), and we
-    // still want DEV_XLS_DSO_WORKSPACE or downloads to work in that case.
+    // Note: we intentionally do *not* hard-fail when only one is set, since
+    // some environments export XLS_DSO_PATH globally (e.g. for runtime
+    // use), and we still want DEV_XLS_DSO_WORKSPACE or downloads to work in
+    // that case.
     let have_xls_dso_path = std::env::var("XLS_DSO_PATH").is_ok();
     let have_dslx_stdlib_path = std::env::var("DSLX_STDLIB_PATH").is_ok();
     if have_xls_dso_path ^ have_dslx_stdlib_path {

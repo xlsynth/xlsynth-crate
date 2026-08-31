@@ -256,8 +256,8 @@ pub fn metropolis_accept<R: RngCore + ?Sized>(
     // Using `(raw as f64) / (u64::MAX as f64)` can produce `1.0` when `raw ==
     // u64::MAX`, which introduces a tiny rejection bias in Metropolis-Hastings.
     //
-    // We instead take the top 53 bits (the precision of f64’s mantissa) and scale
-    // by 2^-53, yielding values in [0, 1).
+    // We instead take the top 53 bits (the precision of f64’s mantissa) and
+    // scale by 2^-53, yielding values in [0, 1).
     let u01 = (raw >> 11) as f64 * 2.0_f64.powi(-53);
     u01 < accept_prob
 }

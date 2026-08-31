@@ -528,8 +528,9 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
         std::ptr::from_ref(&y).cast::<u8>(),
     ];
 
-    // SAFETY: the compiled signature describes two bits[8] (`u8`) inputs and one
-    // bits[8] (`u8`) output, all alive and properly aligned for this call.
+    // SAFETY: the compiled signature describes two bits[8] (`u8`) inputs and
+    // one bits[8] (`u8`) output, all alive and properly aligned for this
+    // call.
     unsafe {
         compiler
             .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
@@ -1919,8 +1920,8 @@ fn f(low: bits[8] id=1, high: bits[17] id=2) -> (bits[8], bits[17]) {
         std::ptr::from_ref(&low).cast::<u8>(),
         std::ptr::from_ref(&high).cast::<u8>(),
     ];
-    // SAFETY: `Pair` has the `#[repr(C)]` tuple layout published by the compiler,
-    // and the scalar inputs use their respective native carriers.
+    // SAFETY: `Pair` has the `#[repr(C)]` tuple layout published by the
+    // compiler, and the scalar inputs use their respective native carriers.
     unsafe {
         compiler
             .run_native(&inputs, std::ptr::from_mut(&mut output).cast())

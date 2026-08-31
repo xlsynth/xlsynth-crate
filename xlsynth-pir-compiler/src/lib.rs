@@ -1494,7 +1494,8 @@ unsafe fn read_ir_value_from_native(
                     .map_err(|error| CompilerError::Value(error.to_string()));
             }
             let mut bytes = [0u8; std::mem::size_of::<u64>()];
-            // SAFETY: the caller provides readable storage for this scalar layout.
+            // SAFETY: the caller provides readable storage for this scalar
+            // layout.
             unsafe {
                 ptr::copy_nonoverlapping(source, bytes.as_mut_ptr(), scalar.byte_count);
             }

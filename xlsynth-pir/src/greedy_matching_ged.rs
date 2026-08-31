@@ -308,8 +308,8 @@ impl UnreadyMatchScoreCache {
         IsUnreadyF: Fn(NewNodeRef) -> bool,
         GetScoreF: Fn(OldNodeRef, NewNodeRef) -> i32,
     {
-        // Compute the best score matching `old_index` with an equivalent not-ready new
-        // node.
+        // Compute the best score matching `old_index` with an equivalent
+        // not-ready new node.
         let mut best = 0i32;
         log::trace!("Computing old score for {:?}", old_index);
         for &new_equiv in equivalents
@@ -342,8 +342,8 @@ impl UnreadyMatchScoreCache {
         IsUnreadyF: Fn(OldNodeRef) -> bool,
         GetScoreF: Fn(OldNodeRef, NewNodeRef) -> i32,
     {
-        // Compute the best score matching `new_index` with an equivalent not-ready old
-        // node.
+        // Compute the best score matching `new_index` with an equivalent
+        // not-ready old node.
         let mut best = 0i32;
         log::trace!("Computing new score for {:?}", new_index);
         for &old_equiv in equivalents
@@ -392,8 +392,8 @@ impl UnreadyMatchScoreCache {
         added_node: OldNodeRef,
         equivalents: &EquivalentNodeSet,
     ) {
-        // `added_node` is now ready and thus is no longer in the set of unready nodes.
-        // Invalidate all equivalent new nodes.
+        // `added_node` is now ready and thus is no longer in the set of unready
+        // nodes. Invalidate all equivalent new nodes.
         for new_equiv in equivalents.get_equivalent_new_nodes(added_node) {
             self.new_scores.borrow_mut().set(*new_equiv, None);
         }
@@ -403,8 +403,8 @@ impl UnreadyMatchScoreCache {
         added_node: NewNodeRef,
         equivalents: &EquivalentNodeSet,
     ) {
-        // `added_node` is now ready and thus is no longer in the set of unready nodes.
-        // Invalidate all equivalent old nodes.
+        // `added_node` is now ready and thus is no longer in the set of unready
+        // nodes. Invalidate all equivalent old nodes.
         for old_equiv in equivalents.get_equivalent_old_nodes(added_node) {
             self.old_scores.borrow_mut().set(*old_equiv, None);
         }
@@ -574,9 +574,9 @@ impl GreedyMatchSelector {
     }
 
     fn select_best_action(&mut self) -> Option<(i32, MatchAction)> {
-        // TODO(meheff): There is probably an order of magnitude speedup to be had by
-        // keeping an ordered queue of match actions rather than iterating through all
-        // possible actions every time.
+        // TODO(meheff): There is probably an order of magnitude speedup to be
+        // had by keeping an ordered queue of match actions rather than
+        // iterating through all possible actions every time.
 
         if !(0..self.ready_old.len()).any(|i| *self.ready_old.get(OldNodeRef(i)))
             && !(0..self.ready_new.len()).any(|i| *self.ready_new.get(NewNodeRef(i)))
@@ -587,7 +587,8 @@ impl GreedyMatchSelector {
         let mut best_action: Option<MatchAction> = None;
         let mut best_score: i32 = i32::MIN;
 
-        // 1) Consider match actions for each ready old against compatible ready new.
+        // 1) Consider match actions for each ready old against compatible ready
+        //    new.
         let ready_old_sorted: Vec<OldNodeRef> = (0..self.ready_old.len())
             .filter(|&i| *self.ready_old.get(OldNodeRef(i)))
             .map(OldNodeRef)
@@ -813,15 +814,16 @@ fn compute_reverse_match_scores(
 
     // Process worklist: on improvement, propagate to operand pairs.
     while let Some((a, b)) = worklist.pop_front() {
-        // Mark as no longer on the worklist so it can be re-enqueued upon future
-        // improvements.
+        // Mark as no longer on the worklist so it can be re-enqueued upon
+        // future improvements.
         on_worklist.remove(&(a, b));
         let new_score = recompute_score(a, b, &m_scores);
         let old_score = m_scores.get(a, b).copied().unwrap_or(0);
         if new_score > old_score {
             m_scores.set(a, b, new_score);
 
-            // Walk operands in lockstep; if counts match, enqueue compatible pairs.
+            // Walk operands in lockstep; if counts match, enqueue compatible
+            // pairs.
             let a_ops: Vec<OldNodeRef> = old_graph.get_node(a).operands.iter().copied().collect();
             let b_ops: Vec<NewNodeRef> = new_graph.get_node(b).operands.iter().copied().collect();
             if a_ops.len() == b_ops.len() {
@@ -1035,7 +1037,8 @@ mod tests {
         );
         let old_fn = pkg_old.get_top_fn().unwrap();
 
-        // Different structure: wrap the add in an identity, keep params identical.
+        // Different structure: wrap the add in an identity, keep params
+        // identical.
         let pkg_new = parse_ir_from_string(
             r#"package p
             top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
@@ -1124,7 +1127,8 @@ mod tests {
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
 
-        // Expect exactly three operand substitutions, and patched result is isomorphic.
+        // Expect exactly three operand substitutions, and patched result is
+        // isomorphic.
         assert_eq!(
             edits.edits.len(),
             3,
@@ -1162,8 +1166,8 @@ mod tests {
         );
         let old_fn = pkg_old.get_top_fn().unwrap();
 
-        // New: or(or(A'(w,x), C'(y,z)), B'(x,y)) — A stays in inner slot0; B,C swap
-        // levels.
+        // New: or(or(A'(w,x), C'(y,z)), B'(x,y)) — A stays in inner slot0; B,C
+        // swap levels.
         let pkg_new = parse_ir_from_string(
             r#"package p2
             top fn f2(w: bits[8] id=1, x: bits[8] id=2, y: bits[8] id=3, z: bits[8] id=4) -> bits[8] {

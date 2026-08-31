@@ -97,7 +97,8 @@ fn build_8b_cmp_ir_text(kind: ir::Binop, rhs_spec: RhsSpec) -> String {
             fb.literal(&v, Some("rhs"))
         }
         RhsSpec::LowHalfOnes => {
-            // High half bits are zero; low half bits are ones: 0b0000_1111 for u8.
+            // High half bits are zero; low half bits are ones: 0b0000_1111 for
+            // u8.
             let v = IrValue::make_ubits(8, 0x0f).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
@@ -144,7 +145,8 @@ fn build_64b_slt_rhs_u32_max_ir_text() -> String {
     let ty_u64 = package.get_bits_type(64);
     let lhs = fb.param("leaf_5", &ty_u64);
 
-    // 0x0000_0000_FFFF_FFFF, i.e. 2^32-1 (non-negative as a signed 64-bit value).
+    // 0x0000_0000_FFFF_FFFF, i.e. 2^32-1 (non-negative as a signed 64-bit
+    // value).
     let v = IrValue::make_ubits(64, 0xffff_ffff).expect("make_ubits");
     let rhs = fb.literal(&v, Some("rhs"));
 

@@ -306,7 +306,8 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         0
     };
 
-    // Require an explicit clock port (default name `clk`, overridable via --clk).
+    // Require an explicit clock port (default name `clk`, overridable via
+    // --clk).
     if ports
         .iter()
         .find(|p| p.name == clk_signal_name && p.is_input)
@@ -348,7 +349,8 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         std::process::exit(1);
     }
 
-    // Parse or generate the XLS IR value. If not provided, generate zero values.
+    // Parse or generate the XLS IR value. If not provided, generate zero
+    // values.
     let input_value = match matches.get_one::<String>("input_value") {
         Some(input_value_str) => {
             // User provided an input value, parse it
@@ -463,7 +465,8 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         }
     }
 
-    // Determine data outputs (exclude handshake outputs like output_valid_signal)
+    // Determine data outputs (exclude handshake outputs like
+    // output_valid_signal)
     let data_outputs: Vec<&PortInfo> = ports
         .iter()
         .filter(|p| {
@@ -610,10 +613,10 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     // outputs and any handshake de-assertion before ending.
     tb_src.push_str("    @(posedge clk);\n    $finish;\n  end\n");
 
-    // Timeout watchdog: if the simulation exceeds a generous cycle budget, abort.
-    // Each clock cycle is 10 ns (clk toggles every 5 ns).  Deep pipelines with
-    // handshake signalling can legitimately run for hundreds of cycles before
-    // `out_valid` drops, so budget much more generously.
+    // Timeout watchdog: if the simulation exceeds a generous cycle budget,
+    // abort. Each clock cycle is 10 ns (clk toggles every 5 ns).  Deep
+    // pipelines with handshake signalling can legitimately run for hundreds
+    // of cycles before `out_valid` drops, so budget much more generously.
     let timeout_cycles = latency + 500;
     tb_src.push_str(&format!(
         "  initial begin\n    #{};\n    $fatal(1, \"Simulation timed out\");\n  end\n",

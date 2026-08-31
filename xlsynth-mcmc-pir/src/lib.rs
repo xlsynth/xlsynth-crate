@@ -980,8 +980,9 @@ fn compute_g8r_stats_for_pir_fn(
     compute_postprocessed_stats: bool,
 ) -> Result<GateCostStats> {
     // The PIR → text → XLS → optimize → PIR → gatify pipeline assumes a DAG.
-    // Random rewiring transforms can (transiently) create cycles; if that happens
-    // we treat it as a candidate failure and fall back to PIR node count.
+    // Random rewiring transforms can (transiently) create cycles; if that
+    // happens we treat it as a candidate failure and fall back to PIR node
+    // count.
     //
     // Note: we intentionally catch panics here because some PIR utilities
     // currently panic on cycle detection.
@@ -2036,13 +2037,15 @@ pub fn mcmc_iteration(
                 (true, 0u128)
             } else {
                 let oracle_start = Instant::now();
-                // For transforms that are not guaranteed to preserve semantics, we run a
-                // lightweight equivalence oracle:
+                // For transforms that are not guaranteed to preserve semantics,
+                // we run a lightweight equivalence oracle:
                 // - Deterministic corner cases (all-zeros, all-ones)
-                // - A small number of randomized samples (seeded by the run's RNG)
+                // - A small number of randomized samples (seeded by the run's
+                //   RNG)
                 //
-                // If evaluation fails (e.g. due to a cycle or unsupported node kinds),
-                // we treat that as non-equivalence for this candidate and reject it.
+                // If evaluation fails (e.g. due to a cycle or unsupported node
+                // kinds), we treat that as non-equivalence for
+                // this candidate and reject it.
                 let ok = pir_equiv_oracle(
                     &current_fn,
                     &candidate_fn,
@@ -2149,7 +2152,8 @@ pub fn mcmc_iteration(
                         if new_metric_u128 == curr_metric_u128
                             && new_candidate_cost.pir_nodes > current_cost.pir_nodes
                         {
-                            // Equal objective metric but PIR nodes grew: only accept if
+                            // Equal objective metric but PIR nodes grew: only
+                            // accept if
                             // the temperature still allows it.
                             metropolis_accept(
                                 current_cost.pir_nodes as f64,
@@ -2170,10 +2174,11 @@ pub fn mcmc_iteration(
 
                 if accept {
                     if new_score < *best_score {
-                        // When storing a new global best, prefer the optimized IR form so
-                        // artifacts (and subsequent segments via shared best) are based on
-                        // the canonical optimized representation, not the raw exploration
-                        // state.
+                        // When storing a new global best, prefer the optimized
+                        // IR form so artifacts (and
+                        // subsequent segments via shared best) are based on
+                        // the canonical optimized representation, not the raw
+                        // exploration state.
                         *best_fn = match optimize_pir_fn_via_xls_with_extension_mode(
                             &candidate_fn,
                             extension_costing_mode,
@@ -2284,7 +2289,8 @@ fn make_all_ones_value(ty: &PirType) -> Result<IrValue> {
                     &IrBits::make_ubits(*width, mask).unwrap(),
                 ))
             } else {
-                // Build the bit vector directly to avoid fixed-width integer limits.
+                // Build the bit vector directly to avoid fixed-width integer
+                // limits.
                 let ones: Vec<bool> = vec![true; *width];
                 Ok(IrValue::from_bits(&IrBits::from_lsb_is_0(&ones)))
             }
@@ -3215,8 +3221,10 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                                 }
                             }
                             Err(e) => {
-                                // The sampler wants uniqueness defined by the XLS-optimized form.
-                                // If we cannot obtain it, skip emission rather than falling back
+                                // The sampler wants uniqueness defined by the
+                                // XLS-optimized form.
+                                // If we cannot obtain it, skip emission rather
+                                // than falling back
                                 // to the pre-optimized state.
                                 log::warn!(
                                     "[pir-mcmc] failed to XLS-optimize accepted sample '{}' (c{:03}:i{:06}): {}; skipping sample emission",
@@ -3279,8 +3287,9 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "accepted_digest": accepted_digest.map(|d| hash_to_hex(&d)),
                     "accepted_sample_sent": accepted_sample_sent,
                 });
-                // Best-effort: if trajectory logging fails, abort the segment. This should
-                // never happen and indicates an infrastructure issue (disk full, permissions,
+                // Best-effort: if trajectory logging fails, abort the segment.
+                // This should never happen and indicates an
+                // infrastructure issue (disk full, permissions,
                 // etc.).
                 writeln!(w, "{}", rec.to_string())?;
                 if global_iter % 1000 == 0 {
@@ -3304,8 +3313,9 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                             format_search_score(before),
                             format_search_score(after),
                         );
-                        // Best-effort: if a checkpoint writer is active, trigger an
-                        // immediate update so the monotone global best is visible on disk.
+                        // Best-effort: if a checkpoint writer is active,
+                        // trigger an immediate update
+                        // so the monotone global best is visible on disk.
                         if let Some(ref tx) = self.checkpoint_tx {
                             let _ = tx.send(CheckpointMsg {
                                 chain_no: params.chain_no,

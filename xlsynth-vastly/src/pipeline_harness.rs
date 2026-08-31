@@ -331,9 +331,9 @@ fn exec_observers<W: Write>(
         }
     }
 
-    // Line coverage: if SIMULATION observers are present, the always_ff blocks are
-    // being evaluated each posedge. Mark their spans as hit (even when the
-    // condition is false).
+    // Line coverage: if SIMULATION observers are present, the always_ff blocks
+    // are being evaluated each posedge. Mark their spans as hit (even when
+    // the condition is false).
     if let Some((src, cov)) = cov_ctx {
         for s in &m.observer_spans {
             cov.hit_span(src, *s);

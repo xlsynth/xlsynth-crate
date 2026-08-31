@@ -274,7 +274,8 @@ fn matches_literal_operand_details(
             return false;
         }
         if let Some(ref allowed_nonliteral) = allowed_nonliteral_operand {
-            // If `i` is not allowed to be a non-literal but is, then we don't match.
+            // If `i` is not allowed to be a non-literal but is, then we don't
+            // match.
             let is_allowed_nonliteral = allowed_nonliteral.contains(&i);
             let is_nonliteral = !*is_literal;
             if is_nonliteral && !is_allowed_nonliteral {
@@ -302,9 +303,10 @@ fn find_estimator_for_op<'a>(
         if op_model.op != op {
             continue;
         }
-        // Reminder: an `OpModel` has a "typical case" estimator and can have any number
-        // of "specializations" that match on the predicates we get. The specializations
-        // take precedence if they are matched on.
+        // Reminder: an `OpModel` has a "typical case" estimator and can have
+        // any number of "specializations" that match on the predicates
+        // we get. The specializations take precedence if they are
+        // matched on.
         for specialization in op_model.specializations.iter() {
             log::info!("checking specialization: {:?}", specialization);
             let specialization_kind =

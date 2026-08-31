@@ -2956,15 +2956,15 @@ fn main() -> u32 {
             "caller"
         );
 
-        // Ensure the invocation returned by the invocation data matches the one we
-        // queried with.
+        // Ensure the invocation returned by the invocation data matches the one
+        // we queried with.
         let round_trip_invocation = invocation_data
             .invocation()
             .expect("round-trip invocation present");
         assert_eq!(round_trip_invocation.as_ptr(), invocation.as_ptr());
 
-        // The caller binding value should match the callee binding value for this
-        // simple program.
+        // The caller binding value should match the callee binding value for
+        // this simple program.
         let caller_value_str = caller_value.to_string();
         assert_eq!(caller_value_str, callee_value.to_string());
     }
@@ -3209,7 +3209,8 @@ fn plain_fn(x: u32) -> u32 { x }
         let tmpdir = xlsynth_test_helpers::make_test_tmpdir("xlsynth_dslx_test");
         let tmpdir = tmpdir.path().to_path_buf();
 
-        // Write the imported module file to disk so ImportData can resolve it by name.
+        // Write the imported module file to disk so ImportData can resolve it
+        // by name.
         let imported_path = tmpdir.join("imported.x");
         let imported_dslx = r#"
             const TEN = u32:10;
@@ -3228,8 +3229,8 @@ fn plain_fn(x: u32) -> u32 { x }
         // Use ImportData with the temp directory as a search path.
         let mut import_data = ImportData::new(None, &[tmpdir.as_path()]);
 
-        // Parse and typecheck ONLY the main module; imported module will be resolved by
-        // import.
+        // Parse and typecheck ONLY the main module; imported module will be
+        // resolved by import.
         let main_tcm = parse_and_typecheck(
             main_dslx,
             main_path.to_str().unwrap(),
@@ -3259,8 +3260,8 @@ fn plain_fn(x: u32) -> u32 { x }
             .unwrap();
         assert!(p0_ty.is_enum());
 
-        // Get the EnumDef backing the imported type and grab a value expression from
-        // it.
+        // Get the EnumDef backing the imported type and grab a value expression
+        // from it.
         let enum_def = p0_ty.get_enum_def().expect("enum def for imported type");
         assert_eq!(enum_def.get_identifier(), "ImpEnum");
         assert!(enum_def.get_member_count() >= 1);
@@ -3270,8 +3271,8 @@ fn plain_fn(x: u32) -> u32 { x }
         let owner_module = member_expr.get_owner_module();
         assert_eq!(owner_module.get_name(), "imported");
 
-        // Now fetch the TypeInfo corresponding to that imported module from the main
-        // TCM.
+        // Now fetch the TypeInfo corresponding to that imported module from the
+        // main TCM.
         let imported_type_info = main_tcm
             .get_type_info_for_module(&owner_module)
             .expect("imported type info available");
@@ -3285,8 +3286,8 @@ fn plain_fn(x: u32) -> u32 { x }
             enum_def.get_identifier()
         );
 
-        // Also ensure we can evaluate a const expr in the imported module via its
-        // TypeInfo.
+        // Also ensure we can evaluate a const expr in the imported module via
+        // its TypeInfo.
         use crate::ir_value::IrFormatPreference;
         let iv = imported_type_info
             .get_const_expr(&member_expr)

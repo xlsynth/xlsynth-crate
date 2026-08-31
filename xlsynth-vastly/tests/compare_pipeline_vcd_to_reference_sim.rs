@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "reference-sim-tests")]
+#![cfg(feature = "iverilog-tests")]
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -81,8 +81,8 @@ endmodule
     let mut init: State = BTreeMap::new();
     init.insert("q".to_string(), vbits(4, Signedness::Unsigned, "0101"));
 
-    // Quick invariant check: the combo path can compute `out` and `t` from seeded
-    // env.
+    // Quick invariant check: the combo path can compute `out` and `t` from
+    // seeded env.
     let plan = plan_combo_eval(&cm.combo).unwrap();
     let mut seed = xlsynth_vastly::Env::new();
     seed.insert("q".to_string(), init.get("q").unwrap().clone());
@@ -369,7 +369,8 @@ fn build_tb(
         s.push_str(&format!("    {} = {};\n", p.name, to_verilog_literal(v)));
     }
 
-    // Initialize sequential state in dut at t=0 (for deterministic comparisons).
+    // Initialize sequential state in dut at t=0 (for deterministic
+    // comparisons).
     for (name, v) in initial_state {
         s.push_str(&format!("    dut.{} = {};\n", name, to_verilog_literal(v)));
     }

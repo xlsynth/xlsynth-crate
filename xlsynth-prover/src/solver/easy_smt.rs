@@ -289,8 +289,8 @@ impl Solver for EasySmtSolver {
         // Boolector would render 1-bit bit-vector results as `true` or `false`
         // instead of `#b1` or `#b0`.
         //
-        // We need to ensure that easy-smt already knows about `true` and `false`
-        // so that it can parse them correctly.
+        // We need to ensure that easy-smt already knows about `true` and
+        // `false` so that it can parse them correctly.
         context.atom("true");
         context.atom("false");
         Ok(EasySmtSolver {
@@ -363,8 +363,9 @@ impl Solver for EasySmtSolver {
                 arg_widths,
                 result_width,
             } => {
-                // Build the actual argument list containing only non-zero-width bitvectors,
-                // since the EasySMT UF was declared skipping zero-width arguments.
+                // Build the actual argument list containing only non-zero-width
+                // bitvectors, since the EasySMT UF was declared
+                // skipping zero-width arguments.
                 let shared = Arc::clone(&self.context);
                 let mut context = shared.lock().unwrap();
 

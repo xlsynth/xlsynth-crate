@@ -80,8 +80,8 @@ pub trait Solver: Sized {
         if width == 0 {
             return BitVec::ZeroWidth;
         }
-        // Build a binary string of exactly `width` bits (MSB-first) and delegate to
-        // from_raw_str.
+        // Build a binary string of exactly `width` bits (MSB-first) and
+        // delegate to from_raw_str.
         let mut s = String::with_capacity(2 + width);
         s.push_str("#b");
         for bit in (0..width).rev() {
@@ -320,7 +320,8 @@ pub trait Solver: Sized {
     ) -> BitVec<Self::Term> {
         // Implements XLS semantics for unsigned division with division-by-zero
         // handling. When the divisor (b) is zero, XLS specifies that the result
-        // should be all ones. For zero-width values the result is also zero-width.
+        // should be all ones. For zero-width values the result is also
+        // zero-width.
 
         let width = lhs.get_width();
         assert_eq!(
@@ -577,14 +578,15 @@ pub trait Solver: Sized {
             let flipped_shifted_result = self.not(&shifted_result);
             let non_zero_result = self.and(&flipped_shifted_result, &result);
 
-            // Build a sentinel vector that has the top bit set iff the input was zero.
-            // This avoids the use of an `ite`, generating a simpler SMT formula.
+            // Build a sentinel vector that has the top bit set iff the input
+            // was zero. This avoids the use of an `ite`, generating
+            // a simpler SMT formula.
             let is_zero = self.is_zero(&arg_concated); // 1-bit
             let zeros = self.zero(width - 1); // width-1 zeros
             let sentinel_result = self.concat(&is_zero, &zeros); // width bits
 
-            // The sentinel and non-zero results are mutually exclusive, so a bit-wise OR
-            // yields the desired final value.
+            // The sentinel and non-zero results are mutually exclusive, so a
+            // bit-wise OR yields the desired final value.
             self.or(&non_zero_result, &sentinel_result)
         }
     }
@@ -620,7 +622,8 @@ pub trait Solver: Sized {
 
     fn xls_encode(&mut self, operand: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let n_bits = operand.get_width();
-        // Compute ceil(log2(n_bits)).  For n_bits <= 1 the result is zero-width.
+        // Compute ceil(log2(n_bits)).  For n_bits <= 1 the result is
+        // zero-width.
         let result_width = if n_bits <= 1 {
             0
         } else {
@@ -2268,7 +2271,8 @@ macro_rules! test_solver {
                 let fa = solver.apply_uf(&uf, &[&a]);
                 let fb = solver.apply_uf(&uf, &[&b]);
 
-                // Enforce a == b, then require f(a) != f(b) → should be UNSAT by congruence
+                // Enforce a == b, then require f(a) != f(b) → should be UNSAT by
+                // congruence
                 solver.push().unwrap();
                 let a_eq_b = solver.eq(&a, &b);
                 let fa_ne_fb = solver.ne(&fa, &fb);

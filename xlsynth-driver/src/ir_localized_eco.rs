@@ -177,7 +177,8 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
         },
     };
 
-    // Build patched function via structural rebase; compute simple node-add count.
+    // Build patched function via structural rebase; compute simple node-add
+    // count.
     let patched_for_count = localized_eco2::compute_localized_eco(old_fn, new_fn);
     let added_count: usize = patched_for_count
         .nodes
@@ -211,8 +212,8 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     // out_dir/eco_report.json
     let json_path = if let Some(json_out) = matches.get_one::<String>("json_out") {
         let path = std::path::PathBuf::from(json_out);
-        // We'll serialize after computing text edit distance below; write later.
-        // For now, just return the path.
+        // We'll serialize after computing text edit distance below; write
+        // later. For now, just return the path.
         path
     } else {
         let path = out_dir.join("eco_report.json");
@@ -220,8 +221,9 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
         path
     };
 
-    // Patched IR path: emit the NEW IR with IDs remapped to preserve old IDs where
-    // subgraphs are structurally equal; allocate fresh IDs for new nodes.
+    // Patched IR path: emit the NEW IR with IDs remapped to preserve old IDs
+    // where subgraphs are structurally equal; allocate fresh IDs for new
+    // nodes.
     let patched_ir_path = out_dir.join("patched_old.ir");
     // Re-emit both old and patched packages to ensure a comparable formatting
     // baseline.
@@ -446,7 +448,8 @@ fn handle_ir_localized_eco_blocks_in_packages(
     solver: SolverChoice,
     tool_path: Option<&Path>,
 ) {
-    // Summaries (rebase-based): will compute added_count after building applied.
+    // Summaries (rebase-based): will compute added_count after building
+    // applied.
     let added_ops: Vec<AddedOpsSummaryItem> = Vec::new();
 
     // Prepare output directory.
@@ -787,8 +790,8 @@ fn try_interpret_cex(
     let new_f = new_pkg
         .get_function(top_name)
         .map_err(|e| format!("get new top failed: {}", e))?;
-    // Extract the top-level tuple text after "input:" using balanced paren/bracket
-    // parsing.
+    // Extract the top-level tuple text after "input:" using balanced
+    // paren/bracket parsing.
     let tuple_text = extract_tuple_text(arg_text)
         .ok_or_else(|| "could not extract tuple from counterexample text".to_string())?;
     let arg_tuple = xlsynth::IrValue::parse_typed(&tuple_text)
@@ -831,8 +834,8 @@ fn try_interpret_cex(
             .get_elements()
             .map_err(|e| format!("decompose cex tuple failed: {}", e))?
     } else if let Ok(top_elems) = arg_tuple.get_elements() {
-        // If the top-level is a singleton that itself matches the arg tuple type,
-        // unwrap it.
+        // If the top-level is a singleton that itself matches the arg tuple
+        // type, unwrap it.
         if top_elems.len() == 1 {
             let inner = &top_elems[0];
             if let Ok(inner_ty) = new_pkg.get_type_for_value(inner) {
@@ -859,8 +862,8 @@ fn try_interpret_cex(
                 .map_err(|e| format!("reshape cex args failed: {}", e))?
         }
     } else {
-        // Last resort: treat the parsed tuple elements as a flat list and try to
-        // assemble by type.
+        // Last resort: treat the parsed tuple elements as a flat list and try
+        // to assemble by type.
         let flat = arg_tuple
             .get_elements()
             .map_err(|e| format!("decompose cex tuple failed: {}", e))?;

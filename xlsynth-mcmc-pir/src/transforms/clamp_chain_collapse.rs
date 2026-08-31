@@ -141,7 +141,8 @@ impl PirTransform for ClampChainCollapseTransform {
             {
                 continue;
             }
-            // One case must be a literal; the other is the value we attempt to clamp.
+            // One case must be a literal; the other is the value we attempt to
+            // clamp.
             let (bound, x) = if Self::is_literal(f, cases[0]) && !Self::is_literal(f, cases[1]) {
                 (cases[0], cases[1])
             } else if Self::is_literal(f, cases[1]) && !Self::is_literal(f, cases[0]) {
@@ -153,8 +154,8 @@ impl PirTransform for ClampChainCollapseTransform {
             if Self::literal_u64_value(f, bound).is_none() {
                 continue;
             }
-            // Only fire when the selector cone already references a compare between x and
-            // bound.
+            // Only fire when the selector cone already references a compare
+            // between x and bound.
             if !Self::selector_cone_contains_cmp(f, *selector, x, bound, 64) {
                 continue;
             }

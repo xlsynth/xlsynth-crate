@@ -208,8 +208,8 @@ pub fn get_equivalences(
     // Candidate discovery via shared-input simulation.
     //
     // Important: we must drive PIR and GateFn with the *same* bit patterns in
-    // the same flattened order (LSB=0), otherwise history matching is meaningless
-    // for tuple/array parameters.
+    // the same flattened order (LSB=0), otherwise history matching is
+    // meaningless for tuple/array parameters.
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(options.sample_seed);
 
     // PIR node histories keyed by node_text_id.
@@ -889,8 +889,9 @@ fn make_random_args_for_both(
 
     for (param, gate_input) in pir_fn.params.iter().zip(gate_fn.inputs.iter()) {
         // Generate the *flat* bitvector first, then unflatten into an IrValue.
-        // This ensures the PIR evaluator and the GateFn see identical bit patterns
-        // in the same flattened order for tuple/array parameters.
+        // This ensures the PIR evaluator and the GateFn see identical bit
+        // patterns in the same flattened order for tuple/array
+        // parameters.
         let random_bits = generate_biased_irbits_with_rng(rng, param.ty.bit_count());
         let flat_bits: Vec<bool> = (0..random_bits.get_bit_count())
             .map(|bit_index| random_bits.get_bit(bit_index).unwrap())
@@ -940,8 +941,9 @@ fn unflatten_ir_value_from_lsb0_bits_at(
             Ok((IrValue::from_bits(&IrBits::from_lsb_is_0(slice)), offset))
         }
         ir::Type::Tuple(types) => {
-            // Flattening places the *last* tuple element at the least-significant bits.
-            // So when unflattening, consume elements from the tail first.
+            // Flattening places the *last* tuple element at the
+            // least-significant bits. So when unflattening, consume
+            // elements from the tail first.
             let mut elems_rev: Vec<IrValue> = Vec::with_capacity(types.len());
             for t in types.iter().rev() {
                 let (v, next) = unflatten_ir_value_from_lsb0_bits_at(t, flat_bits, offset)?;

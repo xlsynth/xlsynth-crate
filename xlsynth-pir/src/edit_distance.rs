@@ -154,7 +154,8 @@ mod tests {
         );
         let identity = identity_pkg.get_top_fn().unwrap();
         let edit_distance = compute_edit_distance(&inverter, &identity);
-        // The only difference is the operator in the node ("not" vs "identity").
+        // The only difference is the operator in the node ("not" vs
+        // "identity").
         assert_eq!(edit_distance, 1);
     }
 
@@ -248,7 +249,8 @@ mod tests {
         );
         let singleton_fn = singleton_pkg.get_top_fn().unwrap();
         let edit_distance = compute_edit_distance(&two_tuple_fn, &singleton_fn);
-        // The only difference is the operator in the node ("tuple" vs "identity").
+        // The only difference is the operator in the node ("tuple" vs
+        // "identity").
         assert_eq!(edit_distance, 1);
     }
 }

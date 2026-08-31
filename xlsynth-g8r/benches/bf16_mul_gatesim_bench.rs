@@ -21,8 +21,8 @@ fn bf16_mul_gatesim_benchmark(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("bf16_mul_gatesim_zero_input");
 
-    // Configure throughput measurement: specify the number of samples processed per
-    // iteration Even though b.iter runs once, it represents processing
+    // Configure throughput measurement: specify the number of samples processed
+    // per iteration Even though b.iter runs once, it represents processing
     // `num_samples` items conceptually.
     group.throughput(Throughput::Elements(num_samples));
 

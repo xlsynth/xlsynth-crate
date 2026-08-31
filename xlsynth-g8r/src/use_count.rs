@@ -15,10 +15,10 @@ pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usiz
     };
     let mut processed_nodes = HashSet::new();
 
-    // The worklist represents the set of nodes for which we observed that they were
-    // used but we haven't yet traversed to their arguments. If a node is in
-    // "processed" that means we have already traversed to its arguments so we
-    // should not do it again.
+    // The worklist represents the set of nodes for which we observed that they
+    // were used but we haven't yet traversed to their arguments. If a node
+    // is in "processed" that means we have already traversed to its
+    // arguments so we should not do it again.
     let mut worklist = Vec::new();
 
     // Start from outputs - each output use counts as 1
@@ -29,8 +29,8 @@ pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usiz
         }
     }
 
-    // Process the worklist - each time a node is used as an argument, increment its
-    // use count
+    // Process the worklist - each time a node is used as an argument, increment
+    // its use count
     while let Some(node) = worklist.pop() {
         // Skip if we've already processed this node's arguments
         let first_time_seen = processed_nodes.insert(node);

@@ -119,7 +119,8 @@ fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
     };
     let dso_path: &PathBuf = &chosen;
 
-    // Use nm to enumerate exported symbols. We rely on nm being available in CI.
+    // Use nm to enumerate exported symbols. We rely on nm being available in
+    // CI.
     let output = Command::new("nm")
         .arg("-D")
         .arg("--defined-only")
@@ -139,8 +140,9 @@ fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
         // Format: "<addr> <type> <name>" or variations; take last field.
         let maybe_name = line.split_whitespace().last();
         if let Some(name) = maybe_name {
-            // The DSO still exports VAST, but xlsynth-vast implements it entirely
-            // in Rust, so those legacy symbols intentionally have no FFI bindings.
+            // The DSO still exports VAST, but xlsynth-vast implements it
+            // entirely in Rust, so those legacy symbols
+            // intentionally have no FFI bindings.
             if requires_rust_sys_binding(name) {
                 dso_symbols.insert(name.to_string());
             }
@@ -161,7 +163,8 @@ fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
         "No xls_* pub fn bindings found in xlsynth-sys/src/lib.rs"
     );
 
-    // Compute difference: required DSO symbols that lack Rust extern declarations.
+    // Compute difference: required DSO symbols that lack Rust extern
+    // declarations.
     let missing: Vec<&String> = dso_symbols
         .iter()
         .filter(|name| !binding_names.contains(*name))
@@ -182,12 +185,13 @@ fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
         panic!("{}", report);
     }
 
-    // Also check the inverse: symbols declared in Rust externs must exist in the
-    // DSO.
+    // Also check the inverse: symbols declared in Rust externs must exist in
+    // the DSO.
     //
     // This catches situations where we accidentally add a binding that is not
     // present in the pinned/shipped DSO (which may only fail to link in builds
-    // that force dead-code retention, like `cargo fuzz` with `-Clink-dead-code`).
+    // that force dead-code retention, like `cargo fuzz` with
+    // `-Clink-dead-code`).
     let bound_but_missing_in_dso: Vec<&String> = binding_names
         .iter()
         .filter(|name| !dso_symbols.contains(*name))

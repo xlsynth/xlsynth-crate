@@ -93,11 +93,12 @@ impl IrRangeInfo {
 
     /// Returns true iff analysis proves the node value is never equal to zero.
     pub fn proves_nonzero(&self, text_id: usize) -> bool {
-        // Prefer interval reasoning when available: prove `0` is not in the interval
-        // set.
+        // Prefer interval reasoning when available: prove `0` is not in the
+        // interval set.
         if let Some(node) = self.get(text_id) {
             if let Some(intervals) = node.intervals.as_ref() {
-                // Zero-width values are always "zero", so we cannot prove nonzero.
+                // Zero-width values are always "zero", so we cannot prove
+                // nonzero.
                 let w = node
                     .unsigned_min
                     .as_ref()

@@ -94,8 +94,9 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
 
-            // For golden comparison files (i.e. ones we compare to literally for code
-            // generation facilities) we don't require SPDX identifiers.
+            // For golden comparison files (i.e. ones we compare to literally
+            // for code generation facilities) we don't require SPDX
+            // identifiers.
             let path_str = path.as_os_str().to_str().unwrap();
 
             // Exclude fuzz corpora; these are inputs, not source files.
@@ -139,7 +140,8 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             {
                 continue;
             }
-            // VCDs are generated simulation waveforms, not maintained source files.
+            // VCDs are generated simulation waveforms, not maintained source
+            // files.
             if path
                 .file_name()
                 .unwrap()

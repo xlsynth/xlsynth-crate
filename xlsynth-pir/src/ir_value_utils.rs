@@ -442,8 +442,8 @@ mod tests {
             bv.push(i % 2 == 0);
         }
         let ir = ir_bits_from_bitvec_msb_is_0(&bv);
-        // In this case, bit 0 is MSB, so ir.get_bit(99) is bv[0], ir.get_bit(0) is
-        // bv[99]
+        // In this case, bit 0 is MSB, so ir.get_bit(99) is bv[0], ir.get_bit(0)
+        // is bv[99]
         for i in 0..100 {
             assert_eq!(ir.get_bit(99 - i).unwrap(), i % 2 == 0, "bit {}", 99 - i);
         }

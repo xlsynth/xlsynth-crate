@@ -188,16 +188,19 @@ fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
             }
             QueryExpr::Placeholder(_) | QueryExpr::Number(_) | QueryExpr::Numeric(_) => Ok(()),
             QueryExpr::Matcher(m) => {
-                // Only explicit operator matchers (e.g. `nor(...)`) support ellipsis.
+                // Only explicit operator matchers (e.g. `nor(...)`) support
+                // ellipsis.
                 let allow_in_args = matches!(m.kind, MatcherKind::OpName(_));
                 for a in &m.args {
                     walk(a, allow_in_args)?;
                 }
 
-                // Named args usually never support ellipsis; they are not operand lists.
+                // Named args usually never support ellipsis; they are not
+                // operand lists.
                 //
-                // Exception: select-like nodes expose `cases=[...]` which is explicitly an
-                // operand list, and ellipsis provides useful "any arity" matching.
+                // Exception: select-like nodes expose `cases=[...]` which is
+                // explicitly an operand list, and ellipsis
+                // provides useful "any arity" matching.
                 for na in &m.named_args {
                     match &na.value {
                         NamedArgValue::Any
@@ -332,12 +335,14 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
                     return Ok(());
                 }
 
-                // Width is never allowed in positional operand lists; it doesn't match nodes.
+                // Width is never allowed in positional operand lists; it
+                // doesn't match nodes.
                 for a in &m.args {
                     walk(a, /* width_allowed_here= */ false)?;
                 }
 
-                // Allow width only in the numeric named args where we know how to interpret it.
+                // Allow width only in the numeric named args where we know how
+                // to interpret it.
                 for na in &m.named_args {
                     if is_numeric_named_arg_name(na.name.as_str()) {
                         let NamedArgValue::Numeric(pattern) = &na.value else {
@@ -525,7 +530,8 @@ fn match_solutions(
             }
 
             if placeholder.name == "_" {
-                // Wildcard: matches any node without creating/consulting a binding.
+                // Wildcard: matches any node without creating/consulting a
+                // binding.
                 return vec![bindings.clone()];
             }
             match bindings.get(&placeholder.name) {
@@ -637,8 +643,9 @@ fn match_solutions(
                 return out;
             }
             let operands = ir_utils::operands(&node.payload);
-            // Important: match operands first (binding placeholders), then evaluate named
-            // args. This allows named args like `start=$width(t)` to refer to placeholders
+            // Important: match operands first (binding placeholders), then
+            // evaluate named args. This allows named args like
+            // `start=$width(t)` to refer to placeholders
             // bound within the operand expressions.
             let mut out = Vec::new();
             let operand_bindings =
@@ -717,7 +724,8 @@ fn match_literal_solutions(
             }
 
             if placeholder.name == "_" {
-                // Wildcard literal argument: match any literal value without binding.
+                // Wildcard literal argument: match any literal value without
+                // binding.
                 return vec![bindings.clone()];
             }
 
@@ -2122,7 +2130,8 @@ fn main(t: bits[8] id=1) -> bits[1] {
         let pkg = parser.parse_and_validate_package().expect("parse package");
         let f = pkg.get_top_fn().expect("top function");
 
-        // Match the carry bit by requiring start == $width(t), i.e. 8 for bits[8].
+        // Match the carry bit by requiring start == $width(t), i.e. 8 for
+        // bits[8].
         let query = parse_query("bit_slice(concat(_, t), start=$width(t), width=1)").unwrap();
         let matches = find_matching_nodes(f, &query);
         assert_eq!(matches.len(), 1);

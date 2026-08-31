@@ -79,7 +79,8 @@ impl PirTransform for CloneMultiUserNodeTransform {
                 // The first user keeps using the original node.
                 target_ref
             } else {
-                // Subsequent users each get their own cloned node appended to `f.nodes`.
+                // Subsequent users each get their own cloned node appended to
+                // `f.nodes`.
                 let mut cloned = original_node.clone();
                 cloned.text_id = next_text_id;
                 next_text_id = next_text_id.saturating_add(1);

@@ -1091,8 +1091,8 @@ fn test_ir2gates_adder_mapping_flag() {
         .as_u64()
         .expect("expected deepest_path to be a u64");
 
-    // We expect the mapping choice to influence depth, and ripple-carry should be
-    // no better than more parallel prefix structures.
+    // We expect the mapping choice to influence depth, and ripple-carry should
+    // be no better than more parallel prefix structures.
     assert!(rc_depth >= bk_depth);
     assert!(rc_depth >= ks_depth);
     // Empirically in our current mapping pipeline, Kogge-Stone is at least as
@@ -2429,14 +2429,15 @@ fn test_dslx2pipeline_with_dslx_path_two_entries(use_tool_path: bool) {
     let b_dir = temp_dir.path().join("b");
     std::fs::create_dir(&b_dir).unwrap();
 
-    // Make a file `a/a.x` and `b/b.x` in the temp dir with constants `A` and `B`
-    // respectively.
+    // Make a file `a/a.x` and `b/b.x` in the temp dir with constants `A` and
+    // `B` respectively.
     let a_path = a_dir.join("a.x");
     std::fs::write(&a_path, "pub const A: u32 = u32:42;").unwrap();
     let b_path = b_dir.join("b.x");
     std::fs::write(&b_path, "pub const B: u32 = u32:64;").unwrap();
 
-    // Write out the main file that just imports `a` and `b` and adds a::A + b::B.
+    // Write out the main file that just imports `a` and `b` and adds a::A +
+    // b::B.
     let main_path = temp_dir.path().join("main.x");
     std::fs::write(
         &main_path,
@@ -2831,8 +2832,8 @@ fn test_ir2gates_determinism() {
 fn test_toolchain_picked_up_when_in_cwd_even_if_no_cmdline_flag(use_tool_path: bool) {
     let temp_dir = tempfile::tempdir().unwrap();
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
-    // Create a DSLX stdlib path that points at our temp dir so we can see things
-    // worked.
+    // Create a DSLX stdlib path that points at our temp dir so we can see
+    // things worked.
     let dslx_stdlib_path = temp_dir.path().join("dslx_stdlib");
     std::fs::create_dir(&dslx_stdlib_path).unwrap();
     let dslx_stdlib_path_str = dslx_stdlib_path.to_str().unwrap();
@@ -2864,8 +2865,8 @@ dslx_stdlib_path = "{}"
     )
     .unwrap();
 
-    // We run the command without an explicit --toolchain flag but in the directory
-    // where the toolchain.toml is located.
+    // We run the command without an explicit --toolchain flag but in the
+    // directory where the toolchain.toml is located.
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("dslx2ir")
@@ -4126,8 +4127,8 @@ fn my_main(x: bits[8]) -> bits[8] {
     let rhs_path = temp_dir.path().join("rhs.ir");
     std::fs::write(&rhs_path, rhs_ir).unwrap();
 
-    // Toolchain file so driver can run external tools when needed (not used here
-    // but consistent with other tests).
+    // Toolchain file so driver can run external tools when needed (not used
+    // here but consistent with other tests).
     let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
@@ -4331,7 +4332,8 @@ pub fn main(x: u8, y: u8) -> (u8, u8) { if y == u8:0 { (all_ones!<u8>(), zero!<u
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
-    // First, check that single-threaded solver proves equivalence for these IRs.
+    // First, check that single-threaded solver proves equivalence for these
+    // IRs.
     let output_single = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml_path.to_str().unwrap())
@@ -4811,7 +4813,8 @@ fn test_ir2g8r_emits_all_outputs() {
         "ir2g8r failed: {}",
         String::from_utf8_lossy(&ir2g8r_output.stderr)
     );
-    // Check stdout identifies the native format and contains its transition body.
+    // Check stdout identifies the native format and contains its transition
+    // body.
     let stdout = String::from_utf8_lossy(&ir2g8r_output.stdout);
     assert!(
         stdout.starts_with("g8r_v2\n"),
@@ -6913,8 +6916,8 @@ fn test_g8r2v_use_system_verilog() {
         String::from_utf8_lossy(&output.stderr)
     );
     let netlist = String::from_utf8_lossy(&output.stdout);
-    // At this stage, with VAST, the output might be identical for simple Verilog vs
-    // SV unless specific SV features are used by emit_netlist.
+    // At this stage, with VAST, the output might be identical for simple
+    // Verilog vs SV unless specific SV features are used by emit_netlist.
     // We are mainly testing that the flag is accepted and the command runs.
     let expected_netlist = r#"module my_sv_inv(
   input wire i,
@@ -7756,8 +7759,9 @@ fn test_tiv2_slice_oob_is_error(use_tool_path: bool) {
     );
 }
 
+#[cfg(feature = "iverilog-tests")]
 #[test]
-fn test_simulate_simple_pipeline() {
+fn test_simulate_simple_pipeline_iverilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     // Binary function so we can exercise multiple input ports.
@@ -8246,24 +8250,25 @@ fn test_dslx_stitch_pipeline_with_dslx_path_two_entries(use_tool_path: bool) {
     let _ = env_logger::try_init();
     log::info!("test_dslx_stitch_pipeline_with_dslx_path_two_entries");
 
-    // Create a temporary directory hierarchy with two separate DSLX library paths.
+    // Create a temporary directory hierarchy with two separate DSLX library
+    // paths.
     let temp_dir = tempfile::tempdir().unwrap();
     let a_dir = temp_dir.path().join("a");
     std::fs::create_dir(&a_dir).unwrap();
     let b_dir = temp_dir.path().join("b");
     std::fs::create_dir(&b_dir).unwrap();
 
-    // Populate the libraries with simple constants so we can check that they are
-    // resolved through the dslx_path setting.
+    // Populate the libraries with simple constants so we can check that they
+    // are resolved through the dslx_path setting.
     let a_path = a_dir.join("a.x");
     std::fs::write(&a_path, "pub const A: u32 = u32:42;").unwrap();
     let b_path = b_dir.join("b.x");
     std::fs::write(&b_path, "pub const B: u32 = u32:64;").unwrap();
 
-    // Top-level DSLX file that stitches two pipeline stages together and uses the
-    // imported constants from the two separate library paths. The final stage
-    // computes A + B which should constant-fold to 0x6a (decimal 106) in the
-    // generated SystemVerilog.
+    // Top-level DSLX file that stitches two pipeline stages together and uses
+    // the imported constants from the two separate library paths. The final
+    // stage computes A + B which should constant-fold to 0x6a (decimal 106)
+    // in the generated SystemVerilog.
     let top_path = temp_dir.path().join("foo.x");
     std::fs::write(
         &top_path,
@@ -8272,8 +8277,8 @@ fn test_dslx_stitch_pipeline_with_dslx_path_two_entries(use_tool_path: bool) {
     .unwrap();
 
     // Build a toolchain.toml that points at the two library directories via
-    // `dslx_path` so that the driver should make them visible during parsing and
-    // type-checking.
+    // `dslx_path` so that the driver should make them visible during parsing
+    // and type-checking.
     let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let mut toolchain_toml = format!(
         r#"[toolchain]
@@ -8376,6 +8381,18 @@ dslx_stdlib_path = "{}""#,
 
 #[test]
 fn test_dslx_stitch_pipeline_with_valid() {
+    check_test_dslx_stitch_pipeline_with_valid(false);
+}
+
+#[cfg(feature = "iverilog-tests")]
+#[test]
+fn test_dslx_stitch_pipeline_with_valid_iverilog() {
+    check_test_dslx_stitch_pipeline_with_valid(true);
+}
+
+/// Checks the golden fixture and, in the selected simulation test, its
+/// behavior.
+fn check_test_dslx_stitch_pipeline_with_valid(_simulate: bool) {
     let dslx =
         "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
     let temp_dir = tempfile::tempdir().unwrap();
@@ -8405,12 +8422,26 @@ fn test_dslx_stitch_pipeline_with_valid() {
         "tests/test_dslx_stitch_pipeline_with_valid.golden.v",
     );
 
-    // Simulation (input_valid only, active-low rst)
-    simulate_basic_valid_pipeline(&stdout, "foo", "input_valid", "rst", false);
+    #[cfg(feature = "iverilog-tests")]
+    if _simulate {
+        // Simulation (input_valid only, active-low rst)
+        simulate_basic_valid_pipeline(&stdout, "foo", "input_valid", "rst", false);
+    }
 }
 
 #[test]
 fn test_stitch_with_valid_custom_in_valid_reset() {
+    check_test_stitch_with_valid_custom_in_valid_reset(false);
+}
+
+#[cfg(feature = "iverilog-tests")]
+#[test]
+fn test_stitch_with_valid_custom_in_valid_reset_iverilog() {
+    check_test_stitch_with_valid_custom_in_valid_reset(true);
+}
+
+/// Checks custom valid/reset naming in golden output and optional simulation.
+fn check_test_stitch_with_valid_custom_in_valid_reset(_simulate: bool) {
     let dslx =
         "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
     let temp_dir = tempfile::tempdir().unwrap();
@@ -8440,12 +8471,26 @@ fn test_stitch_with_valid_custom_in_valid_reset() {
         "tests/test_dslx_stitch_pipeline_with_valid_in_valid_rst.golden.v",
     );
 
-    // Simulation active-high reset without output_valid
-    simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst", false);
+    #[cfg(feature = "iverilog-tests")]
+    if _simulate {
+        // Simulation active-high reset without output_valid
+        simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst", false);
+    }
 }
 
 #[test]
 fn test_stitch_with_valid_custom_in_valid_rst_n_active_low() {
+    check_test_stitch_with_valid_custom_in_valid_rst_n_active_low(false);
+}
+
+#[cfg(feature = "iverilog-tests")]
+#[test]
+fn test_stitch_with_valid_custom_in_valid_rst_n_active_low_iverilog() {
+    check_test_stitch_with_valid_custom_in_valid_rst_n_active_low(true);
+}
+
+/// Checks active-low reset naming in golden output and optional simulation.
+fn check_test_stitch_with_valid_custom_in_valid_rst_n_active_low(_simulate: bool) {
     let dslx =
         "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
     let temp_dir = tempfile::tempdir().unwrap();
@@ -8475,12 +8520,27 @@ fn test_stitch_with_valid_custom_in_valid_rst_n_active_low() {
         "tests/test_dslx_stitch_pipeline_with_valid_in_valid_rst_n_active_low.golden.v",
     );
 
-    // Simulation active-low reset with rst_n name
-    simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst_n", true);
+    #[cfg(feature = "iverilog-tests")]
+    if _simulate {
+        // Simulation active-low reset with rst_n name
+        simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst_n", true);
+    }
 }
 
 #[test]
 fn test_stitch_with_valid_custom_in_and_out_valid() {
+    check_test_stitch_with_valid_custom_in_and_out_valid(false);
+}
+
+#[cfg(feature = "iverilog-tests")]
+#[test]
+fn test_stitch_with_valid_custom_in_and_out_valid_iverilog() {
+    check_test_stitch_with_valid_custom_in_and_out_valid(true);
+}
+
+/// Checks both valid signals in golden output and the selected simulation
+/// suite.
+fn check_test_stitch_with_valid_custom_in_and_out_valid(_simulate: bool) {
     let _ = env_logger::try_init();
     let dslx =
         "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
@@ -8512,22 +8572,25 @@ fn test_stitch_with_valid_custom_in_and_out_valid() {
         "tests/test_dslx_stitch_pipeline_with_valid_in_and_out_valid.golden.v",
     );
 
-    // Simulation check for custom valid signal names.
-    let inputs = vec![("x", IrBits::u32(5))];
-    let expected = IrBits::u32(8);
-    let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
-        &stdout,
-        "foo",
-        &inputs,
-        &expected,
-        2,
-        "in_valid",
-        Some("out_valid"),
-        "rst",
-        false,
-    )
-    .expect("simulation succeeds");
-    assert!(vcd.contains("$var"));
+    #[cfg(feature = "iverilog-tests")]
+    if _simulate {
+        // Simulation check for custom valid signal names.
+        let inputs = vec![("x", IrBits::u32(5))];
+        let expected = IrBits::u32(8);
+        let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
+            &stdout,
+            "foo",
+            &inputs,
+            &expected,
+            2,
+            "in_valid",
+            Some("out_valid"),
+            "rst",
+            false,
+        )
+        .expect("simulation succeeds");
+        assert!(vcd.contains("$var"));
+    }
 }
 
 #[test]
@@ -8564,6 +8627,7 @@ fn test_stitch_with_valid_custom_in_and_out_valid_no_reset() {
 }
 
 // Helper to simulate two-stage valid pipelines without output_valid.
+#[cfg(feature = "iverilog-tests")]
 fn simulate_basic_valid_pipeline(
     sv: &str,
     module_name: &str,
@@ -8819,13 +8883,17 @@ fn should_skip_if_no_slang() -> bool {
     false // Don't skip - slang is working
 }
 
+#[cfg(feature = "iverilog-tests")]
 #[test]
-fn test_run_verilog_pipeline_basic_add1() {
+fn test_run_verilog_pipeline_basic_add1_iverilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if should_skip_if_no_slang() {
-        return;
-    }
+    xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
+        .expect("Icarus tests require iverilog and vvp");
+    assert!(
+        !should_skip_if_no_slang(),
+        "run-verilog-pipeline tests require Slang"
+    );
 
     // Simple DSLX that increments by one.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -8885,13 +8953,17 @@ fn test_run_verilog_pipeline_basic_add1() {
     );
 }
 
+#[cfg(feature = "iverilog-tests")]
 #[test]
-fn test_run_verilog_pipeline_wave_dump() {
+fn test_run_verilog_pipeline_wave_dump_iverilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if should_skip_if_no_slang() {
-        return;
-    }
+    xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
+        .expect("Icarus tests require iverilog and vvp");
+    assert!(
+        !should_skip_if_no_slang(),
+        "run-verilog-pipeline tests require Slang"
+    );
 
     // Simple DSLX that increments by one.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -8962,13 +9034,17 @@ fn test_run_verilog_pipeline_wave_dump() {
     );
 }
 
+#[cfg(feature = "iverilog-tests")]
 #[test]
-fn test_run_verilog_pipeline_with_valid_signals() {
+fn test_run_verilog_pipeline_with_valid_signals_iverilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if should_skip_if_no_slang() {
-        return;
-    }
+    xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
+        .expect("Icarus tests require iverilog and vvp");
+    assert!(
+        !should_skip_if_no_slang(),
+        "run-verilog-pipeline tests require Slang"
+    );
 
     // DSLX with simple increment.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -9032,13 +9108,17 @@ fn test_run_verilog_pipeline_with_valid_signals() {
     );
 }
 
+#[cfg(feature = "iverilog-tests")]
 #[test]
-fn test_run_verilog_pipeline_with_valid_signals_and_flops() {
+fn test_run_verilog_pipeline_with_valid_signals_and_flops_iverilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if should_skip_if_no_slang() {
-        return;
-    }
+    xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
+        .expect("Icarus tests require iverilog and vvp");
+    assert!(
+        !should_skip_if_no_slang(),
+        "run-verilog-pipeline tests require Slang"
+    );
 
     // DSLX with simple increment.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -9120,8 +9200,8 @@ fn test_dslx_equiv_solver_param(solver: &str, should_succeed: bool) {
     let _ = env_logger::builder().is_test(true).try_init();
     let temp_dir = tempfile::tempdir().unwrap();
 
-    // LHS DSLX (same in both success/failure cases): algebraically (x + x) - x == x
-    // modulo 2^32.
+    // LHS DSLX (same in both success/failure cases): algebraically (x + x) - x
+    // == x modulo 2^32.
     let lhs_dslx = "fn main(x: u32) -> u32 { (x + x) - x }";
     // RHS varies depending on whether we want equivalence.
     let rhs_dslx_equiv = "fn main(x: u32) -> u32 { x }";
@@ -9140,8 +9220,8 @@ fn test_dslx_equiv_solver_param(solver: &str, should_succeed: bool) {
     )
     .unwrap();
 
-    // Toolchain config so the toolchain solver (and default path when unspecified)
-    // works.
+    // Toolchain config so the toolchain solver (and default path when
+    // unspecified) works.
     let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let mut toolchain_toml_contents = "[toolchain]\n".to_string();
     // Always add tool_path so the default / toolchain solver path is available.
@@ -9548,13 +9628,17 @@ fn test_dslx_equiv_solver_param_different_tops(solver: &str, should_succeed: boo
     }
 }
 
+#[cfg(feature = "iverilog-tests")]
 #[test]
-fn test_run_verilog_pipeline_with_valid_signals_and_output_flops_only() {
+fn test_run_verilog_pipeline_with_valid_signals_and_output_flops_only_iverilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if should_skip_if_no_slang() {
-        return;
-    }
+    xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
+        .expect("Icarus tests require iverilog and vvp");
+    assert!(
+        !should_skip_if_no_slang(),
+        "run-verilog-pipeline tests require Slang"
+    );
 
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
     let temp_dir = tempfile::tempdir().unwrap();
@@ -9619,13 +9703,17 @@ fn test_run_verilog_pipeline_with_valid_signals_and_output_flops_only() {
     );
 }
 
+#[cfg(feature = "iverilog-tests")]
 #[test]
-fn test_run_verilog_pipeline_with_valid_signals_and_input_flops_only() {
+fn test_run_verilog_pipeline_with_valid_signals_and_input_flops_only_iverilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if should_skip_if_no_slang() {
-        return;
-    }
+    xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
+        .expect("Icarus tests require iverilog and vvp");
+    assert!(
+        !should_skip_if_no_slang(),
+        "run-verilog-pipeline tests require Slang"
+    );
 
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
     let temp_dir = tempfile::tempdir().unwrap();
@@ -9860,7 +9948,8 @@ fn test_dslx_equiv_assume_enum_in_bound_swapped_default() {
         String::from_utf8_lossy(&out_default.stderr)
     );
 
-    // With enum-in-bound assumption explicitly set to true → should be equivalent.
+    // With enum-in-bound assumption explicitly set to true → should be
+    // equivalent.
     let out_with_flag = std::process::Command::new(driver)
         .args([
             "dslx-equiv",
@@ -10044,8 +10133,8 @@ fn f_cycle1(x: u6) -> u6 {
     let dslx_path = temp_dir.path().join("prio.x");
     std::fs::write(&dslx_path, dslx).unwrap();
 
-    // Write out toolchain.toml with (1) external tool path and (2) the invariant
-    // flag.
+    // Write out toolchain.toml with (1) external tool path and (2) the
+    // invariant flag.
     let toolchain_toml_base = if add_inv {
         "[toolchain]\n[toolchain.codegen]\nadd_invariant_assertions = true\n"
     } else {
@@ -10178,7 +10267,8 @@ fn main(sel: E, arr: u32[4]) -> u32 {
 fn test_dslx_stitch_pipeline_array_index_bounds_checking_enum_cast() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // Two-stage pipeline; first stage indexes an array using an enum-based index.
+    // Two-stage pipeline; first stage indexes an array using an enum-based
+    // index.
     let dslx = r#"enum E : u2 {
     A = 0,
     B = 1,
@@ -10511,8 +10601,8 @@ fn test_prove_quickcheck_json_array_mixed() {
         .output()
         .unwrap();
 
-    // Expect non-zero because one quickcheck is false; results are written to JSON
-    // file.
+    // Expect non-zero because one quickcheck is false; results are written to
+    // JSON file.
     assert!(
         !output.status.success(),
         "expected failure due to one disproved QC; stderr: {}",
@@ -11400,7 +11490,8 @@ fn test_prover_nested_all_any_succeeds() {
     std::fs::write(&lhs_dslx, "fn main(x: u32) -> u32 { (x + x) - x }").unwrap();
     std::fs::write(&rhs_dslx, "fn main(x: u32) -> u32 { x }").unwrap();
 
-    // QuickCheck file with success/failure tests; we'll filter to the success one.
+    // QuickCheck file with success/failure tests; we'll filter to the success
+    // one.
     let qc_path = dir.join("qc.x");
     std::fs::write(&qc_path, QUICKCHECK_DSLX).unwrap();
 
@@ -11496,7 +11587,8 @@ fn test_prover_nested_any_all_fails() {
         std::fs::write(p, s).unwrap();
     }
 
-    // DSLX equivalent pair (won't save the all-group that has a failing ir-equiv).
+    // DSLX equivalent pair (won't save the all-group that has a failing
+    // ir-equiv).
     let lhs_dslx = dir.join("lhs.x");
     let rhs_dslx = dir.join("rhs.x");
     std::fs::write(&lhs_dslx, "fn main(x: u32) -> u32 { (x + x) - x }").unwrap();
@@ -11586,8 +11678,8 @@ fn test_prover_nested_any_all_fails() {
 fn test_dslx_equiv_uninterpreted_functions_solver_param(solver: &str) {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // LHS calls g(x) = x + x; RHS calls h(x) = x - x. Not equivalent unless both
-    // g and h are mapped to the same uninterpreted function symbol.
+    // LHS calls g(x) = x + x; RHS calls h(x) = x - x. Not equivalent unless
+    // both g and h are mapped to the same uninterpreted function symbol.
     let lhs_dslx = "fn g(x: u8) -> u8 { x + x }\nfn main(x: u8) -> u8 { g(x) }";
     let rhs_dslx = "fn h(x: u8) -> u8 { x - x }\nfn main(x: u8) -> u8 { h(x) }";
 
@@ -11717,7 +11809,8 @@ top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Load JSON and check rebase-based summary: nonzero additions and no edit list.
+    // Load JSON and check rebase-based summary: nonzero additions and no edit
+    // list.
     let json_bytes = std::fs::read(&json_out).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
     let added = v
@@ -11730,9 +11823,9 @@ top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
         String::from_utf8_lossy(&json_bytes)
     );
 
-    // As a final step, create a "patched old" IR (for now identical to new_ir) and
-    // prove equivalence to new_ir via the ir-equiv subcommand to validate the
-    // proving pipeline/flags.
+    // As a final step, create a "patched old" IR (for now identical to new_ir)
+    // and prove equivalence to new_ir via the ir-equiv subcommand to
+    // validate the proving pipeline/flags.
     let patched_old_path = temp_dir.path().join("patched_old.ir");
     std::fs::write(&patched_old_path, new_ir).unwrap();
     // Provide a toolchain toml for ir-equiv's toolchain solver.
@@ -11824,15 +11917,17 @@ top fn main(x: bits[8]) -> bits[8] {
 fn test_prove_quickcheck_uninterpreted_functions_solver_param(solver: &str) {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // Property compares two different helper functions; false without UF mapping,
-    // true when both helpers are mapped to the same uninterpreted function symbol.
+    // Property compares two different helper functions; false without UF
+    // mapping, true when both helpers are mapped to the same uninterpreted
+    // function symbol.
     let dslx = "fn g(x: u8) -> u8 { x + x }\nfn h(x: u8) -> u8 { x - x }\n#[quickcheck] fn qc_equiv(x: u8) -> bool { g(x) == h(x) }\n";
 
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("qc.x");
     std::fs::write(&dslx_path, dslx).unwrap();
 
-    // Toolchain file for parity with other tests (native solvers don't require it).
+    // Toolchain file for parity with other tests (native solvers don't require
+    // it).
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
@@ -11859,7 +11954,8 @@ fn test_prove_quickcheck_uninterpreted_functions_solver_param(solver: &str) {
         String::from_utf8_lossy(&out_no_uf.stderr)
     );
 
-    // 2) With UF mapping: compute mangled helper names and map both to symbol F.
+    // 2) With UF mapping: compute mangled helper names and map both to symbol
+    //    F.
     let out_with_uf = std::process::Command::new(driver)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())

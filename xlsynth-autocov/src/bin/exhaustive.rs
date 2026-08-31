@@ -167,13 +167,13 @@ fn main() -> anyhow::Result<()> {
         let (res_tx, res_rx) = sync_channel::<WorkResult>(work_cap);
         let work_rx = Arc::new(Mutex::new(work_rx));
 
-        // Clone a minimal engine per worker to evaluate observations. This reuses
-        // parsing/type information but keeps maps centralized in the
-        // coordinator.
+        // Clone a minimal engine per worker to evaluate observations. This
+        // reuses parsing/type information but keeps maps centralized in
+        // the coordinator.
         //
-        // Note: AutocovEngine is not cheaply cloneable (contains maps), so workers
-        // reconstruct a lightweight evaluator by parsing the IR text once up
-        // front.
+        // Note: AutocovEngine is not cheaply cloneable (contains maps), so
+        // workers reconstruct a lightweight evaluator by parsing the IR
+        // text once up front.
         let ir_text = std::fs::read_to_string(&args.ir_file)?;
         let entry_fn = args.entry_fn.clone();
 

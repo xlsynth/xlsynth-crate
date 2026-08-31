@@ -26,7 +26,8 @@ fn bench_greedy_matching_ged(c: &mut Criterion) {
     let ir_text = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", ir_path.display(), e));
 
-    // Use the same IR for both old and new sides (identical graphs on both sides).
+    // Use the same IR for both old and new sides (identical graphs on both
+    // sides).
     let old_fn = top_fn_from_ir_text(&ir_text);
     let new_fn = top_fn_from_ir_text(&ir_text);
 

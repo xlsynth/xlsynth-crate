@@ -75,13 +75,13 @@ fn collects_line_ternary_and_toggle_coverage() {
 
     run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap();
 
-    // Line hits: two assigns evaluated 6 times each (time0 + (posedge+negedge)*2 +
-    // input-change for cycle1).
+    // Line hits: two assigns evaluated 6 times each (time0 +
+    // (posedge+negedge)*2 + input-change for cycle1).
     assert_eq!(cov.line_hits.get(&7).copied().unwrap_or(0), 6);
     assert_eq!(cov.line_hits.get(&8).copied().unwrap_or(0), 6);
 
-    // Ternary decision coverage: 3 false decisions in cycle0, 3 true decisions in
-    // cycle1.
+    // Ternary decision coverage: 3 false decisions in cycle0, 3 true decisions
+    // in cycle1.
     assert_eq!(cov.ternary_branches.len(), 1);
     let (_k, c) = cov.ternary_branches.iter().next().unwrap();
     assert_eq!(c.f_taken, 3);

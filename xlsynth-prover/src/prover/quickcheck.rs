@@ -148,12 +148,14 @@ where
     let condition = match assertion_semantics {
         QuickCheckAssertionSemantics::Ignore => output_is_false.clone(),
         QuickCheckAssertionSemantics::Never => {
-            // We require no assertion to fail, so any failure is a counter-example.
+            // We require no assertion to fail, so any failure is a
+            // counter-example.
             let failed = solver.not(&success_flag);
             solver.or(&failed, &output_is_false)
         }
         QuickCheckAssertionSemantics::Assume => {
-            // If the function succeeds (all assertions pass) AND output is false.
+            // If the function succeeds (all assertions pass) AND output is
+            // false.
             solver.and(&success_flag, &output_is_false)
         }
     };
@@ -182,7 +184,8 @@ where
                 })
                 .collect();
 
-            // Determine if any assertion violated and build FnOutput accordingly
+            // Determine if any assertion violated and build FnOutput
+            // accordingly
             let mut violation: Option<(String, String)> = None;
             for a in filtered_assertions.iter() {
                 let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
@@ -746,7 +749,8 @@ mod test_utils {
         }
     "#;
 
-    // Function with implicit token & activation param, returns activation param.
+    // Function with implicit token & activation param, returns activation
+    // param.
     pub const TOKEN_ACT_RET_ACT: &str = r#"
         fn f(__token: token, __act: bits[1]) -> (token, bits[1]) {
             literal.2: bits[1] = literal(value=1, id=2)
@@ -766,8 +770,8 @@ mod test_utils {
     /// `inputs` vector from `BoolPropertyResult::Disproved` preserves the
     /// declared parameter order and widths.
     pub fn test_counterexample_input_order<S: Solver>(solver_config: &S::Config) {
-        // Intentionally not always-true: returns param `c`, so setting c=0 falsifies
-        // the property.
+        // Intentionally not always-true: returns param `c`, so setting c=0
+        // falsifies the property.
         let ir_text = r#"
             fn f(a: bits[8], b: bits[4], c: bits[1]) -> bits[1] {
                 ret pc: bits[1] = identity(c, id=1)

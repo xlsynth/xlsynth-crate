@@ -112,7 +112,8 @@ impl PirTransform for BitSliceSelDistributeTransform {
                         let wb = Self::bits_width(f, b);
                         let wout = Self::bits_width(f, nr);
                         if wa.is_some() && wa == wb && wout == Some(*width) {
-                            // Also require slice to be in-bounds to avoid constructing invalid IR.
+                            // Also require slice to be in-bounds to avoid
+                            // constructing invalid IR.
                             if start.saturating_add(*width) <= wa.unwrap() {
                                 out.push(TransformCandidate {
                                     location: TransformLocation::Node(nr),

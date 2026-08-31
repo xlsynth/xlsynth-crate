@@ -70,9 +70,9 @@ impl NpnTransform {
             inv_p[p[i] as usize] = i as u8;
         }
 
-        // If the original transform applies input negation on new index `i`, the
-        // inverse must apply that negation on new index `p[i]` (see derivation in
-        // module docs).
+        // If the original transform applies input negation on new index `i`,
+        // the inverse must apply that negation on new index `p[i]` (see
+        // derivation in module docs).
         let mut inv_neg_mask: u8 = 0;
         for i in 0..4usize {
             let old_index = p[i] as usize;
@@ -206,8 +206,9 @@ pub fn canon_tt16(tt: TruthTable16) -> (TruthTable16, NpnTransform) {
                     output_neg,
                 };
                 let cand = transform_tt16(tt, xform);
-                // Deterministic tie-break: (cand_tt, output_neg, input_neg_mask, perm-array)
-                // Note: cand_tt primary ensures stable canonical representative by numeric
+                // Deterministic tie-break: (cand_tt, output_neg,
+                // input_neg_mask, perm-array) Note: cand_tt
+                // primary ensures stable canonical representative by numeric
                 // order.
                 if cand.0 < best_tt.0
                     || (cand.0 == best_tt.0

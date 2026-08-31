@@ -68,7 +68,8 @@ impl Drop for RawBitwuzla {
     fn drop(&mut self) {
         unsafe {
             bitwuzla_delete(self.raw);
-            // Bitwuzla doesn't require us to release the terms prior to calling the delete.
+            // Bitwuzla doesn't require us to release the terms prior to calling
+            // the delete.
             bitwuzla_term_manager_delete(self.term_manager);
         };
     }
@@ -777,8 +778,9 @@ impl Solver for Bitwuzla {
                 }
 
                 let app_raw = if items.len() == 1 {
-                    // No non-zero arguments (possibly zero-arity uf declared as constant);
-                    // just return the function term itself.
+                    // No non-zero arguments (possibly zero-arity uf declared as
+                    // constant); just return the function
+                    // term itself.
                     items[0]
                 } else {
                     unsafe {

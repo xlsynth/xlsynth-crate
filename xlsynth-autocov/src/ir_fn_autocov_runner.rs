@@ -80,7 +80,8 @@ fn install_signal_handlers<W: Write>(
     let mut sig_ids = Vec::new();
     for sig in [SIGINT, SIGTERM, SIGHUP] {
         let stop = Arc::clone(&stop);
-        // Set run-scoped stop flag so Ctrl-C exits via normal report/flush path.
+        // Set run-scoped stop flag so Ctrl-C exits via normal report/flush
+        // path.
         match unsafe { siglow::register(sig, move || stop.store(true, Ordering::Relaxed)) } {
             Ok(sig_id) => sig_ids.push(sig_id),
             Err(e) => {

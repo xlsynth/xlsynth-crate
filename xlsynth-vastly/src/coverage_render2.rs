@@ -52,7 +52,8 @@ pub fn render_annotated_source(src: &SourceText, cov: &CoverageCounters, ansi: b
         let mut segs = segments_for_line(cov, line_start, line_end);
         if let Some(spans) = zero_toggle_by_line.get(&line_1b) {
             for (s, e) in spans {
-                // Lower priority than branch coloring, higher than base line bg.
+                // Lower priority than branch coloring, higher than base line
+                // bg.
                 segs.push(Segment {
                     start: *s,
                     end: *e,
@@ -298,7 +299,8 @@ fn render_line_plain(
         };
     }
 
-    // Same boundary splitting as ANSI mode, but insert markers instead of colors.
+    // Same boundary splitting as ANSI mode, but insert markers instead of
+    // colors.
     let mut bounds: Vec<usize> = Vec::new();
     bounds.push(line_start);
     bounds.push(line_start + line.len());

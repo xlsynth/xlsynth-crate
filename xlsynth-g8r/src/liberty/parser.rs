@@ -1185,8 +1185,8 @@ fn block_to_model_cells(
             }
         }
 
-        // Second pass: build Pin models, marking pins that are referred to by any
-        // clocked_on attribute in an ff block as clocking pins.
+        // Second pass: build Pin models, marking pins that are referred to by
+        // any clocked_on attribute in an ff block as clocking pins.
         let mut pins = Vec::new();
         let mut clock_gate_clock_pins = Vec::new();
         let mut clock_gate_output_pins = Vec::new();
@@ -3713,7 +3713,8 @@ mod tests {
 
     #[test]
     fn test_ff_next_state_is_captured() {
-        // Inspired by the ASAP7 `SDFH*` scan-flop `ff { next_state: ... }` pattern.
+        // Inspired by the ASAP7 `SDFH*` scan-flop `ff { next_state: ... }`
+        // pattern.
         let liberty_text = r#"
         library (my_library) {
             cell (my_scan_ff) {

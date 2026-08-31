@@ -47,8 +47,9 @@ fn get_latest_patch_versions(
     let mut response = match ureq::get(&url).header("User-Agent", USER_AGENT).call() {
         Ok(response) => response,
         Err(ureq::Error::StatusCode(404)) => {
-            // First-time publish case: the crate is not yet present on crates.io, so
-            // there are no released versions to compare against.
+            // First-time publish case: the crate is not yet present on
+            // crates.io, so there are no released versions to
+            // compare against.
             return Ok(BTreeMap::new());
         }
         Err(ureq::Error::StatusCode(status)) => {
@@ -137,7 +138,8 @@ fn validate_local_version_against_latest_patches(
             ))))
         }
     } else {
-        // No released versions for this major.minor; vacuously the latest patch.
+        // No released versions for this major.minor; vacuously the latest
+        // patch.
         Ok(())
     }
 }

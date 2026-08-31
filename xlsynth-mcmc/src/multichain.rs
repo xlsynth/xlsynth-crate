@@ -181,8 +181,8 @@ where
 
             let mut local_state: Vec<S> = vec![start_state.clone(); thread_count];
             let mut local_best_state: Vec<S> = vec![start_state.clone(); thread_count];
-            // This assumes the runner will produce a consistent initial best on first
-            // segment.
+            // This assumes the runner will produce a consistent initial best on
+            // first segment.
             let mut local_best_cost: Vec<Option<C>> = vec![None; thread_count];
             let mut local_stats: Vec<McmcStats<K>> = std::iter::repeat_with(McmcStats::default)
                 .take(thread_count)
@@ -276,7 +276,8 @@ where
                     }
                 }
 
-                // Allow exploit chains to jump to global best deterministically.
+                // Allow exploit chains to jump to global best
+                // deterministically.
                 let gb = global_best_state
                     .as_ref()
                     .expect("global best must be set")
@@ -293,7 +294,8 @@ where
                 iter_offset += seg;
             }
 
-            // Pick which chain's stats to return: the chain whose best matches global best.
+            // Pick which chain's stats to return: the chain whose best matches
+            // global best.
             let gb = global_best_state.expect("global best must be set");
             let gbc = global_best_cost.expect("global best cost must be set");
 

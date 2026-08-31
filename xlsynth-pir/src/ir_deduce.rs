@@ -287,7 +287,8 @@ where
             let array_ty = operand_types
                 .get(0)
                 .ok_or(DeduceError::MissingOperand("array_update.array"))?;
-            // We could validate value/index types in the future; for now, pass through.
+            // We could validate value/index types in the future; for now, pass
+            // through.
             match array_ty {
                 Type::Array(_) => Ok(Some(array_ty.clone())),
                 _ => Err(DeduceError::ExpectedArray("array_update")),

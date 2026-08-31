@@ -614,7 +614,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Token::LParen => {
-                    // Function call on identifier only, for parity with existing parser.
+                    // Function call on identifier only, for parity with
+                    // existing parser.
                     let SpannedExprKind::Ident(name) = &base.kind else {
                         break;
                     };

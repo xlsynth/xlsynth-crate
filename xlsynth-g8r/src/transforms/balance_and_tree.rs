@@ -462,7 +462,8 @@ impl Transform for UnbalanceAndTreeTransform {
                 }
                 build_chain(g, orient, &nodes, &ops)?;
                 union_chain_provenance(g, &nodes, &ops);
-                // Assert strong invariant: UnbalanceAndTree must not create cycles.
+                // Assert strong invariant: UnbalanceAndTree must not create
+                // cycles.
                 topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
                 if let AigNode::And2 { tags: Some(ts), .. } = &mut g.gates[root.id] {
                     ts.retain(|t| t != TAG_LEFT && t != TAG_RIGHT);
@@ -526,8 +527,8 @@ mod tests {
 
     #[test]
     fn test_balance_and_unbalance_roundtrip_right() {
-        // Construct a right-leaning AND chain: o = ((((i0 & i1) & i2) & i3)) with chain
-        // on the right.
+        // Construct a right-leaning AND chain: o = ((((i0 & i1) & i2) & i3))
+        // with chain on the right.
         let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
         let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
         let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();

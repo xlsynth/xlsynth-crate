@@ -190,8 +190,9 @@ pub fn compute_default_ordering(outer: &IrFn, to_outline: &HashSet<NodeRef>) -> 
     }
 
     let mut params: Vec<OutlineParamSpec> = Vec::new();
-    // Prefer the GetParam node inside the selection if present for each ParamId,
-    // otherwise reference the external GetParam node driving the region.
+    // Prefer the GetParam node inside the selection if present for each
+    // ParamId, otherwise reference the external GetParam node driving the
+    // region.
     let mut param_id_to_internal_node: BTreeMap<usize, usize> = BTreeMap::new();
     for &idx in to_outline_set.iter() {
         if let NodePayload::GetParam(pid) = outer.nodes[idx].payload {
@@ -298,7 +299,8 @@ pub fn outline_with_ordering(
             used_param_ids.entry(key).or_insert((nm, ty));
         }
     }
-    // Any GetParam node used as an external input contributes its ParamId as well.
+    // Any GetParam node used as an external input contributes its ParamId as
+    // well.
     for &idx in inputs_ext.iter() {
         if let NodePayload::GetParam(pid) = outer.nodes[idx].payload {
             let key = pid.get_wrapped_id();
@@ -429,8 +431,9 @@ pub fn outline_with_ordering(
     let mut outlined_to_inner: HashMap<usize, NodeRef> = HashMap::new();
     let mut next_inner_text_id: usize = next_text_id(&outer.nodes);
 
-    // A selected GetParam still becomes an inner signature parameter; preserving
-    // its source text id retains stable emitted IR while keeping parameters dense.
+    // A selected GetParam still becomes an inner signature parameter;
+    // preserving its source text id retains stable emitted IR while keeping
+    // parameters dense.
     for (pidx, ps) in ordering.params.iter().enumerate() {
         let node = ps.node;
         let src_node = &outer.nodes[node.index];
@@ -612,7 +615,8 @@ pub fn outline_with_ordering(
     let mut outer_nodes = outer.nodes.clone();
 
     // Build invoke operands in the exact order of inner params.
-    // Map from outer ParamId number -> NodeRef for the corresponding GetParam node.
+    // Map from outer ParamId number -> NodeRef for the corresponding GetParam
+    // node.
     let mut paramid_to_node_ref: HashMap<usize, NodeRef> = HashMap::new();
     for (i, n) in outer.nodes.iter().enumerate() {
         if let NodePayload::GetParam(pid) = n.payload {
@@ -686,12 +690,13 @@ pub fn outline_with_ordering(
         replacement_map.insert(r.node.index, rep);
     }
 
-    // Compute a protected operand producer cone for the invoke's operands to avoid
-    // creating cycles: skip rewriting inside this cone.
+    // Compute a protected operand producer cone for the invoke's operands to
+    // avoid creating cycles: skip rewriting inside this cone.
     let mut protected: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut stack: Vec<usize> = Vec::new();
-    // The operands vector we built earlier refers to indices in `outer` (and thus
-    // the cloned `outer_nodes`). Walk reverse-transitively via operands.
+    // The operands vector we built earlier refers to indices in `outer` (and
+    // thus the cloned `outer_nodes`). Walk reverse-transitively via
+    // operands.
     for op in invoke_operands.iter() {
         if protected.insert(op.index) {
             stack.push(op.index);
@@ -723,8 +728,8 @@ pub fn outline_with_ordering(
         node.payload = new_payload;
     }
 
-    // Clobber outlined nodes' payloads with Nil (except GetParam nodes, which may
-    // be used as invoke operands)
+    // Clobber outlined nodes' payloads with Nil (except GetParam nodes, which
+    // may be used as invoke operands)
     for &idx in to_outline_set.iter() {
         if !matches!(outer_nodes[idx].payload, NodePayload::GetParam(_)) {
             outer_nodes[idx].payload = NodePayload::Nil;
@@ -836,8 +841,9 @@ mod tests {
     fn assert_equiv_pkg(orig: &IrFn, outlined_outer: &IrFn, outlined_inner: Option<&IrFn>) {
         // If the outlined outer contains invokes, the external tool requires a
         // multi-function package with globally unique node ids, which our
-        // pretty-printer does not guarantee across functions. Skip equivalence in
-        // that case for unit tests; fuzz target covers semantic checks separately.
+        // pretty-printer does not guarantee across functions. Skip equivalence
+        // in that case for unit tests; fuzz target covers semantic
+        // checks separately.
         if outlined_outer
             .nodes
             .iter()
@@ -989,8 +995,8 @@ fn f_inner(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
 }"#;
         let (mut pkg, f) = parse_single_fn(ir);
         let before_pkg = pkg.to_string();
-        // Outline only the mul node (index 4 or 5 depending on params); detect by
-        // operator
+        // Outline only the mul node (index 4 or 5 depending on params); detect
+        // by operator
         let mut to_sel: HashSet<NodeRef> = HashSet::new();
         for (i, n) in f.nodes.iter().enumerate() {
             if let NodePayload::Binop(op, _, _) = n.payload {
@@ -1040,9 +1046,9 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
 
     #[test]
     fn outline_external_nonparam_inputs_unnamed_sources() {
-        // External inputs to the outlined region are unnamed nodes (e.g., add.3,
-        // not.4). This exercises GetParam synthesis and naming for non-param
-        // external inputs.
+        // External inputs to the outlined region are unnamed nodes (e.g.,
+        // add.3, not.4). This exercises GetParam synthesis and naming
+        // for non-param external inputs.
         let ir = r#"fn g2(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   add.3: bits[8] = add(a, b, id=3)
   not.4: bits[8] = not(a, id=4)
@@ -1060,7 +1066,8 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
                 }
             }
         }
-        // Expect exact package strings for determinism; inner params must be named
+        // Expect exact package strings for determinism; inner params must be
+        // named
         let expected_before = r#"package test
 
 fn g2(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
@@ -1120,7 +1127,8 @@ fn g2_inner(arg_0: bits[8] id=1, arg_1: bits[8] id=2) -> bits[8] {
                 _ => {}
             }
         }
-        // Ensure we only captured the add/sub (ids 3 and 4). Filter to exclude xor.
+        // Ensure we only captured the add/sub (ids 3 and 4). Filter to exclude
+        // xor.
         to_sel.retain(|nr| match f.nodes[nr.index].payload {
             NodePayload::Binop(ir::Binop::Add, _, _) | NodePayload::Binop(ir::Binop::Sub, _, _) => {
                 true
@@ -1170,9 +1178,9 @@ fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
 
     #[test]
     fn outline_multi_in_multi_out_with_postprocess() {
-        // Pre-op "px" makes the outlined region interior: it appears before the invoke
-        // and feeds the outlined add/umul, while xor/and/or remain after the
-        // invoke.
+        // Pre-op "px" makes the outlined region interior: it appears before the
+        // invoke and feeds the outlined add/umul, while xor/and/or
+        // remain after the invoke.
         let ir = r#"fn k(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
   px: bits[8] = xor(a, c, id=4)
   add.5: bits[8] = add(px, b, id=5)

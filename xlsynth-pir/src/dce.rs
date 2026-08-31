@@ -145,7 +145,8 @@ mod tests {
         );
         let g = remove_dead_nodes(&f);
         g.check_pir_layout_invariants().unwrap();
-        // Validate function still has GetParam for both a and b (even if b was dead)
+        // Validate function still has GetParam for both a and b (even if b was
+        // dead)
         let mut seen_params = 0usize;
         for node in g.nodes.iter() {
             if matches!(node.payload, crate::ir::NodePayload::GetParam(_)) {
@@ -156,7 +157,8 @@ mod tests {
             seen_params, 2,
             "expected both GetParam nodes to be preserved"
         );
-        // Ensure return remains and only live path nodes are present besides params.
+        // Ensure return remains and only live path nodes are present besides
+        // params.
         assert!(g.ret_node_ref.is_some());
         // Ensure no node references are out of bounds post-remap.
         for i in 0..g.nodes.len() {

@@ -380,8 +380,9 @@ fn flatten(param: &BValue, ty: &ir::Type, fb: &mut FnBuilder) -> BValue {
             element_count,
         }) => {
             let mut elements = Vec::new();
-            // `concat()` places its first operand in the highest bits, so reverse
-            // array iteration here to keep element 0 at the least-significant bits.
+            // `concat()` places its first operand in the highest bits, so
+            // reverse array iteration here to keep element 0 at the
+            // least-significant bits.
             for i in (0..*element_count).rev() {
                 let index = fb.literal(&IrValue::u32(i as u32), None);
                 let element = fb.array_index(param, &index, None);
@@ -391,8 +392,9 @@ fn flatten(param: &BValue, ty: &ir::Type, fb: &mut FnBuilder) -> BValue {
             fb.concat(&elements_refs, None)
         }
         ir::Type::Token => {
-            // Tokens are zero bits so the nearest definition that makes sense for
-            // flattening is that we make a zero-bit literal value.
+            // Tokens are zero bits so the nearest definition that makes sense
+            // for flattening is that we make a zero-bit literal
+            // value.
             fb.literal(&IrValue::make_ubits(0, 0).unwrap(), None)
         }
     }

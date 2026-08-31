@@ -449,8 +449,8 @@ mod tests {
         let mut g = gb.build();
 
         let transform = InsertTrueAndTransform::new();
-        // Candidate should be Operand(and_gate_ref, is_rhs=true) which refers to
-        // const_false_ref
+        // Candidate should be Operand(and_gate_ref, is_rhs=true) which refers
+        // to const_false_ref
         let candidate_loc = TransformLocation::Operand(and_gate_op.node, true);
         let result = transform.apply(&mut g, &candidate_loc, TransformDirection::Forward);
         assert!(result.is_err());

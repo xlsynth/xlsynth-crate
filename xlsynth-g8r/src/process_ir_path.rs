@@ -621,9 +621,11 @@ pub fn process_ir_text_with_gatefn(
             {
                 Ok(node_gate_fn) => node_gate_fn,
                 Err(e) => {
-                    // Not a sample failure: some IR nodes are not currently representable as
-                    // standalone independent-op GateFns (e.g. Invoke/CountedFor/Cover). We skip
-                    // them for this reporting mode instead of crashing.
+                    // Not a sample failure: some IR nodes are not currently
+                    // representable as standalone
+                    // independent-op GateFns (e.g. Invoke/CountedFor/Cover). We
+                    // skip them for this reporting mode
+                    // instead of crashing.
                     log::debug!(
                         "Skipping independent-op stats for node {} (text_id={}): {}",
                         node_index,

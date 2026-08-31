@@ -569,8 +569,9 @@ impl<'a> Parser<'a> {
 
         let mut items: Vec<ModuleItem> = Vec::new();
         let endmodule_span: Span = loop {
-            // If we're inside a disabled `ifdef branch, skip tokens until we see a
-            // directive (which can update nesting) or endmodule/EOF.
+            // If we're inside a disabled `ifdef branch, skip tokens until we
+            // see a directive (which can update nesting) or
+            // endmodule/EOF.
             if !self.all_active() {
                 match self.cur() {
                     TokKind::Other('`') => {
@@ -1291,8 +1292,8 @@ impl<'a> Parser<'a> {
                     )
                 }
                 TokKind::Number(n) => {
-                    // Back-compat: allow numeric token and parse as a casez pattern (strict
-                    // subset).
+                    // Back-compat: allow numeric token and parse as a casez
+                    // pattern (strict subset).
                     let s0 = self.toks[self.idx].start;
                     let e0 = self.toks[self.idx].end;
                     self.bump();

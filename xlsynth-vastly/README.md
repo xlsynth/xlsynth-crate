@@ -65,15 +65,16 @@ cargo test -p xlsynth-vastly
 - Run extended reference-simulator tests:
 
 ```bash
-cargo test -p xlsynth-vastly --features reference-sim-tests
+cargo test -p xlsynth-vastly --features iverilog-tests
 ```
 
 ## Tooling Requirements
 
 - Core unit/integration tests do not require external simulators.
 - Reference-simulator tests require the current external simulator backend to
-  be available on `PATH`; enable them with `--features reference-sim-tests`.
-- `reference-sim-tests` exists so default `cargo test` remains
+  be available on `PATH`; enable them with `--features iverilog-tests`.
+- `reference-sim-tests` remains a compatibility alias for `iverilog-tests`.
+  These test-selection flags keep default `cargo test`
   tool-independent while still providing an explicit opt-in lane for
   differential checks against external implementations.
 - The reference-simulator layer is intentionally pluggable so additional

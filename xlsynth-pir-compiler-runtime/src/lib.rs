@@ -1483,7 +1483,8 @@ unsafe fn shift_wide_limbs(
                 let high = source_index
                     .checked_sub(1)
                     .map(|index| {
-                        // SAFETY: out-of-range source indices are converted to zero.
+                        // SAFETY: out-of-range source indices are converted to
+                        // zero.
                         unsafe { read_unsigned_limb(lhs, lhs_bit_count, index) }
                     })
                     .unwrap_or(0);
@@ -1496,7 +1497,8 @@ unsafe fn shift_wide_limbs(
                     // SAFETY: out-of-range source indices are sign-extended.
                     unsafe { read_signed_limb(lhs, lhs_bit_count, index, negative) }
                 } else {
-                    // SAFETY: out-of-range source indices are converted to zero.
+                    // SAFETY: out-of-range source indices are converted to
+                    // zero.
                     unsafe { read_unsigned_limb(lhs, lhs_bit_count, index) }
                 }
             };
@@ -1872,9 +1874,11 @@ unsafe fn format_trace_message(
             .find(|(specifier, _)| remainder.starts_with(specifier))
         {
             if let Some(layout) = layouts.get(operand_index) {
-                // SAFETY: callback ABI provides one matching pointer per layout.
+                // SAFETY: callback ABI provides one matching pointer per
+                // layout.
                 let pointer = unsafe { *operand_ptrs.add(operand_index) };
-                // SAFETY: callback ABI specifies readable storage matching `layout`.
+                // SAFETY: callback ABI specifies readable storage matching
+                // `layout`.
                 output.push_str(&unsafe { format_native_value(pointer, layout, *preference) });
             }
             operand_index += 1;
@@ -1904,7 +1908,8 @@ unsafe fn format_native_value(
         } => {
             let mut bytes = vec![0u8; *byte_count];
             if *byte_count != 0 {
-                // SAFETY: callback ABI provides native scalar storage of this size.
+                // SAFETY: callback ABI provides native scalar storage of this
+                // size.
                 unsafe { ptr::copy_nonoverlapping(pointer, bytes.as_mut_ptr(), *byte_count) };
             }
             let value = if cfg!(target_endian = "little") {
@@ -1929,7 +1934,8 @@ unsafe fn format_native_value(
         } => {
             let elements = (0..*element_count)
                 .map(|index| {
-                    // SAFETY: each element is within the caller-provided array region.
+                    // SAFETY: each element is within the caller-provided array
+                    // region.
                     unsafe {
                         format_native_value(
                             pointer.wrapping_add(index * element.byte_count()),
@@ -1945,7 +1951,8 @@ unsafe fn format_native_value(
             let fields = fields
                 .iter()
                 .map(|field| {
-                    // SAFETY: each field offset is prescribed by native tuple metadata.
+                    // SAFETY: each field offset is prescribed by native tuple
+                    // metadata.
                     unsafe {
                         format_native_value(
                             pointer.wrapping_add(field.offset),
@@ -2605,7 +2612,8 @@ mod tests {
                 ),
             };
             let mut output = vec![0; dst_bit_count.div_ceil(u64::BITS as usize)];
-            // SAFETY: `output` contains the limbs prescribed by `dst_bit_count`.
+            // SAFETY: `output` contains the limbs prescribed by
+            // `dst_bit_count`.
             unsafe { write_wide_bits(output.as_mut_ptr(), dst_bit_count, result) };
             output
         }
@@ -2664,7 +2672,8 @@ mod tests {
                                 operation,
                             );
                             let mut actual = vec![0; dst_bit_count.div_ceil(u64::BITS as usize)];
-                            // SAFETY: all slices contain the limbs prescribed by their widths.
+                            // SAFETY: all slices contain the limbs prescribed
+                            // by their widths.
                             unsafe {
                                 xlsynth_pir_runtime_wide_binop(
                                     actual.as_mut_ptr(),

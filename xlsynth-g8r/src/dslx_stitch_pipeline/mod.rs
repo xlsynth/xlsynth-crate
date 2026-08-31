@@ -206,7 +206,8 @@ fn make_stage_info_comb(
 ) -> Result<StageInfo, xlsynth::XlsynthError> {
     let opt = optimize_ir(cfg.ir, stage_mangled)?;
     let sched = "delay_model: \"unit\"\npipeline_stages: 1";
-    // Use the XLS "combinational" generator so the resulting module has *no* clock.
+    // Use the XLS "combinational" generator so the resulting module has *no*
+    // clock.
     let mut codegen = format!(
         r#"register_merge_strategy: STRATEGY_IDENTITY_ONLY
 generator: GENERATOR_KIND_COMBINATIONAL
@@ -330,8 +331,8 @@ fn check_for_parametric_stages(
             }
         }
         None => {
-            // Note: even this is more prone to false positives than necessary; we should
-            // check for {top}_cycle0, {top}_cycle1, etc.
+            // Note: even this is more prone to false positives than necessary;
+            // we should check for {top}_cycle0, {top}_cycle1, etc.
             let prefix = format!("{top}_cycle");
             for i in 0..module.get_member_count() {
                 let member = module.get_member(i);
@@ -494,6 +495,7 @@ pub fn stitch_pipeline<'a>(
 mod tests {
     use super::*;
     use env_logger;
+    #[cfg(feature = "iverilog-tests")]
     use xlsynth::ir_value::IrBits;
     use xlsynth_test_helpers::{self, compare_golden_sv};
 
@@ -695,8 +697,12 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
         let _ = env_logger::builder().is_test(true).try_init();
         let result = verilog_for_foo_pipeline_with_valid();
         compare_golden_sv(&result, "tests/goldens/foo_with_valid.golden.sv");
+    }
 
-        // Simulation check
+    #[cfg(feature = "iverilog-tests")]
+    #[test]
+    fn test_stitch_pipeline_with_valid_iverilog() {
+        let result = verilog_for_foo_pipeline_with_valid();
         let inputs = vec![("x", IrBits::u32(5))];
         let expected = IrBits::u32(8);
         let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse(

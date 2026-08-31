@@ -76,10 +76,11 @@ fn specialize_typechecked_module(
     top_env: Option<&ParametricEnv>,
 ) -> Result<(TypecheckedModule, String), XlsynthError> {
     let tm = if top_env.is_some() {
-        // When a parameter environment is provided we cannot rely on the initial
-        // call graph reachability analysis: parametric callees may appear
-        // unreachable until the requested specializations are installed. Skip the
-        // early pruning step so we have the full module available for cloning.
+        // When a parameter environment is provided we cannot rely on the
+        // initial call graph reachability analysis: parametric callees
+        // may appear unreachable until the requested specializations
+        // are installed. Skip the early pruning step so we have the
+        // full module available for cloning.
         info!("Skipping initial prune because a top parameter environment was provided");
         tm
     } else {
@@ -214,8 +215,9 @@ fn accumulate_specializations(
         if let Some(env) = top_env_owned.as_ref() {
             if let Some(spec_name) = spec_name_map.get(&(top_function_owned.clone(), env.clone())) {
                 current_top_name = spec_name.clone();
-                // We only need to update once; avoid repeated lookups by clearing the env
-                // so we do not spend additional work cloning the key.
+                // We only need to update once; avoid repeated lookups by
+                // clearing the env so we do not spend
+                // additional work cloning the key.
                 top_env_owned = None;
             }
         }

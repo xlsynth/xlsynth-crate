@@ -468,8 +468,9 @@ fn gatify_barrel_shifter_internal(
         match direction {
             Direction::Right => {
                 // For a right shift:
-                // If control == 1 then output bit at position j becomes current[j + shift] (if
-                // within range), or false otherwise; if control == 0 then
+                // If control == 1 then output bit at position j becomes
+                // current[j + shift] (if within range), or
+                // false otherwise; if control == 0 then
                 // remain unchanged.
                 for j in 0..bit_count {
                     let candidate = if j + shift < bit_count {
@@ -478,15 +479,17 @@ fn gatify_barrel_shifter_internal(
                         // Out of range: use the false literal.
                         g8_builder.get_false()
                     };
-                    // Mux: if control is true choose candidate (shifted), else keep current[j].
+                    // Mux: if control is true choose candidate (shifted), else
+                    // keep current[j].
                     let mux = g8_builder.add_mux2(*control, candidate, current[j]);
                     next_stage.push(mux);
                 }
             }
             Direction::Left => {
                 // For a left shift:
-                // If control == 1 then output bit at position j becomes current[j - shift] (if
-                // possible), or false if j < shift; if control == 0 then remain
+                // If control == 1 then output bit at position j becomes
+                // current[j - shift] (if possible), or false if
+                // j < shift; if control == 0 then remain
                 // unchanged.
                 for j in 0..bit_count {
                     let candidate = if j >= shift {
@@ -494,7 +497,8 @@ fn gatify_barrel_shifter_internal(
                     } else {
                         g8_builder.get_false()
                     };
-                    // Mux: if control is true choose candidate (shifted), else keep current[j].
+                    // Mux: if control is true choose candidate (shifted), else
+                    // keep current[j].
                     let mux = g8_builder.add_mux2(*control, candidate, current[j]);
                     next_stage.push(mux);
                 }
@@ -528,9 +532,9 @@ pub fn gatify_barrel_shifter(
 ) -> AigBitVector {
     let natural_amount_bits = (arg_gates.get_bit_count() as f64).log2().ceil() as usize;
     let amount_can_be_oversize = amount_gates.get_bit_count() > natural_amount_bits;
-    // The "amount" value is limited in what it can realistically cause to happen by
-    // the number of bits in the arg value. If the number is larger than that,
-    // we can just give back zero.
+    // The "amount" value is limited in what it can realistically cause to
+    // happen by the number of bits in the arg value. If the number is
+    // larger than that, we can just give back zero.
     if amount_can_be_oversize {
         let gate::Split { msbs, lsbs } =
             amount_gates.get_lsb_partition(natural_amount_bits as usize);
@@ -858,8 +862,8 @@ pub fn gatify_one_hot_with_nonzero_flag_prefix_strategy(
     }
 
     if value_cannot_be_zero {
-        // If the input value is provably nonzero, then "none of the input bits were
-        // set" is provably false. Emit it as a literal zero.
+        // If the input value is provably nonzero, then "none of the input bits
+        // were set" is provably false. Emit it as a literal zero.
         gates.push(gb.get_false());
     } else {
         let no_prior_bit = if inclusive.is_empty() {

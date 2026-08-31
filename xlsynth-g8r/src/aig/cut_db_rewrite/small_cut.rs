@@ -309,7 +309,8 @@ impl CutEnumerator {
     fn compute_cuts_for_node_from_memo(&mut self, g: &GateFn, r: AigRef) -> Vec<Cut> {
         let mut cuts: Vec<Cut> = Vec::new();
 
-        // Trivial self-cut: allow this node to be used as a leaf for its fanout.
+        // Trivial self-cut: allow this node to be used as a leaf for its
+        // fanout.
         push_unique_cut(
             &mut cuts,
             Cut {
