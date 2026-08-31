@@ -3,7 +3,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_pir::ir_parser;
-use xlsynth_pir::ir_random::{generate_package, DepletableBytes, RandomFnOptions, StopPolicy};
+use xlsynth_pir::ir_random::{
+    ArrayAssumptionMode, DepletableBytes, RandomFnOptions, StopPolicy, generate_package,
+};
 use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
 
 fuzz_target!(|data: &[u8]| {
@@ -17,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
         allow_arbitrary_width_multiply: true,
         allow_gate: true,
         allow_events: true,
-        allow_assumed_in_bounds: true,
+        array_assumption_mode: ArrayAssumptionMode::Unrestricted,
         ..RandomFnOptions::default()
     };
     let mut generated = generate_package(

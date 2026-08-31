@@ -48,7 +48,6 @@ fn fuzz_block_options() -> RandomBlockOptions {
     RandomBlockOptions {
         max_input_ports: 6,
         max_output_ports: 4,
-        min_registers: 1,
         max_registers: 4,
         require_reset_on_all_registers: true,
         reset_timing: RandomBlockResetTiming::Synchronous,
