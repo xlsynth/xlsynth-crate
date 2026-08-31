@@ -186,14 +186,14 @@ fn get_extern_type_ref(
     if let Some(type_ref_type_annotation) = type_annotation.to_type_ref_type_annotation() {
         let type_ref = type_ref_type_annotation.get_type_ref();
 
-        // Inspect whether the type definition is a colon-reference where the subject is
-        // another module.
+        // Inspect whether the type definition is a colon-reference where the
+        // subject is another module.
         let type_definition: dslx::TypeDefinition = type_ref.get_type_definition();
         if let Some(colon_ref) = type_definition.to_colon_ref()
             && let Some(import) = colon_ref.resolve_import_subject()
         {
-            // It is a reference to a type defined in another module -- refer to its in
-            // its external module.
+            // It is a reference to a type defined in another module -- refer to
+            // its in its external module.
             let pkg_name = import_to_pkg_name(&import);
             let extern_ref =
                 convert_extern_type(&pkg_name, Some(&colon_ref.get_attr()), concrete_ty, None)
@@ -425,9 +425,9 @@ impl SvBridgeBuilder {
     fn struct_member_line(member: &StructMemberData) -> Result<String, XlsynthError> {
         let member_name = &member.name;
 
-        // Note: this is the type that type inference determined the member is; i.e. it
-        // will be something like `BitsType`, `StructType`, `ArrayType`,
-        // etc.
+        // Note: this is the type that type inference determined the member is;
+        // i.e. it will be something like `BitsType`, `StructType`,
+        // `ArrayType`, etc.
         let member_concrete_ty = &member.concrete_type;
 
         let member_annotated_ty = &member.type_annotation;

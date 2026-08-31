@@ -156,15 +156,15 @@ impl AigHasher {
         let depth = self.get_depth(aig_ref, nodes);
 
         // We want to insert this ref into the formula data.
-        // If there's an extra that has the same formula with <= depth, we return that
-        // instead.
+        // If there's an extra that has the same formula with <= depth, we
+        // return that instead.
         let hash = self.get_hash(aig_ref, nodes);
 
         let hash_data = self.hash_to_nodes.entry(hash).or_insert_with(HashData::new);
         if let Some((min_depth, min_ref)) = hash_data.min_depth {
             if depth >= min_depth {
-                // Note: if we found something existing/better there's no need to insert the
-                // given node into the hash data.
+                // Note: if we found something existing/better there's no need
+                // to insert the given node into the hash data.
                 return Some(min_ref);
             }
         }
@@ -207,7 +207,8 @@ mod tests {
             });
         }
         let mut hasher = AigHasher::new();
-        // This used to cause a stack overflow before the worklist-based implementation.
+        // This used to cause a stack overflow before the worklist-based
+        // implementation.
         let _ = hasher.get_depth_and_hash(&AigRef { id: depth }, &nodes);
     }
 

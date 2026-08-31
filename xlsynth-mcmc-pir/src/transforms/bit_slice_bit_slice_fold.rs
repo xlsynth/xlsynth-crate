@@ -125,7 +125,8 @@ impl PirTransform for BitSliceBitSliceFoldTransform {
             return Ok(());
         }
 
-        // Expand: bit_slice(x,s,w) -> bit_slice(bit_slice(x,0,w1),s,w) with w1=s+w.
+        // Expand: bit_slice(x,s,w) -> bit_slice(bit_slice(x,0,w1),s,w) with
+        // w1=s+w.
         let x = arg;
         let in_w = Self::bits_width(f, x)
             .ok_or_else(|| "BitSliceBitSliceFoldTransform: input must be bits[w]".to_string())?;

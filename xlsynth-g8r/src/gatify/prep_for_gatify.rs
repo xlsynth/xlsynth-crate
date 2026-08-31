@@ -1753,7 +1753,8 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
     let use_counts = get_use_counts(f);
     let mut rewrites: usize = 0;
 
-    // Snapshot length so we only visit original nodes; rewrites may append nodes.
+    // Snapshot length so we only visit original nodes; rewrites may append
+    // nodes.
     let original_len = f.nodes.len();
     for node_index in 0..original_len {
         let payload = f.nodes[node_index].payload.clone();
@@ -1780,8 +1781,8 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
         }
 
         // Supported idioms (c_in opportunistic):
-        // (a) bit_slice(add(add(zero_ext(x), zero_ext(y)), zero_ext(c_in)), msb)
-        // (b) bit_slice(add(add(x, y), literal(1)), msb)
+        // (a) bit_slice(add(add(zero_ext(x), zero_ext(y)), zero_ext(c_in)),
+        // msb) (b) bit_slice(add(add(x, y), literal(1)), msb)
         // (c) bit_slice(add(x, y), msb)   => ext_carry_out(x, y, literal(0))
         let arg_payload = f.nodes[arg.index].payload.clone();
 
@@ -1816,10 +1817,13 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
                                 && f.nodes[rhs.index].ty.bit_count() == w
                                 && f.nodes[c_in.index].ty.bit_count() == 1
                             {
-                                // Rewrite the `bit_slice` node into `ext_carry_out`.
+                                // Rewrite the `bit_slice` node into
+                                // `ext_carry_out`.
                                 //
-                                // Note: this is an in-place rewrite (so it preserves ordering),
-                                // and we separately DCE the now-dead add chain (guarded by
+                                // Note: this is an in-place rewrite (so it
+                                // preserves ordering),
+                                // and we separately DCE the now-dead add chain
+                                // (guarded by
                                 // single-use checks above).
                                 let bit_slice_nr = ir::NodeRef { index: node_index };
                                 ir_utils::replace_node_payload(
@@ -1832,7 +1836,8 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
                                     "prep_for_gatify: ext_carry_out payload replacement failed",
                                 );
 
-                                // Nil out the now-dead chain (safe due to single-use checks).
+                                // Nil out the now-dead chain (safe due to
+                                // single-use checks).
                                 nil_out_node(f, arg);
                                 nil_out_node(f, sum_w1);
                                 nil_out_node(f, lhs_ext);
@@ -1888,8 +1893,8 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
         // We may have appended helper nodes (e.g. low-bit slices) while
         // computing `lhs_low`/`rhs_low`. To preserve the SSA / textual ordering
         // invariant (operands must be defined before use) without reindexing,
-        // we materialize the `ExtCarryOut` node *after* helpers and then use the
-        // node replacement helpers to redirect the return to it.
+        // we materialize the `ExtCarryOut` node *after* helpers and then use
+        // the node replacement helpers to redirect the return to it.
         //
         // This rewrite is intended for cone-style patterns where the carry-out
         // slice is the (single-use) return value (possibly wrapped in an
@@ -1928,8 +1933,8 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
             },
         );
 
-        // Redirect the return (and any users) to the new node, then drop the old
-        // return node(s).
+        // Redirect the return (and any users) to the new node, then drop the
+        // old return node(s).
         ir_utils::replace_node_with_ref(f, ret_target, ext_nr)
             .expect("prep_for_gatify: redirecting return to ext_carry_out failed");
         nil_out_node(f, ret_target);
@@ -2974,7 +2979,8 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
         let pir_pkg = pir_parser.parse_and_validate_package().unwrap();
         let pir_fn = pir_pkg.get_top_fn().unwrap();
 
-        // Build range info from libxls analysis on the same text (no extensions).
+        // Build range info from libxls analysis on the same text (no
+        // extensions).
         let mut xlsynth_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
         xlsynth_pkg.set_top_by_name("cone").unwrap();
         let analysis = xlsynth_pkg.create_ir_analysis().unwrap();

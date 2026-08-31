@@ -245,8 +245,8 @@ struct QueueEntry {
 
 impl Ord for QueueEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse cost and order for min-heap behavior using BinaryHeap (which is
-        // max-heap).
+        // Reverse cost and order for min-heap behavior using BinaryHeap (which
+        // is max-heap).
         (Reverse(self.cost), Reverse(self.order)).cmp(&(Reverse(other.cost), Reverse(other.order)))
     }
 }
@@ -417,7 +417,8 @@ pub fn compute_fn_match<S: MatchSelector>(
         }
     }
 
-    // Helper: decrement users' remaining counts and enqueue when they become ready.
+    // Helper: decrement users' remaining counts and enqueue when they become
+    // ready.
     let mut update_ready = |idx: usize, side: NodeSide, selector: &mut S| match side {
         NodeSide::Old => {
             for &(user, _slot) in old_graph.nodes[idx].users.iter() {
@@ -524,7 +525,8 @@ pub fn apply_fn_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
                 patched.nodes[node.index].payload = crate::ir::NodePayload::Nil;
             }
             IrEdit::AddNode { node } => {
-                // Payloads in AddNode must already use old or previously-added patched indices.
+                // Payloads in AddNode must already use old or previously-added
+                // patched indices.
                 patched.nodes.push(node);
             }
             IrEdit::SubstituteOperand {
@@ -547,7 +549,8 @@ pub fn apply_fn_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
                         operand_slot, idx, op_count
                     ));
                 }
-                // Remap exactly the requested operand slot to new_operand, preserving others.
+                // Remap exactly the requested operand slot to new_operand,
+                // preserving others.
                 let remapped_payload = remap_payload_with(
                     &patched.nodes[idx].payload,
                     |(slot, nr): (usize, NodeRef)| {
@@ -639,8 +642,9 @@ pub fn convert_match_set_to_edit_set(
                 new_index,
                 is_return: _,
             } => {
-                // Clone new node and remap operands that refer to matched new nodes to their
-                // corresponding old indices. References to other new nodes must refer to
+                // Clone new node and remap operands that refer to matched new
+                // nodes to their corresponding old indices.
+                // References to other new nodes must refer to
                 // previously added nodes; remap those to their patched indices.
                 let ni: usize = (*new_index).into();
                 let src = &new.nodes[ni];
@@ -720,14 +724,16 @@ pub fn convert_match_set_to_edit_set(
     // Ensure the function return matches `new`.
     if let Some(nr) = new.ret_node_ref {
         if let Some(&old_idx) = new_to_old.get(&nr.index) {
-            // Only emit SetReturn if the old function does not already return this node.
+            // Only emit SetReturn if the old function does not already return
+            // this node.
             if old.ret_node_ref.map(|r| r.index) != Some(old_idx) {
                 edits.push(IrEdit::SetReturn {
                     node: NodeRef { index: old_idx },
                 });
             }
         } else {
-            // Return refers to a newly added node; map to its patched index assigned above.
+            // Return refers to a newly added node; map to its patched index
+            // assigned above.
             let patched_idx = *added_new_to_patched
                 .get(&nr.index)
                 .expect("SetReturn refers to a new node that was not added");
@@ -753,8 +759,8 @@ pub fn format_ir_edit(old: &Fn, e: &IrEdit) -> String {
             format!("DeleteNode: {}", name_for_index(node.index))
         }
         IrEdit::AddNode { node } => {
-            // Use the same identifier style as DeleteNode: name if present, else
-            // "op.text_id".
+            // Use the same identifier style as DeleteNode: name if present,
+            // else "op.text_id".
             let added_name = node
                 .name
                 .clone()
@@ -1050,7 +1056,8 @@ mod tests {
         );
         let old_fn = pkg_old.get_top_fn().unwrap();
 
-        // Different structure: wrap the add in an identity, keep params identical.
+        // Different structure: wrap the add in an identity, keep params
+        // identical.
         let pkg_new = parse_ir_from_string(
             r#"package p
             top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {

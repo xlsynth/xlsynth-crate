@@ -1019,8 +1019,8 @@ impl Parser {
                 break;
             }
             if c == '\n' || c == '\r' {
-                // Strings cannot span lines in XLS IR; treat newline before closing
-                // quote as unterminated.
+                // Strings cannot span lines in XLS IR; treat newline before
+                // closing quote as unterminated.
                 return Err(ParseError::new("unterminated quoted string".to_string()));
             }
             if c == '\\' {
@@ -2182,8 +2182,9 @@ impl Parser {
                 break;
             }
             if self.peek_is("pos=") {
-                // `pos=` is generic trailing node metadata handled by `parse_node()`
-                // after the operator-specific parser returns.
+                // `pos=` is generic trailing node metadata handled by
+                // `parse_node()` after the operator-specific
+                // parser returns.
                 break;
             }
 
@@ -3382,8 +3383,8 @@ impl Parser {
             None
         };
 
-        // Enforce dotted LHS consistency: '<prefix>.<digits>' must match operator and
-        // id.
+        // Enforce dotted LHS consistency: '<prefix>.<digits>' must match
+        // operator and id.
         if let Some(lhs_prefix) = dotted_prefix_opt.as_ref() {
             let expected_op = operator.as_str();
             if lhs_prefix != expected_op {
@@ -3585,10 +3586,11 @@ impl Parser {
         while !self.try_drop("}") {
             let is_ret = self.try_drop("ret ");
             let node = self.parse_node(&mut node_env)?;
-            // Special handling: avoid duplicating GetParam nodes if we've already
-            // created one for this param id from the function signature. If a
-            // duplicate param(...) appears (e.g., for a return), just reference
-            // the existing node instead of adding a new one.
+            // Special handling: avoid duplicating GetParam nodes if we've
+            // already created one for this param id from the
+            // function signature. If a duplicate param(...) appears
+            // (e.g., for a return), just reference the existing
+            // node instead of adding a new one.
             let mut node_ref = ir::NodeRef { index: nodes.len() };
             let is_get_param = matches!(node.payload, ir::NodePayload::GetParam(_));
             if is_get_param {
@@ -3597,8 +3599,9 @@ impl Parser {
                     .copied()
                 {
                     // If a GetParam node with this id already exists (from the
-                    // function signature), ensure the textual node's type matches
-                    // the existing param node type. If not, this is a parse-time
+                    // function signature), ensure the textual node's type
+                    // matches the existing param node type.
+                    // If not, this is a parse-time
                     // error (mirrors upstream xlsynth behavior).
                     let existing_ty = &nodes[existing.index].ty;
                     if existing_ty != &node.ty {
@@ -3625,8 +3628,8 @@ impl Parser {
                 ret_node_ref = Some(node_ref);
             }
         }
-        // If the return type is not the same type as the return node, then we flag a
-        // validation error.
+        // If the return type is not the same type as the return node, then we
+        // flag a validation error.
         if let Some(ret_nr) = ret_node_ref {
             let ret_node = &nodes[ret_nr.index];
             if ret_node.ty != ret_ty {
@@ -3741,11 +3744,13 @@ impl Parser {
                 continue;
             }
             // If this is an input_port or output_port, handle specially.
-            // Peek ahead to capture the operator by temporarily parsing the LHS name and
-            // type. Save current offset to backtrack for normal node parsing.
+            // Peek ahead to capture the operator by temporarily parsing the LHS
+            // name and type. Save current offset to backtrack for
+            // normal node parsing.
             let saved_offset = self.offset;
-            // If we can't parse a node header (name: type = ...), fall back to normal
-            // parsing which will error with a helpful message.
+            // If we can't parse a node header (name: type = ...), fall back to
+            // normal parsing which will error with a helpful
+            // message.
             let parse_port_line = || -> Result<Option<()>, ParseError> {
                 // name or id.
                 let name_or_id = self.pop_node_name_or_error("node name")?;
@@ -3820,7 +3825,8 @@ impl Parser {
                     self.drop_or_error("(")?;
                     // First arg is the value being output.
                     let value_ref = self.parse_node_ref(&node_env, "output_port value")?;
-                    // Consume any additional attributes in any order until we hit ')'.
+                    // Consume any additional attributes in any order until we
+                    // hit ')'.
                     let mut out_name_opt: Option<String> = None;
                     let mut out_id_opt: Option<usize> = None;
                     loop {
@@ -3880,8 +3886,8 @@ impl Parser {
             }
         }
 
-        // Build function parameters in the order they appear in the header, but only
-        // for inputs.
+        // Build function parameters in the order they appear in the header, but
+        // only for inputs.
         let mut params: Vec<ir::Param> = Vec::new();
         for (hname, hty) in header_ports.iter() {
             if let Some((_, _, id)) = input_params.iter().find(|(n, _, _)| n == hname) {
@@ -4560,7 +4566,8 @@ fn foo() -> bits[65] {
         // Verify the C++ parser accepts this IR.
         let _pkg = xlsynth::IrPackage::parse_ir(ir, None).unwrap();
 
-        // Verify the Rust parser accepts the same IR and parses the literal correctly.
+        // Verify the Rust parser accepts the same IR and parses the literal
+        // correctly.
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
         let f = pkg.get_fn("foo").unwrap();
@@ -5086,7 +5093,8 @@ top fn main(t: token id=1) -> token {
     #[test]
     fn test_round_trip_or_nary_ir_node() {
         let _ = env_logger::builder().is_test(true).try_init();
-        // Build a small node environment for the n-ary OR node we want to parse.
+        // Build a small node environment for the n-ary OR node we want to
+        // parse.
         let mut node_env = IrNodeEnv::new();
         let _ = node_env.add(
             Some("is_result_nan".to_string()),
@@ -5109,7 +5117,8 @@ top fn main(t: token id=1) -> token {
             ir::NodeRef { index: 90409 },
         );
 
-        // Input string containing an n-ary OR with four operands and a pos attribute.
+        // Input string containing an n-ary OR with four operands and a pos
+        // attribute.
         let input = "or.91095: bits[1] = or(is_result_nan, is_operand_inf, bit_slice.90408, and_reduce.90409, id=91095, pos=[(0,2144,26), (2,312,48), (3,2,51)])";
         let mut parser = Parser::new(input);
         let node = parser
@@ -5184,8 +5193,8 @@ fn f(x: bits[1] id=1) -> token {
     fn test_parse_counted_for_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        // Provide a mapping for the init literal referenced as `literal.5` in the input
-        // string.
+        // Provide a mapping for the init literal referenced as `literal.5` in
+        // the input string.
         let _ = node_env.add(Some("literal".to_string()), 5, ir::NodeRef { index: 5 });
         let input = "counted_for.6: bits[11] = counted_for(literal.5, trip_count=7, stride=1, body=body1, id=6)";
         let mut parser = Parser::new(input);
@@ -5521,7 +5530,8 @@ fn id(x: bits[1] id=1) -> bits[1] {
         let mut parser = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
         let f = parser.parse_block_to_fn().unwrap();
         // Emit -> block text (provide output name to match header)
-        // When parsing from block, preserve original port ids via BlockMetadata.
+        // When parsing from block, preserve original port ids via
+        // BlockMetadata.
         let mut parser2 = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
         let (_f2, metadata) = parser2.parse_block_to_fn_with_ports().unwrap();
         let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);

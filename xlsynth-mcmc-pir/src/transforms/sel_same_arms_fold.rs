@@ -108,7 +108,8 @@ impl PirTransform for SelSameArmsFoldTransform {
                             continue;
                         }
                         if fanout_cone.contains(&cand) {
-                            // Would introduce a dependency cycle: nr -> cand and cand ->* nr.
+                            // Would introduce a dependency cycle: nr -> cand
+                            // and cand ->* nr.
                             continue;
                         }
                         chosen_p = Some(cand);
@@ -213,7 +214,8 @@ impl PirTransform for SelSameArmsFoldTransform {
                     default: None,
                 };
 
-                // Ensure the output type remains bits[w] (it does, since we didn't change ty).
+                // Ensure the output type remains bits[w] (it does, since we
+                // didn't change ty).
                 let _ = w;
                 Ok(())
             }

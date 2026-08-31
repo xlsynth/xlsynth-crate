@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Helpers for compiling and simulating SystemVerilog/Verilog sources via
-//! iverilog when it is present via system installation.
+//! a required Icarus toolchain (environment overrides or PATH).
 //!
 //! These helpers mirror the functionality of `assert_valid_sv` except they
 //! build the given sources with `iverilog`, run the resulting simulation via
 //! `vvp`, and return the collected VCD waveform contents so tests can make
 //! assertions about dynamic behaviour.
 
+use crate::iverilog::required_iverilog_toolchain;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::process::Command as StdCommand;
 
 use tempfile::tempdir;
 
@@ -104,25 +104,6 @@ impl From<std::io::Error> for SimulateSvError {
     }
 }
 
-/// Attempts to locate the `iverilog` binary using the caller's `PATH`.
-///
-/// The function executes `which iverilog` and returns the absolute path if the
-/// tool is found. If `iverilog` is not available in `PATH` the function returns
-/// `None`.
-fn find_iverilog() -> Option<PathBuf> {
-    // Probe the user's PATH for an `iverilog` executable without introducing
-    // any additional dependencies.
-    if let Ok(output) = StdCommand::new("which").arg("iverilog").output()
-        && output.status.success()
-    {
-        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            return Some(PathBuf::from(path_str));
-        }
-    }
-    None
-}
-
 /// Runs `iverilog` with the given sources and returns the path to the produced
 /// `*.vvp` executable inside `work_dir`.
 fn compile_with_iverilog(
@@ -130,10 +111,11 @@ fn compile_with_iverilog(
     sources: &[PathBuf],
     top_module: &str,
 ) -> Result<PathBuf, SimulateSvError> {
-    let iverilog_bin =
-        find_iverilog().expect("iverilog binary not found; ensure it is available in PATH");
+    let tools = required_iverilog_toolchain().map_err(|error| {
+        SimulateSvError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, error))
+    })?;
     let out_path = work_dir.join("sim.vvp");
-    let mut cmd = Command::new(&iverilog_bin);
+    let mut cmd = Command::new(tools.iverilog_path());
     cmd.current_dir(work_dir)
         .arg("-g2012") // Enable SystemVerilog-2012 features – fine for pure Verilog too.
         .arg("-o")
@@ -161,8 +143,10 @@ fn compile_with_iverilog(
 
 /// Executes the given `*.vvp` simulation and waits for completion.
 fn run_vvp(vvp_path: &Path, work_dir: &Path) -> Result<(), SimulateSvError> {
-    // Rely on PATH lookup for `vvp` instead of an environment variable.
-    let mut cmd = Command::new("vvp");
+    let tools = required_iverilog_toolchain().map_err(|error| {
+        SimulateSvError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, error))
+    })?;
+    let mut cmd = Command::new(tools.vvp_path());
     cmd.current_dir(work_dir).arg(vvp_path);
 
     log::info!("Running: {cmd:?}");
@@ -192,8 +176,7 @@ fn run_vvp(vvp_path: &Path, work_dir: &Path) -> Result<(), SimulateSvError> {
 /// * `vcd_name` – Path (relative to the temporary work dir) of the VCD file the
 ///   test bench writes to, typically something like `dump.vcd`.
 ///
-/// If Icarus is not available the function logs a warning and returns an empty
-/// string so tests can gracefully skip.
+/// Missing or unusable compiler/runtime executables are reported as errors.
 pub fn simulate_sv_flist(
     files: &[FlistEntry],
     top_module: &str,
@@ -293,8 +276,8 @@ pub fn simulate_pipeline_single_pulse_custom(
         .trim_start_matches("0x")
         .to_string();
 
-    // Handshake and reset regs are declared separately in the TB header below to
-    // avoid duplicates.
+    // Handshake and reset regs are declared separately in the TB header below
+    // to avoid duplicates.
 
     // Reset literal values depending on polarity.
     let initial_reset_val = if reset_active_low { "0" } else { "1" };
@@ -388,7 +371,7 @@ pub fn simulate_pipeline_single_pulse(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "iverilog-tests"))]
 mod tests {
     use super::*;
 

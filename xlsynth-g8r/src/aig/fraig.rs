@@ -140,21 +140,23 @@ fn build_replacements_from_proven_sets(
     let mut replacements = SubstitutionMap::new();
     for proven_equiv_set in proven_equiv_sets {
         log::debug!("fraig_optimize: proven_equiv_set: {:?}", proven_equiv_set);
-        // Determine the minimum-depth node in the proven_equiv_set, using node ID as
-        // tiebreaker
+        // Determine the minimum-depth node in the proven_equiv_set, using node
+        // ID as tiebreaker
         let min_depth_node = proven_equiv_set
             .iter()
             .filter(|equiv_node| {
-                // Any node that is being substituted cannot win as the target in an equivalence
-                // class.
+                // Any node that is being substituted cannot win as the target
+                // in an equivalence class.
                 //
-                // The main reason this is necessary is because we consider both values and
-                // their negations, so when two nodes have the same depth we see both:
+                // The main reason this is necessary is because we consider both
+                // values and their negations, so when two nodes
+                // have the same depth we see both:
                 // - (normal_a, negated_b)
                 // - (negated_a, normal_b)
                 //
-                // And in this case we need to make sure we don't make a chain, so we'll replace
-                // negated_b with normal_a for the first pair and see that b is already being
+                // And in this case we need to make sure we don't make a chain,
+                // so we'll replace negated_b with normal_a for
+                // the first pair and see that b is already being
                 // replaced for the second set.
                 let node_ref = equiv_node.aig_ref();
                 let is_replaced = replacements.contains_key(&node_ref);
@@ -169,8 +171,8 @@ fn build_replacements_from_proven_sets(
             continue;
         };
         for equiv_node in proven_equiv_set.iter() {
-            // if this is the "minimum depth" one in the equivalence class, we don't replace
-            // it with anything
+            // if this is the "minimum depth" one in the equivalence class, we
+            // don't replace it with anything
             if equiv_node == min_depth_node {
                 continue;
             }
@@ -328,16 +330,18 @@ mod tests {
             .expect("fraig_optimize should not panic")
             .optimized_fn;
 
-        // The original graph has 2 inputs, 1 constant literal node (e.g., 'true', which
-        // is node 0), and 2 AND nodes (one for the AND, one for the
-        // AND-with-true used to force a real node for the inverted output).
+        // The original graph has 2 inputs, 1 constant literal node (e.g.,
+        // 'true', which is node 0), and 2 AND nodes (one for the AND,
+        // one for the AND-with-true used to force a real node for the
+        // inverted output).
         let orig_stats = get_summary_stats(&test_graph.g);
         assert_eq!(orig_stats.live_nodes, 5);
 
-        // After optimization, DCE removes both the extra AND node and the now-unused
-        // constant literal node. Only the two inputs and the single AND node
-        // remain live, so live_nodes should decrease by 2: from 5 (2 inputs, 1
-        // constant, 2 ANDs) to 3 (2 inputs, 1 AND node).
+        // After optimization, DCE removes both the extra AND node and the
+        // now-unused constant literal node. Only the two inputs and the
+        // single AND node remain live, so live_nodes should decrease by
+        // 2: from 5 (2 inputs, 1 constant, 2 ANDs) to 3 (2 inputs, 1
+        // AND node).
         let opt_stats = get_summary_stats(&optimized_fn);
         assert_eq!(
             opt_stats.live_nodes,
@@ -354,7 +358,8 @@ mod tests {
     fn test_fraig_with_dead_equiv_node_no_panic() {
         let _ = env_logger::builder().is_test(true).try_init();
 
-        // Create a simple 1-bit AND gate that is live plus an identical dead gate.
+        // Create a simple 1-bit AND gate that is live plus an identical dead
+        // gate.
         let mut gb = GateBuilder::new("dead_redundant".to_string(), GateBuilderOptions::no_opt());
         let in0 = gb.add_input("a".to_string(), 1);
         let in1 = gb.add_input("b".to_string(), 1);

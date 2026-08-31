@@ -44,7 +44,8 @@ fn cmp_irbits_unsigned(a: &xlsynth::IrBits, b: &xlsynth::IrBits) -> Ordering {
 }
 
 fn format_intervals(intervals: &[xlsynth::Interval]) -> String {
-    // Ensure deterministic output ordering regardless of libxls enumeration order.
+    // Ensure deterministic output ordering regardless of libxls enumeration
+    // order.
     let mut idxs: Vec<usize> = (0..intervals.len()).collect();
     idxs.sort_by(|&a, &b| {
         let lo_cmp = cmp_irbits_unsigned(&intervals[a].lo, &intervals[b].lo);

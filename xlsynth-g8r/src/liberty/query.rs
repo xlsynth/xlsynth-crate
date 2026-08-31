@@ -271,8 +271,8 @@ pub fn run_query<'a>(root: &'a Block, steps: &[QueryStep]) -> Vec<QueryMatch<'a>
         for item in &current {
             match step.axis {
                 Axis::Child => {
-                    // First child-step can match the root itself for convenience:
-                    // /library/cell...
+                    // First child-step can match the root itself for
+                    // convenience: /library/cell...
                     if step_index == 0 && block_matches(item.block, step) {
                         next.push(QueryMatch {
                             block: item.block,

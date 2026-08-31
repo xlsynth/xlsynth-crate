@@ -235,8 +235,8 @@ impl IncrementalSat for CadicalSat {
                     "terminate limit {limit} exceeds CaDiCaL's i32 range"
                 ))
             })?;
-            // CaDiCaL resets limits after each solve, so apply this before every
-            // incremental query.
+            // CaDiCaL resets limits after each solve, so apply this before
+            // every incremental query.
             self.solver
                 .set_limit("terminate", limit)
                 .map_err(|e| ValidationError::CadicalConfigError(e.to_string()))?;
@@ -1325,8 +1325,8 @@ fn validate_equivalence_classes_with_solver_and_virtual_state<S: IncrementalSat>
     mut virtual_equivalence: Option<&mut VirtualEquivalence>,
     virtual_proof_count: &mut usize,
 ) -> Result<ValidationResult, ValidationError> {
-    // Extract the combined cone for all of the references we're trying to determine
-    // equivalence for.
+    // Extract the combined cone for all of the references we're trying to
+    // determine equivalence for.
     let mut frontier: Vec<AigRef> = vec![];
     for equiv_class in equiv_classes {
         for equiv_node in equiv_class.iter() {
@@ -1399,7 +1399,8 @@ fn validate_equivalence_classes_with_solver_and_virtual_state<S: IncrementalSat>
             let mut known_equiv = vec![bucket[0]];
             let mut split_bucket = false;
             for &candidate in &bucket[1..] {
-                // Create a miter between this candidate and the class representative.
+                // Create a miter between this candidate and the class
+                // representative.
                 let representative = known_equiv[0];
                 if virtual_equivalence
                     .as_mut()
@@ -1414,12 +1415,14 @@ fn validate_equivalence_classes_with_solver_and_virtual_state<S: IncrementalSat>
                 }
                 let miter = add_miter(solver, &aig_ref_to_lit, representative, candidate);
 
-                // Assume the miter output is true, which asks for a counterexample where
-                // the candidate is unequal to the representative.
+                // Assume the miter output is true, which asks for a
+                // counterexample where the candidate is unequal
+                // to the representative.
                 validation_result.proof_query_count += 1;
                 match solver.sat_solve_assuming(&[miter]) {
                     Ok(SatSolveResult::Unsat) => {
-                        // No counterexample found, expand the known equivalent set.
+                        // No counterexample found, expand the known equivalent
+                        // set.
                         if let Some(equivalence) = virtual_equivalence.as_mut() {
                             equivalence.union_equiv_nodes(representative, candidate);
                         }
@@ -1446,7 +1449,8 @@ fn validate_equivalence_classes_with_solver_and_virtual_state<S: IncrementalSat>
                     }
                     Err(ValidationError::CadicalSolveInterrupted) => {
                         // A resource-limited proof is inconclusive. Leaving the
-                        // candidate out of the proven set preserves correctness.
+                        // candidate out of the proven set preserves
+                        // correctness.
                         validation_result.interrupted_proof_count += 1;
                     }
                     Err(e) => return Err(e),

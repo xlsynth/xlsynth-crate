@@ -825,8 +825,8 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
         assert_eq!(result, IrValue::make_ubits(4, 2).unwrap());
     }
 
-    // Note: because the current signature takes N bit operands and produces an N
-    // bit result, we cannot distinguish between umul and smul.
+    // Note: because the current signature takes N bit operands and produces an
+    // N bit result, we cannot distinguish between umul and smul.
     #[test]
     fn test_ir_builder_umul_vs_smul() {
         let mut package = IrPackage::new("sample_package").unwrap();
@@ -1279,8 +1279,8 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
     fn test_ir_builder_priority_select() {
         let mut package = IrPackage::new("sample_package").unwrap();
         let mut fb = FnBuilder::new(&mut package, "priority_select", true);
-        // We use a u4 to select among the four values (plus a default for when no bits
-        // are set).
+        // We use a u4 to select among the four values (plus a default for when
+        // no bits are set).
         let u4 = package.get_bits_type(4);
         let selector = fb.param("selector", &u4);
 

@@ -2,6 +2,8 @@
 
 mod assert_valid_sv;
 mod dslx_prover;
+pub mod iverilog;
+pub mod rtl_sim;
 mod simulate_sv;
 
 pub use assert_valid_sv::{FlistEntry, assert_valid_sv, assert_valid_sv_flist};

@@ -182,12 +182,13 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
 
                 let ind_ty = &callee.params[0].ty;
                 let ind_width = ind_ty.bit_count();
-                // TODO: Make an independent verify_ir function that verifies a package to have
-                // all these invariants hold.
+                // TODO: Make an independent verify_ir function that verifies a
+                // package to have all these invariants hold.
                 //
-                // Statically ensure the induction variable cannot overflow given
-                // trip_count/stride. Minimal bits needed is ceil(log2(max_i +
-                // 1)), where max_i = (trip_count-1)*stride.
+                // Statically ensure the induction variable cannot overflow
+                // given trip_count/stride. Minimal bits needed
+                // is ceil(log2(max_i + 1)), where max_i =
+                // (trip_count-1)*stride.
                 let max_i: u128 = (*trip_count as u128)
                     .saturating_sub(1)
                     .saturating_mul(*stride as u128);
@@ -209,7 +210,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     solver.numerical_u128(ind_width, val)
                 };
 
-                // Pre-fetch invariant arg BVs once; they do not change across iterations.
+                // Pre-fetch invariant arg BVs once; they do not change across
+                // iterations.
                 let invariant_bvs: Vec<IrTypedBitVec<'_, S::Term>> = invariant_args
                     .iter()
                     .map(|nr| {
@@ -551,7 +553,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     indices: &[&IrTypedBitVec<'a, S::Term>],
                     new_value: &IrTypedBitVec<'a, S::Term>,
                 ) -> IrTypedBitVec<'a, S::Term> {
-                    // If we have consumed all indices, replace the entire value.
+                    // If we have consumed all indices, replace the entire
+                    // value.
                     if indices.is_empty() {
                         return new_value.clone();
                     }
@@ -581,7 +584,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                         let low = i * elem_bits;
                         let orig_slice = solver.extract(&array_val.bitvec, high, low);
 
-                        // Recursively update child if this is the selected index.
+                        // Recursively update child if this is the selected
+                        // index.
                         let updated_child = array_update_recursive(
                             solver,
                             &IrTypedBitVec {
@@ -598,8 +602,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                             let cond = solver.eq(&index_bv.bitvec, &idx_val);
                             solver.ite(&cond, &updated_child.bitvec, &orig_slice)
                         } else {
-                            // This lane is unreachable for the index width. Comparing a
-                            // truncated lane number would alias a representable lane.
+                            // This lane is unreachable for the index width.
+                            // Comparing a truncated
+                            // lane number would alias a representable lane.
                             orig_slice
                         };
 
@@ -634,7 +639,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                         return array_val.clone();
                     }
 
-                    // The value must be an array; retrieve element type / count.
+                    // The value must be an array; retrieve element type /
+                    // count.
                     let (elem_ty, elem_cnt) = match array_val.ir_type {
                         ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
                         _ => panic!(
@@ -643,7 +649,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                         ),
                     };
 
-                    // Recursively compute each element after applying the *tail* indices.
+                    // Recursively compute each element after applying the
+                    // *tail* indices.
                     let elem_bit_width = elem_ty.bit_count() as i32;
                     let children: Vec<IrTypedBitVec<'a, S::Term>> = (0..elem_cnt as i32)
                         .map(|i| {
@@ -661,8 +668,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                         })
                         .collect();
 
-                    // Build a chain of `ite` expressions that selects the requested
-                    // element, falling back to the last element for OOB indices (XLS
+                    // Build a chain of `ite` expressions that selects the
+                    // requested element, falling back to
+                    // the last element for OOB indices (XLS
                     // semantics).
                     let index_bv = indices[0];
                     let max_selectable = get_num_indexable_elements::<S>(index_bv, children.len());
@@ -696,7 +704,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 width,
             } => {
                 // Shift-based implementation with padding by last element.
-                // Flattened array layout is chunked by element width with index 0 at LSB.
+                // Flattened array layout is chunked by element width with index
+                // 0 at LSB.
                 let base_array = env.get(array).expect("Array BV must be present");
                 let start_bv = env.get(start).expect("Start BV must be present");
                 let (elem_ty, elem_cnt) = match base_array.ir_type {
@@ -708,10 +717,12 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 };
                 let e_bits = elem_ty.bit_count() as i32;
 
-                // Clamp start to the last valid element index to model XLS OOB semantics.
-                // This ensures that for any start >= elem_cnt - 1 the slice replicates the
-                // last element, matching the piecewise definition (and avoids relying on
-                // oversized padding when the start width allows larger values).
+                // Clamp start to the last valid element index to model XLS OOB
+                // semantics. This ensures that for any start >=
+                // elem_cnt - 1 the slice replicates the
+                // last element, matching the piecewise definition (and avoids
+                // relying on oversized padding when the start
+                // width allows larger values).
                 let start_width = start_bv.bitvec.get_width();
                 let needs_clamp =
                     start_width >= usize::BITS as usize || (1usize << start_width) > elem_cnt;
@@ -721,12 +732,14 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     let start_le_last = solver.ule(&start_bv.bitvec, &last_idx_const);
                     solver.ite(&start_le_last, &start_bv.bitvec, &last_idx_const)
                 } else {
-                    // Every value representable by the start operand is in bounds.
-                    // Encoding the last array index at this narrower width would truncate it.
+                    // Every value representable by the start operand is in
+                    // bounds. Encoding the last array index
+                    // at this narrower width would truncate it.
                     start_bv.bitvec.clone()
                 };
 
-                // 1) Build a padding prefix of (width-1) copies of the last element.
+                // 1) Build a padding prefix of (width-1) copies of the last
+                //    element.
                 let last_idx = (elem_cnt as i32) - 1;
                 let last_high = (last_idx + 1) * e_bits - 1;
                 let last_low = last_idx * e_bits;
@@ -738,7 +751,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     }
                 }
 
-                // 2) Concatenate pad || base_array to form the extended sequence.
+                // 2) Concatenate pad || base_array to form the extended
+                //    sequence.
                 let extended = solver.concat(&pad, &base_array.bitvec);
 
                 // 3) Compute start_scaled = start * e_bits.
@@ -750,7 +764,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 let start_scaled =
                     solver.xls_arbitrary_width_umul(&start_ext, &e_const, start_scaled_w);
 
-                // 4) Shift right by start_scaled and slice low (width * e_bits) bits.
+                // 4) Shift right by start_scaled and slice low (width * e_bits)
+                //    bits.
                 let shifted = solver.xls_shrl(&extended, &start_scaled);
                 let out_width_bits = (*width as usize) * (e_bits as usize);
                 let result_bv = solver.slice(&shifted, 0, out_width_bits);
@@ -861,7 +876,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 panic!("RegisterWrite is not supported in prover translation");
             }
             NodePayload::AfterAll(_) => {
-                // AfterAll is a no-op for Boolector; do not insert a BV (like Nil)
+                // AfterAll is a no-op for Boolector; do not insert a BV (like
+                // Nil)
                 IrTypedBitVec {
                     ir_type: &node.ty,
                     bitvec: BitVec::ZeroWidth,
@@ -888,7 +904,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
             NodePayload::Invoke { to_apply, operands } => {
                 let callee = inputs.get_fn(to_apply);
 
-                // Build callee inputs by mapping current env operands to callee params.
+                // Build callee inputs by mapping current env operands to callee
+                // params.
                 assert_eq!(
                     callee.params.len(),
                     operands.len(),
@@ -910,9 +927,10 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     );
                 }
 
-                // Kind of hacky as this is just determining whether it is implicit token
-                // calling convention based on the name of the function. But
-                // this seems to be the only way to determine it from the IR.
+                // Kind of hacky as this is just determining whether it is
+                // implicit token calling convention based on
+                // the name of the function. But this seems to
+                // be the only way to determine it from the IR.
                 let has_itok_in_name = callee.name.starts_with("__itok");
                 let has_itok_calling_convention_in_param = callee.params.len() >= 2
                     && matches!(callee.params[0].ty, ir::Type::Token)
@@ -937,8 +955,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 } else {
                     callee.name.clone()
                 };
-                // If this callee is configured to be treated as an uninterpreted function,
-                // apply the UF instead of inlining the body.
+                // If this callee is configured to be treated as an
+                // uninterpreted function, apply the UF instead
+                // of inlining the body.
                 if let Some(uf_sym) = uf_map.get(&no_itok_name) {
                     let uf = uf_registry
                         .ufs
@@ -1037,7 +1056,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     1usize << width
                 };
 
-                // ---------------- Validation -------------------------------------------------
+                // ---------------- Validation
+                // -------------------------------------------------
                 assert!(!cases.is_empty(), "Sel: must have at least one case");
                 let case_count = cases.len();
                 assert!(
@@ -1045,7 +1065,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     "Sel: too many cases for selector width"
                 );
 
-                // XLS rule: default iff selector width does NOT cover all cases.
+                // XLS rule: default iff selector width does NOT cover all
+                // cases.
                 if case_count == addr_space {
                     assert!(
                         default.is_none(),
@@ -1058,8 +1079,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     );
                 }
 
-                // ---------------- Initial accumulator & loop ------------------------------
-                // Gather all case bit-vectors once.
+                // ---------------- Initial accumulator & loop
+                // ------------------------------ Gather all
+                // case bit-vectors once.
                 let mut case_bvs: Vec<_> = cases
                     .iter()
                     .map(|r| env.get(r).unwrap().bitvec.clone())
@@ -1076,7 +1098,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     case_bvs.pop().unwrap() // O(1) pop from back
                 };
 
-                // Iterate remaining cases from highest to 0, building the ITE chain.
+                // Iterate remaining cases from highest to 0, building the ITE
+                // chain.
                 for idx in (0..case_bvs.len()).rev() {
                     let case_bv = case_bvs[idx].clone();
                     let idx_const = solver.numerical(width, idx as u64);

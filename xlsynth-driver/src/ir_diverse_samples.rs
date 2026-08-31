@@ -133,10 +133,11 @@ fn populate_symlink_dir(
                 })?;
             let link_name = format!("{:05}_{}", i, basename);
             let link_path = dir.join(link_name);
-            // Use an absolute target so the symlink remains valid regardless of the
-            // symlink's location. This avoids surprising breakage when
-            // `ir_file_path` is relative (e.g. when the corpus dir passed to
-            // `ir-diverse-samples` was `.`).
+            // Use an absolute target so the symlink remains valid regardless of
+            // the symlink's location. This avoids surprising
+            // breakage when `ir_file_path` is relative (e.g. when
+            // the corpus dir passed to `ir-diverse-samples` was
+            // `.`).
             //
             // We canonicalize `ir_file_path` in the current process. The driver
             // canonicalizes `corpus_dir` before selection, so this should not

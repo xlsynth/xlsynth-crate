@@ -429,8 +429,8 @@ unsafe extern "C" {
         result_out: *mut *mut CIrValue,
     ) -> bool;
 
-    // Extracts an element from a tuple/array value or gives an error (e.g. if this
-    // value is not a tuple/array or the index is out of bounds).
+    // Extracts an element from a tuple/array value or gives an error (e.g. if
+    // this value is not a tuple/array or the index is out of bounds).
     pub fn xls_value_get_element(
         tuple: *const CIrValue,
         index: libc::size_t,
@@ -444,7 +444,8 @@ unsafe extern "C" {
         count_out: *mut i64,
     ) -> bool;
 
-    // Creates a bits value (via an unsigned integer) that is boxed in an IrValue.
+    // Creates a bits value (via an unsigned integer) that is boxed in an
+    // IrValue.
     pub fn xls_value_make_ubits(
         bit_count: i64,
         value: u64,
@@ -529,8 +530,8 @@ unsafe extern "C" {
     pub fn xls_bits_shift_right_arithmetic(bits: *const CIrBits, shift_amount: i64)
     -> *mut CIrBits;
 
-    // struct xls_bits* xls_bits_width_slice(const struct xls_bits* bits, int64_t
-    // start, int64_t width);
+    // struct xls_bits* xls_bits_width_slice(const struct xls_bits* bits,
+    // int64_t start, int64_t width);
 
     pub fn xls_bits_width_slice(bits: *const CIrBits, start: i64, width: i64) -> *mut CIrBits;
 

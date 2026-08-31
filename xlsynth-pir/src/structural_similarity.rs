@@ -318,7 +318,8 @@ pub fn collect_backward_structural_entries(f: &Fn) -> (Vec<StructuralEntry<BwdHa
         bwd_hashes[node_ref.index] =
             compute_node_backward_structural_hash(f, node_ref, &user_pairs);
 
-        // Backward depth: sinks (no users) are depth 0; else 1 + max(user depths).
+        // Backward depth: sinks (no users) are depth 0; else 1 + max(user
+        // depths).
         depths[node_ref.index] = match user_depths.iter().copied().max() {
             Some(m) => 1 + m,
             None => 0,
@@ -1065,7 +1066,8 @@ fn build_inner_with_union_user_slots(
         next_text_id += 1;
     }
 
-    // 2) Topologically clone region nodes mapping external operands to inner params
+    // 2) Topologically clone region nodes mapping external operands to inner
+    //    params
     let topo = get_topological(f);
     let mut old_to_new: HashMap<usize, NodeRef> = HashMap::new();
     for nr in topo.into_iter() {
@@ -1227,8 +1229,8 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
 
     // Build extra passthrough param union across sides for missing slots.
     let mut extra_passthrough: BTreeMap<String, Type> = BTreeMap::new();
-    // For each slot, determine if each side needs a passthrough, and if so, add the
-    // appropriate param.
+    // For each slot, determine if each side needs a passthrough, and if so, add
+    // the appropriate param.
     for (consumer_text, op_index) in slot_order.iter() {
         // LHS side
         if !lhs_edges.contains_key(&(consumer_text.clone(), *op_index)) {
@@ -1245,8 +1247,8 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
                             .or_insert(lhs.get_node(dep).ty.clone());
                     }
                 } else {
-                    // Operand index out of range on LHS; fall back to synthetic param using RHS
-                    // type if available.
+                    // Operand index out of range on LHS; fall back to synthetic
+                    // param using RHS type if available.
                     if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
                         let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
                         if *op_index < rhs_deps.len() {
@@ -1257,8 +1259,9 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
                     }
                 }
             } else {
-                // Consumer absent on LHS; create synthetic param with type derived from RHS
-                // consumer operand if possible.
+                // Consumer absent on LHS; create synthetic param with type
+                // derived from RHS consumer operand if
+                // possible.
                 if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
                     let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
                     if *op_index < rhs_deps.len() {
@@ -1309,7 +1312,8 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
     let extra_passthrough_params: Vec<(String, Type)> = extra_passthrough.into_iter().collect();
     // Order by name via BTreeMap; keep as-is.
 
-    // Build each inner with fixed + passthrough params and the unified slot tuple.
+    // Build each inner with fixed + passthrough params and the unified slot
+    // tuple.
     let lhs_inner = build_inner_with_union_user_slots(
         lhs,
         &lhs_interior,
@@ -1389,7 +1393,8 @@ mod tests {
             "fn i(a: bits[1] id=1) -> bits[1] {\n  ret identity.2: bits[1] = identity(a, id=2)\n}",
         );
         let hist = discrepancies_by_depth(&f, &g);
-        // Param (depth 0) matches; op differs at depth 1. Symmetric multiset diff = 2.
+        // Param (depth 0) matches; op differs at depth 1. Symmetric multiset
+        // diff = 2.
         assert_eq!(hist.get(&1).copied(), Some(2));
         assert_eq!(hist.len(), 1);
     }
@@ -1414,8 +1419,8 @@ mod tests {
             "fn i(a: bits[1] id=1) -> bits[1] {\n  ret identity.2: bits[1] = identity(a, id=2)\n}",
         );
         let hist = discrepancies_by_depth_bwd(&f, &g);
-        // Sink (op) differs at depth 0; the param's backward context differs at depth
-        // 1.
+        // Sink (op) differs at depth 0; the param's backward context differs at
+        // depth 1.
         assert_eq!(hist.get(&1).copied(), Some(2));
         assert_eq!(hist.len(), 2);
     }
@@ -1433,7 +1438,8 @@ mod tests {
 }",
         );
         let hist = discrepancies_by_depth(&f, &g);
-        // Only the tuple node at forward depth 1 differs; symmetric multiset diff = 2.
+        // Only the tuple node at forward depth 1 differs; symmetric multiset
+        // diff = 2.
         assert_eq!(hist.get(&1).copied(), Some(2));
         assert_eq!(hist.len(), 1);
     }
@@ -1452,9 +1458,9 @@ mod tests {
         );
         let hist = discrepancies_by_depth_bwd(&f, &g);
         // The sink 'and' has identical user context (none), so depth 0 matches.
-        // Each param's user-operand index differs, so both params differ at backward
-        // depth 1. There are 2 params on each side but with distinct hashes;
-        // symmetric diff = 4 at depth 1.
+        // Each param's user-operand index differs, so both params differ at
+        // backward depth 1. There are 2 params on each side but with
+        // distinct hashes; symmetric diff = 4 at depth 1.
         assert_eq!(hist.get(&1).copied(), Some(4));
         assert_eq!(hist.get(&0).copied(), None);
     }
@@ -1473,7 +1479,8 @@ mod tests {
 }",
         );
         let hist = discrepancies_by_depth_bwd(&f, &g);
-        // The extra user 'not' on RHS changes the backward context of 'a' (depth 1).
+        // The extra user 'not' on RHS changes the backward context of 'a'
+        // (depth 1).
         assert_eq!(hist.get(&1).copied(), Some(2));
     }
 }

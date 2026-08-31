@@ -207,8 +207,8 @@ pub fn run_aug_opt_over_ir_text_with_stats(
             let mut rewrite_stats = AugOptRewriteStats::default();
             let mut total_rewrites = 0usize;
 
-            // Even with zero rounds, we still want to validate the requested top
-            // and ensure the emitted text marks it as top.
+            // Even with zero rounds, we still want to validate the requested
+            // top and ensure the emitted text marks it as top.
             if options.rounds == 0 {
                 let mut pir_parser = ir_parser::Parser::new(&cur_text);
                 let mut pir_pkg = pir_parser
@@ -1231,7 +1231,8 @@ fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
 
             let compared_width = width.saturating_sub(truncated);
             let term = if compared_width == 0 {
-                // Safe to omit the data-compare arm when no payload bits remain.
+                // Safe to omit the data-compare arm when no payload bits
+                // remain.
                 s_eq_k
             } else {
                 let x_slice = push_node(
@@ -1538,8 +1539,8 @@ fn rewrite_guarded_sel_ne_literal1_nor(f: &mut ir::Fn) -> usize {
         // Build: not(s)
         let not_s = push_node(f, Type::Bits(1), NodePayload::Unop(Unop::Not, s));
 
-        // Build: eq(x, literal(1)) using the matched literal node to keep graphs
-        // stable.
+        // Build: eq(x, literal(1)) using the matched literal node to keep
+        // graphs stable.
         let eq_x = push_node(
             f,
             Type::Bits(1),
@@ -1619,8 +1620,8 @@ fn rewrite_eq_priority_sel_to_selector_predicate(
             continue;
         };
 
-        // Try both operand orders: eq(priority_sel(...), literal) or eq(literal,
-        // priority_sel(...)).
+        // Try both operand orders: eq(priority_sel(...), literal) or
+        // eq(literal, priority_sel(...)).
         let candidates = [(a, b), (b, a)];
         let mut matched: Option<(NodeRef, NodeRef, NodeRef, Vec<NodeRef>, NodeRef, IrValue)> = None;
 
@@ -2080,9 +2081,10 @@ fn rewrite_predicate_hoist_across_select(f: &mut ir::Fn) -> usize {
         let Some((shape, value_nr)) = match_predicate_shape(f, nr) else {
             continue;
         };
-        // For compare-to-constant predicates, only hoist when the selected value
-        // has a single user. This bounds compare replication in membership-like
-        // shapes (e.g. OR-of-many EQs on the same selected value).
+        // For compare-to-constant predicates, only hoist when the selected
+        // value has a single user. This bounds compare replication in
+        // membership-like shapes (e.g. OR-of-many EQs on the same
+        // selected value).
         if matches!(shape, PredicateShape::CompareConst { .. }) && count_users(f, value_nr) != 1 {
             continue;
         }
@@ -2596,7 +2598,8 @@ fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
             continue;
         };
 
-        // Try both operand orders: ne(add(..), all_ones) or ne(all_ones, add(..)).
+        // Try both operand orders: ne(add(..), all_ones) or ne(all_ones,
+        // add(..)).
         let candidates = [(a, b), (b, a)];
         let mut matched: Option<(NodeRef, NodeRef)> = None; // (x, y)
 
@@ -3342,7 +3345,8 @@ top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3)
         )
         .expect("aug opt");
 
-        // After aug-opt + libxls opt, the top function should not contain a Sel.
+        // After aug-opt + libxls opt, the top function should not contain a
+        // Sel.
         let mut p = ir_parser::Parser::new(&out_text);
         let pkg = p.parse_and_validate_package().expect("parse/validate");
         let f = pkg.get_fn("cone").expect("top fn");
@@ -3583,7 +3587,8 @@ top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3)
         )
         .expect("aug opt aug-opt-only");
 
-        // In aug-opt-only mode, we still expect the Nor rewrite to have fired...
+        // In aug-opt-only mode, we still expect the Nor rewrite to have
+        // fired...
         let mut p = ir_parser::Parser::new(&out_text);
         let pkg = p.parse_and_validate_package().expect("parse/validate");
         let f = pkg.get_fn("cone").expect("top fn");
@@ -3739,15 +3744,17 @@ top fn cone(sel: bits[1] id=1, x: bits[5] id=2) -> bits[1] {
         let pkg = p.parse_and_validate_package().expect("parse/validate");
         let f = pkg.get_fn("cone").expect("top fn");
 
-        // In PirOnly mode we do not run libxls optimization after rewriting, so we
-        // do not expect dead nodes to be removed. Instead, assert that the return
-        // no longer depends on the priority_sel and is rewritten to the selector.
+        // In PirOnly mode we do not run libxls optimization after rewriting, so
+        // we do not expect dead nodes to be removed. Instead, assert
+        // that the return no longer depends on the priority_sel and is
+        // rewritten to the selector.
         let ret_nr = f.ret_node_ref.expect("ret node");
         let ret_node = f.get_node(ret_nr);
         assert_eq!(ret_node.ty, Type::Bits(1));
         match &ret_node.payload {
             NodePayload::Unop(Unop::Identity, op) => {
-                // Param nodes are at indices 1..=params.len() in signature order.
+                // Param nodes are at indices 1..=params.len() in signature
+                // order.
                 assert_eq!(*op, NodeRef { index: 1 });
             }
             other => panic!("unexpected ret payload: {:?}\noutput:\n{}", other, out_text),

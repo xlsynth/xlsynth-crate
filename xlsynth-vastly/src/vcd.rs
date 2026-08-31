@@ -65,8 +65,8 @@ impl Vcd {
                         in_timescale_block = true;
                         timescale_buf.clear();
                     } else {
-                        // "$timescale" with tokens but no $end (rare); capture remainder and enter
-                        // block.
+                        // "$timescale" with tokens but no $end (rare); capture
+                        // remainder and enter block.
                         let rest = line.trim_start_matches("$timescale").trim();
                         in_timescale_block = true;
                         timescale_buf = rest.to_string();
@@ -218,8 +218,8 @@ fn normalize_bits(s: &str) -> String {
 }
 
 fn normalize_timescale(s: String) -> String {
-    // Keep minimal normalization: strip any surrounding tokens/whitespace, collapse
-    // spaces. Common forms: "1ns", "1 ns", "10ps".
+    // Keep minimal normalization: strip any surrounding tokens/whitespace,
+    // collapse spaces. Common forms: "1ns", "1 ns", "10ps".
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() == 2 {
         format!("{}{}", parts[0], parts[1])

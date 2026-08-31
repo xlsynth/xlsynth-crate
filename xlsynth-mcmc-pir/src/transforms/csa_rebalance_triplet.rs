@@ -199,9 +199,11 @@ impl PirTransform for CsaRebalanceTripletTransform {
         let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
-                // `bits[0]` is permitted in the IR, but this transform materializes a
-                // shift-amount literal `1`, which cannot be represented as `bits[0]`.
-                // Skip zero-width adds rather than risking panics in literal creation.
+                // `bits[0]` is permitted in the IR, but this transform
+                // materializes a shift-amount literal `1`,
+                // which cannot be represented as `bits[0]`.
+                // Skip zero-width adds rather than risking panics in literal
+                // creation.
                 if Self::bits_width(f, nr) == Some(0) {
                     continue;
                 }
@@ -231,9 +233,10 @@ impl PirTransform for CsaRebalanceTripletTransform {
             .ok_or_else(|| "CsaRebalanceTripletTransform: output must be bits[w]".to_string())?;
 
         if w == 0 {
-            // `bits[0]` is permitted elsewhere in the IR, but this transform requires
-            // constructing a shift-amount literal `1`. Avoid panicking on
-            // `IrBits::make_ubits(0, 1)` by treating this as a non-applicable site.
+            // `bits[0]` is permitted elsewhere in the IR, but this transform
+            // requires constructing a shift-amount literal `1`.
+            // Avoid panicking on `IrBits::make_ubits(0, 1)` by
+            // treating this as a non-applicable site.
             return Err(
                 "CsaRebalanceTripletTransform: zero-width bits are not supported".to_string(),
             );

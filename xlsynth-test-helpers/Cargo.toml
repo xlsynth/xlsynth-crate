@@ -12,6 +12,18 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 [lints]
 workspace = true
 
+[features]
+default = []
+iverilog-tests = []
+
+[[test]]
+name = "rtl_sim_iverilog_test"
+required-features = ["iverilog-tests"]
+
+[[test]]
+name = "rtl_syntax_iverilog_test"
+required-features = ["iverilog-tests"]
+
 [dependencies]
 slang-rs = "0.12.0"
 tempfile = "3.20"
@@ -21,6 +33,7 @@ xlsynth = { version = "0.69.0", path = "../xlsynth" }
 xlsynth-prover = { version = "0.69.0", path = "../xlsynth-prover" }
 arbitrary = { version = "1.3", features = ["derive"] }
 pretty_assertions = "1.4.1"
+libc = "0.2"
 
 [dev-dependencies]
 xlsynth-sys = { path = "../xlsynth-sys" }

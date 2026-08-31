@@ -25,7 +25,8 @@ impl<'a> QueryParser<'a> {
     pub fn parse_expr(&mut self) -> Result<QueryExpr, String> {
         self.skip_ws();
 
-        // Variadic wildcard used inside operator arg lists, e.g. `nor(..., a, ...)`.
+        // Variadic wildcard used inside operator arg lists, e.g. `nor(..., a,
+        // ...)`.
         if self
             .bytes
             .get(self.pos..)
@@ -104,7 +105,8 @@ impl<'a> QueryParser<'a> {
                 let ident = self.parse_ident("placeholder or operator")?;
                 self.skip_ws();
 
-                // Placeholder type constraint: `name: bits[1]`, `x: token`, etc.
+                // Placeholder type constraint: `name: bits[1]`, `x: token`,
+                // etc.
                 if self.peek() == Some(b':') {
                     self.bump();
                     let ty = self.parse_type("type constraint")?;
@@ -114,10 +116,12 @@ impl<'a> QueryParser<'a> {
                     }));
                 }
 
-                // If an identifier is followed by a bracket clause and/or an argument
-                // list, interpret it as an operator matcher (e.g. `add(x, y)`).
+                // If an identifier is followed by a bracket clause and/or an
+                // argument list, interpret it as an operator
+                // matcher (e.g. `add(x, y)`).
                 //
-                // Otherwise it is a node placeholder binding (e.g. `x`, `y`, `_`).
+                // Otherwise it is a node placeholder binding (e.g. `x`, `y`,
+                // `_`).
                 if self.peek() != Some(b'[') && self.peek() != Some(b'(') {
                     return Ok(QueryExpr::Placeholder(PlaceholderExpr {
                         name: ident,
@@ -670,7 +674,8 @@ impl<'a> QueryParser<'a> {
                     let count = self.parse_number("bit count")?;
                     self.expect(']')?;
                     let mut bits_ty = ir::Type::Bits(count);
-                    // `bits` can have array dimensions directly attached: `bits[8][4]`.
+                    // `bits` can have array dimensions directly attached:
+                    // `bits[8][4]`.
                     while self.peek() == Some(b'[') {
                         self.expect('[')?;
                         let n = self.parse_number("array type size")?;
@@ -684,8 +689,8 @@ impl<'a> QueryParser<'a> {
             }
         };
 
-        // Additional array dimensions after any base type: `(bits[1], bits[2])[3]`,
-        // etc.
+        // Additional array dimensions after any base type: `(bits[1],
+        // bits[2])[3]`, etc.
         while self.peek() == Some(b'[') {
             self.expect('[')?;
             let n = self.parse_number("array type size")?;

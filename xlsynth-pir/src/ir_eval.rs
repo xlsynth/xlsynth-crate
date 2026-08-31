@@ -562,8 +562,9 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     IrValue::bool(lhs_bits.sle(&rhs_bits))
                 }
                 ir::Binop::Gate => {
-                    // XLS `gate`: when predicate is false, returns all-zero value.
-                    // Predicate is expected to be bits[1].
+                    // XLS `gate`: when predicate is false, returns all-zero
+                    // value. Predicate is expected to be
+                    // bits[1].
                     let pred = lhs_value.to_bool().expect("gate predicate must be bits[1]");
                     if pred {
                         rhs_value.clone()
@@ -587,8 +588,8 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                 .expect("ExtCarryOut c_in must be bits[1]");
 
             // Reference semantics:
-            //   carry = bit_slice(zero_ext(lhs,w+1)+zero_ext(rhs,w+1)+zero_ext(c_in,w+1),
-            // start=w, width=1)
+            //   carry = bit_slice(zero_ext(lhs,w+1)+zero_ext(rhs,
+            // w+1)+zero_ext(c_in,w+1), start=w, width=1)
             let mut lhs_ext: Vec<bool> = Vec::with_capacity(w + 1);
             let mut rhs_ext: Vec<bool> = Vec::with_capacity(w + 1);
             for i in 0..w {
@@ -629,8 +630,8 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                 }
             }
 
-            // Preserve `encode(one_hot(...))` sentinel semantics: if no bits are
-            // set, return `n` (for `arg: bits[n]`).
+            // Preserve `encode(one_hot(...))` sentinel semantics: if no bits
+            // are set, return `n` (for `arg: bits[n]`).
             let idx = found.unwrap_or(n);
 
             let out_w = ceil_log2(
@@ -899,10 +900,11 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             assumed_in_bounds: _,
             ..
         } => {
-            // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
-            // index for the respective dimension. Note: this helper does not
-            // surface `assumed_in_bounds` errors (those are handled in
-            // `eval_fn_with_observer`, which can return Failure).
+            // XLS semantics: out-of-bounds indices are clamped to the maximum
+            // in-bounds index for the respective dimension. Note:
+            // this helper does not surface `assumed_in_bounds`
+            // errors (those are handled in `eval_fn_with_observer`,
+            // which can return Failure).
             let mut value = operand_values[0].clone();
             for (_idx_ref, idx_value) in indices.iter().zip(operand_values[1..].iter()) {
                 let idx_bits = idx_value.to_bits().unwrap();
@@ -1032,11 +1034,12 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     IrValue::from_bits(&r)
                 }
                 ir::NaryOp::Concat => {
-                    // XLS concat semantics: concat(x0, x1, ..., xn-1) places x0 in the MSBs and
-                    // xn-1 in the LSBs.
+                    // XLS concat semantics: concat(x0, x1, ..., xn-1) places x0
+                    // in the MSBs and xn-1 in the LSBs.
                     //
-                    // Our `IrBits` is indexed with LSB at bit 0, so we build the output bits
-                    // vector by appending operands in reverse order.
+                    // Our `IrBits` is indexed with LSB at bit 0, so we build
+                    // the output bits vector by appending
+                    // operands in reverse order.
                     let mut out: Vec<bool> = Vec::new();
                     for operand_value in operand_values.iter().rev() {
                         let bits: IrBits = operand_value.to_bits().unwrap();
@@ -1185,8 +1188,8 @@ fn observed_type_string_for_expected(expected: &ir::Type, value: &IrValue) -> St
                 let mut parts: Vec<String> = Vec::with_capacity(count);
                 for i in 0..count {
                     let elem = value.get_element(i).unwrap();
-                    // If we have fewer expected entries than elements, just reuse last expected
-                    // kind.
+                    // If we have fewer expected entries than elements, just
+                    // reuse last expected kind.
                     let ety = member_types
                         .get(i)
                         .unwrap_or_else(|| member_types.last().unwrap());
@@ -1665,9 +1668,10 @@ fn observe_corner_like_node(
 
             // Add corners: treat lhs==0 and rhs==0 as separate coverpoints.
             //
-            // If an operand is a literal, suppress the corresponding coverpoint,
-            // because it cannot vary across samples and would be misleading to
-            // report as "missed" for the corpus.
+            // If an operand is a literal, suppress the corresponding
+            // coverpoint, because it cannot vary across samples and
+            // would be misleading to report as "missed" for the
+            // corpus.
             if !is_literal_operand(f, *lhs) {
                 if is_zero_value(env.get(lhs).unwrap()) {
                     observer.on_corner_event(CornerEvent {
@@ -1694,8 +1698,8 @@ fn observe_corner_like_node(
                 matches!(f.get_node(r).payload, ir::NodePayload::Literal(_))
             }
 
-            // If the operand is a literal, suppress these coverpoints because the
-            // operand cannot vary across samples.
+            // If the operand is a literal, suppress these coverpoints because
+            // the operand cannot vary across samples.
             if is_literal_operand(f, *operand) {
                 return;
             }
@@ -1827,7 +1831,8 @@ fn observe_select_like_node(
                 select_kind: if default.is_some() {
                     SelectKind::Default
                 } else {
-                    // No explicit default: XLS semantics use the last case as an implicit default.
+                    // No explicit default: XLS semantics use the last case as
+                    // an implicit default.
                     SelectKind::Default
                 },
                 selected_index: usize::MAX,
@@ -1992,9 +1997,9 @@ fn eval_fn_impl<'a>(
         "argument count must match params"
     );
 
-    // Map sparse textual ParamId values to dense argument indices. ParamIds come
-    // from IR text `id=` attributes, so they are not guaranteed to be small or
-    // contiguous even though PIR parameter NodeRefs are dense.
+    // Map sparse textual ParamId values to dense argument indices. ParamIds
+    // come from IR text `id=` attributes, so they are not guaranteed to be
+    // small or contiguous even though PIR parameter NodeRefs are dense.
     let mut param_index_by_id: HashMap<ir::ParamId, usize> = HashMap::with_capacity(f.params.len());
     for (i, p) in f.params.iter().enumerate() {
         assert!(
@@ -2049,7 +2054,8 @@ fn eval_fn_impl<'a>(
                         label: label.clone(),
                     });
                 }
-                // The result of assert is a token. Tokens are zero-sized; produce a token.
+                // The result of assert is a token. Tokens are zero-sized;
+                // produce a token.
                 IrValue::make_token()
             }
             P::Trace {
@@ -2233,7 +2239,8 @@ fn eval_fn_impl<'a>(
                 ))
             }
             P::Decode { arg, width: _ } => {
-                // Produce a one-hot vector of the node's annotated width, setting bit[arg].
+                // Produce a one-hot vector of the node's annotated width,
+                // setting bit[arg].
                 let arg_bits = env
                     .get(arg)
                     .expect("arg must be evaluated")
@@ -2251,8 +2258,9 @@ fn eval_fn_impl<'a>(
                 IrValue::from_bits(&out_bits)
             }
             P::Encode { arg } => {
-                // XLS `encode`: converts a bits-typed argument (commonly one-hot) into a
-                // compact bits value (the selected index). The output width is taken from
+                // XLS `encode`: converts a bits-typed argument (commonly
+                // one-hot) into a compact bits value (the
+                // selected index). The output width is taken from
                 // the node's annotated type.
                 let arg_bits = env
                     .get(arg)
@@ -2267,10 +2275,12 @@ fn eval_fn_impl<'a>(
                 if expected_w == 0 {
                     IrValue::make_ubits(0, 0).expect("make ubits[0]")
                 } else {
-                    // XLS encode semantics: bitwise-OR together the indices of all set bits.
+                    // XLS encode semantics: bitwise-OR together the indices of
+                    // all set bits.
                     //
-                    // Example: for a 6-bit input, indices 5 (0b101) and 2 (0b010) set yields
-                    // output 0b111 (7) in bits[3].
+                    // Example: for a 6-bit input, indices 5 (0b101) and 2
+                    // (0b010) set yields output 0b111 (7)
+                    // in bits[3].
                     let mut encoded: u64 = 0;
                     for i in 0..in_w {
                         if arg_bits.get_bit(i).unwrap() {
@@ -2285,8 +2295,9 @@ fn eval_fn_impl<'a>(
                 indices,
                 assumed_in_bounds,
             } => {
-                // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
-                // index for the respective dimension. `assumed_in_bounds` makes
+                // XLS semantics: out-of-bounds indices are clamped to the
+                // maximum in-bounds index for the respective
+                // dimension. `assumed_in_bounds` makes
                 // an OOB access observable without changing that safe value.
                 let mut value = env.get(array).expect("array must be evaluated").clone();
                 let mut clamped_any = false;
@@ -2343,12 +2354,14 @@ fn eval_fn_impl<'a>(
                 indices,
                 assumed_in_bounds,
             } => {
-                // XLS semantics: if any index is out of bounds, the result is identical to the
-                // input array. `assumed_in_bounds` additionally reports an
+                // XLS semantics: if any index is out of bounds, the result is
+                // identical to the input array.
+                // `assumed_in_bounds` additionally reports an
                 // observable contract violation.
                 let arr = env.get(array).expect("array must be evaluated").clone();
                 let val = env.get(value).expect("value must be evaluated").clone();
-                // Gather concrete indices, preserving values that exceed host width as OOB.
+                // Gather concrete indices, preserving values that exceed host
+                // width as OOB.
                 let mut idxs: Vec<Option<usize>> = Vec::with_capacity(indices.len());
                 for r in indices.iter() {
                     let u = env
@@ -2422,8 +2435,9 @@ fn eval_fn_impl<'a>(
             }
         };
         // Coerce only for specific nodes where a wider internal computation is
-        // permitted by semantics but the annotated type narrows (e.g. smul/umul,
-        // or decode results). For other nodes we do not coerce.
+        // permitted by semantics but the annotated type narrows (e.g.
+        // smul/umul, or decode results). For other nodes we do not
+        // coerce.
         let coerced: IrValue = match &node.payload {
             ir::NodePayload::Binop(binop @ (ir::Binop::Smul | ir::Binop::Umul), _, _) => {
                 match (&node.ty, value.to_bits()) {
@@ -2451,8 +2465,8 @@ fn eval_fn_impl<'a>(
             },
             _ => value.clone(),
         };
-        // Verify the computed value conforms to the node's annotated type, include node
-        // context.
+        // Verify the computed value conforms to the node's annotated type,
+        // include node context.
         assert_value_conforms_to_type(&node.ty, &coerced, node);
         if let Some(observer) = observer {
             let observer = unsafe { &mut *observer };
@@ -3250,7 +3264,8 @@ fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
 
     #[test]
     fn test_eval_pure_priority_sel_basic() {
-        // selector: bits[2]:01, cases: [3, 5], default: 7 => select index 1 => 5
+        // selector: bits[2]:01, cases: [3, 5], default: 7 => select index 1 =>
+        // 5
         let env = hashmap!(
             ir::NodeRef { index: 0 } => IrValue::make_ubits(2, 0b01).unwrap(),
             ir::NodeRef { index: 1 } => IrValue::make_ubits(8, 3).unwrap(),
@@ -3406,7 +3421,8 @@ fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
             IrValue::make_ubits(8, 0x05).unwrap()
         );
 
-        // Multiple bits set (0b101) => OR of case0 | case2 => 0x03 | 0x0A = 0x0B
+        // Multiple bits set (0b101) => OR of case0 | case2 => 0x03 | 0x0A =
+        // 0x0B
         let env2 = hashmap!(
             ir::NodeRef { index: 0 } => IrValue::make_ubits(3, 0b101).unwrap(),
             ir::NodeRef { index: 1 } => IrValue::make_ubits(8, 0x03).unwrap(),
@@ -4266,8 +4282,8 @@ fn f(x: bits[2] id=1, y: bits[2] id=2) -> bits[1] {
         let mut obs = RecordingBoolObserver::new();
         let _ = eval_fn_with_observer(&f, &args, Some(&mut obs));
 
-        // Only computed bits[1] nodes (excluding GetParam) should be observed, in topo
-        // order: eq first, then not.
+        // Only computed bits[1] nodes (excluding GetParam) should be observed,
+        // in topo order: eq first, then not.
         let want = vec![(10, true), (11, false)];
         assert_eq!(obs.bool_events, want);
     }
@@ -4290,8 +4306,8 @@ fn f(x: bits[32] id=1) -> bits[32] {
         let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
         assert!(matches!(r, FnEvalResult::Success(_)));
 
-        // Only computed nodes (excluding GetParam) should be observed, in topo order:
-        // literal first, then add.
+        // Only computed nodes (excluding GetParam) should be observed, in topo
+        // order: literal first, then add.
         let got = obs.lines.join("\n") + "\n";
         let want = "node_text_id=2 value=bits[32]:1\nnode_text_id=3 value=bits[32]:3\n";
         assert_eq!(got, want);
@@ -4464,8 +4480,8 @@ fn f() -> bits[1] {
 
     #[test]
     fn test_encode_matches_xlsynth_interpreter() {
-        // Note: package-level validation requires ids to be unique across functions, so
-        // we keep a single function here.
+        // Note: package-level validation requires ids to be unique across
+        // functions, so we keep a single function here.
         let ir_text = r#"package test
 
 fn f(x: bits[8] id=1) -> bits[3] {
@@ -4511,9 +4527,11 @@ fn f(x: bits[8] id=1) -> bits[3] {
 
     #[test]
     fn test_encode_after_umul_matches_xlsynth_interpreter() {
-        // This is the minimal CI-discovered shape: `umul` feeding into `encode`.
+        // This is the minimal CI-discovered shape: `umul` feeding into
+        // `encode`.
         //
-        // Pick x=6 so umul(x,x) == 36 == 0b100100, which has bits set at indices 5 and
+        // Pick x=6 so umul(x,x) == 36 == 0b100100, which has bits set at
+        // indices 5 and
         // 2. XLS encode semantics (and xlsynth interpreter behavior) ORs those
         // indices: 5|2 == 7.
         let ir_text = r#"package test
@@ -4547,8 +4565,8 @@ fn f(x: bits[6] id=1) -> bits[3] {
     #[test]
     #[should_panic(expected = "BitSlice OOB")]
     fn test_eval_fn_oob_bit_slice_panics_for_unvalidated_fn() {
-        // OOB static bit_slice is invalid XLS IR. Evaluation assumes verification
-        // has already produced the user-facing diagnostic.
+        // OOB static bit_slice is invalid XLS IR. Evaluation assumes
+        // verification has already produced the user-facing diagnostic.
         let ir_text = r#"package test
 
 fn f(x: bits[3] id=1) -> bits[1] {
@@ -4568,7 +4586,8 @@ fn f(x: bits[3] id=1) -> bits[1] {
 
     #[test]
     fn test_eval_pure_array_update_no_indices_replaces_entire_array() {
-        // Base array: [0,1,2], new array: [9,9,9], indices=[] => result=new array
+        // Base array: [0,1,2], new array: [9,9,9], indices=[] => result=new
+        // array
         let base = IrValue::make_array(&[
             IrValue::make_ubits(8, 0).unwrap(),
             IrValue::make_ubits(8, 1).unwrap(),
@@ -4743,7 +4762,8 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
             _ => unreachable!(),
         };
 
-        // a = [1,2,3,4], v = 9, i = 5 (OOB) => unchanged when not assumed_in_bounds
+        // a = [1,2,3,4], v = 9, i = 5 (OOB) => unchanged when not
+        // assumed_in_bounds
         let a = IrValue::make_array(&[
             IrValue::make_ubits(5, 1).unwrap(),
             IrValue::make_ubits(5, 2).unwrap(),

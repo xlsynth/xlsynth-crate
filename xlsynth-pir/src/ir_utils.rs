@@ -671,8 +671,9 @@ pub fn compact_and_toposort_with_mapping_in_place(
             match old_to_new.get(dep.index).and_then(|x| *x) {
                 Some(new_index) => NodeRef { index: new_index },
                 None => {
-                    // Encountered a dependency that was removed (Nil). This indicates the
-                    // function still references a deleted node; surface an error.
+                    // Encountered a dependency that was removed (Nil). This
+                    // indicates the function still
+                    // references a deleted node; surface an error.
                     panic!(
                         "compact_and_toposort_in_place: dependency {} was removed (Nil)",
                         dep.index
@@ -1405,8 +1406,8 @@ fn main(x: bits[8] id=1) -> bits[8] {
 
     #[test]
     fn topo_large_chain_non_recursive() {
-        // Build a long identity chain to stress recursion; here we expect non-recursive
-        // handling.
+        // Build a long identity chain to stress recursion; here we expect
+        // non-recursive handling.
         let mut ir = String::from("fn g(x: bits[1] id=1) -> bits[1] {\n");
         ir.push_str("  n2: bits[1] = identity(x, id=2)\n");
         let chain_len = 1024;
@@ -1433,8 +1434,8 @@ fn main(x: bits[8] id=1) -> bits[8] {
 
     #[test]
     fn topo_two_independent_chains_depth_first_contiguous() {
-        // Two independent chains A and B. DFS-based topo should list all A nodes
-        // before all B nodes (no interleaving), then ret.
+        // Two independent chains A and B. DFS-based topo should list all A
+        // nodes before all B nodes (no interleaving), then ret.
         let f = parse_fn(
             r#"fn f() -> bits[1] {
   a1: bits[1] = literal(value=1, id=1)
@@ -1447,7 +1448,8 @@ fn main(x: bits[8] id=1) -> bits[8] {
 }"#,
         );
         let order = get_topological(&f);
-        // Collect positions of nodes; indices 0..=2 are chain A, 3..=5 are chain B.
+        // Collect positions of nodes; indices 0..=2 are chain A, 3..=5 are
+        // chain B.
         let mut pos: Vec<usize> = vec![0; f.nodes.len()];
         for (i, nr) in order.iter().enumerate() {
             pos[nr.index] = i;
@@ -1892,7 +1894,8 @@ mod users_tests {
         let users = compute_users(&f);
         assert_eq!(users.len(), f.nodes.len());
 
-        // Find literal and its sole user (the identity node) by payload relationships.
+        // Find literal and its sole user (the identity node) by payload
+        // relationships.
         let mut lit_ref: Option<NodeRef> = None;
         let mut idn_ref: Option<NodeRef> = None;
         for (i, node) in f.nodes.iter().enumerate() {
@@ -1949,7 +1952,8 @@ mod users_tests {
         let a = a_ref.expect("expected lhs operand");
         let b = b_ref.expect("expected rhs operand");
 
-        // Find unreachable literal as the literal that is not an operand of 'and'.
+        // Find unreachable literal as the literal that is not an operand of
+        // 'and'.
         for (i, node) in f.nodes.iter().enumerate() {
             if let NodePayload::Literal(_) = &node.payload {
                 let nr = NodeRef { index: i };

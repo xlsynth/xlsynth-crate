@@ -274,8 +274,8 @@ impl Scheduler {
             cancel_flag,
             deadlines: BTreeMap::new(),
         };
-        // Precompute planned cmdlines for all tasks so short-circuited tasks still
-        // report one.
+        // Precompute planned cmdlines for all tasks so short-circuited tasks
+        // still report one.
         for n in &sched.nodes {
             if let NodeInner::Task(t) = &n.inner {
                 let cmd = t.task.to_command();
@@ -329,12 +329,13 @@ impl Scheduler {
             }
 
             if self.running.is_empty() {
-                // No running processes; if root not resolved and no runnable left, consider
-                // failure.
+                // No running processes; if root not resolved and no runnable
+                // left, consider failure.
                 panic!("prover: no running tasks remain and root unresolved; should not happen");
             }
 
-            // Block until any child process changes state; handle one completion at a time.
+            // Block until any child process changes state; handle one
+            // completion at a time.
             if let Err(_e) = self.wait_for_one_child_and_handle() {
                 return Err(io::Error::new(io::ErrorKind::Other, "waitpid failed"));
             }
@@ -406,7 +407,8 @@ impl Scheduler {
                 if self.is_task_runnable(tid) {
                     self.spawn_task(tid)?;
                 } else {
-                    // This happens only when inconsistent state is left by the cleanup.
+                    // This happens only when inconsistent state is left by the
+                    // cleanup.
                     assert!(!self.is_task_completed(tid));
                     self.round_robin.push_back(tid);
                 }
@@ -433,19 +435,22 @@ impl Scheduler {
     /// - A temp JSON file is created and tracked in `json_files`.
     fn spawn_task(&mut self, task_id: NodeId) -> io::Result<()> {
         let node = &mut self.nodes[task_id.0];
-        // Build command and tempfiles; only insert into maps after successful spawn.
+        // Build command and tempfiles; only insert into maps after successful
+        // spawn.
         let (mut cmd, stdout_tmp, stderr_tmp, json_tmp, json_path, timeout_ms, cmdline) =
             match &mut node.inner {
                 NodeInner::Task(t) => match t.state {
                     TaskState::NotStarted => {
                         let mut cmd = t.task.to_command();
-                        // Create a temp path for JSON results and pass it to the child.
+                        // Create a temp path for JSON results and pass it to
+                        // the child.
                         let json_tmp = tempfile::Builder::new().suffix(".json").tempfile()?;
                         let json_path = json_tmp.path().to_path_buf();
                         cmd.arg("--output_json").arg(&json_path);
                         let json_path = json_path.display().to_string();
 
-                        // Create temp files to capture stdout/stderr; pass fds to child.
+                        // Create temp files to capture stdout/stderr; pass fds
+                        // to child.
                         let stdout_tmp = tempfile::Builder::new().suffix(".stdout").tempfile()?;
                         let stderr_tmp = tempfile::Builder::new().suffix(".stderr").tempfile()?;
                         let stdout_file = stdout_tmp.as_file().try_clone()?;
@@ -465,8 +470,8 @@ impl Scheduler {
                             format!("{} {}", program, args.join(" "))
                         };
 
-                        // Ensure child is leader of its own process group so we can kill the
-                        // subtree.
+                        // Ensure child is leader of its own process group so we
+                        // can kill the subtree.
                         unsafe {
                             cmd.pre_exec(|| {
                                 let rc = libc::setpgid(0, 0);
@@ -602,7 +607,8 @@ impl Scheduler {
             };
 
             if let Some(tid) = self.pid_to_node.remove(&pid) {
-                // If the task was already indefinite, do not convert it to normal or bubble up.
+                // If the task was already indefinite, do not convert it to
+                // normal or bubble up.
                 let was_indefinite = self.is_task_indefinite(tid);
                 if was_indefinite {
                     debug!("prover: reaped indefinite task pid={}", pid);
@@ -621,7 +627,8 @@ impl Scheduler {
 
                 let success = self.read_success_from_json(tid);
 
-                // Read captured stdout/stderr for this task; store for final report printing.
+                // Read captured stdout/stderr for this task; store for final
+                // report printing.
                 let mut captured_stdout: Option<String> = None;
                 let mut captured_stderr: Option<String> = None;
                 if let Some((stdout_tmp, stderr_tmp, _cmdline)) = self.outputs.remove(&tid) {
@@ -765,8 +772,8 @@ impl Scheduler {
             )
         };
 
-        // Only consider the direct child's actual resolved outcome (if any) for early
-        // resolution.
+        // Only consider the direct child's actual resolved outcome (if any) for
+        // early resolution.
         let child_outcome = self.node_outcome(child_id);
 
         match kind {
@@ -1079,7 +1086,8 @@ impl Scheduler {
             }
 
             if !reaped_any {
-                // Brief sleep to avoid busy-wait; children were SIGKILLed in cancel_subtree.
+                // Brief sleep to avoid busy-wait; children were SIGKILLed in
+                // cancel_subtree.
                 let mut ts = libc::timespec {
                     tv_sec: 0,
                     tv_nsec: 100 * 1000000,
@@ -1162,7 +1170,8 @@ pub fn run_prover_plan(plan: ProverPlan, max_procs: usize) -> io::Result<ProverR
     let mut sig_ids = Vec::new();
     for sig in [SIGINT, SIGTERM, SIGHUP] {
         let flag = Arc::clone(&cancel_flag);
-        // Set the flag from signal handler; store SigId so we can unregister on exit.
+        // Set the flag from signal handler; store SigId so we can unregister on
+        // exit.
         match unsafe { siglow::register(sig, move || flag.store(true, Ordering::Relaxed)) } {
             Ok(id) => sig_ids.push(id),
             Err(e) => warn!("prover: failed to register signal {}: {}", sig, e),
@@ -1306,14 +1315,15 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
     match run_prover_plan(plan, cores) {
         Ok(report) => {
             if let Some(path) = &output_json_path {
-                // Write full report including plan tree and captured outputs; do not print
-                // per-task outputs.
+                // Write full report including plan tree and captured outputs;
+                // do not print per-task outputs.
                 let s = serde_json::to_string(&report).unwrap();
                 if let Err(e) = std::fs::write(path, s) {
                     warn!("prover: failed writing output_json to {}: {}", path, e);
                 }
             } else {
-                // No JSON requested; print all task outputs together at the end in DFS order.
+                // No JSON requested; print all task outputs together at the end
+                // in DFS order.
                 fn print_task_outputs(node: &ProverReportNode) {
                     match node {
                         ProverReportNode::Task {

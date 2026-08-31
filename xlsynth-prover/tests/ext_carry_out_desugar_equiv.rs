@@ -18,8 +18,8 @@ fn ext_carry_out_equivalent_to_desugared_export_form_and_exports_to_upstream() {
             p.parse_and_validate_package().expect("parse/validate")
         };
 
-        // Export smoke: desugaring removes extension spelling and is accepted by
-        // upstream XLS.
+        // Export smoke: desugaring removes extension spelling and is accepted
+        // by upstream XLS.
         let exported = emit_package_as_xls_ir_text(&pkg).expect("export desugaring");
         assert!(
             !exported.contains("ext_carry_out"),

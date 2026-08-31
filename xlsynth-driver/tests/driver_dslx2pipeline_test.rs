@@ -82,8 +82,8 @@ fn test_dslx2pipeline_output_ir_files(use_tool_path: bool) {
     assert!(!unopt_ir_text.trim().is_empty());
     assert!(!opt_ir_text.trim().is_empty());
 
-    // Use `xlsynth-driver ir-equiv` to prove the unoptimized and optimized IRs are
-    // equivalent.
+    // Use `xlsynth-driver ir-equiv` to prove the unoptimized and optimized IRs
+    // are equivalent.
     let module_name = xlsynth::dslx_path_to_module_name(&dslx_path).unwrap();
     let ir_top = xlsynth::mangle_dslx_name(module_name, "main").unwrap();
 

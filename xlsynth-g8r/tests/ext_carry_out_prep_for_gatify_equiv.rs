@@ -212,9 +212,9 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
 #[test]
 fn carry_out_rewrite_can_trigger_with_range_info_msb_zero_proof() {
     // With a range proof, this becomes safe:
-    // `umod(..., 256)` constrains the 9-bit values to <256, so their MSB (bit 8)
-    // is provably 0. Then the MSB of the 9-bit sum equals carry-out of the low
-    // 8-bit add.
+    // `umod(..., 256)` constrains the 9-bit values to <256, so their MSB (bit
+    // 8) is provably 0. Then the MSB of the 9-bit sum equals carry-out of
+    // the low 8-bit add.
     let ir_text = "package sample
 
 top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {

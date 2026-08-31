@@ -397,7 +397,8 @@ mod tests {
         };
         assert_eq!(skel_payload.lhs.top_func, "f1_comp");
         assert_eq!(skel_payload.rhs.top_func, "f2_comp");
-        // LHS gets all file1 slices + composed; RHS gets all file2 slices + composed
+        // LHS gets all file1 slices + composed; RHS gets all file2 slices +
+        // composed
         let lhs_appends = skel_payload.lhs.file.edits.len();
         let rhs_appends = skel_payload.rhs.file.edits.len();
         assert_eq!(lhs_appends, 3);

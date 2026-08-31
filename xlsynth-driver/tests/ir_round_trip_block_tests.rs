@@ -23,7 +23,8 @@ fn test_ir_round_trip_standalone_block() {
 
 #[test]
 fn test_ir_round_trip_package_with_top_block() {
-    // Input package that includes a top block equivalent to the expected emission.
+    // Input package that includes a top block equivalent to the expected
+    // emission.
     let input_ir = r#"package p
 
 top block myb(a: bits[1], out: bits[1]) {
@@ -48,9 +49,9 @@ top block myb(a: bits[1], out: bits[1]) {
 
 #[test]
 fn test_ir_round_trip_package_invalid_fn_but_valid_block_fails() {
-    // Package starts with an invalid top fn (missing -> ...) but contains a valid
-    // block. ir-round-trip should reject the malformed package instead of
-    // recovering a later block member.
+    // Package starts with an invalid top fn (missing -> ...) but contains a
+    // valid block. ir-round-trip should reject the malformed package
+    // instead of recovering a later block member.
     let input_ir = r#"package p
 
 top fn broken() {

@@ -2,6 +2,7 @@
 
 pub mod dslx;
 pub mod dslx_bridge;
+pub mod external_tool;
 pub mod ir_analysis;
 pub mod ir_builder;
 pub mod ir_package;

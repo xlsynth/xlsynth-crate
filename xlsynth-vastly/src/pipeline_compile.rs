@@ -222,8 +222,8 @@ fn compile_pipeline_module_with_options(
             )
         })?;
 
-    // Partition always_ff blocks into zero or more stateful seq blocks and observer
-    // blocks.
+    // Partition always_ff blocks into zero or more stateful seq blocks and
+    // observer blocks.
     let mut stateful: Vec<(crate::sv_ast::AlwaysFf, Span)> = Vec::new();
     for (af, af_span) in always_ffs {
         if af.clk_name != clk_name {

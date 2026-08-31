@@ -229,7 +229,8 @@ fn build_args_for_call(
         .get_elements()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    // Activation (u1) immediately follows token when present in the IR signature.
+    // Activation (u1) immediately follows token when present in the IR
+    // signature.
     if is_itok {
         assert!(
             fty.param_count() >= 2,

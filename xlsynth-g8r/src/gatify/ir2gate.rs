@@ -675,8 +675,8 @@ fn gatify_array_index_oob_one_hot(
     let oob = gb.add_ez(&index_decoded, ReductionKind::Tree);
     let one_hot_selector = AigBitVector::concat(oob.into(), index_decoded);
 
-    // An array index selection is effectively a one hot selection of the elements
-    // into a single element result.
+    // An array index selection is effectively a one hot selection of the
+    // elements into a single element result.
     let mut cases = Vec::new();
     for i in 0..array_element_count {
         let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
@@ -822,9 +822,10 @@ fn gatify_array_slice_element_mux_if_profitable(
         return None;
     }
 
-    // The bit-shift lowering must synthesize `start * e_bits`; this is especially
-    // expensive when `e_bits` is not a power of two. Single-bit elements also
-    // consistently benefit from selecting element windows directly.
+    // The bit-shift lowering must synthesize `start * e_bits`; this is
+    // especially expensive when `e_bits` is not a power of two. Single-bit
+    // elements also consistently benefit from selecting element windows
+    // directly.
     if e_bits != 1 && e_bits.is_power_of_two() {
         return None;
     }
@@ -864,10 +865,11 @@ fn gatify_array_slice_bit_shift(
         // `start_bits` cannot represent `last_idx` (or any larger index), so an
         // out-of-bounds start is impossible from the type alone.
         //
-        // Example: for 8 elements, `last_idx = 7` (needs 3 bits). If `start_w = 2`,
-        // representable starts are only 0..=3, all in-bounds. Clamping would be a
-        // semantic no-op, so keep `start_bits` as-is and avoid creating an
-        // out-of-range literal like bits[2]:7.
+        // Example: for 8 elements, `last_idx = 7` (needs 3 bits). If `start_w =
+        // 2`, representable starts are only 0..=3, all in-bounds.
+        // Clamping would be a semantic no-op, so keep `start_bits`
+        // as-is and avoid creating an out-of-range literal like
+        // bits[2]:7.
         start_bits.clone()
     } else {
         let last_idx_bits =
@@ -876,7 +878,8 @@ fn gatify_array_slice_bit_shift(
         gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits)
     };
 
-    // 1) Build a padding prefix of (width-1) copies of the last element to emulate
+    // 1) Build a padding prefix of (width-1) copies of the last element to
+    //    emulate
     // XLS out-of-bounds semantics (select last element when OOB).
     let last_elem = array_bits.get_lsb_slice((n_elems - 1) * e_bits, e_bits);
     let mut pad = AigBitVector::zeros(0);
@@ -889,8 +892,8 @@ fn gatify_array_slice_bit_shift(
     // 2) Concatenate pad || array_bits to form the extended sequence.
     let extended = AigBitVector::concat(pad, array_bits.clone());
 
-    // 3) Compute start_scaled = clamped_start * e_bits, with sufficient width to
-    //    hold the product.
+    // 3) Compute start_scaled = clamped_start * e_bits, with sufficient width
+    //    to hold the product.
     let mut tmp = if e_bits > 0 { e_bits - 1 } else { 0 };
     let mut extra = 0usize;
     while tmp > 0 {
@@ -1018,8 +1021,8 @@ fn gatify_sel(
         let one_hot_selector = AigBitVector::concat(oob.into(), index_decoded);
         gatify_one_hot_select(gb, &one_hot_selector, &ohs_cases)
     } else {
-        // This is the scenario where there is no OOB case so we can just OHS using the
-        // decoded value.
+        // This is the scenario where there is no OOB case so we can just OHS
+        // using the decoded value.
         gatify_one_hot_select(gb, &index_decoded, &ohs_cases)
     }
 }
@@ -1635,8 +1638,8 @@ pub fn gatify_ule_via_adder(
         Some(&format!("ule_{}", text_id)),
         gb,
     );
-    // Note: there's a choice here of whether to test after subtraction or equality
-    // before subtraction.
+    // Note: there's a choice here of whether to test after subtraction or
+    // equality before subtraction.
     let is_lt = gb.add_not(c_out);
     let is_eq = gb.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
     gb.add_or_binary(is_lt, is_eq)
@@ -1862,8 +1865,8 @@ fn get_pow2_lsb_index(bits: &xlsynth::IrBits) -> Option<usize> {
 }
 
 pub(super) fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
-    // Recognizes values of the form (1<<k)-1, i.e. k low bits are 1 and the rest
-    // are 0. k=0 => 0, k=bit_count => all ones.
+    // Recognizes values of the form (1<<k)-1, i.e. k low bits are 1 and the
+    // rest are 0. k=0 => 0, k=bit_count => all ones.
     let bit_count = bits.get_bit_count();
     let mut k = 0usize;
     while k < bit_count && bits.get_bit(k).unwrap() {
@@ -1893,8 +1896,9 @@ fn normalize_umul_literal_rhs(
 }
 
 fn get_neg_pow2_k(bits: &xlsynth::IrBits) -> Option<usize> {
-    // Recognizes values of the form -2^k in two's complement, i.e. high bits are
-    // 1 and the low k bits are 0. k=0 => all ones, k=bit_count-1 => int_min.
+    // Recognizes values of the form -2^k in two's complement, i.e. high bits
+    // are 1 and the low k bits are 0. k=0 => all ones, k=bit_count-1 =>
+    // int_min.
     let bit_count = bits.get_bit_count();
     assert!(bit_count > 0);
     if !bits.get_bit(bit_count - 1).unwrap() {
@@ -2050,8 +2054,8 @@ fn try_simplify_cmp_literal_rhs(
             } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
                 // x < (1<<k)-1  iff  upper_bits == 0  AND  low_bits != all_ones
                 //
-                // When k==0 => rhs==0, handled above. When k==bit_count => rhs==all_ones,
-                // handled above.
+                // When k==0 => rhs==0, handled above. When k==bit_count =>
+                // rhs==all_ones, handled above.
                 assert!(k > 0 && k < bit_count);
                 let upper = lhs_bits.get_lsb_slice(k, bit_count - k);
                 let upper_is_zero = gb.add_ez(&upper, ReductionKind::Tree);
@@ -2070,15 +2074,17 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.get_true())
             } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
                 assert!(k < bit_count);
-                // For small k, the (upper==0) & (!bit_k | low==0) form is cheaper than building
-                // a full equality check. For larger k, this form adds extra
+                // For small k, the (upper==0) & (!bit_k | low==0) form is
+                // cheaper than building a full equality check.
+                // For larger k, this form adds extra
                 // reduction depth, so we use (lt | eq) instead.
                 if k <= 4 {
-                    // x <= (1<<k) iff upper bits above k are zero and (bit_k is 0 or low bits are
-                    // zero).
+                    // x <= (1<<k) iff upper bits above k are zero and (bit_k is
+                    // 0 or low bits are zero).
                     //
-                    // This captures the fact that with upper bits = 0, values are in [0, 2^(k+1)-1]
-                    // and the only disallowed case is bit_k=1 with any lower bit set.
+                    // This captures the fact that with upper bits = 0, values
+                    // are in [0, 2^(k+1)-1] and the only
+                    // disallowed case is bit_k=1 with any lower bit set.
                     let upper = lhs_bits.get_lsb_slice(k + 1, bit_count.saturating_sub(k + 1));
                     let upper_is_zero = if upper.get_bit_count() == 0 {
                         gb.get_true()
@@ -2117,8 +2123,8 @@ fn try_simplify_cmp_literal_rhs(
             } else if rhs_is_all_ones {
                 Some(gb.get_false())
             } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
-                // x > (1<<k) iff (upper bits above k are non-zero) OR (bit_k is 1 AND low bits
-                // are non-zero).
+                // x > (1<<k) iff (upper bits above k are non-zero) OR (bit_k is
+                // 1 AND low bits are non-zero).
                 assert!(k < bit_count);
                 let upper = lhs_bits.get_lsb_slice(k + 1, bit_count.saturating_sub(k + 1));
                 let upper_is_nonzero = if upper.get_bit_count() == 0 {
@@ -2154,10 +2160,11 @@ fn try_simplify_cmp_literal_rhs(
                 let lt_pow2 = gb.add_ez(&slice, ReductionKind::Tree);
                 Some(gb.add_not(lt_pow2))
             } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
-                // x >= (1<<k)-1  iff  (upper_bits != 0) OR (low_bits == all_ones)
+                // x >= (1<<k)-1  iff  (upper_bits != 0) OR (low_bits ==
+                // all_ones)
                 //
-                // When k==0 => rhs==0, handled above. When k==bit_count => rhs==all_ones,
-                // handled above.
+                // When k==0 => rhs==0, handled above. When k==bit_count =>
+                // rhs==all_ones, handled above.
                 assert!(k > 0 && k < bit_count);
                 let upper = lhs_bits.get_lsb_slice(k, bit_count - k);
                 let upper_is_zero = gb.add_ez(&upper, ReductionKind::Tree);
@@ -2195,8 +2202,9 @@ fn try_simplify_cmp_literal_rhs(
                     // rhs is non-negative: any negative lhs is strictly less.
                     Some(gb.add_or_binary(msb, u))
                 } else {
-                    // rhs is negative: lhs must also be negative, and then signed
-                    // ordering matches unsigned ordering.
+                    // rhs is negative: lhs must also be negative, and then
+                    // signed ordering matches unsigned
+                    // ordering.
                     Some(gb.add_and_binary(msb, u))
                 }
             }
@@ -2257,11 +2265,13 @@ fn try_simplify_cmp_literal_rhs(
                     rhs_bits,
                 );
                 if is_non_negative_signed(rhs_bits) {
-                    // rhs is non-negative: lhs must be non-negative, and then signed
-                    // ordering matches unsigned ordering.
+                    // rhs is non-negative: lhs must be non-negative, and then
+                    // signed ordering matches unsigned
+                    // ordering.
                     Some(gb.add_and_binary(nonneg, u))
                 } else {
-                    // rhs is negative: any non-negative lhs is strictly greater.
+                    // rhs is negative: any non-negative lhs is strictly
+                    // greater.
                     Some(gb.add_or_binary(nonneg, u))
                 }
             }
@@ -2288,8 +2298,9 @@ fn try_simplify_cmp_literal_rhs(
                     rhs_bits,
                 );
                 if is_non_negative_signed(rhs_bits) {
-                    // rhs is non-negative: lhs must be non-negative, and then signed
-                    // ordering matches unsigned ordering.
+                    // rhs is non-negative: lhs must be non-negative, and then
+                    // signed ordering matches unsigned
+                    // ordering.
                     Some(gb.add_and_binary(nonneg, u))
                 } else {
                     // rhs is negative: any non-negative lhs is >= rhs.
@@ -2567,8 +2578,8 @@ pub fn gatify_scmp_via_bit_tests(
 
     let bit_count = lhs_bits.get_bit_count();
     if bit_count == 1 {
-        // Special-case 1-bit: In two's complement, 0 represents 0 and 1 represents -1.
-        // Thus, for a 1-bit comparison:
+        // Special-case 1-bit: In two's complement, 0 represents 0 and 1
+        // represents -1. Thus, for a 1-bit comparison:
         //   a < b is true if a = 1 and b = 0.
         //   a > b is true if a = 0 and b = 1.
         let a = *lhs_bits.get_lsb(0);
@@ -2585,9 +2596,10 @@ pub fn gatify_scmp_via_bit_tests(
         }
     } else {
         // Signed comparisons:
-        // - If signs differ, a < b iff a is negative, and a > b iff b is negative.
-        // - If signs are the same, signed order matches unsigned order on the lower
-        //   bits; the equal sign bits do not need to be compared again.
+        // - If signs differ, a < b iff a is negative, and a > b iff b is
+        //   negative.
+        // - If signs are the same, signed order matches unsigned order on the
+        //   lower bits; the equal sign bits do not need to be compared again.
         let a_msb = lhs_bits.get_msb(0);
         let b_msb = rhs_bits.get_msb(0);
         let sign_diff = gb.add_xor_binary(*a_msb, *b_msb);
@@ -2632,8 +2644,8 @@ pub fn gatify_scmp(
     );
     let bit_count = lhs_bits.get_bit_count();
     if bit_count == 1 {
-        // Special-case 1-bit: In two's complement, 0 represents 0 and 1 represents -1.
-        // Thus, for a 1-bit comparison:
+        // Special-case 1-bit: In two's complement, 0 represents 0 and 1
+        // represents -1. Thus, for a 1-bit comparison:
         //   a < b is true if a = 1 and b = 0.
         //   a > b is true if a = 0 and b = 1.
         let a = *lhs_bits.get_lsb(0);
@@ -2661,7 +2673,8 @@ pub fn gatify_scmp(
             }
         }
     } else {
-        // For multi-bit signed comparisons, compute diff = a - b = a + (not b) + 1.
+        // For multi-bit signed comparisons, compute diff = a - b = a + (not b)
+        // + 1.
         let b_complement = gb.add_not_vec(rhs_bits);
         let scmp_tag = format!("scmp_{}", text_id);
         let (_carry, diff) = gatify_add_with_mapping(
@@ -2783,8 +2796,8 @@ fn gatify_encode(
         // Input bits that contribute to the jth output bit.
         let mut or_candidates: Vec<AigOperand> = Vec::new();
 
-        // For each input bit, check if the j-th bit of its index is `1`. That means
-        // it contributes to the jth output bit.
+        // For each input bit, check if the j-th bit of its index is `1`. That
+        // means it contributes to the jth output bit.
         for i in 0..input_bit_count {
             // Shifting by an amount >= width of usize is UB in Rust. If that
             // happens we know the result would be zero, so we can avoid the
@@ -2831,8 +2844,8 @@ fn gatify_decode(
             continue;
         }
         let mut terms = Vec::with_capacity(input_count);
-        // For each bit in the input, choose whether to use the bit directly or its
-        // inversion.
+        // For each bit in the input, choose whether to use the bit directly or
+        // its inversion.
         for j in 0..input_count {
             let bit = arg_bits.get_lsb(j);
             // Avoid shifting by more than the width of `usize`.
@@ -2904,19 +2917,19 @@ fn gatify_shra(
     let w = arg_bits.get_bit_count();
     assert!(w > 0, "shra requires non-zero-width operands");
 
-    // Effective shift bits needed to represent [0..w-1]. When w<=1, shifting is a
-    // no-op.
+    // Effective shift bits needed to represent [0..w-1]. When w<=1, shifting is
+    // a no-op.
     let required_k = if w <= 1 {
         0
     } else {
         xlsynth_pir::math::ceil_log2(w)
     };
 
-    // If range_info proves amount < w, there can be no out-of-bounds case and we
-    // may ignore any provably-irrelevant high bits.
+    // If range_info proves amount < w, there can be no out-of-bounds case and
+    // we may ignore any provably-irrelevant high bits.
     let (k_for_shift, oob): (usize, AigOperand) = if range_info.is_some_and(|ri| {
-        // `proves_ult(amount, w)` means the dynamic shift amount is always in-bounds
-        // for this consumer.
+        // `proves_ult(amount, w)` means the dynamic shift amount is always
+        // in-bounds for this consumer.
         ri.proves_ult(amount_text_id, w)
     }) {
         let max_effective_bits = range_info
@@ -2935,7 +2948,8 @@ fn gatify_shra(
             lsbs: _,
         } = amount_bits.get_lsb_partition(k);
 
-        // `oob_hi` is true when any higher (beyond `k`) shift amount bit is set.
+        // `oob_hi` is true when any higher (beyond `k`) shift amount bit is
+        // set.
         let oob = if amt_hi.get_bit_count() == 0 {
             gb.get_false()
         } else {
@@ -2950,9 +2964,9 @@ fn gatify_shra(
 
     let amt_lo = amount_bits.get_lsb_slice(0, k_for_shift);
     let arith = if !w.is_power_of_two() && k_for_shift == required_k {
-        // Low shift amounts in [w, next_power_of_two(w)) naturally produce all sign
-        // bits through the staged sign-fill shifter, so only high amount bits need a
-        // separate out-of-bounds mux.
+        // Low shift amounts in [w, next_power_of_two(w)) naturally produce all
+        // sign bits through the staged sign-fill shifter, so only high
+        // amount bits need a separate out-of-bounds mux.
         gatify_arithmetic_right_barrel_shifter(
             arg_bits,
             &amt_lo,
@@ -2961,8 +2975,9 @@ fn gatify_shra(
         )
     } else {
         // For power-of-two widths or too-narrow amount fields, the former
-        // sign-extend-then-logical-shift shape remains slightly smaller after AIG
-        // folding because there is no low-field saturation case to remove.
+        // sign-extend-then-logical-shift shape remains slightly smaller after
+        // AIG folding because there is no low-field saturation case to
+        // remove.
         let sign_ext = gb.replicate(sign, w);
         let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
         let shifted = gatify_barrel_shifter(
@@ -3135,8 +3150,8 @@ fn gatify_node(
         }
         ir::NodePayload::Array(members) => {
             // Similar to Tuple: flatten all members into a bit vector.
-            // Arrays are conceptually homogeneous, but in bit flattening, we just
-            // concatenate all elements.
+            // Arrays are conceptually homogeneous, but in bit flattening, we
+            // just concatenate all elements.
             let mut lsb_to_msb = Vec::new();
             for member in members.iter() {
                 let member_bits = env
@@ -3148,8 +3163,8 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(bit_vector));
         }
         ir::NodePayload::TupleIndex { tuple, index } => {
-            // We have to figure out what bit range the index indicates from the original
-            // tuple's flat bits.
+            // We have to figure out what bit range the index indicates from the
+            // original tuple's flat bits.
             let tuple_bits = env.get_bit_vector(*tuple).unwrap();
             let tuple_ty = f.get_node_ty(*tuple);
             let StartAndLimit { start, limit } =
@@ -3164,16 +3179,18 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(bit_vector));
         }
         ir::NodePayload::Tuple(args) => {
-            // Tuples, similar to arrays, need to answer the question: "which member is
-            // least significant when flattened?"
+            // Tuples, similar to arrays, need to answer the question: "which
+            // member is least significant when flattened?"
             //
-            // When we perform: `tuple(a, b, c)` does `a` go in the lower bits or does `c`?
+            // When we perform: `tuple(a, b, c)` does `a` go in the lower bits
+            // or does `c`?
             //
-            // For concat we have `concat(a, b, c)` place `a` in the upper bits such that
-            // the result is: `a_msb, ..., a_lsb, b_msb, ..., b_lsb, c_msb,
-            // ..., c_lsb`. So we take the same approach for tuples -- we
-            // iterate the arguments in reverse order to make sure c's lsb
-            // comes first and build from lsb to msb.
+            // For concat we have `concat(a, b, c)` place `a` in the upper bits
+            // such that the result is: `a_msb, ..., a_lsb, b_msb,
+            // ..., b_lsb, c_msb, ..., c_lsb`. So we take the same
+            // approach for tuples -- we iterate the arguments in
+            // reverse order to make sure c's lsb comes first and
+            // build from lsb to msb.
 
             let mut lsb_to_msb = Vec::new();
             for arg in args.iter().rev() {
@@ -3190,8 +3207,8 @@ fn gatify_node(
             cases,
             default,
         } => {
-            // Note: sel is basically an array index into the cases where we pick default if
-            // the selector value is OOB.
+            // Note: sel is basically an array index into the cases where we
+            // pick default if the selector value is OOB.
             let impossible_case_indices =
                 get_impossible_in_bounds_sel_case_indices(options, f, *selector, cases.len());
             if !impossible_case_indices.is_empty() {
@@ -4164,8 +4181,9 @@ fn gatify_node(
             // -----------------------------------------------------------------
             let mask_not = g8_builder.add_not_vec(&mask);
             let cleared = g8_builder.add_and_vec(&arg_bits, &mask_not);
-            // `update_shifted` was zero-extended before shifting, so it is already
-            // zero outside the write window selected by `mask`.
+            // `update_shifted` was zero-extended before shifting, so it is
+            // already zero outside the write window selected by
+            // `mask`.
             let result_bits = g8_builder.add_or_vec(&cleared, &update_shifted);
 
             env.add(node_ref, GateOrVec::BitVector(result_bits));
@@ -4462,11 +4480,12 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
     validate_fn_for_gatify(orig_fn)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
 
-    // `prep_for_gatify` may introduce many new nodes (e.g. lowering ext ops), so
-    // any `NodeRef { index }` values produced during gatification generally
-    // refer to the *prepared* function's node vector. Most consumers want to
-    // interpret the lowering map in terms of the original function, so we
-    // remap prepared nodes back to original nodes via stable `text_id`.
+    // `prep_for_gatify` may introduce many new nodes (e.g. lowering ext ops),
+    // so any `NodeRef { index }` values produced during gatification
+    // generally refer to the *prepared* function's node vector. Most
+    // consumers want to interpret the lowering map in terms of the original
+    // function, so we remap prepared nodes back to original nodes via
+    // stable `text_id`.
     let mut orig_ref_by_text_id: HashMap<usize, ir::NodeRef> = HashMap::new();
     for (idx, n) in orig_fn.nodes.iter().enumerate() {
         orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
@@ -4539,8 +4558,8 @@ pub fn gatify_node_as_fn(
     );
     let mut env = GateEnv::new(f);
 
-    // Precompute a map from parameter id to its NodeRef in f.nodes. This is used
-    // when lowering GetParam nodes.
+    // Precompute a map from parameter id to its NodeRef in f.nodes. This is
+    // used when lowering GetParam nodes.
     let mut param_id_to_node_ref: HashMap<ParamId, ir::NodeRef> = HashMap::new();
     for (i, param) in f.params.iter().enumerate() {
         let param_ref = ir::NodeRef { index: i + 1 };
@@ -4743,7 +4762,8 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
 
         let lowering_map = gatify_output.lowering_map;
 
-        // Find the 'Not' node and its input parameter reference within the IR function.
+        // Find the 'Not' node and its input parameter reference within the IR
+        // function.
         let mut not_node_ref: Option<ir::NodeRef> = None;
         let mut param_ref: Option<ir::NodeRef> = None;
 
@@ -4759,7 +4779,8 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
         let not_ref = not_node_ref.expect("Could not find 'Not' node in IR function");
         let param_ref = param_ref.expect("Could not find input parameter for 'Not' node");
 
-        // Retrieve AIG vectors from the map using the identified node references
+        // Retrieve AIG vectors from the map using the identified node
+        // references
         let param_vec = lowering_map
             .get(&param_ref)
             .expect("Lowering for parameter node not found");
@@ -4770,14 +4791,15 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
         assert_eq!(param_vec.get_bit_count(), 8, "Param should be 8 bits");
         assert_eq!(not_vec.get_bit_count(), 8, "Node 'not' should be 8 bits");
 
-        // Verify that each bit in not_vec is the negation of the corresponding bit in
-        // param_vec
+        // Verify that each bit in not_vec is the negation of the corresponding
+        // bit in param_vec
         for i in 0..8 {
             let param_op = param_vec.get_lsb(i);
             let not_op = not_vec.get_lsb(i);
 
-            // The not operation should ideally result in operands pointing to the same
-            // underlying node but with opposite negation flags.
+            // The not operation should ideally result in operands pointing to
+            // the same underlying node but with opposite negation
+            // flags.
             assert_eq!(param_op.node, not_op.node, "Bit {} nodes should match", i);
             assert_ne!(
                 param_op.negated, not_op.negated,
@@ -6524,8 +6546,9 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
         let ir_package = parser.parse_and_validate_package().unwrap();
         let ir_fn = ir_package.get_top_fn().unwrap();
 
-        // Regression: this used to panic when clamping an out-of-bounds start index
-        // because last_idx (7) was forced into start width (2 bits).
+        // Regression: this used to panic when clamping an out-of-bounds start
+        // index because last_idx (7) was forced into start width (2
+        // bits).
         let gatify_output = gatify(
             &ir_fn,
             GatifyOptions {
@@ -6543,8 +6566,9 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
         );
 
         // Optional end-to-end equivalence check against the source IR.
-        // This test focuses on clamp behavior in the gate-level lowering itself.
-        // End-to-end IR equivalence for this wider-start case is covered elsewhere.
+        // This test focuses on clamp behavior in the gate-level lowering
+        // itself. End-to-end IR equivalence for this wider-start case
+        // is covered elsewhere.
         let _ = ir_fn;
     }
 

@@ -93,7 +93,8 @@ impl Transform for ToggleOutputBitTransform {
                 bit_idx,
             } => {
                 let res = do_toggle_output_bit(g, *output_idx, *bit_idx);
-                // Assert strong invariant: toggling output bit must not create cycles.
+                // Assert strong invariant: toggling output bit must not create
+                // cycles.
                 topo::debug_assert_no_cycles(&g.gates, "toggle_output_bit");
                 res
             }

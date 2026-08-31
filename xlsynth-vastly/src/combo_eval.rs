@@ -1168,8 +1168,8 @@ fn casez_matches(sel_bits_msb: &str, pat: &CasezPattern) -> bool {
     }
     let bits = pat.bits_msb.as_str();
     if bits.len() != pat.width as usize {
-        // Accept shorter patterns by left-padding with zeros (generator shouldn't do
-        // this).
+        // Accept shorter patterns by left-padding with zeros (generator
+        // shouldn't do this).
         if bits.len() > pat.width as usize {
             return false;
         }

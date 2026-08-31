@@ -77,8 +77,8 @@ impl CutDb {
     }
 
     pub fn load_from_reader(mut r: impl io::Read) -> Result<Self, LoadError> {
-        // Prefer v2 format (contains dense table). If that fails, try legacy v1 and
-        // upgrade (slow; only for compatibility).
+        // Prefer v2 format (contains dense table). If that fails, try legacy v1
+        // and upgrade (slow; only for compatibility).
         let bytes: Vec<u8> = {
             let mut v = Vec::new();
             r.read_to_end(&mut v)?;
@@ -198,7 +198,8 @@ impl CutDb {
                     xform,
                 };
             } else {
-                // Missing canonical entry => map to entry 0 which should be empty.
+                // Missing canonical entry => map to entry 0 which should be
+                // empty.
                 dense[tt_u as usize] = DenseInfo {
                     canon_index: 0,
                     xform,

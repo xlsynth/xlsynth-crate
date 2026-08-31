@@ -352,8 +352,9 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, config: &Option<Too
         .unwrap_or(0)
         .saturating_add(1);
 
-    // Use the meta-produced inners (which share union ordering). Rename RHS inner
-    // to the common inner name if needed so the LHS outer's invoke callee matches.
+    // Use the meta-produced inners (which share union ordering). Rename RHS
+    // inner to the common inner name if needed so the LHS outer's invoke
+    // callee matches.
     let mut lhs_inner = meta.lhs_inner.clone();
     lhs_inner.name = common_inner_name.clone();
     let mut rhs_inner = meta.rhs_inner.clone();
@@ -386,7 +387,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, config: &Option<Too
     println!("  LHS diff IR written to: {}", lhs_diff_path.display());
     println!("  RHS diff IR written to: {}", rhs_diff_path.display());
 
-    // Parse and verify the emitted diff packages; print results without panicking.
+    // Parse and verify the emitted diff packages; print results without
+    // panicking.
     {
         let mut p = ir_parser::Parser::new(&lhs_diff_pkg);
         match p.parse_and_validate_package() {

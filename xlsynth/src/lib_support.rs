@@ -145,10 +145,10 @@ pub(crate) unsafe fn c_str_to_rust_no_dealloc(xls_c_str: *mut std::os::raw::c_ch
 pub(crate) unsafe fn c_str_to_rust(xls_c_str: *mut std::os::raw::c_char) -> String {
     let result = unsafe { c_str_to_rust_no_dealloc(xls_c_str) };
 
-    // We release the C string via a call to the XLS library so that it can use the
-    // same allocator it used to allocate the string for deallocation and we don't
-    // need to assume the Rust code and dynmic library are using the same underlying
-    // allocator.
+    // We release the C string via a call to the XLS library so that it can use
+    // the same allocator it used to allocate the string for deallocation
+    // and we don't need to assume the Rust code and dynmic library are
+    // using the same underlying allocator.
     unsafe {
         xlsynth_sys::xls_c_str_free(xls_c_str);
     }

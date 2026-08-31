@@ -243,7 +243,8 @@ fn run_explore_exploit(
             let mut iter_offset: u64 = 0;
             const MIN_TEMP_RATIO: f64 = 1e-5;
 
-            // Explorer gets 10× the user-supplied temperature and does *not* cool.
+            // Explorer gets 10× the user-supplied temperature and does *not*
+            // cool.
             let explorer_temp = cfg_cl.initial_temperature * 10.0;
 
             let mut segment_temperature: f64;
@@ -369,7 +370,8 @@ fn main() -> Result<()> {
         initial_stats.live_nodes, initial_stats.deepest_path
     );
 
-    // Determine output paths early so that we can periodically dump during MCMC.
+    // Determine output paths early so that we can periodically dump during
+    // MCMC.
     let output_g8r_filename = "best.g8r";
     let output_stats_filename = "best.stats.json";
 

@@ -609,8 +609,9 @@ impl<'a> ClockDependencyAnalyzer<'a> {
             return Ok(*depends);
         }
         if !self.ident_visiting.insert(name.to_string()) {
-            // Combo assign cycles are rejected earlier; treat any unexpected re-entry
-            // conservatively so the fixture runner stays sound.
+            // Combo assign cycles are rejected earlier; treat any unexpected
+            // re-entry conservatively so the fixture runner stays
+            // sound.
             return Ok(true);
         }
 
@@ -635,8 +636,8 @@ impl<'a> ClockDependencyAnalyzer<'a> {
             return Ok(*depends);
         }
         if !self.function_visiting.insert(name.to_string()) {
-            // Recursive helper analysis is not expected here; reject recursively
-            // referenced functions conservatively.
+            // Recursive helper analysis is not expected here; reject
+            // recursively referenced functions conservatively.
             return Ok(true);
         }
 

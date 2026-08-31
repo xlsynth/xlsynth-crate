@@ -89,9 +89,10 @@ pub fn rebase_onto(
         .map(|nr| DesiredNodeRef(nr))
         .collect::<Vec<_>>();
     for d_ref in topo_desired.into_iter() {
-        // Note: NodeRef.index is a dense index into `Fn.nodes` (0..nodes.len()),
-        // not the textual node id. `desired_entries` was built by enumerating
-        // `desired.nodes`, so `desired_entries[d_idx]` corresponds to this index.
+        // Note: NodeRef.index is a dense index into `Fn.nodes`
+        // (0..nodes.len()), not the textual node id. `desired_entries`
+        // was built by enumerating `desired.nodes`, so
+        // `desired_entries[d_idx]` corresponds to this index.
         let d_idx = d_ref.0.index;
         let d_entry = &desired_entries[d_idx];
         let mut key = [0u8; 32];
@@ -125,8 +126,8 @@ pub fn rebase_onto(
             }
         };
         let new_payload = remap_payload_with(&d_node.payload, mapper);
-        // Ensure any new node name does not collide with names already present in the
-        // result.
+        // Ensure any new node name does not collide with names already present
+        // in the result.
         let new_name: Option<String> = match &d_node.name {
             Some(s) => Some(make_unique_name(s)),
             None => None,
@@ -255,7 +256,8 @@ mod tests {
             result.nodes[result_ret_idx].text_id,
             existing.nodes[existing_ret_idx].text_id
         );
-        // Topological orders should match existing since no new nodes were added.
+        // Topological orders should match existing since no new nodes were
+        // added.
         let order_existing: Vec<usize> = get_topological(&existing)
             .into_iter()
             .map(|nr| nr.index)
@@ -297,13 +299,14 @@ mod tests {
             id
         });
         assert_eq!(result.nodes.len(), existing.nodes.len() + 1);
-        // Ensure the mul node exists and depends on the existing add node (not a new
-        // add)
+        // Ensure the mul node exists and depends on the existing add node (not
+        // a new add)
         let mut mul_idx: Option<usize> = None;
         for (i, n) in result.nodes.iter().enumerate() {
             if let NodePayload::Binop(Binop::Umul, a, _c) = &n.payload {
                 mul_idx = Some(i);
-                // The operand 'a' should refer to a reused existing add node via text_id
+                // The operand 'a' should refer to a reused existing add node
+                // via text_id
                 let existing_add_text_id = existing
                     .nodes
                     .iter()
@@ -422,8 +425,8 @@ mod tests {
         let result = rebase_onto(&desired, &existing, "t_rebased", || 5000);
         // No new nodes
         assert_eq!(result.nodes.len(), existing.nodes.len());
-        // The chosen return should be the lower of the two identical add indices
-        // (deterministic)
+        // The chosen return should be the lower of the two identical add
+        // indices (deterministic)
         let add_indices: Vec<usize> = existing
             .nodes
             .iter()
@@ -455,9 +458,9 @@ mod tests {
   ret foo: bits[8] = add(x, y, id=3)
 }"#,
         );
-        // desired reuses the add node (with a different name) and adds a NEW node also
-        // named 'foo'. This would collide with existing's 'foo' unless we
-        // uniquify new-node names on rebase.
+        // desired reuses the add node (with a different name) and adds a NEW
+        // node also named 'foo'. This would collide with existing's
+        // 'foo' unless we uniquify new-node names on rebase.
         let desired = parse_fn(
             r#"fn c(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
   t: bits[8] = add(x, y, id=3)
@@ -477,8 +480,8 @@ mod tests {
 }"#;
         assert_eq!(result.to_string(), expected);
 
-        // Verify parse/validate of the pretty-printed result succeeds (no duplicate
-        // names).
+        // Verify parse/validate of the pretty-printed result succeeds (no
+        // duplicate names).
         let pkg_text = format!("package test\n\n top {}\n", result.to_string());
         let mut p = Parser::new(&pkg_text);
         let parsed_pkg = p.parse_and_validate_package();
@@ -498,8 +501,9 @@ mod tests {
                 );
             }
         }
-        // And the added node does not keep the conflicting base name 'foo' if it was
-        // already used. There should be at most one exact 'foo' in the result.
+        // And the added node does not keep the conflicting base name 'foo' if
+        // it was already used. There should be at most one exact 'foo'
+        // in the result.
         let foo_count = result
             .nodes
             .iter()

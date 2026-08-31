@@ -184,8 +184,8 @@ impl<I: Iterator<Item = u8>> AsciiStream<I> {
         ))
     }
 
-    // This scans forward through whitespace and/or comments until we see either an
-    // EOL or another character.
+    // This scans forward through whitespace and/or comments until we see either
+    // an EOL or another character.
     pub fn peek_char_or_eol(&mut self) -> Result<Option<u8>, String> {
         loop {
             self.ensure_buffer(2);
@@ -240,7 +240,8 @@ impl<I: Iterator<Item = u8>> AsciiStream<I> {
                 self.peek_line()
             ))
         } else {
-            // Since we assume ASCII, converting vector of bytes into String is safe.
+            // Since we assume ASCII, converting vector of bytes into String is
+            // safe.
             Ok(String::from_utf8_lossy(&ident).into_owned())
         }
     }
@@ -357,7 +358,8 @@ mod tests {
     fn test_char_stream_empty() {
         let input = "";
         let mut stream = AsciiStream::new(input.bytes());
-        // For an empty stream, both peek and next should immediately return None.
+        // For an empty stream, both peek and next should immediately return
+        // None.
         assert_eq!(stream.peek(), None);
     }
 

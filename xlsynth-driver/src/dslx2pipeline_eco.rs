@@ -102,8 +102,8 @@ fn dslx2pipeline_eco(
     let baseline_opt_ir_path = temp_dir.path().join("baseline_opt.ir");
     std::fs::write(&baseline_opt_ir_path, baseline_opt_ir).unwrap();
 
-    // Run the baseline opt IR through codegen to get the block IR and the residual
-    // metadata.
+    // Run the baseline opt IR through codegen to get the block IR and the
+    // residual metadata.
     let baseline_block_ir_path = temp_dir.path().join("baseline.block.ir");
     let baseline_residual_data_path = temp_dir.path().join("residual_data.pb");
     let baseline_codegen_flags = CodegenFlags {
@@ -121,8 +121,8 @@ fn dslx2pipeline_eco(
     let baseline_sv_path = temp_dir.path().join("baseline_sv.sv");
     std::fs::write(&baseline_sv_path, &baseline_sv).unwrap();
     if let Some(path) = output_baseline_verilog_path {
-        // Add a newline to the end of the file to match the output of dslx2pipeline
-        // which uses println.
+        // Add a newline to the end of the file to match the output of
+        // dslx2pipeline which uses println.
         std::fs::write(path, format!("{}\n", baseline_sv))
             .expect("write output_baseline_verilog_path");
     }

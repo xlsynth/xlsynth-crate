@@ -11,8 +11,8 @@ fn traverse_to_structure(
     start_numbering: usize,
     f: &GateFn,
 ) -> (String, usize) {
-    // We traverse down the AIG from the root node through single-use nodes only.
-    // This forms a structure description.
+    // We traverse down the AIG from the root node through single-use nodes
+    // only. This forms a structure description.
     assert!(node_to_use_count.get(root).unwrap() == &1);
     let mut args = Vec::new();
     let mut next_number = start_numbering;

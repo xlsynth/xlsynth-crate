@@ -269,7 +269,8 @@ impl fmt::Display for AnnotationValue {
         match self {
             AnnotationValue::I64(i) => write!(f, "{}", i),
             AnnotationValue::String(s) => {
-                // Annotation strings cannot contain embedded '"' per scanner rules.
+                // Annotation strings cannot contain embedded '"' per scanner
+                // rules.
                 let s = s.replace('"', "");
                 write!(f, "\"{}\"", s)
             }
@@ -291,7 +292,8 @@ impl fmt::Display for TokenPayload {
                 if is_simple_identifier(s) {
                     write!(f, "{}", s)
                 } else {
-                    // Escaped identifier: leading backslash, terminated by whitespace
+                    // Escaped identifier: leading backslash, terminated by
+                    // whitespace
                     write!(f, "\\{} ", s)
                 }
             }
@@ -646,7 +648,8 @@ impl<R: Read + 'static> TokenScanner<R> {
                 };
                 if self.peekb() == Some(b'\'') {
                     self.popb(); // consume '
-                    // Now parse base and value as a string until whitespace or '*' or ')'
+                    // Now parse base and value as a string until whitespace or
+                    // '*' or ')'
                     let mut base_and_value = String::new();
                     while let Some(b2) = self.peekb() {
                         let c2 = b2 as char;
@@ -911,7 +914,8 @@ impl<R: Read + 'static> TokenScanner<R> {
                     None => Ok(None),
                 };
             } else {
-                // Not a supported directive: report unexpected backtick at its position
+                // Not a supported directive: report unexpected backtick at its
+                // position
                 return Err(self.error_with_context(
                     "Unexpected character '`'",
                     Span {
@@ -936,7 +940,8 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
         // Handle identifier/keyword
         //
-        // Note that "escaped identifiers" can begin with the backslash character.
+        // Note that "escaped identifiers" can begin with the backslash
+        // character.
         if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' {
             return Ok(Some(self.pop_identifier(start)));
         }
@@ -958,9 +963,10 @@ impl<R: Read + 'static> TokenScanner<R> {
             };
             if self.peekb() == Some(b'\'') {
                 self.popb(); // consume '
-                // Now parse base and value as a string, but only consume characters
-                // that are valid inside a Verilog number literal (base char plus
-                // digits/hex digits, x/z/?, and underscores). This ensures we do
+                // Now parse base and value as a string, but only consume
+                // characters that are valid inside a Verilog
+                // number literal (base char plus digits/hex
+                // digits, x/z/?, and underscores). This ensures we do
                 // not accidentally swallow structural punctuation like '}' that
                 // should be tokenized separately.
                 let mut base_and_value = String::new();
@@ -1393,8 +1399,8 @@ impl<R: Read + 'static> Parser<R> {
                             break;
                         }
                     }
-                    // Parse one element (identifier with optional select, literal, or nested
-                    // concat)
+                    // Parse one element (identifier with optional select,
+                    // literal, or nested concat)
                     let elem = self.parse_netref_expr()?;
                     elems.push(elem);
                     // Optional comma
@@ -2064,9 +2070,9 @@ impl<R: Read + 'static> Parser<R> {
             }
         }
         // Preserve top-level port order from the module header list, even when
-        // non-ANSI input/output declarations are grouped by direction in the body.
-        // Ports not present in the header (if any) are left at the end in their
-        // original declaration order.
+        // non-ANSI input/output declarations are grouped by direction in the
+        // body. Ports not present in the header (if any) are left at
+        // the end in their original declaration order.
         let mut header_port_index: HashMap<PortId, usize> = HashMap::new();
         for (i, port_name) in port_names.into_iter().enumerate() {
             header_port_index.entry(port_name).or_insert(i);
@@ -2200,9 +2206,9 @@ impl<R: Read + 'static> Parser<R> {
                     });
                 }
             };
-            // Ensure a corresponding net exists for this port (non-ANSI body decls imply
-            // nets). If a width is present here and not previously known,
-            // record it; if conflicting, error.
+            // Ensure a corresponding net exists for this port (non-ANSI body
+            // decls imply nets). If a width is present here and not
+            // previously known, record it; if conflicting, error.
             let _net_index = self.ensure_net(name, width, t.span)?;
             ports.push(NetlistPort {
                 direction: direction.clone(),
@@ -2348,7 +2354,8 @@ impl<R: Read + 'static> Parser<R> {
                     });
                 }
             };
-            // Ensure/dedupe nets for wires too; reconcile widths per rules above.
+            // Ensure/dedupe nets for wires too; reconcile widths per rules
+            // above.
             let net_idx = self.ensure_net(name, width, t.span)?;
             net_indices.push(net_idx);
             // If next is ',', continue
@@ -2979,8 +2986,8 @@ endmodule
         let m = &modules[0];
         assert_eq!(m.instances.len(), 1);
         let inst = &m.instances[0];
-        // 'u1' starts on line 6 (leading newline in the raw string), after two spaces +
-        // 'INV' (3 chars) + one space => column 7.
+        // 'u1' starts on line 6 (leading newline in the raw string), after two
+        // spaces + 'INV' (3 chars) + one space => column 7.
         assert_eq!(inst.inst_lineno, 6);
         assert_eq!(inst.inst_colno, 7);
     }

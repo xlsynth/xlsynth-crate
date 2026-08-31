@@ -35,12 +35,15 @@ fn required_opname_prefilter_tokens(query: &ir_query::QueryExpr) -> Vec<String> 
             | ir_query::QueryExpr::Ellipsis => {}
             ir_query::QueryExpr::Matcher(m) => {
                 if let ir_query::MatcherKind::OpName(op) = &m.kind {
-                    // Quick and effective heuristic: if the query contains an explicit
-                    // operator match like `and(...)`, require the file text to contain
-                    // `= and(`. This avoids PIR parsing for most non-matching files.
+                    // Quick and effective heuristic: if the query contains an
+                    // explicit operator match like
+                    // `and(...)`, require the file text to contain
+                    // `= and(`. This avoids PIR parsing for most non-matching
+                    // files.
                     //
-                    // Note: XLS IR node lines always contain `= <opname>(...)` for op nodes.
-                    // Using `= <opname>(` is a stricter filter than `<opname>(`.
+                    // Note: XLS IR node lines always contain `= <opname>(...)`
+                    // for op nodes. Using `= <opname>(` is
+                    // a stricter filter than `<opname>(`.
                     out.push(format!("= {op}("));
                 }
                 for a in &m.args {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "reference-sim-tests")]
+#![cfg(feature = "iverilog-tests")]
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

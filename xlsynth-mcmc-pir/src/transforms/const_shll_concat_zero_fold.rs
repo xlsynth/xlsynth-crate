@@ -53,7 +53,8 @@ impl ConstShllConcatZeroFoldTransform {
         let NodePayload::Literal(v) = &f.get_node(r).payload else {
             return None;
         };
-        // This helper is only used for small shift constants in tests/transforms.
+        // This helper is only used for small shift constants in
+        // tests/transforms.
         v.to_u64().ok()
     }
 }

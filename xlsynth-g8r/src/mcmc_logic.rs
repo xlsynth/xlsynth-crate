@@ -276,7 +276,8 @@ pub fn mcmc_iteration(
                     transform: Some(current_transform_kind),
                 })
             } else {
-                // Apply DCE to remove any dead nodes, reducing memory footprint.
+                // Apply DCE to remove any dead nodes, reducing memory
+                // footprint.
                 let candidate_gfn_dce = dce::dce(&candidate_gfn);
 
                 let new_candidate_cost = cost(&candidate_gfn_dce);

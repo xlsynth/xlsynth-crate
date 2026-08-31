@@ -193,9 +193,9 @@ fn function_casez_arm_coverage_is_aggregated_at_definition() {
     cov.register_functions(&cm.fn_meta);
     run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap();
 
-    // With 2 cycles and no seq, the harness evaluates combo 3*cycles times, so the
-    // function call should be observed 6 times (one call per eval due to the
-    // single `assign y = f(...)`).
+    // With 2 cycles and no seq, the harness evaluates combo 3*cycles times, so
+    // the function call should be observed 6 times (one call per eval due
+    // to the single `assign y = f(...)`).
     assert_eq!(cov.function_calls.get("f").copied().unwrap_or(0), 6);
 
     let rendered = render_annotated_source(&src, &cov, false);

@@ -200,7 +200,8 @@ fn compute_single_mffc_spec(f: &ir::Fn, users: &[Vec<usize>], root_idx: usize) -
                     // leaf.
                 }
                 NodePayload::Literal(_) => {
-                    // Inline literals in extracted cones, even if globally shared.
+                    // Inline literals in extracted cones, even if globally
+                    // shared.
                     in_mffc[pred_idx] = true;
                     frontier.remove(&pred_idx);
                     worklist.push(pred_idx);

@@ -69,6 +69,7 @@ prost-build = "0.12"
 
 [features]
 default = []
+iverilog-tests = []
 has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
 with-bitwuzla-system = ["xlsynth-prover/with-bitwuzla-system", "has-bitwuzla"]
 with-bitwuzla-built = ["xlsynth-prover/with-bitwuzla-built", "has-bitwuzla"]

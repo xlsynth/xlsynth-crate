@@ -158,7 +158,8 @@ pub fn enumerate_full_space(options: EnumerateOptions) -> FullSpaceDb {
     let mut all_points: Vec<ParetoPoint> = Vec::new();
     let mut worklist: VecDeque<ParetoPoint> = VecDeque::new();
 
-    // Seed with const0 (const1 is represented by output negation in later steps).
+    // Seed with const0 (const1 is represented by output negation in later
+    // steps).
     {
         let frag = GateFnFragment::const0();
         let p = ParetoPoint {
@@ -220,14 +221,16 @@ pub fn enumerate_full_space(options: EnumerateOptions) -> FullSpaceDb {
             }
         }
 
-        // Snapshot current all-points length to avoid infinite growth within this pop.
+        // Snapshot current all-points length to avoid infinite growth within
+        // this pop.
         let current_points_len = all_points.len();
 
-        // Generate small candidate keys in parallel over chunks of `all_points`.
-        // We intentionally do NOT build fragments in the parallel phase; fragments
-        // are expensive to allocate and most candidates will be dominated. Instead
-        // we build fragments only for candidates that survive the fast Pareto check
-        // during the deterministic sequential merge phase.
+        // Generate small candidate keys in parallel over chunks of
+        // `all_points`. We intentionally do NOT build fragments in the
+        // parallel phase; fragments are expensive to allocate and most
+        // candidates will be dominated. Instead we build fragments only
+        // for candidates that survive the fast Pareto check during the
+        // deterministic sequential merge phase.
         let chunk_size = core::cmp::max(1, options.parallel_chunk_size);
         let frontiers_snapshot = &db.frontiers;
         let chunk_results: Vec<(usize, Vec<CandidateKey>)> = all_points[..current_points_len]
@@ -252,8 +255,10 @@ pub fn enumerate_full_space(options: EnumerateOptions) -> FullSpaceDb {
                             let q_tt = negate_tt(q.tt, rhs_neg);
                             let cand_tt = p_tt.and(q_tt);
                             let idx = cand_tt.0 as usize;
-                            // Safe pruning: if dominated by the current frontier snapshot,
-                            // it will remain dominated as frontiers only ever improve.
+                            // Safe pruning: if dominated by the current
+                            // frontier snapshot, it
+                            // will remain dominated as frontiers only ever
+                            // improve.
                             if !can_insert_pareto(&frontiers_snapshot[idx], cand_ands, cand_depth) {
                                 continue;
                             }
@@ -273,8 +278,8 @@ pub fn enumerate_full_space(options: EnumerateOptions) -> FullSpaceDb {
             .collect();
 
         // Deterministic merge order across rayon scheduling:
-        // process chunks in ascending chunk index, and candidates in the order they
-        // were generated within the chunk.
+        // process chunks in ascending chunk index, and candidates in the order
+        // they were generated within the chunk.
         let mut chunk_results = chunk_results;
         chunk_results.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 

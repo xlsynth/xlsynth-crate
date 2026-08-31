@@ -523,7 +523,8 @@ fn extend_or_truncate_to_width(
 fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     let mut changed = false;
 
-    // Snapshot length so we only visit original nodes; desugaring appends nodes.
+    // Snapshot length so we only visit original nodes; desugaring appends
+    // nodes.
     let original_len = f.nodes.len();
     for idx in 0..original_len {
         let nr = NodeRef { index: idx };
@@ -1370,7 +1371,8 @@ fn desugar_ext_nary_add_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     let mut changed = false;
 
-    // Snapshot length so we only visit original nodes; desugaring appends nodes.
+    // Snapshot length so we only visit original nodes; desugaring appends
+    // nodes.
     let original_len = f.nodes.len();
     for idx in 0..original_len {
         let nr = NodeRef { index: idx };

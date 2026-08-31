@@ -29,6 +29,7 @@ pub fn handle_ir_fn_to_block(matches: &ArgMatches, config: &Option<ToolchainConf
 
     let block_ir = run_codegen_block_ir_to_string(input_path, top, tool_path, &block_ir_path);
 
-    // Note: If we later add a --keep_temps flag, we could `temp_dir.keep()` here.
+    // Note: If we later add a --keep_temps flag, we could `temp_dir.keep()`
+    // here.
     println!("{}", block_ir);
 }

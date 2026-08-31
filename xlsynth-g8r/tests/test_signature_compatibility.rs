@@ -45,7 +45,8 @@ top fn simple(input: bits[$INPUT_WIDTH] id=1) -> bits[$INPUT_WIDTH] {
 
 #[test]
 fn test_pack_unpack_signature_compatibility() {
-    // Create a temporary DSLX IR file with a .x extension to use DSLX code syntax
+    // Create a temporary DSLX IR file with a .x extension to use DSLX code
+    // syntax
     let mut temp_file = tempfile::Builder::new().suffix(".ir").tempfile().unwrap();
     let contents = "package pack_unpack
 

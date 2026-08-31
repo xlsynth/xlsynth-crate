@@ -56,7 +56,8 @@ fn run_ir2gates_like_flow_for_umul(width: usize) {
 fn ir2gates_mul_width_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("ir2gates_umul_width");
 
-    // Keep this modest; 64-bit multiplies can be quite expensive in debug builds.
+    // Keep this modest; 64-bit multiplies can be quite expensive in debug
+    // builds.
     for width in [1usize, 2, 4, 8, 16, 32] {
         group.bench_with_input(BenchmarkId::new("umul", width), &width, |b, &w| {
             b.iter(|| run_ir2gates_like_flow_for_umul(w))

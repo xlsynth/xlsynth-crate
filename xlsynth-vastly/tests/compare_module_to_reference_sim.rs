@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "reference-sim-tests")]
+#![cfg(feature = "iverilog-tests")]
 
 mod reference_sim_iverilog;
 
@@ -44,7 +44,8 @@ endmodule
     let cm = compile_single_seq_block(src);
     let mut state = cm.initial_state_x(); // time-zero X requirement
 
-    // Override initial state to a known value so we can compare deterministically.
+    // Override initial state to a known value so we can compare
+    // deterministically.
     state.insert("q".to_string(), vbits(4, Signedness::Unsigned, "0011"));
 
     let mut inputs = Env::new();
@@ -157,8 +158,9 @@ fn compile_single_seq_block(src: &str) -> CompiledSeqBlock {
 }
 
 fn build_tb(dut_src: &str, inputs: &Env, state: &xlsynth_vastly::State, watch: &str) -> String {
-    // We rely on "time-zero X" for regs by *not* initializing q unless provided in
-    // `state`. For deterministic tests we do drive initial state explicitly.
+    // We rely on "time-zero X" for regs by *not* initializing q unless provided
+    // in `state`. For deterministic tests we do drive initial state
+    // explicitly.
     let mut s = String::new();
     s.push_str(dut_src);
     s.push_str("\nmodule tb;\n");
@@ -171,7 +173,8 @@ fn build_tb(dut_src: &str, inputs: &Env, state: &xlsynth_vastly::State, watch: &
         s.push_str(&format!("  logic [{}:0] {};\n", v.width - 1, name));
     }
     for (name, v) in state.iter() {
-        // Do not drive DUT outputs from the testbench; treat these as observed wires.
+        // Do not drive DUT outputs from the testbench; treat these as observed
+        // wires.
         s.push_str(&format!("  wire [{}:0] {};\n", v.width - 1, name));
     }
 

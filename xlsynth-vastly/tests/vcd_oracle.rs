@@ -78,7 +78,8 @@ fn build_tb(
     s.push_str("\nmodule tb;\n");
     s.push_str("  logic clk;\n");
 
-    // Declare all stimulus input signals (excluding clk) + state outputs as wires.
+    // Declare all stimulus input signals (excluding clk) + state outputs as
+    // wires.
     let mut input_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for cyc in &stimulus.cycles {
         for name in cyc.inputs.keys() {
@@ -86,8 +87,8 @@ fn build_tb(
         }
     }
     for name in &input_names {
-        // v1: assume 1-bit inputs unless overridden by cycle values; pick max width
-        // seen.
+        // v1: assume 1-bit inputs unless overridden by cycle values; pick max
+        // width seen.
         let mut w: u32 = 1;
         for cyc in &stimulus.cycles {
             if let Some(v) = cyc.inputs.get(name) {
@@ -121,7 +122,8 @@ fn build_tb(
             s.push_str(&format!("    {} = {};\n", name, to_verilog_literal(v)));
         }
     }
-    // Initialize sequential state in dut at t=0 (for deterministic comparisons).
+    // Initialize sequential state in dut at t=0 (for deterministic
+    // comparisons).
     for (name, v) in initial_state {
         s.push_str(&format!("    dut.{} = {};\n", name, to_verilog_literal(v)));
     }

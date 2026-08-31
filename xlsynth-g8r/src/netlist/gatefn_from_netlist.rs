@@ -1914,22 +1914,24 @@ fn project_gatefn_from_netlist_and_liberty_internal(
             }
         }
         if !processed_any && (!unprocessed.is_empty() || !pending_assigns.is_empty()) {
-            // Build a short, actionable diagnostic to help pinpoint why instances
-            // could not be resolved. We show up to a bounded number of examples
-            // with their missing inputs.
+            // Build a short, actionable diagnostic to help pinpoint why
+            // instances could not be resolved. We show up to a
+            // bounded number of examples with their missing inputs.
             let mut diag_lines: Vec<String> = Vec::new();
             let example_limit = 10usize.min(unprocessed.len());
             for inst in unprocessed.iter().take(example_limit) {
                 let type_name = interner.resolve(inst.type_name).unwrap_or("<unknown>");
                 let inst_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
-                // Determine pin directions for this cell type (to identify inputs).
+                // Determine pin directions for this cell type (to identify
+                // inputs).
                 let mut pin_directions = HashMap::new();
                 if let Some(cell) = liberty_lib.cells.iter().find(|c| c.name == type_name) {
                     for pin in &cell.pins {
                         pin_directions.insert(liberty_lib.resolve_string(&pin.name), pin.direction);
                     }
                 }
-                // Recompute missing inputs for this instance w.r.t. current resolved nets.
+                // Recompute missing inputs for this instance w.r.t. current
+                // resolved nets.
                 let (_input_map, missing_inputs, _port_map) = build_instance_input_map(
                     inst,
                     &pin_directions,
@@ -3740,10 +3742,10 @@ endmodule
 
     #[test]
     fn test_dff_identity_q_bitselect_expands_to_full_width() {
-        // Build a netlist with a DFF cell where Q drives a single bit of a 4-bit output
-        // net. Regression: ensure we size the destination vector to the full
-        // net width (4), not just the bit index slice width (1), and that no
-        // width-assertion fires.
+        // Build a netlist with a DFF cell where Q drives a single bit of a
+        // 4-bit output net. Regression: ensure we size the destination
+        // vector to the full net width (4), not just the bit index
+        // slice width (1), and that no width-assertion fires.
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let y = interner.get_or_intern("y");
@@ -3815,7 +3817,8 @@ endmodule
 
         // Signature must show full 4-bit output width.
         assert_eq!(gate_fn.get_signature(), "fn top(a: bits[1]) -> bits[4]");
-        // And we should be writing to y[3] (the selected bit) in the output mapping.
+        // And we should be writing to y[3] (the selected bit) in the output
+        // mapping.
         let s = gate_fn.to_string();
         assert!(s.contains("  y[3] = "), "GateFn output: {}", s);
     }
@@ -3823,7 +3826,8 @@ endmodule
     #[test]
     fn test_dff_identity_q_partselect_writes_at_offset() {
         // DFF cell where Q drives a 4-bit slice y[7:4] of an 8-bit output net.
-        // Regression: ensure we size to full width (8) and write at lsb offset 4.
+        // Regression: ensure we size to full width (8) and write at lsb offset
+        // 4.
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let x = interner.get_or_intern("x");
         let y = interner.get_or_intern("y");
@@ -4194,8 +4198,8 @@ endmodule
 
     #[test]
     fn test_sequential_iqn_inverts_next_state_when_collapsing() {
-        // Collapsing sequential state variables should treat IQN as the complement of
-        // IQ.
+        // Collapsing sequential state variables should treat IQN as the
+        // complement of IQ.
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let d = interner.get_or_intern("d");
         let q = interner.get_or_intern("q");
@@ -4351,8 +4355,8 @@ endmodule
             assigns: vec![],
             instances,
         };
-        // Include an unsupported sequential cell in the library, but do not instantiate
-        // it.
+        // Include an unsupported sequential cell in the library, but do not
+        // instantiate it.
         let mut builder = LibraryBuilder::new();
         let inv = test_cell(
             &mut builder,
@@ -4817,8 +4821,8 @@ endmodule
 
     #[test]
     fn test_instance_input_tied_to_literal() {
-        // Build a netlist and Liberty proto for a 2-input AND gate, with one input tied
-        // to 1'b0
+        // Build a netlist and Liberty proto for a 2-input AND gate, with one
+        // input tied to 1'b0
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let y = interner.get_or_intern("y");

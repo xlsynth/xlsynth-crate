@@ -406,7 +406,8 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("PIR parse_package failed: {:?}", e))?;
         ir_verify::verify_package(&pkg)
             .map_err(|e| anyhow::anyhow!("PIR verify_package failed: {:?}", e))?;
-        // Drop the file table so `to_string()` does not emit `file_number` lines.
+        // Drop the file table so `to_string()` does not emit `file_number`
+        // lines.
         pkg.file_table.id_to_path.clear();
         pkg
     };

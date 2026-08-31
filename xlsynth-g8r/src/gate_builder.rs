@@ -613,8 +613,8 @@ impl GateBuilder {
         self.add_not(and)
     }
 
-    // Performs an `or` across all the gates given in `args` to produce a single bit
-    // output.
+    // Performs an `or` across all the gates given in `args` to produce a single
+    // bit output.
     pub fn add_or_nary(
         &mut self,
         args: &[AigOperand],
@@ -717,8 +717,8 @@ impl GateBuilder {
         reduction_kind: ReductionKind,
     ) -> AigBitVector {
         let bit_count = args[0].get_bit_count();
-        // Assert all vectors are the same length -- we're going to or-reduce the bit
-        // positions.
+        // Assert all vectors are the same length -- we're going to or-reduce
+        // the bit positions.
         for arg in args {
             assert_eq!(arg.get_bit_count(), bit_count);
         }
@@ -752,8 +752,8 @@ impl GateBuilder {
         args: &[AigBitVector],
         reduction_kind: ReductionKind,
     ) -> AigBitVector {
-        // Assert all vectors are the same length -- we're going to xor-reduce the bit
-        // positions.
+        // Assert all vectors are the same length -- we're going to xor-reduce
+        // the bit positions.
         for arg in args {
             assert_eq!(arg.get_bit_count(), args[0].get_bit_count());
         }
@@ -848,7 +848,8 @@ impl GateBuilder {
         self.add_and_reduce(&xnors, reduction_kind)
     }
 
-    // Returns whether the two bit-vectors are not equal (ne) as a single bit value.
+    // Returns whether the two bit-vectors are not equal (ne) as a single bit
+    // value.
     pub fn add_ne_vec(
         &mut self,
         a: &AigBitVector,
@@ -1301,14 +1302,14 @@ mod tests {
         builder.add_output("nota_notb".to_string(), nota_notb.into());
         let gate_fn = builder.build();
 
-        // Expected gates: Literal(false), Input(a), Input(b), And(a,b), And(a,!b),
-        // And(!a,b), And(!a,!b)
+        // Expected gates: Literal(false), Input(a), Input(b), And(a,b),
+        // And(a,!b), And(!a,b), And(!a,!b)
         let stats: SummaryStats = get_summary_stats(&gate_fn);
         assert_eq!(stats.live_nodes, 6);
         assert_eq!(stats.deepest_path, 2);
 
-        // Hash-consing rejects duplicate nodes before appending them, so the four
-        // distinct AND expressions occupy consecutive node IDs.
+        // Hash-consing rejects duplicate nodes before appending them, so the
+        // four distinct AND expressions occupy consecutive node IDs.
         let expected_str = "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%3], a_notb: bits[1] = [%4], nota_b: bits[1] = [%5], nota_notb: bits[1] = [%6]) {
   %6 = and(not(a[0]), not(b[0]))
   %5 = and(not(a[0]), b[0])

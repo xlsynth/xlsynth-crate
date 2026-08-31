@@ -152,8 +152,8 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         return Err("unfactor_shared_and_primitive: inner gate is AND(x,x); cannot unfactor");
     }
 
-    // Ensure we do not combine operands of opposite polarity referring to the same
-    // node.
+    // Ensure we do not combine operands of opposite polarity referring to the
+    // same node.
     let same_node_diff_pol =
         |x: AigOperand| x.node == common_op.node && x.negated != common_op.negated;
     if same_node_diff_pol(inner_a) || same_node_diff_pol(inner_b) {
@@ -189,8 +189,8 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         return Err("unfactor_shared_and_primitive: would create cycle");
     }
 
-    // Reject patterns that would create self-referential loops or back-edges via
-    // inner_ref.
+    // Reject patterns that would create self-referential loops or back-edges
+    // via inner_ref.
     if common_op.node == inner_ref
         || unique_op.node == inner_ref
         || node_reaches_target(&g.gates, common_op.node, inner_ref)
@@ -216,7 +216,8 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         ),
     };
     let new_ref = AigRef { id: g.gates.len() };
-    // Extra safety: neither operand of the new gate may reference new_ref itself.
+    // Extra safety: neither operand of the new gate may reference new_ref
+    // itself.
     debug_assert!(common_op.node != new_ref && unique_op.node != new_ref);
     g.gates.push(new_gate);
     let new_sources = [outer, inner_ref, new_ref, common_op.node, unique_op.node];

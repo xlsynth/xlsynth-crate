@@ -67,8 +67,8 @@ fn run_show(
         }
     }
 
-    // Parse symbol path: module path (optional, dot-separated) + final identifier.
-    // We follow DSLX notation for module paths in source files:
+    // Parse symbol path: module path (optional, dot-separated) + final
+    // identifier. We follow DSLX notation for module paths in source files:
     //   import foo.bar.baz;  and references like  baz::Type
     // On the CLI we accept only:
     //   - dotted module path + ::member:  foo.bar.baz::Name

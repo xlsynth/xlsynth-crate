@@ -835,14 +835,15 @@ impl Value4 {
         for p in parts {
             width = width.saturating_add(p.width);
             if p.signedness == Signedness::Signed {
-                // concatenation is unsigned in Verilog, but keep unsigned unless you want to
-                // treat differently.
+                // concatenation is unsigned in Verilog, but keep unsigned
+                // unless you want to treat differently.
                 signedness = Signedness::Unsigned;
             }
         }
         let mut bits: Vec<LogicBit> = Vec::with_capacity(width as usize);
         for p in parts.iter().rev() {
-            // MSB..LSB of concatenation => LSB-first storage means append each part's bits.
+            // MSB..LSB of concatenation => LSB-first storage means append each
+            // part's bits.
             bits.extend_from_slice(p.bits_lsb_first());
         }
         Value4::new(width, signedness, bits)

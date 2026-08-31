@@ -120,7 +120,8 @@ fn make_flop_layer(
     reset_signal: Option<LogicRef>,
     reset_active_low: bool,
 ) -> NetBundle {
-    // First create register declarations so they appear before procedural blocks.
+    // First create register declarations so they appear before procedural
+    // blocks.
     let mut new_name_to_ref = HashMap::new();
 
     // Collect and sort for deterministic emission order.
@@ -190,8 +191,8 @@ fn make_flop_layer(
                     src_logic.to_expr()
                 }
             } else {
-                // The valid reg itself just captures the signal directly, but respect reset
-                // gating.
+                // The valid reg itself just captures the signal directly, but
+                // respect reset gating.
                 if let Some(ref rst) = reset_signal {
                     if reset_active_low {
                         file.make_ternary(&rst.to_expr(), &src_logic.to_expr(), &zero_expr)
@@ -234,8 +235,8 @@ fn create_outer_io_ports(
         outer_module_inputs.push((outer_module_input, vast_type));
     }
 
-    // A LogicRef that represents the input valid signal coming combinationally into
-    // the outer module.
+    // A LogicRef that represents the input valid signal coming combinationally
+    // into the outer module.
     let bit_type = file.make_bit_vector_type(1, false);
     let outer_module_input_valid_signal: Option<LogicRef> =
         if let Some(ref input_valid_signal_name) = config.input_valid_signal {
@@ -246,7 +247,8 @@ fn create_outer_io_ports(
             None
         };
 
-    // Now do outputs on the outer module, which come from the last stage module.
+    // Now do outputs on the outer module, which come from the last stage
+    // module.
     let stage_last_module = config.stage_modules.last().unwrap();
     let mut outer_module_outputs: Vec<(LogicRef, VastDataType)> = Vec::new();
     for port in stage_last_module.output_ports() {
@@ -327,14 +329,15 @@ pub fn build_pipeline(
         let stage_output_type = file.make_bit_vector_type(stage_output_width, false);
         let stage_output_wire = file.add_wire(outer_module, &stage_output_name, &stage_output_type);
 
-        // -- "Smart" slicing: the stage has exactly one output port (because that's how
-        // XLS does combinational module generation today), but the next stage
-        // (or the final outer-module connection) may require multiple
-        // signals wired up to input ports: create slice wires for each required
-        // destination.
+        // -- "Smart" slicing: the stage has exactly one output port (because
+        // that's how XLS does combinational module generation today),
+        // but the next stage (or the final outer-module connection) may
+        // require multiple signals wired up to input ports: create
+        // slice wires for each required destination.
 
-        // Determine the required destinations to potentially slice the output wire
-        // into. This is a vector of (next_stage_name, start, limit)
+        // Determine the required destinations to potentially slice the output
+        // wire into. This is a vector of (next_stage_name, start,
+        // limit)
         let mut dest_ports: Vec<(String, i64, i64)> = Vec::new();
         let mut dest_bit_index: i64 = 0;
 
@@ -415,8 +418,8 @@ pub fn build_pipeline(
         );
         file.add_member_instantiation(outer_module, instantiation);
 
-        // If the next stage wants more than one signal (i.e. it has arity > 1), we
-        // break out the signals by slicing here.
+        // If the next stage wants more than one signal (i.e. it has arity > 1),
+        // we break out the signals by slicing here.
         current_inputs = if dest_ports.len() > 1 {
             let total_bits: i64 = dest_bit_index;
             assert_eq!(
@@ -455,8 +458,8 @@ pub fn build_pipeline(
 
         log::debug!("current_inputs now: {:?}", current_inputs);
 
-        // If this is not the last stage, then we need to make a intra-pipeline flop
-        // layer.
+        // If this is not the last stage, then we need to make a intra-pipeline
+        // flop layer.
         if !last_stage {
             current_inputs = make_flop_layer(
                 file,
@@ -496,8 +499,8 @@ pub fn build_pipeline(
     // Now we need to wire up the output ports for the outer module using the
     // `current_inputs` bundle.
     for (logic_ref, _data_type) in outer_module_outputs.iter() {
-        // Make an assignment to this output from the corresponding `current_inputs`
-        // value.
+        // Make an assignment to this output from the corresponding
+        // `current_inputs` value.
         let current_input = &current_inputs
             .name_to_ref
             .get(&file.logic_ref_name(*logic_ref))

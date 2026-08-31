@@ -657,7 +657,8 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     }
     validate_function_call_graph(p)?;
 
-    // Enforce package-wide uniqueness of node text ids (including parameter nodes).
+    // Enforce package-wide uniqueness of node text ids (including parameter
+    // nodes).
     let mut seen_ids: HashSet<usize> = HashSet::new();
     for member in &p.members {
         let (f, synthetic_block_ret) = match member {
@@ -672,7 +673,8 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
             ),
         };
         for (node_index, node) in f.nodes.iter().enumerate() {
-            // Skip synthetic Nil node at index 0 which is never emitted to IR text.
+            // Skip synthetic Nil node at index 0 which is never emitted to IR
+            // text.
             if matches!(node.payload, NodePayload::Nil) {
                 continue;
             }
@@ -824,8 +826,8 @@ where
     }
     // Track GetParam node ids to verify 1:1 mapping with signature params.
     let mut seen_param_ids: HashSet<usize> = HashSet::new();
-    // Map parameter names to their declared ids from the function signature, and
-    // check name uniqueness.
+    // Map parameter names to their declared ids from the function signature,
+    // and check name uniqueness.
     let mut param_name_to_id: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
     for p in &f.params {
@@ -841,8 +843,9 @@ where
     for (i, node) in f.nodes.iter().enumerate() {
         // Enforce: if a node has a name that looks like a default textual id
         // pattern '<prefix>.<digits>', then '<prefix>' must match the operator
-        // and the numeric suffix must match the node's text id. This aligns with
-        // external xlsynth verifier expectations and prevents misleading names.
+        // and the numeric suffix must match the node's text id. This aligns
+        // with external xlsynth verifier expectations and prevents
+        // misleading names.
         if let Some(ref name) = node.name {
             if let Some(dot_pos) = name.rfind('.') {
                 let (prefix, suffix) = name.split_at(dot_pos);
@@ -879,7 +882,8 @@ where
                     .copied()
                     .unwrap_or(pid.get_wrapped_id());
                 let actual_pid = pid.get_wrapped_id();
-                // First: mismatch between declared and actual -> ParamIdMismatch.
+                // First: mismatch between declared and actual ->
+                // ParamIdMismatch.
                 if actual_pid != declared || node.text_id != declared {
                     let param_name = node
                         .name
@@ -899,7 +903,8 @@ where
                         text_id: node.text_id,
                     });
                 }
-                // Ensure each GetParam id appears exactly once in the node list.
+                // Ensure each GetParam id appears exactly once in the node
+                // list.
                 if !seen_param_ids.insert(actual_pid) {
                     return Err(ValidationError::DuplicateTextId {
                         func: f.name.clone(),
@@ -1275,7 +1280,8 @@ where
                         node.payload,
                         first_ty
                     );
-                    // Require bits type and identical types across all operands.
+                    // Require bits type and identical types across all
+                    // operands.
                     for nr in elems.iter().skip(1) {
                         let operand_ty = &f.get_node(*nr).ty;
                         log::trace!(
@@ -1715,7 +1721,8 @@ mod tests {
     #[test]
     fn manual_construct_one_dot_id_literal_fails() {
         // Build a function programmatically containing a node named "one.2"
-        // with operator literal(id=2). This should fail with NodeNameOpMismatch.
+        // with operator literal(id=2). This should fail with
+        // NodeNameOpMismatch.
         let mut pkg = ir::Package {
             name: "test".to_string(),
             file_table: ir::FileTable::new(),
@@ -1805,7 +1812,8 @@ mod tests {
         let mut pkg = parser.parse_package().unwrap();
         {
             let f = pkg.get_top_fn_mut().unwrap();
-            // Manually insert a duplicate GetParam node with the same id as 'x'.
+            // Manually insert a duplicate GetParam node with the same id as
+            // 'x'.
             let pid = f.params[0].id;
             let dup = ir::Node {
                 text_id: pid.get_wrapped_id(),

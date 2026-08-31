@@ -148,7 +148,8 @@ impl PirTransform for BitSliceConcatDistributeTransform {
             return Ok(());
         }
 
-        // Straddle: low part from b[start..wb), high part from a[0..(start+width-wb)).
+        // Straddle: low part from b[start..wb), high part from
+        // a[0..(start+width-wb)).
         let width_b = wb - start;
         let width_a = width - width_b;
         let bs_b = Self::mk_bit_slice_node(f, width_b, b, start, width_b);

@@ -78,7 +78,8 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
     match payload {
         NodePayload::Nil => {}
         NodePayload::GetParam(param_id) => {
-            // Use stable ordinal position within the function signature, not the text id.
+            // Use stable ordinal position within the function signature, not
+            // the text id.
             let ordinal = get_param_ordinal(f, *param_id) as u64 + 1;
             update_hash_u64(hasher, ordinal);
         }

@@ -470,7 +470,8 @@ where
                         if is_clocking_pin_for_instance(&ctx, *nbr_inst_idx, *nbr_port_sym) {
                             continue;
                         }
-                        // Skip self-loops; the starting instance has already been emitted.
+                        // Skip self-loops; the starting instance has already
+                        // been emitted.
                         if *nbr_inst_idx == inst_idx {
                             continue;
                         }
@@ -976,8 +977,8 @@ mod tests {
             instances,
         };
 
-        // Liberty library with INV, BUF, and DFF (from common test utils), where
-        // DFF.CLK is marked as a clocking pin.
+        // Liberty library with INV, BUF, and DFF (from common test utils),
+        // where DFF.CLK is marked as a clocking pin.
         let lib: Library = make_test_library();
 
         let indexed = IndexedLibrary::new(lib);

@@ -743,7 +743,8 @@ top fn main(x: bits[8] id=1) -> bits[8] {
         "#;
         std::fs::write(&imported_path, imported_dslx).expect("write imported.x");
 
-        // main.x imports `imported` and exposes a top that takes the imported enum.
+        // main.x imports `imported` and exposes a top that takes the imported
+        // enum.
         let main_path = dir.join("main.x");
         let main_dslx = r#"
             import imported;
@@ -751,7 +752,8 @@ top fn main(x: bits[8] id=1) -> bits[8] {
         "#;
         std::fs::write(&main_path, main_dslx).expect("write main.x");
 
-        // Parse/typecheck the main module; imported will be resolved via search path.
+        // Parse/typecheck the main module; imported will be resolved via search
+        // path.
         let mut import_data = dslx::ImportData::new(None, &[dir]);
         let tcm = dslx::parse_and_typecheck(
             main_dslx,

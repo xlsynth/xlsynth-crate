@@ -97,8 +97,8 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     //  * stage-discovery prefix: only used for implicit discovery of
     //    `<prefix>_cycleN` when `--stages` is not provided (from `--dslx_top`).
     //  * wrapper module name: the emitted outer module name (from
-    //    `--output_module_name`, or defaults to `--dslx_top` when using implicit
-    //    discovery).
+    //    `--output_module_name`, or defaults to `--dslx_top` when using
+    //    implicit discovery).
     let stage_discovery_prefix_opt = dslx_top.as_deref();
     let wrapper_name = output_module_name_opt
         .as_deref()
@@ -121,9 +121,9 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         output_module_name: wrapper_name,
     };
 
-    // Library `top` parameter is the implicit stage-discovery prefix; when stages
-    // are provided explicitly, this value is unused by discovery but we pass
-    // the wrapper name.
+    // Library `top` parameter is the implicit stage-discovery prefix; when
+    // stages are provided explicitly, this value is unused by discovery but
+    // we pass the wrapper name.
     let top_for_library = stage_discovery_prefix_opt.unwrap_or(wrapper_name);
     let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,

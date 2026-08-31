@@ -83,8 +83,8 @@ fn run_dslx2pipeline_and_eco(
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let baseline_unopt_ir = temp_dir.path().join("baseline.unopt.ir");
 
-    // Run baseline: `dslx2pipeline` to capture unoptimized IR and baseline Verilog
-    // on stdout.
+    // Run baseline: `dslx2pipeline` to capture unoptimized IR and baseline
+    // Verilog on stdout.
     let mut baseline_cmd = Command::new(driver);
     baseline_cmd
         .arg("--toolchain")
@@ -165,7 +165,8 @@ fn test_dslx2pipeline_eco_basic() {
     let outputs = run_dslx2pipeline_and_eco(baseline_dslx, modified_dslx, &args)
         .expect("dslx2pipeline and eco should succeed");
 
-    // Expect exactly one-line difference between ECO stdout and baseline stdout.
+    // Expect exactly one-line difference between ECO stdout and baseline
+    // stdout.
     let eco_stdout = outputs.eco_verilog.clone();
     let baseline_stdout = outputs.baseline_verilog.clone();
     if !differ_in_one_line(&eco_stdout, &baseline_stdout) {
@@ -207,7 +208,8 @@ fn test_dslx2pipeline_eco_module_name() {
     let outputs = run_dslx2pipeline_and_eco(baseline_dslx, modified_dslx, &args)
         .expect("dslx2pipeline and eco should succeed");
 
-    // Expect exactly one-line difference between ECO stdout and baseline stdout.
+    // Expect exactly one-line difference between ECO stdout and baseline
+    // stdout.
     let eco_stdout = outputs.eco_verilog.clone();
     let baseline_stdout = outputs.baseline_verilog.clone();
     if !differ_in_one_line(&eco_stdout, &baseline_stdout) {

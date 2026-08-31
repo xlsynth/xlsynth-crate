@@ -951,7 +951,8 @@ impl EvalObserver for CollectingMuxObserver {
         };
         self.mux_outcomes.push((ev.node_text_id, outcome));
 
-        // Path hash is the concatenation of the mux features in observation order.
+        // Path hash is the concatenation of the mux features in observation
+        // order.
         self.path_hasher.update(&feature.node_id.to_le_bytes());
         self.path_hasher.update(&[match feature.select_kind {
             MuxSelectKind::CaseIndex => 0,
@@ -1198,8 +1199,8 @@ impl AutocovEngine {
                 continue;
             }
 
-            // If the node is a literal bool, it cannot vary across samples, so do
-            // not report "missing" values for it.
+            // If the node is a literal bool, it cannot vary across samples, so
+            // do not report "missing" values for it.
             if matches!(n.payload, ir::NodePayload::Literal(_)) {
                 continue;
             }
@@ -1242,7 +1243,8 @@ impl AutocovEngine {
                     }
                 }
                 ir::NodePayload::Unop(ir::Unop::Neg, operand) => {
-                    // OperandIsMinSigned only makes sense for non-empty bit vectors.
+                    // OperandIsMinSigned only makes sense for non-empty bit
+                    // vectors.
                     let w = bit_width_if_bits(self.f.get_node_ty(*operand)).unwrap_or(0);
                     let operand_is_lit = matches!(
                         self.f.get_node(*operand).payload,
@@ -1277,7 +1279,8 @@ impl AutocovEngine {
                 ir::NodePayload::Binop(binop, lhs, rhs)
                     if matches!(binop, ir::Binop::Eq | ir::Binop::Ne) =>
                 {
-                    // Only include compare-distance buckets reachable for this operand width.
+                    // Only include compare-distance buckets reachable for this
+                    // operand width.
                     let lhs_w = bit_width_if_bits(self.f.get_node_ty(*lhs)).unwrap_or(0);
                     let rhs_w = bit_width_if_bits(self.f.get_node_ty(*rhs)).unwrap_or(0);
                     if lhs_w == 0 || lhs_w != rhs_w {
@@ -1301,7 +1304,8 @@ impl AutocovEngine {
                     let lhs_w = bit_width_if_bits(self.f.get_node_ty(*lhs)).unwrap_or(0);
                     let rhs_w = bit_width_if_bits(self.f.get_node_ty(*rhs)).unwrap_or(0);
 
-                    // AmtIsZero is always reachable (including rhs_w==0 where amt==0).
+                    // AmtIsZero is always reachable (including rhs_w==0 where
+                    // amt==0).
                     out.insert(CornerEventId {
                         node_text_id: n.text_id,
                         kind: CornerKind::Shift,
@@ -1314,7 +1318,8 @@ impl AutocovEngine {
                             tag: ShiftCornerTag::AmtLtWidth.into(),
                         });
                     }
-                    // AmtGeWidth is reachable only if the selector can represent a value >= lhs_w.
+                    // AmtGeWidth is reachable only if the selector can
+                    // represent a value >= lhs_w.
                     if let Some(max_amt) = max_value_for_bit_width(rhs_w) {
                         if max_amt >= (lhs_w as u128) {
                             out.insert(CornerEventId {
@@ -1339,7 +1344,8 @@ impl AutocovEngine {
                         continue;
                     }
 
-                    // msb can be 0 or 1 in general, so include both msb branches.
+                    // msb can be 0 or 1 in general, so include both msb
+                    // branches.
                     let can_amt_lt = true; // amt==0 exists, and 0 < lhs_w holds since lhs_w>0
                     let can_amt_ge = match max_value_for_bit_width(rhs_w) {
                         Some(max_amt) => max_amt >= (lhs_w as u128),
@@ -1879,7 +1885,8 @@ impl AutocovEngine {
                         last_iter_added: added,
                         new_coverage: new_cov,
                     };
-                    // Safety: caller holds exclusive mutable access for duration of run.
+                    // Safety: caller holds exclusive mutable access for
+                    // duration of run.
                     unsafe { &mut *p_ptr }.on_progress(p);
                 }
             }
@@ -2089,7 +2096,8 @@ impl AutocovEngine {
             return self.biased_random_bits(self.args_bit_count);
         }
 
-        // Mutation/crossover strategy mix (single-threaded, deterministic via PRNG).
+        // Mutation/crossover strategy mix (single-threaded, deterministic via
+        // PRNG).
         //
         // Rationale:
         // - Single-bit flip is good for local edge conditions.
@@ -2213,7 +2221,8 @@ impl AutocovEngine {
         let max_flips = std::cmp::min(self.args_bit_count, 64);
         let flips = 1 + ((self.rng.next_u64() as usize) % max_flips);
         let mut seen: Vec<usize> = Vec::with_capacity(flips);
-        // Best-effort distinct indices; duplicates are harmless but less effective.
+        // Best-effort distinct indices; duplicates are harmless but less
+        // effective.
         for _ in 0..flips {
             let idx = (self.rng.next_u64() as usize) % self.args_bit_count;
             if !seen.contains(&idx) {
@@ -2252,9 +2261,9 @@ impl AutocovEngine {
             return self.mutate_havoc(bits);
         }
 
-        // Overwrite up to 4 distinct slices at this width. This makes it plausible to
-        // satisfy multiple independent predicates in a single proposal (classic
-        // "magic bytes").
+        // Overwrite up to 4 distinct slices at this width. This makes it
+        // plausible to satisfy multiple independent predicates in a
+        // single proposal (classic "magic bytes").
         let overwrite_count = std::cmp::min(4, starts.len());
         let mut idxs: Vec<usize> = (0..starts.len()).collect();
         for i in 0..overwrite_count {
@@ -2372,10 +2381,10 @@ impl AutocovEngine {
         }
         if let Some(sink_ptr) = sink {
             let tuple_value = ir_value_from_bits_with_type(&cand, &self.args_tuple_type);
-            // Safety: `run_with_sink` requires the caller to provide a stable, exclusive
-            // sink reference for the duration of the run. We only create a
-            // temporary `&mut` for this call site, and we remain
-            // single-threaded.
+            // Safety: `run_with_sink` requires the caller to provide a stable,
+            // exclusive sink reference for the duration of the run.
+            // We only create a temporary `&mut` for this call site,
+            // and we remain single-threaded.
             unsafe { &mut *sink_ptr }.on_new_sample(&tuple_value);
         }
         self.corpus.push(cand);
@@ -2660,9 +2669,10 @@ fn f(x: bits[2] id=1) -> bits[1] {
     #[test]
     fn relevance_end_to_end_exhaustive_for_irrelevant_and_relevant_bool_nodes() {
         // Two boolean nodes:
-        // - `b_irrel`: used as a selector, but both cases are identical, so it is
-        //   irrelevant.
-        // - `b_rel`: used as a selector with different cases, so it is relevant.
+        // - `b_irrel`: used as a selector, but both cases are identical, so it
+        //   is irrelevant.
+        // - `b_rel`: used as a selector with different cases, so it is
+        //   relevant.
         let ir_text = r#"package test
 
 fn f(x: bits[2] id=1) -> (bits[8], bits[8]) {
@@ -3094,8 +3104,8 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
         let _ = corner_engine.apply_candidate_features(&f_corner);
         assert_eq!(corner_engine.corner_map.set_count(), 1);
 
-        // Failure coverage: array_index OOB with assumed_in_bounds=true should set a
-        // bit in the failure map.
+        // Failure coverage: array_index OOB with assumed_in_bounds=true should
+        // set a bit in the failure map.
         let ir_fail = r#"package test
 
 fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
@@ -3231,7 +3241,8 @@ fn f(
             SignExtCornerTag::MsbIsZero.into()
         ));
 
-        // 8-bit compare can only reach xor-popcount 0..=8, which maps to buckets 0..=5.
+        // 8-bit compare can only reach xor-popcount 0..=8, which maps to
+        // buckets 0..=5.
         for tag in [
             CompareDistanceCornerTag::XorPopcount0.into(),
             CompareDistanceCornerTag::XorPopcount1.into(),
@@ -3273,8 +3284,8 @@ fn f(
 
     #[test]
     fn compare_distance_domain_does_not_include_unreachable_buckets_for_small_widths() {
-        // For an 8-bit compare, xor-popcount is in 0..=8, which only reaches buckets
-        // 0..=5.
+        // For an 8-bit compare, xor-popcount is in 0..=8, which only reaches
+        // buckets 0..=5.
         let ir_text = r#"package test
 
 fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
@@ -3320,8 +3331,8 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
 
     #[test]
     fn bool_event_domain_excludes_params_and_literals() {
-        // bits[1] literal should be excluded from domain; computed bits[1] should
-        // include both true/false.
+        // bits[1] literal should be excluded from domain; computed bits[1]
+        // should include both true/false.
         let ir_text = r#"package test
 
 fn f(x: bits[1] id=1) -> bits[1] {
@@ -3428,8 +3439,8 @@ fn f(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
             let _ = single.observe_candidate(&bits);
         }
 
-        // Parallel-style: evaluate observations on two independent evaluators and apply
-        // to a single accumulating engine in arbitrary order.
+        // Parallel-style: evaluate observations on two independent evaluators
+        // and apply to a single accumulating engine in arbitrary order.
         let eval_a = AutocovEngine::from_ir_text(
             ir_text,
             None,
@@ -3491,9 +3502,9 @@ fn f(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
 
     #[test]
     fn case_study_finds_xls_bang_tuple_in_corpus() {
-        // The intent is to exercise "classic" magic-byte comparisons and ensure the
-        // coverage guidance (especially compare-distance + bools hashing) can
-        // find the satisfying input.
+        // The intent is to exercise "classic" magic-byte comparisons and ensure
+        // the coverage guidance (especially compare-distance + bools
+        // hashing) can find the satisfying input.
         let ir_text = r#"package test
 
 fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3, d: bits[8] id=4) -> bits[1] {
@@ -3578,8 +3589,8 @@ fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3, d: bits[8] id=4) -> bits
             false
         }
 
-        // Note: stdout is captured by default; use `cargo test -- --nocapture` to see
-        // this.
+        // Note: stdout is captured by default; use `cargo test -- --nocapture`
+        // to see this.
         println!(
             "case_study first_hit_iter={:?} corpus_len={}",
             first_hit_iter,

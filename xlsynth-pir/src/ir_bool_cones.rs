@@ -207,8 +207,8 @@ fn prune_cuts_dedup_dominance_and_cap(
     // Filter by K (literals cost 0).
     cuts.retain(|c| c.non_literal_cost(f) <= k);
 
-    // Dominance: if we already have a cut whose leaves are a subset of this one,
-    // drop the dominated (superset) cut.
+    // Dominance: if we already have a cut whose leaves are a subset of this
+    // one, drop the dominated (superset) cut.
     let mut kept: Vec<Cut> = Vec::new();
     'outer: for c in cuts.into_iter() {
         for kcut in kept.iter() {
@@ -384,8 +384,8 @@ pub fn extract_bool_cone(
         old_to_new.insert(old_idx, nodes.len() - 1);
     }
 
-    // Clone included nodes in ascending original index order, remapping operands.
-    // Assign new text ids deterministically after the param ids.
+    // Clone included nodes in ascending original index order, remapping
+    // operands. Assign new text ids deterministically after the param ids.
     let mut next_text_id: usize = params.len() + 1;
     for old_idx in included.iter().copied() {
         // Skip any included index that has already been mapped (should not
@@ -532,7 +532,8 @@ mod tests {
             !specs.is_empty(),
             "expected at least one cone spec for bits[1] sink"
         );
-        // Ensure we can extract at least one cone without any non-literal leaves.
+        // Ensure we can extract at least one cone without any non-literal
+        // leaves.
         let extracted = extract_bool_cone(&f, None, &specs[0], &cfg);
         assert_eq!(extracted.frontier_non_literal_count, 0);
         // Round-trip parse of the emitted package should succeed.

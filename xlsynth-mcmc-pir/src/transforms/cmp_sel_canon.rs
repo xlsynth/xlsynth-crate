@@ -68,7 +68,8 @@ impl CmpSelCanonTransform {
     }
 
     fn sel_is_min(op: Binop, a: NodeRef, b: NodeRef, c0: NodeRef, c1: NodeRef) -> Option<bool> {
-        // Returns Some(true) if this sel computes min(a,b), Some(false) if max(a,b).
+        // Returns Some(true) if this sel computes min(a,b), Some(false) if
+        // max(a,b).
         if c0 == b && c1 == a {
             match op {
                 Binop::Ult | Binop::Ule | Binop::Slt | Binop::Sle => Some(true),

@@ -236,8 +236,8 @@ impl<'a> Lexer<'a> {
             if c.is_whitespace() {
                 break;
             }
-            // NOTE: Do NOT break on `?` so `2'b?1` stays a single token for `casez`
-            // patterns.
+            // NOTE: Do NOT break on `?` so `2'b?1` stays a single token for
+            // `casez` patterns.
             if matches!(c, ';' | ',' | ')' | '(' | '[' | ']' | '{' | '}' | ':') {
                 break;
             }
@@ -282,8 +282,8 @@ fn parse_casez_pattern_literal(s: &str) -> Option<(u32, String)> {
     if bits.is_empty() {
         return None;
     }
-    // Only treat as casez pattern token if it contains '?' or is used in a casez
-    // context. We can still safely promote all binary-sized literals here; keep
-    // it strict and simple.
+    // Only treat as casez pattern token if it contains '?' or is used in a
+    // casez context. We can still safely promote all binary-sized literals
+    // here; keep it strict and simple.
     Some((width, bits.to_string()))
 }

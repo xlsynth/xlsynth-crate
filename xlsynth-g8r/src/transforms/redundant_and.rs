@@ -286,8 +286,8 @@ impl Transform for RemoveRedundantAndTransform {
 mod tests {
     use super::*;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-    // use rand::rngs::StdRng; // No longer needed if the specific test is removed
-    // use rand::SeedableRng; // No longer needed
+    // use rand::rngs::StdRng; // No longer needed if the specific test is
+    // removed use rand::SeedableRng; // No longer needed
     use crate::transforms::transform_trait::Transform; // For new trait tests
 
     #[test]
@@ -317,10 +317,10 @@ mod tests {
         assert_eq!(g1.to_string(), g2.to_string());
     }
 
-    // test_insert_redundant_and_rand_round_trip is removed as its logic is covered
-    // by MCMC testing of the Transform trait implementations, or should be
-    // tested via direct calls to the new Transform trait methods if specific
-    // scenarios are desired.
+    // test_insert_redundant_and_rand_round_trip is removed as its logic is
+    // covered by MCMC testing of the Transform trait implementations, or
+    // should be tested via direct calls to the new Transform trait methods
+    // if specific scenarios are desired.
 
     #[test]
     fn test_remove_redundant_and_primitive_on_non_redundant_fails() {
@@ -441,8 +441,9 @@ mod tests {
         // Verify the output now points to i0 directly
         let final_output_op = g.outputs[0].bit_vector.get_lsb(0);
         assert_eq!(final_output_op.node, i0.node);
-        // The negation might change depending on how remove_redundant_and_primitive
-        // handles it. If redundant_and_op was Op(redundant_ref, false), and
+        // The negation might change depending on how
+        // remove_redundant_and_primitive handles it. If
+        // redundant_and_op was Op(redundant_ref, false), and
         // inner was i0 (false), then output is Op(i0_ref, false ^ false)
         assert_eq!(
             final_output_op.negated,

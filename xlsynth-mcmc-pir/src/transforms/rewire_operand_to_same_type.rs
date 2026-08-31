@@ -76,12 +76,12 @@ impl PirTransform for RewireOperandToSameTypeTransform {
                 continue;
             }
 
-            // To avoid introducing cycles, we disallow rewiring a node's operand to any
-            // node in the node's fanout cone (i.e., any node that depends on
-            // `node_ref`).
+            // To avoid introducing cycles, we disallow rewiring a node's
+            // operand to any node in the node's fanout cone (i.e.,
+            // any node that depends on `node_ref`).
             //
-            // If `new_operand` depends on `node_ref`, then adding an edge `node_ref ->
-            // new_operand` would create a cycle.
+            // If `new_operand` depends on `node_ref`, then adding an edge
+            // `node_ref -> new_operand` would create a cycle.
             let fanout_cone = Self::compute_fanout_cone(&users_map, node_ref);
 
             for (slot, old_dep) in pairs {

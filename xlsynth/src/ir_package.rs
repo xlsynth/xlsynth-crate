@@ -445,7 +445,8 @@ mod tests {
     #[test]
     fn test_ir_package_set_top_by_name() {
         let mut package = IrPackage::new("test_package").unwrap();
-        // Build the identity function inside of the package that is not marked as top.
+        // Build the identity function inside of the package that is not marked
+        // as top.
         let u32 = package.get_bits_type(32);
         let mut builder = FnBuilder::new(&mut package, "f", true);
         let x = builder.param("x", &u32);
@@ -531,9 +532,9 @@ fn f(x: bits[8] id=1) -> bits[8] {
         let mut package = IrPackage::new("test_package").unwrap();
         let u32 = package.get_bits_type(32);
 
-        // Construct a function with mismatched operand types using a builder that does
-        // not verify nodes as they are added. The package verifier should catch
-        // this mismatch.
+        // Construct a function with mismatched operand types using a builder
+        // that does not verify nodes as they are added. The package
+        // verifier should catch this mismatch.
         let mut builder = FnBuilder::new(&mut package, "bad", false);
         let x = builder.param("x", &u32);
         let wide_literal = IrValue::parse_typed("bits[64]:1").unwrap();

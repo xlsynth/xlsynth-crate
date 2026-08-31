@@ -418,8 +418,8 @@ mod tests {
         let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
         let i0_bv = gb.add_input("i0".to_string(), 1);
         // Add a dummy output to allow GateFn to build
-        // The test logic depends on the content of the graph (no And2s), not this
-        // specific output.
+        // The test logic depends on the content of the graph (no And2s), not
+        // this specific output.
         gb.add_output("dummy_out".to_string(), i0_bv.get_lsb(0).clone().into());
         let g = gb.build();
         let mut transform = DuplicateGateTransform::new();

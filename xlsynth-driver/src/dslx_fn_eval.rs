@@ -67,7 +67,8 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
         Err(e) => {
             let msg = e.to_string();
             if matches!(eval_mode, Some(s) if s == "pir-interp") {
-                // Always emit a canonical marker for assertion-related failures in PIR mode.
+                // Always emit a canonical marker for assertion-related failures
+                // in PIR mode.
                 eprintln!("assertion failure(s)");
                 eprintln!("assertion failure");
                 if msg.contains("assertion failure") {

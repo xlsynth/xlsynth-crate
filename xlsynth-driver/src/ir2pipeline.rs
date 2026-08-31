@@ -72,8 +72,8 @@ fn ir2pipeline(
     }
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         log::info!("ir2pipeline: using tool path: {}", tool_path);
-        // Temporary directory for any artifacts we create (optimized IR and generated
-        // SV).
+        // Temporary directory for any artifacts we create (optimized IR and
+        // generated SV).
         let temp_dir = tempfile::TempDir::new().unwrap();
 
         // Determine which IR file we hand to codegen.
@@ -118,7 +118,8 @@ fn ir2pipeline(
             tool_path,
         );
 
-        // Persist the SV output in the temp dir for symmetry with dslx2pipeline.
+        // Persist the SV output in the temp dir for symmetry with
+        // dslx2pipeline.
         let sv_path = temp_dir.path().join("output.sv");
         std::fs::write(&sv_path, &sv).unwrap();
 

@@ -43,7 +43,8 @@ pub fn run_and_write_vcd(
     writer.change(&mut f, time, &format!("tb.{}", m.clk_name), "0")?;
     writer.change(&mut f, time, &format!("tb.dut.{}", m.clk_name), "0")?;
 
-    // Initialize declared signals from initial_state if present; otherwise leave X.
+    // Initialize declared signals from initial_state if present; otherwise
+    // leave X.
     for (name, v) in initial_state {
         writer.change(
             &mut f,
@@ -110,7 +111,8 @@ pub fn run_and_write_vcd(
         writer.change(&mut f, pos_t, &format!("tb.{}", m.clk_name), "1")?;
         writer.change(&mut f, pos_t, &format!("tb.dut.{}", m.clk_name), "1")?;
 
-        // Compute next state and update outputs (state regs are outputs in v1 tests).
+        // Compute next state and update outputs (state regs are outputs in v1
+        // tests).
         let next = m.step(&inputs, &state)?;
         for (name, v) in &next {
             writer.change(

@@ -84,7 +84,8 @@ fn true_expr() -> VExpr {
 }
 
 fn else_taken_cond(cond: VExpr) -> VExpr {
-    // Procedural Verilog if/else control flow takes else when condition is 0/X/Z.
+    // Procedural Verilog if/else control flow takes else when condition is
+    // 0/X/Z.
     let cond_is_zero = VExpr::Binary {
         op: BinaryOp::CaseEq,
         lhs: Box::new(cond.clone()),
@@ -138,7 +139,8 @@ impl SimObserver {
 }
 
 fn format_display(fmt: &str, args: &[Value4]) -> String {
-    // Minimal formatter: replace `%d` / `%0d` with decimal text (or X if unknown).
+    // Minimal formatter: replace `%d` / `%0d` with decimal text (or X if
+    // unknown).
     let mut out = String::new();
     let mut i = 0usize;
     let mut arg_i = 0usize;

@@ -1183,8 +1183,8 @@ where
 
     let writer_handle = if let (Some(best), Some(rx)) = (shared_best.clone(), checkpoint_rx) {
         Some(std::thread::spawn(move || {
-            // Track last written metric to reduce redundant writes when multiple
-            // chains hit the same checkpoint boundary.
+            // Track last written metric to reduce redundant writes when
+            // multiple chains hit the same checkpoint boundary.
             let mut last_written: Option<crate::SearchScore> = None;
             // Monotonic snapshot write index (per run) so filenames sort by
             // checkpoint write order across chains.
@@ -1230,12 +1230,14 @@ where
                 let best_opt_ir_path = output_dir_for_thread.join("best.opt.ir");
                 let _ = std::fs::write(&best_opt_ir_path, best_opt_ir_text.as_bytes());
 
-                // Also snapshot each new "best so far" optimized IR so users can
-                // inspect the trajectory of improvements over time.
+                // Also snapshot each new "best so far" optimized IR so users
+                // can inspect the trajectory of improvements
+                // over time.
                 //
-                // We prefer the chain/iter from the most recent GlobalBestUpdate
-                // message; if not available, fall back to the message that
-                // triggered this write.
+                // We prefer the chain/iter from the most recent
+                // GlobalBestUpdate message; if not available,
+                // fall back to the message that triggered this
+                // write.
                 let snapshot_msg = last_best_update_msg.unwrap_or(msg);
                 write_index = write_index.saturating_add(1);
                 let best_opt_ir_snapshot_path = output_dir_for_thread.join(format!(

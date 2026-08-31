@@ -157,8 +157,9 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
         }
     }
 
-    // We do this in a worklist / topological fashion to avoid deep recursion and
-    // potential stack overflows when the AIG has very long paths (e.g. >100k).
+    // We do this in a worklist / topological fashion to avoid deep recursion
+    // and potential stack overflows when the AIG has very long paths (e.g.
+    // >100k).
     let topo_order = topo_sort_refs(&gate_fn.gates);
     for node_ref in topo_order {
         if depths.contains_key(&node_ref) {
@@ -167,8 +168,8 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
         let depth = match &gate_fn.gates[node_ref.id] {
             AigNode::Input { .. } | AigNode::Literal { .. } => 0,
             AigNode::And2 { a, b, .. } => {
-                // We expect childrens' depths to be present as topo order ensures
-                // they come earlier.
+                // We expect childrens' depths to be present as topo order
+                // ensures they come earlier.
                 1 + std::cmp::max(
                     *depths.get(&a.node).expect("child depth missing (a)"),
                     *depths.get(&b.node).expect("child depth missing (b)"),
@@ -178,8 +179,8 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
         depths.insert(node_ref, depth);
     }
 
-    // Filter to just the nodes that are outputs to determine the deepest primary
-    // output.
+    // Filter to just the nodes that are outputs to determine the deepest
+    // primary output.
     let mut deepest_primary_output: Option<(gate::AigRef, usize)> = None;
     for output in gate_fn.outputs.iter() {
         for operand in output.bit_vector.iter_lsb_to_msb() {
@@ -194,7 +195,8 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
     }
 
     if deepest_primary_output.is_none() {
-        // If there are no outputs for this function, its summary stats are trivial.
+        // If there are no outputs for this function, its summary stats are
+        // trivial.
         return GateDepthStats {
             depth_to_count: HashMap::new(),
             deepest_path: vec![],

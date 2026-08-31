@@ -12,8 +12,9 @@ mod tests {
     use xlsynth_g8r::test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample};
     use xlsynth_g8r::verilog_version::VerilogVersion;
     use xlsynth_test_helpers::compare_golden_sv;
-    // Use pretty_assertions if detailed diffs are needed in the future, but remove
-    // for now as not strictly used. use pretty_assertions::assert_eq;
+    // Use pretty_assertions if detailed diffs are needed in the future, but
+    // remove for now as not strictly used. use
+    // pretty_assertions::assert_eq;
 
     fn make_packed_inverter_gate_fn(bit_count: usize) -> GateFn {
         let mut g8_builder =
@@ -129,8 +130,8 @@ mod tests {
             result.err()
         );
         if let Ok(verilog) = result {
-            // println!("bf16_add_flopped Verilog length: {}", verilog.len()); // Optional:
-            // for debugging
+            // println!("bf16_add_flopped Verilog length: {}", verilog.len());
+            // // Optional: for debugging
             assert!(
                 verilog.len() > 100,
                 "Generated Verilog for bf16_add_flopped seems too short"
@@ -167,8 +168,8 @@ mod tests {
             result.err()
         );
         if let Ok(verilog) = result {
-            // println!("bf16_mul_flopped Verilog length: {}", verilog.len()); // Optional:
-            // for debugging
+            // println!("bf16_mul_flopped Verilog length: {}", verilog.len());
+            // // Optional: for debugging
             assert!(
                 verilog.len() > 100,
                 "Generated Verilog for bf16_mul_flopped seems too short"

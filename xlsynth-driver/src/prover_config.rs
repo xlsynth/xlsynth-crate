@@ -385,8 +385,8 @@ pub struct FakeTaskConfig {
 #[cfg(feature = "enable-fake-task")]
 impl ToDriverCommand for FakeTaskConfig {
     fn to_command(&self) -> Command {
-        // Use a POSIX shell snippet to sleep and then locate the --output_json path
-        // from argv.
+        // Use a POSIX shell snippet to sleep and then locate the --output_json
+        // path from argv.
         let script = r#"
 delay_ms="${FAKE_DELAY_MS:-}"
 # If delay_ms is empty, sleep indefinitely (never complete).

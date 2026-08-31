@@ -130,8 +130,8 @@ pub fn load_aiger(src: &str, opts: GateBuilderOptions) -> Result<LoadAigerResult
         if var_to_operand.contains_key(&var) {
             return Err(format!("duplicate input variable index {}", var));
         }
-        // Create input bit (single-bit vector for now; may regroup later using symbol
-        // table).
+        // Create input bit (single-bit vector for now; may regroup later using
+        // symbol table).
         let default_name = format!("i{}", idx);
         let bv = gb.add_input(default_name.clone(), 1);
         let op = *bv.get_lsb(0);

@@ -843,7 +843,8 @@ fn foo(x: bits[8] id=1) -> bits[16] {
 "#;
         let mut parser = Parser::new(ir);
         let f = parser.parse_fn().expect("parse fn");
-        // add node is declared bits[16] but deduction expects bits[8]; should error.
+        // add node is declared bits[16] but deduction expects bits[8]; should
+        // error.
         assert!(verify_fn_types_agree_with_deduction(&f).is_err());
     }
 
