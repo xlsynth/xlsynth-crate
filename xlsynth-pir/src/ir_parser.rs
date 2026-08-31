@@ -1878,6 +1878,32 @@ impl Parser {
         self.pop_identifier_or_error(&format!("{} attribute", attr_name))
     }
 
+    /// Parses a port identifier with optional numeric tuple-component suffixes.
+    fn parse_dotted_identifier_attribute(&mut self, attr_name: &str) -> Result<String, ParseError> {
+        let mut identifier = self.parse_identifier_attribute(attr_name)?;
+        while self.peekc() == Some('.') {
+            self.dropc()?;
+            identifier.push('.');
+            let mut found_digit = false;
+            while let Some(c) = self.peekc() {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                self.dropc()?;
+                identifier.push(c);
+                found_digit = true;
+            }
+            if !found_digit {
+                return Err(ParseError::new(format!(
+                    "expected numeric tuple component in {} attribute; rest_of_line: {:?}",
+                    attr_name,
+                    self.rest_of_line()
+                )));
+            }
+        }
+        Ok(identifier)
+    }
+
     fn parse_node_ref_attribute(
         &mut self,
         attr_name: &str,
@@ -1939,6 +1965,7 @@ impl Parser {
         }
         self.drop_or_error("(")?;
         let mut block_ref: Option<String> = None;
+        let mut foreign_function: Option<String> = None;
         let mut kind: Option<String> = None;
         loop {
             self.drop_whitespace_and_comments();
@@ -1946,8 +1973,25 @@ impl Parser {
                 break;
             }
             if self.peek_is("block=") {
+                if block_ref.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation block attribute".to_string(),
+                    ));
+                }
                 block_ref = Some(self.parse_identifier_attribute("block")?);
+            } else if self.peek_is("foreign_function=") {
+                if foreign_function.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation foreign_function attribute".to_string(),
+                    ));
+                }
+                foreign_function = Some(self.parse_identifier_attribute("foreign_function")?);
             } else if self.peek_is("kind=") {
+                if kind.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation kind attribute".to_string(),
+                    ));
+                }
                 kind = Some(self.parse_identifier_attribute("kind")?);
             } else {
                 return Err(ParseError::new(format!(
@@ -1960,19 +2004,44 @@ impl Parser {
                 break;
             }
         }
-        let block_ref = block_ref
-            .ok_or_else(|| ParseError::new("instantiation missing block attribute".to_string()))?;
         let kind = kind
             .ok_or_else(|| ParseError::new("instantiation missing kind attribute".to_string()))?;
-        if kind != "block" {
-            return Err(ParseError::new(format!(
-                "unsupported instantiation kind '{}'",
-                kind
-            )));
-        }
+        let (block, kind) = match kind.as_str() {
+            "block" => {
+                if foreign_function.is_some() {
+                    return Err(ParseError::new(
+                        "block instantiation cannot have a foreign_function attribute".to_string(),
+                    ));
+                }
+                let block = block_ref.ok_or_else(|| {
+                    ParseError::new("instantiation missing block attribute".to_string())
+                })?;
+                (block, ir::InstantiationKind::Block)
+            }
+            "extern" => {
+                if block_ref.is_some() {
+                    return Err(ParseError::new(
+                        "external instantiation cannot have a block attribute".to_string(),
+                    ));
+                }
+                let function = foreign_function.ok_or_else(|| {
+                    ParseError::new(
+                        "external instantiation missing foreign_function attribute".to_string(),
+                    )
+                })?;
+                (function, ir::InstantiationKind::Extern)
+            }
+            _ => {
+                return Err(ParseError::new(format!(
+                    "unsupported instantiation kind '{}'",
+                    kind
+                )));
+            }
+        };
         Ok(ir::Instantiation {
             name: inst_name,
-            block: block_ref,
+            block,
+            kind,
         })
     }
 
@@ -2709,26 +2778,32 @@ impl Parser {
                 let activate = self.parse_node_ref(&node_env, "assert activate")?;
                 self.drop_or_error(",")?;
                 let message = self.parse_string_attribute("message")?;
-                self.drop_or_error(",")?;
-                let label = self.parse_string_attribute("label")?;
-                if self.peek_is(",") {
-                    self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+                let mut label = String::new();
+                if self.try_drop(",") {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("label=") {
+                        label = self.parse_string_attribute("label")?;
+                        if self.try_drop(",") {
+                            maybe_id = Some(self.parse_id_attribute()?);
+                        }
+                    } else {
+                        maybe_id = Some(self.parse_id_attribute()?);
+                    }
                 }
-                if maybe_id.is_none() {
-                    return Err(ParseError::new(format!(
+                let id = maybe_id.ok_or_else(|| {
+                    ParseError::new(format!(
                         "expected id for assert; rest_of_line: {:?}",
                         self.rest_of_line()
-                    )));
-                }                (
+                    ))
+                })?;
+                (
                     ir::NodePayload::Assert {
                         token,
                         activate,
                         message,
                         label,
                     },
-                    maybe_id.unwrap(),
+                    id,
                 )
             }
             "cover" => {
@@ -2920,7 +2995,7 @@ impl Parser {
                         continue;
                     }
                     if self.peek_is("port_name") {
-                        port_name = Some(self.parse_identifier_attribute("port_name")?);
+                        port_name = Some(self.parse_dotted_identifier_attribute("port_name")?);
                         continue;
                     }
                     if self.peek_is("id=") {
@@ -2971,7 +3046,7 @@ impl Parser {
                         continue;
                     }
                     if self.peek_is("port_name") {
-                        port_name = Some(self.parse_identifier_attribute("port_name")?);
+                        port_name = Some(self.parse_dotted_identifier_attribute("port_name")?);
                         continue;
                     }
                     if self.peek_is("id=") {
@@ -3678,16 +3753,29 @@ impl Parser {
 
         // Parse port list from the block header: `name: type, ...` (no ids).
         let mut header_ports: Vec<(String, ir::Type)> = Vec::new();
+        let mut port_order: Vec<String> = Vec::new();
+        let mut header_port_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         self.drop_or_error("(")?;
         loop {
             if self.try_drop(")") {
                 break;
             }
             let pname = self.pop_identifier_or_error("block port name")?;
+            if !header_port_names.insert(pname.clone()) {
+                return Err(ParseError::new(format!(
+                    "duplicate port '{}' in block '{}'",
+                    pname, block_name
+                )));
+            }
+            port_order.push(pname.clone());
             self.drop_or_error(":")?;
             if self.try_drop("clock") {
-                if !header_ports.is_empty() {
-                    return Err(ParseError::new("clock must be first port".to_string()));
+                if clock_port_name.is_some() {
+                    return Err(ParseError::new(format!(
+                        "block '{}' has multiple clock ports",
+                        block_name
+                    )));
                 }
                 clock_port_name = Some(pname);
             } else {
@@ -3718,6 +3806,7 @@ impl Parser {
         let mut outputs: Vec<(String, ir::NodeRef)> = Vec::new();
         let mut output_ids_by_name: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+        let mut port_sv_types: BTreeMap<String, String> = BTreeMap::new();
 
         // Collect inner attributes at the top of the block body.
         let inner_attrs: Vec<String> = self.parse_inner_attributes()?;
@@ -3763,15 +3852,31 @@ impl Parser {
                     self.drop_or_error("name=")?;
                     let port_name = self.pop_identifier_or_error("input_port name")?;
                     let mut id_opt: Option<usize> = None;
-                    if self.try_drop(",") {
+                    let mut sv_type: Option<String> = None;
+                    while self.try_drop(",") {
                         self.drop_whitespace_and_comments();
                         if self.peek_is("id=") {
+                            if id_opt.is_some() {
+                                return Err(ParseError::new(
+                                    "duplicate input_port id attribute".to_string(),
+                                ));
+                            }
                             id_opt = Some(self.parse_id_attribute()?);
+                        } else if self.peek_is("sv_type=") {
+                            if sv_type.is_some() {
+                                return Err(ParseError::new(
+                                    "duplicate input_port sv_type attribute".to_string(),
+                                ));
+                            }
+                            sv_type = Some(self.parse_string_attribute("sv_type")?);
+                        } else if self.peek_is("pos=") {
+                            let _ = self.maybe_drop_pos_attribute()?;
+                        } else {
+                            return Err(ParseError::new(format!(
+                                "unexpected input_port attribute; rest_of_line: {:?}",
+                                self.rest_of_line()
+                            )));
                         }
-                    }
-                    // Optionally allow a trailing pos attribute, then ')'
-                    if self.try_drop(",") {
-                        let _ = self.maybe_drop_pos_attribute()?;
                     }
                     self.drop_or_error(")")?;
                     // Validate and construct a GetParam node with the given id.
@@ -3818,6 +3923,9 @@ impl Parser {
                         .add(node.name.clone(), node.text_id, node_ref)
                         .map_err(ParseError::new)?;
                     nodes.push(node);
+                    if let Some(sv_type) = sv_type {
+                        port_sv_types.insert(port_name.clone(), sv_type);
+                    }
                     // Record input param for fn signature.
                     input_params.push((port_name, node_ty, id_val));
                     Ok(Some(()))
@@ -3829,6 +3937,7 @@ impl Parser {
                     // hit ')'.
                     let mut out_name_opt: Option<String> = None;
                     let mut out_id_opt: Option<usize> = None;
+                    let mut sv_type: Option<String> = None;
                     loop {
                         self.drop_whitespace_and_comments();
                         if !self.try_drop(",") {
@@ -3845,6 +3954,15 @@ impl Parser {
                             out_id_opt = Some(self.parse_id_attribute()?);
                             continue;
                         }
+                        if self.peek_is("sv_type=") {
+                            if sv_type.is_some() {
+                                return Err(ParseError::new(
+                                    "duplicate output_port sv_type attribute".to_string(),
+                                ));
+                            }
+                            sv_type = Some(self.parse_string_attribute("sv_type")?);
+                            continue;
+                        }
                         if self.peek_is("pos=") {
                             let _ = self.maybe_drop_pos_attribute()?;
                             continue;
@@ -3859,6 +3977,9 @@ impl Parser {
                     let out_id = out_id_opt.ok_or_else(|| {
                         ParseError::new("output_port missing id attribute".to_string())
                     })?;
+                    if let Some(sv_type) = sv_type {
+                        port_sv_types.insert(out_name.clone(), sv_type);
+                    }
                     outputs.push((out_name.clone(), value_ref));
                     output_ids_by_name.insert(out_name, out_id);
                     Ok(Some(()))
@@ -3957,6 +4078,8 @@ impl Parser {
                 },
                 BlockMetadata {
                     clock_port_name,
+                    port_order,
+                    port_sv_types,
                     input_port_ids: input_params
                         .iter()
                         .map(|(n, _t, id)| (n.clone(), *id))
@@ -3996,6 +4119,8 @@ impl Parser {
             },
             BlockMetadata {
                 clock_port_name,
+                port_order,
+                port_sv_types,
                 input_port_ids: input_params
                     .iter()
                     .map(|(n, _t, id)| (n.clone(), *id))
@@ -4203,18 +4328,51 @@ pub fn emit_fn_as_block(
         (0..ret_nodes.len()).map(|i| format!("out{}", i)).collect()
     };
 
-    // Construct header: optional clock, then inputs, then outputs.
+    // Preserve the full source port order when block metadata provides it.
     let mut header_parts: Vec<String> = Vec::new();
-    if let Some(pi) = port_ids {
-        if let Some(clk_name) = &pi.clock_port_name {
-            header_parts.push(format!("{}: clock", clk_name));
+    if let Some(pi) = port_ids.filter(|pi| !pi.port_order.is_empty()) {
+        let mut emitted_names = BTreeSet::new();
+        for name in &pi.port_order {
+            if pi.clock_port_name.as_ref() == Some(name) {
+                header_parts.push(format!("{}: clock", name));
+                emitted_names.insert(name.clone());
+            } else if let Some(param) = f.params.iter().find(|param| param.name == *name) {
+                header_parts.push(format!("{}: {}", param.name, param.ty));
+                emitted_names.insert(name.clone());
+            } else if let Some(index) = pi.output_names.iter().position(|output| output == name) {
+                if let (Some(output_name), Some(ty)) =
+                    (decided_out_names.get(index), ret_types.get(index))
+                {
+                    header_parts.push(format!("{}: {}", output_name, ty));
+                    emitted_names.insert(output_name.clone());
+                }
+            }
         }
-    }
-    for p in f.params.iter() {
-        header_parts.push(format!("{}: {}", p.name, p.ty));
-    }
-    for (i, ty) in ret_types.iter().enumerate() {
-        header_parts.push(format!("{}: {}", decided_out_names[i], ty));
+        if let Some(clock) = &pi.clock_port_name {
+            if emitted_names.insert(clock.clone()) {
+                header_parts.push(format!("{}: clock", clock));
+            }
+        }
+        for param in &f.params {
+            if emitted_names.insert(param.name.clone()) {
+                header_parts.push(format!("{}: {}", param.name, param.ty));
+            }
+        }
+        for (index, ty) in ret_types.iter().enumerate() {
+            if emitted_names.insert(decided_out_names[index].clone()) {
+                header_parts.push(format!("{}: {}", decided_out_names[index], ty));
+            }
+        }
+    } else {
+        if let Some(clock) = port_ids.and_then(|metadata| metadata.clock_port_name.as_ref()) {
+            header_parts.push(format!("{}: clock", clock));
+        }
+        for param in &f.params {
+            header_parts.push(format!("{}: {}", param.name, param.ty));
+        }
+        for (index, ty) in ret_types.iter().enumerate() {
+            header_parts.push(format!("{}: {}", decided_out_names[index], ty));
+        }
     }
 
     // Emit body lines.
@@ -4246,10 +4404,16 @@ pub fn emit_fn_as_block(
             }
         }
         for inst in &pi.instantiations {
-            lines.push(format!(
-                "  instantiation {}(block={}, kind=block)",
-                inst.name, inst.block
-            ));
+            match inst.kind {
+                ir::InstantiationKind::Block => lines.push(format!(
+                    "  instantiation {}(block={}, kind=block)",
+                    inst.name, inst.block
+                )),
+                ir::InstantiationKind::Extern => lines.push(format!(
+                    "  instantiation {}(foreign_function={}, kind=extern)",
+                    inst.name, inst.block
+                )),
+            }
         }
     }
     // input_port lines for each param (in order).
@@ -4261,9 +4425,13 @@ pub fn emit_fn_as_block(
         } else {
             p.id.get_wrapped_id()
         };
+        let sv_type = port_ids
+            .and_then(|metadata| metadata.port_sv_types.get(&p.name))
+            .map(|ty| format!(", sv_type=\"{}\"", ir::escape_xls_ir_string(ty)))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {}: {} = input_port(name={}, id={})",
-            p.name, p.ty, p.name, input_id
+            "  {}: {} = input_port(name={}{}, id={})",
+            p.name, p.ty, p.name, sv_type, input_id
         ));
     }
     // Emit non-param nodes as IR lines.
@@ -4305,9 +4473,13 @@ pub fn emit_fn_as_block(
             next_id += 1;
             id
         };
+        let sv_type = port_ids
+            .and_then(|metadata| metadata.port_sv_types.get(out_name))
+            .map(|ty| format!(", sv_type=\"{}\"", ir::escape_xls_ir_string(ty)))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {}: () = output_port({}, name={}, id={})",
-            out_name, val_name, out_name, out_id
+            "  {}: () = output_port({}, name={}{}, id={})",
+            out_name, val_name, out_name, sv_type, out_id
         ));
     }
 
@@ -5091,6 +5263,76 @@ top fn main(t: token id=1) -> token {
     }
 
     #[test]
+    fn test_round_trip_assert_without_optional_label() {
+        let input = r#"package public_assert
+
+fn check(tkn: token id=1, condition: bits[1] id=2) -> token {
+  ret checked: token = assert(tkn, condition, message="condition failed", id=3)
+}
+"#;
+        xlsynth::IrPackage::parse_ir(input, None).expect("upstream accepts an unlabeled assert");
+        let package = Parser::new(input)
+            .parse_and_verify_package()
+            .expect("PIR accepts an unlabeled assert");
+        let function = package.get_fn("check").expect("function exists");
+        let node = function.get_node(function.ret_node_ref.expect("return node exists"));
+        match &node.payload {
+            ir::NodePayload::Assert { label, .. } => assert!(label.is_empty()),
+            payload => panic!("expected assert node, got {payload:?}"),
+        }
+        assert_eq!(package.to_string(), input);
+        Parser::new(&package.to_string())
+            .parse_and_verify_package()
+            .expect("unlabeled assert round-trips");
+    }
+
+    #[test]
+    fn test_assert_supports_optional_labels_and_implicit_or_explicit_ids() {
+        for labeled in [false, true] {
+            for explicit_id in [false, true] {
+                let node_name = if explicit_id { "checked" } else { "assert.3" };
+                let label = if labeled {
+                    ", label=\"condition_check\""
+                } else {
+                    ""
+                };
+                let id = if explicit_id { ", id=3" } else { "" };
+                let input = format!(
+                    r#"package public_assert
+
+fn check(tkn: token id=1, condition: bits[1] id=2) -> token {{
+  ret {node_name}: token = assert(tkn, condition, message="condition failed"{label}{id})
+}}
+"#
+                );
+                xlsynth::IrPackage::parse_ir(&input, None).unwrap_or_else(|error| {
+                    panic!(
+                        "upstream rejected labeled={labeled}, explicit_id={explicit_id}: {error}"
+                    )
+                });
+                let package = Parser::new(&input)
+                    .parse_and_verify_package()
+                    .unwrap_or_else(|error| {
+                        panic!("PIR rejected labeled={labeled}, explicit_id={explicit_id}: {error}")
+                    });
+                let function = package.get_fn("check").unwrap();
+                let node = function.get_node(function.ret_node_ref.unwrap());
+                assert_eq!(node.text_id, 3);
+                match &node.payload {
+                    ir::NodePayload::Assert { label, .. } => {
+                        assert_eq!(label.is_empty(), !labeled);
+                    }
+                    payload => panic!("expected assert node, got {payload:?}"),
+                }
+                let emitted = package.to_string();
+                Parser::new(&emitted)
+                    .parse_and_verify_package()
+                    .expect("assert variant round-trips");
+            }
+        }
+    }
+
+    #[test]
     fn test_round_trip_or_nary_ir_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         // Build a small node environment for the n-ary OR node we want to
@@ -5522,6 +5764,117 @@ fn id(x: bits[1] id=1) -> bits[1] {
   out0: () = output_port(instantiation_output.25, name=out0, id=21)
   out1: () = output_port(instantiation_output.26, name=out1, id=22)
 }"#;
+
+    const BLK_INTERLEAVED_PORTS_AND_TYPES: &str = r#"block typed_register(in: bits[8], out: bits[8], clk: clock, enable: bits[1]) {
+  reg value(bits[8])
+  in: bits[8] = input_port(name=in, sv_type="types::input_t", id=1)
+  enable: bits[1] = input_port(name=enable, id=2)
+  value_d: () = register_write(in, register=value, load_enable=enable, id=3)
+  value_q: bits[8] = register_read(register=value, id=4)
+  out: () = output_port(value_q, name=out, sv_type="types::output_t", id=5)
+}"#;
+
+    const PKG_EXTERNAL_TUPLE_INSTANTIATION: &str = r#"package public_external
+
+#[ffi_proto("""code_template: "external_pair {fn} (.low({pair.0}), .high({pair.1.0}), .result({return.1.0}));"
+""")]
+fn external_pair(pair: (bits[8], (bits[16])) id=1) -> (bits[8], (bits[16])) {
+  ret pair: (bits[8], (bits[16])) = param(name=pair, id=1)
+}
+
+top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
+  instantiation external_instance(foreign_function=external_pair, kind=extern)
+  low: bits[8] = input_port(name=low, id=2)
+  high: bits[16] = input_port(name=high, id=3)
+  instantiation_input.4: () = instantiation_input(low, instantiation=external_instance, port_name=pair.0, id=4)
+  instantiation_input.5: () = instantiation_input(high, instantiation=external_instance, port_name=pair.1.0, id=5)
+  instantiation_output.6: bits[16] = instantiation_output(instantiation=external_instance, port_name=return.1.0, id=6)
+  result: () = output_port(instantiation_output.6, name=result, id=7)
+}
+"#;
+
+    #[test]
+    fn test_roundtrip_block_preserves_interleaved_ports_and_systemverilog_types() {
+        let mut parser = Parser::new(BLK_INTERLEAVED_PORTS_AND_TYPES);
+        let (function, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        assert_eq!(metadata.port_order, ["in", "out", "clk", "enable"]);
+        assert_eq!(metadata.clock_port_name.as_deref(), Some("clk"));
+        assert_eq!(
+            metadata.port_sv_types.get("in").map(String::as_str),
+            Some("types::input_t")
+        );
+        assert_eq!(
+            metadata.port_sv_types.get("out").map(String::as_str),
+            Some("types::output_t")
+        );
+        assert_eq!(
+            emit_fn_as_block(&function, None, Some(&metadata), false),
+            BLK_INTERLEAVED_PORTS_AND_TYPES
+        );
+    }
+
+    #[test]
+    fn test_roundtrip_external_instantiation_with_nested_tuple_ports() {
+        let mut parser = Parser::new(PKG_EXTERNAL_TUPLE_INSTANTIATION);
+        let package = parser.parse_and_validate_package().unwrap();
+        let PackageMember::Block { metadata, .. } = package.get_top_block().unwrap() else {
+            panic!("expected top block");
+        };
+        assert_eq!(metadata.instantiations.len(), 1);
+        assert_eq!(metadata.instantiations[0].name, "external_instance");
+        assert_eq!(metadata.instantiations[0].block, "external_pair");
+        assert_eq!(
+            metadata.instantiations[0].kind,
+            ir::InstantiationKind::Extern
+        );
+        assert_eq!(package.to_string(), PKG_EXTERNAL_TUPLE_INSTANTIATION);
+    }
+
+    #[test]
+    fn test_block_rejects_multiple_clock_ports() {
+        let mut parser = Parser::new("block invalid(clk0: clock, clk1: clock) {} ");
+        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ParseError: block 'invalid' has multiple clock ports"
+        );
+    }
+
+    #[test]
+    fn test_block_rejects_duplicate_port_names() {
+        let mut parser = Parser::new("block invalid(value: bits[8], value: bits[8]) {} ");
+        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ParseError: duplicate port 'value' in block 'invalid'"
+        );
+    }
+
+    #[test]
+    fn test_external_instantiation_requires_foreign_function_attribute() {
+        let input = r#"block invalid() {
+  instantiation external_instance(kind=extern)
+}"#;
+        let mut parser = Parser::new(input);
+        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ParseError: external instantiation missing foreign_function attribute"
+        );
+    }
+
+    #[test]
+    fn test_block_instantiation_rejects_foreign_function_attribute() {
+        let input = r#"block invalid() {
+  instantiation instance(block=child, foreign_function=external, kind=block)
+}"#;
+        let mut parser = Parser::new(input);
+        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ParseError: block instantiation cannot have a foreign_function attribute"
+        );
+    }
 
     #[test]
     fn test_roundtrip_block_parse_then_emit_single_output() {

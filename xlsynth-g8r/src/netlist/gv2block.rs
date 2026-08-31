@@ -939,6 +939,8 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
 
     let meta = BlockMetadata {
         clock_port_name: clock_pin,
+        port_order: Vec::new(),
+        port_sv_types: Default::default(),
         input_port_ids,
         output_port_ids,
         output_names,
@@ -1241,6 +1243,7 @@ fn build_top_block(
         instantiations.push(Instantiation {
             name: inst_name.clone(),
             block: cell_name.clone(),
+            kind: xlsynth_pir::ir::InstantiationKind::Block,
         });
 
         let outputs = lib_indexed
@@ -1429,6 +1432,8 @@ fn build_top_block(
 
     let meta = BlockMetadata {
         clock_port_name,
+        port_order: Vec::new(),
+        port_sv_types: Default::default(),
         input_port_ids,
         output_port_ids: HashMap::new(),
         output_names,

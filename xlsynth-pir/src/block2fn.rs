@@ -150,6 +150,8 @@ fn tie_input_ports(
         .map_err(|e| format!("block2fn: tie input '{}': {e}", param.name))?;
         tied_param_ids.insert(param.id);
         metadata.input_port_ids.remove(&param.name);
+        metadata.port_order.retain(|name| name != &param.name);
+        metadata.port_sv_types.remove(&param.name);
     }
 
     f.params.retain(|p| !tied_param_ids.contains(&p.id));
@@ -164,11 +166,15 @@ fn strip_clock_port(f: &mut ir::Fn, metadata: &mut BlockMetadata) -> Result<(), 
 
     let Some(param_id) = f.params.iter().find(|p| p.name == clock_name).map(|p| p.id) else {
         metadata.clock_port_name = None;
+        metadata.port_order.retain(|name| name != &clock_name);
+        metadata.port_sv_types.remove(&clock_name);
         return Ok(());
     };
 
     let Some(param_node_index) = find_get_param_node_index(f, param_id) else {
         metadata.clock_port_name = None;
+        metadata.port_order.retain(|name| name != &clock_name);
+        metadata.port_sv_types.remove(&clock_name);
         return Ok(());
     };
     let param_ref = NodeRef {
@@ -210,6 +216,8 @@ fn strip_clock_port(f: &mut ir::Fn, metadata: &mut BlockMetadata) -> Result<(), 
     f.params.retain(|p| p.id != param_id);
     metadata.input_port_ids.remove(&clock_name);
     metadata.clock_port_name = None;
+    metadata.port_order.retain(|name| name != &clock_name);
+    metadata.port_sv_types.remove(&clock_name);
     reorder_params_and_compact(f)?;
     Ok(())
 }
@@ -267,6 +275,12 @@ fn drop_output_ports(
         metadata
             .output_port_ids
             .retain(|name, _| retained_set.contains(name.as_str()));
+        metadata
+            .port_order
+            .retain(|name| !options.drop_output_ports.contains(name));
+        metadata
+            .port_sv_types
+            .retain(|name, _| !options.drop_output_ports.contains(name));
         return Ok(());
     }
 
@@ -309,6 +323,12 @@ fn drop_output_ports(
         metadata
             .output_port_ids
             .retain(|name, _| retained_set.contains(name.as_str()));
+        metadata
+            .port_order
+            .retain(|name| !options.drop_output_ports.contains(name));
+        metadata
+            .port_sv_types
+            .retain(|name, _| !options.drop_output_ports.contains(name));
         return Ok(());
     }
 
@@ -331,6 +351,12 @@ fn drop_output_ports(
     metadata
         .output_port_ids
         .retain(|name, _| retained_set.contains(name.as_str()));
+    metadata
+        .port_order
+        .retain(|name| !options.drop_output_ports.contains(name));
+    metadata
+        .port_sv_types
+        .retain(|name, _| !options.drop_output_ports.contains(name));
     Ok(())
 }
 

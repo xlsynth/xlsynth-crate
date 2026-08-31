@@ -877,12 +877,17 @@ impl NodePayload {
                 activate,
                 message,
                 label,
-            } => vec![
-                format_operand(*token),
-                format_operand(*activate),
-                format!("message=\"{}\"", escape_xls_ir_string(message)),
-                format!("label=\"{}\"", escape_xls_ir_string(label)),
-            ],
+            } => {
+                let mut attrs = vec![
+                    format_operand(*token),
+                    format_operand(*activate),
+                    format!("message=\"{}\"", escape_xls_ir_string(message)),
+                ];
+                if !label.is_empty() {
+                    attrs.push(format!("label=\"{}\"", escape_xls_ir_string(label)));
+                }
+                attrs
+            }
             NodePayload::Trace {
                 token,
                 activated,
@@ -1722,10 +1727,19 @@ pub struct Register {
     pub reset_value: Option<IrValue>,
 }
 
+/// Distinguishes a child block from a foreign-function instantiation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InstantiationKind {
+    Block,
+    Extern,
+}
+
 #[derive(Debug, Clone)]
 pub struct Instantiation {
     pub name: String,
+    /// Child block name, or foreign-function name for an external instance.
     pub block: String,
+    pub kind: InstantiationKind,
 }
 
 #[derive(Debug, Clone)]
@@ -1738,6 +1752,10 @@ pub struct BlockResetMetadata {
 #[derive(Debug, Clone)]
 pub struct BlockMetadata {
     pub clock_port_name: Option<String>,
+    /// Complete block-header port order, including the optional clock.
+    pub port_order: Vec<String>,
+    /// Optional SystemVerilog type annotations keyed by port name.
+    pub port_sv_types: std::collections::BTreeMap<String, String>,
     pub input_port_ids: std::collections::HashMap<String, usize>,
     pub output_port_ids: std::collections::HashMap<String, usize>,
     pub output_names: Vec<String>,
