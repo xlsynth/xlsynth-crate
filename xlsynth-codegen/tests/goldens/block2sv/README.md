@@ -1,8 +1,11 @@
 # Block-codegen golden fixtures
 
-These independently authored `.golden.ir` files contain valid block IR,
-declarative codegen options, and exact expected library results. Tests run
-inside `xlsynth-codegen`, without a driver or codegen binary.
+This intentionally small, independently authored suite contains valid block
+IR, declarative codegen options, and exact expected library results. It keeps
+textual contracts reviewable without trying to snapshot every supported
+operation. Broad correctness belongs in focused tests, iverilog/Yosys checks,
+and fuzzing. Tests run inside `xlsynth-codegen`, without a driver or codegen
+binary.
 
 ```text
 package example
@@ -63,8 +66,9 @@ cargo test -p xlsynth-codegen --features yosys-tests --test block2sv_yosys
 ```
 
 Both features are off by default. Selected suites require their tools and fail
-when tools are missing. Icarus checks compilation, outputs, hierarchy, register
-templates, and reset/enable behavior. Yosys consumes generated SystemVerilog.
+when tools are missing. iverilog checks compilation, outputs, hierarchy,
+register templates, and reset/enable behavior. Yosys consumes generated
+SystemVerilog.
 Random-block fuzzing also checks Yosys/ABC → mapped
 netlist → netlist evaluation; see the crate's fuzz guide.
 

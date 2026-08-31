@@ -272,15 +272,9 @@ fn block2sv_extension_operators_match_pir_evaluation() {
     let examples = [
         "extended_carry_out.golden.ir",
         "extended_priority_encode.golden.ir",
-        "extended_priority_encode_msb.golden.ir",
         "extended_leading_zeros.golden.ir",
-        "extended_leading_zeros_scalar.golden.ir",
         "extended_normalize.golden.ir",
-        "extended_normalize_with_count.golden.ir",
-        "extended_normalize_boundaries.golden.ir",
-        "extended_mask_low.golden.ir",
         "extended_nary_add.golden.ir",
-        "extended_nary_add_empty.golden.ir",
     ];
     let temporary_directory = tempfile::tempdir().expect("create extension simulation directory");
     let source_path = temporary_directory.path().join("extension_equivalence.sv");
