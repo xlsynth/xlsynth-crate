@@ -41,6 +41,7 @@ pub enum ReductionKind {
     Tree,
 }
 
+#[derive(Clone)]
 pub struct GateBuilder {
     pub name: String,
     pub gates: Vec<AigNode>,
@@ -1422,5 +1423,47 @@ mod tests {
             GateBuilder::new("uncached_depth".to_string(), GateBuilderOptions::no_opt());
         let input = no_hash.add_input("input".to_string(), 1);
         assert_eq!(no_hash.aig_depth(*input.get_lsb(0)), None);
+    }
+
+    #[test]
+    fn test_clone_is_an_independent_structural_hash_fork() {
+        let mut original = GateBuilder::new("clone_fork".to_string(), GateBuilderOptions::opt());
+        let a = *original.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *original.add_input("b".to_string(), 1).get_lsb(0);
+
+        original.set_current_pir_node_id(Some(7));
+        let ab = original.add_and_binary(a, b);
+        original.add_tag(ab.node, "base".to_string());
+        original.set_current_pir_node_id(Some(8));
+
+        let mut fork = original.clone();
+        original.set_current_pir_node_id(None);
+        let original_gate_count = original.gates.len();
+
+        // The fork retains the structural hash and current provenance context,
+        // so this commuted AND reuses the existing node only in the fork.
+        let fork_ab = fork.add_and_binary(b, a);
+        fork.add_tag(fork_ab.node, "fork".to_string());
+        let not_b = fork.add_not(b);
+        let fork_a_not_b = fork.add_and_binary(a, not_b);
+
+        assert_eq!(fork_ab, ab);
+        assert_eq!(fork.gates[ab.node.id].get_pir_node_ids(), &[7, 8]);
+        assert_eq!(
+            fork.gates[ab.node.id].get_tags(),
+            Some(&["base".to_string(), "fork".to_string()][..])
+        );
+        assert_eq!(fork.aig_depth(fork_a_not_b), Some(1));
+
+        assert_eq!(original.gates.len(), original_gate_count);
+        assert_eq!(original.gates[ab.node.id].get_pir_node_ids(), &[7]);
+        assert_eq!(
+            original.gates[ab.node.id].get_tags(),
+            Some(&["base".to_string()][..])
+        );
+
+        let original_ab = original.add_and_binary(b, a);
+        assert_eq!(original_ab, ab);
+        assert_eq!(original.gates.len(), original_gate_count);
     }
 }

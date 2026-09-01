@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig::fanout::fanout_histogram;
-use crate::aig::gate::{self, AigNode};
-use crate::aig::topo::topo_sort_refs;
+use crate::aig::gate::{self, AigNode, AigOperand};
+use crate::aig::topo::{postorder_for_aig_refs_node_only, topo_sort_refs};
 use crate::use_count::get_id_to_use_count;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -29,6 +29,48 @@ pub struct AigStats {
     ///   primary output will typically contribute to the `1` bin.
     /// - This is computed over *live* nodes (reachable from primary outputs).
     pub fanout_histogram: BTreeMap<usize, usize>,
+}
+
+/// Exact structural statistics for the combined AIG cone rooted at arbitrary
+/// operands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AigConeStats {
+    /// Count of distinct reachable `AigNode::And2` nodes.
+    pub and_nodes: usize,
+    /// AIG AND-level depth for each root, in the same order as the input roots.
+    pub root_depths: Vec<usize>,
+}
+
+/// Computes exact structural statistics for the combined cone rooted at
+/// `roots`.
+pub fn get_aig_cone_stats(nodes: &[AigNode], roots: &[AigOperand]) -> AigConeStats {
+    let root_refs = roots.iter().map(|root| root.node).collect::<Vec<_>>();
+    let empty_cache = HashMap::<gate::AigRef, ()>::new();
+    let postorder = postorder_for_aig_refs_node_only(&root_refs, nodes, &empty_cache);
+    let mut depths = vec![None; nodes.len()];
+    let mut and_nodes = 0;
+
+    for node_ref in postorder {
+        let depth = match &nodes[node_ref.id] {
+            AigNode::Input { .. } | AigNode::Literal { .. } => 0,
+            AigNode::And2 { a, b, .. } => {
+                and_nodes += 1;
+                1 + std::cmp::max(
+                    depths[a.node.id].expect("left fanin depth should be available"),
+                    depths[b.node.id].expect("right fanin depth should be available"),
+                )
+            }
+        };
+        depths[node_ref.id] = Some(depth);
+    }
+
+    AigConeStats {
+        and_nodes,
+        root_depths: roots
+            .iter()
+            .map(|root| depths[root.node.id].expect("root depth should be available"))
+            .collect(),
+    }
 }
 
 // Add structured return type for gate depth info.
@@ -300,7 +342,9 @@ pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_level_critical_path_and_nodes, get_level_critical_path_ands};
+    use super::{
+        get_aig_cone_stats, get_level_critical_path_and_nodes, get_level_critical_path_ands,
+    };
     use crate::aig::gate;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::use_count::get_id_to_use_count;
@@ -333,5 +377,24 @@ mod tests {
         );
         assert_eq!(got_with_depth.depth_aig_nodes, 2);
         assert_eq!(got_with_depth.and_nodes.len(), 3);
+    }
+
+    #[test]
+    fn test_get_aig_cone_stats_uses_arbitrary_roots_and_deduplicates_nodes() {
+        let mut builder = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let input = builder.add_input("input".to_string(), 3);
+        let a = *input.get_lsb(0);
+        let b = *input.get_lsb(1);
+        let c = *input.get_lsb(2);
+
+        let ab = builder.add_and_binary(a, b);
+        let abc = builder.add_and_binary(ab, c);
+        let _unreachable = builder.add_and_binary(a, c);
+        let roots = [abc, ab, builder.add_not(abc), builder.get_false()];
+
+        let stats = get_aig_cone_stats(&builder.gates, &roots);
+
+        assert_eq!(stats.and_nodes, 2);
+        assert_eq!(stats.root_depths, vec![2, 1, 2, 0]);
     }
 }
