@@ -47,7 +47,7 @@ pub fn get_aig_cone_stats(nodes: &[AigNode], roots: &[AigOperand]) -> AigConeSta
     let root_refs = roots.iter().map(|root| root.node).collect::<Vec<_>>();
     let empty_cache = HashMap::<gate::AigRef, ()>::new();
     let postorder = postorder_for_aig_refs_node_only(&root_refs, nodes, &empty_cache);
-    let mut depths = vec![None; nodes.len()];
+    let mut depths = HashMap::<gate::AigRef, usize>::with_capacity(postorder.len());
     let mut and_nodes = 0;
 
     for node_ref in postorder {
@@ -56,19 +56,27 @@ pub fn get_aig_cone_stats(nodes: &[AigNode], roots: &[AigOperand]) -> AigConeSta
             AigNode::And2 { a, b, .. } => {
                 and_nodes += 1;
                 1 + std::cmp::max(
-                    depths[a.node.id].expect("left fanin depth should be available"),
-                    depths[b.node.id].expect("right fanin depth should be available"),
+                    *depths
+                        .get(&a.node)
+                        .expect("left fanin depth should be available"),
+                    *depths
+                        .get(&b.node)
+                        .expect("right fanin depth should be available"),
                 )
             }
         };
-        depths[node_ref.id] = Some(depth);
+        depths.insert(node_ref, depth);
     }
 
     AigConeStats {
         and_nodes,
         root_depths: roots
             .iter()
-            .map(|root| depths[root.node.id].expect("root depth should be available"))
+            .map(|root| {
+                *depths
+                    .get(&root.node)
+                    .expect("root depth should be available")
+            })
             .collect(),
     }
 }

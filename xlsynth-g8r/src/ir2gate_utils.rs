@@ -486,18 +486,18 @@ fn is_strict_pareto_improvement(natural: &AigConeStats, candidate: &AigConeStats
     no_output_later && no_area_regression && (some_output_earlier || some_area_improvement)
 }
 
-/// Builds a natural-order result and, when control arrival suggests a distinct
-/// order, builds that alternative in a cloned builder. The alternative is
-/// committed only when its exact retained-output cone is a strict Pareto
-/// improvement in per-output depth and reachable AND count.
+/// Builds natural and control-arrival orders as append-only trials against the
+/// same builder prefix. The alternative is committed only when its exact
+/// retained-output cone is a strict Pareto improvement in per-output depth and
+/// reachable AND count.
 pub(crate) fn gatify_barrel_shifter_with_forked_stage_order<F>(
     amount_gates: &AigBitVector,
     relevant_output_bit_count: usize,
     gb: &mut GateBuilder,
-    mut build: F,
+    build: F,
 ) -> AigBitVector
 where
-    F: FnMut(&[usize], &mut GateBuilder) -> AigBitVector,
+    F: Fn(&[usize], &mut GateBuilder) -> AigBitVector,
 {
     let natural_order = (0..amount_gates.get_bit_count()).collect::<Vec<_>>();
     if relevant_output_bit_count == 0 {
@@ -508,12 +508,14 @@ where
         return build(&natural_order, gb);
     }
 
-    let mut candidate_gb = gb.clone();
+    let natural_checkpoint = gb.begin_append_checkpoint();
     let natural_result = build(&natural_order, gb);
-    let candidate_result = build(&candidate_order, &mut candidate_gb);
     let natural_stats = relevant_cone_stats(gb, &natural_result, relevant_output_bit_count);
-    let candidate_stats =
-        relevant_cone_stats(&candidate_gb, &candidate_result, relevant_output_bit_count);
+    gb.rollback_append_checkpoint(natural_checkpoint);
+
+    let candidate_checkpoint = gb.begin_append_checkpoint();
+    let candidate_result = build(&candidate_order, gb);
+    let candidate_stats = relevant_cone_stats(gb, &candidate_result, relevant_output_bit_count);
 
     let select_candidate = is_strict_pareto_improvement(&natural_stats, &candidate_stats);
     log::debug!(
@@ -521,10 +523,11 @@ where
         "forked stage order natural={natural_order:?} candidate={candidate_order:?} natural_stats={natural_stats:?} candidate_stats={candidate_stats:?} selected={select_candidate}"
     );
     if select_candidate {
-        *gb = candidate_gb;
+        gb.commit_append_checkpoint(candidate_checkpoint);
         candidate_result
     } else {
-        natural_result
+        gb.rollback_append_checkpoint(candidate_checkpoint);
+        build(&natural_order, gb)
     }
 }
 
