@@ -490,6 +490,11 @@ fn is_strict_pareto_improvement(natural: &AigConeStats, candidate: &AigConeStats
 /// same builder prefix. The alternative is committed only when its exact
 /// retained-output cone is a strict Pareto improvement in per-output depth and
 /// reachable AND count.
+///
+/// This is a local guard over the retained shifter-output cone. Later AIG
+/// sharing and reconvergence, and downstream technology mapping, may still
+/// worsen whole-function depth, area, or delay; it does not guarantee globally
+/// monotonic QoR.
 pub(crate) fn gatify_barrel_shifter_with_forked_stage_order<F>(
     amount_gates: &AigBitVector,
     relevant_output_bit_count: usize,
