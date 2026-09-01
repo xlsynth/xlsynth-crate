@@ -443,10 +443,40 @@ pub fn array_add(
     array_add_with_carry_out(gb, &operands, carry_in, AdderMapping::default()).sum
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
     Right,
+}
+
+/// Selects how the commuting stages of a barrel shifter are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarrelShifterStageOrdering {
+    /// Increasing shift distance: 1, 2, 4, ...
+    Natural,
+    /// Earlier-arriving controls first, leaving later controls nearer the
+    /// output.
+    ControlArrival,
+}
+
+fn barrel_shifter_stage_indices(
+    amount_gates: &AigBitVector,
+    stage_ordering: BarrelShifterStageOrdering,
+    gb: &mut GateBuilder,
+) -> Vec<usize> {
+    let mut stages = (0..amount_gates.get_bit_count()).collect::<Vec<_>>();
+    if stage_ordering == BarrelShifterStageOrdering::ControlArrival {
+        let controls = amount_gates.iter_lsb_to_msb().copied().collect::<Vec<_>>();
+        let arrivals = gb.get_operand_graph_logical_effort_arrival_times(&controls);
+        // The stage transformations commute. Put early controls first so a
+        // late-arriving control traverses fewer downstream mux stages.
+        stages.sort_by(|lhs, rhs| {
+            arrivals[*lhs]
+                .total_cmp(&arrivals[*rhs])
+                .then_with(|| lhs.cmp(rhs))
+        });
+    }
+    stages
 }
 
 // Implements a stage-based barrel shifter (with logarithmic stages) using 2:1
@@ -455,6 +485,7 @@ fn gatify_barrel_shifter_internal(
     arg_gates: &AigBitVector,
     amount_gates: &AigBitVector,
     direction: Direction,
+    stage_ordering: BarrelShifterStageOrdering,
     tag_prefix: &str,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
@@ -463,7 +494,7 @@ fn gatify_barrel_shifter_internal(
     // Start with the input vector.
     let mut current: Vec<AigOperand> = arg_gates.iter_lsb_to_msb().cloned().collect::<Vec<_>>();
     // Each bit in the shift amount (assumed little-endian) represents a stage.
-    for stage in 0..amount_gates.get_bit_count() {
+    for stage in barrel_shifter_stage_indices(amount_gates, stage_ordering, g8_builder) {
         let shift = 1 << stage; // 2^stage shift amount for this stage.
         let control = amount_gates.get_lsb(stage);
         let mut next_stage = Vec::with_capacity(bit_count);
@@ -528,6 +559,28 @@ pub fn gatify_barrel_shifter(
     tag_prefix: &str,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
+    gatify_barrel_shifter_with_stage_ordering(
+        arg_gates,
+        amount_gates,
+        direction,
+        BarrelShifterStageOrdering::ControlArrival,
+        tag_prefix,
+        gb,
+    )
+}
+
+/// Emits a barrel shifter with an explicit stage ordering.
+///
+/// The public gatify path uses control-arrival ordering. The explicit natural
+/// ordering is retained for equivalence tests and QoR characterization.
+pub fn gatify_barrel_shifter_with_stage_ordering(
+    arg_gates: &AigBitVector,
+    amount_gates: &AigBitVector,
+    direction: Direction,
+    stage_ordering: BarrelShifterStageOrdering,
+    tag_prefix: &str,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
     let natural_amount_bits = (arg_gates.get_bit_count() as f64).log2().ceil() as usize;
     let amount_can_be_oversize = amount_gates.get_bit_count() > natural_amount_bits;
     // The "amount" value is limited in what it can realistically cause to happen by
@@ -541,11 +594,25 @@ pub fn gatify_barrel_shifter(
             "since amount can be oversize high bits should be non-empty"
         );
         let overlarge = gb.add_nez(&msbs, ReductionKind::Tree);
-        let normal = gatify_barrel_shifter_internal(arg_gates, &lsbs, direction, tag_prefix, gb);
+        let normal = gatify_barrel_shifter_internal(
+            arg_gates,
+            &lsbs,
+            direction,
+            stage_ordering,
+            tag_prefix,
+            gb,
+        );
         let zero = AigBitVector::zeros(arg_gates.get_bit_count());
         gb.add_mux2_vec(&overlarge, &zero, &normal)
     } else {
-        gatify_barrel_shifter_internal(arg_gates, amount_gates, direction, tag_prefix, gb)
+        gatify_barrel_shifter_internal(
+            arg_gates,
+            amount_gates,
+            direction,
+            stage_ordering,
+            tag_prefix,
+            gb,
+        )
     }
 }
 
@@ -966,7 +1033,7 @@ fn combine_prefix_pg(gb: &mut GateBuilder, lhs: PrefixPg, rhs: PrefixPg) -> Pref
 #[cfg(test)]
 mod tests {
     use crate::{
-        aig::gate::AigBitVector,
+        aig::{gate::AigBitVector, get_summary_stats::get_summary_stats},
         aig_sim::gate_sim,
         check_equivalence,
         gate_builder::GateBuilderOptions,
@@ -1100,6 +1167,89 @@ mod tests {
         carry_select_builder.add_output("c_out".to_string(), AigBitVector::from_bit(c_out));
         carry_select_builder.add_output("results".to_string(), results);
         carry_select_builder.build()
+    }
+
+    #[test]
+    fn test_barrel_shifter_stage_ordering_uses_graph_logical_effort() {
+        let mut gb = GateBuilder::new(
+            "graph_le_stage_ordering".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let a = gb.add_input("a".to_string(), 1);
+        let b = gb.add_input("b".to_string(), 1);
+        let c = gb.add_input("c".to_string(), 1);
+        let d = gb.add_input("d".to_string(), 1);
+        let side = gb.add_input("side".to_string(), 4);
+        let high_effort = gb.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+        let low_effort = gb.add_and_binary(*c.get_lsb(0), *d.get_lsb(0));
+        for side_bit in side.iter_lsb_to_msb() {
+            let _side_consumer = gb.add_and_binary(*a.get_lsb(0), *side_bit);
+        }
+        let controls = AigBitVector::from_lsb_is_index_0(&[high_effort, low_effort]);
+
+        assert_eq!(
+            barrel_shifter_stage_indices(&controls, BarrelShifterStageOrdering::Natural, &mut gb,),
+            vec![0, 1]
+        );
+        assert_eq!(
+            barrel_shifter_stage_indices(
+                &controls,
+                BarrelShifterStageOrdering::ControlArrival,
+                &mut gb,
+            ),
+            vec![1, 0]
+        );
+    }
+
+    fn make_delayed_barrel_shifter(
+        direction: Direction,
+        stage_ordering: BarrelShifterStageOrdering,
+    ) -> gate::GateFn {
+        let mut gb = GateBuilder::new(
+            "delayed_barrel_shifter".to_string(),
+            GateBuilderOptions::opt(),
+        );
+        let data = gb.add_input("data".to_string(), 8);
+        let amount = gb.add_input("amount".to_string(), 3);
+        let delay = gb.add_input("delay".to_string(), 6);
+        let delay_levels = [6usize, 0, 3];
+        let mut controls = Vec::with_capacity(3);
+        for (stage, levels) in delay_levels.into_iter().enumerate() {
+            let mut control = *amount.get_lsb(stage);
+            for level in 0..levels {
+                control = gb.add_and_binary(control, *delay.get_lsb(level));
+            }
+            controls.push(control);
+        }
+        let delayed_amount = AigBitVector::from_lsb_is_index_0(&controls);
+        let result = gatify_barrel_shifter_with_stage_ordering(
+            &data,
+            &delayed_amount,
+            direction,
+            stage_ordering,
+            "test",
+            &mut gb,
+        );
+        gb.add_output("result".to_string(), result);
+        gb.build()
+    }
+
+    #[test_case(Direction::Left; "left")]
+    #[test_case(Direction::Right; "right")]
+    fn test_barrel_shifter_control_arrival_ordering(direction: Direction) {
+        let natural = make_delayed_barrel_shifter(direction, BarrelShifterStageOrdering::Natural);
+        let control_arrival =
+            make_delayed_barrel_shifter(direction, BarrelShifterStageOrdering::ControlArrival);
+
+        check_equivalence::prove_same_gate_fn_via_ir(&natural, &control_arrival)
+            .expect("barrel-shifter stage permutation should preserve semantics");
+
+        let natural_stats = get_summary_stats(&natural);
+        let control_arrival_stats = get_summary_stats(&control_arrival);
+        assert!(
+            control_arrival_stats.deepest_path < natural_stats.deepest_path,
+            "arrival ordering should improve the deliberately skewed case: natural={natural_stats:?} arrival={control_arrival_stats:?}"
+        );
     }
 
     #[test]

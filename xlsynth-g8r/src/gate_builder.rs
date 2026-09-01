@@ -33,6 +33,7 @@ use crate::{
     aig::aig_hasher::AigHasher,
     aig::aig_simplify,
     aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds},
+    aig::graph_logical_effort::{GraphLogicalEffortArrivalCache, GraphLogicalEffortOptions},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub struct GateBuilder {
     pub outputs: Vec<Output>,
     pub options: GateBuilderOptions,
     pub hasher: Option<AigHasher>,
+    graph_logical_effort_arrival_cache: GraphLogicalEffortArrivalCache,
     current_pir_node_id: Option<u32>,
 }
 
@@ -121,6 +123,12 @@ impl GateBuilder {
             } else {
                 None
             },
+            graph_logical_effort_arrival_cache: GraphLogicalEffortArrivalCache::new(
+                GraphLogicalEffortOptions {
+                    beta1: 1.0,
+                    beta2: 0.0,
+                },
+            ),
             current_pir_node_id: None,
         }
     }
@@ -216,6 +224,19 @@ impl GateBuilder {
             );
         }
         self.outputs.push(Output { name, bit_vector });
+    }
+
+    /// Returns graph logical-effort arrival times for operands in input order.
+    pub fn get_operand_graph_logical_effort_arrival_times(
+        &mut self,
+        operands: &[AigOperand],
+    ) -> Vec<f64> {
+        let targets = operands
+            .iter()
+            .map(|operand| operand.node)
+            .collect::<Vec<_>>();
+        self.graph_logical_effort_arrival_cache
+            .arrival_times(&self.gates, &targets)
     }
 
     pub fn replicate(&self, arg: AigOperand, bit_count: usize) -> AigBitVector {

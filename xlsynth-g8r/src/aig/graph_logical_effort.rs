@@ -2,7 +2,7 @@
 
 //! Graph-based logical effort worst-case delay estimation.
 
-use crate::aig::topo::topo_sort_refs;
+use crate::aig::topo::{postorder_for_aig_refs_node_only, topo_sort_refs};
 use crate::aig::{AigNode, AigRef, GateFn};
 use std::collections::HashMap;
 
@@ -12,6 +12,28 @@ struct State {
     n: usize,
     p: f64,
     prev: Option<(AigRef, f64, usize, f64)>,
+}
+
+fn state_delay(state: &State) -> f64 {
+    if state.n == 0 {
+        0.0
+    } else {
+        (state.n as f64) * ((state.log_f / (state.n as f64)).exp()) + state.p
+    }
+}
+
+fn dominates(o: &State, c: &State) -> bool {
+    let (of, on, op) = (o.log_f, o.n as f64, o.p);
+    let (cf, cn, cp) = (c.log_f, c.n as f64, c.p);
+    let left = on <= of && cn <= cf;
+    let right = on >= of && cn >= cf;
+    if left {
+        return on <= cn && of >= cf && op >= cp;
+    }
+    if right {
+        return on >= cn && of >= cf && op >= cp;
+    }
+    false
 }
 
 /// Computes the worst-case delay in a DAG using logical effort analysis.
@@ -72,21 +94,6 @@ where
     let mut best_delay = -1.0_f64;
     let mut best_state: Option<(AigRef, State)> = None;
 
-    // dominance function
-    fn dominates(o: &State, c: &State) -> bool {
-        let (of, on, op) = (o.log_f, o.n as f64, o.p);
-        let (cf, cn, cp) = (c.log_f, c.n as f64, c.p);
-        let left = on <= of && cn <= cf;
-        let right = on >= of && cn >= cf;
-        if left {
-            return on <= cn && of >= cf && op >= cp;
-        }
-        if right {
-            return on >= cn && of >= cf && op >= cp;
-        }
-        false
-    }
-
     for &u in topo.iter() {
         // initialize the frontier
         if S.get(&u).map_or(true, |v| v.is_empty()) {
@@ -144,7 +151,7 @@ where
                     // if v is a sink, maybe update champion
                     let is_sink = dag.get(&v).map_or(true, |e| e.is_empty());
                     if is_sink {
-                        let d = (cand.n as f64) * ((cand.log_f / (cand.n as f64)).exp()) + cand.p;
+                        let d = state_delay(&cand);
                         if d > best_delay {
                             best_delay = d;
                             best_state = Some((v, cand));
@@ -218,9 +225,196 @@ pub struct LogicalEffortAnalysis {
     pub delay: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct GraphLogicalEffortOptions {
     pub beta1: f64,
     pub beta2: f64,
+}
+
+fn build_logical_effort_dag(gate_nodes: &[AigNode]) -> HashMap<AigRef, Vec<(AigRef, f64, f64)>> {
+    let g_nand = 4.0 / 3.0;
+    let p_nand = 2.0;
+    let mut dag: HashMap<AigRef, Vec<(AigRef, f64, f64)>> = HashMap::new();
+    for (i, node) in gate_nodes.iter().enumerate() {
+        let u = AigRef { id: i };
+        if let AigNode::And2 { a, b, .. } = node {
+            dag.entry(a.node).or_default().push((u, g_nand, p_nand));
+            dag.entry(b.node).or_default().push((u, g_nand, p_nand));
+        }
+    }
+    dag
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DependencyStamp {
+    node: AigRef,
+    frontier_version: u64,
+    fanout: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CachedFrontier {
+    states: Vec<State>,
+    dependencies: Vec<DependencyStamp>,
+    version: u64,
+}
+
+/// Incremental graph logical-effort arrival cache for an append-only AIG.
+///
+/// New consumers can change an existing node's fanout load. Cached frontiers
+/// therefore record both dependency versions and dependency fanouts; stale
+/// descendants are recomputed lazily when a later query reaches them.
+pub struct GraphLogicalEffortArrivalCache {
+    options: GraphLogicalEffortOptions,
+    processed_gate_count: usize,
+    fanouts: Vec<usize>,
+    frontiers: Vec<Option<CachedFrontier>>,
+    next_frontier_version: u64,
+}
+
+impl GraphLogicalEffortArrivalCache {
+    pub fn new(options: GraphLogicalEffortOptions) -> Self {
+        Self {
+            options,
+            processed_gate_count: 0,
+            fanouts: Vec::new(),
+            frontiers: Vec::new(),
+            next_frontier_version: 1,
+        }
+    }
+
+    fn sync_graph(&mut self, gate_nodes: &[AigNode]) {
+        assert!(
+            gate_nodes.len() >= self.processed_gate_count,
+            "graph logical-effort cache requires an append-only gate graph"
+        );
+        self.fanouts.resize(gate_nodes.len(), 0);
+        self.frontiers.resize_with(gate_nodes.len(), || None);
+        for node in &gate_nodes[self.processed_gate_count..] {
+            if let AigNode::And2 { a, b, .. } = node {
+                assert!(a.node.id < gate_nodes.len());
+                assert!(b.node.id < gate_nodes.len());
+                self.fanouts[a.node.id] += 1;
+                self.fanouts[b.node.id] += 1;
+            }
+        }
+        self.processed_gate_count = gate_nodes.len();
+    }
+
+    fn make_dependency_stamp(&self, node: AigRef) -> DependencyStamp {
+        DependencyStamp {
+            node,
+            frontier_version: self.frontiers[node.id]
+                .as_ref()
+                .expect("dependency frontier should be available in topological order")
+                .version,
+            fanout: self.fanouts[node.id],
+        }
+    }
+
+    fn extend_frontier(&self, out: &mut Vec<State>, dependency: AigRef) {
+        let f = self.fanouts[dependency.id] as f64;
+        let h = self.options.beta1 * f + self.options.beta2 * f.powi(2);
+        let w = (4.0_f64 / 3.0).ln() + h.ln();
+        let input_states = &self.frontiers[dependency.id]
+            .as_ref()
+            .expect("dependency frontier should be available")
+            .states;
+        for state in input_states {
+            let cand = State {
+                log_f: state.log_f + w,
+                n: state.n + 1,
+                p: state.p + 2.0,
+                prev: None,
+            };
+            if out.iter().any(|other| {
+                dominates(other, &cand)
+                    || (other.n == cand.n && other.log_f >= cand.log_f && other.p >= cand.p)
+            }) {
+                continue;
+            }
+            out.retain(|other| !dominates(&cand, other));
+            out.push(cand);
+        }
+    }
+
+    /// Returns arrival times for all targets, sharing cached work across calls.
+    pub fn arrival_times(&mut self, gate_nodes: &[AigNode], targets: &[AigRef]) -> Vec<f64> {
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        self.sync_graph(gate_nodes);
+        for target in targets {
+            assert!(
+                target.id < gate_nodes.len(),
+                "graph logical-effort target {} is out of range for {} gates",
+                target.id,
+                gate_nodes.len()
+            );
+        }
+
+        let topo =
+            postorder_for_aig_refs_node_only(targets, gate_nodes, &HashMap::<AigRef, ()>::new());
+        for node_ref in topo {
+            let dependencies = match &gate_nodes[node_ref.id] {
+                AigNode::Input { .. } | AigNode::Literal { .. } => Vec::new(),
+                AigNode::And2 { a, b, .. } => vec![
+                    self.make_dependency_stamp(a.node),
+                    self.make_dependency_stamp(b.node),
+                ],
+            };
+            if self.frontiers[node_ref.id]
+                .as_ref()
+                .is_some_and(|cached| cached.dependencies == dependencies)
+            {
+                continue;
+            }
+
+            let states = match &gate_nodes[node_ref.id] {
+                AigNode::Input { .. } | AigNode::Literal { .. } => vec![State {
+                    log_f: 0.0,
+                    n: 0,
+                    p: 0.0,
+                    prev: None,
+                }],
+                AigNode::And2 { a, b, .. } => {
+                    let mut states = Vec::new();
+                    self.extend_frontier(&mut states, a.node);
+                    self.extend_frontier(&mut states, b.node);
+                    states
+                }
+            };
+            let version = self.next_frontier_version;
+            self.next_frontier_version += 1;
+            self.frontiers[node_ref.id] = Some(CachedFrontier {
+                states,
+                dependencies,
+                version,
+            });
+        }
+
+        targets
+            .iter()
+            .map(|target| {
+                self.frontiers[target.id]
+                    .as_ref()
+                    .expect("target frontier should be available")
+                    .states
+                    .iter()
+                    .map(state_delay)
+                    .fold(0.0_f64, f64::max)
+            })
+            .collect()
+    }
+}
+
+/// Computes graph logical-effort arrival times for all targets in one pass.
+pub fn graph_logical_effort_arrival_times(
+    gate_nodes: &[AigNode],
+    targets: &[AigRef],
+    options: &GraphLogicalEffortOptions,
+) -> Vec<f64> {
+    GraphLogicalEffortArrivalCache::new(*options).arrival_times(gate_nodes, targets)
 }
 
 /// Analyzes a GateFn for logical effort using standard NAND2 parameters and
@@ -229,19 +423,7 @@ pub fn analyze_graph_logical_effort(
     gate_fn: &GateFn,
     options: &GraphLogicalEffortOptions,
 ) -> LogicalEffortAnalysis {
-    let g_nand = 4.0 / 3.0;
-    let p_nand = 2.0;
-    let mut dag: HashMap<AigRef, Vec<(AigRef, f64, f64)>> = HashMap::new();
-    for (i, node) in gate_fn.gates.iter().enumerate() {
-        let u = AigRef { id: i };
-        match node {
-            AigNode::And2 { a, b, .. } => {
-                dag.entry(a.node).or_default().push((u, g_nand, p_nand));
-                dag.entry(b.node).or_default().push((u, g_nand, p_nand));
-            }
-            _ => {}
-        }
-    }
+    let dag = build_logical_effort_dag(&gate_fn.gates);
     let pin_load = eff_with_branch(&dag, options.beta1, options.beta2);
     let (path, delay) = worst_case_delay(&dag, pin_load, &gate_fn.gates);
     LogicalEffortAnalysis { dag, path, delay }
@@ -252,6 +434,41 @@ mod tests {
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     use super::*;
+
+    #[test]
+    fn test_arrival_times_for_multiple_targets_reflect_current_fanout() {
+        let mut gb = GateBuilder::new("arrival_times".to_string(), GateBuilderOptions::no_opt());
+        let a = gb.add_input("a".to_string(), 1);
+        let b = gb.add_input("b".to_string(), 1);
+        let c = gb.add_input("c".to_string(), 1);
+        let first = gb.add_nand_binary(*a.get_lsb(0), *b.get_lsb(0));
+        let second = gb.add_nand_binary(first, *c.get_lsb(0));
+        let options = GraphLogicalEffortOptions {
+            beta1: 1.0,
+            beta2: 0.0,
+        };
+
+        let mut cache = GraphLogicalEffortArrivalCache::new(options);
+        let before = cache.arrival_times(&gb.gates, &[first.node, second.node]);
+        assert_eq!(before.len(), 2);
+        assert!(before[1] > before[0]);
+
+        gb.add_output("result".to_string(), second.into());
+        let gate_fn = GateFn {
+            name: gb.name.clone(),
+            inputs: gb.inputs.clone(),
+            outputs: gb.outputs.clone(),
+            gates: gb.gates.clone(),
+        };
+        let whole_graph = analyze_graph_logical_effort(&gate_fn, &options);
+        assert!((before[1] - whole_graph.delay).abs() < 1e-9);
+
+        // Appending a new consumer changes first's fanout load. The persistent
+        // cache must lazily invalidate the affected descendant frontier.
+        let _side_consumer = gb.add_nand_binary(first, *a.get_lsb(0));
+        let after = cache.arrival_times(&gb.gates, &[first.node, second.node]);
+        assert!(after[1] > before[1]);
+    }
 
     #[test]
     fn test_nand_fanout_case() {

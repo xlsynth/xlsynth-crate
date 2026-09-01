@@ -504,6 +504,24 @@ bit_count_test_cases!(test_shll_dslx_to_gates, |input_bits: u32, opt: Opt| -> ()
     );
 });
 
+#[test_case(Opt::No; "unoptimized")]
+#[test_case(Opt::Yes; "optimized")]
+fn test_shrl_computed_control_arrivals_equivalence(opt: Opt) {
+    let ir_text = "package sample
+fn shift_arrival(data: bits[8] id=1, a0: bits[1] id=2, a1: bits[1] id=3, a2: bits[1] id=4, d0: bits[1] id=5, d1: bits[1] id=6, d2: bits[1] id=7, d3: bits[1] id=8) -> bits[8] {
+  a0_d1: bits[1] = and(a0, d0, id=9)
+  a0_d2: bits[1] = and(a0_d1, d1, id=10)
+  a0_d3: bits[1] = and(a0_d2, d2, id=11)
+  a0_d4: bits[1] = and(a0_d3, d3, id=12)
+  a2_d1: bits[1] = and(a2, d0, id=13)
+  a2_d2: bits[1] = and(a2_d1, d1, id=14)
+  amount: bits[3] = concat(a2_d2, a1, a0_d4, id=15)
+  ret result: bits[8] = shrl(data, amount, id=16)
+}
+";
+    do_test_ir_conversion(ir_text, opt);
+}
+
 #[test]
 fn test_shra_wide_amount_equivalence_w6_amt4() {
     let _ = env_logger::builder().is_test(true).try_init();
