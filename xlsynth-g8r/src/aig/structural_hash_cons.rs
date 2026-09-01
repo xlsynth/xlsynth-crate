@@ -36,6 +36,7 @@ struct ExpressionData {
 }
 
 /// Incrementally interns structural AIG expressions as a builder appends nodes.
+#[derive(Clone)]
 pub(crate) struct StructuralHashCons {
     key_to_expression_id: HashMap<StructuralKey, usize>,
     expression_data: Vec<ExpressionData>,
