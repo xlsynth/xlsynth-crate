@@ -738,7 +738,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     start_bv.bitvec.clone()
                 };
 
-                // 1) Build a padding prefix of (width-1) copies of the last element.
+                // 1) Build a padding prefix of (width-1) copies of the last
+                //    element.
                 let last_idx = (elem_cnt as i32) - 1;
                 let last_high = (last_idx + 1) * e_bits - 1;
                 let last_low = last_idx * e_bits;
@@ -750,7 +751,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     }
                 }
 
-                // 2) Concatenate pad || base_array to form the extended sequence.
+                // 2) Concatenate pad || base_array to form the extended
+                //    sequence.
                 let extended = solver.concat(&pad, &base_array.bitvec);
 
                 // 3) Compute start_scaled = start * e_bits.
@@ -762,7 +764,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 let start_scaled =
                     solver.xls_arbitrary_width_umul(&start_ext, &e_const, start_scaled_w);
 
-                // 4) Shift right by start_scaled and slice low (width * e_bits) bits.
+                // 4) Shift right by start_scaled and slice low (width * e_bits)
+                //    bits.
                 let shifted = solver.xls_shrl(&extended, &start_scaled);
                 let out_width_bits = (*width as usize) * (e_bits as usize);
                 let result_bv = solver.slice(&shifted, 0, out_width_bits);

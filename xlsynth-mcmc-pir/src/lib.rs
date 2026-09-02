@@ -2040,7 +2040,8 @@ pub fn mcmc_iteration(
                 // For transforms that are not guaranteed to preserve semantics,
                 // we run a lightweight equivalence oracle:
                 // - Deterministic corner cases (all-zeros, all-ones)
-                // - A small number of randomized samples (seeded by the run's RNG)
+                // - A small number of randomized samples (seeded by the run's
+                //   RNG)
                 //
                 // If evaluation fails (e.g. due to a cycle or unsupported node
                 // kinds), we treat that as non-equivalence for

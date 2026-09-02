@@ -97,8 +97,8 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     //  * stage-discovery prefix: only used for implicit discovery of
     //    `<prefix>_cycleN` when `--stages` is not provided (from `--dslx_top`).
     //  * wrapper module name: the emitted outer module name (from
-    //    `--output_module_name`, or defaults to `--dslx_top` when using implicit
-    //    discovery).
+    //    `--output_module_name`, or defaults to `--dslx_top` when using
+    //    implicit discovery).
     let stage_discovery_prefix_opt = dslx_top.as_deref();
     let wrapper_name = output_module_name_opt
         .as_deref()

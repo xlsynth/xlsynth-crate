@@ -1066,7 +1066,8 @@ fn build_inner_with_union_user_slots(
         next_text_id += 1;
     }
 
-    // 2) Topologically clone region nodes mapping external operands to inner params
+    // 2) Topologically clone region nodes mapping external operands to inner
+    //    params
     let topo = get_topological(f);
     let mut old_to_new: HashMap<usize, NodeRef> = HashMap::new();
     for nr in topo.into_iter() {

@@ -879,7 +879,8 @@ fn gatify_array_slice_bit_shift(
         gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits)
     };
 
-    // 1) Build a padding prefix of (width-1) copies of the last element to emulate
+    // 1) Build a padding prefix of (width-1) copies of the last element to
+    //    emulate
     // XLS out-of-bounds semantics (select last element when OOB).
     let last_elem = array_bits.get_lsb_slice((n_elems - 1) * e_bits, e_bits);
     let mut pad = AigBitVector::zeros(0);
@@ -892,8 +893,8 @@ fn gatify_array_slice_bit_shift(
     // 2) Concatenate pad || array_bits to form the extended sequence.
     let extended = AigBitVector::concat(pad, array_bits.clone());
 
-    // 3) Compute start_scaled = clamped_start * e_bits, with sufficient width to
-    //    hold the product.
+    // 3) Compute start_scaled = clamped_start * e_bits, with sufficient width
+    //    to hold the product.
     let mut tmp = if e_bits > 0 { e_bits - 1 } else { 0 };
     let mut extra = 0usize;
     while tmp > 0 {
@@ -2597,9 +2598,10 @@ pub fn gatify_scmp_via_bit_tests(
         }
     } else {
         // Signed comparisons:
-        // - If signs differ, a < b iff a is negative, and a > b iff b is negative.
-        // - If signs are the same, signed order matches unsigned order on the lower
-        //   bits; the equal sign bits do not need to be compared again.
+        // - If signs differ, a < b iff a is negative, and a > b iff b is
+        //   negative.
+        // - If signs are the same, signed order matches unsigned order on the
+        //   lower bits; the equal sign bits do not need to be compared again.
         let a_msb = lhs_bits.get_msb(0);
         let b_msb = rhs_bits.get_msb(0);
         let sign_diff = gb.add_xor_binary(*a_msb, *b_msb);

@@ -19,8 +19,8 @@ use std::collections::{HashMap, HashSet};
 /// Internally it first figures out reachability, then *rebuilds* the graph in
 /// topological order before remapping inputs/outputs.
 pub fn dce_safe(orig_fn: &GateFn) -> GateFn {
-    // 1. Mark reachable nodes starting from outputs (and always include the bits of
-    //    inputs so they stay alive).
+    // 1. Mark reachable nodes starting from outputs (and always include the
+    //    bits of inputs so they stay alive).
     let mut reachable = HashSet::new();
     let mut stack = Vec::new();
     for output in &orig_fn.outputs {

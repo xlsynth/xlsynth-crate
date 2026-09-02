@@ -587,7 +587,8 @@ impl GreedyMatchSelector {
         let mut best_action: Option<MatchAction> = None;
         let mut best_score: i32 = i32::MIN;
 
-        // 1) Consider match actions for each ready old against compatible ready new.
+        // 1) Consider match actions for each ready old against compatible ready
+        //    new.
         let ready_old_sorted: Vec<OldNodeRef> = (0..self.ready_old.len())
             .filter(|&i| *self.ready_old.get(OldNodeRef(i)))
             .map(OldNodeRef)
