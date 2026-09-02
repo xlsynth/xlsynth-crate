@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::aig::gate::{self, AigBitVector, AigOperand};
+use crate::aig::get_summary_stats::{AigConeStats, get_aig_cone_stats};
 use crate::gate_builder::GateBuilder;
 use crate::gate_builder::ReductionKind;
 use crate::prefix_scan_utils::{prefix_scan_exclusive, prefix_scan_inclusive};
@@ -441,18 +442,108 @@ pub fn array_add(
     array_add_with_carry_out(gb, &operands, carry_in, AdderMapping::default()).sum
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
     Right,
 }
 
+fn control_arrival_stage_order(amount_gates: &AigBitVector, gb: &GateBuilder) -> Vec<usize> {
+    let controls = amount_gates.iter_lsb_to_msb().copied().collect::<Vec<_>>();
+    let control_depths = get_aig_cone_stats(&gb.gates, &controls).root_depths;
+    let mut stages = (0..controls.len()).collect::<Vec<_>>();
+    stages.sort_by_key(|stage| (control_depths[*stage], *stage));
+    stages
+}
+
+fn relevant_cone_stats(
+    gb: &GateBuilder,
+    result: &AigBitVector,
+    relevant_output_bit_count: usize,
+) -> AigConeStats {
+    let roots = result
+        .iter_lsb_to_msb()
+        .take(relevant_output_bit_count)
+        .copied()
+        .collect::<Vec<_>>();
+    get_aig_cone_stats(&gb.gates, &roots)
+}
+
+fn is_strict_pareto_improvement(natural: &AigConeStats, candidate: &AigConeStats) -> bool {
+    assert_eq!(natural.root_depths.len(), candidate.root_depths.len());
+    let no_output_later = candidate
+        .root_depths
+        .iter()
+        .zip(&natural.root_depths)
+        .all(|(candidate, natural)| candidate <= natural);
+    let some_output_earlier = candidate
+        .root_depths
+        .iter()
+        .zip(&natural.root_depths)
+        .any(|(candidate, natural)| candidate < natural);
+    let no_area_regression = candidate.and_nodes <= natural.and_nodes;
+    let some_area_improvement = candidate.and_nodes < natural.and_nodes;
+    no_output_later && no_area_regression && (some_output_earlier || some_area_improvement)
+}
+
+/// Builds natural and control-arrival orders as append-only trials against the
+/// same builder prefix. The alternative is committed only when its exact
+/// retained-output cone is a strict Pareto improvement in per-output depth and
+/// reachable AND count.
+///
+/// This is a local guard over the retained shifter-output cone. Later AIG
+/// sharing and reconvergence, and downstream technology mapping, may still
+/// worsen whole-function depth, area, or delay; it does not guarantee globally
+/// monotonic QoR.
+pub(crate) fn gatify_barrel_shifter_with_forked_stage_order<F>(
+    amount_gates: &AigBitVector,
+    relevant_output_bit_count: usize,
+    gb: &mut GateBuilder,
+    build: F,
+) -> AigBitVector
+where
+    F: Fn(&[usize], &mut GateBuilder) -> AigBitVector,
+{
+    let natural_order = (0..amount_gates.get_bit_count()).collect::<Vec<_>>();
+    if relevant_output_bit_count == 0 {
+        return build(&natural_order, gb);
+    }
+    let candidate_order = control_arrival_stage_order(amount_gates, gb);
+    if candidate_order == natural_order {
+        return build(&natural_order, gb);
+    }
+
+    let natural_checkpoint = gb.begin_append_checkpoint();
+    let natural_result = build(&natural_order, gb);
+    let natural_stats = relevant_cone_stats(gb, &natural_result, relevant_output_bit_count);
+    gb.rollback_append_checkpoint(natural_checkpoint);
+
+    let candidate_checkpoint = gb.begin_append_checkpoint();
+    let candidate_result = build(&candidate_order, gb);
+    let candidate_stats = relevant_cone_stats(gb, &candidate_result, relevant_output_bit_count);
+
+    let select_candidate = is_strict_pareto_improvement(&natural_stats, &candidate_stats);
+    log::debug!(
+        target: "xlsynth_g8r::barrel_shifter",
+        "forked stage order natural={natural_order:?} candidate={candidate_order:?} natural_stats={natural_stats:?} candidate_stats={candidate_stats:?} selected={select_candidate}"
+    );
+    if select_candidate {
+        gb.commit_append_checkpoint(candidate_checkpoint);
+        candidate_result
+    } else {
+        gb.rollback_append_checkpoint(candidate_checkpoint);
+        build(&natural_order, gb)
+    }
+}
+
 // Implements a stage-based barrel shifter (with logarithmic stages) using 2:1
 // muxes.
-fn gatify_barrel_shifter_internal(
+pub(crate) fn gatify_barrel_shifter_with_stage_order(
     arg_gates: &AigBitVector,
     amount_gates: &AigBitVector,
     direction: Direction,
+    fill: AigOperand,
+    stage_order: &[usize],
     tag_prefix: &str,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
@@ -461,9 +552,9 @@ fn gatify_barrel_shifter_internal(
     // Start with the input vector.
     let mut current: Vec<AigOperand> = arg_gates.iter_lsb_to_msb().cloned().collect::<Vec<_>>();
     // Each bit in the shift amount (assumed little-endian) represents a stage.
-    for stage in 0..amount_gates.get_bit_count() {
-        let shift = 1 << stage; // 2^stage shift amount for this stage.
-        let control = amount_gates.get_lsb(stage);
+    for stage in stage_order {
+        let shift = 1usize << *stage; // 2^stage shift amount for this stage.
+        let control = amount_gates.get_lsb(*stage);
         let mut next_stage = Vec::with_capacity(bit_count);
         match direction {
             Direction::Right => {
@@ -476,8 +567,7 @@ fn gatify_barrel_shifter_internal(
                     let candidate = if j + shift < bit_count {
                         current[j + shift]
                     } else {
-                        // Out of range: use the false literal.
-                        g8_builder.get_false()
+                        fill
                     };
                     // Mux: if control is true choose candidate (shifted), else
                     // keep current[j].
@@ -492,11 +582,7 @@ fn gatify_barrel_shifter_internal(
                 // j < shift; if control == 0 then remain
                 // unchanged.
                 for j in 0..bit_count {
-                    let candidate = if j >= shift {
-                        current[j - shift]
-                    } else {
-                        g8_builder.get_false()
-                    };
+                    let candidate = if j >= shift { current[j - shift] } else { fill };
                     // Mux: if control is true choose candidate (shifted), else
                     // keep current[j].
                     let mux = g8_builder.add_mux2(*control, candidate, current[j]);
@@ -530,6 +616,26 @@ pub fn gatify_barrel_shifter(
     tag_prefix: &str,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
+    gatify_barrel_shifter_with_output_width(
+        arg_gates,
+        amount_gates,
+        direction,
+        arg_gates.get_bit_count(),
+        tag_prefix,
+        gb,
+    )
+}
+
+/// Emits a logical barrel shifter while scoring only the low output bits that
+/// its caller will retain.
+pub(crate) fn gatify_barrel_shifter_with_output_width(
+    arg_gates: &AigBitVector,
+    amount_gates: &AigBitVector,
+    direction: Direction,
+    relevant_output_bit_count: usize,
+    tag_prefix: &str,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
     let natural_amount_bits = (arg_gates.get_bit_count() as f64).log2().ceil() as usize;
     let amount_can_be_oversize = amount_gates.get_bit_count() > natural_amount_bits;
     // The "amount" value is limited in what it can realistically cause to
@@ -543,11 +649,41 @@ pub fn gatify_barrel_shifter(
             "since amount can be oversize high bits should be non-empty"
         );
         let overlarge = gb.add_nez(&msbs, ReductionKind::Tree);
-        let normal = gatify_barrel_shifter_internal(arg_gates, &lsbs, direction, tag_prefix, gb);
         let zero = AigBitVector::zeros(arg_gates.get_bit_count());
-        gb.add_mux2_vec(&overlarge, &zero, &normal)
+        gatify_barrel_shifter_with_forked_stage_order(
+            &lsbs,
+            relevant_output_bit_count,
+            gb,
+            |stage_order, local_gb| {
+                let normal = gatify_barrel_shifter_with_stage_order(
+                    arg_gates,
+                    &lsbs,
+                    direction,
+                    local_gb.get_false(),
+                    stage_order,
+                    tag_prefix,
+                    local_gb,
+                );
+                local_gb.add_mux2_vec(&overlarge, &zero, &normal)
+            },
+        )
     } else {
-        gatify_barrel_shifter_internal(arg_gates, amount_gates, direction, tag_prefix, gb)
+        gatify_barrel_shifter_with_forked_stage_order(
+            amount_gates,
+            relevant_output_bit_count,
+            gb,
+            |stage_order, local_gb| {
+                gatify_barrel_shifter_with_stage_order(
+                    arg_gates,
+                    amount_gates,
+                    direction,
+                    local_gb.get_false(),
+                    stage_order,
+                    tag_prefix,
+                    local_gb,
+                )
+            },
+        )
     }
 }
 
@@ -1029,7 +1165,10 @@ fn combine_prefix_pg(gb: &mut GateBuilder, lhs: PrefixPg, rhs: PrefixPg) -> Pref
 #[cfg(test)]
 mod tests {
     use crate::{
-        aig::gate::AigBitVector,
+        aig::{
+            gate::{AigBitVector, GateFn},
+            get_summary_stats::{AigConeStats, get_aig_cone_stats},
+        },
         aig_sim::gate_sim,
         check_equivalence,
         gate_builder::GateBuilderOptions,
@@ -1040,6 +1179,175 @@ mod tests {
 
     use test_case::test_case;
     use xlsynth::IrBits;
+
+    fn add_test_barrel_shifter(
+        gb: &mut GateBuilder,
+        data: &AigBitVector,
+        controls: &AigBitVector,
+        direction: Direction,
+        stage_order: Option<&[usize]>,
+    ) -> AigBitVector {
+        match stage_order {
+            Some(stage_order) => gatify_barrel_shifter_with_stage_order(
+                data,
+                controls,
+                direction,
+                gb.get_false(),
+                stage_order,
+                "test",
+                gb,
+            ),
+            None => gatify_barrel_shifter(data, controls, direction, "test", gb),
+        }
+    }
+
+    fn output_cone_stats(gate_fn: &GateFn) -> AigConeStats {
+        let roots = gate_fn
+            .outputs
+            .iter()
+            .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+            .copied()
+            .collect::<Vec<_>>();
+        get_aig_cone_stats(&gate_fn.gates, &roots)
+    }
+
+    fn make_delayed_control_barrel_shifter(
+        direction: Direction,
+        stage_order: Option<&[usize]>,
+    ) -> GateFn {
+        let mut gb = GateBuilder::new(
+            "delayed_control_barrel_shifter".to_string(),
+            GateBuilderOptions::opt(),
+        );
+        let data = gb.add_input("data".to_string(), 8);
+        let amount = gb.add_input("amount".to_string(), 3);
+        let delay = gb.add_input("delay".to_string(), 6);
+        let delay_levels = [6usize, 0, 3];
+        let controls = delay_levels
+            .into_iter()
+            .enumerate()
+            .map(|(stage, levels)| {
+                let mut control = *amount.get_lsb(stage);
+                for level in 0..levels {
+                    control = gb.add_and_binary(control, *delay.get_lsb(level));
+                }
+                control
+            })
+            .collect::<Vec<_>>();
+        let controls = AigBitVector::from_lsb_is_index_0(&controls);
+        let result = add_test_barrel_shifter(&mut gb, &data, &controls, direction, stage_order);
+        gb.add_output("result".to_string(), result);
+        gb.build()
+    }
+
+    #[test_case(Direction::Left; "left")]
+    #[test_case(Direction::Right; "right")]
+    fn forked_barrel_shifter_selects_equivalent_depth_improvement(direction: Direction) {
+        let natural = make_delayed_control_barrel_shifter(direction, Some(&[0, 1, 2]));
+        let forked = make_delayed_control_barrel_shifter(direction, None);
+
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&natural, &forked)
+            .expect("barrel-shifter stage permutation should preserve semantics");
+
+        let natural_stats = output_cone_stats(&natural);
+        let forked_stats = output_cone_stats(&forked);
+        assert!(forked_stats.and_nodes <= natural_stats.and_nodes);
+        assert!(
+            forked_stats
+                .root_depths
+                .iter()
+                .zip(&natural_stats.root_depths)
+                .all(|(forked, natural)| forked <= natural)
+        );
+        assert!(
+            forked_stats
+                .root_depths
+                .iter()
+                .zip(&natural_stats.root_depths)
+                .any(|(forked, natural)| forked < natural)
+        );
+    }
+
+    fn make_data_arrival_guard_barrel_shifter(stage_order: Option<&[usize]>) -> GateFn {
+        let mut gb = GateBuilder::new(
+            "barrel_shifter_data_arrival_guard".to_string(),
+            GateBuilderOptions::opt(),
+        );
+        let input_data = gb.add_input("data".to_string(), 8);
+        let data_delay = gb.add_input("data_delay".to_string(), 1);
+        let mut data = input_data.iter_lsb_to_msb().copied().collect::<Vec<_>>();
+        data[6] = gb.add_and_binary(data[6], *data_delay.get_lsb(0));
+        let data = AigBitVector::from_lsb_is_index_0(&data);
+
+        let input_amount = gb.add_input("amount".to_string(), 3);
+        let control_delay = gb.add_input("control_delay".to_string(), 1);
+        let mut controls = input_amount.iter_lsb_to_msb().copied().collect::<Vec<_>>();
+        controls[1] = gb.add_and_binary(controls[1], *control_delay.get_lsb(0));
+        let controls = AigBitVector::from_lsb_is_index_0(&controls);
+        let result =
+            add_test_barrel_shifter(&mut gb, &data, &controls, Direction::Right, stage_order);
+        gb.add_output("result".to_string(), result);
+        gb.build()
+    }
+
+    #[test]
+    fn forked_barrel_shifter_rejects_later_output_bit() {
+        let natural = make_data_arrival_guard_barrel_shifter(Some(&[0, 1, 2]));
+        let candidate = make_data_arrival_guard_barrel_shifter(Some(&[0, 2, 1]));
+        let forked = make_data_arrival_guard_barrel_shifter(None);
+        let natural_stats = output_cone_stats(&natural);
+        let candidate_stats = output_cone_stats(&candidate);
+
+        assert_eq!(candidate_stats.and_nodes, natural_stats.and_nodes);
+        assert!(
+            candidate_stats
+                .root_depths
+                .iter()
+                .zip(&natural_stats.root_depths)
+                .any(|(candidate, natural)| candidate > natural)
+        );
+        assert_eq!(output_cone_stats(&forked), natural_stats);
+    }
+
+    fn make_area_guard_barrel_shifter(stage_order: Option<&[usize]>) -> GateFn {
+        let mut gb = GateBuilder::new(
+            "barrel_shifter_area_guard".to_string(),
+            GateBuilderOptions::opt(),
+        );
+        let values = gb.add_input("values".to_string(), 2);
+        let a = *values.get_lsb(0);
+        let b = *values.get_lsb(1);
+        let data = AigBitVector::from_lsb_is_index_0(&[a, a, a, a, a, a, b, b]);
+
+        let input_amount = gb.add_input("amount".to_string(), 3);
+        let control_delay = gb.add_input("control_delay".to_string(), 1);
+        let mut controls = input_amount.iter_lsb_to_msb().copied().collect::<Vec<_>>();
+        controls[1] = gb.add_and_binary(controls[1], *control_delay.get_lsb(0));
+        let controls = AigBitVector::from_lsb_is_index_0(&controls);
+        let result =
+            add_test_barrel_shifter(&mut gb, &data, &controls, Direction::Right, stage_order);
+        gb.add_output("result".to_string(), result);
+        gb.build()
+    }
+
+    #[test]
+    fn forked_barrel_shifter_rejects_reachable_area_regression() {
+        let natural = make_area_guard_barrel_shifter(Some(&[0, 1, 2]));
+        let candidate = make_area_guard_barrel_shifter(Some(&[0, 2, 1]));
+        let forked = make_area_guard_barrel_shifter(None);
+        let natural_stats = output_cone_stats(&natural);
+        let candidate_stats = output_cone_stats(&candidate);
+
+        assert!(candidate_stats.and_nodes > natural_stats.and_nodes);
+        assert!(
+            candidate_stats
+                .root_depths
+                .iter()
+                .zip(&natural_stats.root_depths)
+                .all(|(candidate, natural)| candidate <= natural)
+        );
+        assert_eq!(output_cone_stats(&forked), natural_stats);
+    }
 
     fn eval_array_add_case(
         bit_count: usize,

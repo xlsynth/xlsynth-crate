@@ -22,9 +22,10 @@ use xlsynth_prover::prover::SolverChoice;
 use crate::ir2gate_utils::{
     AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
     gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
-    gatify_indexed_select_mux_tree_exact, gatify_indexed_select_mux_tree_pad_last_if_type_fits,
-    gatify_mask_low, gatify_one_hot, gatify_one_hot_select, gatify_one_hot_with_nonzero_flag,
-    gatify_prio_encode,
+    gatify_barrel_shifter_with_forked_stage_order, gatify_barrel_shifter_with_output_width,
+    gatify_barrel_shifter_with_stage_order, gatify_indexed_select_mux_tree_exact,
+    gatify_indexed_select_mux_tree_pad_last_if_type_fits, gatify_mask_low, gatify_one_hot,
+    gatify_one_hot_select, gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -918,14 +919,15 @@ fn gatify_array_slice_bit_shift(
     let start_scaled = gatify_umul(&start_ext, &e_ext, start_scaled_w, mul_adder_mapping, gb);
 
     // 4) Shift right by start_scaled and take low (width * e_bits) bits.
-    let shifted = gatify_barrel_shifter(
+    let out_width_bits = width * e_bits;
+    let shifted = gatify_barrel_shifter_with_output_width(
         &extended,
         &start_scaled,
         Direction::Right,
+        out_width_bits,
         &format!("array_slice_shift_{}", text_id),
         gb,
     );
-    let out_width_bits = width * e_bits;
     shifted.get_lsb_slice(0, out_width_bits)
 }
 
@@ -2872,6 +2874,7 @@ fn gatify_decode(
 fn gatify_arithmetic_right_barrel_shifter(
     arg_bits: &AigBitVector,
     amount_bits: &AigBitVector,
+    stage_order: &[usize],
     tag_prefix: &str,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
@@ -2880,9 +2883,9 @@ fn gatify_arithmetic_right_barrel_shifter(
 
     let sign = *arg_bits.get_msb(0);
     let mut current: Vec<AigOperand> = arg_bits.iter_lsb_to_msb().cloned().collect();
-    for stage in 0..amount_bits.get_bit_count() {
-        let shift = 1usize << stage;
-        let control = amount_bits.get_lsb(stage);
+    for stage in stage_order {
+        let shift = 1usize << *stage;
+        let control = amount_bits.get_lsb(*stage);
         let mut next_stage = Vec::with_capacity(bit_count);
         for j in 0..bit_count {
             let candidate = if j + shift < bit_count {
@@ -2963,40 +2966,48 @@ fn gatify_shra(
     let sign = *arg_bits.get_msb(0);
 
     let amt_lo = amount_bits.get_lsb_slice(0, k_for_shift);
-    let arith = if !w.is_power_of_two() && k_for_shift == required_k {
-        // Low shift amounts in [w, next_power_of_two(w)) naturally produce all
-        // sign bits through the staged sign-fill shifter, so only high
-        // amount bits need a separate out-of-bounds mux.
-        gatify_arithmetic_right_barrel_shifter(
-            arg_bits,
-            &amt_lo,
-            &format!("shra_ext_{}", text_id),
-            gb,
-        )
-    } else {
-        // For power-of-two widths or too-narrow amount fields, the former
-        // sign-extend-then-logical-shift shape remains slightly smaller after
-        // AIG folding because there is no low-field saturation case to
-        // remove.
-        let sign_ext = gb.replicate(sign, w);
-        let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
-        let shifted = gatify_barrel_shifter(
-            &arg_ext,
-            &amt_lo,
-            Direction::Right,
-            &format!("shra_ext_{}", text_id),
-            gb,
-        );
-        shifted.get_lsb_slice(0, w)
-    };
+    let use_sign_fill = !w.is_power_of_two() && k_for_shift == required_k;
+    let sign_ext = gb.replicate(sign, w);
+    let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
+    let tag_prefix = format!("shra_ext_{}", text_id);
 
-    // Saturating/oob rule: shift >= w => all sign bits.
-    if gb.is_known_false(oob) {
-        arith
-    } else {
-        let all_sign = gb.replicate(sign, w);
-        gb.add_mux2_vec(&oob, &all_sign, &arith)
-    }
+    gatify_barrel_shifter_with_forked_stage_order(&amt_lo, w, gb, |stage_order, local_gb| {
+        let arith = if use_sign_fill {
+            // Low shift amounts in [w, next_power_of_two(w)) naturally
+            // produce all sign bits through the staged sign-fill shifter,
+            // so only high amount bits need a separate out-of-bounds mux.
+            gatify_arithmetic_right_barrel_shifter(
+                arg_bits,
+                &amt_lo,
+                stage_order,
+                &tag_prefix,
+                local_gb,
+            )
+        } else {
+            // For power-of-two widths or too-narrow amount fields, the
+            // former sign-extend-then-logical-shift shape remains slightly
+            // smaller after AIG folding because there is no low-field
+            // saturation case to remove.
+            let shifted = gatify_barrel_shifter_with_stage_order(
+                &arg_ext,
+                &amt_lo,
+                Direction::Right,
+                local_gb.get_false(),
+                stage_order,
+                &tag_prefix,
+                local_gb,
+            );
+            shifted.get_lsb_slice(0, w)
+        };
+
+        // Saturating/oob rule: shift >= w => all sign bits.
+        if local_gb.is_known_false(oob) {
+            arith
+        } else {
+            let all_sign = local_gb.replicate(sign, w);
+            local_gb.add_mux2_vec(&oob, &all_sign, &arith)
+        }
+    })
 }
 
 fn flatten_literal_to_bits(
@@ -4090,10 +4101,11 @@ fn gatify_node(
             let start_bits = env
                 .get_bit_vector(*start)
                 .expect("DynamicBitSlice start should be present");
-            let shifted_bits = gatify_barrel_shifter(
+            let shifted_bits = gatify_barrel_shifter_with_output_width(
                 &arg_bits,
                 &start_bits,
                 Direction::Right,
+                *width,
                 &format!("dynamic_bit_slice_shift_{}", node.text_id),
                 g8_builder,
             );
@@ -6515,7 +6527,7 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
             ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 1, old_and_nodes: 389, old_depth: 12, elem_mux_and_nodes: 105, elem_mux_depth: 6, public_and_nodes: 105, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 2, old_and_nodes: 525, old_depth: 12, elem_mux_and_nodes: 195, elem_mux_depth: 6, public_and_nodes: 195, public_depth: 6 },
             ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 3, old_and_nodes: 607, old_depth: 12, elem_mux_and_nodes: 235, elem_mux_depth: 6, public_and_nodes: 235, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 4, old_and_nodes: 664, old_depth: 12, elem_mux_and_nodes: 265, elem_mux_depth: 6, public_and_nodes: 265, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 4, old_and_nodes: 652, old_depth: 12, elem_mux_and_nodes: 265, elem_mux_depth: 6, public_and_nodes: 265, public_depth: 6 },
 
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 1, old_and_nodes: 45, old_depth: 8, elem_mux_and_nodes: 45, elem_mux_depth: 8, public_and_nodes: 45, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 87, old_depth: 8, elem_mux_and_nodes: 87, elem_mux_depth: 8, public_and_nodes: 87, public_depth: 8 },

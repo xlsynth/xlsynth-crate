@@ -25,7 +25,7 @@
 //! let gate_fn: GateFn = builder.build();
 //! ```
 
-use std::iter::zip;
+use std::{collections::HashMap, iter::zip};
 
 use xlsynth::IrBits;
 
@@ -50,6 +50,23 @@ pub struct GateBuilder {
     pub options: GateBuilderOptions,
     hash_cons: Option<StructuralHashCons>,
     current_pir_node_id: Option<u32>,
+    active_append_checkpoint: Option<ActiveAppendCheckpoint>,
+}
+
+#[derive(Clone)]
+struct ActiveAppendCheckpoint {
+    gate_count: usize,
+    input_count: usize,
+    output_count: usize,
+    current_pir_node_id: Option<u32>,
+    original_prefix_nodes: HashMap<usize, AigNode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GateBuilderAppendCheckpoint {
+    gate_count: usize,
+    input_count: usize,
+    output_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +142,93 @@ impl GateBuilder {
             options,
             hash_cons,
             current_pir_node_id: None,
+            active_append_checkpoint: None,
         }
+    }
+
+    /// Starts an append-only trial that can be committed or rolled back in
+    /// time proportional to the trial suffix and mutated prefix metadata.
+    pub(crate) fn begin_append_checkpoint(&mut self) -> GateBuilderAppendCheckpoint {
+        assert!(
+            self.active_append_checkpoint.is_none(),
+            "GateBuilder append checkpoints cannot be nested"
+        );
+        let checkpoint = GateBuilderAppendCheckpoint {
+            gate_count: self.gates.len(),
+            input_count: self.inputs.len(),
+            output_count: self.outputs.len(),
+        };
+        self.active_append_checkpoint = Some(ActiveAppendCheckpoint {
+            gate_count: checkpoint.gate_count,
+            input_count: checkpoint.input_count,
+            output_count: checkpoint.output_count,
+            current_pir_node_id: self.current_pir_node_id,
+            original_prefix_nodes: HashMap::new(),
+        });
+        checkpoint
+    }
+
+    fn take_append_checkpoint(
+        &mut self,
+        checkpoint: GateBuilderAppendCheckpoint,
+    ) -> ActiveAppendCheckpoint {
+        let active = self
+            .active_append_checkpoint
+            .take()
+            .expect("GateBuilder append checkpoint should be active");
+        assert_eq!(active.gate_count, checkpoint.gate_count);
+        assert_eq!(active.input_count, checkpoint.input_count);
+        assert_eq!(active.output_count, checkpoint.output_count);
+        assert_eq!(self.inputs.len(), checkpoint.input_count);
+        assert_eq!(self.outputs.len(), checkpoint.output_count);
+        active
+    }
+
+    /// Keeps the nodes and metadata added since `checkpoint`.
+    pub(crate) fn commit_append_checkpoint(&mut self, checkpoint: GateBuilderAppendCheckpoint) {
+        self.take_append_checkpoint(checkpoint);
+    }
+
+    /// Restores the builder state from before `checkpoint` without copying the
+    /// accumulated graph prefix.
+    pub(crate) fn rollback_append_checkpoint(&mut self, checkpoint: GateBuilderAppendCheckpoint) {
+        let active = self.take_append_checkpoint(checkpoint);
+        if let Some(hash_cons) = &mut self.hash_cons {
+            hash_cons.truncate_to_gate_count(checkpoint.gate_count, &self.gates);
+        }
+        self.gates.truncate(checkpoint.gate_count);
+        self.current_pir_node_id = active.current_pir_node_id;
+        for (id, node) in active.original_prefix_nodes {
+            self.gates[id] = node;
+        }
+    }
+
+    fn journal_prefix_node_before_mutation(&mut self, aig_ref: AigRef) {
+        let Some(prefix_gate_count) = self
+            .active_append_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.gate_count)
+        else {
+            return;
+        };
+        if aig_ref.id >= prefix_gate_count {
+            return;
+        }
+        if self
+            .active_append_checkpoint
+            .as_ref()
+            .expect("append checkpoint should still be active")
+            .original_prefix_nodes
+            .contains_key(&aig_ref.id)
+        {
+            return;
+        }
+        let original = self.gates[aig_ref.id].clone();
+        self.active_append_checkpoint
+            .as_mut()
+            .expect("append checkpoint should still be active")
+            .original_prefix_nodes
+            .insert(aig_ref.id, original);
     }
 
     pub fn build(self) -> GateFn {
@@ -142,6 +245,7 @@ impl GateBuilder {
     }
 
     pub fn add_tag(&mut self, aig_ref: AigRef, tag: String) {
+        self.journal_prefix_node_before_mutation(aig_ref);
         let gate = &mut self.gates[aig_ref.id];
         gate.add_tag(tag)
     }
@@ -151,10 +255,12 @@ impl GateBuilder {
     }
 
     pub fn add_pir_node_id(&mut self, aig_ref: AigRef, pir_node_id: u32) {
+        self.journal_prefix_node_before_mutation(aig_ref);
         self.gates[aig_ref.id].add_pir_node_id(pir_node_id);
     }
 
     pub fn add_pir_node_ids(&mut self, aig_ref: AigRef, pir_node_ids: &[u32]) {
+        self.journal_prefix_node_before_mutation(aig_ref);
         self.gates[aig_ref.id].try_add_pir_node_ids(pir_node_ids);
     }
 
@@ -1465,5 +1571,52 @@ mod tests {
         let original_ab = original.add_and_binary(b, a);
         assert_eq!(original_ab, ab);
         assert_eq!(original.gates.len(), original_gate_count);
+    }
+
+    #[test]
+    fn test_append_checkpoint_rollback_restores_builder_prefix() {
+        let mut builder = GateBuilder::new("checkpoint".to_string(), GateBuilderOptions::opt());
+        let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *builder.add_input("b".to_string(), 1).get_lsb(0);
+        let c = *builder.add_input("c".to_string(), 1).get_lsb(0);
+
+        builder.set_current_pir_node_id(Some(7));
+        let ab = builder.add_and_binary(a, b);
+        builder.add_tag(ab.node, "base".to_string());
+        builder.set_current_pir_node_id(None);
+        let a_or_b = builder.add_or_binary(a, b);
+        let folded_to_b = builder.add_and_binary(a_or_b, b);
+        assert_eq!(folded_to_b, b);
+
+        let prefix_gate_count = builder.gates.len();
+
+        let checkpoint = builder.begin_append_checkpoint();
+        builder.set_current_pir_node_id(Some(8));
+        let reused_ab = builder.add_and_binary(b, a);
+        builder.add_tag(reused_ab.node, "trial".to_string());
+
+        assert_eq!(reused_ab, ab);
+        assert_eq!(builder.gates[ab.node.id].get_pir_node_ids(), &[7, 8]);
+
+        builder.rollback_append_checkpoint(checkpoint);
+
+        assert_eq!(builder.gates.len(), prefix_gate_count);
+        assert_eq!(builder.current_pir_node_id, None);
+        assert_eq!(builder.gates[ab.node.id].get_pir_node_ids(), &[7]);
+        assert_eq!(
+            builder.gates[ab.node.id].get_tags(),
+            Some(&["base".to_string()][..])
+        );
+
+        let suffix_checkpoint = builder.begin_append_checkpoint();
+        let trial_ac = builder.add_and_binary(a, c);
+        assert_eq!(trial_ac.node.id, prefix_gate_count);
+        builder.rollback_append_checkpoint(suffix_checkpoint);
+
+        // Rebuilding the discarded expression must not find a stale hash
+        // entry referring to the rolled-back suffix.
+        let rebuilt_ac = builder.add_and_binary(a, c);
+        assert_eq!(rebuilt_ac.node.id, prefix_gate_count);
+        assert_eq!(builder.aig_depth(rebuilt_ac), Some(1));
     }
 }

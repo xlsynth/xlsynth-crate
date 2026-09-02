@@ -145,4 +145,34 @@ impl StructuralHashCons {
             self.and_key(lhs, rhs),
         );
     }
+
+    /// Removes registrations for append-only AND nodes at or above
+    /// `gate_count`.
+    pub(crate) fn truncate_to_gate_count(
+        &mut self,
+        gate_count: usize,
+        nodes: &[crate::aig::gate::AigNode],
+    ) {
+        assert!(self.ref_data.len() <= nodes.len());
+        for id in (gate_count.min(self.ref_data.len())..self.ref_data.len()).rev() {
+            let Some(ref_data) = self.ref_data[id] else {
+                // Folded-away trial nodes are deliberately not hash-consed.
+                continue;
+            };
+            let crate::aig::gate::AigNode::And2 { a, b, .. } = &nodes[id] else {
+                panic!("append checkpoint can only roll back AND nodes");
+            };
+            let key = self.and_key(*a, *b);
+            let removed = self
+                .key_to_expression_id
+                .remove(&key)
+                .expect("trial AND key should be registered");
+            assert_eq!(removed, ref_data.expression_id);
+            assert_eq!(ref_data.expression_id + 1, self.expression_data.len());
+            self.expression_data.pop();
+        }
+        // `ref_data` can already be shorter than `gate_count` when the graph
+        // prefix ends in folded-away, deliberately unregistered nodes.
+        self.ref_data.truncate(gate_count);
+    }
 }
