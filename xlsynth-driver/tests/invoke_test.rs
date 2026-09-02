@@ -11954,8 +11954,7 @@ fn test_prove_quickcheck_uninterpreted_functions_solver_param(solver: &str) {
         String::from_utf8_lossy(&out_no_uf.stderr)
     );
 
-    // 2) With UF mapping: compute mangled helper names and map both to symbol
-    //    F.
+    // 2) With UF mapping: compute mangled helper names and map both to symbol F.
     let out_with_uf = std::process::Command::new(driver)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())

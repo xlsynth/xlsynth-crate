@@ -35,6 +35,8 @@ use crate::{
     aig::structural_hash_cons::StructuralHashCons,
 };
 
+mod full_adder;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionKind {
     Linear,
@@ -421,8 +423,19 @@ impl GateBuilder {
         HalfAdderOutput { sum, carry }
     }
 
-    /// Emits a 1-bit full-adder.
+    /// Emits a full-adder, choosing input placement with a joint sum/carry
+    /// depth and reachable-area guard when arrival information is available.
     pub fn add_full_adder(
+        &mut self,
+        a: AigOperand,
+        b: AigOperand,
+        c: AigOperand,
+    ) -> FullAdderOutput {
+        self.add_full_adder_with_input_placement(a, b, c)
+    }
+
+    /// Emits the linear XOR sum and majority carry in the supplied input order.
+    fn add_full_adder_in_order(
         &mut self,
         a: AigOperand,
         b: AigOperand,

@@ -317,8 +317,7 @@ fn build_dir_by_pin_for_instance(
     // - Module port directions when the type matches a parsed module name and
     //   `module_port_dirs` is provided.
     // - Otherwise, skip connectivity for this instance (maintaining historical
-    //   behavior where unknown cell types are treated as an invariant
-    //   violation).
+    //   behavior where unknown cell types are treated as an invariant violation).
     let mut dir_by_pin: HashMap<String, PinDirection> = HashMap::new();
 
     if let Some(cell) = lib.get_cell(type_name.as_str()) {

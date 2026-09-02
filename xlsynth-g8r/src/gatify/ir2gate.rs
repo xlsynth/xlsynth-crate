@@ -879,8 +879,7 @@ fn gatify_array_slice_bit_shift(
         gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits)
     };
 
-    // 1) Build a padding prefix of (width-1) copies of the last element to
-    //    emulate
+    // 1) Build a padding prefix of (width-1) copies of the last element to emulate
     // XLS out-of-bounds semantics (select last element when OOB).
     let last_elem = array_bits.get_lsb_slice((n_elems - 1) * e_bits, e_bits);
     let mut pad = AigBitVector::zeros(0);
@@ -893,8 +892,8 @@ fn gatify_array_slice_bit_shift(
     // 2) Concatenate pad || array_bits to form the extended sequence.
     let extended = AigBitVector::concat(pad, array_bits.clone());
 
-    // 3) Compute start_scaled = clamped_start * e_bits, with sufficient width
-    //    to hold the product.
+    // 3) Compute start_scaled = clamped_start * e_bits, with sufficient width to
+    //    hold the product.
     let mut tmp = if e_bits > 0 { e_bits - 1 } else { 0 };
     let mut extra = 0usize;
     while tmp > 0 {
@@ -2598,10 +2597,9 @@ pub fn gatify_scmp_via_bit_tests(
         }
     } else {
         // Signed comparisons:
-        // - If signs differ, a < b iff a is negative, and a > b iff b is
-        //   negative.
-        // - If signs are the same, signed order matches unsigned order on the
-        //   lower bits; the equal sign bits do not need to be compared again.
+        // - If signs differ, a < b iff a is negative, and a > b iff b is negative.
+        // - If signs are the same, signed order matches unsigned order on the lower
+        //   bits; the equal sign bits do not need to be compared again.
         let a_msb = lhs_bits.get_msb(0);
         let b_msb = rhs_bits.get_msb(0);
         let sign_diff = gb.add_xor_binary(*a_msb, *b_msb);
@@ -6533,10 +6531,10 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 87, old_depth: 8, elem_mux_and_nodes: 87, elem_mux_depth: 8, public_and_nodes: 87, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 3, old_and_nodes: 107, old_depth: 8, elem_mux_and_nodes: 107, elem_mux_depth: 8, public_and_nodes: 107, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 4, old_and_nodes: 125, old_depth: 8, elem_mux_and_nodes: 125, elem_mux_depth: 8, public_and_nodes: 125, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 388, old_depth: 13, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 542, old_depth: 13, elem_mux_and_nodes: 261, elem_mux_depth: 8, public_and_nodes: 261, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 636, old_depth: 13, elem_mux_and_nodes: 321, elem_mux_depth: 8, public_and_nodes: 321, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 694, old_depth: 13, elem_mux_and_nodes: 375, elem_mux_depth: 8, public_and_nodes: 375, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 388, old_depth: 12, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 542, old_depth: 12, elem_mux_and_nodes: 261, elem_mux_depth: 8, public_and_nodes: 261, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 636, old_depth: 12, elem_mux_and_nodes: 321, elem_mux_depth: 8, public_and_nodes: 321, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 694, old_depth: 12, elem_mux_and_nodes: 375, elem_mux_depth: 8, public_and_nodes: 375, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 1, old_and_nodes: 790, old_depth: 14, elem_mux_and_nodes: 225, elem_mux_depth: 8, public_and_nodes: 225, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1051, old_depth: 14, elem_mux_and_nodes: 435, elem_mux_depth: 8, public_and_nodes: 435, public_depth: 8 },
             ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1211, old_depth: 14, elem_mux_and_nodes: 535, elem_mux_depth: 8, public_and_nodes: 535, public_depth: 8 },

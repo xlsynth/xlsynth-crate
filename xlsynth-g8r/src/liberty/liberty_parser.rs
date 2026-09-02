@@ -90,13 +90,12 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
             self.stream.pop_or_error(b")", "block-like attribute end")?;
 
             // There are a few cases we're interested in:
-            // * We see a `{` on this line, in which case we want to start
-            //   parsing a sub-block.
-            // * We see a `;` on this line, in which case we're done parsing
-            //   this member.
-            // * We see nothing else meaningful (just whitespace and comments)
-            //   until `\n` (EOL), in which case we do automatic semicolon
-            //   insertion and consider this member done.
+            // * We see a `{` on this line, in which case we want to start parsing a
+            //   sub-block.
+            // * We see a `;` on this line, in which case we're done parsing this member.
+            // * We see nothing else meaningful (just whitespace and comments) until `\n`
+            //   (EOL), in which case we do automatic semicolon insertion and consider this
+            //   member done.
             let next: Option<u8> = self.stream.peek_char_or_eol()?;
             match next {
                 None => Err(format!(

@@ -675,8 +675,7 @@ pub mod test_utils {
         );
         assert!(matches!(res_no_uf, super::EquivResult::Disproved { .. }));
 
-        // 2) With UF mapping: map g (LHS) and h (RHS) to the same UF symbol
-        //    "F".
+        // 2) With UF mapping: map g (LHS) and h (RHS) to the same UF symbol "F".
         let mut lhs_uf_map: HashMap<String, String> = HashMap::new();
         lhs_uf_map.insert("g".to_string(), "F".to_string());
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();

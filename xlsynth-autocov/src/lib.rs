@@ -2669,10 +2669,9 @@ fn f(x: bits[2] id=1) -> bits[1] {
     #[test]
     fn relevance_end_to_end_exhaustive_for_irrelevant_and_relevant_bool_nodes() {
         // Two boolean nodes:
-        // - `b_irrel`: used as a selector, but both cases are identical, so it
-        //   is irrelevant.
-        // - `b_rel`: used as a selector with different cases, so it is
-        //   relevant.
+        // - `b_irrel`: used as a selector, but both cases are identical, so it is
+        //   irrelevant.
+        // - `b_rel`: used as a selector with different cases, so it is relevant.
         let ir_text = r#"package test
 
 fn f(x: bits[2] id=1) -> (bits[8], bits[8]) {

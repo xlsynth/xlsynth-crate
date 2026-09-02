@@ -444,7 +444,7 @@ fn test_ext_nary_add_unit_dec_gate_stats_sweep_w16_corrections_0_to_4() {
         ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes:  80, deepest_path: 18 },
         ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes: 166, deepest_path: 17 },
         ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 234, deepest_path: 21 },
-        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 238, deepest_path: 21 },
+        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 236, deepest_path: 21 },
     ];
 
     assert_eq!(got.as_slice(), want);
@@ -464,9 +464,9 @@ fn test_ext_nary_add_sub_plus_signext_gate_stats_sweep_w16_corrections_0_to_4() 
     let want: &[ExtNaryAddCorrectionCountRow] = &[
         ExtNaryAddCorrectionCountRow { correction_count: 0, live_nodes: 221, deepest_path: 18 },
         ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes: 240, deepest_path: 18 },
-        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes: 363, deepest_path: 21 },
-        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 418, deepest_path: 23 },
-        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 430, deepest_path: 23 },
+        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes: 349, deepest_path: 21 },
+        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 389, deepest_path: 23 },
+        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 401, deepest_path: 23 },
     ];
 
     assert_eq!(got.as_slice(), want);
@@ -484,10 +484,10 @@ fn test_ext_nary_add_counter_inc_dec_gate_stats_sweep_w16_corrections_0_to_4() {
     #[rustfmt::skip]
     let want: &[ExtNaryAddCorrectionCountRow] = &[
         ExtNaryAddCorrectionCountRow { correction_count: 0, live_nodes:  16, deepest_path:  1 },
-        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes: 222, deepest_path: 17 },
-        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes: 344, deepest_path: 21 },
-        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 373, deepest_path: 27 },
-        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 291, deepest_path: 27 },
+        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes: 221, deepest_path: 17 },
+        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes: 329, deepest_path: 21 },
+        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 359, deepest_path: 27 },
+        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 289, deepest_path: 27 },
     ];
 
     assert_eq!(got.as_slice(), want);
