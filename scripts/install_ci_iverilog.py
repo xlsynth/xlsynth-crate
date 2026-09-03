@@ -40,7 +40,9 @@ def main():
         download("elf", compiler, compiler.name)
         download("elf", runtime, runtime.name)
         download("tar-gz", libraries, libraries.name)
-        subprocess.check_call(["sudo", "mkdir", "-p", "/usr/local/bin", "/usr/local/lib"])
+        subprocess.check_call(
+            ["sudo", "mkdir", "-p", "/usr/local/bin", "/usr/local/lib"]
+        )
         subprocess.check_call(
             ["sudo", "install", "-m", "0755", str(compiler), "/usr/local/bin/iverilog"]
         )
