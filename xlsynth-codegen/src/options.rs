@@ -32,8 +32,8 @@ pub struct BlockCodegenOptions {
     pub max_inline_depth: usize,
     /// Preserves SystemVerilog type annotations on block ports.
     pub emit_sv_types: bool,
-    /// Emits invariant assertions when present in the input block.
-    pub add_invariant_assertions: bool,
+    /// Emits assert operations present in the input block.
+    pub emit_asserts: bool,
     /// Supplies optional register-lowering templates and related options.
     pub register_codegen_options: Option<CodegenOptions>,
 }
@@ -48,7 +48,7 @@ impl Default for BlockCodegenOptions {
             separate_lines: false,
             max_inline_depth: 5,
             emit_sv_types: true,
-            add_invariant_assertions: true,
+            emit_asserts: true,
             register_codegen_options: None,
         }
     }

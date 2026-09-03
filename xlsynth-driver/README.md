@@ -287,8 +287,8 @@ Flags:
   (default: `5`).
 - `--emit_sv_types <BOOL>` controls emission of SystemVerilog port types
   (default: `true`).
-- `--add_invariant_assertions <BOOL>` controls generated invariant assertions
-  (default: `true`).
+- `--emit_asserts <BOOL>` emits assert operations present in the input block
+  (default: `true`). This does not affect coverage or trace statements.
 - `--register_codegen_options <TOML>` loads optional custom register-emission
   templates from a TOML file. Templates must preserve the block's reset and
   enable behavior; incompatible asynchronous-reset templates are rejected.

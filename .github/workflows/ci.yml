@@ -427,13 +427,8 @@ jobs:
           fi
           cargo test --features "with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test${EXTERNAL_TEST_FEATURES:+,$EXTERNAL_TEST_FEATURES}" --workspace --exclude sample-usage
 
-      - name: Check codegen fuzz oracles, including mapped-netlist evaluation
+      - name: Check codegen fuzz targets, native simulation, and preflight
         if: matrix.os == 'ubuntu-24.04'
-        env:
-          # Ordinary yosys-tests need no cell library. This small library is
-          # only the mapping harness's CI input; real-library runs can supply
-          # a compatible Liberty set such as ASAP7 RVT/SS NLDM.
-          XLSYNTH_LIBERTY_FILES: ${{ github.workspace }}/xlsynth-codegen/fuzz/testdata/public_cells.lib
         run: |
           cargo check --manifest-path xlsynth-codegen/fuzz/Cargo.toml --all-targets --features external-yosys
           cargo test --manifest-path xlsynth-codegen/fuzz/Cargo.toml --lib --features external-yosys

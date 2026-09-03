@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Validated Yosys execution and Liberty-backed technology mapping.
-//! Syntax checks and proofs use `YosysToolchain` without any Liberty
-//! dependency; mapping uses `YosysEnvironment`, optionally with a parsed
-//! `YosysMappingContext`.
+//! Syntax checks, combinational evaluation, and proofs use `YosysToolchain`
+//! without any Liberty dependency; mapping uses `YosysEnvironment`, optionally
+//! with a parsed `YosysMappingContext`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +17,8 @@ use crate::netlist::gv_eval::{
 };
 
 use xlsynth::external_tool::{ToolError, resolve_executable, run_checked, run_checked_detailed};
+
+mod eval;
 
 /// Environment variable naming the Yosys executable used for external mapping.
 pub const YOSYS_PATH_ENV: &str = "XLSYNTH_YOSYS_PATH";

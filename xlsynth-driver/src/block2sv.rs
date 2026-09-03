@@ -43,8 +43,8 @@ pub fn handle_block2sv(matches: &ArgMatches) -> anyhow::Result<()> {
     if let Some(value) = matches.get_one::<bool>("emit_sv_types") {
         options.emit_sv_types = *value;
     }
-    if let Some(value) = matches.get_one::<bool>("add_invariant_assertions") {
-        options.add_invariant_assertions = *value;
+    if let Some(value) = matches.get_one::<bool>("emit_asserts") {
+        options.emit_asserts = *value;
     }
     if let Some(path) = matches.get_one::<String>("register_codegen_options") {
         let text = std::fs::read_to_string(path)

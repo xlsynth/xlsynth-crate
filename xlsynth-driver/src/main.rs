@@ -2043,11 +2043,11 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
-                    Arg::new("add_invariant_assertions")
-                        .long("add_invariant_assertions")
-                        .visible_alias("add-invariant-assertions")
+                    Arg::new("emit_asserts")
+                        .long("emit_asserts")
+                        .visible_alias("emit-asserts")
                         .value_name("BOOL")
-                        .help("Emit assertions for generated invariants")
+                        .help("Emit assert operations present in the input block (default: true)")
                         .value_parser(clap::value_parser!(bool))
                         .action(ArgAction::Set),
                 )

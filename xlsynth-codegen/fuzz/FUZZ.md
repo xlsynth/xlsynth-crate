@@ -195,24 +195,17 @@ of injected special cases.
 
 ## Liberty configuration
 
-The mapping targets and fuzz library tests that exercise
-them require `XLSYNTH_YOSYS_PATH` and `XLSYNTH_LIBERTY_FILES`. The latter is a
+The mapping fuzz targets require `XLSYNTH_YOSYS_PATH` and
+`XLSYNTH_LIBERTY_FILES`. The latter is a
 comma-separated list of explicit Liberty paths, consumed by both Yosys/ABC
 and our netlist evaluator. Relative paths are resolved from the starting
 working directory. The setup is independent of any particular PDK;
 no LEF, GDS, or physical-design files are needed. Ordinary workspace
-`yosys-tests` perform parsing/proofs without a cell library.
+`yosys-tests` perform parsing, combinational `eval` smoke tests, and proofs
+without a cell library. CI builds the mapping fuzz targets and checks their
+startup errors; actual mapping campaigns require an installed Liberty set.
 
-For the small CI harness library, run from this directory:
-
-```sh
-export XLSYNTH_YOSYS_PATH="$(command -v yosys)"
-export XLSYNTH_LIBERTY_FILES="$PWD/testdata/public_cells.lib"
-cargo fuzz run --sanitizer none --features external-yosys \
-  fuzz_codegen_yosys_combo -- -max_total_time=30
-```
-
-Missing Yosys or Liberty configuration fails any selected Yosys check. Ordinary
+Missing Yosys or Liberty configuration fails any selected mapping fuzz target. Ordinary
 workspace `yosys-tests` / `iverilog-tests` features do not control fuzz targets.
 The fuzz crate's existing `external-yosys` feature selects its mapping/formal
 targets. Native simulation does not require Yosys or Liberty files.
@@ -220,8 +213,8 @@ Use a recent Yosys with SystemVerilog support (CI pins OSS CAD Suite 2026-08-29)
 
 Absent, empty, nonexistent, or archive inputs produce a setup error with a
 configuration example. Supply files from an existing PDK installation; the
-harness does not install or extract PDKs, or silently fall back to the small
-test library. Every mapping target validates the tool and library configuration
+harness does not install or extract PDKs or substitute a test library.
+Every mapping target validates the tool and library configuration
 at startup, before processing samples. A short setup-and-sample check is:
 
 ```sh
@@ -236,6 +229,7 @@ For example, in Bash, with all five files installed under `~/pdks/asap7`
 (adjust `ASAP7_LIB_DIR` for another installation):
 
 ```bash
+export XLSYNTH_YOSYS_PATH="$(command -v yosys)"
 ASAP7_LIB_DIR="$HOME/pdks/asap7"
 asap7_files=(
   "$ASAP7_LIB_DIR/asap7sc7p5t_AO_RVT_SS_nldm_211120.lib"
@@ -260,8 +254,7 @@ retain narrower scalar complexity limits to bound mapping cost. These paths
 use our Liberty-backed gate evaluator,
 not a Rust SystemVerilog parser/evaluator.
 
-Use a real Liberty set such as ASAP7 for campaign coverage. The small public
-test library is also supported for harness regressions; it is not an ASAP7 run.
+Use a real Liberty set such as ASAP7 for campaign coverage.
 The dedicated mapping targets compare native RTL synthesized by Yosys/ABC with
 PIR evaluation (simulation) or independent PIR-to-G8R lowering (formal).
 Sequential simulation resets every register before comparing external outputs.

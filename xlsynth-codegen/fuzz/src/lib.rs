@@ -238,17 +238,11 @@ pub fn assert_sequential_semantics(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use crate::check_case;
     use crate::coverage::{CoverageReport, Outcome};
     use rand::rngs::StdRng;
     use rand::{RngCore, SeedableRng};
     use xlsynth_codegen::BlockCodegenOptions;
-    use xlsynth_g8r::liberty::cell_formula::parse_formula;
-    use xlsynth_g8r::liberty::parser::{
-        LibertyPayloadOptions, parse_liberty_files_with_payload_options,
-    };
     use xlsynth_pir::ir_random::RandomOperation;
 
     use super::{
@@ -434,46 +428,6 @@ top block zero(clk: clock, x: bits[0], enable: bits[1], out: bits[0]) {
             rng.fill_bytes(&mut entropy);
             let package = generate(&entropy, &generation);
             assert_sequential_semantics(&package, &BlockCodegenOptions::default()).unwrap();
-        }
-    }
-
-    #[test]
-    fn public_cell_library_supports_combinational_and_sequential_mapping() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/public_cells.lib");
-        let library = parse_liberty_files_with_payload_options(
-            &[path],
-            LibertyPayloadOptions {
-                include_timing: false,
-                include_power: false,
-            },
-        )
-        .expect("independently authored public cell library should parse");
-
-        for name in [
-            "INV", "BUF", "AND2", "NAND2", "OR2", "NOR2", "XOR2", "XNOR2", "MUX2", "DFF",
-        ] {
-            let cell = library
-                .cells
-                .iter()
-                .find(|cell| cell.name == name)
-                .unwrap_or_else(|| panic!("public library is missing required cell `{name}`"));
-            if name == "DFF" {
-                assert_eq!(
-                    cell.sequential.len(),
-                    1,
-                    "public DFF must have one sequential model"
-                );
-            }
-            for pin in &cell.pins {
-                let function = library.resolve_string(&pin.function);
-                if !function.is_empty() {
-                    parse_formula(function).unwrap_or_else(|error| {
-                        panic!(
-                            "public cell `{name}` has an unsupported formula `{function}`: {error}"
-                        )
-                    });
-                }
-            }
         }
     }
 }

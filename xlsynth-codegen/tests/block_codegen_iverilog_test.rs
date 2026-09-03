@@ -128,7 +128,7 @@ top block hot_helpers(value: bits[4], one_hot_lsb_4: bits[4], first: bits[5], se
 }
 "#;
     let generated = emit(ir, &BlockCodegenOptions::default());
-    assert_golden_sv(&generated, "tests/testdata/one_hot_functions.svtxt");
+    assert_golden_sv(&generated, "tests/testdata/one_hot_functions.sv");
     for value in 0_u64..16 {
         for second in 0_u64..16 {
             let outputs = evaluate(
@@ -1740,7 +1740,7 @@ top block update_indices(values: bits[8][7], data_bit: bits[1], replacement: bit
                 ..BlockCodegenOptions::default()
             },
         );
-        assert_golden_sv(&generated, "tests/testdata/array_update_indices.svtxt");
+        assert_golden_sv(&generated, "tests/testdata/array_update_indices.sv");
         for (data_bit, expected) in [(0, 0x07_06_05_04_03_a9_01), (1, 0x07_06_05_04_03_02_a9)] {
             let inputs = [
                 ("values", 56, 0x07_06_05_04_03_02_01),
@@ -1824,10 +1824,7 @@ top block nested_update(values: bits[1][3][7], row_source: bits[1], replacement:
             ..BlockCodegenOptions::default()
         },
     );
-    assert_golden_sv(
-        &generated,
-        "tests/testdata/nested_array_update_indices.svtxt",
-    );
+    assert_golden_sv(&generated, "tests/testdata/nested_array_update_indices.sv");
     for row_source in 0..2 {
         let expected = 1 << ((1 - row_source) * 3 + 2);
         assert_eq!(

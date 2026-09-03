@@ -9,7 +9,7 @@ top block unchecked_value(clk: clock, data: bits[8], out: bits[8]) {
   out: () = output_port(data, name=out, id=6)
 }
 
-// OPTIONS: add_invariant_assertions = false
+// OPTIONS: emit_asserts = false
 // EXPECT-SV: module unchecked_value(
 // EXPECT-SV:   input logic clk,
 // EXPECT-SV:   input logic [7:0] data,

@@ -80,10 +80,7 @@ fn underscore_and_hyphen_flags_forward_typed_codegen_options() {
             ("separate_lines", options.separate_lines.to_string()),
             ("max_inline_depth", options.max_inline_depth.to_string()),
             ("emit_sv_types", options.emit_sv_types.to_string()),
-            (
-                "add_invariant_assertions",
-                options.add_invariant_assertions.to_string(),
-            ),
+            ("emit_asserts", options.emit_asserts.to_string()),
         ];
         if let Some(top) = &options.top {
             flags.push(("top", top.clone()));
@@ -151,6 +148,7 @@ fn invalid_flags_fail_before_reading_the_input() {
     for flag in [
         "--layout=invalid",
         "--separate-lines=not-a-boolean",
+        "--emit-asserts=not-a-boolean",
         "--max-inline-depth=-1",
         "--unknown-flag=true",
     ] {

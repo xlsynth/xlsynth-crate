@@ -448,7 +448,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         for node in &self.func.nodes {
             match &node.payload {
                 NodePayload::Assert { label, .. }
-                    if self.options.add_invariant_assertions && !label.is_empty() =>
+                    if self.options.emit_asserts && !label.is_empty() =>
                 {
                     reserve(label, "assertion label")?;
                 }

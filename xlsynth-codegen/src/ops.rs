@@ -72,7 +72,7 @@ impl BlockEmitter<'_, '_> {
                 label,
                 ..
             } => {
-                if self.options.add_invariant_assertions {
+                if self.options.emit_asserts {
                     self.emit_assertion(*activate, message, label)?;
                 }
                 None

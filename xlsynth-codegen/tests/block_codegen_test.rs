@@ -1134,7 +1134,7 @@ top block debug_events(clk: clock, predicate: bits[1], value: bits[8], result: b
     let disabled = emit(
         ir,
         &BlockCodegenOptions {
-            add_invariant_assertions: false,
+            emit_asserts: false,
             ..BlockCodegenOptions::default()
         },
     );
@@ -1492,7 +1492,7 @@ top block omitted_names(data: bits[1], out: bits[1]) {
         emit(
             ir,
             &BlockCodegenOptions {
-                add_invariant_assertions: false,
+                emit_asserts: false,
                 ..BlockCodegenOptions::default()
             }
         ),

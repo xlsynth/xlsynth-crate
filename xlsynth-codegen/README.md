@@ -141,13 +141,18 @@ representation.
 
 ## Validation
 
+`emit_asserts` (default: `true`) controls emission of assert operations already
+present in the input block. It does not infer new invariants or disable coverage
+and trace statements.
+
 Semantic tests selected with `iverilog-tests` require iverilog and vvp. Generated RTL
 is compiled once per design and simulated against the independent PIR block
 interpreter, with exact four-state output comparisons and cycle-by-cycle
 register checks. Testbench interfaces come from IR, not an SV parser.
-The separate `yosys-tests` suite checks consumption of generated SystemVerilog
-and focused synthesis equivalence without Liberty files or a PDK. Random-block
-fuzzing also checks the Yosys/ABC → mapped netlist → netlist evaluator path
+The separate `yosys-tests` suite checks consumption of generated SystemVerilog,
+combinational outputs with Yosys `eval`, and focused synthesis equivalence
+without Liberty files or a PDK. Random-block fuzzing also checks the
+Yosys/ABC → mapped netlist → netlist evaluator path
 against PIR expectations. These mapping checks require `XLSYNTH_YOSYS_PATH`
 and `XLSYNTH_LIBERTY_FILES`, a comma-separated list of standard-cell Liberty
 files. Include flip-flop cells for sequential mapping. The same files supply
@@ -159,7 +164,7 @@ Shared compilation, syntax checks, and finite simulations live in
 `xlsynth-test-helpers::iverilog::IcarusToolchain`; the persistent vector/cycle
 protocol lives in `xlsynth-test-helpers::rtl_sim`. Both use
 `xlsynth::external_tool` for bounded execution and process cleanup.
-Yosys execution and Liberty-backed mapping live in
+Yosys execution, batched combinational evaluation, and Liberty-backed mapping live in
 `xlsynth-g8r::netlist::yosys`. The codegen adapters retain only IR interfaces,
 testbench construction, and semantic comparisons.
 
@@ -185,7 +190,7 @@ XLSYNTH_UPDATE_GOLDEN=1 cargo test -p xlsynth-codegen \
   --test block2sv_goldens block2sv_golden_fixtures -- --exact
 ```
 
-The remaining standalone `.svtxt` snapshots use the same update variable in
+The remaining standalone `.sv` snapshots use the same update variable in
 the Icarus suite. To update both kinds and run their semantic checks:
 
 ```sh
@@ -201,9 +206,9 @@ use `XLSYNTH_YOSYS_PATH`, falling back to `PATH`; they require recent
 SystemVerilog support (CI pins OSS CAD Suite 2026-08-29). Runtime library APIs
 remain available without these test-selection features.
 
-CI uses the small checked-in `fuzz/testdata/public_cells.lib` for mapping
-harness coverage. For real-library coverage, supply a compatible Liberty set
-such as ASAP7 7.5-track RVT slow-corner NLDM. This is runtime configuration;
+CI runs the library-free Yosys smoke/proof tests and builds the mapping fuzz
+targets, but does not run technology mapping. For mapping campaigns, supply a
+compatible Liberty set such as ASAP7 7.5-track RVT slow-corner NLDM. This is runtime configuration;
 it adds no PDK-specific Cargo feature. See the
 [Liberty configuration](fuzz/FUZZ.md#liberty-configuration) for setup and a
 preflight command. No LEF, GDS, or other physical-design collateral is needed

@@ -51,7 +51,7 @@ XLSYNTH_UPDATE_GOLDEN=1 cargo test -p xlsynth-codegen \
 ```
 
 Update mode still fails on unexpected codegen success/failure; it only updates
-expected text. Review the diff. Standalone `.svtxt` snapshots in `tests/testdata`
+expected text. Review the diff. Standalone `.sv` snapshots in `tests/testdata`
 also honor this variable, preserve SPDX headers, and run in the Icarus suite:
 
 ```sh

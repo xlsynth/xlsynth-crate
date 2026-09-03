@@ -2,28 +2,6 @@
 
 //! Public, synthetic block references shared by focused codegen targets.
 
-/// Narrowing followed by replacement and concatenation exercises width
-/// boundaries.
-pub const NARROW_SLICE_UPDATE: &str = r#"package public_narrow_slice_update
-top block narrow_slice_update(in0: bits[3], in1: bits[3], out: bits[5]) {
-  in0: bits[3] = input_port(name=in0, id=1)
-  in1: bits[3] = input_port(name=in1, id=2)
-  dynamic_bit_slice.3: bits[1] = dynamic_bit_slice(in0, in1, width=1, id=3)
-  literal.4: bits[4] = literal(value=1, id=4)
-  decode.5: bits[2] = decode(in1, width=2, id=5)
-  bit_slice_update.6: bits[3] = bit_slice_update(in0, decode.5, dynamic_bit_slice.3, id=6)
-  sel.7: bits[4] = sel(in1, cases=[literal.4, literal.4, literal.4, literal.4], default=literal.4, id=7)
-  bit_slice.8: bits[1] = bit_slice(decode.5, start=1, width=1, id=8)
-  ugt.9: bits[1] = ugt(in0, in1, id=9)
-  concat.10: bits[5] = concat(decode.5, bit_slice_update.6, id=10)
-  encode.11: bits[3] = encode(concat.10, id=11)
-  xor.12: bits[4] = xor(sel.7, id=12)
-  shrl.13: bits[5] = shrl(concat.10, literal.4, id=13)
-  ne.14: bits[1] = ne(in0, in0, id=14)
-  out: () = output_port(shrl.13, name=out, id=15)
-}
-"#;
-
 /// Register-free scalar block with multiple independently observable outputs.
 pub const COMBINATIONAL: &str = r#"package public_combinational
 
