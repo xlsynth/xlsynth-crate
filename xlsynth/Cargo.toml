@@ -7,7 +7,6 @@ description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
 license = "Apache-2.0"
 repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
-homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 # Specify the path to the top-level README.md
 readme = "../README.md"
