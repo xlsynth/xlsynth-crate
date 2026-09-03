@@ -7,8 +7,6 @@ description = "Rust-native SystemVerilog generation for XLS block IR"
 license = "Apache-2.0"
 repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth-codegen"
-homepage = "https://github.com/xlsynth/xlsynth-crate"
-readme = "README.md"
 
 [lints]
 workspace = true
