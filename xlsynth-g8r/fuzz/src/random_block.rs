@@ -96,10 +96,9 @@ pub fn evaluate_block_cycle_observed(
                 write.reset,
                 register.reset_value.as_ref(),
                 metadata.reset.as_ref(),
-            ) {
-                if bool_value(value(reset)) ^ reset_metadata.active_low {
-                    next = reset_value.clone();
-                }
+            ) && bool_value(value(reset)) ^ reset_metadata.active_low
+            {
+                next = reset_value.clone();
             }
             next
         })

@@ -19,8 +19,8 @@ use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosy
 use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_outputs, flatten_value};
 use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions, RandomOperation,
-    StopPolicy, generate_block_package,
+    BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions,
+    RandomOperation, StopPolicy, generate_block_package,
 };
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 
@@ -34,6 +34,7 @@ fn fuzz_block_options() -> RandomBlockOptions {
     RandomBlockOptions {
         max_input_ports: 4,
         max_output_ports: 4,
+        topology: BlockTopology::Combinational,
         max_registers: 0,
         allow_load_enable: false,
         allow_reset: false,

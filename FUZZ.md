@@ -126,6 +126,12 @@ from source.
 
 Builds a random `GateFn`, serializes to text, parses it back, and checks structural equivalence of the original vs parsed `GateFn`.
 
+The shared `FuzzGraph` builder uses a separate fuzzed seed for output wiring.
+Its first output selects a generated operation when one exists; additional
+outputs can select any input or operation. This also gives the gate transform
+targets observable generated logic instead of systematically selecting inputs.
+Builder optimizations can still simplify selected operations to inputs or constants.
+
 Primarily tests:
 
 - GateFn textual serdes roundtrip
