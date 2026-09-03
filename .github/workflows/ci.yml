@@ -435,11 +435,10 @@ jobs:
           # a compatible Liberty set such as ASAP7 RVT/SS NLDM.
           XLSYNTH_LIBERTY_FILES: ${{ github.workspace }}/xlsynth-codegen/fuzz/testdata/public_cells.lib
         run: |
-          export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
           cargo check --manifest-path xlsynth-codegen/fuzz/Cargo.toml --all-targets --features external-yosys
           cargo test --manifest-path xlsynth-codegen/fuzz/Cargo.toml --lib --features external-yosys
           cargo test --manifest-path xlsynth-codegen/fuzz/Cargo.toml --test preflight_test --features external-yosys
-          cargo run --manifest-path xlsynth-codegen/fuzz/Cargo.toml --example coverage -- --profile stock-xls --samples 8 --bytes 256 --seed 1 --check
+          cargo run --manifest-path xlsynth-codegen/fuzz/Cargo.toml --example coverage -- --samples 8 --bytes 256 --seed 1 --check
 
 
   # -----------------------------------------------------------

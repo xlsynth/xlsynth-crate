@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use libfuzzer_sys::fuzz_target;
 use xlsynth_codegen::BlockCodegenOptions;
-use xlsynth_codegen_fuzz::iverilog::{StateLayout, interface};
+use xlsynth_codegen_fuzz::iverilog::interface;
 use xlsynth_codegen_fuzz::preflight::{Oracles, validate};
 use xlsynth_codegen_fuzz::{
     INPUT_SAMPLE_COUNT, deterministic_rng, emit, generate_inputs, parse_reference, references,
@@ -31,7 +31,7 @@ fuzz_target!(init: {
     let package = parse_reference(&ir);
     let rtl = emit(&package, &BlockCodegenOptions::default());
     let mut simulator = xlsynth_codegen_fuzz::fuzz_tool!(
-        Icarus::new(&rtl, interface(&package, None, StateLayout::Packed))
+        Icarus::new(&rtl, interface(&package, None))
             .map_err(|error| error.with_context(format!("Icarus compilation failed:\n{ir}")))
     );
     let (block, _) = top_block(&package);

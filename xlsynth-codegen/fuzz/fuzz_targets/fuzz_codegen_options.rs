@@ -6,7 +6,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use xlsynth_codegen_fuzz::preflight::{Oracles, validate};
-use xlsynth_codegen_fuzz::{Profile, input::FuzzCase, top_block};
+use xlsynth_codegen_fuzz::{input::FuzzCase, top_block};
 
 fuzz_target!(init: {
     if let Err(error) = validate(Oracles::Icarus) {
@@ -14,7 +14,7 @@ fuzz_target!(init: {
         std::process::exit(2);
     }
 }, |data: &[u8]| {
-    let Ok(mut case) = FuzzCase::decode(data, Profile::NativeSemantics) else {
+    let Ok(mut case) = FuzzCase::decode(data) else {
         // An unknown explicit input-format version is not a generated RTL bug.
         return;
     };

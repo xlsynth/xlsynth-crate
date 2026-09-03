@@ -6,15 +6,13 @@ mod fixtures;
 use fixtures::*;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
-use xlsynth::external_tool::{resolve_executable, run_checked};
+use xlsynth_g8r::netlist::yosys::YosysToolchain;
 
 /// Parses every successful generated fixture as synthesis-mode SystemVerilog.
 #[test]
 fn block2sv_generated_fixtures_parse_with_yosys() {
-    let yosys = std::env::var_os("XLSYNTH_YOSYS_PATH").unwrap_or_else(|| "yosys".into());
-    let yosys = resolve_executable(Path::new(&yosys)).expect("resolve required Yosys executable");
+    let yosys = YosysToolchain::from_env().expect("required Yosys executable");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
     let mut paths = Vec::new();
     collect_golden_fixtures(&directory, &mut paths).unwrap();
@@ -40,12 +38,9 @@ fn block2sv_generated_fixtures_parse_with_yosys() {
         };
         fs::write(&verilog_path, format!("{support_types}{output}"))
             .expect("write generated SystemVerilog");
-        if let Err(error) = run_checked(
-            Command::new(&yosys)
-                .current_dir(temporary_directory.path())
-                .args(["-q", "-p", "read_verilog -sv -DSYNTHESIS generated.sv"]),
+        if let Err(error) = yosys.run_script(
             temporary_directory.path(),
-            "yosys-fixture",
+            "read_verilog -sv -DSYNTHESIS generated.sv",
             Duration::from_secs(120),
         ) {
             failures.push(format!("{}: {error}", path.display()));

@@ -3,10 +3,8 @@
 //! Shared external Yosys/Liberty oracles for public block codegen targets.
 
 use std::collections::BTreeMap;
-use std::process::Command;
-use std::time::Duration;
 
-use xlsynth::external_tool::{ToolError, run_checked_detailed};
+use xlsynth::external_tool::ToolError;
 
 use xlsynth::IrBits;
 use xlsynth_codegen::BlockCodegenOptions;
@@ -17,7 +15,7 @@ use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, LabeledNetlistAig, LabeledSequentialNetlistAig,
     load_labeled_netlist_aig_with_liberty, load_labeled_sequential_netlist_aig_with_liberty,
 };
-use xlsynth_g8r_fuzz::external_yosys::ExternalYosysContext;
+use xlsynth_g8r::netlist::yosys::{YosysInputLanguage, YosysMappingContext, YosysMappingKind};
 use xlsynth_pir::ir::{BlockMetadata, Fn, Package};
 
 use crate::emit;
@@ -41,7 +39,7 @@ pub struct MappedSequential {
 /// Maps emitted combinational SystemVerilog through external Yosys and Liberty.
 pub fn map_combinational(
     package: &Package,
-    context: &ExternalYosysContext,
+    context: &YosysMappingContext,
 ) -> Result<MappedCombinational, ToolError> {
     let ir = package.to_string();
     let rtl = emit(package, &BlockCodegenOptions::default());
@@ -51,7 +49,14 @@ pub fn map_combinational(
         source.registers.is_empty(),
         "combinational mapping received registers:\n{ir}"
     );
-    let netlist = synthesize_combinational_system_verilog(&rtl, &source.name, context)
+    let netlist = context
+        .yosys
+        .synthesize_to_gv(
+            &rtl,
+            &source.name,
+            YosysInputLanguage::SystemVerilog,
+            YosysMappingKind::Combinational,
+        )
         .map_err(|error| error.with_context(format!("IR:\n{ir}\nRTL:\n{rtl}")))?;
     let directory = tempfile::tempdir().expect("create mapped-netlist directory");
     let path = directory.path().join("mapped.gv");
@@ -75,51 +80,10 @@ pub fn map_combinational(
     })
 }
 
-/// Uses Yosys's SystemVerilog frontend for a combinational technology map.
-fn synthesize_combinational_system_verilog(
-    rtl: &str,
-    top: &str,
-    context: &ExternalYosysContext,
-) -> Result<String, ToolError> {
-    let directory =
-        tempfile::tempdir().map_err(|error| format!("create Yosys directory: {error}"))?;
-    let input = directory.path().join("dut.sv");
-    let mapped = directory.path().join("mapped.gv");
-    std::fs::write(&input, rtl).map_err(|error| format!("write Yosys SystemVerilog: {error}"))?;
-
-    let mut read_libraries = String::new();
-    let mut abc_libraries = String::new();
-    for path in context.yosys.liberty_files().paths() {
-        let quoted = path
-            .display()
-            .to_string()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        read_libraries.push_str(&format!("read_liberty -lib \"{quoted}\"\n"));
-        abc_libraries.push_str(&format!(" -liberty \"{quoted}\""));
-    }
-    let program = format!(
-        "{read_libraries}read_verilog -sv dut.sv\nhierarchy -check -top {top}\nproc\nflatten\nopt\ntechmap\nopt\nabc{abc_libraries}\nclean -purge\nwrite_verilog -noattr mapped.gv\n"
-    );
-    run_checked_detailed(
-        Command::new(context.yosys.yosys_path())
-            .current_dir(directory.path())
-            .args(["-Q", "-p", &program]),
-        directory.path(),
-        "yosys-mapping",
-        Duration::from_secs(120),
-    )
-    .map_err(|error| error.with_context(format!("Yosys program:\n{program}")))?;
-
-    std::fs::read_to_string(&mapped).map_err(|error| {
-        ToolError::failure(format!("read mapped SystemVerilog gate netlist: {error}"))
-    })
-}
-
 /// Maps emitted synchronous SystemVerilog through external Yosys and Liberty.
 pub fn map_sequential(
     package: &Package,
-    context: &ExternalYosysContext,
+    context: &YosysMappingContext,
 ) -> Result<MappedSequential, ToolError> {
     let ir = package.to_string();
     let rtl = emit(package, &BlockCodegenOptions::default());
@@ -248,7 +212,8 @@ mod tests {
 
     use crate::{parse_reference, references};
 
-    use super::{map_combinational, map_sequential, synthesize_combinational_system_verilog};
+    use super::{map_combinational, map_sequential};
+    use xlsynth_g8r::netlist::yosys::{YosysInputLanguage, YosysMappingKind};
 
     #[test]
     fn narrow_slice_update_is_formally_equivalent_after_yosys_mapping() {
@@ -302,7 +267,14 @@ mod tests {
   assign result = 1'(value >> 1);
 endmodule
 "#;
-        let mapped = synthesize_combinational_system_verilog(rtl, "public_cast", context)
+        let mapped = context
+            .yosys
+            .synthesize_to_gv(
+                rtl,
+                "public_cast",
+                YosysInputLanguage::SystemVerilog,
+                YosysMappingKind::Combinational,
+            )
             .expect("Yosys combinational mapper must enable SystemVerilog parsing");
         assert!(mapped.contains("module public_cast("));
     }

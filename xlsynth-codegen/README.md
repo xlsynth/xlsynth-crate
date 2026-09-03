@@ -141,7 +141,7 @@ representation.
 
 ## Validation
 
-Semantic tests selected with `iverilog-tests` require Icarus. Generated RTL
+Semantic tests selected with `iverilog-tests` require iverilog and vvp. Generated RTL
 is compiled once per design and simulated against the independent PIR block
 interpreter, with exact four-state output comparisons and cycle-by-cycle
 register checks. Testbench interfaces come from IR, not an SV parser.
@@ -154,6 +154,14 @@ files. Include flip-flop cells for sequential mapping. The same files supply
 cell definitions to Yosys/ABC and our netlist evaluator.
 These codegen paths do not use C++ compilation or the `xlsynth-vastly`
 evaluator.
+
+Shared compilation, syntax checks, and finite simulations live in
+`xlsynth-test-helpers::iverilog::IcarusToolchain`; the persistent vector/cycle
+protocol lives in `xlsynth-test-helpers::rtl_sim`. Both use
+`xlsynth::external_tool` for bounded execution and process cleanup.
+Yosys execution and Liberty-backed mapping live in
+`xlsynth-g8r::netlist::yosys`. The codegen adapters retain only IR interfaces,
+testbench construction, and semantic comparisons.
 
 The golden corpus and its in-process runner live in this crate. Fixtures use
 typed `OPTIONS` metadata and exact `EXPECT-SV` / `EXPECT-ERROR` comments; tests
@@ -203,6 +211,6 @@ for these checks.
 
 The standalone coverage-guided test suite in `fuzz/` exercises determinism,
 scalar and aggregate semantics, sequential behavior, hierarchy, foreign
-instantiations, stock-XLS differential behavior, Yosys/ABC mapping, and bounded
+instantiations, Yosys/ABC mapping, and bounded
 formal equivalence. See [`fuzz/FUZZ.md`](fuzz/FUZZ.md) for required external
 tool configuration and individual target descriptions.

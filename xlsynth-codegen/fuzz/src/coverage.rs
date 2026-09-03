@@ -16,13 +16,12 @@ use xlsynth_pir::ir_random::gather_block_stats;
 use xlsynth_pir::ir_utils::operands;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize_in_range;
 
-use crate::{Profile, top_block};
+use crate::{block_options, operations, top_block};
 
 /// Records whether a generated case reached and passed a semantic oracle.
 pub enum Outcome<'a> {
     GeneratedOnly,
     Checked,
-    Skipped(&'a str),
     Inconclusive(&'a ToolError),
 }
 
@@ -30,7 +29,6 @@ pub enum Outcome<'a> {
 pub struct CoverageReport {
     pub generated_cases: u64,
     pub checked_cases: u64,
-    pub skipped_cases: BTreeMap<String, u64>,
     pub inconclusive_cases: BTreeMap<String, u64>,
     pub generated_operations: BTreeMap<String, u64>,
     pub checked_graph_operations: BTreeMap<String, u64>,
@@ -97,7 +95,6 @@ impl CoverageReport {
         let checked = matches!(outcome, Outcome::Checked);
         match outcome {
             Outcome::Checked => self.checked_cases += 1,
-            Outcome::Skipped(reason) => *self.skipped_cases.entry(reason.into()).or_default() += 1,
             Outcome::Inconclusive(error) => {
                 *self
                     .inconclusive_cases
@@ -247,7 +244,8 @@ impl CoverageReport {
                             .entry(category)
                             .or_default() += 1;
                     }
-                    // Power-of-two buckets bound the histogram size in long campaigns.
+                    // Power-of-two buckets bound the histogram size in long
+                    // campaigns.
                     let shape = format!(
                         "{}:<= {} x <= {} -> <= {}",
                         node.payload.get_operator(),
@@ -325,9 +323,9 @@ impl CoverageReport {
 
     /// Serializes stable maps and explicit missing-op lists, including dead
     /// ops.
-    pub fn json(&self, profile: Profile) -> String {
-        let operations = profile.operations(true);
-        let limits = profile.block_options(true, true).function_options;
+    pub fn json(&self) -> String {
+        let operations = operations(true);
+        let limits = block_options(true, true).function_options;
         let missing_generated: Vec<_> = operations
             .iter()
             .map(|op| op.name())
@@ -344,7 +342,7 @@ impl CoverageReport {
             .filter(|op| !self.checked_live_operations.contains_key(*op))
             .collect();
         serde_json::to_string(&serde_json::json!({
-            "profile": profile.name(), "coverage": self,
+            "coverage": self,
             "generator_version": crate::input::GENERATOR_VERSION,
             "width_policy": "balanced data widths; budgeted operand adaptation",
             "unique_count_scope": "exact within this reporter; not additive across workers",
@@ -357,8 +355,8 @@ impl CoverageReport {
             "observed_behavior_scope": "live-PIR-nodes-on-vectors-passing-all-required-oracles",
             "feature_histogram_scope": "all-generated-cases",
             "excluded_operations": ["invoke", "counted_for", "umulp", "smulp", "after_all", "assert", "cover", "trace"],
-            "zero_width_generation": profile == Profile::NativeSemantics,
-            "public_extensions": profile == Profile::NativeSemantics,
+            "zero_width_generation": true,
+            "public_extensions": true,
             "missing_generated_operations": missing_generated,
             "missing_checked_operations": missing_checked,
             "missing_checked_live_operations": missing_live,
@@ -369,7 +367,7 @@ impl CoverageReport {
 #[cfg(test)]
 mod tests {
     use super::{CoverageReport, Outcome};
-    use crate::{Profile, parse_reference};
+    use crate::parse_reference;
 
     #[test]
     fn data_widths_distinguish_operand_roles_even_when_nodes_are_shared() {
@@ -394,7 +392,7 @@ top block roles(x: bits[8], out: bits[8]) {
 
     #[test]
     fn unique_graphs_are_separate_from_stimulus_and_presentation_variations() {
-        let mut case = crate::input::FuzzCase::random(2, Profile::NativeSemantics);
+        let mut case = crate::input::FuzzCase::random(2);
         let mut report = CoverageReport::default();
         report.record_case(&case, Outcome::GeneratedOnly, None);
         report.record_case(&case, Outcome::GeneratedOnly, None);
@@ -411,18 +409,16 @@ top block roles(x: bits[8], out: bits[8]) {
 
     #[test]
     fn reports_independent_generation_width_limits() {
-        for profile in [Profile::NativeSemantics, Profile::StockXls] {
-            let report: serde_json::Value =
-                serde_json::from_str(&CoverageReport::default().json(profile)).unwrap();
-            assert_eq!(
-                report["configured_generation_width_limits"],
-                serde_json::json!({
-                    "general": 256,
-                    "multiply_operand": 64,
-                    "div_mod_operand_and_result": 16,
-                })
-            );
-        }
+        let report: serde_json::Value =
+            serde_json::from_str(&CoverageReport::default().json()).unwrap();
+        assert_eq!(
+            report["configured_generation_width_limits"],
+            serde_json::json!({
+                "general": 256,
+                "multiply_operand": 64,
+                "div_mod_operand_and_result": 16,
+            })
+        );
     }
 
     #[test]
@@ -486,7 +482,7 @@ top block behaviors(values: bits[8][3], index: bits[128], data: bits[65], read: 
     }
 
     #[test]
-    fn census_distinguishes_generated_checked_live_and_skipped_nodes() {
+    fn census_distinguishes_generated_checked_and_live_nodes() {
         let package = parse_reference(
             r#"package census
 top block census(x: bits[8], y: bits[8], out: bits[8]) {
@@ -500,18 +496,16 @@ top block census(x: bits[8], y: bits[8], out: bits[8]) {
         );
         let mut report = CoverageReport::default();
         report.record(&package, Outcome::GeneratedOnly);
-        report.record(&package, Outcome::Skipped("documented-capability"));
         assert!(report.checked_graph_operations.is_empty());
         report.record(&package, Outcome::Checked);
-        assert_eq!(report.generated_cases, 3);
+        assert_eq!(report.generated_cases, 2);
         assert_eq!(report.checked_cases, 1);
-        assert_eq!(report.skipped_cases["documented-capability"], 1);
-        assert_eq!(report.generated_operations["add"], 3);
+        assert_eq!(report.generated_operations["add"], 2);
         assert_eq!(report.checked_graph_operations["xor"], 1);
         assert_eq!(report.checked_live_operations["add"], 1);
         assert!(!report.checked_live_operations.contains_key("xor"));
-        let json = report.json(Profile::NativeSemantics);
-        assert_eq!(json, report.json(Profile::NativeSemantics));
+        let json = report.json();
+        assert_eq!(json, report.json());
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(
             parsed["missing_checked_live_operations"]
@@ -529,7 +523,7 @@ top block census(x: bits[8], y: bits[8], out: bits[8]) {
 }
 
 thread_local! {
-    static REPORTS: RefCell<BTreeMap<(&'static str, &'static str), (CoverageReport, Instant)>> = RefCell::new(BTreeMap::new());
+    static REPORTS: RefCell<BTreeMap<&'static str, (CoverageReport, Instant)>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 /// Returns snapshots on inconclusive checks, the first case, every 4096 cases,
@@ -543,7 +537,7 @@ pub fn record_progress(
     REPORTS.with(|reports| {
         let mut reports = reports.borrow_mut();
         let (report, last) = reports
-            .entry((case.profile.name(), case.engine()))
+            .entry(case.engine())
             .or_insert_with(|| (CoverageReport::default(), Instant::now()));
         let inconclusive = matches!(outcome, Outcome::Inconclusive(_));
         report.record_case(case, outcome, trace);
@@ -553,7 +547,7 @@ pub fn record_progress(
             || last.elapsed() >= Duration::from_secs(30)
         {
             *last = Instant::now();
-            Some(report.json(case.profile))
+            Some(report.json())
         } else {
             None
         }

@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! External Yosys helpers for Liberty technology mapping.
+//! Validated Yosys execution and Liberty-backed technology mapping.
+//! Syntax checks and proofs use `YosysToolchain` without any Liberty
+//! dependency; mapping uses `YosysEnvironment`, optionally with a parsed
+//! `YosysMappingContext`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+use crate::liberty::parser::{LibertyPayloadOptions, parse_liberty_files_with_payload_options};
+use crate::liberty_model::{Library, SequentialKind};
+use crate::netlist::gv_eval::{
+    GvEvalOptions, load_labeled_netlist_aig_with_liberty,
+    load_labeled_sequential_netlist_aig_with_liberty,
+};
 
 use xlsynth::external_tool::{ToolError, resolve_executable, run_checked, run_checked_detailed};
 
@@ -16,9 +26,74 @@ pub const LIBERTY_FILES_ENV: &str = "XLSYNTH_LIBERTY_FILES";
 
 const LIBERTY_FILES_HELP: &str = "Set XLSYNTH_LIBERTY_FILES=/path/to/combo.lib,/path/to/seq.lib to comma-separated installed Liberty files from one compatible library/corner; include flip-flop cells for sequential mapping.";
 
+/// A validated Yosys executable, independent of Liberty or mapping
+/// configuration.
+#[derive(Clone, Debug)]
+pub struct YosysToolchain {
+    path: PathBuf,
+}
+
+impl YosysToolchain {
+    /// Resolves and probes the executable before changing working directories.
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = resolve_executable(path.as_ref()).map_err(|error| format!("Yosys {error}"))?;
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        run_checked(
+            Command::new(&path).arg("-V"),
+            directory.path(),
+            "yosys-version",
+            Duration::from_secs(10),
+        )?;
+        Ok(Self { path })
+    }
+
+    /// Uses XLSYNTH_YOSYS_PATH when set, otherwise resolves yosys on PATH.
+    pub fn from_env() -> Result<Self, String> {
+        Self::new(std::env::var_os(YOSYS_PATH_ENV).unwrap_or_else(|| "yosys".into()))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Runs a caller-supplied script with captured diagnostics and
+    /// process-group cleanup. Script paths are relative to directory; no
+    /// Liberty is required.
+    pub fn run_script(
+        &self,
+        directory: &Path,
+        program: &str,
+        timeout: Duration,
+    ) -> Result<String, ToolError> {
+        run_checked_detailed(
+            Command::new(&self.path)
+                .current_dir(directory)
+                .args(["-Q", "-p", program]),
+            directory,
+            "yosys",
+            timeout,
+        )
+        .map_err(|error| error.with_context(format_yosys_invocation_context(&self.path, program)))
+    }
+}
+
+/// Frontend used to parse the input RTL, independently of mapping mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YosysInputLanguage {
+    Verilog,
+    SystemVerilog,
+}
+
+/// Whether synthesis must also map state elements using dfflibmap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YosysMappingKind {
+    Combinational,
+    Sequential,
+}
+
 /// Validated external Yosys executable and Liberty-library configuration.
 pub struct YosysEnvironment {
-    yosys_path: PathBuf,
+    toolchain: YosysToolchain,
     liberty_files: YosysLibertyFileSet,
 }
 
@@ -28,18 +103,8 @@ impl YosysEnvironment {
         yosys_path: P,
         liberty_files: YosysLibertyFileSet,
     ) -> Result<Self, String> {
-        let path = yosys_path.as_ref();
-        // Resolve before synthesis switches to a temporary working directory.
-        let yosys_path = resolve_executable(path).map_err(|error| format!("Yosys {error}"))?;
-        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
-        run_checked(
-            Command::new(&yosys_path).arg("-V"),
-            directory.path(),
-            "yosys-version",
-            Duration::from_secs(10),
-        )?;
         Ok(Self {
-            yosys_path,
+            toolchain: YosysToolchain::new(yosys_path)?,
             liberty_files,
         })
     }
@@ -51,7 +116,7 @@ impl YosysEnvironment {
 
     /// Returns the validated Yosys executable path.
     pub fn yosys_path(&self) -> &Path {
-        &self.yosys_path
+        self.toolchain.path()
     }
 
     /// Returns the validated Liberty files used by Yosys and ABC.
@@ -76,11 +141,11 @@ impl YosysEnvironment {
         verilog: &str,
         top_module: &str,
     ) -> Result<String, ToolError> {
-        synthesize_verilog_to_gv_with_yosys(
-            &self.yosys_path,
+        self.synthesize_to_gv(
             verilog,
             top_module,
-            &self.liberty_files,
+            YosysInputLanguage::Verilog,
+            YosysMappingKind::Combinational,
         )
     }
 
@@ -104,12 +169,108 @@ impl YosysEnvironment {
         verilog: &str,
         top_module: &str,
     ) -> Result<String, ToolError> {
-        synthesize_sequential_verilog_to_gv_with_yosys(
-            &self.yosys_path,
+        self.synthesize_to_gv(
             verilog,
             top_module,
-            &self.liberty_files,
+            YosysInputLanguage::SystemVerilog,
+            YosysMappingKind::Sequential,
         )
+    }
+
+    /// Maps RTL with an explicit frontend and mapping mode, preserving typed
+    /// tool failures. Uses the same synthesis passes for both input languages.
+    pub fn synthesize_to_gv(
+        &self,
+        source: &str,
+        top_module: &str,
+        language: YosysInputLanguage,
+        kind: YosysMappingKind,
+    ) -> Result<String, ToolError> {
+        let program =
+            render_synthesis_program(top_module, self.liberty_files.paths(), language, kind);
+        run_yosys_synthesis_program(&self.toolchain, source, top_module, &program, kind)
+    }
+}
+
+/// Parsed Liberty semantics and matching mapping configuration. This is
+/// reusable library state; callers decide whether to cache it or run a startup
+/// probe.
+pub struct YosysMappingContext {
+    pub liberty: Library,
+    pub yosys: YosysEnvironment,
+}
+
+impl YosysMappingContext {
+    /// Loads Liberty cell semantics without timing/power payloads.
+    pub fn new(yosys: YosysEnvironment) -> Result<Self, String> {
+        let liberty = parse_liberty_files_with_payload_options(
+            yosys.liberty_files().paths(),
+            LibertyPayloadOptions {
+                include_timing: false,
+                include_power: false,
+            },
+        )
+        .map_err(|error| {
+            format!("parse Liberty inputs configured by XLSYNTH_LIBERTY_FILES: {error}")
+        })?;
+        if liberty.cells.is_empty() {
+            return Err(
+            "XLSYNTH_LIBERTY_FILES contains no cells; supply installed standard-cell Liberty files"
+                .into(),
+        );
+        }
+        Ok(Self { liberty, yosys })
+    }
+
+    /// Requires an explicitly configured mapper and installed Liberty files.
+    pub fn from_env() -> Result<Self, String> {
+        Self::new(YosysEnvironment::from_env()?)
+    }
+
+    /// Exercises mapping and netlist import with a small infrastructure probe.
+    /// This does not impose any fuzzing error-handling or caching policy.
+    pub fn preflight(&self, kind: YosysMappingKind) -> Result<(), ToolError> {
+        let sequential = kind == YosysMappingKind::Sequential;
+        if sequential
+            && !self.liberty.cells.iter().any(|cell| {
+                cell.sequential
+                    .iter()
+                    .any(|state| state.kind == SequentialKind::Ff as i32)
+            })
+        {
+            return Err("XLSYNTH_LIBERTY_FILES has no flip-flop cells; include a sequential Liberty file for this target".into());
+        }
+        let source = if sequential {
+            "module preflight(input clk, input a, input b, output reg q); always @(posedge clk) q <= a ^ b; endmodule\n"
+        } else {
+            "module preflight(input a, input b, output y); assign y = a ^ b; endmodule\n"
+        };
+        let netlist = if sequential {
+            self.yosys
+                .synthesize_sequential_verilog_to_gv_detailed(source, "preflight")
+        } else {
+            self.yosys
+                .synthesize_verilog_to_gv_detailed(source, "preflight")
+        }
+        .map_err(|error| error.with_context("Yosys/ABC startup mapping check failed"))?;
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = directory.path().join("mapped.gv");
+        std::fs::write(&path, netlist).map_err(|error| error.to_string())?;
+        let options = GvEvalOptions {
+            module_name: Some("preflight".into()),
+            clock_port_name: sequential.then(|| "clk".into()),
+        };
+        if sequential {
+            load_labeled_sequential_netlist_aig_with_liberty(&path, &self.liberty, &options)
+                .map(|_| ())
+        } else {
+            load_labeled_netlist_aig_with_liberty(&path, &self.liberty, &options).map(|_| ())
+        }
+        .map_err(|error| {
+            ToolError::failure(format!(
+                "startup mapped-netlist import failed for XLSYNTH_LIBERTY_FILES: {error}"
+            ))
+        })
     }
 }
 
@@ -193,48 +354,13 @@ fn yosys_path_from_env() -> Result<PathBuf, String> {
         })
 }
 
-/// Maps one combinational Verilog module through Yosys and its default ABC
-/// executable, returning the emitted Liberty-backed gate-level Verilog.
-fn synthesize_verilog_to_gv_with_yosys(
-    yosys_path: &Path,
-    verilog: &str,
-    top_module: &str,
-    liberty_files: &YosysLibertyFileSet,
-) -> Result<String, ToolError> {
-    let yosys_program = render_combo_synthesis_program(top_module, liberty_files.paths());
-    run_yosys_synthesis_program(
-        yosys_path,
-        verilog,
-        top_module,
-        &yosys_program,
-        "combinational",
-    )
-}
-
-/// Maps one sequential Verilog module through Yosys, dfflibmap, and its
-/// default ABC executable.
-fn synthesize_sequential_verilog_to_gv_with_yosys(
-    yosys_path: &Path,
-    verilog: &str,
-    top_module: &str,
-    liberty_files: &YosysLibertyFileSet,
-) -> Result<String, ToolError> {
-    let yosys_program = render_sequential_synthesis_program(top_module, liberty_files.paths());
-    run_yosys_synthesis_program(
-        yosys_path,
-        verilog,
-        top_module,
-        &yosys_program,
-        "sequential",
-    )
-}
-
+/// Stages source and retrieves the mapped netlist using the shared runner.
 fn run_yosys_synthesis_program(
-    yosys_path: &Path,
+    toolchain: &YosysToolchain,
     verilog: &str,
     top_module: &str,
     yosys_program: &str,
-    mapping_kind: &str,
+    mapping_kind: YosysMappingKind,
 ) -> Result<String, ToolError> {
     if !is_simple_yosys_identifier(top_module) {
         return Err(format!("Yosys top module must be a simple identifier: '{top_module}'").into());
@@ -246,21 +372,13 @@ fn run_yosys_synthesis_program(
     let output_path = temp_dir.path().join("mapped.gv");
     std::fs::write(&input_path, verilog)
         .map_err(|e| format!("write temporary Yosys input Verilog: {e}"))?;
-    let invocation_context = format_yosys_invocation_context(yosys_path, yosys_program);
+    let invocation_context = format_yosys_invocation_context(toolchain.path(), yosys_program);
 
-    run_checked_detailed(
-        Command::new(yosys_path)
-            .current_dir(temp_dir.path())
-            .args(["-Q", "-p", yosys_program]),
-        temp_dir.path(),
-        "yosys",
-        Duration::from_secs(120),
-    )
-    .map_err(|error| {
-        error.with_context(format!(
-            "Yosys {mapping_kind} technology mapping\n{invocation_context}"
-        ))
-    })?;
+    toolchain
+        .run_script(temp_dir.path(), yosys_program, Duration::from_secs(120))
+        .map_err(|error| {
+            error.with_context(format!("Yosys {mapping_kind:?} technology mapping"))
+        })?;
 
     std::fs::read_to_string(&output_path).map_err(|e| {
         ToolError::failure(format!(
@@ -278,33 +396,13 @@ fn format_yosys_invocation_context(yosys_path: &Path, yosys_program: &str) -> St
     )
 }
 
-fn render_combo_synthesis_program(top_module: &str, liberty_paths: &[PathBuf]) -> String {
-    let read_liberty_commands = liberty_paths
-        .iter()
-        .map(|path| format!("read_liberty -lib {}", quote_yosys_path(path)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let abc_liberty_arguments = liberty_paths
-        .iter()
-        .map(|path| format!("-liberty {}", quote_yosys_path(path)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "{read_liberty_commands}\n\
-         read_verilog dut.v\n\
-         hierarchy -check -top {top_module}\n\
-         proc\n\
-         flatten\n\
-         opt\n\
-         techmap\n\
-         opt\n\
-         abc {abc_liberty_arguments}\n\
-         clean -purge\n\
-         write_verilog -noattr mapped.gv\n"
-    )
-}
-
-fn render_sequential_synthesis_program(top_module: &str, liberty_paths: &[PathBuf]) -> String {
+/// Renders the common mapping script with only frontend and FF mapping varying.
+fn render_synthesis_program(
+    top_module: &str,
+    liberty_paths: &[PathBuf],
+    language: YosysInputLanguage,
+    kind: YosysMappingKind,
+) -> String {
     let read_liberty_commands = liberty_paths
         .iter()
         .map(|path| format!("read_liberty -lib {}", quote_yosys_path(path)))
@@ -315,18 +413,24 @@ fn render_sequential_synthesis_program(top_module: &str, liberty_paths: &[PathBu
         .map(|path| format!("-liberty {}", quote_yosys_path(path)))
         .collect::<Vec<_>>()
         .join(" ");
+    let frontend = match language {
+        YosysInputLanguage::Verilog => "read_verilog dut.v",
+        YosysInputLanguage::SystemVerilog => "read_verilog -sv dut.v",
+    };
+    let map_registers = match kind {
+        YosysMappingKind::Combinational => String::new(),
+        YosysMappingKind::Sequential => format!("dfflibmap {liberty_arguments}\nopt\n"),
+    };
     format!(
         "{read_liberty_commands}\n\
-         read_verilog -sv dut.v\n\
+         {frontend}\n\
          hierarchy -check -top {top_module}\n\
          proc\n\
          flatten\n\
          opt\n\
          techmap\n\
          opt\n\
-         dfflibmap {liberty_arguments}\n\
-         opt\n\
-         abc {liberty_arguments}\n\
+         {map_registers}abc {liberty_arguments}\n\
          clean -purge\n\
          write_verilog -noattr mapped.gv\n"
     )
@@ -355,12 +459,86 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use xlsynth::external_tool::ToolFailureKind;
+
+    /// Keeps relative-path fixtures out of concurrent source/license scans.
+    fn relative_test_directory(cwd: &Path) -> tempfile::TempDir {
+        let target = cwd.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        tempfile::tempdir_in(target).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_runner_needs_no_liberty_and_preserves_timeout_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("yosys");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$1" = "-V" ]; then exit 0; fi
+echo diagnostic >&2
+sleep 10
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let toolchain = YosysToolchain::new(&executable).unwrap();
+        let error = toolchain
+            .run_script(directory.path(), "help", Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(error.kind, ToolFailureKind::Timeout);
+        assert!(error.to_string().contains("diagnostic"), "{error}");
+        assert!(
+            error.to_string().contains("Yosys program:\nhelp"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mapping_context_rejects_empty_cell_libraries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("empty.lib");
+        std::fs::write(&path, "library(empty) {}").unwrap();
+        let environment =
+            YosysEnvironment::new("/usr/bin/true", YosysLibertyFileSet::new(&[path]).unwrap())
+                .unwrap();
+        let error = YosysMappingContext::new(environment).err().unwrap();
+        assert_eq!(
+            error,
+            "XLSYNTH_LIBERTY_FILES contains no cells; supply installed standard-cell Liberty files"
+        );
+    }
+
+    #[test]
+    fn input_language_changes_only_the_frontend() {
+        let libraries = [PathBuf::from("cells.lib")];
+        for kind in [
+            YosysMappingKind::Combinational,
+            YosysMappingKind::Sequential,
+        ] {
+            let verilog =
+                render_synthesis_program("top", &libraries, YosysInputLanguage::Verilog, kind);
+            let system_verilog = render_synthesis_program(
+                "top",
+                &libraries,
+                YosysInputLanguage::SystemVerilog,
+                kind,
+            );
+            assert_eq!(
+                system_verilog,
+                verilog.replace("read_verilog dut.v", "read_verilog -sv dut.v")
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
     fn relative_yosys_path_survives_synthesis_working_directory_change() {
         let cwd = std::env::current_dir().unwrap();
-        let directory = tempfile::tempdir_in(&cwd).unwrap();
+        let directory = relative_test_directory(&cwd);
         let executable = directory.path().join("yosys");
         std::fs::write(
             &executable,
@@ -405,7 +583,7 @@ mod tests {
     #[test]
     fn liberty_file_set_canonicalizes_relative_paths() {
         let current_dir = std::env::current_dir().unwrap();
-        let source_dir = tempfile::tempdir_in(&current_dir).unwrap();
+        let source_dir = relative_test_directory(&current_dir);
         let absolute_path = source_dir.path().join("cells.lib");
         std::fs::write(&absolute_path, "library (cells) {}\n").unwrap();
         let relative_path = absolute_path.strip_prefix(&current_dir).unwrap();
@@ -418,7 +596,12 @@ mod tests {
     #[test]
     fn synthesis_program_passes_each_liberty_file_to_yosys_and_abc() {
         let liberty_paths = vec![PathBuf::from("first.lib"), PathBuf::from("second.lib")];
-        let program = render_combo_synthesis_program("top", &liberty_paths);
+        let program = render_synthesis_program(
+            "top",
+            &liberty_paths,
+            YosysInputLanguage::Verilog,
+            YosysMappingKind::Combinational,
+        );
         assert_eq!(
             program,
             "read_liberty -lib \"first.lib\"\n\
@@ -439,7 +622,12 @@ mod tests {
     #[test]
     fn sequential_synthesis_program_maps_ffs_before_abc() {
         let liberty_paths = vec![PathBuf::from("first.lib"), PathBuf::from("second.lib")];
-        let program = render_sequential_synthesis_program("top", &liberty_paths);
+        let program = render_synthesis_program(
+            "top",
+            &liberty_paths,
+            YosysInputLanguage::SystemVerilog,
+            YosysMappingKind::Sequential,
+        );
         assert_eq!(
             program,
             "read_liberty -lib \"first.lib\"\n\

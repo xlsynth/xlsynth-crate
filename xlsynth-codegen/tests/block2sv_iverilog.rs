@@ -7,25 +7,22 @@ mod fixtures;
 use fixtures::*;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
-use xlsynth::external_tool::run_checked;
 use xlsynth_pir::ir::PackageMember;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 
 /// Compiles every successful fixture with a second SystemVerilog frontend.
 #[test]
-fn block2sv_generated_fixtures_compile_with_icarus() {
+fn block2sv_generated_fixtures_compile_with_iverilog() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("Icarus tests require iverilog and vvp");
-    let iverilog = tools.iverilog_path();
+        .expect("iverilog tests require iverilog and vvp");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
     let mut paths = Vec::new();
     collect_golden_fixtures(&directory, &mut paths).unwrap();
     paths.sort();
 
-    let temporary_directory = tempfile::tempdir().expect("create Icarus input directory");
+    let temporary_directory = tempfile::tempdir().expect("create iverilog input directory");
     let verilog_path = temporary_directory.path().join("generated.sv");
     let support_types =
         "package types; typedef logic [7:0] input_t; typedef logic [7:0] output_t; endpackage\n";
@@ -45,12 +42,10 @@ fn block2sv_generated_fixtures_compile_with_icarus() {
         };
         fs::write(&verilog_path, format!("{support_types}{output}"))
             .expect("write generated SystemVerilog");
-        if let Err(error) = run_checked(
-            Command::new(&iverilog)
-                .args(["-g2012", "-DSYNTHESIS", "-i", "-t", "null"])
-                .arg(&verilog_path),
+        if let Err(error) = tools.check_syntax(
             temporary_directory.path(),
-            "iverilog-fixture",
+            &[&verilog_path],
+            &["SYNTHESIS"],
             Duration::from_secs(60),
         ) {
             failures.push(format!("{}: {error}", path.display()));
@@ -68,9 +63,7 @@ fn block2sv_generated_fixtures_compile_with_icarus() {
 #[test]
 fn packed_array_ports_connect_to_flat_vectors() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("Icarus tests require iverilog and vvp");
-    let iverilog = tools.iverilog_path();
-    let vvp = tools.vvp_path();
+        .expect("iverilog tests require iverilog and vvp");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
     let cases = [
         (
@@ -137,30 +130,28 @@ endmodule
     ];
     let temporary = tempfile::tempdir().unwrap();
     let source_path = temporary.path().join("packed.sv");
-    let binary_path = temporary.path().join("packed.vvp");
     for (relative, testbench) in cases {
         let path = directory.join(relative);
         let fixture = parse_golden_fixture(&path, &fs::read_to_string(&path).unwrap()).unwrap();
         let generated = execute_golden_fixture(&fixture).unwrap();
         let support = "package types; typedef logic [7:0] input_t; typedef logic [7:0] output_t; endpackage\n";
         fs::write(&source_path, format!("{support}{generated}{testbench}")).unwrap();
-        run_checked(
-            Command::new(&iverilog)
-                .args(["-g2012", "-s", "tb", "-o"])
-                .arg(&binary_path)
-                .arg(&source_path),
-            source_path.parent().unwrap(),
-            "iverilog",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-        run_checked(
-            Command::new(&vvp).arg(&binary_path),
-            source_path.parent().unwrap(),
-            "vvp",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        let binary_path = tools
+            .compile(
+                source_path.parent().unwrap(),
+                &[&source_path],
+                "tb",
+                &[],
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        tools
+            .run(
+                source_path.parent().unwrap(),
+                &binary_path,
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
     }
 }
 
@@ -169,13 +160,10 @@ endmodule
 #[test]
 fn block2sv_asynchronous_resets_activate_between_clock_edges() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("Icarus tests require iverilog and vvp");
-    let iverilog = tools.iverilog_path();
-    let vvp = tools.vvp_path();
+        .expect("iverilog tests require iverilog and vvp");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
     let temporary_directory = tempfile::tempdir().expect("create asynchronous reset testbench");
     let source_path = temporary_directory.path().join("asynchronous_reset.sv");
-    let binary_path = temporary_directory.path().join("asynchronous_reset.vvp");
     let cases = [
         (
             "registers/asynchronous_active_high_reset.golden.ir",
@@ -240,23 +228,22 @@ endmodule
         );
         fs::write(&source_path, format!("{generated}\n{testbench}"))
             .expect("write asynchronous-reset testbench");
-        run_checked(
-            Command::new(&iverilog)
-                .args(["-g2012", "-DSYNTHESIS", "-s", "asynchronous_reset_tb", "-o"])
-                .arg(&binary_path)
-                .arg(&source_path),
-            source_path.parent().unwrap(),
-            "iverilog",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-        run_checked(
-            Command::new(&vvp).arg(&binary_path),
-            source_path.parent().unwrap(),
-            "vvp",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        let binary_path = tools
+            .compile(
+                source_path.parent().unwrap(),
+                &[&source_path],
+                "asynchronous_reset_tb",
+                &["SYNTHESIS"],
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        tools
+            .run(
+                source_path.parent().unwrap(),
+                &binary_path,
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
     }
 }
 
@@ -265,9 +252,7 @@ endmodule
 #[test]
 fn block2sv_extension_operators_match_pir_evaluation() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("Icarus tests require iverilog and vvp");
-    let iverilog = tools.iverilog_path();
-    let vvp = tools.vvp_path();
+        .expect("iverilog tests require iverilog and vvp");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv/arithmetic");
     let examples = [
         "extended_carry_out.golden.ir",
@@ -278,7 +263,6 @@ fn block2sv_extension_operators_match_pir_evaluation() {
     ];
     let temporary_directory = tempfile::tempdir().expect("create extension simulation directory");
     let source_path = temporary_directory.path().join("extension_equivalence.sv");
-    let binary_path = temporary_directory.path().join("extension_equivalence.vvp");
 
     for relative_path in examples {
         let path = directory.join(relative_path);
@@ -361,23 +345,22 @@ fn block2sv_extension_operators_match_pir_evaluation() {
         fs::write(&source_path, format!("{generated}\n{testbench}"))
             .expect("write extension equivalence testbench");
 
-        run_checked(
-            Command::new(&iverilog)
-                .args(["-g2012", "-DSYNTHESIS", "-s", "extension_tb", "-o"])
-                .arg(&binary_path)
-                .arg(&source_path),
-            source_path.parent().unwrap(),
-            "iverilog",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-        run_checked(
-            Command::new(&vvp).arg(&binary_path),
-            source_path.parent().unwrap(),
-            "vvp",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        let binary_path = tools
+            .compile(
+                source_path.parent().unwrap(),
+                &[&source_path],
+                "extension_tb",
+                &["SYNTHESIS"],
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        tools
+            .run(
+                source_path.parent().unwrap(),
+                &binary_path,
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
     }
 }
 
@@ -385,14 +368,11 @@ fn block2sv_extension_operators_match_pir_evaluation() {
 #[test]
 fn block2sv_hierarchy_preserves_child_latency_and_reset() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("Icarus tests require iverilog and vvp");
-    let iverilog = tools.iverilog_path();
-    let vvp = tools.vvp_path();
+        .expect("iverilog tests require iverilog and vvp");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
     let temporary_directory =
         tempfile::tempdir().expect("create hierarchical simulation directory");
     let source_path = temporary_directory.path().join("hierarchy_equivalence.sv");
-    let binary_path = temporary_directory.path().join("hierarchy_equivalence.vvp");
     let cases = [
         (
             "hierarchy/child_reset_and_clock.golden.ir",
@@ -561,23 +541,22 @@ endmodule
         let generated = execute_golden_fixture(&fixture).expect("generate hierarchical RTL");
         fs::write(&source_path, format!("{generated}\n{testbench}"))
             .expect("write hierarchical testbench");
-        run_checked(
-            Command::new(&iverilog)
-                .args(["-g2012", "-DSYNTHESIS", "-s", "hierarchy_tb", "-o"])
-                .arg(&binary_path)
-                .arg(&source_path),
-            source_path.parent().unwrap(),
-            "iverilog",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-        run_checked(
-            Command::new(&vvp).arg(&binary_path),
-            source_path.parent().unwrap(),
-            "vvp",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        let binary_path = tools
+            .compile(
+                source_path.parent().unwrap(),
+                &[&source_path],
+                "hierarchy_tb",
+                &["SYNTHESIS"],
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        tools
+            .run(
+                source_path.parent().unwrap(),
+                &binary_path,
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
     }
 }
 
@@ -585,9 +564,7 @@ endmodule
 #[test]
 fn block2sv_custom_register_template_preserves_reset_and_enable() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("Icarus tests require iverilog and vvp");
-    let iverilog = tools.iverilog_path();
-    let vvp = tools.vvp_path();
+        .expect("iverilog tests require iverilog and vvp");
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/goldens/block2sv/registers/custom_reset_and_enable_template.golden.ir");
     let text = fs::read_to_string(&path).expect("read custom register fixture");
@@ -635,39 +612,34 @@ endmodule
 "#;
     let directory = tempfile::tempdir().expect("create custom register testbench");
     let source_path = directory.path().join("custom_register.sv");
-    let binary_path = directory.path().join("custom_register.vvp");
     fs::write(&source_path, format!("{generated}\n{testbench}"))
         .expect("write custom register testbench");
-    run_checked(
-        Command::new(&iverilog)
-            .args(["-g2012", "-DSYNTHESIS", "-s", "register_template_tb", "-o"])
-            .arg(&binary_path)
-            .arg(&source_path),
-        source_path.parent().unwrap(),
-        "iverilog",
-        Duration::from_secs(60),
-    )
-    .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-    run_checked(
-        Command::new(&vvp).arg(&binary_path),
-        source_path.parent().unwrap(),
-        "vvp",
-        Duration::from_secs(60),
-    )
-    .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+    let binary_path = tools
+        .compile(
+            source_path.parent().unwrap(),
+            &[&source_path],
+            "register_template_tb",
+            &["SYNTHESIS"],
+            Duration::from_secs(60),
+        )
+        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+    tools
+        .run(
+            source_path.parent().unwrap(),
+            &binary_path,
+            Duration::from_secs(60),
+        )
+        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
 }
 
 /// Compares actual simulated trace text with XLS format-directive semantics.
 #[test]
 fn block2sv_trace_formats_produce_expected_simulation_output() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("Icarus tests require iverilog and vvp");
-    let iverilog = tools.iverilog_path();
-    let vvp = tools.vvp_path();
+        .expect("iverilog tests require iverilog and vvp");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv/debug");
     let temporary_directory = tempfile::tempdir().expect("create trace-format testbench");
     let source_path = temporary_directory.path().join("trace_formats.sv");
-    let binary_path = temporary_directory.path().join("trace_formats.vvp");
     let cases = [
         (
             "trace_formats.golden.ir",
@@ -729,23 +701,22 @@ endmodule
         let generated = execute_golden_fixture(&fixture).expect("generate trace-format RTL");
         fs::write(&source_path, format!("{generated}\n{testbench}"))
             .expect("write trace-format testbench");
-        run_checked(
-            Command::new(&iverilog)
-                .args(["-g2012", "-s", "trace_tb", "-o"])
-                .arg(&binary_path)
-                .arg(&source_path),
-            source_path.parent().unwrap(),
-            "iverilog",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-        let simulation = run_checked(
-            Command::new(&vvp).arg(&binary_path),
-            source_path.parent().unwrap(),
-            "vvp",
-            Duration::from_secs(60),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        let binary_path = tools
+            .compile(
+                source_path.parent().unwrap(),
+                &[&source_path],
+                "trace_tb",
+                &[],
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        let simulation = tools
+            .run(
+                source_path.parent().unwrap(),
+                &binary_path,
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
         assert_eq!(
             simulation,
             format!("{expected}\n"),

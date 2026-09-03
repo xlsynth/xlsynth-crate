@@ -8,7 +8,7 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_codegen_fuzz::preflight::{Oracles, validate};
 use xlsynth_codegen_fuzz::yosys::{map_sequential, map_sequential_inputs, map_sequential_outputs};
 use xlsynth_codegen_fuzz::{
-    CYCLE_COUNT, Profile, deterministic_rng, generate, generate_cycle_inputs, top_block,
+    CYCLE_COUNT, block_options, deterministic_rng, generate, generate_cycle_inputs, top_block,
 };
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r_fuzz::external_yosys::required_external_yosys_context;
@@ -23,9 +23,10 @@ fuzz_target!(init: {
 }, |data: &[u8]| {
     let context = required_external_yosys_context()
         .expect("startup validated Yosys/Liberty setup");
-    let mut options = Profile::StockXls.block_options(false, true);
+    let mut options = block_options(false, true);
     options.allow_zero_width_ports_and_registers = false;
     options.function_options.allow_zero_width_bits = false;
+    options.function_options.allow_extension_ops = false;
     options.require_reset_on_all_registers = true;
     options.function_options.max_nodes = 24;
     options.function_options.max_bit_width = 8;

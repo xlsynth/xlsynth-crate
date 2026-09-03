@@ -7,7 +7,7 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth_codegen_fuzz::preflight::{Oracles, validate};
 use xlsynth_codegen_fuzz::yosys::map_combinational;
-use xlsynth_codegen_fuzz::{Profile, generate};
+use xlsynth_codegen_fuzz::{block_options, generate};
 use xlsynth_g8r::prove_gate_fn_equiv_sat::{
     EquivResult, GateFormalBackend, prove_gate_fn_equiv_with_backend_and_options,
 };
@@ -22,9 +22,10 @@ fuzz_target!(init: {
 }, |data: &[u8]| {
     let context = required_external_yosys_context()
         .expect("startup validated Yosys/Liberty setup");
-    let mut options = Profile::StockXls.block_options(false, false);
+    let mut options = block_options(false, false);
     options.allow_zero_width_ports_and_registers = false;
     options.function_options.allow_zero_width_bits = false;
+    options.function_options.allow_extension_ops = false;
     options.function_options.max_nodes = 14;
     options.function_options.max_bit_width = 5;
     let package = generate(data, &options);

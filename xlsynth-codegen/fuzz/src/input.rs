@@ -13,7 +13,7 @@ use xlsynth_pir::ir_random::{
 };
 
 use crate::semantics::Trace;
-use crate::{Profile, generate};
+use crate::{block_options, generate};
 
 pub const FORMAT_VERSION: u8 = 1;
 pub const GENERATOR_VERSION: u32 = 3;
@@ -22,7 +22,6 @@ const MAGIC: &[u8; 4] = b"XBCF";
 
 pub struct FuzzCase {
     pub package: Package,
-    pub profile: Profile,
     pub stimulus_seed: [u8; 32],
     pub options: BlockCodegenOptions,
     pub origin: CaseOrigin,
@@ -40,7 +39,6 @@ pub struct CheckResult {
 
 pub enum CheckOutcome {
     Checked,
-    Unsupported(&'static str),
     Inconclusive(ToolError),
 }
 
@@ -48,7 +46,6 @@ impl CheckResult {
     pub fn coverage_outcome(&self) -> crate::coverage::Outcome<'_> {
         match &self.outcome {
             CheckOutcome::Checked => crate::coverage::Outcome::Checked,
-            CheckOutcome::Unsupported(reason) => crate::coverage::Outcome::Skipped(reason),
             CheckOutcome::Inconclusive(error) => crate::coverage::Outcome::Inconclusive(error),
         }
     }
@@ -61,7 +58,7 @@ impl CheckResult {
 impl FuzzCase {
     /// Decodes v1 or legacy graph-only inputs. Short recognized headers are
     /// zero-padded, and unknown explicit versions are rejected.
-    pub fn decode(data: &[u8], profile: Profile) -> Result<Self, String> {
+    pub fn decode(data: &[u8]) -> Result<Self, String> {
         let (graph, seed, flags) = if data.starts_with(MAGIC) {
             if data.get(4).copied().unwrap_or_default() != FORMAT_VERSION {
                 return Err("unsupported block fuzz input format version".into());
@@ -79,13 +76,12 @@ impl FuzzCase {
         } else {
             (data, None, [0; 8])
         };
-        let (options, codegen_options) = options_for_flags(profile, flags);
+        let (options, codegen_options) = options_for_flags(flags);
         let package = generate(graph, &options);
         let stimulus_seed =
             seed.unwrap_or_else(|| *blake3::hash(package.to_string().as_bytes()).as_bytes());
         Ok(Self {
             package,
-            profile,
             stimulus_seed,
             options: codegen_options,
             origin: CaseOrigin::Guided(data.to_vec()),
@@ -94,13 +90,13 @@ impl FuzzCase {
 
     /// Generates a fresh graph from non-depleting entropy with an explicit
     /// size budget; the seed reproduces graph, presentation, and stimuli.
-    pub fn random(seed: u64, profile: Profile) -> Self {
+    pub fn random(seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut stimulus_seed = [0; 32];
         rng.fill_bytes(&mut stimulus_seed);
         let mut flags = [0; 8];
         rng.fill_bytes(&mut flags);
-        let (options, codegen_options) = options_for_flags(profile, flags);
+        let (options, codegen_options) = options_for_flags(flags);
         let body_nodes = rng.gen_range(4..=options.function_options.max_nodes);
         let package = generate_block_package(
             &mut RngEntropy::new(rng),
@@ -111,7 +107,6 @@ impl FuzzCase {
         .package;
         Self {
             package,
-            profile,
             stimulus_seed,
             options: codegen_options,
             origin: CaseOrigin::Random(seed),
@@ -129,7 +124,7 @@ impl FuzzCase {
         Trace::with_seed(&self.package, self.stimulus_seed)
     }
 
-    /// Computes one reference trace and checks all required external oracles.
+    /// Computes one reference trace and checks the generated RTL in iverilog.
     pub fn check(&self) -> CheckResult {
         self.check_with_artifacts(None)
     }
@@ -148,7 +143,7 @@ impl FuzzCase {
                 CaseOrigin::Random(seed) => serde_json::json!({"engine":"random", "seed":seed}),
             };
             std::fs::write(dir.join("case.ir"), self.package.to_string()).expect("save case IR");
-            let manifest = serde_json::json!({"origin":origin, "profile":self.profile.name(),
+            let manifest = serde_json::json!({"origin":origin,
                 "generator_version":GENERATOR_VERSION, "input_format_version":FORMAT_VERSION,
                 "stimulus_seed":self.stimulus_seed, "codegen_options":format!("{:?}", self.options),
                 "started_unix":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()});
@@ -179,14 +174,12 @@ impl FuzzCase {
             )
             .expect("save case trace");
         }
-        let outcome = match crate::tool_failure::recover(crate::check_profile_trace(
+        let outcome = match crate::tool_failure::recover(crate::check_trace(
             &self.package,
-            self.profile,
             &self.options,
             &trace,
         )) {
-            Ok(None) => CheckOutcome::Checked,
-            Ok(Some(reason)) => CheckOutcome::Unsupported(reason),
+            Ok(()) => CheckOutcome::Checked,
             Err(error) => {
                 if let Some(dir) = directory {
                     save_inconclusive(dir, &error).expect("save latest inconclusive check");
@@ -228,11 +221,8 @@ pub fn clear_case_artifacts(directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn options_for_flags(
-    profile: Profile,
-    flags: [u8; 8],
-) -> (RandomBlockOptions, BlockCodegenOptions) {
-    let mut options = profile.mixed_block_options();
+fn options_for_flags(flags: [u8; 8]) -> (RandomBlockOptions, BlockCodegenOptions) {
+    let mut options = block_options(true, true);
     options.topology = if flags[0] & 1 != 0 {
         BlockTopology::FeedForwardPipeline
     } else if flags[2] & 1 != 0 {
@@ -265,8 +255,8 @@ pub fn mark_versioned(data: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{FuzzCase, HEADER_BYTES, mark_versioned};
-    use crate::iverilog::{StateLayout, assert_rtl_trace};
-    use crate::{Profile, emit, top_block};
+    use crate::iverilog::assert_rtl_trace;
+    use crate::{emit, top_block};
     use rand::{RngCore, SeedableRng, rngs::StdRng};
     use xlsynth_codegen::{BlockCodegenOptions, Layout};
 
@@ -290,19 +280,17 @@ mod tests {
     }
 
     #[test]
-    fn random_cases_are_replayable_bounded_and_preserve_both_profiles() {
-        for profile in [Profile::NativeSemantics, Profile::StockXls] {
-            for seed in 0..256 {
-                let a = FuzzCase::random(seed, profile);
-                let b = FuzzCase::random(seed, profile);
-                assert_eq!(a.package.to_string(), b.package.to_string());
-                assert_eq!(a.stimulus_seed, b.stimulus_seed);
-                assert_eq!(format!("{:?}", a.options), format!("{:?}", b.options));
-                xlsynth_pir::ir_verify::verify_package(&a.package).unwrap();
-                let (block, _) = top_block(&a.package);
-                assert!(block.nodes.len() - 1 <= 48);
-                emit(&a.package, &a.options);
-            }
+    fn random_cases_are_replayable_and_bounded() {
+        for seed in 0..256 {
+            let a = FuzzCase::random(seed);
+            let b = FuzzCase::random(seed);
+            assert_eq!(a.package.to_string(), b.package.to_string());
+            assert_eq!(a.stimulus_seed, b.stimulus_seed);
+            assert_eq!(format!("{:?}", a.options), format!("{:?}", b.options));
+            xlsynth_pir::ir_verify::verify_package(&a.package).unwrap();
+            let (block, _) = top_block(&a.package);
+            assert!(block.nodes.len() - 1 <= 48);
+            emit(&a.package, &a.options);
         }
     }
 
@@ -310,7 +298,7 @@ mod tests {
     fn random_cases_match_icarus_and_save_complete_reproducers() {
         let directory = tempfile::tempdir().unwrap();
         for seed in 0..24 {
-            let case = FuzzCase::random(seed, Profile::NativeSemantics);
+            let case = FuzzCase::random(seed);
             let checked = case.check_with_artifacts(Some(directory.path()));
             assert!(matches!(checked.outcome, super::CheckOutcome::Checked));
             let manifest: serde_json::Value = serde_json::from_str(
@@ -338,9 +326,9 @@ mod tests {
         let mut data = vec![0; 2048];
         StdRng::seed_from_u64(4).fill_bytes(&mut data);
         mark_versioned(&mut data);
-        let a = FuzzCase::decode(&data, Profile::NativeSemantics).unwrap();
+        let a = FuzzCase::decode(&data).unwrap();
         data[8..40].fill(0xfe);
-        let b = FuzzCase::decode(&data, Profile::NativeSemantics).unwrap();
+        let b = FuzzCase::decode(&data).unwrap();
         assert_eq!(a.package.to_string(), b.package.to_string());
         assert_eq!(format!("{:?}", a.options), format!("{:?}", b.options));
         assert_ne!(a.trace().samples[15].inputs, b.trace().samples[15].inputs);
@@ -349,13 +337,13 @@ mod tests {
     #[test]
     fn short_headers_are_deterministic_and_unknown_versions_are_rejected() {
         let mut short = b"XBCF\x01".to_vec();
-        let a = FuzzCase::decode(&short, Profile::NativeSemantics).unwrap();
+        let a = FuzzCase::decode(&short).unwrap();
         short.resize(HEADER_BYTES, 0);
-        let b = FuzzCase::decode(&short, Profile::NativeSemantics).unwrap();
+        let b = FuzzCase::decode(&short).unwrap();
         assert_eq!(a.package.to_string(), b.package.to_string());
         assert_eq!(a.stimulus_seed, b.stimulus_seed);
         short[4] = 2;
-        assert!(FuzzCase::decode(&short, Profile::NativeSemantics).is_err());
+        assert!(FuzzCase::decode(&short).is_err());
     }
 
     #[test]
@@ -366,7 +354,7 @@ mod tests {
             StdRng::seed_from_u64(seed).fill_bytes(&mut bytes);
             mark_versioned(&mut bytes);
             bytes[40] |= 3;
-            let case = FuzzCase::decode(&bytes, Profile::NativeSemantics).unwrap();
+            let case = FuzzCase::decode(&bytes).unwrap();
             let (_, metadata) = top_block(&case.package);
             assert!(metadata.registers.len() >= 2);
             saw_aggregate |= metadata
@@ -377,12 +365,13 @@ mod tests {
             let trace = case.trace();
             for options in [&BlockCodegenOptions::default(), &case.options] {
                 let rtl = emit(&case.package, options);
-                assert_rtl_trace(&case.package, &rtl, None, StateLayout::Packed, &trace).unwrap();
+                assert_rtl_trace(&case.package, &rtl, None, &trace).unwrap();
             }
-            // Presentation mutations must not perturb graph or stimulus entropy.
+            // Presentation mutations must not perturb graph or stimulus
+            // entropy.
             bytes[41] ^= 0xff;
             bytes[40] ^= 12;
-            let other = FuzzCase::decode(&bytes, Profile::NativeSemantics).unwrap();
+            let other = FuzzCase::decode(&bytes).unwrap();
             assert_eq!(other.package.to_string(), case.package.to_string());
             assert_eq!(other.stimulus_seed, case.stimulus_seed);
         }

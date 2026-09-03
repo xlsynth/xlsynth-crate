@@ -8,14 +8,10 @@ use std::path::{Path, PathBuf};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use xlsynth_codegen_fuzz::coverage::{CoverageReport, Outcome};
-use xlsynth_codegen_fuzz::{
-    Profile,
-    input::{FuzzCase, mark_versioned},
-};
+use xlsynth_codegen_fuzz::input::{FuzzCase, mark_versioned};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let mut profile = Profile::NativeSemantics;
     let mut corpus = None;
     let mut write_corpus = None;
     let mut samples = 1000usize;
@@ -24,13 +20,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut check = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--profile" => {
-                profile = match args.next().as_deref() {
-                    Some("native") => Profile::NativeSemantics,
-                    Some("stock-xls") => Profile::StockXls,
-                    _ => return Err("--profile requires native or stock-xls".into()),
-                }
-            }
             "--corpus" => {
                 corpus = Some(PathBuf::from(
                     args.next().ok_or("--corpus needs a file or directory")?,
@@ -47,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--check" => check = true,
             "--help" => {
                 println!(
-                    "coverage [--profile native|stock-xls] [--corpus PATH | --samples N --seed N --bytes N] [--check] [--write-corpus DIR]"
+                    "coverage [--corpus PATH | --samples N --seed N --bytes N] [--check] [--write-corpus DIR]"
                 );
                 return Ok(());
             }
@@ -55,7 +44,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if check {
-        xlsynth_codegen_fuzz::preflight::validate(profile.into())?;
+        xlsynth_codegen_fuzz::preflight::validate(
+            xlsynth_codegen_fuzz::preflight::Oracles::Icarus,
+        )?;
     }
     let mut paths = Vec::new();
     if let Some(path) = &corpus {
@@ -71,13 +62,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut rng = StdRng::seed_from_u64(seed);
     let mut report = CoverageReport::default();
-    for index in 0..if corpus.is_some() {
+    let sample_count = if corpus.is_some() {
         paths.len()
     } else {
         samples
-    } {
-        let data = if corpus.is_some() {
-            std::fs::read(&paths[index])?
+    };
+    let mut paths = paths.into_iter();
+    for _ in 0..sample_count {
+        let data = if let Some(path) = paths.next() {
+            std::fs::read(path)?
         } else {
             let mut bytes = vec![0; byte_count];
             rng.fill_bytes(&mut bytes);
@@ -88,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(path) = &write_corpus {
             std::fs::write(path.join(blake3::hash(&data).to_hex().as_str()), &data)?;
         }
-        let case = match FuzzCase::decode(&data, profile) {
+        let case = match FuzzCase::decode(&data) {
             Ok(case) => case,
             Err(reason) if reason == "unsupported block fuzz input format version" => {
                 // Rejected format versions never describe a generated block.
@@ -106,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let trace = checked.as_ref().and_then(|c| c.checked_trace());
         report.record_case(&case, outcome, trace);
     }
-    println!("{}", report.json(profile));
+    println!("{}", report.json());
     Ok(())
 }
 

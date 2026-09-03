@@ -2,26 +2,20 @@
 
 //! Icarus oracles with block-IR interfaces and public hierarchy/foreign models.
 
-use std::process::Command;
 use std::time::Duration;
 
 use rand::Rng;
-use xlsynth::external_tool::{ToolError, run_checked_detailed};
+use xlsynth::external_tool::ToolError;
 use xlsynth_g8r_fuzz::random_block::block_output_types;
-use xlsynth_pir::ir::{Package, Type};
+use xlsynth_pir::ir::Package;
+use xlsynth_test_helpers::iverilog::required_iverilog_toolchain;
 use xlsynth_test_helpers::rtl_sim::{Icarus, Interface, Port, StateSignal, identifier};
 
 use crate::semantics::Trace;
 use crate::{INPUT_SAMPLE_COUNT, deterministic_rng, top_block};
 
-#[derive(Clone, Copy)]
-pub enum StateLayout {
-    Packed,
-    StockUnpacked,
-}
-
 /// Derives testbench bindings from block IR without parsing the emitted RTL.
-pub fn interface(package: &Package, module_name: Option<&str>, layout: StateLayout) -> Interface {
+pub fn interface(package: &Package, module_name: Option<&str>) -> Interface {
     let (block, metadata) = top_block(package);
     let types = block_output_types(block, metadata);
     Interface {
@@ -53,10 +47,7 @@ pub fn interface(package: &Package, module_name: Option<&str>, layout: StateLayo
                 StateSignal {
                     name: r.name.clone(),
                     width: r.ty.bit_count(),
-                    expression: match layout {
-                        StateLayout::Packed => name,
-                        StateLayout::StockUnpacked => stock_state_lvalue(&name, &r.ty),
-                    },
+                    expression: name,
                 }
             })
             .collect(),
@@ -68,10 +59,9 @@ pub fn assert_rtl_semantics(
     package: &Package,
     rtl: &str,
     module_name: Option<&str>,
-    layout: StateLayout,
 ) -> Result<(), ToolError> {
     let trace = Trace::for_package(package);
-    assert_rtl_trace(package, rtl, module_name, layout, &trace)
+    assert_rtl_trace(package, rtl, module_name, &trace)
 }
 
 /// Replays exactly the same precomputed inputs and expectations as other
@@ -80,11 +70,10 @@ pub fn assert_rtl_trace(
     package: &Package,
     rtl: &str,
     module_name: Option<&str>,
-    layout: StateLayout,
     trace: &Trace,
 ) -> Result<(), ToolError> {
     let ir = package.to_string();
-    let mut simulator = Icarus::new(rtl, interface(package, module_name, layout))
+    let mut simulator = Icarus::new(rtl, interface(package, module_name))
         .map_err(|e| e.with_context(format!("Icarus compilation\nIR:\n{ir}")))?;
     simulator
         .set_state(&trace.initial_state)
@@ -111,21 +100,6 @@ pub fn assert_rtl_trace(
     }
     Ok(())
 }
-fn stock_state_lvalue(name: &str, ty: &Type) -> String {
-    if let Type::Array(array) = ty {
-        format!(
-            "{{{}}}",
-            (0..array.element_count)
-                .rev()
-                .map(|i| stock_state_lvalue(&format!("{name}[{i}]"), &array.element_type))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    } else {
-        name.to_owned()
-    }
-}
-
 /// Verifies two independently connected child instances by concrete simulation.
 pub fn assert_hierarchy_semantics(ir: &str, rtl: &str, width: usize) -> Result<(), ToolError> {
     let mut testbench = format!(
@@ -179,46 +153,31 @@ fn simulate_public_design(ir: &str, rtl: &str, testbench: &str) -> Result<(), To
     let directory = tempfile::tempdir().expect("create public Icarus simulation directory");
     let design_path = directory.path().join("public_design.sv");
     let testbench_path = directory.path().join("public_testbench.sv");
-    let output_path = directory.path().join("public_simulator");
     std::fs::write(&design_path, rtl).expect("write generated public SystemVerilog");
     std::fs::write(&testbench_path, testbench).expect("write public simulation testbench");
 
-    run_checked_detailed(
-        Command::new(
-            xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-                .expect("Icarus compiler/runtime required")
-                .iverilog_path(),
+    let tools = required_iverilog_toolchain()?;
+    let output_path = tools
+        .compile(
+            directory.path(),
+            &[design_path, testbench_path],
+            "public_fuzz_testbench",
+            &[],
+            Duration::from_secs(60),
         )
-        .args(["-g2012", "-s", "public_fuzz_testbench", "-o"])
-        .arg(&output_path)
-        .arg(&design_path)
-        .arg(&testbench_path),
-        directory.path(),
-        "compile",
-        Duration::from_secs(60),
-    )
-    .map_err(|e| {
-        e.with_context(format!(
+        .map_err(|e| {
+            e.with_context(format!(
             "public hierarchy/external compilation\nIR:\n{ir}\nRTL:\n{rtl}\ntestbench:\n{testbench}"
         ))
-    })?;
+        })?;
 
-    run_checked_detailed(
-        Command::new(
-            xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-                .expect("Icarus compiler/runtime required")
-                .vvp_path(),
-        )
-        .arg(&output_path),
-        directory.path(),
-        "simulate",
-        Duration::from_secs(60),
-    )
-    .map_err(|e| {
-        e.with_context(format!(
+    tools
+        .run(directory.path(), &output_path, Duration::from_secs(60))
+        .map_err(|e| {
+            e.with_context(format!(
             "public hierarchy/external simulation\nIR:\n{ir}\nRTL:\n{rtl}\ntestbench:\n{testbench}"
         ))
-    })?;
+        })?;
     Ok(())
 }
 

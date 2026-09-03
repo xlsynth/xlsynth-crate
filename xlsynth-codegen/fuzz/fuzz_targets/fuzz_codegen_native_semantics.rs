@@ -2,14 +2,14 @@
 
 #![no_main]
 
-//! Mixed scalar/aggregate datapaths and synchronous state under the native
-//! profile.
+//! Mixed scalar/aggregate datapaths and synchronous state checked with
+//! iverilog.
 
 use libfuzzer_sys::fuzz_target;
 use std::{path::PathBuf, sync::OnceLock};
 use xlsynth_codegen_fuzz::coverage::record_progress;
+use xlsynth_codegen_fuzz::input::FuzzCase;
 use xlsynth_codegen_fuzz::preflight::{Oracles, validate};
-use xlsynth_codegen_fuzz::{Profile, input::FuzzCase};
 static ARTIFACTS: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 fuzz_target!(init: {
@@ -18,8 +18,7 @@ fuzz_target!(init: {
         std::process::exit(2);
     }
 }, |data: &[u8]| {
-    let profile = Profile::NativeSemantics;
-    let Ok(case) = FuzzCase::decode(data, profile) else {
+    let Ok(case) = FuzzCase::decode(data) else {
         // An unknown explicit input-format version is not a generated RTL bug.
         return;
     };

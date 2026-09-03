@@ -5,13 +5,11 @@
 pub mod coverage;
 pub mod input;
 pub mod iverilog;
-pub mod mapped_semantics;
 pub mod preflight;
 pub mod references;
 pub mod semantics;
 pub mod stimulus;
 pub mod tool_failure;
-pub mod xls;
 #[cfg(feature = "external-yosys")]
 pub mod yosys;
 
@@ -53,121 +51,81 @@ pub fn emit(package: &Package, options: &BlockCodegenOptions) -> String {
         .system_verilog
 }
 
-/// Selects native datapath semantics or the stock-XLS-compatible subset.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Profile {
-    NativeSemantics,
-    StockXls,
-}
-
-impl Profile {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::NativeSemantics => "native",
-            Self::StockXls => "stock-xls",
-        }
-    }
-
-    /// Uses one fixed wiring-header size for mixed combinational/sequential
-    /// cases.
-    pub fn mixed_block_options(self) -> RandomBlockOptions {
-        self.block_options(true, true)
-    }
-
-    /// Bounds cost without tying native coverage to another frontend's limits.
-    pub fn block_options(self, aggregates: bool, sequential: bool) -> RandomBlockOptions {
-        RandomBlockOptions {
-            min_input_ports: 1,
-            max_input_ports: 4,
-            min_output_ports: 1,
-            max_output_ports: 3,
-            topology: if sequential {
-                BlockTopology::GeneralSequential
-            } else {
-                BlockTopology::Combinational
-            },
-            max_registers: if sequential { 3 } else { 0 },
-            allow_zero_width_ports_and_registers: self == Self::NativeSemantics,
-            allow_load_enable: sequential,
-            allow_reset: sequential,
-            reset_timing: RandomBlockResetTiming::Synchronous,
-            function_options: RandomFnOptions {
-                max_params: 6,
-                max_nodes: 48,
-                max_bit_width: 256,
-                // Bound simulator multiword arithmetic and synthesis expansion.
-                max_div_mod_bit_width: Some(16),
-                max_multiply_operand_bit_width: Some(64),
-                max_type_depth: if aggregates { 3 } else { 0 },
-                max_aggregate_leaves: 32,
-                max_array_length: 8,
-                max_tuple_length: 6,
-                max_nary_operands: 8,
-                allow_arrays: aggregates,
-                allow_tuples: aggregates,
-                allow_zero_width_bits: self == Self::NativeSemantics,
-                allow_arbitrary_width_multiply: true,
-                array_assumption_mode: ArrayAssumptionMode::ProvenSafe,
-                allow_extension_ops: self == Self::NativeSemantics,
-                allow_gate: true,
-                enabled_operations: self.operations(aggregates),
-                ..RandomFnOptions::default()
-            },
-            ..RandomBlockOptions::default()
-        }
-    }
-
-    /// Calls, partial products, and debug events are outside these campaigns.
-    pub fn operations(self, aggregates: bool) -> OperationSet {
-        OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
-            if matches!(
-                operation,
-                RandomOperation::Invoke
-                    | RandomOperation::CountedFor
-                    | RandomOperation::Umulp
-                    | RandomOperation::Smulp
-                    | RandomOperation::AfterAll
-                    | RandomOperation::Cover
-                    | RandomOperation::Assert
-                    | RandomOperation::Trace
-            ) {
-                return false;
-            }
-            if self == Self::StockXls
-                && matches!(
-                    operation,
-                    RandomOperation::ExtCarryOut
-                        | RandomOperation::ExtPrioEncode
-                        | RandomOperation::ExtClz
-                        | RandomOperation::ExtNormalizeLeft
-                        | RandomOperation::ExtMaskLow
-                        | RandomOperation::ExtNaryAdd
-                )
-            {
-                return false;
-            }
-            if !aggregates
-                && matches!(
-                    operation,
-                    RandomOperation::Array
-                        | RandomOperation::ArrayIndex
-                        | RandomOperation::ArrayConcat
-                        | RandomOperation::ArraySlice
-                        | RandomOperation::ArrayUpdate
-                        | RandomOperation::Tuple
-                        | RandomOperation::TupleIndex
-                )
-            {
-                return false;
-            }
-            true
-        }))
-    }
-}
-
-/// Uses the native profile for existing focused targets.
+/// Bounds cost without tying native coverage to another frontend's limits.
 pub fn block_options(aggregates: bool, sequential: bool) -> RandomBlockOptions {
-    Profile::NativeSemantics.block_options(aggregates, sequential)
+    RandomBlockOptions {
+        min_input_ports: 1,
+        max_input_ports: 4,
+        min_output_ports: 1,
+        max_output_ports: 3,
+        topology: if sequential {
+            BlockTopology::GeneralSequential
+        } else {
+            BlockTopology::Combinational
+        },
+        max_registers: if sequential { 3 } else { 0 },
+        allow_zero_width_ports_and_registers: true,
+        allow_load_enable: sequential,
+        allow_reset: sequential,
+        reset_timing: RandomBlockResetTiming::Synchronous,
+        function_options: RandomFnOptions {
+            max_params: 6,
+            max_nodes: 48,
+            max_bit_width: 256,
+            // Bound simulator multiword arithmetic and synthesis expansion.
+            max_div_mod_bit_width: Some(16),
+            max_multiply_operand_bit_width: Some(64),
+            max_type_depth: if aggregates { 3 } else { 0 },
+            max_aggregate_leaves: 32,
+            max_array_length: 8,
+            max_tuple_length: 6,
+            max_nary_operands: 8,
+            allow_arrays: aggregates,
+            allow_tuples: aggregates,
+            allow_zero_width_bits: true,
+            allow_arbitrary_width_multiply: true,
+            array_assumption_mode: ArrayAssumptionMode::ProvenSafe,
+            allow_extension_ops: true,
+            allow_gate: true,
+            enabled_operations: operations(aggregates),
+            ..RandomFnOptions::default()
+        },
+        ..RandomBlockOptions::default()
+    }
+}
+
+/// Calls, partial products, and debug events are outside these campaigns.
+pub fn operations(aggregates: bool) -> OperationSet {
+    OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+        if matches!(
+            operation,
+            RandomOperation::Invoke
+                | RandomOperation::CountedFor
+                | RandomOperation::Umulp
+                | RandomOperation::Smulp
+                | RandomOperation::AfterAll
+                | RandomOperation::Cover
+                | RandomOperation::Assert
+                | RandomOperation::Trace
+        ) {
+            return false;
+        }
+        if !aggregates
+            && matches!(
+                operation,
+                RandomOperation::Array
+                    | RandomOperation::ArrayIndex
+                    | RandomOperation::ArrayConcat
+                    | RandomOperation::ArraySlice
+                    | RandomOperation::ArrayUpdate
+                    | RandomOperation::Tuple
+                    | RandomOperation::TupleIndex
+            )
+        {
+            return false;
+        }
+        true
+    }))
 }
 
 /// Builds a valid block package directly from coverage-guided structure bytes.
@@ -178,50 +136,29 @@ pub fn generate(data: &[u8], options: &RandomBlockOptions) -> Package {
         .package
 }
 
-/// Checks a mixed profile case and returns only documented oracle exclusions.
-pub fn check_profile_case(package: &Package, profile: Profile) -> Option<&'static str> {
-    check_profile_trace(
+/// Checks generated RTL against an independently evaluated PIR trace.
+pub fn check_case(package: &Package) {
+    check_trace(
         package,
-        profile,
         &BlockCodegenOptions::default(),
         &semantics::Trace::for_package(package),
     )
-    .unwrap_or_else(|error| panic!("{error}"))
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
-/// Checks all selected oracles against identical stimuli and codegen options.
-pub fn check_profile_trace(
+/// Checks deterministic emission and replays the reference trace in iverilog.
+pub fn check_trace(
     package: &Package,
-    profile: Profile,
     options: &BlockCodegenOptions,
     trace: &semantics::Trace,
-) -> Result<Option<&'static str>, ToolError> {
-    if profile == Profile::StockXls {
-        let executable = xls::stock_xls_path().expect("stock-XLS profile requires block_to_verilog_main; configure XLSYNTH_TOOLS or XLSYNTH_BLOCK_TO_VERILOG_PATH");
-        let context = xlsynth_g8r_fuzz::external_yosys::required_external_yosys_context()
-            .unwrap_or_else(|error| {
-                panic!("stock-XLS profile requires Yosys/Liberty netlist evaluation: {error}")
-            });
-        if let Some(reason) = xls::stock_xls_skip_reason(package) {
-            return Ok(Some(reason));
-        }
-        xls::assert_stock_xls_semantics(package, executable, context, options, trace)?;
-    } else {
-        let rtl = emit(package, options);
-        assert_eq!(
-            rtl,
-            emit(package, options),
-            "codegen options produced nondeterministic RTL"
-        );
-        iverilog::assert_rtl_trace(
-            package,
-            &rtl,
-            options.module_name.as_deref(),
-            iverilog::StateLayout::Packed,
-            trace,
-        )?;
-    }
-    Ok(None)
+) -> Result<(), ToolError> {
+    let rtl = emit(package, options);
+    assert_eq!(
+        rtl,
+        emit(package, options),
+        "codegen options produced nondeterministic RTL"
+    );
+    iverilog::assert_rtl_trace(package, &rtl, options.module_name.as_deref(), trace)
 }
 
 /// Returns the selected generated block and its structural metadata.
@@ -287,12 +224,7 @@ pub fn assert_combinational_semantics(
     options: &BlockCodegenOptions,
 ) -> Result<(), ToolError> {
     let rtl = emit(package, options);
-    iverilog::assert_rtl_semantics(
-        package,
-        &rtl,
-        options.module_name.as_deref(),
-        iverilog::StateLayout::Packed,
-    )
+    iverilog::assert_rtl_semantics(package, &rtl, options.module_name.as_deref())
 }
 
 /// Compares clocked RTL outputs and next state with PIR using Icarus.
@@ -301,20 +233,15 @@ pub fn assert_sequential_semantics(
     options: &BlockCodegenOptions,
 ) -> Result<(), ToolError> {
     let rtl = emit(package, options);
-    iverilog::assert_rtl_semantics(
-        package,
-        &rtl,
-        options.module_name.as_deref(),
-        iverilog::StateLayout::Packed,
-    )
+    iverilog::assert_rtl_semantics(package, &rtl, options.module_name.as_deref())
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
+    use crate::check_case;
     use crate::coverage::{CoverageReport, Outcome};
-    use crate::{Profile, check_profile_case};
     use rand::rngs::StdRng;
     use rand::{RngCore, SeedableRng};
     use xlsynth_codegen::BlockCodegenOptions;
@@ -330,85 +257,77 @@ mod tests {
     };
 
     #[test]
-    fn profiles_reach_all_enabled_operations_and_expanded_shapes() {
-        for profile in [Profile::NativeSemantics, Profile::StockXls] {
-            let options = profile.mixed_block_options();
-            assert_eq!(options.wiring_header_byte_count().unwrap(), 72);
-            assert_eq!(options.function_options.max_div_mod_bit_width, Some(16));
-            assert_eq!(
-                options.function_options.max_multiply_operand_bit_width,
-                Some(64)
+    fn generation_reaches_all_enabled_operations_and_expanded_shapes() {
+        let options = block_options(true, true);
+        assert_eq!(options.wiring_header_byte_count().unwrap(), 72);
+        assert_eq!(options.function_options.max_div_mod_bit_width, Some(16));
+        assert_eq!(
+            options.function_options.max_multiply_operand_bit_width,
+            Some(64)
+        );
+        for operation in [
+            RandomOperation::Invoke,
+            RandomOperation::CountedFor,
+            RandomOperation::Umulp,
+            RandomOperation::Smulp,
+            RandomOperation::Assert,
+            RandomOperation::Cover,
+            RandomOperation::Trace,
+            RandomOperation::AfterAll,
+        ] {
+            assert!(
+                !options
+                    .function_options
+                    .enabled_operations
+                    .contains(operation)
             );
-            for operation in [
-                RandomOperation::Invoke,
-                RandomOperation::CountedFor,
-                RandomOperation::Umulp,
-                RandomOperation::Smulp,
-                RandomOperation::Assert,
-                RandomOperation::Cover,
-                RandomOperation::Trace,
-                RandomOperation::AfterAll,
-            ] {
-                assert!(
-                    !options
-                        .function_options
-                        .enabled_operations
-                        .contains(operation)
-                );
-            }
-            let mut rng = StdRng::seed_from_u64(1);
-            let mut report = CoverageReport::default();
-            for _ in 0..2000 {
-                let mut data = [0; 2048];
-                rng.fill_bytes(&mut data);
-                report.record(&generate(&data, &options), Outcome::GeneratedOnly);
-            }
-            for operation in profile.operations(true).iter() {
-                assert!(
-                    report.generated_operations.contains_key(operation.name()),
-                    "{profile:?}: {} missing",
-                    operation.name()
-                );
-            }
-            assert!(report.checked_graph_operations.is_empty());
+        }
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut report = CoverageReport::default();
+        for _ in 0..2000 {
+            let mut data = [0; 2048];
+            rng.fill_bytes(&mut data);
+            report.record(&generate(&data, &options), Outcome::GeneratedOnly);
+        }
+        for operation in super::operations(true).iter() {
+            assert!(
+                report.generated_operations.contains_key(operation.name()),
+                "{} missing",
+                operation.name()
+            );
+        }
+        assert!(report.checked_graph_operations.is_empty());
+        assert!(
+            report
+                .div_mod_widths
+                .keys()
+                .all(|key| { key.split_once(':').unwrap().1.parse::<usize>().unwrap() <= 16 })
+        );
+        for operation in ["udiv", "sdiv", "umod", "smod"] {
             assert!(
                 report
                     .div_mod_widths
-                    .keys()
-                    .all(|key| { key.split_once(':').unwrap().1.parse::<usize>().unwrap() <= 16 })
-            );
-            for operation in ["udiv", "sdiv", "umod", "smod"] {
-                assert!(
-                    report
-                        .div_mod_widths
-                        .contains_key(&format!("{operation}:16"))
-                );
-            }
-            assert!(report.bit_widths.contains_key(&256));
-            assert!(report.selector_widths.keys().any(|width| *width > 64));
-            assert!(report.array_lengths.contains_key(&8));
-            assert!(report.tuple_lengths.contains_key(&6));
-            assert!(report.type_depths.contains_key(&3));
-            assert!(report.attributes.contains_key("assumed_in_bounds=true"));
-            assert!(report.attributes.contains_key("assumed_in_bounds=false"));
-            assert!(report.attributes.contains_key("load_enable=true"));
-            assert!(report.attributes.contains_key("load_enable=false"));
-            for count in 1..=3 {
-                assert!(report.register_counts.contains_key(&count));
-            }
-            assert_eq!(
-                report.bit_widths.contains_key(&0),
-                profile == Profile::NativeSemantics
-            );
-            assert_eq!(
-                report.generated_operations.contains_key("ext_clz"),
-                profile == Profile::NativeSemantics
+                    .contains_key(&format!("{operation}:16"))
             );
         }
+        assert!(report.bit_widths.contains_key(&256));
+        assert!(report.selector_widths.keys().any(|width| *width > 64));
+        assert!(report.array_lengths.contains_key(&8));
+        assert!(report.tuple_lengths.contains_key(&6));
+        assert!(report.type_depths.contains_key(&3));
+        assert!(report.attributes.contains_key("assumed_in_bounds=true"));
+        assert!(report.attributes.contains_key("assumed_in_bounds=false"));
+        assert!(report.attributes.contains_key("load_enable=true"));
+        assert!(report.attributes.contains_key("load_enable=false"));
+        for count in 1..=3 {
+            assert!(report.register_counts.contains_key(&count));
+        }
+        assert!(report.bit_widths.contains_key(&0));
+        assert!(report.generated_operations.contains_key("ext_clz"));
     }
 
     #[test]
-    fn native_profile_checks_wide_priority_expressions_with_icarus() {
+    fn native_checks_wide_priority_expressions_with_icarus() {
         let package = parse_reference(
             r#"package wide
 top block wide(x: bits[255], out: bits[256]) {
@@ -418,11 +337,11 @@ top block wide(x: bits[255], out: bits[256]) {
 }
 "#,
         );
-        assert_eq!(check_profile_case(&package, Profile::NativeSemantics), None);
+        check_case(&package);
     }
 
     #[test]
-    fn native_profile_checks_omitted_zero_bit_ports_and_registers() {
+    fn native_checks_omitted_zero_bit_ports_and_registers() {
         let package = parse_reference(
             r#"package zero
 top block zero(clk: clock, x: bits[0], enable: bits[1], out: bits[0]) {
@@ -435,7 +354,7 @@ top block zero(clk: clock, x: bits[0], enable: bits[1], out: bits[0]) {
 }
 "#,
         );
-        assert_eq!(check_profile_case(&package, Profile::NativeSemantics), None);
+        check_case(&package);
     }
 
     #[test]

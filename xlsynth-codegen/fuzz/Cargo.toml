@@ -8,7 +8,6 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = { version = "1.3", features = ["derive"] }
 blake3 = "1"
 libfuzzer-sys = "0.4"
 rand = "0.8"
@@ -93,12 +92,6 @@ doc = false
 [[bin]]
 name = "fuzz_codegen_extern"
 path = "fuzz_targets/fuzz_codegen_extern.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_codegen_xls_differential"
-path = "fuzz_targets/fuzz_codegen_xls_differential.rs"
 test = false
 doc = false
 

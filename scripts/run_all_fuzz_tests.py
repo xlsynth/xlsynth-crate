@@ -35,8 +35,6 @@ DEFAULT_FUZZ_RUN_ARGS: str = ""
 DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=60"
 DEFAULT_THREADS: int = 4
 DEFAULT_SKIPPED_FUZZ_TARGETS: set[str] = {
-    # Stock block codegen is an explicit external-tool requirement.
-    "fuzz_codegen_xls_differential",
     # Yosys is not always available, including in GitHub CI.
     "fuzz_codegen_yosys_combo",
     "fuzz_codegen_yosys_formal",

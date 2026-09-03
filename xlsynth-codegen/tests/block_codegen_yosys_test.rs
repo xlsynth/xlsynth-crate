@@ -5,16 +5,13 @@
 mod cases;
 mod support;
 use cases::*;
-use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
-use xlsynth::external_tool::{resolve_executable, run_checked};
 use xlsynth_codegen::BlockCodegenOptions;
+use xlsynth_g8r::netlist::yosys::YosysToolchain;
 
 #[test]
 fn one_hot_case_functions_prove_equivalent_to_prefix_logic_with_yosys() {
-    let yosys = std::env::var_os("XLSYNTH_YOSYS_PATH").unwrap_or_else(|| "yosys".into());
-    let yosys = resolve_executable(Path::new(&yosys)).expect("resolve required Yosys executable");
+    let yosys = YosysToolchain::from_env().expect("required Yosys executable");
     let directory = tempfile::tempdir().unwrap();
     for width in [1, 4, 8, 65, 256] {
         let ir = format!(
@@ -59,8 +56,6 @@ module proof(input logic [{last}:0] value, output logic equal);
         }
         source.push_str("endmodule\n");
         std::fs::write(directory.path().join("proof.sv"), source).unwrap();
-        run_checked(Command::new(&yosys).current_dir(directory.path()).args([
-            "-Q", "-p", "read_verilog -sv proof.sv; hierarchy -check -top proof; proc; flatten; opt; sat -verify -prove equal 1 -show-inputs -show-outputs"
-        ]), directory.path(), "one-hot-proof", Duration::from_secs(60)).unwrap_or_else(|e| panic!("one_hot width={width}: {e}"));
+        yosys.run_script(directory.path(), "read_verilog -sv proof.sv; hierarchy -check -top proof; proc; flatten; opt; sat -verify -prove equal 1 -show-inputs -show-outputs", Duration::from_secs(60)).unwrap_or_else(|e| panic!("one_hot width={width}: {e}"));
     }
 }

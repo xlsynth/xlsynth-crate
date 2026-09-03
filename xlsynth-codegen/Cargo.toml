@@ -41,6 +41,7 @@ xlsynth-vast = { path = "../xlsynth-vast", version = "0.69.0" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.69.0" }
 toml = "0.8.19"
 pretty_assertions = "1.4.1"
 tempfile = "3.20"
