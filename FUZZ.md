@@ -10,37 +10,33 @@ With Python 3.11+ and cargo-fuzz installed, run the smoke suite with:
 python3 scripts/run_all_fuzz_tests.py --target-dir target/fuzz-ci
 ```
 
-The runner generates one smoke package under `target/fuzz-smoke-workspace`
-from the existing fuzz manifests. It references the original target sources and
-support libraries, combines their dependency requirements/features, and builds
-all targets in one Cargo invocation with one lockfile. Targets remain registered
-in their original manifests; individual `cargo fuzz` commands are unchanged.
+The runner builds each existing fuzz package once, sequentially, using a shared
+`target/fuzz-ci` output directory. Cargo reuses compatible dependencies across
+packages. There is no generated package or workspace; each package retains its
+own manifest and lockfile, and individual `cargo fuzz` commands are unchanged.
 
-`--features` selects features for the entire smoke suite (default:
-`with-bitwuzla-system`). Builds and runs use the same combined feature set,
-including features contributed by other targets such as `xlsynth/clap` and
-`serde_json/arbitrary_precision`. Unknown features and conflicting dependency
-sources are errors. Targets whose `required-features` are not enabled are
-reported as excluded, as are the existing default-excluded Yosys targets.
+`--features` selects common features (default: `with-bitwuzla-system`), forwarded
+to each fuzz package that declares them. A package's prebuild and subsequent runs
+use identical flags. Fuzz manifests align `xlsynth/clap` and solver forwarding
+where applicable, but different transitive feature sets may still require
+separate compiled variants. Unknown features are errors. Targets whose
+`required-features` are not enabled are reported as excluded, as are the existing
+default-excluded Yosys targets.
 
-The optional `--target-dir` changes the shared build output directory;
-`--workspace-dir` changes the separate generated manifest/lockfile directory.
-These directories must not overlap. Relative paths are resolved from the
-invoking directory. Target names must be unique across packages; the runner
-checks this before any builds. Runs use each target's existing corpus directory.
-Smoke crash artifacts are written beneath
-`target/fuzz-smoke-workspace/artifacts` (or the selected workspace directory),
-and can be replayed with the original per-crate `cargo fuzz run` command.
+The optional `--target-dir` changes the shared build output directory. Relative
+paths are resolved from the invoking directory. Target names must be unique
+across packages; the runner checks this before any builds. Corpora and crash
+artifacts stay in each original fuzz package's `corpus/` and `artifacts/`
+directories, separate from the build cache.
 
-CI generates the workspace under `$RUNNER_TEMP/xlsynth-fuzz-smoke` and uses
-`--prepare-only` to resolve a fresh lockfile before restoring build outputs.
-The cache is configured against that prepared dependency graph and contains
-`target/fuzz-ci`, not the generated manifests, lockfile, corpus or run artifacts.
-Its key includes the Rust toolchain, Cargo configuration, XLS release, current
-manifests/lockfile, smoke orchestration scripts, and selected build flags. Nightly
-remains floating; a compiler update invalidates the compiled-artifact cache.
-Only successful jobs save the cache, so interrupted setup cannot establish an
-incomplete cache entry. The suite builds once; fuzz runs use four workers by
+CI resolves the existing fuzz packages' lockfiles before restoring cached build
+outputs. Its cache key includes all fuzz dependency graphs, the Rust toolchain,
+Cargo configuration, XLS release, manifests/lockfiles, and the runner script.
+Only build outputs under `target/fuzz-ci` and Cargo's dependency cache persist;
+package lockfiles, corpora and run artifacts are not restored from that cache.
+Nightly remains floating; a compiler update invalidates the compiled-artifact
+cache. Only successful jobs save the cache, so interrupted setup cannot establish
+an incomplete cache entry. Fuzz runs use four workers by
 default. CI retains its `-max_total_time=5` override and
 `--sanitizer none`. Without a `--fuzz-bin-args` override, the runner also sets a
 60-second per-input watchdog. These smoke runs do not replace longer fuzz
