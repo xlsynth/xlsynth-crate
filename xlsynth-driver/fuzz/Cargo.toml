@@ -31,3 +31,4 @@ doc = false
 [features]
 # Pass-through toggles for optional solver integrations if needed later.
 default = []
+with-bitwuzla-system = ["xlsynth-driver/with-bitwuzla-system"]

@@ -15,7 +15,8 @@ env_logger = "0.11"
 libfuzzer-sys = "0.4"
 log = "0.4"
 rand = "0.8"
-xlsynth = { path = "../../xlsynth" }
+# Match the other fuzz packages' xlsynth features for shared build reuse.
+xlsynth = { path = "../../xlsynth", features = ["clap"] }
 xlsynth-mcmc-pir = { path = ".." }
 xlsynth-pir = { path = "../../xlsynth-pir" }
 xlsynth-prover = { path = "../../xlsynth-prover" }

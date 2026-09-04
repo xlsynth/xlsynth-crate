@@ -102,7 +102,7 @@ append_source_if_missing "${HOME}/.profile"
 echo "==> Prefetching all Cargo dependencies"
 manifests=(Cargo.toml)
 if [[ "${mode}" == "full" ]]; then
-  manifests+=(xlsynth-g8r/fuzz/Cargo.toml xlsynth-vastly/fuzz/Cargo.toml)
+  manifests+=(xlsynth-g8r/fuzz/Cargo.toml)
 fi
 for manifest in "${manifests[@]}"; do
   cargo fetch --manifest-path "${manifest}" --quiet

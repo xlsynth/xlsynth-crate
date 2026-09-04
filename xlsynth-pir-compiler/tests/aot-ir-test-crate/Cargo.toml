@@ -17,7 +17,7 @@ workspace = true
 xlsynth-pir-compiler-runtime = { path = "../../../xlsynth-pir-compiler-runtime" }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion.workspace = true
 
 [build-dependencies]
 xlsynth-pir-compiler = { path = "../.." }

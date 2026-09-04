@@ -22,5 +22,13 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+colored = "3.0.0"
+criterion = "0.5"
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
+thiserror = "2"
+toml = "0.8.19"
+which = "7.0.3"
+
 [workspace.lints.rust]
 warnings = "deny"

@@ -13,7 +13,8 @@ arbitrary = { version = "1.3", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 blake3 = "1"
-xlsynth = { path = "../../xlsynth", version = "0.69.0" }
+# Match the other fuzz packages' xlsynth features for shared build reuse.
+xlsynth = { path = "../../xlsynth", version = "0.69.0", features = ["clap"] }
 rand = "0.8"
 tempfile = "3.20"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
