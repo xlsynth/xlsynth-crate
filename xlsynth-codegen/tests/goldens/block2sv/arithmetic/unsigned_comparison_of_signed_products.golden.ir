@@ -1,0 +1,50 @@
+package unsigned_signed_products_package
+
+top block unsigned_signed_products(x: bits[8], y: bits[8], z: bits[8], w: bits[8], less: bits[1], less_equal: bits[1], greater: bits[1], greater_equal: bits[1]) {
+  x: bits[8] = input_port(name=x, id=1)
+  y: bits[8] = input_port(name=y, id=2)
+  z: bits[8] = input_port(name=z, id=3)
+  w: bits[8] = input_port(name=w, id=4)
+  smul.5: bits[8] = smul(x, y, id=5)
+  smul.6: bits[8] = smul(z, w, id=6)
+  ult.7: bits[1] = ult(smul.5, smul.6, id=7)
+  ule.8: bits[1] = ule(smul.5, smul.6, id=8)
+  ugt.9: bits[1] = ugt(smul.5, smul.6, id=9)
+  uge.10: bits[1] = uge(smul.5, smul.6, id=10)
+  less: () = output_port(ult.7, name=less, id=11)
+  less_equal: () = output_port(ule.8, name=less_equal, id=12)
+  greater: () = output_port(ugt.9, name=greater, id=13)
+  greater_equal: () = output_port(uge.10, name=greater_equal, id=14)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module unsigned_signed_products(
+// EXPECT-SV:   input logic [7:0] x,
+// EXPECT-SV:   input logic [7:0] y,
+// EXPECT-SV:   input logic [7:0] z,
+// EXPECT-SV:   input logic [7:0] w,
+// EXPECT-SV:   output logic less,
+// EXPECT-SV:   output logic less_equal,
+// EXPECT-SV:   output logic greater,
+// EXPECT-SV:   output logic greater_equal
+// EXPECT-SV: );
+// EXPECT-SV:   function automatic logic [7:0] smul8b_8b_x_8b (input logic [7:0] lhs, input logic [7:0] rhs);
+// EXPECT-SV:     logic signed [7:0] signed_lhs;
+// EXPECT-SV:     logic signed [7:0] signed_rhs;
+// EXPECT-SV:     logic signed [7:0] signed_result;
+// EXPECT-SV:     begin
+// EXPECT-SV:       signed_lhs = $signed(lhs);
+// EXPECT-SV:       signed_rhs = $signed(rhs);
+// EXPECT-SV:       signed_result = signed_lhs * signed_rhs;
+// EXPECT-SV:       smul8b_8b_x_8b = $unsigned(signed_result);
+// EXPECT-SV:     end
+// EXPECT-SV:   endfunction
+// EXPECT-SV:   logic [7:0] smul_5;
+// EXPECT-SV:   logic [7:0] smul_6;
+// EXPECT-SV:   assign smul_5 = smul8b_8b_x_8b(x, y);
+// EXPECT-SV:   assign smul_6 = smul8b_8b_x_8b(z, w);
+// EXPECT-SV:   assign less = smul_5 < smul_6;
+// EXPECT-SV:   assign less_equal = smul_5 <= smul_6;
+// EXPECT-SV:   assign greater = smul_5 > smul_6;
+// EXPECT-SV:   assign greater_equal = smul_5 >= smul_6;
+// EXPECT-SV: endmodule

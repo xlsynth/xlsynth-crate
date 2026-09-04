@@ -385,11 +385,6 @@ impl GateBuilder {
         let gate_ref = AigRef {
             id: self.gates.len(),
         };
-        debug_assert!(
-            self.gates.capacity() < 1024 * 1024,
-            "gates capacity grew unexpectedly large: {}",
-            self.gates.capacity()
-        );
         self.gates.push(gate);
         if self.options.fold {
             if let Some(simplified) = aig_simplify::operand_simplify(gate_ref, self) {

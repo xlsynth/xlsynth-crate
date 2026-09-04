@@ -6,6 +6,7 @@ members = [
     "xlsynth-mcmc-pir",
     "xlsynth-driver",
     "xlsynth-estimator",
+    "xlsynth-codegen",
     "xlsynth-g8r",
     "xlsynth-pir-compiler-runtime",
     "xlsynth-pir-compiler",

@@ -1,0 +1,21 @@
+package extended_nary_package
+
+top block extended_nary(lhs: bits[8], signed_term: bits[6], subtrahend: bits[8], out: bits[10]) {
+  lhs: bits[8] = input_port(name=lhs, id=1)
+  signed_term: bits[6] = input_port(name=signed_term, id=2)
+  subtrahend: bits[8] = input_port(name=subtrahend, id=3)
+  result: bits[10] = ext_nary_add(lhs, signed_term, subtrahend, signed=[false, true, false], negated=[false, false, true], arch=kogge_stone, id=4)
+  out: () = output_port(result, name=out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module extended_nary(
+// EXPECT-SV:   input logic [7:0] lhs,
+// EXPECT-SV:   input logic [5:0] signed_term,
+// EXPECT-SV:   input logic [7:0] subtrahend,
+// EXPECT-SV:   output logic [9:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [9:0] result;
+// EXPECT-SV:   assign result = 10'h000 + {2'h0, lhs} + {{4{signed_term[5]}}, signed_term} + -{2'h0, subtrahend};
+// EXPECT-SV:   assign out = result;
+// EXPECT-SV: endmodule

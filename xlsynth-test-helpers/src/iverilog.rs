@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Validated Icarus compiler/runtime configuration shared by RTL tests.
+//! Validated iverilog compilation and simulation shared by RTL tests.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use xlsynth::external_tool::{resolve_executable, run_checked};
+use xlsynth::external_tool::{ToolError, resolve_executable, run_checked, run_checked_detailed};
 
-/// An Icarus installation; neither executable is needed to compile this API.
+/// An iverilog installation; neither executable is needed to compile this API.
 #[derive(Clone, Debug)]
 pub struct IcarusToolchain {
     iverilog: PathBuf,
@@ -33,7 +33,7 @@ impl IcarusToolchain {
             )
             .map_err(|error| {
                 format!(
-                    "required Icarus tool `{name}` at {} is unavailable: {error}",
+                    "required iverilog tool `{name}` at {} is unavailable: {error}",
                     path.display()
                 )
             })?;
@@ -60,6 +60,78 @@ impl IcarusToolchain {
     pub fn vvp_path(&self) -> &Path {
         &self.vvp
     }
+
+    /// Compiles SystemVerilog sources into `sim.vvp` in the given directory.
+    /// Relative source paths are resolved against `directory`; the returned
+    /// executable path is absolute. Calls sharing a directory must be serial.
+    /// Defines use `NAME` or `NAME=value`, without the `-D` prefix.
+    pub fn compile(
+        &self,
+        directory: &Path,
+        sources: &[impl AsRef<Path>],
+        top: &str,
+        defines: &[&str],
+        timeout: Duration,
+    ) -> Result<PathBuf, ToolError> {
+        let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+        let executable = directory.join("sim.vvp");
+        let mut command = self.compile_command(defines);
+        command
+            .current_dir(&directory)
+            .arg("-s")
+            .arg(top)
+            .arg("-o")
+            .arg(&executable)
+            .args(sources.iter().map(AsRef::as_ref));
+        run_checked_detailed(&mut command, &directory, "iverilog", timeout)?;
+        Ok(executable)
+    }
+
+    /// Checks SystemVerilog syntax, allowing unresolved modules and producing
+    /// no simulation executable. Source paths and defines follow `compile`.
+    pub fn check_syntax(
+        &self,
+        directory: &Path,
+        sources: &[impl AsRef<Path>],
+        defines: &[&str],
+        timeout: Duration,
+    ) -> Result<(), ToolError> {
+        let mut command = self.compile_command(defines);
+        command
+            .current_dir(directory)
+            .args(["-i", "-t", "null"])
+            .args(sources.iter().map(AsRef::as_ref));
+        run_checked_detailed(&mut command, directory, "iverilog-syntax", timeout).map(|_| ())
+    }
+
+    /// Runs a compiled simulation to completion and returns captured stdout.
+    /// Relative executable paths are resolved against `directory`. Timeouts
+    /// and resource failures retain their categories and captured diagnostics.
+    pub fn run(
+        &self,
+        directory: &Path,
+        executable: &Path,
+        timeout: Duration,
+    ) -> Result<String, ToolError> {
+        run_checked_detailed(
+            Command::new(&self.vvp)
+                .current_dir(directory)
+                .arg(executable),
+            directory,
+            "vvp",
+            timeout,
+        )
+    }
+
+    /// Builds common compiler arguments without selecting an execution mode.
+    fn compile_command(&self, defines: &[&str]) -> Command {
+        let mut command = Command::new(&self.iverilog);
+        command.arg("-g2012");
+        for define in defines {
+            command.arg(format!("-D{define}"));
+        }
+        command
+    }
 }
 
 static ICARUS: OnceLock<Result<IcarusToolchain, String>> = OnceLock::new();
@@ -75,8 +147,111 @@ pub fn required_iverilog_toolchain() -> Result<&'static IcarusToolchain, &'stati
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use xlsynth::external_tool::ToolFailureKind;
 
     use super::IcarusToolchain;
+
+    /// Provides a successful version probe and a caller-selected tool body.
+    fn fake_tool(directory: &Path, name: &str, body: &str) -> PathBuf {
+        let path = directory.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then exit 0; fi\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn compile_and_run_resolve_relative_paths_and_preserve_arguments() {
+        let cwd = std::env::current_dir().unwrap();
+        // Keep transient source/diagnostic files out of concurrent SPDX scans.
+        let target = cwd.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let directory = tempfile::tempdir_in(target).unwrap();
+        let tool = fake_tool(
+            directory.path(),
+            "tool",
+            "test -f source.sv || exit 1\nprintf '%s\\n' \"$@\"",
+        );
+        std::fs::write(directory.path().join("source.sv"), "").unwrap();
+        let relative = directory.path().strip_prefix(&cwd).unwrap();
+        let tools = IcarusToolchain::new(relative.join("tool"), &tool).unwrap();
+        let executable = tools
+            .compile(
+                relative,
+                &["source.sv"],
+                "top",
+                &["SYNTHESIS", "VALUE=2"],
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            executable,
+            directory.path().canonicalize().unwrap().join("sim.vvp")
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("iverilog.stdout")).unwrap(),
+            format!(
+                "-g2012\n-DSYNTHESIS\n-DVALUE=2\n-s\ntop\n-o\n{}\nsource.sv\n",
+                executable.display()
+            ),
+        );
+        tools
+            .check_syntax(
+                relative,
+                &["source.sv"],
+                &["SYNTHESIS"],
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("iverilog-syntax.stdout")).unwrap(),
+            "-g2012\n-DSYNTHESIS\n-i\n-t\nnull\nsource.sv\n",
+        );
+        assert_eq!(
+            tools
+                .run(relative, Path::new("sim.vvp"), Duration::from_secs(1))
+                .unwrap(),
+            "sim.vvp\n"
+        );
+    }
+
+    #[test]
+    fn compilation_and_simulation_preserve_failure_categories_and_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        for (body, expected) in [
+            ("echo diagnostic >&2; exit 1", ToolFailureKind::Failure),
+            (
+                "echo 'out of memory' >&2; exit 1",
+                ToolFailureKind::ResourceExhausted,
+            ),
+            ("echo diagnostic >&2; sleep 10", ToolFailureKind::Timeout),
+        ] {
+            let tool = fake_tool(directory.path(), "tool", body);
+            let tools = IcarusToolchain::new(&tool, &tool).unwrap();
+            let timeout = Duration::from_secs(1);
+            for error in [
+                tools
+                    .compile(directory.path(), &["source.sv"], "top", &[], timeout)
+                    .unwrap_err(),
+                tools
+                    .run(directory.path(), Path::new("sim.vvp"), timeout)
+                    .unwrap_err(),
+            ] {
+                assert_eq!(error.kind, expected, "{error}");
+                let expected_diagnostic = if expected == ToolFailureKind::ResourceExhausted {
+                    "out of memory"
+                } else {
+                    "diagnostic"
+                };
+                assert!(error.to_string().contains(expected_diagnostic), "{error}");
+            }
+        }
+    }
 
     #[test]
     fn validates_both_executables_without_requiring_an_installation() {

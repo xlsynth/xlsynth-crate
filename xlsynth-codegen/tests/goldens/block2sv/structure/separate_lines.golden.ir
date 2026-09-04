@@ -1,0 +1,23 @@
+package separate_line_package
+
+top block separate_lines(lhs: bits[8], rhs: bits[8], out: bits[8]) {
+  lhs: bits[8] = input_port(name=lhs, id=1)
+  rhs: bits[8] = input_port(name=rhs, id=2)
+  sum: bits[8] = add(lhs, rhs, id=3)
+  inverted: bits[8] = not(sum, id=4)
+  out: () = output_port(inverted, name=out, id=5)
+}
+
+// OPTIONS: separate_lines = true
+// OPTIONS: max_inline_depth = 0
+// EXPECT-SV: module separate_lines(
+// EXPECT-SV:   input logic [7:0] lhs,
+// EXPECT-SV:   input logic [7:0] rhs,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] sum;
+// EXPECT-SV:   logic [7:0] inverted;
+// EXPECT-SV:   assign sum = lhs + rhs;
+// EXPECT-SV:   assign inverted = ~sum;
+// EXPECT-SV:   assign out = inverted;
+// EXPECT-SV: endmodule

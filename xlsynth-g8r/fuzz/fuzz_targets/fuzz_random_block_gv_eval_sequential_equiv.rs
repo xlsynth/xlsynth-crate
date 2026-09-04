@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use libfuzzer_sys::fuzz_target;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::aig_serdes::emit_netlist::{
@@ -21,10 +21,8 @@ use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty,
 };
 use xlsynth_g8r::verilog_version::VerilogVersion;
-use xlsynth_g8r_fuzz::external_yosys::external_yosys_context;
-use xlsynth_g8r_fuzz::random_block::{
-    block_output_types, evaluate_block_cycle, flatten_value,
-};
+use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosys_context};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
 use xlsynth_pir::ir::{BlockMetadata, Fn};
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
@@ -35,16 +33,10 @@ use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 const CYCLE_COUNT: usize = 32;
 
 fn fuzz_block_options() -> RandomBlockOptions {
-    let operations = OperationSet::new(
-        OperationSet::all_supported()
-            .iter()
-            .filter(|operation| {
-                !matches!(
-                    operation,
-                    RandomOperation::Umulp | RandomOperation::Smulp
-                )
-            }),
-    );
+    let operations =
+        OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+            !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
+        }));
     RandomBlockOptions {
         max_input_ports: 6,
         max_output_ports: 4,
@@ -167,12 +159,14 @@ fn remap_outputs_for_design(
         .collect()
 }
 
-fuzz_target!(|data: &[u8]| {
-    // Missing Yosys or Liberty files are infrastructure conditions, not
-    // properties of an individual fuzz sample.
-    let Some(context) = external_yosys_context() else {
-        return;
-    };
+fuzz_target!(init: {
+    if let Err(error) = preflight_mapping(true) {
+        eprintln!("fuzz setup failed: {error}");
+        std::process::exit(2);
+    }
+}, |data: &[u8]| {
+    let context = required_external_yosys_context()
+        .expect("startup validated Yosys/Liberty setup");
 
     let mut entropy = DepletableBytes::new(data);
     let generated = generate_block_package(
@@ -215,12 +209,21 @@ fuzz_target!(|data: &[u8]| {
         NetlistPortStyle::PackedBits,
     )
     .unwrap_or_else(|error| panic!("random block RTL emission failed:\n{block_ir}\n{error}"));
-    let mapped_gv = context
+    let mapped_gv = match context
         .yosys
-        .synthesize_sequential_verilog_to_gv(&rtl, &source_design.name)
-        .unwrap_or_else(|error| {
+        .synthesize_sequential_verilog_to_gv_detailed(&rtl, &source_design.name)
+    {
+        Ok(netlist) => netlist,
+        // A resource-limited mapper produces no semantic verdict for this
+        // sample, so keep the campaign running and try another input.
+        Err(error) if error.is_resource_failure() => {
+            eprintln!("inconclusive-tool-check {}: {error}", error.reason_key());
+            return;
+        }
+        Err(error) => {
             panic!("random block Yosys mapping failed:\nIR:\n{block_ir}\nRTL:\n{rtl}\n{error}")
-        });
+        }
+    };
     let netlist_dir = tempfile::tempdir().expect("create temporary mapped-netlist directory");
     let netlist_path = netlist_dir.path().join("mapped.gv");
     std::fs::write(&netlist_path, &mapped_gv).expect("write temporary mapped netlist");

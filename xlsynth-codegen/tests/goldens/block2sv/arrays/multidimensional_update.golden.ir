@@ -1,0 +1,27 @@
+package nested_update_package
+
+top block nested_update(data: bits[8][3][2], row: bits[2], column: bits[2], value: bits[8], out: bits[8][3][2]) {
+  data: bits[8][3][2] = input_port(name=data, id=1)
+  row: bits[2] = input_port(name=row, id=2)
+  column: bits[2] = input_port(name=column, id=3)
+  value: bits[8] = input_port(name=value, id=4)
+  updated: bits[8][3][2] = array_update(data, value, indices=[row, column], id=5)
+  out: () = output_port(updated, name=out, id=6)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module nested_update(
+// EXPECT-SV:   input logic [1:0][2:0][7:0] data,
+// EXPECT-SV:   input logic [1:0] row,
+// EXPECT-SV:   input logic [1:0] column,
+// EXPECT-SV:   input logic [7:0] value,
+// EXPECT-SV:   output logic [1:0][2:0][7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0][2:0][7:0] updated;
+// EXPECT-SV:   for (genvar __i0 = 0; __i0 < 2; __i0 = __i0 + 1) begin : gen__updated_0
+// EXPECT-SV:     for (genvar __i1 = 0; __i1 < 3; __i1 = __i1 + 1) begin : gen__updated_1
+// EXPECT-SV:       assign updated[__i0][__i1] = row == __i0 && column == __i1 ? value : data[__i0][__i1];
+// EXPECT-SV:     end
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = updated;
+// EXPECT-SV: endmodule

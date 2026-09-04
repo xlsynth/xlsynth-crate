@@ -1,0 +1,57 @@
+package registered_child_feedback_package
+
+block feedback_delay(child_clk: clock, child_reset: bits[1], data: bits[8], out: bits[8]) {
+  #![reset(port="child_reset", asynchronous=false, active_low=false)]
+  reg state(bits[8], reset_value=0)
+  child_reset: bits[1] = input_port(name=child_reset, id=1)
+  data: bits[8] = input_port(name=data, id=2)
+  state_q: bits[8] = register_read(register=state, id=3)
+  state_d: () = register_write(data, register=state, reset=child_reset, id=4)
+  out: () = output_port(state_q, name=out, id=5)
+}
+
+top block registered_feedback(parent_clk: clock, parent_reset: bits[1], step: bits[8], out: bits[8]) {
+  instantiation child(block=feedback_delay, kind=block)
+  parent_reset: bits[1] = input_port(name=parent_reset, id=6)
+  step: bits[8] = input_port(name=step, id=7)
+  child_output: bits[8] = instantiation_output(instantiation=child, port_name=out, id=8)
+  next: bits[8] = add(child_output, step, id=9)
+  child_reset_input: () = instantiation_input(parent_reset, instantiation=child, port_name=child_reset, id=10)
+  child_data_input: () = instantiation_input(next, instantiation=child, port_name=data, id=11)
+  out: () = output_port(child_output, name=out, id=12)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module feedback_delay(
+// EXPECT-SV:   input logic child_clk,
+// EXPECT-SV:   input logic child_reset,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] state;
+// EXPECT-SV:   always_ff @ (posedge child_clk) begin
+// EXPECT-SV:     if (child_reset) begin
+// EXPECT-SV:       state <= 8'h00;
+// EXPECT-SV:     end else begin
+// EXPECT-SV:       state <= data;
+// EXPECT-SV:     end
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = state;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module registered_feedback(
+// EXPECT-SV:   input logic parent_clk,
+// EXPECT-SV:   input logic parent_reset,
+// EXPECT-SV:   input logic [7:0] step,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] child_output;
+// EXPECT-SV:   logic [7:0] next;
+// EXPECT-SV:   assign next = child_output + step;
+// EXPECT-SV:   assign out = child_output;
+// EXPECT-SV:   feedback_delay child (
+// EXPECT-SV:     .child_clk(parent_clk),
+// EXPECT-SV:     .child_reset(parent_reset),
+// EXPECT-SV:     .data(next),
+// EXPECT-SV:     .out(child_output)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

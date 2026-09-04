@@ -14,9 +14,7 @@ use crate::iverilog::{IcarusToolchain, required_iverilog_toolchain};
 use tempfile::TempDir;
 use xlsynth::IrBits;
 pub use xlsynth::external_tool::run_checked;
-use xlsynth::external_tool::{
-    ToolError, kill_process_group, run_checked_detailed, set_process_group,
-};
+use xlsynth::external_tool::{ToolError, kill_process_group, set_process_group};
 
 pub type Bindings = BTreeMap<String, LogicValue>;
 type WriteRequest = (String, Sender<std::io::Result<()>>);
@@ -145,29 +143,21 @@ impl Icarus {
         std::fs::write(directory.path().join("dut.sv"), source).map_err(|e| e.to_string())?;
         std::fs::write(directory.path().join("tb.sv"), &testbench).map_err(|e| e.to_string())?;
         let timeout = Duration::from_secs(60);
-        run_checked_detailed(
-            Command::new(tools.iverilog_path())
-                .current_dir(directory.path())
-                .args([
-                    "-g2012",
-                    "-s",
-                    "rtl_oracle_tb",
-                    "-o",
-                    "sim.vvp",
-                    "dut.sv",
-                    "tb.sv",
-                ]),
-            directory.path(),
-            "compile",
-            timeout,
-        )
-        .map_err(|e| e.with_context(format!("RTL:\n{source}\nTestbench:\n{testbench}")))?;
+        let executable = tools
+            .compile(
+                directory.path(),
+                &["dut.sv", "tb.sv"],
+                "rtl_oracle_tb",
+                &[],
+                timeout,
+            )
+            .map_err(|e| e.with_context(format!("RTL:\n{source}\nTestbench:\n{testbench}")))?;
         let stderr = std::fs::File::create(directory.path().join("vvp.stderr"))
             .map_err(|e| e.to_string())?;
         let mut command = Command::new(tools.vvp_path());
         command
             .current_dir(directory.path())
-            .arg("sim.vvp")
+            .arg(executable)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr);

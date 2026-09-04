@@ -36,6 +36,9 @@ DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=60"
 DEFAULT_THREADS: int = 4
 DEFAULT_SKIPPED_FUZZ_TARGETS: set[str] = {
     # Yosys is not always available, including in GitHub CI.
+    "fuzz_codegen_yosys_combo",
+    "fuzz_codegen_yosys_formal",
+    "fuzz_codegen_yosys_sequential",
     "fuzz_random_block_gv_eval_combo_equiv",
     "fuzz_random_block_gv_eval_sequential_equiv",
 }

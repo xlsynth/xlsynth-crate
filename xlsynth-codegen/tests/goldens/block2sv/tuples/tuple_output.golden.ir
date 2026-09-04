@@ -1,0 +1,19 @@
+package tuple_output_package
+
+top block pack_tuple(first: bits[8], second: bits[12], out: (bits[8], bits[12])) {
+  first: bits[8] = input_port(name=first, id=1)
+  second: bits[12] = input_port(name=second, id=2)
+  combined: (bits[8], bits[12]) = tuple(first, second, id=3)
+  out: () = output_port(combined, name=out, id=4)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module pack_tuple(
+// EXPECT-SV:   input logic [7:0] first,
+// EXPECT-SV:   input logic [11:0] second,
+// EXPECT-SV:   output logic [19:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [19:0] combined;
+// EXPECT-SV:   assign combined = {first, second};
+// EXPECT-SV:   assign out = combined;
+// EXPECT-SV: endmodule

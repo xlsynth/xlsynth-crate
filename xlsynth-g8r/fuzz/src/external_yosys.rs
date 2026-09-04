@@ -1,50 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared external Yosys and Liberty setup for fuzz targets.
+//! Per-process caching policy for the shared Yosys/Liberty mapping APIs.
 
 use std::sync::OnceLock;
 
-use xlsynth_g8r::liberty::parser::{
-    LibertyPayloadOptions, parse_liberty_files_with_payload_options,
-};
-use xlsynth_g8r::liberty_model::Library;
-use xlsynth_g8r::netlist::yosys::YosysEnvironment;
+use xlsynth_g8r::netlist::yosys::{YosysMappingContext, YosysMappingKind};
 
-/// Parsed Liberty data and validated Yosys configuration shared by one target.
-pub struct ExternalYosysContext {
-    pub liberty: Library,
-    pub yosys: YosysEnvironment,
+static EXTERNAL_YOSYS_CONTEXT: OnceLock<Result<YosysMappingContext, String>> = OnceLock::new();
+static COMBO_PREFLIGHT: OnceLock<Result<(), String>> = OnceLock::new();
+static SEQUENTIAL_PREFLIGHT: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Requires the configured oracle instead of treating absent tools as a skip.
+pub fn required_external_yosys_context() -> Result<&'static YosysMappingContext, &'static str> {
+    EXTERNAL_YOSYS_CONTEXT
+        .get_or_init(YosysMappingContext::from_env)
+        .as_ref()
+        .map_err(String::as_str)
 }
 
-static EXTERNAL_YOSYS_CONTEXT: OnceLock<Result<ExternalYosysContext, String>> = OnceLock::new();
-static SKIP_REPORTED: OnceLock<()> = OnceLock::new();
-
-/// Returns the external Yosys context, or reports one infrastructure skip.
-///
-/// Missing Yosys or Liberty files are environmental conditions rather than
-/// properties of an individual fuzz sample, so callers should early-return
-/// when this returns None.
-pub fn external_yosys_context() -> Option<&'static ExternalYosysContext> {
-    match EXTERNAL_YOSYS_CONTEXT.get_or_init(build_external_yosys_context) {
-        Ok(context) => Some(context),
-        Err(error) => {
-            if SKIP_REPORTED.set(()).is_ok() {
-                eprintln!("skipping external Yosys/Liberty fuzz target: {error}");
-            }
-            None
-        }
-    }
-}
-
-fn build_external_yosys_context() -> Result<ExternalYosysContext, String> {
-    let yosys = YosysEnvironment::from_env()?;
-    let liberty = parse_liberty_files_with_payload_options(
-        yosys.liberty_files().paths(),
-        LibertyPayloadOptions {
-            include_timing: false,
-            include_power: false,
-        },
-    )
-    .map_err(|error| format!("parse Liberty inputs: {error}"))?;
-    Ok(ExternalYosysContext { liberty, yosys })
+/// Runs the library mapping/import probe once per selected mode and process.
+pub fn preflight_mapping(sequential: bool) -> Result<(), String> {
+    let (state, kind) = if sequential {
+        (&SEQUENTIAL_PREFLIGHT, YosysMappingKind::Sequential)
+    } else {
+        (&COMBO_PREFLIGHT, YosysMappingKind::Combinational)
+    };
+    state
+        .get_or_init(|| {
+            required_external_yosys_context()
+                .map_err(str::to_owned)?
+                .preflight(kind)
+                .map_err(|error| error.to_string())
+        })
+        .clone()
 }

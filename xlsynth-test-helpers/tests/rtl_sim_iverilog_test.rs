@@ -215,7 +215,7 @@ fn icarus_compile_errors_include_source_and_diagnostics() {
     let error = Icarus::new("module broken(; endmodule", interface)
         .err()
         .unwrap();
-    assert!(error.to_string().contains("compile failed"), "{error}");
+    assert!(error.to_string().contains("iverilog failed"), "{error}");
     assert!(
         error.to_string().contains("module broken(; endmodule"),
         "{error}"

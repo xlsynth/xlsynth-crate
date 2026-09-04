@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Helpers for compiling and simulating SystemVerilog/Verilog sources via
-//! a required Icarus toolchain (environment overrides or PATH).
+//! a required iverilog toolchain (environment overrides or PATH).
 //!
 //! These helpers mirror the functionality of `assert_valid_sv` except they
 //! build the given sources with `iverilog`, run the resulting simulation via
@@ -9,8 +9,8 @@
 //! assertions about dynamic behaviour.
 
 use crate::iverilog::required_iverilog_toolchain;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+use xlsynth::external_tool::ToolError;
 
 use tempfile::tempdir;
 
@@ -36,6 +36,8 @@ pub enum SimulateSvError {
         stdout: String,
         stderr: String,
     },
+    /// Compilation or simulation failed, including timeout/resource categories.
+    ExternalTool(ToolError),
     /// Generic I/O error (e.g. writing sources or reading the VCD).
     Io(std::io::Error),
 }
@@ -45,6 +47,9 @@ impl PartialEq for SimulateSvError {
         use SimulateSvError::*;
         match (self, other) {
             (IverilogUnavailable, IverilogUnavailable) => true,
+            (ExternalTool(a), ExternalTool(b)) => {
+                a.kind == b.kind && a.tool == b.tool && a.to_string() == b.to_string()
+            }
             (
                 CompileFailed {
                     status: s1,
@@ -91,77 +96,26 @@ impl std::fmt::Display for SimulateSvError {
             SimulateSvError::SimulationFailed { status, .. } => {
                 write!(f, "vvp failed with status {status:?}")
             }
+            SimulateSvError::ExternalTool(e) => write!(f, "{e}"),
             SimulateSvError::Io(e) => write!(f, "IO error: {e}"),
         }
     }
 }
 
-impl std::error::Error for SimulateSvError {}
+impl std::error::Error for SimulateSvError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ExternalTool(error) => Some(error),
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for SimulateSvError {
     fn from(e: std::io::Error) -> Self {
         SimulateSvError::Io(e)
     }
-}
-
-/// Runs `iverilog` with the given sources and returns the path to the produced
-/// `*.vvp` executable inside `work_dir`.
-fn compile_with_iverilog(
-    work_dir: &Path,
-    sources: &[PathBuf],
-    top_module: &str,
-) -> Result<PathBuf, SimulateSvError> {
-    let tools = required_iverilog_toolchain().map_err(|error| {
-        SimulateSvError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, error))
-    })?;
-    let out_path = work_dir.join("sim.vvp");
-    let mut cmd = Command::new(tools.iverilog_path());
-    cmd.current_dir(work_dir)
-        .arg("-g2012") // Enable SystemVerilog-2012 features – fine for pure Verilog too.
-        .arg("-o")
-        .arg(&out_path)
-        .arg("-s")
-        .arg(top_module);
-    for src in sources {
-        cmd.arg(src);
-    }
-
-    // Log the command we are about to run.
-    log::info!("Running: {cmd:?}");
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        return Err(SimulateSvError::CompileFailed {
-            status: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into(),
-            stderr: String::from_utf8_lossy(&output.stderr).into(),
-        });
-    }
-    log::info!("iverilog finished OK, output {out_path:?}");
-    Ok(out_path)
-}
-
-/// Executes the given `*.vvp` simulation and waits for completion.
-fn run_vvp(vvp_path: &Path, work_dir: &Path) -> Result<(), SimulateSvError> {
-    let tools = required_iverilog_toolchain().map_err(|error| {
-        SimulateSvError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, error))
-    })?;
-    let mut cmd = Command::new(tools.vvp_path());
-    cmd.current_dir(work_dir).arg(vvp_path);
-
-    log::info!("Running: {cmd:?}");
-
-    let output = cmd.current_dir(work_dir).output()?;
-
-    if !output.status.success() {
-        return Err(SimulateSvError::SimulationFailed {
-            status: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into(),
-            stderr: String::from_utf8_lossy(&output.stderr).into(),
-        });
-    }
-    log::info!("vvp simulation completed successfully");
-    Ok(())
 }
 
 /// Compiles and simulates the given SystemVerilog/Verilog sources and returns
@@ -183,7 +137,7 @@ pub fn simulate_sv_flist(
     vcd_name: &str,
 ) -> Result<String, SimulateSvError> {
     // Write all sources to a temporary work directory.
-    let temp_dir = tempdir().expect("create temp dir");
+    let temp_dir = tempdir()?;
 
     // Pre-compute the VCD path (handy for the log below and later reading).
     let vcd_path = temp_dir.path().join(vcd_name);
@@ -206,11 +160,15 @@ pub fn simulate_sv_flist(
         src_paths.push(path);
     }
 
-    // Compile.
-    let vvp_path = compile_with_iverilog(temp_dir.path(), &src_paths, top_module)?;
-
-    // Run simulation.
-    run_vvp(&vvp_path, temp_dir.path())?;
+    let tools = required_iverilog_toolchain()
+        .map_err(|error| SimulateSvError::ExternalTool(ToolError::failure(error)))?;
+    let timeout = Duration::from_secs(60);
+    let executable = tools
+        .compile(temp_dir.path(), &src_paths, top_module, &[], timeout)
+        .map_err(SimulateSvError::ExternalTool)?;
+    tools
+        .run(temp_dir.path(), &executable, timeout)
+        .map_err(SimulateSvError::ExternalTool)?;
 
     // Read and return the VCD contents.
     let vcd = std::fs::read_to_string(&vcd_path).map_err(SimulateSvError::Io)?;

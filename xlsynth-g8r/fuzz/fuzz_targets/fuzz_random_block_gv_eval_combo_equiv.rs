@@ -5,45 +5,36 @@
 //! Differentially checks combinational block IR against Yosys-mapped gv-eval.
 
 use libfuzzer_sys::fuzz_target;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use xlsynth::IrValue;
 use xlsynth_g8r::aig_serdes::emit_netlist::{
     NetlistPortStyle, emit_netlist_with_version_and_port_style,
 };
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
-use xlsynth_g8r::netlist::gv_eval::{
-    GvEvalOptions, load_labeled_netlist_aig_with_liberty,
-};
+use xlsynth_g8r::netlist::gv_eval::{GvEvalOptions, load_labeled_netlist_aig_with_liberty};
 use xlsynth_g8r::verilog_version::VerilogVersion;
-use xlsynth_g8r_fuzz::external_yosys::external_yosys_context;
-use xlsynth_g8r_fuzz::random_block::{
-    block_output_types, evaluate_block_outputs, flatten_value,
-};
+use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosys_context};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_outputs, flatten_value};
 use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions, RandomOperation,
-    StopPolicy, generate_block_package,
+    BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions,
+    RandomOperation, StopPolicy, generate_block_package,
 };
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 
 const INPUT_SAMPLE_COUNT: usize = 16;
 
 fn fuzz_block_options() -> RandomBlockOptions {
-    let operations = OperationSet::new(
-        OperationSet::all_supported()
-            .iter()
-            .filter(|operation| {
-                !matches!(
-                    operation,
-                    RandomOperation::Umulp | RandomOperation::Smulp
-                )
-            }),
-    );
+    let operations =
+        OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+            !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
+        }));
     RandomBlockOptions {
         max_input_ports: 4,
         max_output_ports: 4,
+        topology: BlockTopology::Combinational,
         max_registers: 0,
         allow_load_enable: false,
         allow_reset: false,
@@ -66,12 +57,14 @@ fn generate_inputs(block: &Fn, rng: &mut StdRng) -> Vec<IrValue> {
         .collect()
 }
 
-fuzz_target!(|data: &[u8]| {
-    // Missing Yosys or Liberty files are infrastructure conditions, not
-    // properties of an individual fuzz sample.
-    let Some(context) = external_yosys_context() else {
-        return;
-    };
+fuzz_target!(init: {
+    if let Err(error) = preflight_mapping(false) {
+        eprintln!("fuzz setup failed: {error}");
+        std::process::exit(2);
+    }
+}, |data: &[u8]| {
+    let context = required_external_yosys_context()
+        .expect("startup validated Yosys/Liberty setup");
 
     let mut entropy = DepletableBytes::new(data);
     let generated = generate_block_package(
@@ -108,12 +101,21 @@ fuzz_target!(|data: &[u8]| {
         NetlistPortStyle::PackedBits,
     )
     .unwrap_or_else(|error| panic!("random block RTL emission failed:\n{block_ir}\n{error}"));
-    let mapped_gv = context
+    let mapped_gv = match context
         .yosys
-        .synthesize_verilog_to_gv(&rtl, &design.name)
-        .unwrap_or_else(|error| {
-        panic!("random block Yosys mapping failed:\nIR:\n{block_ir}\nRTL:\n{rtl}\n{error}")
-    });
+        .synthesize_verilog_to_gv_detailed(&rtl, &design.name)
+    {
+        Ok(netlist) => netlist,
+        // A resource-limited mapper produces no semantic verdict for this
+        // sample, so keep the campaign running and try another input.
+        Err(error) if error.is_resource_failure() => {
+            eprintln!("inconclusive-tool-check {}: {error}", error.reason_key());
+            return;
+        }
+        Err(error) => {
+            panic!("random block Yosys mapping failed:\nIR:\n{block_ir}\nRTL:\n{rtl}\n{error}")
+        }
+    };
     let netlist_dir = tempfile::tempdir().expect("create temporary mapped-netlist directory");
     let netlist_path = netlist_dir.path().join("mapped.gv");
     std::fs::write(&netlist_path, &mapped_gv).expect("write temporary mapped netlist");

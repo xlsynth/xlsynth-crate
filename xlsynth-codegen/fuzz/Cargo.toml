@@ -1,0 +1,121 @@
+[package]
+name = "xlsynth-codegen-fuzz"
+version = "0.69.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+blake3 = "1"
+libfuzzer-sys = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3.20"
+xlsynth = { path = "../../xlsynth", version = "0.69.0" }
+xlsynth-codegen = { path = "..", version = "0.69.0" }
+xlsynth-g8r = { path = "../../xlsynth-g8r", version = "0.69.0" }
+xlsynth-g8r-fuzz = { path = "../../xlsynth-g8r/fuzz" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.69.0" }
+xlsynth-test-helpers = { path = "../../xlsynth-test-helpers", version = "0.69.0" }
+
+[lib]
+name = "xlsynth_codegen_fuzz"
+path = "src/lib.rs"
+
+[[test]]
+name = "preflight_test"
+required-features = ["external-yosys"]
+
+[workspace]
+members = ["."]
+
+[workspace.lints.rust]
+warnings = "deny"
+
+[[bin]]
+name = "fuzz_codegen_native_semantics"
+path = "fuzz_targets/fuzz_codegen_native_semantics.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_parser_robustness"
+path = "fuzz_targets/fuzz_codegen_parser_robustness.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_determinism"
+path = "fuzz_targets/fuzz_codegen_determinism.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_combinational_semantics"
+path = "fuzz_targets/fuzz_codegen_combinational_semantics.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_sequential_semantics"
+path = "fuzz_targets/fuzz_codegen_sequential_semantics.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_aggregate_semantics"
+path = "fuzz_targets/fuzz_codegen_aggregate_semantics.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_partial_products"
+path = "fuzz_targets/fuzz_codegen_partial_products.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_options"
+path = "fuzz_targets/fuzz_codegen_options.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_hierarchy"
+path = "fuzz_targets/fuzz_codegen_hierarchy.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_extern"
+path = "fuzz_targets/fuzz_codegen_extern.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_yosys_combo"
+path = "fuzz_targets/fuzz_codegen_yosys_combo.rs"
+test = false
+doc = false
+required-features = ["external-yosys"]
+
+[[bin]]
+name = "fuzz_codegen_yosys_sequential"
+path = "fuzz_targets/fuzz_codegen_yosys_sequential.rs"
+test = false
+doc = false
+required-features = ["external-yosys"]
+
+[[bin]]
+name = "fuzz_codegen_yosys_formal"
+path = "fuzz_targets/fuzz_codegen_yosys_formal.rs"
+test = false
+doc = false
+required-features = ["external-yosys"]
+
+[features]
+default = []
+external-yosys = []

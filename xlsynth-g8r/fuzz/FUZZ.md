@@ -1,5 +1,14 @@
 # xlsynth-g8r Fuzz Targets
 
+Mapping targets selected with `external-yosys` require an explicit
+`XLSYNTH_YOSYS_PATH` and comma-separated `XLSYNTH_LIBERTY_FILES`. Missing or
+invalid setup exits with status 2 during libFuzzer initialization, before
+generating IR or crash artifacts. Startup also checks mapping and netlist
+import. Use compatible standard-cell Liberty files from one library/corner,
+including flip-flop cells for sequential checks. A full PDK is unnecessary.
+See [Liberty configuration](../../xlsynth-codegen/fuzz/FUZZ.md#liberty-configuration)
+for the shared setup, including an ASAP7 configuration example.
+
 ## `fuzz_random_block_g8r_equiv`
 
 Directly generates random block IR, lowers supported synchronous blocks to

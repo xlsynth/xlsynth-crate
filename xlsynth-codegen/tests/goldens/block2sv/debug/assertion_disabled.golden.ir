@@ -1,0 +1,23 @@
+package disabled_assertion_package
+
+top block unchecked_value(clk: clock, data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  zero: bits[8] = literal(value=0, id=2)
+  valid: bits[1] = ne(data, zero, id=3)
+  token: token = after_all(id=4)
+  checked: token = assert(token, valid, message="data must be nonzero", label="nonzero_data", id=5)
+  out: () = output_port(data, name=out, id=6)
+}
+
+// OPTIONS: emit_asserts = false
+// EXPECT-SV: module unchecked_value(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] zero;
+// EXPECT-SV:   logic valid;
+// EXPECT-SV:   assign zero = 8'h00;
+// EXPECT-SV:   assign valid = data != zero;
+// EXPECT-SV:   assign out = data;
+// EXPECT-SV: endmodule

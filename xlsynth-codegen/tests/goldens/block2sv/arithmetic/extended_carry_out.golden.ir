@@ -1,0 +1,21 @@
+package extended_carry_package
+
+top block extended_carry(lhs: bits[8], rhs: bits[8], carry_in: bits[1], carry_out: bits[1]) {
+  lhs: bits[8] = input_port(name=lhs, id=1)
+  rhs: bits[8] = input_port(name=rhs, id=2)
+  carry_in: bits[1] = input_port(name=carry_in, id=3)
+  result: bits[1] = ext_carry_out(lhs, rhs, carry_in, id=4)
+  carry_out: () = output_port(result, name=carry_out, id=5)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module extended_carry(
+// EXPECT-SV:   input logic [7:0] lhs,
+// EXPECT-SV:   input logic [7:0] rhs,
+// EXPECT-SV:   input logic carry_in,
+// EXPECT-SV:   output logic carry_out
+// EXPECT-SV: );
+// EXPECT-SV:   logic result;
+// EXPECT-SV:   assign result = 1'({1'h0, lhs} + {1'h0, rhs} + {8'h00, carry_in} >> 8);
+// EXPECT-SV:   assign carry_out = result;
+// EXPECT-SV: endmodule
