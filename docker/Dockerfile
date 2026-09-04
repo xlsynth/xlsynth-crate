@@ -4,7 +4,7 @@
 # Run via: `docker build --platform linux/amd64 -f docker/Dockerfile -t xlsynth-dev-offline .`
 
 # Ubuntu 24.04, Linux amd64. The downloaded XLS/protoc/Slang binaries are x86-64.
-FROM ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+FROM ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316 AS tools
 
 ARG BUILD_JOBS=4
 ENV RUSTUP_TOOLCHAIN=nightly-2026-08-27 \
@@ -19,6 +19,8 @@ WORKDIR /workspace/xlsynth-crate
 COPY docker/install_tools.sh docker/
 COPY scripts/ci_apt_retry.sh scripts/ci_install_rustup.py scripts/download_and_verify.py scripts/slang_rocky8.sha256 scripts/
 RUN bash docker/install_tools.sh
+
+FROM tools AS validation
 
 # Keep this after the expensive tool layer: changing validation mode should not
 # invalidate tool installation in the Docker cache.

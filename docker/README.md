@@ -12,8 +12,9 @@ docker build --platform linux/amd64 --progress=plain \
 
 The default full build includes workspace `cargo check`, nextest tests, doctests,
 and pre-commit, all with the container network disabled. Full preparation also
-compile-checks the solver-independent `fuzz_gate_fn_roundtrip` target and the
-`xlsynth-vastly` fuzz targets used by pre-commit, with sanitizers disabled.
+compile-checks the solver-independent `fuzz_gate_fn_roundtrip` target with
+sanitizers disabled. Pre-commit does not build benchmarks or fuzz targets;
+dedicated CI jobs cover those builds.
 Workspace commands enable `with-bitwuzla-system`, using the same pinned Bitwuzla
 binaries as CI.
 
@@ -30,6 +31,11 @@ network-disabled `cargo build --workspace --frozen --features with-bitwuzla-syst
 It omits pre-commit environment setup and execution, fuzz compilation, nextest,
 tests, and doctests. The `container-build-and-test` CI job uses this mode from a
 fresh checkout; full mode remains the contributor default.
+
+CI persists only the Dockerfile's `tools` stage through the GitHub Actions
+BuildKit cache. The `validation` stage is rebuilt without caching, so each job
+still resolves workspace dependencies and runs the network-disabled build.
+Neither stage is pushed to a container registry by CI.
 
 Both modes contain the source, resolved main-workspace Cargo lockfile and
 dependencies, matching XLS DSO/DSLX standard library, and tool caches. Full mode

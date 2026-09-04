@@ -27,7 +27,7 @@ env:
 
 jobs:
   # -----------------------------------------------------------
-  # 1) Lint-check / pre-commit gate on Ubuntu
+  # 1) Lint-check / pre-commit on Ubuntu, in parallel with build/test jobs
   # -----------------------------------------------------------
   lint-check-ubuntu:
     runs-on: ubuntu-latest
@@ -136,10 +136,6 @@ jobs:
           echo "--- End Git Diagnostics ---"
           ./.venv-precommit/bin/pre-commit install
 
-      - name: Install cargo-fuzz
-        run: |
-          cargo install cargo-fuzz
-
       - name: Run pre-commit (which can include your rustfmt checks, etc.)
         env:
           SKIP: no-commit-to-branch
@@ -152,24 +148,44 @@ jobs:
   # Build the offline reference environment from a fresh checkout, but keep the
   # PR lane to a network-disabled workspace compilation rather than full tests.
   container-build-and-test:
-    needs: [lint-check-ubuntu]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
     steps:
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Cache container tool installation
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          target: tools
+          cache-from: type=gha,scope=xlsynth-offline-tools
+          cache-to: type=gha,scope=xlsynth-offline-tools,mode=max
+
+      # Only the tools stage is persisted. Resolve dependencies and exercise the
+      # network-disabled workspace build afresh, even on a rerun of this commit.
       - name: Build container and compile workspace offline
-        env:
-          DOCKER_BUILDKIT: "1"
-        run: docker build --build-arg VALIDATION_MODE=build-only --platform linux/amd64 --progress=plain -f docker/Dockerfile -t xlsynth-dev-offline .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          target: validation
+          build-args: VALIDATION_MODE=build-only
+          no-cache-filters: validation
 
   # -----------------------------------------------------------
   # 2) iverilog-backed test lane
   # -----------------------------------------------------------
   iverilog-tests:
     name: iverilog-backed tests
-    needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
 
     steps:
@@ -271,7 +287,6 @@ jobs:
   # 3) Build/test on Ubuntu 22.04 and 24.04
   # -----------------------------------------------------------
   build-and-test-ubuntu:
-    needs: [lint-check-ubuntu] # Ensure lint checks pass first
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -440,7 +455,6 @@ jobs:
   # 4) Ubuntu 20.04 job (no Slang download)
   # -----------------------------------------------------------
   build-and-test-ubuntu-2004-no-slang:
-    needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     env:
@@ -575,7 +589,6 @@ jobs:
   # 4) macOS job
   # -----------------------------------------------------------
   build-and-test-macos:
-    needs: [lint-check-ubuntu]
     runs-on: macos-latest
 
     steps:
@@ -656,11 +669,6 @@ jobs:
           brew update
           brew install icarus-verilog
 
-      - name: Set up Python + pre-commit
-        run: |
-          python -m pip install --upgrade pip
-          pip install pre-commit
-
       - name: Set up Rust
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
@@ -701,22 +709,18 @@ jobs:
           echo "LIBRARY_PATH=$(brew --prefix z3)/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           pkg-config --modversion z3 || true
 
-      - name: Install cargo-fuzz
-        run: |
-          cargo install cargo-fuzz
-
-      - name: Fetch Cargo dependencies for offline pre-commit hooks
+      - name: Fetch Cargo dependencies for offline Clippy checks
         run: cargo fetch
 
       - name: Check build-script DSO runtime discovery
         run: bash scripts/check_build_script_dso_runtime.sh
 
-      - name: Run pre-commit
-        env:
-          SKIP: no-commit-to-branch
+      # Platform-independent hooks run once in lint-check-ubuntu. Keep the same
+      # Clippy selections here to cover macOS-specific code and build scripts.
+      - name: Run macOS Clippy checks
         run: |
-          pre-commit install
-          pre-commit run --all-files
+          cargo clippy --offline -p xlsynth-sys --no-deps
+          cargo clippy --offline -p xlsynth -p xlsynth-test-helpers --all-targets --features clap --no-deps
 
       - name: Test crate
         env:
@@ -729,7 +733,6 @@ jobs:
   # 5) Rocky Linux job
   # -----------------------------------------------------------
   build-and-test-rocky8:
-    # needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: rockylinux:8
     env:
@@ -868,7 +871,6 @@ jobs:
   # -----------------------------------------------------------
   alma9-smoke:
     name: AlmaLinux 9 Smoke Test
-    needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: almalinux:9
 
@@ -933,7 +935,6 @@ jobs:
 
   valgrind-tests:
     name: Valgrind Tests (Ubuntu)
-    needs: [lint-check-ubuntu]
     runs-on: ubuntu-22.04
     steps:
       - name: Check out code
@@ -1152,6 +1153,15 @@ jobs:
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # The fuzz runner and its tests use tomllib and require Python 3.11+.
+      - name: Set up Python for fuzz orchestration
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Test fuzz orchestration
+        run: python3 -m unittest discover -s scripts -p run_all_fuzz_tests_test.py
+
       - name: Resolve XLS release tag
         id: resolve-xls-tag-smoke
         run: |
@@ -1181,7 +1191,11 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
-          key: ubuntu-latest-${{ hashFiles('**/Cargo.lock') }}
+          key: fuzz-none-${{ steps.resolve-xls-tag-smoke.outputs.tag }}
+          # All fuzz workspaces share this output directory, separate from
+          # ordinary Cargo builds. Cargo fingerprints distinguish features.
+          workspaces: . -> target/fuzz-ci
+          cache-workspace-crates: true
 
       - name: Install protobuf compiler
         run: |
@@ -1241,13 +1255,12 @@ jobs:
           XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
-          python3 scripts/run_all_fuzz_tests.py --fuzz-bin-args=-max_total_time=5
+          python3 scripts/run_all_fuzz_tests.py --target-dir "$GITHUB_WORKSPACE/target/fuzz-ci" --fuzz-bin-args=-max_total_time=5
 
   # -----------------------------------------------------------
   # X) Benches compile-only job
   # -----------------------------------------------------------
   benches-compile:
-    needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
 
     steps:

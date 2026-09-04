@@ -2,6 +2,30 @@
 
 This document lists the fuzz targets in the repository and summarizes what each one exercises at a high level. Each entry describes the essential property under test and the major failure modes it is intended to surface. Per-target early-return rationales are documented inline in the target source above the relevant condition, not here.
 
+### Running the smoke suite
+
+With Python 3.11+ and cargo-fuzz installed, run the smoke suite with:
+
+```shell
+python3 scripts/run_all_fuzz_tests.py --target-dir target/fuzz-ci
+```
+
+The optional `--target-dir` shares compatible build artifacts across the separate
+fuzz workspaces. Relative paths are resolved from the invoking directory, and
+both prebuilds and runs use the same absolute path. Without this flag, workspaces
+keep their individual output directories. Shared output requires unique target
+names across workspaces; the runner checks this before any builds.
+
+CI caches `target/fuzz-ci`, separately from ordinary workspace builds, and keys
+the cache on the Rust toolchain, Cargo configuration, and XLS release. Nightly
+remains floating; a compiler update invalidates the compiled-artifact cache.
+Workspace builds run sequentially to reuse dependencies; fuzz runs use four
+workers by default. CI retains its `-max_total_time=5` override and
+`--sanitizer none`. Without a `--fuzz-bin-args` override, the runner also sets a
+60-second per-input watchdog. These smoke runs do not replace longer fuzz
+campaigns. Optional solver/tool requirements and default target exclusions are
+unchanged.
+
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
 Generates an upstream-standard acyclic random package directly as PIR, including

@@ -114,7 +114,6 @@ class DockerPrepareTest(unittest.TestCase):
             for manifest in (
                 "Cargo.toml",
                 "xlsynth-g8r/fuzz/Cargo.toml",
-                "xlsynth-vastly/fuzz/Cargo.toml",
             )
         ]
         expected.extend(
