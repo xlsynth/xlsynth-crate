@@ -10,21 +10,42 @@ With Python 3.11+ and cargo-fuzz installed, run the smoke suite with:
 python3 scripts/run_all_fuzz_tests.py --target-dir target/fuzz-ci
 ```
 
-The optional `--target-dir` shares compatible build artifacts across the separate
-fuzz workspaces. Relative paths are resolved from the invoking directory, and
-both prebuilds and runs use the same absolute path. Without this flag, workspaces
-keep their individual output directories. Shared output requires unique target
-names across workspaces; the runner checks this before any builds.
+The runner generates one smoke package under `target/fuzz-smoke-workspace`
+from the existing fuzz manifests. It references the original target sources and
+support libraries, combines their dependency requirements/features, and builds
+all targets in one Cargo invocation with one lockfile. Targets remain registered
+in their original manifests; individual `cargo fuzz` commands are unchanged.
 
-CI caches `target/fuzz-ci`, separately from ordinary workspace builds, and keys
-the cache on the Rust toolchain, Cargo configuration, and XLS release. Nightly
+`--features` selects features for the entire smoke suite (default:
+`with-bitwuzla-system`). Builds and runs use the same combined feature set,
+including features contributed by other targets such as `xlsynth/clap` and
+`serde_json/arbitrary_precision`. Unknown features and conflicting dependency
+sources are errors. Targets whose `required-features` are not enabled are
+reported as excluded, as are the existing default-excluded Yosys targets.
+
+The optional `--target-dir` changes the shared build output directory;
+`--workspace-dir` changes the separate generated manifest/lockfile directory.
+These directories must not overlap. Relative paths are resolved from the
+invoking directory. Target names must be unique across packages; the runner
+checks this before any builds. Runs use each target's existing corpus directory.
+Smoke crash artifacts are written beneath
+`target/fuzz-smoke-workspace/artifacts` (or the selected workspace directory),
+and can be replayed with the original per-crate `cargo fuzz run` command.
+
+CI generates the workspace under `$RUNNER_TEMP/xlsynth-fuzz-smoke` and uses
+`--prepare-only` to resolve a fresh lockfile before restoring build outputs.
+The cache is configured against that prepared dependency graph and contains
+`target/fuzz-ci`, not the generated manifests, lockfile, corpus or run artifacts.
+Its key includes the Rust toolchain, Cargo configuration, XLS release, current
+manifests/lockfile, smoke orchestration scripts, and selected build flags. Nightly
 remains floating; a compiler update invalidates the compiled-artifact cache.
-Workspace builds run sequentially to reuse dependencies; fuzz runs use four
-workers by default. CI retains its `-max_total_time=5` override and
+Only successful jobs save the cache, so interrupted setup cannot establish an
+incomplete cache entry. The suite builds once; fuzz runs use four workers by
+default. CI retains its `-max_total_time=5` override and
 `--sanitizer none`. Without a `--fuzz-bin-args` override, the runner also sets a
 60-second per-input watchdog. These smoke runs do not replace longer fuzz
-campaigns. Optional solver/tool requirements and default target exclusions are
-unchanged.
+campaigns. Optional external-tool targets still require explicit selection and
+their runtime prerequisites.
 
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 

@@ -1187,14 +1187,24 @@ jobs:
           echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
 
+      - name: Prepare shared fuzz workspace and lockfile
+        id: prepare-fuzz
+        run: |
+          python3 scripts/run_all_fuzz_tests.py \
+            --workspace-dir "$RUNNER_TEMP/xlsynth-fuzz-smoke" \
+            --target-dir "$GITHUB_WORKSPACE/target/fuzz-ci" \
+            --prepare-only --github-output "$GITHUB_OUTPUT"
+
       - name: Enable Rust build cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          cache-on-failure: true
-          key: fuzz-none-${{ steps.resolve-xls-tag-smoke.outputs.tag }}
-          # All fuzz workspaces share this output directory, separate from
-          # ordinary Cargo builds. Cargo fingerprints distinguish features.
-          workspaces: . -> target/fuzz-ci
+          # A cancelled tools/setup step must not populate an immutable cache
+          # entry before the fuzz suite has actually compiled successfully.
+          cache-on-failure: false
+          key: fuzz-unified-v2-${{ steps.resolve-xls-tag-smoke.outputs.tag }}-${{ steps.prepare-fuzz.outputs.cache-key }}
+          # Cache only build outputs, using the prepared fuzz dependency graph.
+          # Manifests, lockfiles and run artifacts remain in RUNNER_TEMP.
+          workspaces: ${{ steps.prepare-fuzz.outputs.cache-workspace }}
           cache-workspace-crates: true
 
       - name: Install protobuf compiler
@@ -1249,13 +1259,16 @@ jobs:
         run: |
           cargo install cargo-fuzz
 
-      - name: Build and run all fuzz targets for 5 seconds
+      - name: Build shared fuzz suite and run each target for 5 seconds
         env:
           XLSYNTH_TOOLS: /tmp/xlsynth_tools_smoke
           XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
-          python3 scripts/run_all_fuzz_tests.py --target-dir "$GITHUB_WORKSPACE/target/fuzz-ci" --fuzz-bin-args=-max_total_time=5
+          python3 scripts/run_all_fuzz_tests.py \
+            --workspace-dir "$RUNNER_TEMP/xlsynth-fuzz-smoke" \
+            --target-dir "$GITHUB_WORKSPACE/target/fuzz-ci" \
+            --fuzz-bin-args=-max_total_time=5
 
   # -----------------------------------------------------------
   # X) Benches compile-only job

@@ -3,13 +3,13 @@
 
 """Run all fuzz targets beneath xlsynth-crate.
 
-Builds all fuzz targets and runs each for a short period of time.
+Builds all fuzz targets together and runs each for a short period of time.
 Requires Python 3.11 or newer.
 
 Usage:
   python3 scripts/run_all_fuzz_tests.py
 
-  # Share compatible build artifacts across fuzz workspaces (as in CI):
+  # Override the default shared target/fuzz-ci output directory:
   python3 scripts/run_all_fuzz_tests.py --target-dir target/fuzz-ci
 
   # With custom args:
@@ -24,8 +24,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
+
+from fuzz_smoke_workspace import prepare_smoke_workspace, smoke_cache_outputs
 
 # Optional solver comparison backends can be requested with --features.
 DEFAULT_FEATURES: list[str] = [
@@ -107,44 +108,13 @@ def read_run_summary(log_path: Path) -> tuple[int, int] | None:
     return summary
 
 
-def get_crate_features(crate_path: Path) -> list[str]:
-    """Return the list of features defined in <crate>/Cargo.toml."""
-    cargo_toml = crate_path / "Cargo.toml"
-    with open(cargo_toml, "rb") as f:
-        cargo_data = tomllib.load(f)
-    features = cargo_data.get("features")
-    if not features:
-        return []
-    return sorted(features.keys())
-
-
-def fuzz_build_args(
-    fuzz_dir: Path,
-    requested_features: list[str],
-    sanitizer: str,
-    extra_args: list[str],
-    target_dir: Path | None,
-) -> list[str]:
-    """Use identical build settings for prebuilds and subsequent fuzz runs."""
-    args = ["--fuzz-dir", str(fuzz_dir), "--sanitizer", sanitizer]
-    supported_features = [
-        feature
-        for feature in get_crate_features(fuzz_dir)
-        if feature in requested_features
-    ]
-    if supported_features:
-        args.extend(["--features", ",".join(supported_features)])
-    if target_dir is not None:
-        args.extend(["--target-dir", str(target_dir)])
-    return args + extra_args
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--fuzz-run-args",
         default=DEFAULT_FUZZ_RUN_ARGS,
-        help="Arguments string passed to 'cargo fuzz run'. Example: \"--features=with-z3-system\"",
+        help="Build arguments passed to cargo-fuzz, e.g. '--dev'. "
+        "Select features with --features instead.",
     )
     parser.add_argument(
         "--fuzz-bin-args",
@@ -155,14 +125,33 @@ def main() -> int:
         "--features",
         default=DEFAULT_FEATURES,
         type=lambda value: [part.strip() for part in value.split(",") if part.strip()],
-        help='Features to pass to the fuzz targets. Example: "with-z3-system,with-foo"',
+        help='Features for the whole smoke build. Example: "with-bitwuzla-system"',
     )
     parser.add_argument(
         "--target-dir",
         type=Path,
-        help="Share this Cargo output directory across fuzz workspaces. "
-        "Relative paths are resolved from the current directory. "
-        "By default each workspace keeps its own output directory.",
+        help="Output directory for the shared smoke build (default: target/fuzz-ci "
+        "under the repository root). Relative paths are resolved from the "
+        "current directory.",
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        type=Path,
+        help="Generated manifest, lockfile and artifact directory (default: "
+        "target/fuzz-smoke-workspace under the repository root). Must not "
+        "overlap --target-dir; do not cache this directory.",
+    )
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Generate the workspace and freshly resolve its lockfile before "
+        "CI cache restoration, without building or running targets.",
+    )
+    parser.add_argument(
+        "--github-output",
+        type=Path,
+        help="Append rust-cache workspace/key outputs to this GitHub Actions "
+        "output file. Requires --prepare-only.",
     )
     parser.add_argument(
         "--sanitizer",
@@ -179,12 +168,24 @@ def main() -> int:
     num_workers = args.threads
     if num_workers <= 0:
         parser.error("--threads must be positive")
-    target_dir = (
-        args.target_dir.expanduser().resolve() if args.target_dir is not None else None
-    )
-
+    if args.github_output is not None and not args.prepare_only:
+        parser.error("--github-output requires --prepare-only")
     # scripts/ is one level below the repo root.
     repo_root = Path(__file__).resolve().parent.parent
+    target_dir = (
+        args.target_dir.expanduser().resolve()
+        if args.target_dir is not None
+        else repo_root / "target/fuzz-ci"
+    )
+    workspace_dir = (
+        args.workspace_dir.expanduser().resolve()
+        if args.workspace_dir is not None
+        else repo_root / "target/fuzz-smoke-workspace"
+    )
+    if workspace_dir.is_relative_to(target_dir) or target_dir.is_relative_to(
+        workspace_dir
+    ):
+        parser.error("--workspace-dir and --target-dir must not overlap")
     fuzz_dirs = find_fuzz_dirs(repo_root)
 
     if not fuzz_dirs:
@@ -194,92 +195,107 @@ def main() -> int:
     fuzz_run_args_list: list[str] = (
         shlex.split(args.fuzz_run_args) if args.fuzz_run_args else []
     )
-    if any(
-        arg == "--target-dir" or arg.startswith("--target-dir=")
-        for arg in fuzz_run_args_list
-    ):
-        parser.error("pass --target-dir directly, not inside --fuzz-run-args")
+    for flag in ("--target-dir", "--features", "--all-features", "-F"):
+        if any(
+            arg == flag
+            or arg.startswith(flag + "=")
+            or (flag == "-F" and arg.startswith("-F"))
+            for arg in fuzz_run_args_list
+        ):
+            parser.error(
+                "pass --target-dir and --features directly, not inside "
+                "--fuzz-run-args; --all-features is not a smoke configuration"
+            )
     fuzz_bin_args_list: list[str] = (
         shlex.split(args.fuzz_bin_args) if args.fuzz_bin_args else []
     )
 
-    # Find the list of fuzz targets in each fuzz directory.
-    fuzz_targets: list[tuple[Path, list[str]]] = []
-    target_owners: dict[str, Path] = {}
-    for fuzz_dir in fuzz_dirs:
-        list_output = subprocess.check_output(
-            [
-                "cargo",
-                "fuzz",
-                "list",
-                "--fuzz-dir",
-                fuzz_dir.as_posix(),
-            ],
-            text=True,
-            stderr=subprocess.STDOUT,
+    try:
+        workspace = prepare_smoke_workspace(fuzz_dirs, workspace_dir)
+        enabled = workspace.enabled_features(
+            args.features, defaults="--no-default-features" not in fuzz_run_args_list
         )
-        listed_targets = [
-            line.strip() for line in list_output.splitlines() if line.strip()
-        ]
-        if target_dir is not None:
-            # Cargo writes un-hashed executables by target name. Reject collisions
-            # before building, including excluded targets because we build all bins.
-            for target in listed_targets:
-                previous = target_owners.setdefault(target, fuzz_dir)
-                if previous != fuzz_dir:
-                    parser.error(
-                        f"shared --target-dir requires unique fuzz target names: "
-                        f"{target!r} occurs in both {previous} and {fuzz_dir}"
-                    )
-        skipped_targets = [
-            target
-            for target in listed_targets
-            if target in DEFAULT_SKIPPED_FUZZ_TARGETS
-        ]
-        for target in skipped_targets:
+    except ValueError as error:
+        parser.error(str(error))
+    selected = []
+    for target in workspace.targets:
+        if target.name in DEFAULT_SKIPPED_FUZZ_TARGETS:
             print(
-                f"Skipping default-excluded fuzz target {target} in {fuzz_dir}",
+                f"Skipping default-excluded fuzz target {target.name} in {target.fuzz_dir}",
                 file=sys.stderr,
             )
-        targets = [
-            target
-            for target in listed_targets
-            if target not in DEFAULT_SKIPPED_FUZZ_TARGETS
-        ]
-        if not targets:
             continue
-        fuzz_targets.append((fuzz_dir, targets))
-
-    build_args = {
-        fuzz_dir: fuzz_build_args(
-            fuzz_dir, args.features, args.sanitizer, fuzz_run_args_list, target_dir
-        )
-        for fuzz_dir, _ in fuzz_targets
-    }
-
-    # Build workspaces sequentially to reuse artifacts without competing for the
-    # shared Cargo target-directory lock. Fuzz executions still run concurrently.
-    for fuzz_dir, _ in fuzz_targets:
-        print(f"\n=== Building fuzz targets in {fuzz_dir} ===", file=sys.stderr)
-        run_cmd(["cargo", "fuzz", "build", *build_args[fuzz_dir]])
-    run_jobs: list[tuple[Path, str, list[str]]] = []
-    for fuzz_dir, targets in fuzz_targets:
-        for target in targets:
-            run_jobs.append(
-                (
-                    fuzz_dir,
-                    target,
-                    [
-                        "cargo",
-                        "fuzz",
-                        "run",
-                        *build_args[fuzz_dir],
-                        target,
-                        "--",
-                        *fuzz_bin_args_list,
-                    ],
-                )
+        missing = set(target.required_features) - enabled
+        if missing:
+            print(
+                f"Skipping {target.name}: requires --features {','.join(sorted(missing))}",
+                file=sys.stderr,
             )
+            continue
+        selected.append(target)
+
+    # Cargo resolves the union of all dependency features once, including features
+    # requested implicitly by other packages (clap, serde, smallvec, etc.). Runs
+    # use this same package/configuration so their Cargo checks reuse the build.
+    build_args = [
+        "--fuzz-dir",
+        str(workspace.path),
+        "--sanitizer",
+        args.sanitizer,
+        "--target-dir",
+        str(target_dir),
+    ]
+    if args.features:
+        build_args.extend(["--features", ",".join(sorted(set(args.features)))])
+    build_args.extend(fuzz_run_args_list)
+    if args.prepare_only:
+        # Resolve from today's manifests before restoring any build outputs.
+        # generate-lockfile also refreshes an existing local preparation; this
+        # lockfile is never read from or saved into the compiled-artifact cache.
+        run_cmd(
+            [
+                "cargo",
+                "generate-lockfile",
+                "--manifest-path",
+                str(workspace.path / "Cargo.toml"),
+            ]
+        )
+        if args.github_output is not None:
+            outputs = smoke_cache_outputs(
+                repo_root, workspace.path, target_dir, build_args
+            )
+            if any("\n" in value or "\r" in value for value in outputs.values()):
+                parser.error("cache output paths cannot contain newlines")
+            with args.github_output.open("a", encoding="utf-8") as stream:
+                for name, value in outputs.items():
+                    stream.write(f"{name}={value}\n")
+        print(f"Prepared fuzz workspace in {workspace.path}", file=sys.stderr)
+        return 0
+    print(
+        f"\n=== Building shared fuzz smoke suite in {workspace.path} ===",
+        file=sys.stderr,
+    )
+    run_cmd(["cargo", "fuzz", "build", *build_args])
+    run_jobs: list[tuple[Path, str, list[str]]] = []
+    for target in selected:
+        corpus = target.fuzz_dir / "corpus" / target.name
+        corpus.mkdir(parents=True, exist_ok=True)
+        run_jobs.append(
+            (
+                target.fuzz_dir,
+                target.name,
+                [
+                    "cargo",
+                    "fuzz",
+                    "run",
+                    *build_args,
+                    target.name,
+                    str(corpus),
+                    "--",
+                    *fuzz_bin_args_list,
+                ],
+            )
+        )
 
     print(
         f"\n=== Running {len(run_jobs)} fuzz targets with {num_workers} worker threads ===",
