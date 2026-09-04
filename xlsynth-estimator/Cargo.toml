@@ -8,7 +8,6 @@ description = "Delay estimation facilities via Rust"
 license = "Apache-2.0"
 repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
-homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [lints]
 workspace = true

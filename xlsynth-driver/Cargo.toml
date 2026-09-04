@@ -8,7 +8,6 @@ description = "Binary that integrates XLS capabilities into a driver program"
 license = "Apache-2.0"
 repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
-homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [lints]
 workspace = true
@@ -53,10 +52,6 @@ xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
 xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.69.0" }
 test-case = "3.3.1"
 pretty_assertions = "1.4.1"
-
-[build-dependencies]
-prost-build = "0.12"
-glob = "0.3"
 
 [features]
 default = []
