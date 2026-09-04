@@ -2575,6 +2575,14 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("flip_flop_cell")
+                        .long("flip-flop-cell")
+                        .value_name("CELL")
+                        .help("Restrict register mapping and resizing to this Liberty cell; default permits all supported cells")
+                        .requires("sequential_design")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("clock_period")
                         .long("clock-period")
                         .value_name("TIME")

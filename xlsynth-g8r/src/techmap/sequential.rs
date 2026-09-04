@@ -58,6 +58,79 @@ const MAX_POST_BUFFER_RESIZE_ITERATIONS: usize = 12;
 /// Bound speculative downsizing; a final complete recovery pass still follows.
 const MAX_POST_BUFFER_AREA_ITERATIONS: usize = 16;
 
+/// Restricts physical register selection and resizing to one library cell.
+pub fn restrict_mapping_flip_flop(library: &mut Library, cell_name: &str) -> Result<()> {
+    let selected = library
+        .cells
+        .iter()
+        .find(|cell| cell.name == cell_name)
+        .ok_or_else(|| anyhow!("unknown flip-flop cell '{cell_name}'"))?;
+    if selected.sequential.is_empty() || selected.dont_use == Some(true) {
+        bail!("cell '{cell_name}' is not an enabled sequential cell");
+    }
+    for cell in &mut library.cells {
+        if !cell.sequential.is_empty() && cell.name != cell_name {
+            cell.dont_use = Some(true);
+        }
+    }
+    Ok(())
+}
+
+/// Adjusts physical D polarity for an external combinational mapper.
+pub fn prepare_fixed_flip_flop_transition(
+    design: &SequentialGateFn,
+    choices: &ChoiceAig,
+    library: &Library,
+    cell_name: &str,
+    options: StaOptions,
+) -> Result<ChoiceAig> {
+    design.validate().map_err(|error| anyhow!(error))?;
+    validate_transition_interface(&design.transition, choices.graph())?;
+    if design
+        .registers
+        .iter()
+        .any(|register| register.initial_value.is_some())
+    {
+        bail!("external sequential mapping does not support explicit power-up initialization");
+    }
+    let binding = index_flip_flops(library, options)?
+        .into_iter()
+        .find(|binding| binding.cell_name == cell_name)
+        .ok_or_else(|| anyhow!("no supported positive-edge binding for '{cell_name}'"))?;
+    adjust_register_data_phase(design, choices, binding.invert_data)
+}
+
+/// Restores an externally mapped transition using the same physical register
+/// ABI.
+///
+/// The mapper must preserve scalar port names and implement the transition
+/// returned by `prepare_fixed_flip_flop_transition` for this cell. No logic
+/// optimization or cell resizing is performed here.
+pub fn restore_fixed_flip_flop_boundary(
+    mapped: &mut MappedNetlist,
+    design: &SequentialGateFn,
+    library: &Library,
+    cell_name: &str,
+    constraints: &SequentialTechMapConstraints,
+    options: StaOptions,
+) -> Result<()> {
+    design.validate().map_err(|error| anyhow!(error))?;
+    validate_constraints(design, constraints)?;
+    if design
+        .registers
+        .iter()
+        .any(|register| register.initial_value.is_some())
+    {
+        bail!("external sequential mapping does not support explicit power-up initialization");
+    }
+    let binding = index_flip_flops(library, options)?
+        .into_iter()
+        .find(|binding| binding.cell_name == cell_name)
+        .ok_or_else(|| anyhow!("no supported positive-edge binding for '{cell_name}'"))?;
+    reinstate_sequential_boundary(mapped, design, Some(&binding))?;
+    finalize_sequential_mapping(mapped, library, constraints, options)
+}
+
 /// Controller-owned timing constraints for one synchronous mapped design.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SequentialTechMapConstraints {
@@ -1797,8 +1870,26 @@ fn reinstate_sequential_boundary(
             bail!("mapped transition contains duplicate port '{name}'");
         }
     }
+    // External mappers may express identity outputs as scalar aliases. Keep
+    // those connections while validating and folding literal output tie-offs.
+    let mut aliases = Vec::new();
+    let mut constants = Vec::new();
+    for assign in std::mem::take(&mut mapped.module.assigns) {
+        match (&assign.kind, &assign.lhs, &assign.rhs) {
+            (
+                NetlistAssignKind::Continuous,
+                NetRef::Simple(_),
+                AssignExpr::Leaf(NetRef::Simple(_)),
+            ) => {
+                aliases.push(assign);
+            }
+            _ => constants.push(assign),
+        }
+    }
+    mapped.module.assigns = constants;
     let constant_outputs = scalar_constant_output_assignments(&mapped.module, &mapped.nets)
         .context("validating mapped transition constant outputs")?;
+    mapped.module.assigns.extend(aliases);
 
     let mut external_names = BTreeSet::new();
     let mut hidden_scalar_nets = BTreeSet::new();
@@ -1914,7 +2005,8 @@ fn reinstate_sequential_boundary(
         !matches!(
             assign.lhs,
             NetRef::Simple(net)
-                if register_d_nets.contains(&net.0) || packed_constant_nets.contains(&net.0)
+                if (register_d_nets.contains(&net.0) && constant_outputs.contains_key(&net.0))
+                    || packed_constant_nets.contains(&net.0)
         )
     });
     for assign in &mut mapped.module.assigns {
@@ -2767,6 +2859,114 @@ mod tests {
                 pin_name: "CLK".to_string(),
                 is_negated: false,
             },
+        }
+    }
+
+    #[test]
+    fn external_mapping_restores_packed_registers_and_scalar_aliases() {
+        let design = test_design();
+        let library = test_library();
+        let (module, nets, interner) = parse_module(
+            r#"
+module top(data_0, data_1, state__q_0, state__q_1, out_0, out_1, state__d_0, state__d_1);
+  input data_0, data_1, state__q_0, state__q_1;
+  output out_0, out_1, state__d_0, state__d_1;
+  assign out_0 = state__q_0;
+  assign out_1 = state__q_1;
+  assign state__d_0 = data_0;
+  assign state__d_1 = data_1;
+endmodule
+"#,
+        );
+        let mut mapped = MappedNetlist {
+            module,
+            nets,
+            interner,
+            stats: TechMapStats::default(),
+        };
+        restore_fixed_flip_flop_boundary(
+            &mut mapped,
+            &design,
+            &library,
+            "DFF",
+            &SequentialTechMapConstraints::default(),
+            StaOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(mapped.stats.selected_instance_count, 2);
+        assert_eq!(mapped.stats.sequential_instance_count, 2);
+        assert_eq!(mapped.stats.selected_area, 8.0);
+        let projected = project_labeled_sequential_netlist_aig(
+            &mapped.module,
+            &mapped.nets,
+            &mapped.interner,
+            &library,
+            Some("clk"),
+        )
+        .unwrap();
+        let inputs = [0, 1, 3, 2, 0]
+            .into_iter()
+            .map(|value| vec![IrBits::make_ubits(2, value).unwrap()])
+            .collect::<Vec<_>>();
+        let expected = simulate(&design, &inputs, SequentialState::all_zeros(&design)).unwrap();
+        let actual = simulate(
+            &projected.sequential_gate_fn,
+            &inputs,
+            SequentialState::all_zeros(&projected.sequential_gate_fn),
+        )
+        .unwrap();
+        assert_eq!(actual.external_outputs(), expected.external_outputs());
+    }
+
+    #[test]
+    fn fixed_flip_flop_restriction_preserves_combinational_cells() {
+        let mut library = test_library();
+        let mut alternative = library
+            .cells
+            .iter()
+            .find(|cell| cell.name == "DFF")
+            .unwrap()
+            .clone();
+        alternative.name = "DFF_OTHER".to_string();
+        library.cells.push(alternative);
+        restrict_mapping_flip_flop(&mut library, "DFF").unwrap();
+        for cell in &library.cells {
+            assert_eq!(cell.dont_use == Some(true), cell.name == "DFF_OTHER");
+        }
+        assert!(restrict_mapping_flip_flop(&mut library, "DFF_OTHER").is_err());
+    }
+
+    #[test]
+    fn external_mapping_prepares_data_polarity_and_rejects_invalid_cells() {
+        let design = test_design();
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mut library = test_library();
+        assert!(restrict_mapping_flip_flop(&mut library, "missing").is_err());
+        assert!(restrict_mapping_flip_flop(&mut library, "BUF").is_err());
+        library
+            .cells
+            .iter_mut()
+            .find(|cell| cell.name == "DFF")
+            .unwrap()
+            .sequential[0]
+            .next_state = "!D".to_string();
+        let prepared = prepare_fixed_flip_flop_transition(
+            &design,
+            &choices,
+            &library,
+            "DFF",
+            StaOptions::default(),
+        )
+        .unwrap();
+        for bit in 0..2 {
+            assert_eq!(
+                *prepared.graph().outputs[1].bit_vector.get_lsb(bit),
+                choices.graph().outputs[1].bit_vector.get_lsb(bit).negate()
+            );
+            assert_eq!(
+                prepared.graph().outputs[0].bit_vector.get_lsb(bit),
+                choices.graph().outputs[0].bit_vector.get_lsb(bit)
+            );
         }
     }
 

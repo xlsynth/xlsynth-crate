@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+read_aiger "input.aig"
+read_lib -w "gates.lib"
+read_lib -m -w "registers.lib"
+read_constr "timing.constr"
+&get -n
+&st
+&dch
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&put
+buffer -c
+topo
+stime -c
+upsize -c
+dnsize -c
+write_verilog "output.gv"

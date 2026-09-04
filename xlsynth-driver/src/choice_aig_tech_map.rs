@@ -14,6 +14,7 @@ use xlsynth_g8r::techmap::{
     SequentialTechMapConstraints, TechMapOptions, TechMapTimingConstraints, TechMapTimingModel,
     map_choice_aig_portfolio_to_netlist, map_choice_aig_to_netlist,
     map_sequential_choice_aig_portfolio_to_netlist, map_sequential_choice_aig_to_netlist,
+    restrict_mapping_flip_flop,
 };
 
 /// Parses a finite, strictly positive sequential clock period.
@@ -59,13 +60,16 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             );
         }
     }
-    let library = load_liberty_with_timing_data_from_path(Path::new(liberty_proto_path))
+    let mut library = load_liberty_with_timing_data_from_path(Path::new(liberty_proto_path))
         .with_context(|| {
             format!(
                 "failed to load timing-enabled Liberty proto '{}'",
                 liberty_proto_path
             )
         })?;
+    if let Some(cell_name) = matches.get_one::<String>("flip_flop_cell") {
+        restrict_mapping_flip_flop(&mut library, cell_name)?;
+    }
     let primary_input_arrivals =
         parse_named_times(matches, "primary_input_arrival", "--primary-input-arrival")?;
     let primary_output_required = parse_named_times(

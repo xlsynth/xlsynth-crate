@@ -831,6 +831,9 @@ Key flags:
   mapping behavior is unchanged.
 - `--clock-period <TIME>`: optional finite, strictly positive clock period in
   Liberty time units; requires `--sequential-design`.
+- `--flip-flop-cell <CELL>`: restrict register mapping and resizing to one
+  enabled Liberty cell for controlled backend comparisons; requires
+  `--sequential-design`. By default all supported register cells are eligible.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--max-cut-size <N>`: maximum truth-table cut size, from `1` through `6`
   (default: `6`).

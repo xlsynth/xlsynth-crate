@@ -1720,7 +1720,8 @@ fn apply_coordinated_timing_waves<'a>(
             let mut changes = Vec::with_capacity(selected.len());
             for candidate in &selected {
                 let SizingMoveKind::Resize { cell_index } = candidate.kind else {
-                    // Coordinated waves intentionally never change pin assignments.
+                    // Coordinated waves intentionally never change pin
+                    // assignments.
                     continue;
                 };
                 let old_cell_index = timing.instances[candidate.instance_index].cell_index;
@@ -1887,7 +1888,8 @@ fn optimize_timing_moves(
                             break None;
                         };
                         let SizingMoveKind::Resize { cell_index } = kind else {
-                            // Sizing queues contain only physical substitutions.
+                            // Sizing queues contain only physical
+                            // substitutions.
                             continue;
                         };
                         if !visited_sizes.contains(&(queue.instance_index, cell_index)) {

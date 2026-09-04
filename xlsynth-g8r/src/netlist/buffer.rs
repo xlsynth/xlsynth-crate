@@ -184,7 +184,8 @@ fn insert_capacitance_balanced_buffers_for_characterization(
             .any(|sink| matches!(sink.target, SinkTarget::ModuleOutput { .. }))
         {
             let Some((driver_index, connection_index)) = fanout.driver else {
-                // An ideal primary-input/output alias has no internal driver to split.
+                // An ideal primary-input/output alias has no internal driver to
+                // split.
                 continue;
             };
             tree_root = fresh_wire(module, nets, interner, &mut names);

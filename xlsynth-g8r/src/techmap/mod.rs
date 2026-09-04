@@ -18,7 +18,11 @@ mod nf;
 mod sequential;
 mod truth;
 
-pub use sequential::{SequentialTechMapConstraints, map_sequential_choice_aig_to_netlist};
+pub use sequential::{
+    SequentialTechMapConstraints, map_sequential_choice_aig_to_netlist,
+    prepare_fixed_flip_flop_transition, restore_fixed_flip_flop_boundary,
+    restrict_mapping_flip_flop,
+};
 
 /// Timing-oriented covers may safely use a stricter tree than the caller's cap.
 const BALANCED_TIMING_MAX_FANOUT: usize = 8;
