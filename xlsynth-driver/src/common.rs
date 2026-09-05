@@ -584,7 +584,7 @@ use xlsynth_prover::prover::types::ParamDomains;
 pub fn get_enum_domain(
     tcm: &xlsynth::dslx::TypecheckedModule,
     enum_def: &xlsynth::dslx::EnumDef,
-) -> Vec<xlsynth::IrValue> {
+) -> Vec<xlsynth_pir::IrValue> {
     let mut values = Vec::new();
     for mi in 0..enum_def.get_member_count() {
         let m = enum_def.get_member(mi);
@@ -595,6 +595,10 @@ pub fn get_enum_domain(
             .expect("imported type info");
         let interp = owner_type_info.get_const_expr(&expr).expect("constexpr");
         let ir_val = interp.convert_to_ir().expect("convert");
+        let bits =
+            xlsynth_pir::libxls_bridge::bits_from_libxls(&ir_val.to_bits().expect("enum bits"))
+                .expect("canonical enum bits");
+        let ir_val = xlsynth_pir::IrValue::from_bits(&bits);
         values.push(ir_val);
     }
 
@@ -768,7 +772,7 @@ top fn main(x: bits[8] id=1) -> bits[8] {
         assert!(domains.contains_key("x"));
         let values = domains.get("x").unwrap();
         assert_eq!(values.len(), 2);
-        assert!(values.contains(&xlsynth::IrValue::make_ubits(3, 0).unwrap()));
-        assert!(values.contains(&xlsynth::IrValue::make_ubits(3, 5).unwrap()));
+        assert!(values.contains(&xlsynth_pir::IrValue::make_ubits(3, 0).unwrap()));
+        assert!(values.contains(&xlsynth_pir::IrValue::make_ubits(3, 5).unwrap()));
     }
 }

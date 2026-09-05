@@ -5,9 +5,9 @@
 use std::collections::BTreeSet;
 
 use rand::Rng;
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Fn, NodePayload, Type};
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
+use xlsynth_pir::{IrBits, IrValue};
 
 /// Collects small discontinuities from the generated graph, including array
 /// bounds, select case counts, and shift/data widths. No circuit is injected.

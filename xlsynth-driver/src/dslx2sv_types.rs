@@ -10,7 +10,7 @@ use clap::ArgMatches;
 
 use crate::common::get_dslx_paths;
 use crate::toolchain_config::ToolchainConfig;
-use xlsynth::sv_bridge_builder::{SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy};
+use xlsynth_codegen::sv_bridge_builder::{SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy};
 
 /// Converts DSLX type definitions to SV type declarations and writes the result
 /// to stdout.
@@ -37,7 +37,7 @@ pub fn dslx2sv_types(
 
     let mut import_data =
         xlsynth::dslx::ImportData::new(dslx_stdlib_path, additional_search_path_views);
-    let mut builder = xlsynth::sv_bridge_builder::SvBridgeBuilder::with_policies(
+    let mut builder = xlsynth_codegen::sv_bridge_builder::SvBridgeBuilder::with_policies(
         enum_case_naming_policy,
         struct_field_ordering_policy,
     );

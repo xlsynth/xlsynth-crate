@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
@@ -12,6 +11,7 @@ use xlsynth_pir::ir::{
     PackageMember, Param, ParamId, Type,
 };
 use xlsynth_pir::ir_verify;
+use xlsynth_pir::{IrBits, IrValue};
 
 #[derive(Clone, Copy, Debug)]
 enum OperandKind {

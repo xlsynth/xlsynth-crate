@@ -7,7 +7,6 @@
 use libfuzzer_sys::fuzz_target;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use xlsynth::IrValue;
 use xlsynth_g8r::aig_serdes::emit_netlist::{
     NetlistPortStyle, emit_netlist_with_version_and_port_style,
 };
@@ -17,6 +16,7 @@ use xlsynth_g8r::netlist::gv_eval::{GvEvalOptions, load_labeled_netlist_aig_with
 use xlsynth_g8r::verilog_version::VerilogVersion;
 use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosys_context};
 use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_outputs, flatten_value};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir_random::{
     BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions,

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use xlsynth::ir_value::{IrFormatPreference, IrValue};
+use xlsynth::ir_value::{IrFormatPreference, XlsIrValue};
 
 fn bench_to_u64_old(c: &mut Criterion) {
-    let v = IrValue::parse_typed("bits[32]:305419896").unwrap(); // 0x12345678
+    let v = XlsIrValue::parse_typed("bits[32]:305419896").unwrap(); // 0x12345678
     c.bench_function("to_u64_old", |b| {
         b.iter(|| {
             // Old implementation: parse string
@@ -19,7 +19,7 @@ fn bench_to_u64_old(c: &mut Criterion) {
 }
 
 fn bench_to_u64_new(c: &mut Criterion) {
-    let v = IrValue::parse_typed("bits[32]:305419896").unwrap(); // 0x12345678
+    let v = XlsIrValue::parse_typed("bits[32]:305419896").unwrap(); // 0x12345678
     c.bench_function("to_u64_new", |b| {
         b.iter(|| {
             // New implementation: direct bits

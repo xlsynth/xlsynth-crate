@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};

@@ -2772,7 +2772,7 @@ mod tests {
         TokenScanner,
     };
     use string_interner::{StringInterner, backend::StringBackend};
-    use xlsynth::IrBits;
+    use xlsynth_pir::IrBits;
 
     fn input_pin(builder: &mut LibraryBuilder, name: &str) -> Pin {
         Pin {
@@ -4792,7 +4792,7 @@ endmodule
             connections: vec![
                 (
                     interner.get_or_intern("D"),
-                    NetRef::Literal(xlsynth::IrBits::make_ubits(1, 1).unwrap()),
+                    NetRef::Literal(xlsynth_pir::IrBits::make_ubits(1, 1).unwrap()),
                 ),
                 (interner.get_or_intern("Q"), NetRef::Simple(NetIndex(0))),
             ],
@@ -4866,7 +4866,7 @@ endmodule
                 (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
                 (
                     interner.get_or_intern("B"),
-                    NetRef::Literal(xlsynth::IrBits::make_ubits(1, 0).unwrap()),
+                    NetRef::Literal(xlsynth_pir::IrBits::make_ubits(1, 0).unwrap()),
                 ),
                 (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(1))),
             ],

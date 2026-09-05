@@ -8,7 +8,7 @@ use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_fun
 pub use crate::lib_support::{RunResult, TraceMessage};
 use crate::xlsynth_error::XlsynthError;
 use crate::{
-    IrValue,
+    XlsIrValue,
     lib_support::{
         xls_function_get_name, xls_function_get_type, xls_function_to_string,
         xls_function_type_to_string, xls_interpret_function, xls_package_free,
@@ -151,7 +151,7 @@ impl IrPackage {
         self.with_write(|guard| xls_package_get_functions(&self.ptr, guard))
     }
 
-    pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
+    pub fn get_type_for_value(&self, value: &XlsIrValue) -> Result<IrType, XlsynthError> {
         let parent = self.ptr.clone();
         self.with_write(|guard| {
             let ptr = xls_package_get_type_for_value(guard.mut_c_ptr(), value.ptr)?;
@@ -298,7 +298,7 @@ impl IrFunction {
         IrAnalysis::create_from_package_ptr_with_level(self.parent.clone(), level)
     }
 
-    pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
+    pub fn interpret(&self, args: &[XlsIrValue]) -> Result<XlsIrValue, XlsynthError> {
         let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
         xls_interpret_function(&package_read_guard, self.ptr, args)
     }
@@ -365,7 +365,7 @@ impl IrFunctionJit {
         })
     }
 
-    pub fn run(&self, args: &[IrValue]) -> Result<RunResult, XlsynthError> {
+    pub fn run(&self, args: &[XlsIrValue]) -> Result<RunResult, XlsynthError> {
         let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
         xls_function_jit_run(&package_read_guard, self.ptr, args)
     }
@@ -393,7 +393,7 @@ mod tests {
         let f = package.get_function("f").expect("should find function");
         assert_eq!(f.get_name(), "f");
         let result = f.interpret(&[]).expect("interpret success");
-        assert_eq!(result, IrValue::parse_typed("bits[32]:42").unwrap());
+        assert_eq!(result, XlsIrValue::parse_typed("bits[32]:42").unwrap());
     }
 
     #[test]
@@ -412,9 +412,9 @@ mod tests {
         let f_type = f.get_type().expect("get type success");
         assert_eq!(f_type.to_string(), "(bits[32]) -> bits[32]".to_string());
 
-        let ft = IrValue::parse_typed("bits[32]:42").unwrap();
+        let ft = XlsIrValue::parse_typed("bits[32]:42").unwrap();
         let result = f.interpret(&[ft]).expect("interpret success");
-        let want = IrValue::parse_typed("bits[32]:43").unwrap();
+        let want = XlsIrValue::parse_typed("bits[32]:43").unwrap();
         assert_eq!(result, want);
 
         assert_eq!(
@@ -537,7 +537,7 @@ fn f(x: bits[8] id=1) -> bits[8] {
         // verifier should catch this mismatch.
         let mut builder = FnBuilder::new(&mut package, "bad", false);
         let x = builder.param("x", &u32);
-        let wide_literal = IrValue::parse_typed("bits[64]:1").unwrap();
+        let wide_literal = XlsIrValue::parse_typed("bits[64]:1").unwrap();
         let literal = builder.literal(&wide_literal, None);
         let sum = builder.add(&x, &literal, None);
 

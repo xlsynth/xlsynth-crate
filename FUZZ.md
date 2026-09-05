@@ -17,7 +17,7 @@ own manifest and lockfile, and individual `cargo fuzz` commands are unchanged.
 
 `--features` selects common features (default: `with-bitwuzla-system`), forwarded
 to each fuzz package that declares them. A package's prebuild and subsequent runs
-use identical flags. Fuzz manifests align `xlsynth/clap` and solver forwarding
+use identical flags. Fuzz manifests align solver forwarding
 where applicable, but different transitive feature sets may still require
 separate compiled variants. Unknown features are errors. Targets whose
 `required-features` are not enabled are reported as excluded, as are the existing
@@ -453,13 +453,13 @@ Primarily tests:
 ### xlsynth-vastly/fuzz/fuzz_targets/xls_ir_codegen_semantics.rs
 
 Generates XLS IR functions and checks that code generated from those functions
-behaves consistently across `xlsynth` interpretation and `xlsynth-vastly`
+behaves consistently across native PIR interpretation and `xlsynth-vastly`
 simulation paths (including combo and pipelined forms) when supported by the
 sample/tooling.
 
 Primarily tests:
 
-- End-to-end semantic equivalence between XLS IR interpretation and generated
+- End-to-end semantic equivalence between native PIR interpretation and XLS-generated
   Verilog/SystemVerilog simulation
 - Codegen/simulation consistency across combo and pipelined lowering paths
   under random typed inputs

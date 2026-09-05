@@ -720,7 +720,7 @@ jobs:
       - name: Run macOS Clippy checks
         run: |
           cargo clippy --offline -p xlsynth-sys --no-deps
-          cargo clippy --offline -p xlsynth -p xlsynth-test-helpers --all-targets --features clap --no-deps
+          cargo clippy --offline -p xlsynth -p xlsynth-test-helpers --all-targets --no-deps
 
       - name: Test crate
         env:

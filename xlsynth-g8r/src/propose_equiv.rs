@@ -4,7 +4,7 @@
 
 use crate::aig::{AigNode, AigRef, GateFn};
 use crate::aig_sim::gate_simd::{self, Vec256};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 use xlsynth_pir::random_inputs::generate_flat_bitvector_argument_sets_with_rng;
 
 use rand::Rng;
@@ -162,7 +162,7 @@ fn set_lane_inputs(
     let mut bit_cursor = 0;
     for (input_value, &input_width) in inputs.iter().zip(input_widths.iter()) {
         assert_eq!(input_value.get_bit_count(), input_width);
-        let bytes = input_value.to_le_bytes().unwrap();
+        let bytes = input_value.to_le_bytes();
         for bit_idx in 0..input_width {
             if byte_bit(&bytes, bit_idx) {
                 words_per_input_bit[bit_cursor + bit_idx][limb] |= bit_mask;

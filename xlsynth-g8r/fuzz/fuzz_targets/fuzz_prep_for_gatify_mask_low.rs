@@ -3,8 +3,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use xlsynth::IrValue;
 use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;

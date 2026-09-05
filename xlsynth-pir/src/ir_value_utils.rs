@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ir;
+use crate::{IrBits, IrValue};
 use bitvec::vec::BitVec;
-use xlsynth::{IrValue, ir_value::IrBits};
 
 pub fn ir_bits_from_bitvec_lsb_is_0(bv: &BitVec) -> IrBits {
     let bits: Vec<bool> = bv.iter().map(|b| *b).collect();
@@ -34,7 +34,7 @@ pub fn ir_value_from_bits_with_type(bits: &IrBits, ty: &ir::Type) -> IrValue {
                 let elem_value = ir_value_from_bits_with_type(&elem_bits, &array_ty.element_type);
                 elements.push(elem_value);
             }
-            IrValue::make_array(&elements).unwrap()
+            IrValue::make_array_typed((*array_ty.element_type).clone(), &elements).unwrap()
         }
         ir::Type::Tuple(types) => {
             let mut elements = Vec::with_capacity(types.len());
@@ -52,7 +52,7 @@ pub fn ir_value_from_bits_with_type(bits: &IrBits, ty: &ir::Type) -> IrValue {
             }
             IrValue::make_tuple(&elements)
         }
-        ir::Type::Token => IrValue::make_tuple(&[]), // Tokens are zero bits
+        ir::Type::Token => IrValue::make_token(),
     }
 }
 
@@ -71,7 +71,8 @@ pub fn zero_ir_value_for_type(ty: &ir::Type) -> IrValue {
             let elements: Vec<IrValue> = (0..array_ty.element_count)
                 .map(|_| zero_ir_value_for_type(&array_ty.element_type))
                 .collect();
-            IrValue::make_array(&elements).expect("zero array elements must share the same type")
+            IrValue::make_array_typed((*array_ty.element_type).clone(), &elements)
+                .expect("zero array elements must share the same type")
         }
     }
 }
@@ -157,7 +158,7 @@ pub fn deep_or_ir_values_for_type(ty: &ir::Type, lhs: &IrValue, rhs: &IrValue) -
                     deep_or_ir_values_for_type(&array_ty.element_type, &lhs_elem, &rhs_elem)
                 })
                 .collect();
-            IrValue::make_array(&elements)
+            IrValue::make_array_typed((*array_ty.element_type).clone(), &elements)
                 .expect("one_hot_sel array deep-or elements must share the same type")
         }
     }
@@ -216,7 +217,7 @@ pub fn ir_bits_from_value_with_type(value: &IrValue, ty: &ir::Type) -> IrBits {
             bits
         }
         ir::Type::Array(array_ty) => {
-            let elements = value.get_elements().expect("array value must be array");
+            let elements = value.as_elements().expect("array value must be array");
             assert_eq!(
                 elements.len(),
                 array_ty.element_count,
@@ -234,7 +235,7 @@ pub fn ir_bits_from_value_with_type(value: &IrValue, ty: &ir::Type) -> IrBits {
             IrBits::from_lsb_is_0(&out)
         }
         ir::Type::Tuple(types) => {
-            let elements = value.get_elements().expect("tuple value must be tuple");
+            let elements = value.as_elements().expect("tuple value must be tuple");
             assert_eq!(
                 elements.len(),
                 types.len(),
@@ -283,7 +284,7 @@ pub fn flatten_ir_value_to_lsb0_bits_for_type(
             Ok(())
         }
         ir::Type::Tuple(elem_types) => {
-            let elems = value.get_elements().map_err(|e| e.to_string())?;
+            let elems = value.as_elements().map_err(|e| e.to_string())?;
             if elems.len() != elem_types.len() {
                 return Err(format!(
                     "tuple arity mismatch: value has {} elems but type expects {}",
@@ -300,16 +301,16 @@ pub fn flatten_ir_value_to_lsb0_bits_for_type(
             element_type,
             element_count,
         }) => {
-            let got_count = value.get_element_count().map_err(|e| e.to_string())?;
+            let elements = value.as_elements().map_err(|e| e.to_string())?;
+            let got_count = elements.len();
             if got_count != *element_count {
                 return Err(format!(
                     "array length mismatch: value has {} elems but type expects {}",
                     got_count, element_count
                 ));
             }
-            for i in 0..*element_count {
-                let elem = value.get_element(i).map_err(|e| e.to_string())?;
-                flatten_ir_value_to_lsb0_bits_for_type(&elem, element_type, out)?;
+            for elem in elements {
+                flatten_ir_value_to_lsb0_bits_for_type(elem, element_type, out)?;
             }
             Ok(())
         }
@@ -370,7 +371,8 @@ fn ir_value_from_lsb0_bits_with_layout_at(
                 offset = next_offset;
                 elems.push(value);
             }
-            let array = IrValue::make_array(&elems).map_err(|e| e.to_string())?;
+            let array = IrValue::make_array_typed((**element_type).clone(), &elems)
+                .map_err(|e| e.to_string())?;
             Ok((array, offset))
         }
     }
@@ -379,8 +381,32 @@ fn ir_value_from_lsb0_bits_with_layout_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IrBits;
     use bitvec::vec::BitVec;
-    use xlsynth::IrBits;
+    use rand::SeedableRng;
+
+    #[test]
+    fn zero_sized_aggregate_helpers_preserve_types() {
+        let ty = ir::Type::Tuple(vec![
+            Box::new(ir::Type::Token),
+            Box::new(ir::Type::new_array(ir::Type::Bits(8), 0)),
+            Box::new(ir::Type::Bits(0)),
+        ]);
+        let zero = zero_ir_value_for_type(&ty);
+        assert_eq!(zero.type_(), ty);
+        assert_eq!(ir_value_from_bits_with_type(&IrBits::zero(0), &ty), zero);
+        assert_eq!(ir_value_from_lsb0_bits_with_layout(&ty, &[]).unwrap(), zero);
+        assert_eq!(deep_or_ir_values_for_type(&ty, &zero, &zero), zero);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        assert_eq!(
+            crate::random_inputs::generate_uniform_value_with_rng(&mut rng, &ty),
+            zero
+        );
+        assert_eq!(
+            crate::random_inputs::generate_biased_value_with_rng(&mut rng, &ty),
+            zero
+        );
+    }
 
     #[test]
     fn test_ir_bits_from_lsb_is_0() {

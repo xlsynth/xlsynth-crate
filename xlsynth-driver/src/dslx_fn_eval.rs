@@ -25,7 +25,7 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
             std::process::exit(1);
         }
     };
-    let ir_values = match xlsynth::parse_ir_values(&irvals_text) {
+    let ir_values = match xlsynth_pir::parse_ir_values(&irvals_text) {
         Ok(values) => values,
         Err(e) => {
             eprintln!("Failed to parse --input_ir_path: {}", e);

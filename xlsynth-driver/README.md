@@ -14,7 +14,7 @@ cargo run -p xlsynth-driver -- --toolchain=$HOME/xlsynth-toolchain.toml \
     dslx2pipeline ../sample-usage/src/sample.x add1 \
     --delay_model=asap7 --pipeline_stages=2
 cargo run -p xlsynth-driver -- dslx2sv-types \
-    --dslx_input_file=../tests/structure_zoo.x \
+    --dslx_input_file=../xlsynth-codegen/tests/structure_zoo.x \
     --sv_enum_case_naming_policy=unqualified \
     --sv_struct_field_ordering=reversed
 ```

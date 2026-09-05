@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrBits;
 use xlsynth_g8r::aig::{
     AigBitVector, ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId,
     TransitionOutputId,
@@ -12,6 +11,7 @@ use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::test_utils::{
     interesting_ir_roundtrip_cases, load_interesting_ir_roundtrip_case, structurally_equivalent,
 };
+use xlsynth_pir::IrBits;
 
 fn make_pipeline_design() -> SequentialGateFn {
     let mut builder = GateBuilder::new(

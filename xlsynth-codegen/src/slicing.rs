@@ -2,8 +2,8 @@
 
 //! Width-specialized dynamic slicing with explicit range and sizing boundaries.
 
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Fn, Node, NodePayload, NodeRef, Type};
+use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::Expr;
 
 use crate::BlockCodegenError;

@@ -28,7 +28,7 @@ fn test_ir_interpret_array_values() {
     let make_u32x2 = ir.get_function(&make_u32x2_mangled).unwrap();
 
     let array = make_u32x2
-        .interpret(&[IrValue::u32(1), IrValue::u32(2)])
+        .interpret(&[XlsIrValue::u32(1), XlsIrValue::u32(2)])
         .unwrap();
     assert_eq!(array.to_string(), "[bits[32]:1, bits[32]:2]");
 

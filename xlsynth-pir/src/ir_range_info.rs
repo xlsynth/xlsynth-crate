@@ -3,9 +3,23 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use xlsynth::{Interval, IrAnalysis, IrBits, KnownBits};
+use xlsynth::IrAnalysis;
 
+use crate::IrBits;
 use crate::ir;
+use crate::libxls_bridge::bits_from_libxls;
+
+/// Native known-bit masks copied from the XLS analysis boundary.
+pub struct KnownBits {
+    pub mask: IrBits,
+    pub value: IrBits,
+}
+
+/// An inclusive unsigned interval stored in native bits.
+pub struct Interval {
+    pub lo: IrBits,
+    pub hi: IrBits,
+}
 
 pub struct NodeRangeInfo {
     pub known_bits: Option<KnownBits>,
@@ -161,8 +175,11 @@ impl IrRangeInfo {
 
             let known_bits = analysis
                 .get_known_bits_for_node_id(node_id_i64)
-                .map(Some)
                 .map_err(|e| format!("known-bits query failed for node id={}: {}", text_id, e))?;
+            let known_bits = Some(KnownBits {
+                mask: bits_from_libxls(&known_bits.mask).map_err(|e| e.to_string())?,
+                value: bits_from_libxls(&known_bits.value).map_err(|e| e.to_string())?,
+            });
 
             let interval_set = analysis
                 .get_intervals_for_node_id(node_id_i64)
@@ -170,6 +187,16 @@ impl IrRangeInfo {
             let intervals = interval_set.intervals().map_err(|e| {
                 format!("interval enumeration failed for node id={}: {}", text_id, e)
             })?;
+            let intervals = intervals
+                .iter()
+                .map(|interval| {
+                    Ok(Interval {
+                        lo: bits_from_libxls(&interval.lo)?,
+                        hi: bits_from_libxls(&interval.hi)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::ValueError>>()
+                .map_err(|e| e.to_string())?;
 
             let (unsigned_min, unsigned_max) = unsigned_bounds_from_intervals(&intervals);
 

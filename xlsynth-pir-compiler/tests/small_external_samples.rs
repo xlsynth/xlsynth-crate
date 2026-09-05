@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{PirFunctionCompiler, ScalarLayout};

@@ -3,13 +3,13 @@
 use std::{io::Write, path::Path};
 
 use clap::ArgMatches;
-use xlsynth::{IrValue, parse_ir_values_file};
 use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, load_labeled_netlist_aig_with_liberty,
     load_labeled_sequential_netlist_aig_with_liberty,
 };
 use xlsynth_g8r::netlist::io::load_liberty_from_path;
 use xlsynth_g8r::netlist::power::{GvDynamicPowerOptions, GvSequentialDynamicPowerOptions};
+use xlsynth_pir::{IrValue, parse_ir_values_file};
 
 use crate::sequential_eval_io::{
     output_value, read_external_inputs, resolve_initial_state, write_final_state,

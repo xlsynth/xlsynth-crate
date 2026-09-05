@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::IrBits;
+use crate::XlsIrBits;
 use crate::ir_package::IrPackagePtr;
 use crate::lib_support::{
     xls_interval_set_get_interval_bounds, xls_ir_analysis_at_least_one_bit_true,
@@ -32,13 +32,13 @@ impl IrAnalysisLevel {
 }
 
 pub struct KnownBits {
-    pub mask: IrBits,
-    pub value: IrBits,
+    pub mask: XlsIrBits,
+    pub value: XlsIrBits,
 }
 
 pub struct Interval {
-    pub lo: IrBits,
-    pub hi: IrBits,
+    pub lo: XlsIrBits,
+    pub hi: XlsIrBits,
 }
 
 pub struct IntervalSet {

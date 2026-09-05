@@ -14,7 +14,6 @@ use std::thread::JoinHandle;
 use blake3::Hasher;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::corners::{
     AddCornerTag, ArrayIndexCornerTag, CompareDistanceCornerTag, CornerEvent, CornerKind,
     CornerTag, DynamicBitSliceCornerTag, FailureEvent, NegCornerTag, ShiftCornerTag, ShraCornerTag,
@@ -28,6 +27,7 @@ use xlsynth_pir::ir_eval::{
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
 use xlsynth_pir::random_inputs::{generate_biased_irbits_with_rng, generate_corner_irbits};
+use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult};
 use xlsynth_prover::prover::{SolverChoice, SolverLimits};
@@ -1029,15 +1029,18 @@ impl AutocovEngine {
         self.args_bit_count
     }
 
+    /// Returns the native tuple type expected by corpus samples.
+    pub fn args_tuple_type(&self) -> &ir::Type {
+        &self.args_tuple_type
+    }
+
+    /// Validates a corpus argument tuple before flattening it for evaluation.
     pub fn bits_from_arg_tuple(&self, tuple_value: &IrValue) -> Result<IrBits, String> {
-        let elems = tuple_value
-            .get_elements()
-            .map_err(|e| format!("corpus value is not a tuple: {}", e))?;
-        if elems.len() != self.f.params.len() {
+        let observed_type = tuple_value.type_();
+        if observed_type != self.args_tuple_type {
             return Err(format!(
-                "corpus tuple has {} elements but function has {} params",
-                elems.len(),
-                self.f.params.len()
+                "corpus value type mismatch: expected {}, got {}",
+                self.args_tuple_type, observed_type
             ));
         }
         Ok(ir_bits_from_value_with_type(
@@ -2171,7 +2174,7 @@ impl AutocovEngine {
         let mut h = Hasher::new();
         h.update(b"xlsynth-autocov:candidate-bits");
         h.update(&(bits.get_bit_count() as u64).to_le_bytes());
-        h.update(&bits.to_le_bytes().unwrap());
+        h.update(&bits.to_le_bytes());
         *h.finalize().as_bytes()
     }
 
@@ -2534,7 +2537,7 @@ pub fn generate_ir_fn_corpus_from_ir_path_with_replay(
 mod tests {
     use super::*;
     use rand::SeedableRng;
-    use xlsynth::IrValue;
+    use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
     use xlsynth_pir::ir_parser::Parser;
     use xlsynth_pir::ir_random::{
@@ -2609,7 +2612,14 @@ mod tests {
             let args = tuple_value
                 .get_elements()
                 .expect("corpus samples should be typed tuples");
-            let xls_got = xls_f.interpret(&args).expect("xls interpret");
+            let xls_args = args
+                .iter()
+                .map(xlsynth_pir::libxls_bridge::value_to_libxls)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let xls_got = xls_f.interpret(&xls_args).expect("xls interpret");
+            let xls_got =
+                xlsynth_pir::libxls_bridge::value_from_libxls(&xls_got, &pir_f.ret_ty).unwrap();
             let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
                 FnEvalResult::Success(success) => success.value,
                 other => panic!("expected pir eval success, got {:?}", other),

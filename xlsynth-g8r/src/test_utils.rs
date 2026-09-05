@@ -7,9 +7,10 @@ use crate::gatify::ir2gate;
 use crate::ir2gate_utils::gatify_add_ripple_carry;
 use half::bf16;
 use std::path::Path;
-use xlsynth::{IrBits, IrFunction, IrPackage, IrValue, mangle_dslx_name};
+use xlsynth::mangle_dslx_name;
 use xlsynth_pir::ir::{self, Package as CrateIrPackage};
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::{IrBits, IrValue};
 
 // BF16 Constants
 pub const BF16_EXPONENT_BITS: usize = 8;
@@ -44,8 +45,6 @@ pub const NODE_TOLERANCE: isize = 5;
 pub const DEPTH_TOLERANCE: isize = 2;
 
 pub struct LoadedSample {
-    pub ir_package: IrPackage,
-    pub ir_fn: IrFunction,
     pub g8r_pkg: CrateIrPackage,
     pub gate_fn: GateFn,
     pub mangled_fn_name: String,
@@ -431,12 +430,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     // Convert the internal IR function to a GateFn
     let gate_fn = gatify_for_test_ir_fn(&g8r_ir_fn, opt);
 
-    // Get the final IrFunction from the optimized package
-    let ir_fn = opt_ir.get_function(&mangled_name).unwrap();
-
     LoadedSample {
-        ir_package: opt_ir,
-        ir_fn,
         g8r_pkg: g8r_ir_package,
         gate_fn,
         mangled_fn_name: mangled_name,
@@ -467,12 +461,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
     // Convert the internal IR function to a GateFn
     let gate_fn = gatify_for_test_ir_fn(&g8r_ir_fn, opt);
 
-    // Get the final IrFunction from the optimized package
-    let ir_fn = opt_ir.get_function(&mangled_name).unwrap();
-
     LoadedSample {
-        ir_package: opt_ir,
-        ir_fn,
         g8r_pkg: g8r_ir_package,
         gate_fn,
         mangled_fn_name: mangled_name,

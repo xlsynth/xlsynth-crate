@@ -56,9 +56,9 @@ impl PirTransform for SubSignbitToUnsignedCompareTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsynth::{IrBits, IrValue};
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser;
+    use xlsynth_pir::{IrBits, IrValue};
 
     fn eval_u1(f: &IrFn, x: u64, y: u64, width: usize) -> bool {
         let args = [

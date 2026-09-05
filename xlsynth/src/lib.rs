@@ -7,9 +7,7 @@ pub mod ir_analysis;
 pub mod ir_builder;
 pub mod ir_package;
 pub mod ir_value;
-pub mod ir_values;
 mod lib_support;
-pub mod sv_bridge_builder;
 pub mod vast_helpers;
 pub mod vast_helpers_options;
 pub mod xlsynth_error;
@@ -18,7 +16,7 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 
 use ir_package::ScheduleAndCodegenResult;
-pub use ir_value::{IrBits, IrSBits, IrUBits};
+pub use ir_value::XlsIrBits;
 use lib_support::xls_schedule_and_codegen_package;
 use lib_support::{
     c_str_to_rust, c_str_to_rust_no_dealloc, xls_mangle_dslx_name, xls_mangle_dslx_name_full,
@@ -34,11 +32,7 @@ pub use ir_package::IrPackage;
 pub use ir_package::IrType;
 pub use ir_package::RunResult;
 pub use ir_package::TraceMessage;
-pub use ir_value::IrValue;
-pub use ir_values::{
-    IrValuesFile, IrValuesFileKind, NamedIrValue, NamedIrValueSet, parse_ir_values,
-    parse_ir_values_file,
-};
+pub use ir_value::XlsIrValue;
 pub use xlsynth_error::XlsynthError;
 use xlsynth_sys::CIrValue;
 
@@ -216,7 +210,7 @@ pub fn convert_dslx_to_ir_text(
     }
 }
 
-pub fn xls_parse_typed_value(s: &str) -> Result<IrValue, XlsynthError> {
+pub fn xls_parse_typed_value(s: &str) -> Result<XlsIrValue, XlsynthError> {
     unsafe {
         let c_str = CString::new(s).unwrap();
         let mut ir_value_out: *mut CIrValue = std::ptr::null_mut();
@@ -224,7 +218,7 @@ pub fn xls_parse_typed_value(s: &str) -> Result<IrValue, XlsynthError> {
         let success =
             xlsynth_sys::xls_parse_typed_value(c_str.as_ptr(), &mut error_out, &mut ir_value_out);
         if success {
-            Ok(IrValue { ptr: ir_value_out })
+            Ok(XlsIrValue { ptr: ir_value_out })
         } else {
             let error_out_str: String = c_str_to_rust(error_out);
             Err(XlsynthError(error_out_str))
@@ -469,7 +463,7 @@ fn __test_mod__f(x: bits[32] id=1) -> bits[32] {
 
     #[test]
     fn test_parse_typed_value_bits32_42() {
-        let v: IrValue = xls_parse_typed_value("bits[32]:42").expect("should parse ok");
+        let v: XlsIrValue = xls_parse_typed_value("bits[32]:42").expect("should parse ok");
         assert_eq!(v.to_string(), "bits[32]:42");
     }
 

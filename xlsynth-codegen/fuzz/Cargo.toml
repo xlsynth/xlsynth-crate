@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3.20"
 # Match the other fuzz packages' xlsynth features for shared build reuse.
-xlsynth = { path = "../../xlsynth", version = "0.69.0", features = ["clap"] }
+xlsynth = { path = "../../xlsynth", version = "0.69.0" }
 xlsynth-codegen = { path = "..", version = "0.69.0" }
 xlsynth-g8r = { path = "../../xlsynth-g8r", version = "0.69.0" }
 xlsynth-g8r-fuzz = { path = "../../xlsynth-g8r/fuzz" }

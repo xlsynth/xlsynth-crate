@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrBits;
 use xlsynth_g8r::aig::{
     ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
     add_input_registers, add_output_registers,
@@ -8,6 +7,43 @@ use xlsynth_g8r::aig::{
 use xlsynth_g8r::aig_serdes::g8r::{decode_g8r_binary, emit_g8r, encode_g8r_binary, parse_g8r};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::test_utils::structurally_equivalent;
+use xlsynth_pir::IrBits;
+
+#[test]
+fn native_wide_initial_values_roundtrip_through_text_and_binary() {
+    for width in [1, 63, 64, 65, 127, 128, 129, 257] {
+        let mut builder = GateBuilder::new("wide".to_string(), GateBuilderOptions::opt());
+        let state = builder.add_input("state".to_string(), width);
+        builder.add_output("next".to_string(), state);
+        let initial = IrBits::from_lsb_is_0(
+            &(0..width)
+                .map(|bit| bit % 3 == 0 || bit == width - 1)
+                .collect::<Vec<_>>(),
+        );
+        let design = SequentialGateFn::new(
+            "wide".to_string(),
+            builder.build(),
+            vec![],
+            vec![],
+            Some(ClockPort {
+                name: "clk".to_string(),
+            }),
+            vec![RegisterBinding {
+                name: "reg".to_string(),
+                q: TransitionInputId::new(0),
+                d: TransitionOutputId::new(0),
+                initial_value: Some(initial),
+            }],
+        )
+        .unwrap();
+        for decoded in [
+            parse_g8r(&emit_g8r(&design)).unwrap(),
+            decode_g8r_binary(&encode_g8r_binary(&design).unwrap()).unwrap(),
+        ] {
+            assert_eq!(decoded.registers, design.registers, "width={width}");
+        }
+    }
+}
 
 #[test]
 fn zero_register_sequential_gate_fn_may_omit_clock() {

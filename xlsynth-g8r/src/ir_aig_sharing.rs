@@ -18,8 +18,8 @@ use std::ops::Not;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rand_xoshiro::rand_core::SeedableRng;
 
-use xlsynth::IrBits;
-use xlsynth::IrValue;
+use xlsynth_pir::IrBits;
+use xlsynth_pir::IrValue;
 
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval;
@@ -938,7 +938,10 @@ fn unflatten_ir_value_from_lsb0_bits_at(
             }
             let slice = &flat_bits[offset..offset + w];
             offset += w;
-            Ok((IrValue::from_bits(&IrBits::from_lsb_is_0(slice)), offset))
+            Ok((
+                IrValue::from_bits(&xlsynth_pir::IrBits::from_lsb_is_0(slice)),
+                offset,
+            ))
         }
         ir::Type::Tuple(types) => {
             // Flattening places the *last* tuple element at the

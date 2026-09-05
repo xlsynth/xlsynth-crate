@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
 use bitvec::vec::BitVec;
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 use xlsynth_pir::ir_value_utils::ir_bits_from_bitvec_lsb_is_0;
 
 use crate::aig::topo::post_order_operands;
@@ -743,7 +743,7 @@ mod tests {
     use super::{AigNode, PirNodeIds};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use std::collections::HashMap;
-    use xlsynth::IrBits;
+    use xlsynth_pir::IrBits;
 
     #[test]
     fn test_pir_node_ids_remain_sorted_with_fast_and_fallback_insertions() {

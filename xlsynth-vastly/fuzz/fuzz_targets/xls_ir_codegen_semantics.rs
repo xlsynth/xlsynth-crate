@@ -13,10 +13,10 @@ use libfuzzer_sys::fuzz_target;
 use vastly_fuzz::codegen_semantics::make_vastly_input_map;
 use vastly_fuzz::codegen_semantics::pack_ir_value_to_value4;
 use vastly_fuzz::codegen_semantics::packed_signature;
-use vastly_fuzz::codegen_semantics::parse_pir_top_fn;
-use xlsynth::IrValue;
 use xlsynth::XlsynthError;
 use xlsynth_autocov::{IrFnAutocovGenerateConfig, generate_ir_fn_corpus_from_ir_text_with_replay};
+use xlsynth_pir::IrValue;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
 };
@@ -39,17 +39,7 @@ fuzz_target!(|data: &[u8]| {
     )
     .expect("fixed codegen fuzz options should construct valid PIR");
     let pir_package = generated.into_top_package("fuzz_pkg");
-    let fname = pir_package
-        .get_top_fn()
-        .expect("generated package should have a top function")
-        .name
-        .clone();
     let ir_text = pir_package.to_string();
-    let package = xlsynth::IrPackage::parse_ir(&ir_text, None)
-        .expect("PIR-emitted standard IR should parse in libxls");
-    let f = package
-        .get_function(&fname)
-        .expect("libxls package should contain the generated top function");
     set_panic_context_ir(&ir_text);
     // Skip samples that commonly lower via assertion machinery in non-SV
     // codegen or that the optional autocov engine cannot currently evaluate.
@@ -58,18 +48,16 @@ fuzz_target!(|data: &[u8]| {
     if has_sv_only_codegen_noise(&ir_text) {
         return;
     }
-    let pir_top = match parse_pir_top_fn(&ir_text, &fname) {
-        Ok(v) => v,
-        // Parser mismatch on generated text is tracked elsewhere; skip for this semantics target.
-        Err(_) => return,
-    };
-    let sig = match packed_signature(&pir_top) {
+    let pir_top = pir_package
+        .get_top_fn()
+        .expect("generated top function should exist");
+    let sig = match packed_signature(pir_top) {
         Some(sig) => sig,
         // Non-packable signatures are outside this target's current simulation harness.
         None => return,
     };
-    let base_args = generate_biased_arguments_from_seed(&pir_top, stable_hash_bytes(data));
-    let stimuli = match generate_stimuli(base_args, &pir_top, &ir_text, data) {
+    let base_args = generate_biased_arguments_from_seed(pir_top, stable_hash_bytes(data));
+    let stimuli = match generate_stimuli(base_args, pir_top, &ir_text, data) {
         Ok(v) => v,
         Err(e) => {
             unsupported(
@@ -135,14 +123,13 @@ fuzz_target!(|data: &[u8]| {
                 return;
             }
         };
-        let ir_result = match f.interpret(&args) {
-            Ok(v) => v,
-            Err(_) => return,
+        let ir_result = match eval_fn_in_package(&pir_package, pir_top, &args) {
+            FnEvalResult::Success(success) => success.value,
+            // Contract-violating inputs have no expected HDL result to compare.
+            FnEvalResult::Failure(_) => return,
         };
-        let want_bits = match pack_ir_value_to_value4(&sig.ret_ty, &ir_result) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+        let want_bits = pack_ir_value_to_value4(&sig.ret_ty, &ir_result)
+            .expect("PIR result should match the packable return signature");
         if want_bits.width != sig.ret_width {
             maybe_enable_backtrace_on_failure();
             let mut msg = format!(

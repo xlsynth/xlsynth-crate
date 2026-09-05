@@ -154,7 +154,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 fn compute_cost(
     top_fn: &xlsynth_pir::ir::Fn,
     objective: Objective,
-    toggle_stimulus: Option<&[Vec<xlsynth::IrBits>]>,
+    toggle_stimulus: Option<&[Vec<xlsynth_pir::IrBits>]>,
     weighted_switching_options: &xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions,
     cli: &xlsynth_mcmc_pir::driver_cli::PirMcmcCliArgs,
     g8r_evaluation_mode: &G8rEvaluationMode,

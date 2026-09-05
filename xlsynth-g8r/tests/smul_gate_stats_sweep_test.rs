@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrBits;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
+use xlsynth_pir::IrBits;
 use xlsynth_pir::ir_parser;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

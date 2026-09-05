@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use std::fmt::Write as FmtWrite;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 fn resolve_symbol(
     interner: &StringInterner<StringBackend<SymbolU32>>,

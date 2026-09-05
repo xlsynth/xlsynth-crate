@@ -2,7 +2,7 @@
 
 use xlsynth::FnBuilder;
 use xlsynth::IrPackage;
-use xlsynth::IrValue;
+use xlsynth::XlsIrValue;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::test_utils::Opt;
@@ -85,26 +85,26 @@ fn build_8b_cmp_ir_text(kind: ir::Binop, rhs_spec: RhsSpec) -> String {
     let rhs = match rhs_spec {
         RhsSpec::Param => fb.param("rhs", &ty_u8),
         RhsSpec::Zero => {
-            let v = IrValue::make_ubits(8, 0).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(8, 0).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
         RhsSpec::One => {
-            let v = IrValue::make_ubits(8, 1).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(8, 1).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
         RhsSpec::AllOnes => {
-            let v = IrValue::make_ubits(8, 0xff).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(8, 0xff).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
         RhsSpec::LowHalfOnes => {
             // High half bits are zero; low half bits are ones: 0b0000_1111 for
             // u8.
-            let v = IrValue::make_ubits(8, 0x0f).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(8, 0x0f).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
         RhsSpec::Pow2 { bit_index } => {
             assert!(bit_index < 8, "bit_index must be < 8 for 8-bit pow2");
-            let v = IrValue::make_ubits(8, 1u64 << bit_index).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(8, 1u64 << bit_index).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
         RhsSpec::Pow2Minus1 { bit_index } => {
@@ -113,7 +113,7 @@ fn build_8b_cmp_ir_text(kind: ir::Binop, rhs_spec: RhsSpec) -> String {
                 "bit_index must be in 1..=8 for 8-bit pow2minus1"
             );
             let value = (1u64 << bit_index) - 1;
-            let v = IrValue::make_ubits(8, value).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(8, value).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
     };
@@ -147,7 +147,7 @@ fn build_64b_slt_rhs_u32_max_ir_text() -> String {
 
     // 0x0000_0000_FFFF_FFFF, i.e. 2^32-1 (non-negative as a signed 64-bit
     // value).
-    let v = IrValue::make_ubits(64, 0xffff_ffff).expect("make_ubits");
+    let v = XlsIrValue::make_ubits(64, 0xffff_ffff).expect("make_ubits");
     let rhs = fb.literal(&v, Some("rhs"));
 
     let out = fb.slt(&lhs, &rhs, Some("cmp"));

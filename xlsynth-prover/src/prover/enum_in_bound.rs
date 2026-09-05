@@ -4,7 +4,7 @@ use super::types::{BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAsserti
 use crate::prover::Prover;
 
 use std::collections::HashMap;
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 
 use xlsynth_pir::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, ParamId, Type};
 use xlsynth_pir::ir_utils::{

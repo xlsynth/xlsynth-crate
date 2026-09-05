@@ -4,7 +4,7 @@
 //! designs.
 
 use serde::Serialize;
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 use crate::aig::{AigBitVector, SequentialGateFn};
 use crate::aig_sim::count_toggles::{NodeToggleStats, count_toggle_activity_with_all_node_counts};

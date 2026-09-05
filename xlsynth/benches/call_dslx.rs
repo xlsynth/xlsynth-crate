@@ -3,7 +3,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use lazy_static::lazy_static;
 
-use xlsynth::IrValue;
+use xlsynth::XlsIrValue;
 
 const DSLX_CODE: &str = "import float32;
 
@@ -32,12 +32,12 @@ lazy_static! {
 // each trip.
 fn bench_call_dslx(c: &mut Criterion) {
     c.bench_function("call_dslx", |b| {
-        let s = IrValue::make_ubits(1, 0).unwrap();
-        let bexp = IrValue::make_ubits(8, 127).unwrap();
-        let frac = IrValue::make_ubits(23, 0).unwrap();
+        let s = XlsIrValue::make_ubits(1, 0).unwrap();
+        let bexp = XlsIrValue::make_ubits(8, 127).unwrap();
+        let frac = XlsIrValue::make_ubits(23, 0).unwrap();
         let args = vec![s, bexp, frac];
         b.iter(|| {
-            let result: IrValue = MAKE_F32.interpret(&args).unwrap();
+            let result: XlsIrValue = MAKE_F32.interpret(&args).unwrap();
             black_box(result);
         });
     });

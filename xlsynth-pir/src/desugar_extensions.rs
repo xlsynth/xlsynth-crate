@@ -21,7 +21,7 @@ use crate::ir::{Param, ParamId};
 use crate::ir_rebase_ids::rebase_fn_ids;
 use crate::ir_utils::compact_and_toposort_in_place;
 use crate::math::ceil_log2;
-use xlsynth::{IrBits, IrValue};
+use crate::{IrBits, IrValue};
 
 #[derive(Debug, Clone)]
 pub struct DesugarError {

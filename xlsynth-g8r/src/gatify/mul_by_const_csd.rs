@@ -8,7 +8,7 @@
 //! Fewer non-zero terms generally means fewer add/sub inputs in the lowered
 //! network compared to naive bit-by-bit expansion.
 
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 /// Signed digit polarity used by Canonical Signed Digit (CSD) / Non-Adjacent
 /// Form (NAF) decomposition.
@@ -125,7 +125,7 @@ mod tests {
     }
 
     fn decompose_u64(width: usize, value: u64) -> Vec<super::SignedDigitTerm> {
-        let bits = xlsynth::IrBits::make_ubits(width, value).expect("u64 constant");
+        let bits = xlsynth_pir::IrBits::make_ubits(width, value).expect("u64 constant");
         decompose_umul_const_terms(&bits, width)
     }
 

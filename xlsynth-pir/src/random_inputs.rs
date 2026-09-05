@@ -3,9 +3,9 @@
 //! Reusable runtime input generation for simulation, fuzzing, and semantic
 //! checks.
 
+use crate::{IrBits, IrValue};
 use rand::{RngCore, SeedableRng};
 use rand_pcg::Pcg64Mcg;
-use xlsynth::{IrBits, IrValue};
 
 use crate::ir::{Fn, Type};
 use crate::ir_random::{EntropySource, RngEntropy};
@@ -26,7 +26,8 @@ pub fn generate_uniform_value<S: EntropySource>(source: &mut S, ty: &Type) -> Ir
             let values: Vec<IrValue> = (0..array.element_count)
                 .map(|_| generate_uniform_value(source, &array.element_type))
                 .collect();
-            IrValue::make_array(&values).expect("generated array values have identical types")
+            IrValue::make_array_typed((*array.element_type).clone(), &values)
+                .expect("generated array values have identical types")
         }
     }
 }
@@ -72,7 +73,8 @@ pub fn generate_biased_value<S: EntropySource>(source: &mut S, ty: &Type) -> IrV
             let values: Vec<IrValue> = (0..array.element_count)
                 .map(|_| generate_biased_value(source, &array.element_type))
                 .collect();
-            IrValue::make_array(&values).expect("generated array values have identical types")
+            IrValue::make_array_typed((*array.element_type).clone(), &values)
+                .expect("generated array values have identical types")
         }
     }
 }
@@ -274,7 +276,8 @@ pub fn generate_pattern_value(ty: &Type, pattern: BitValuePattern) -> IrValue {
             let values: Vec<IrValue> = (0..array.element_count)
                 .map(|_| generate_pattern_value(&array.element_type, pattern))
                 .collect();
-            IrValue::make_array(&values).expect("generated array values have identical types")
+            IrValue::make_array_typed((*array.element_type).clone(), &values)
+                .expect("generated array values have identical types")
         }
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Tests that compare the results of g8r gate simulation with the results of
-//! XLS IR interpretation.
+//! native PIR interpretation.
 //!
 //! This is useful for ensuring the gate simulation is correct.
 
@@ -19,18 +19,26 @@ use xlsynth_g8r::test_utils::{
     make_bf16,
 };
 use xlsynth_g8r::use_count::get_id_to_use_count;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 
 #[test]
 fn test_bf16_mul_zero_zero() {
     let _ = env_logger::builder().is_test(true).try_init();
     let loaded_sample = load_bf16_mul_sample(Opt::Yes);
-    let ir_fn = loaded_sample.ir_fn;
+    let ir_fn = loaded_sample
+        .g8r_pkg
+        .get_fn(&loaded_sample.mangled_fn_name)
+        .unwrap();
     let gate_fn = loaded_sample.gate_fn;
 
     let arg0 = make_bf16(bf16::from_f32(0.0));
     let arg1 = make_bf16(bf16::from_f32(0.0));
 
-    let ir_result = ir_fn.interpret(&[arg0.clone(), arg1.clone()]).unwrap();
+    let ir_result =
+        match eval_fn_in_package(&loaded_sample.g8r_pkg, ir_fn, &[arg0.clone(), arg1.clone()]) {
+            FnEvalResult::Success(success) => success.value,
+            failure => panic!("PIR reference evaluation failed: {failure:?}"),
+        };
 
     let gate_arg0_bits = ir_value_bf16_to_flat_ir_bits(&arg0);
     let gate_arg1_bits = ir_value_bf16_to_flat_ir_bits(&arg1);
@@ -51,7 +59,10 @@ fn test_bf16_mul_zero_zero() {
 fn test_bf16_mul_random() {
     let _ = env_logger::builder().is_test(true).try_init();
     let loaded_sample = load_bf16_mul_sample(Opt::Yes);
-    let ir_fn = loaded_sample.ir_fn;
+    let ir_fn = loaded_sample
+        .g8r_pkg
+        .get_fn(&loaded_sample.mangled_fn_name)
+        .unwrap();
     let gate_fn = loaded_sample.gate_fn;
 
     let mut rng = rand::thread_rng();
@@ -75,7 +86,14 @@ fn test_bf16_mul_random() {
         let arg0 = make_bf16(f0_bf16);
         let arg1 = make_bf16(f1_bf16);
 
-        let ir_result = ir_fn.interpret(&[arg0.clone(), arg1.clone()]).unwrap();
+        let ir_result = match eval_fn_in_package(
+            &loaded_sample.g8r_pkg,
+            ir_fn,
+            &[arg0.clone(), arg1.clone()],
+        ) {
+            FnEvalResult::Success(success) => success.value,
+            failure => panic!("PIR reference evaluation failed: {failure:?}"),
+        };
 
         let gate_arg0_bits = ir_value_bf16_to_flat_ir_bits(&arg0);
         let gate_arg1_bits = ir_value_bf16_to_flat_ir_bits(&arg1);

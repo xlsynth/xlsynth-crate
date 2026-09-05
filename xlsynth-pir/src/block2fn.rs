@@ -11,7 +11,7 @@ use crate::ir_utils::{
     compact_and_toposort_in_place, get_topological_nodes, operands, remap_payload_with,
     verify_no_cycle,
 };
-use xlsynth::{IrBits, IrValue};
+use crate::{IrBits, IrValue};
 
 #[derive(Debug, Clone, Default)]
 pub struct Block2FnOptions {

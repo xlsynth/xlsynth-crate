@@ -35,7 +35,7 @@ class TestBinaryConfig(TypedDict, total=False):
 
 
 TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
-    "xlsynth": {"filter_out": ["bridge_builder"]},
+    "xlsynth_codegen": {"filter_out": ["bridge_builder"]},
     "ir_interpret_test": {
         "shard_test_cases": True,
         "filter_out": ["test_ir_interpret_array_values"],

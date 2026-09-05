@@ -3,7 +3,7 @@
 use crate::aig::{AigNode, GateFn};
 use crate::aig_sim::gate_simd::{self, Vec256};
 use serde::Serialize;
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ToggleStats {
@@ -524,7 +524,7 @@ mod tests {
     use bitvec::vec::BitVec;
     use rand::{Rng, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
-    use xlsynth::IrBits;
+    use xlsynth_pir::IrBits;
 
     fn scalar_collect_all_values(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> Vec<BitVec> {
         batch_inputs

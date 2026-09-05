@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::block2fn::{Block2FnOptions, block_ir_to_fn};
 use crate::ir::NodePayload;
 use crate::ir_query::{matches_node, parse_query};
-use xlsynth::{IrBits, IrValue};
+use crate::{IrBits, IrValue};
 
 fn parse_bits(value: &str) -> IrBits {
     IrValue::parse_typed(value)

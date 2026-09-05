@@ -2,7 +2,7 @@
 
 use xlsynth::FnBuilder;
 use xlsynth::IrPackage;
-use xlsynth::IrValue;
+use xlsynth::XlsIrValue;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::test_utils::Opt;
@@ -46,7 +46,7 @@ fn build_add_ir_text(bit_count: u32, rhs_literal: Option<u64>) -> String {
     let lhs = fb.param("lhs", &ty_bits);
     let rhs = match rhs_literal {
         Some(rhs) => {
-            let v = IrValue::make_ubits(bit_count as usize, rhs).expect("make ubits");
+            let v = XlsIrValue::make_ubits(bit_count as usize, rhs).expect("make ubits");
             fb.literal(&v, Some("rhs"))
         }
         None => fb.param("rhs", &ty_bits),

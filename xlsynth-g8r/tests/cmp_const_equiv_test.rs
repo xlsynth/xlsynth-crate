@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::{FnBuilder, IrBits, IrPackage, IrValue};
+use xlsynth::XlsIrValue;
+use xlsynth::{FnBuilder, IrPackage};
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_pir::ir;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::{IrBits, IrValue};
 
 #[derive(Debug, Clone)]
 struct BuiltIr {
@@ -31,7 +34,7 @@ fn build_cmp_ir(bit_count: usize, binop: ir::Binop, lhs_is_const: bool, rhs_cons
     let ty = package.get_bits_type(bit_count as u64);
     let x = fb.param("x", &ty);
     let c = {
-        let v = IrValue::make_ubits(bit_count, rhs_const).expect("make_ubits");
+        let v = XlsIrValue::make_ubits(bit_count, rhs_const).expect("make_ubits");
         fb.literal(&v, Some("c"))
     };
 
@@ -78,7 +81,7 @@ fn assert_ir_gate_equivalent_unary_cmp(
 
     let mut parser = ir_parser::Parser::new(&built.ir_text);
     let ir_pkg = parser.parse_and_validate_package().unwrap();
-    let ir_fn = ir_pkg.get_top_fn().unwrap();
+    let ir_fn = ir_pkg.get_fn(&built.top_name).unwrap();
     let gatified = gatify(
         &ir_fn,
         GatifyOptions {
@@ -89,11 +92,12 @@ fn assert_ir_gate_equivalent_unary_cmp(
     .unwrap();
 
     let max_val = 1u64 << bit_count;
-    let interp_pkg = IrPackage::parse_ir(&built.ir_text, None).unwrap();
-    let interp_fn = interp_pkg.get_function(&built.top_name).unwrap();
     for x in 0..max_val {
         let arg = IrValue::make_ubits(bit_count, x).unwrap();
-        let ir_out = interp_fn.interpret(&[arg]).unwrap();
+        let ir_out = match eval_fn_in_package(&ir_pkg, ir_fn, &[arg]) {
+            FnEvalResult::Success(success) => success.value,
+            failure => panic!("PIR reference evaluation failed: {failure:?}"),
+        };
         let ir_bit = ir_out.to_bits().unwrap().get_bit(0).unwrap();
 
         let gate_out = gate_sim::eval(

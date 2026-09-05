@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
@@ -2069,6 +2069,36 @@ fn f(lhs: bits[5] id=1, rhs: bits[4] id=2) -> (bits[8], bits[8]) {
         &(0..32)
             .flat_map(|lhs| (0..16).map(move |rhs| vec![bits(5, lhs), bits(4, rhs)]))
             .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn value_adapter_checks_aggregate_kind_and_zero_sized_arguments() {
+    let array_identity = compile(
+        r#"package test
+fn f(x: bits[8][2] id=1) -> bits[8][2] {
+  ret result: bits[8][2] = identity(x, id=2)
+}
+"#,
+    );
+    assert!(
+        array_identity
+            .run_ir_values(&[tuple(&[bits(8, 1), bits(8, 2)])])
+            .is_err()
+    );
+    let token_identity = compile(
+        r#"package test
+fn f(x: token id=1) -> token {
+  ret result: token = after_all(x, id=2)
+}
+"#,
+    );
+    assert!(token_identity.run_ir_values(&[bits(0, 0)]).is_err());
+    assert_eq!(
+        token_identity
+            .run_ir_values(&[IrValue::make_token()])
+            .unwrap(),
+        IrValue::make_token()
     );
 }
 

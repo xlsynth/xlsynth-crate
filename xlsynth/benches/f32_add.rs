@@ -2,7 +2,7 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use lazy_static::lazy_static;
-use xlsynth::IrValue;
+use xlsynth::XlsIrValue;
 
 const DSLX_CODE: &str = "import float32;
 
@@ -27,13 +27,13 @@ lazy_static! {
 
 fn bench_f32_add_nojit(c: &mut Criterion) {
     let _ = env_logger::builder().is_test(true).try_init();
-    let sign = IrValue::make_ubits(1, 0).unwrap();
-    let bexp = IrValue::make_ubits(8, 127).unwrap();
-    let frac = IrValue::make_ubits(23, 0).unwrap();
-    let f = IrValue::make_tuple(&[sign, bexp, frac]);
+    let sign = XlsIrValue::make_ubits(1, 0).unwrap();
+    let bexp = XlsIrValue::make_ubits(8, 127).unwrap();
+    let frac = XlsIrValue::make_ubits(23, 0).unwrap();
+    let f = XlsIrValue::make_tuple(&[sign, bexp, frac]);
     c.bench_function("f32_add_nojit", |b| {
         b.iter(|| {
-            let result: IrValue = MAIN.interpret(std::slice::from_ref(&f)).unwrap();
+            let result: XlsIrValue = MAIN.interpret(std::slice::from_ref(&f)).unwrap();
             black_box(result);
         });
     });
@@ -41,10 +41,10 @@ fn bench_f32_add_nojit(c: &mut Criterion) {
 
 fn bench_f32_add_jit(c: &mut Criterion) {
     let _ = env_logger::builder().is_test(true).try_init();
-    let sign = IrValue::make_ubits(1, 0).unwrap();
-    let bexp = IrValue::make_ubits(8, 127).unwrap();
-    let frac = IrValue::make_ubits(23, 0).unwrap();
-    let f = IrValue::make_tuple(&[sign, bexp, frac]);
+    let sign = XlsIrValue::make_ubits(1, 0).unwrap();
+    let bexp = XlsIrValue::make_ubits(8, 127).unwrap();
+    let frac = XlsIrValue::make_ubits(23, 0).unwrap();
+    let f = XlsIrValue::make_tuple(&[sign, bexp, frac]);
     let main_jit = xlsynth::IrFunctionJit::new(&MAIN).unwrap();
     c.bench_function("f32_add_jit", |b| {
         b.iter(|| {

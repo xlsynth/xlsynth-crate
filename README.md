@@ -3,9 +3,9 @@
 Rust bindings to the functionality in the "Accelerated Hardware Synthesis" library.
 
 ```rust
-use xlsynth::{DslxToIrPackageResult, IrValue, IrPackage, IrFunction, XlsynthError};
+use xlsynth::{DslxToIrPackageResult, XlsIrValue, IrPackage, IrFunction, XlsynthError};
 
-fn sample() -> Result<IrValue, XlsynthError> {
+fn sample() -> Result<XlsIrValue, XlsynthError> {
     let converted: DslxToIrPackageResult = xlsynth::convert_dslx_to_ir(
         "fn id(x: u32) -> u32 { x }",
         std::path::Path::new("/memfile/sample.x"),
@@ -14,10 +14,10 @@ fn sample() -> Result<IrValue, XlsynthError> {
     let package: IrPackage = converted.ir;
     let mangled = xlsynth::mangle_dslx_name("sample", "id")?;
     let f: IrFunction = package.get_function(&mangled)?;
-    let mol: IrValue = IrValue::u32(42);
+    let mol: XlsIrValue = XlsIrValue::u32(42);
 
     // Use the IR interpreter.
-    let interp_result: IrValue = f.interpret(std::slice::from_ref(&mol))?;
+    let interp_result: XlsIrValue = f.interpret(std::slice::from_ref(&mol))?;
 
     // Use the IR JIT.
     let jit = xlsynth::IrFunctionJit::new(&f)?;
@@ -28,7 +28,7 @@ fn sample() -> Result<IrValue, XlsynthError> {
 }
 
 fn main() {
-    assert_eq!(sample().unwrap(), IrValue::u32(42));
+    assert_eq!(sample().unwrap(), XlsIrValue::u32(42));
 }
 ```
 

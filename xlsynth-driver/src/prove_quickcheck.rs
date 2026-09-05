@@ -467,7 +467,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 mod tests {
     use super::*;
     use std::time::Duration;
-    use xlsynth::IrValue;
+    use xlsynth_pir::IrValue;
     use xlsynth_prover::prover::types::{
         AssertionViolation, FnInput, FnOutput, QuickCheckRunResult,
     };

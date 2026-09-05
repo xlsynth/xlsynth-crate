@@ -23,7 +23,7 @@ pub fn handle_ir_fn_eval(matches: &clap::ArgMatches, _config: &Option<ToolchainC
         }
     };
 
-    let args_value = match xlsynth::IrValue::parse_typed(arg_tuple) {
+    let args_value = match xlsynth::XlsIrValue::parse_typed(arg_tuple) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to parse argument tuple: {}", e);

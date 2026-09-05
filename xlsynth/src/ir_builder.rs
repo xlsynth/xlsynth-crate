@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::IrFunction;
-use crate::IrValue;
+use crate::XlsIrValue;
 use crate::XlsynthError;
 use crate::ir_package::IrPackage;
 use crate::ir_package::IrPackagePtr;
@@ -89,7 +89,7 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
-    pub fn literal(&mut self, value: &IrValue, name: Option<&str>) -> BValue {
+    pub fn literal(&mut self, value: &XlsIrValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_literal(fn_builder_guard, value, name);
@@ -540,7 +540,7 @@ impl FnBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IrValue, ir_value::IrFormatPreference};
+    use crate::{XlsIrValue, ir_value::IrFormatPreference};
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -605,11 +605,11 @@ fn aoi21(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
 
         let result = f
             .interpret(&[
-                IrValue::make_ubits(2, 0b10).unwrap(),
-                IrValue::make_ubits(2, 0b00).unwrap(),
+                XlsIrValue::make_ubits(2, 0b10).unwrap(),
+                XlsIrValue::make_ubits(2, 0b00).unwrap(),
             ])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(4, 0b1000).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(4, 0b1000).unwrap());
     }
 
     #[test]
@@ -626,26 +626,26 @@ fn aoi21(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
 
         let result = f
             .interpret(&[
-                IrValue::make_ubits(2, 0b01).unwrap(),
-                IrValue::make_ubits(2, 0b10).unwrap(),
+                XlsIrValue::make_ubits(2, 0b01).unwrap(),
+                XlsIrValue::make_ubits(2, 0b10).unwrap(),
             ])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 0b11).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(2, 0b11).unwrap());
 
         let result = f
             .interpret(&[
-                IrValue::make_ubits(2, 0b00).unwrap(),
-                IrValue::make_ubits(2, 0b10).unwrap(),
+                XlsIrValue::make_ubits(2, 0b00).unwrap(),
+                XlsIrValue::make_ubits(2, 0b10).unwrap(),
             ])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 0b01).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(2, 0b01).unwrap());
     }
 
     #[test]
     fn test_ir_builder_literal() {
         let mut package = IrPackage::new("sample_package").unwrap();
         let mut builder = FnBuilder::new(&mut package, "literal", true);
-        let literal = builder.literal(&IrValue::make_ubits(2, 0b10).unwrap(), None);
+        let literal = builder.literal(&XlsIrValue::make_ubits(2, 0b10).unwrap(), None);
         let f = builder.build_with_return_value(&literal).unwrap();
 
         let package_text = package.to_string();
@@ -660,7 +660,7 @@ fn literal() -> bits[2] {
         );
 
         let result = f.interpret(&[]).unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 0b10).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(2, 0b10).unwrap());
     }
 
     #[test]
@@ -684,25 +684,25 @@ fn tuple_and_then_index(a: bits[2] id=1, b: bits[2] id=2) -> (bits[2], bits[2]) 
 "
         );
 
-        let a_value = IrValue::make_ubits(2, 0b01).unwrap();
-        let b_value = IrValue::make_ubits(2, 0b10).unwrap();
+        let a_value = XlsIrValue::make_ubits(2, 0b01).unwrap();
+        let b_value = XlsIrValue::make_ubits(2, 0b10).unwrap();
         let result = f.interpret(&[a_value.clone(), b_value.clone()]).unwrap();
-        assert_eq!(result, IrValue::make_tuple(&[a_value, b_value]));
+        assert_eq!(result, XlsIrValue::make_tuple(&[a_value, b_value]));
     }
 
     #[test]
     fn test_ir_builder_bvalue_clone() {
         let mut package = IrPackage::new("sample_package").unwrap();
         let mut builder = FnBuilder::new(&mut package, "make_tuple_literal", true);
-        let a_value = IrValue::make_ubits(2, 0b01).unwrap();
-        let b_value = IrValue::make_ubits(2, 0b10).unwrap();
+        let a_value = XlsIrValue::make_ubits(2, 0b01).unwrap();
+        let b_value = XlsIrValue::make_ubits(2, 0b10).unwrap();
         let a = builder.literal(&a_value, None);
         let b = builder.literal(&b_value, None);
         let tuple = builder.tuple(&[&a, &b], None);
         let tuple2 = tuple.clone();
         let f = builder.build_with_return_value(&tuple2).unwrap();
         let result = f.interpret(&[]).unwrap();
-        assert_eq!(result, IrValue::make_tuple(&[a_value, b_value]));
+        assert_eq!(result, XlsIrValue::make_tuple(&[a_value, b_value]));
     }
 
     #[test]
@@ -742,8 +742,10 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
         let result = builder.add(&a, &b, None);
         let f = builder.build_with_return_value(&result).unwrap();
 
-        let result = f.interpret(&[IrValue::u32(1), IrValue::u32(2)]).unwrap();
-        assert_eq!(result, IrValue::u32(3));
+        let result = f
+            .interpret(&[XlsIrValue::u32(1), XlsIrValue::u32(2)])
+            .unwrap();
+        assert_eq!(result, XlsIrValue::u32(3));
     }
 
     #[test]
@@ -759,26 +761,26 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
         assert_eq!(f.get_name(), "f");
 
         let result = f
-            .interpret(&[IrValue::make_ubits(3, 0b110).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(3, 0b110).unwrap()])
             .unwrap();
         assert_eq!(
             result,
-            IrValue::make_tuple(&[
-                IrValue::make_ubits(1, 0).unwrap(), // and_reduce
-                IrValue::make_ubits(1, 1).unwrap(), // or_reduce
-                IrValue::make_ubits(1, 0).unwrap(), // xor_reduce
+            XlsIrValue::make_tuple(&[
+                XlsIrValue::make_ubits(1, 0).unwrap(), // and_reduce
+                XlsIrValue::make_ubits(1, 1).unwrap(), // or_reduce
+                XlsIrValue::make_ubits(1, 0).unwrap(), // xor_reduce
             ])
         );
 
         let result = f
-            .interpret(&[IrValue::make_ubits(3, 0b111).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(3, 0b111).unwrap()])
             .unwrap();
         assert_eq!(
             result,
-            IrValue::make_tuple(&[
-                IrValue::make_ubits(1, 1).unwrap(), // and_reduce
-                IrValue::make_ubits(1, 1).unwrap(), // or_reduce
-                IrValue::make_ubits(1, 1).unwrap(), // xor_reduce
+            XlsIrValue::make_tuple(&[
+                XlsIrValue::make_ubits(1, 1).unwrap(), // and_reduce
+                XlsIrValue::make_ubits(1, 1).unwrap(), // or_reduce
+                XlsIrValue::make_ubits(1, 1).unwrap(), // xor_reduce
             ])
         );
     }
@@ -798,11 +800,11 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
         for (a, b, expected) in truth_table {
             let result = f
                 .interpret(&[
-                    IrValue::make_ubits(1, a).unwrap(),
-                    IrValue::make_ubits(1, b).unwrap(),
+                    XlsIrValue::make_ubits(1, a).unwrap(),
+                    XlsIrValue::make_ubits(1, b).unwrap(),
                 ])
                 .unwrap();
-            assert_eq!(result, IrValue::make_ubits(1, expected).unwrap());
+            assert_eq!(result, XlsIrValue::make_ubits(1, expected).unwrap());
         }
     }
 
@@ -817,12 +819,12 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
         let f = builder.build_with_return_value(&index).unwrap();
 
         let result = f
-            .interpret(&[IrValue::make_tuple(&[
-                IrValue::make_ubits(2, 1).unwrap(),
-                IrValue::make_ubits(4, 2).unwrap(),
+            .interpret(&[XlsIrValue::make_tuple(&[
+                XlsIrValue::make_ubits(2, 1).unwrap(),
+                XlsIrValue::make_ubits(4, 2).unwrap(),
             ])])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(4, 2).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(4, 2).unwrap());
     }
 
     // Note: because the current signature takes N bit operands and produces an
@@ -840,15 +842,15 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
 
         let result = f
             .interpret(&[
-                IrValue::make_ubits(3, 2).unwrap(),
-                IrValue::make_ubits(3, 0b110).unwrap(),
+                XlsIrValue::make_ubits(3, 2).unwrap(),
+                XlsIrValue::make_ubits(3, 0b110).unwrap(),
             ])
             .unwrap();
         assert_eq!(
             result,
-            IrValue::make_tuple(&[
-                IrValue::make_ubits(3, 0b100).unwrap(),
-                IrValue::make_ubits(3, 0b100).unwrap(),
+            XlsIrValue::make_tuple(&[
+                XlsIrValue::make_ubits(3, 0b100).unwrap(),
+                XlsIrValue::make_ubits(3, 0b100).unwrap(),
             ])
         );
     }
@@ -877,25 +879,25 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
 "
         );
 
-        let x_value = IrValue::make_ubits(2, 0b01).unwrap();
-        let y_value = IrValue::make_ubits(2, 0b10).unwrap();
+        let x_value = XlsIrValue::make_ubits(2, 0b01).unwrap();
+        let y_value = XlsIrValue::make_ubits(2, 0b10).unwrap();
         let result = f
             .interpret(&[
                 x_value.clone(),
                 y_value.clone(),
-                IrValue::make_ubits(1, 0).unwrap(),
+                XlsIrValue::make_ubits(1, 0).unwrap(),
             ])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 0b01).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(2, 0b01).unwrap());
 
         let result = f
             .interpret(&[
                 x_value.clone(),
                 y_value.clone(),
-                IrValue::make_ubits(1, 1).unwrap(),
+                XlsIrValue::make_ubits(1, 1).unwrap(),
             ])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 0b10).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(2, 0b10).unwrap());
     }
 
     #[test]
@@ -912,12 +914,12 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
 
         let got = f
             .interpret(&[
-                IrValue::make_ubits(4, 0b1001).unwrap(),
-                IrValue::make_ubits(2, 0b11).unwrap(),
-                IrValue::make_ubits(2, 1).unwrap(),
+                XlsIrValue::make_ubits(4, 0b1001).unwrap(),
+                XlsIrValue::make_ubits(2, 0b11).unwrap(),
+                XlsIrValue::make_ubits(2, 1).unwrap(),
             ])
             .unwrap();
-        let want = IrValue::make_ubits(4, 0b1111).unwrap();
+        let want = XlsIrValue::make_ubits(4, 0b1111).unwrap();
         assert_eq!(
             got.to_string_fmt(IrFormatPreference::Binary).unwrap(),
             want.to_string_fmt(IrFormatPreference::Binary).unwrap()
@@ -938,14 +940,14 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
 
         let got = f
             .interpret(&[
-                IrValue::make_ubits(4, 0b1010).unwrap(),
-                IrValue::make_ubits(2, 2).unwrap(),
+                XlsIrValue::make_ubits(4, 0b1010).unwrap(),
+                XlsIrValue::make_ubits(2, 2).unwrap(),
             ])
             .unwrap();
-        let want = IrValue::make_tuple(&[
-            IrValue::make_ubits(4, 0b1110).unwrap(), // shra
-            IrValue::make_ubits(4, 0b0010).unwrap(), // shrl
-            IrValue::make_ubits(4, 0b1000).unwrap(), // shll
+        let want = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(4, 0b1110).unwrap(), // shra
+            XlsIrValue::make_ubits(4, 0b0010).unwrap(), // shrl
+            XlsIrValue::make_ubits(4, 0b1000).unwrap(), // shll
         ]);
         assert_eq!(
             got.to_string_fmt(IrFormatPreference::Binary).unwrap(),
@@ -964,20 +966,20 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let f = builder.build_with_return_value(&t).unwrap();
 
         let got = f
-            .interpret(&[IrValue::make_ubits(4, 0b0010).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0b0010).unwrap()])
             .unwrap();
-        let want = IrValue::make_tuple(&[
-            IrValue::make_ubits(4, 2).unwrap(), // clz
-            IrValue::make_ubits(4, 1).unwrap(), // ctz
+        let want = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(4, 2).unwrap(), // clz
+            XlsIrValue::make_ubits(4, 1).unwrap(), // ctz
         ]);
         assert_eq!(got, want);
 
         let got = f
-            .interpret(&[IrValue::make_ubits(4, 0b0000).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0b0000).unwrap()])
             .unwrap();
-        let want = IrValue::make_tuple(&[
-            IrValue::make_ubits(4, 4).unwrap(), // clz
-            IrValue::make_ubits(4, 4).unwrap(), // ctz
+        let want = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(4, 4).unwrap(), // clz
+            XlsIrValue::make_ubits(4, 4).unwrap(), // ctz
         ]);
         assert_eq!(got, want);
     }
@@ -991,9 +993,9 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let f = builder.build_with_return_value(&encoded).unwrap();
 
         let result = f
-            .interpret(&[IrValue::make_ubits(4, 0b1000).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0b1000).unwrap()])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 3).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(2, 3).unwrap());
     }
 
     #[test]
@@ -1004,8 +1006,10 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let decoded = builder.decode(&x, None, None);
         let f = builder.build_with_return_value(&decoded).unwrap();
 
-        let result = f.interpret(&[IrValue::make_ubits(2, 3).unwrap()]).unwrap();
-        assert_eq!(result, IrValue::make_ubits(4, 0b1000).unwrap());
+        let result = f
+            .interpret(&[XlsIrValue::make_ubits(2, 3).unwrap()])
+            .unwrap();
+        assert_eq!(result, XlsIrValue::make_ubits(4, 0b1000).unwrap());
     }
 
     #[test]
@@ -1017,20 +1021,28 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let f = builder.build_with_return_value(&decoded).unwrap();
 
         // Value fits in the width.
-        let result = f.interpret(&[IrValue::make_ubits(2, 0).unwrap()]).unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 1).unwrap());
+        let result = f
+            .interpret(&[XlsIrValue::make_ubits(2, 0).unwrap()])
+            .unwrap();
+        assert_eq!(result, XlsIrValue::make_ubits(2, 1).unwrap());
 
         // Value fits in the width.
-        let result = f.interpret(&[IrValue::make_ubits(2, 1).unwrap()]).unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 2).unwrap());
+        let result = f
+            .interpret(&[XlsIrValue::make_ubits(2, 1).unwrap()])
+            .unwrap();
+        assert_eq!(result, XlsIrValue::make_ubits(2, 2).unwrap());
 
         // Value does not fit in the width.
-        let result = f.interpret(&[IrValue::make_ubits(2, 2).unwrap()]).unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 0).unwrap());
+        let result = f
+            .interpret(&[XlsIrValue::make_ubits(2, 2).unwrap()])
+            .unwrap();
+        assert_eq!(result, XlsIrValue::make_ubits(2, 0).unwrap());
 
         // Value does not fit in the width.
-        let result = f.interpret(&[IrValue::make_ubits(2, 3).unwrap()]).unwrap();
-        assert_eq!(result, IrValue::make_ubits(2, 0).unwrap());
+        let result = f
+            .interpret(&[XlsIrValue::make_ubits(2, 3).unwrap()])
+            .unwrap();
+        assert_eq!(result, XlsIrValue::make_ubits(2, 0).unwrap());
     }
 
     #[test]
@@ -1050,16 +1062,16 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
 
         let got = f
             .interpret(&[
-                IrValue::make_ubits(4, 0b0011).unwrap(),
-                IrValue::make_ubits(4, 0b0101).unwrap(),
+                XlsIrValue::make_ubits(4, 0b0011).unwrap(),
+                XlsIrValue::make_ubits(4, 0b0101).unwrap(),
             ])
             .unwrap();
-        let want = IrValue::make_tuple(&[
-            IrValue::make_ubits(4, 0b0110).unwrap(), // xor
-            IrValue::make_ubits(4, 0b0001).unwrap(), // and
-            IrValue::make_ubits(4, 0b1110).unwrap(), // nand
-            IrValue::make_ubits(4, 0b0111).unwrap(), // or
-            IrValue::make_ubits(4, 0b1000).unwrap(), // nor
+        let want = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(4, 0b0110).unwrap(), // xor
+            XlsIrValue::make_ubits(4, 0b0001).unwrap(), // and
+            XlsIrValue::make_ubits(4, 0b1110).unwrap(), // nand
+            XlsIrValue::make_ubits(4, 0b0111).unwrap(), // or
+            XlsIrValue::make_ubits(4, 0b1000).unwrap(), // nor
         ]);
         assert_eq!(got, want);
     }
@@ -1074,27 +1086,27 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let lhs_array = fb.param("lhs_array", &lhs_array_type);
         let rhs_array = fb.param("rhs_array", &rhs_array_type);
         let concat = fb.array_concat(&[&lhs_array, &rhs_array], None);
-        let start = fb.literal(&IrValue::make_ubits(4, 2).unwrap(), None);
+        let start = fb.literal(&XlsIrValue::make_ubits(4, 2).unwrap(), None);
         let slice = fb.array_slice(&concat, &start, 2, None);
         let f = fb.build_with_return_value(&slice).unwrap();
 
-        let lhs_array_value = IrValue::make_array(&[
-            IrValue::make_ubits(4, 0b0000).unwrap(),
-            IrValue::make_ubits(4, 0b0001).unwrap(),
+        let lhs_array_value = XlsIrValue::make_array(&[
+            XlsIrValue::make_ubits(4, 0b0000).unwrap(),
+            XlsIrValue::make_ubits(4, 0b0001).unwrap(),
         ])
         .unwrap();
-        let rhs_array_value = IrValue::make_array(&[
-            IrValue::make_ubits(4, 0b0010).unwrap(),
-            IrValue::make_ubits(4, 0b0011).unwrap(),
-            IrValue::make_ubits(4, 0b0100).unwrap(),
+        let rhs_array_value = XlsIrValue::make_array(&[
+            XlsIrValue::make_ubits(4, 0b0010).unwrap(),
+            XlsIrValue::make_ubits(4, 0b0011).unwrap(),
+            XlsIrValue::make_ubits(4, 0b0100).unwrap(),
         ])
         .unwrap();
         let result = f.interpret(&[lhs_array_value, rhs_array_value]).unwrap();
         assert_eq!(
             result,
-            IrValue::make_array(&[
-                IrValue::make_ubits(4, 0b0010).unwrap(),
-                IrValue::make_ubits(4, 0b0011).unwrap(),
+            XlsIrValue::make_array(&[
+                XlsIrValue::make_ubits(4, 0b0010).unwrap(),
+                XlsIrValue::make_ubits(4, 0b0011).unwrap(),
             ])
             .unwrap()
         );
@@ -1111,21 +1123,21 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let updated = fb.array_update(&array, &update_value, &[&index], None);
         let f = fb.build_with_return_value(&updated).unwrap();
 
-        let array_value = IrValue::make_array(&[
-            IrValue::make_ubits(4, 0b0000).unwrap(),
-            IrValue::make_ubits(4, 0b0001).unwrap(),
+        let array_value = XlsIrValue::make_array(&[
+            XlsIrValue::make_ubits(4, 0b0000).unwrap(),
+            XlsIrValue::make_ubits(4, 0b0001).unwrap(),
         ])
         .unwrap();
-        let index_value = IrValue::make_ubits(1, 1).unwrap();
-        let update_value = IrValue::make_ubits(4, 0b1111).unwrap();
+        let index_value = XlsIrValue::make_ubits(1, 1).unwrap();
+        let update_value = XlsIrValue::make_ubits(4, 0b1111).unwrap();
 
         let got = f
             .interpret(&[array_value, index_value, update_value])
             .unwrap();
 
-        let want = IrValue::make_array(&[
-            IrValue::make_ubits(4, 0b0000).unwrap(),
-            IrValue::make_ubits(4, 0b1111).unwrap(),
+        let want = XlsIrValue::make_array(&[
+            XlsIrValue::make_ubits(4, 0b0000).unwrap(),
+            XlsIrValue::make_ubits(4, 0b1111).unwrap(),
         ])
         .unwrap();
         assert_eq!(got, want);
@@ -1144,9 +1156,9 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
 
         let f = fb.build_with_return_value(&last_value).unwrap();
         let result = f
-            .interpret(&[IrValue::make_ubits(4, 0b1010).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0b1010).unwrap()])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(4, 0b1010).unwrap());
+        assert_eq!(result, XlsIrValue::make_ubits(4, 0b1010).unwrap());
     }
 
     #[test]
@@ -1203,11 +1215,11 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
 
         let got = f
             .interpret(&[
-                IrValue::make_ubits(4, 0b0010).unwrap(),
-                IrValue::make_ubits(4, 0b0011).unwrap(),
+                XlsIrValue::make_ubits(4, 0b0010).unwrap(),
+                XlsIrValue::make_ubits(4, 0b0011).unwrap(),
             ])
             .unwrap();
-        let want = IrValue::make_tuple(&[
+        let want = XlsIrValue::make_tuple(&[
             true.into(),  // ule
             true.into(),  // ult
             false.into(), // uge
@@ -1232,11 +1244,11 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
         let f = fb.build_with_return_value(&result).unwrap();
 
         let got = f
-            .interpret(&[IrValue::make_ubits(4, 0b1010).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0b1010).unwrap()])
             .unwrap();
-        let want = IrValue::make_tuple(&[
-            IrValue::make_ubits(8, 0b11111010).unwrap(),
-            IrValue::make_ubits(8, 0b00001010).unwrap(),
+        let want = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(8, 0b11111010).unwrap(),
+            XlsIrValue::make_ubits(8, 0b00001010).unwrap(),
         ]);
         assert_eq!(got, want);
     }
@@ -1254,21 +1266,21 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
 
         // Try one value that shows a distinction between the two.
         let got = f
-            .interpret(&[IrValue::make_ubits(4, 0b1010).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0b1010).unwrap()])
             .unwrap();
-        let want = IrValue::make_tuple(&[
-            IrValue::make_ubits(5, 0b00010).unwrap(),
-            IrValue::make_ubits(5, 0b01000).unwrap(),
+        let want = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(5, 0b00010).unwrap(),
+            XlsIrValue::make_ubits(5, 0b01000).unwrap(),
         ]);
         assert_eq!(got, want);
 
         // Try the zero value.
         let got = f
-            .interpret(&[IrValue::make_ubits(4, 0b0000).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0b0000).unwrap()])
             .unwrap();
-        let want = IrValue::make_tuple(&[
-            IrValue::make_ubits(5, 0b10000).unwrap(),
-            IrValue::make_ubits(5, 0b10000).unwrap(),
+        let want = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(5, 0b10000).unwrap(),
+            XlsIrValue::make_ubits(5, 0b10000).unwrap(),
         ]);
         assert_eq!(got, want);
     }
@@ -1285,38 +1297,44 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
         let selector = fb.param("selector", &u4);
 
         // The values we select are all u4s.
-        let cases0_value = IrValue::make_ubits(4, 0b0000).unwrap();
-        let cases1_value = IrValue::make_ubits(4, 0b0001).unwrap();
-        let cases2_value = IrValue::make_ubits(4, 0b0010).unwrap();
-        let cases3_value = IrValue::make_ubits(4, 0b0011).unwrap();
+        let cases0_value = XlsIrValue::make_ubits(4, 0b0000).unwrap();
+        let cases1_value = XlsIrValue::make_ubits(4, 0b0001).unwrap();
+        let cases2_value = XlsIrValue::make_ubits(4, 0b0010).unwrap();
+        let cases3_value = XlsIrValue::make_ubits(4, 0b0011).unwrap();
         let cases = vec![
             fb.literal(&cases0_value, None),
             fb.literal(&cases1_value, None),
             fb.literal(&cases2_value, None),
             fb.literal(&cases3_value, None),
         ];
-        let default_value = IrValue::make_ubits(4, 0b1111).unwrap();
+        let default_value = XlsIrValue::make_ubits(4, 0b1111).unwrap();
         let default = fb.literal(&default_value, None);
         let result = fb.priority_select(&selector, &cases, &default, None);
         let f = fb.build_with_return_value(&result).unwrap();
 
-        let got_zero = f.interpret(&[IrValue::make_ubits(4, 0).unwrap()]).unwrap();
+        let got_zero = f
+            .interpret(&[XlsIrValue::make_ubits(4, 0).unwrap()])
+            .unwrap();
         let want = default_value;
         assert_eq!(got_zero, want);
 
-        let got_lsb0_set = f.interpret(&[IrValue::make_ubits(4, 1).unwrap()]).unwrap();
+        let got_lsb0_set = f
+            .interpret(&[XlsIrValue::make_ubits(4, 1).unwrap()])
+            .unwrap();
         assert_eq!(got_lsb0_set, cases0_value);
 
-        let got_lsb1_set = f.interpret(&[IrValue::make_ubits(4, 2).unwrap()]).unwrap();
+        let got_lsb1_set = f
+            .interpret(&[XlsIrValue::make_ubits(4, 2).unwrap()])
+            .unwrap();
         assert_eq!(got_lsb1_set, cases1_value);
 
         let got_lsb01_set = f
-            .interpret(&[IrValue::make_ubits(4, 0x3).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0x3).unwrap()])
             .unwrap();
         assert_eq!(got_lsb01_set, cases0_value);
 
         let got_all_set = f
-            .interpret(&[IrValue::make_ubits(4, 0xf).unwrap()])
+            .interpret(&[XlsIrValue::make_ubits(4, 0xf).unwrap()])
             .unwrap();
         assert_eq!(got_all_set, cases0_value);
     }
@@ -1328,11 +1346,11 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
         let u4 = package.get_bits_type(4);
         let selector = fb.param("selector", &u4);
 
-        let zero_value = IrValue::make_ubits(4, 0b0000).unwrap();
-        let cases0_value = IrValue::make_ubits(4, 0b0001).unwrap();
-        let cases1_value = IrValue::make_ubits(4, 0b0010).unwrap();
-        let cases2_value = IrValue::make_ubits(4, 0b0011).unwrap();
-        let cases3_value = IrValue::make_ubits(4, 0b0100).unwrap();
+        let zero_value = XlsIrValue::make_ubits(4, 0b0000).unwrap();
+        let cases0_value = XlsIrValue::make_ubits(4, 0b0001).unwrap();
+        let cases1_value = XlsIrValue::make_ubits(4, 0b0010).unwrap();
+        let cases2_value = XlsIrValue::make_ubits(4, 0b0011).unwrap();
+        let cases3_value = XlsIrValue::make_ubits(4, 0b0100).unwrap();
         let cases = vec![
             fb.literal(&cases0_value, None),
             fb.literal(&cases1_value, None),
@@ -1342,19 +1360,29 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
         let result = fb.one_hot_select(&selector, &cases, None);
         let f = fb.build_with_return_value(&result).unwrap();
 
-        let no_bit_set = f.interpret(&[IrValue::make_ubits(4, 0).unwrap()]).unwrap();
+        let no_bit_set = f
+            .interpret(&[XlsIrValue::make_ubits(4, 0).unwrap()])
+            .unwrap();
         assert_eq!(no_bit_set, zero_value);
 
-        let got_lsb0_set = f.interpret(&[IrValue::make_ubits(4, 1).unwrap()]).unwrap();
+        let got_lsb0_set = f
+            .interpret(&[XlsIrValue::make_ubits(4, 1).unwrap()])
+            .unwrap();
         assert_eq!(got_lsb0_set, cases0_value);
 
-        let got_lsb1_set = f.interpret(&[IrValue::make_ubits(4, 2).unwrap()]).unwrap();
+        let got_lsb1_set = f
+            .interpret(&[XlsIrValue::make_ubits(4, 2).unwrap()])
+            .unwrap();
         assert_eq!(got_lsb1_set, cases1_value);
 
-        let got_lsb2_set = f.interpret(&[IrValue::make_ubits(4, 4).unwrap()]).unwrap();
+        let got_lsb2_set = f
+            .interpret(&[XlsIrValue::make_ubits(4, 4).unwrap()])
+            .unwrap();
         assert_eq!(got_lsb2_set, cases2_value);
 
-        let got_lsb3_set = f.interpret(&[IrValue::make_ubits(4, 8).unwrap()]).unwrap();
+        let got_lsb3_set = f
+            .interpret(&[XlsIrValue::make_ubits(4, 8).unwrap()])
+            .unwrap();
         assert_eq!(got_lsb3_set, cases3_value);
     }
 }

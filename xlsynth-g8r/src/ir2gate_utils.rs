@@ -1178,7 +1178,7 @@ mod tests {
     use super::*;
 
     use test_case::test_case;
-    use xlsynth::IrBits;
+    use xlsynth_pir::IrBits;
 
     fn add_test_barrel_shifter(
         gb: &mut GateBuilder,

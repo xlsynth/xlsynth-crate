@@ -2,6 +2,7 @@
 
 //! Lightweight library support for matching and rewriting PIR functions.
 
+use crate::IrValue;
 use crate::dce;
 use crate::ir::{self, MemberType, NodePayload, NodeRef, Type};
 use crate::ir_deduce;
@@ -11,7 +12,6 @@ use crate::ir_utils::Users;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
-use xlsynth::IrValue;
 
 #[derive(Debug, Clone)]
 pub struct MatchPattern {

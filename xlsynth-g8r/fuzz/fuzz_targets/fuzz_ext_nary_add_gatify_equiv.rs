@@ -7,7 +7,6 @@ use std::time::Instant;
 use libfuzzer_sys::fuzz_target;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 #[cfg(feature = "has-bitwuzla")]
@@ -19,6 +18,7 @@ use xlsynth_pir::ir::{
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_verify;
+use xlsynth_pir::{IrBits, IrValue};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
 #[cfg(all(not(feature = "has-bitwuzla"), feature = "has-boolector"))]

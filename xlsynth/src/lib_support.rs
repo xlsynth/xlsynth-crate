@@ -18,7 +18,7 @@ use xlsynth_sys::{
 };
 
 use crate::{
-    IrBits, IrFunction, IrValue, XlsynthError,
+    IrFunction, XlsIrBits, XlsIrValue, XlsynthError,
     ir_package::{IrPackagePtr, IrType, ScheduleAndCodegenResult},
 };
 
@@ -200,10 +200,10 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
 pub(crate) fn xls_value_get_element(
     p: *mut CIrValue,
     index: usize,
-) -> Result<IrValue, XlsynthError> {
+) -> Result<XlsIrValue, XlsynthError> {
     let mut element_out: *mut CIrValue = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_value_get_element, p, index; element_out)?;
-    Ok(IrValue { ptr: element_out })
+    Ok(XlsIrValue { ptr: element_out })
 }
 
 pub(crate) fn xls_value_get_element_count(p: *const CIrValue) -> Result<usize, XlsynthError> {
@@ -212,40 +212,46 @@ pub(crate) fn xls_value_get_element_count(p: *const CIrValue) -> Result<usize, X
     Ok(count as usize)
 }
 
-pub(crate) fn xls_value_make_ubits(value: u64, bit_count: usize) -> Result<IrValue, XlsynthError> {
+pub(crate) fn xls_value_make_ubits(
+    value: u64,
+    bit_count: usize,
+) -> Result<XlsIrValue, XlsynthError> {
     let mut result: *mut CIrValue = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_value_make_ubits, bit_count as i64, value; result)?;
-    Ok(IrValue { ptr: result })
+    Ok(XlsIrValue { ptr: result })
 }
 
-pub(crate) fn xls_value_make_sbits(value: i64, bit_count: usize) -> Result<IrValue, XlsynthError> {
+pub(crate) fn xls_value_make_sbits(
+    value: i64,
+    bit_count: usize,
+) -> Result<XlsIrValue, XlsynthError> {
     let mut result: *mut CIrValue = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_value_make_sbits, bit_count as i64, value; result)?;
-    Ok(IrValue { ptr: result })
+    Ok(XlsIrValue { ptr: result })
 }
 
-pub(crate) fn xls_value_make_token() -> IrValue {
+pub(crate) fn xls_value_make_token() -> XlsIrValue {
     let result = unsafe { xlsynth_sys::xls_value_make_token() };
     assert!(!result.is_null());
-    IrValue { ptr: result }
+    XlsIrValue { ptr: result }
 }
 
-pub(crate) fn xls_value_make_tuple(elements: &[IrValue]) -> IrValue {
+pub(crate) fn xls_value_make_tuple(elements: &[XlsIrValue]) -> XlsIrValue {
     unsafe {
         let elements_ptrs: Vec<*const CIrValue> =
             elements.iter().map(|v| v.ptr as *const CIrValue).collect();
         let result = xlsynth_sys::xls_value_make_tuple(elements_ptrs.len(), elements_ptrs.as_ptr());
         assert!(!result.is_null());
-        IrValue { ptr: result }
+        XlsIrValue { ptr: result }
     }
 }
 
-pub(crate) fn xls_value_make_array(elements: &[IrValue]) -> Result<IrValue, XlsynthError> {
+pub(crate) fn xls_value_make_array(elements: &[XlsIrValue]) -> Result<XlsIrValue, XlsynthError> {
     let elements_ptrs: Vec<*const CIrValue> =
         elements.iter().map(|v| v.ptr as *const CIrValue).collect();
     let mut result: *mut CIrValue = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_value_make_array, elements_ptrs.len(), elements_ptrs.as_ptr(); result)?;
-    Ok(IrValue { ptr: result })
+    Ok(XlsIrValue { ptr: result })
 }
 
 pub(crate) fn xls_bits_to_debug_str(p: *const CIrBits) -> String {
@@ -255,22 +261,22 @@ pub(crate) fn xls_bits_to_debug_str(p: *const CIrBits) -> String {
     }
 }
 
-pub(crate) fn xls_bits_make_ubits(bit_count: usize, value: u64) -> Result<IrBits, XlsynthError> {
+pub(crate) fn xls_bits_make_ubits(bit_count: usize, value: u64) -> Result<XlsIrBits, XlsynthError> {
     let mut result: *mut CIrBits = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_bits_make_ubits, bit_count as i64, value; result)?;
-    Ok(IrBits { ptr: result })
+    Ok(XlsIrBits { ptr: result })
 }
 
-pub(crate) fn xls_bits_make_sbits(bit_count: usize, value: i64) -> Result<IrBits, XlsynthError> {
+pub(crate) fn xls_bits_make_sbits(bit_count: usize, value: i64) -> Result<XlsIrBits, XlsynthError> {
     let mut result: *mut CIrBits = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_bits_make_sbits, bit_count as i64, value; result)?;
-    Ok(IrBits { ptr: result })
+    Ok(XlsIrBits { ptr: result })
 }
 
 pub(crate) fn xls_bits_make_bits_from_bytes(
     bit_count: usize,
     bytes: &[u8],
-) -> Result<IrBits, XlsynthError> {
+) -> Result<XlsIrBits, XlsynthError> {
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut bits_out: *mut CIrBits = std::ptr::null_mut();
@@ -284,14 +290,14 @@ pub(crate) fn xls_bits_make_bits_from_bytes(
         if !success {
             return Err(XlsynthError(c_str_to_rust(error_out)));
         }
-        Ok(IrBits { ptr: bits_out })
+        Ok(XlsIrBits { ptr: bits_out })
     }
 }
 
-pub(crate) fn xls_value_get_bits(p: *const CIrValue) -> Result<IrBits, XlsynthError> {
+pub(crate) fn xls_value_get_bits(p: *const CIrValue) -> Result<XlsIrBits, XlsynthError> {
     let mut result: *mut CIrBits = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_value_get_bits, p; result)?;
-    Ok(IrBits { ptr: result })
+    Ok(XlsIrBits { ptr: result })
 }
 
 pub(crate) fn xls_format_preference_from_string(
@@ -394,7 +400,7 @@ pub(crate) fn xls_ir_analysis_create_from_package_with_options(
 pub(crate) fn xls_ir_analysis_get_known_bits_for_node_id(
     a: *const CIrAnalysis,
     node_id: i64,
-) -> Result<(IrBits, IrBits), XlsynthError> {
+) -> Result<(XlsIrBits, XlsIrBits), XlsynthError> {
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut known_mask_out: *mut CIrBits = std::ptr::null_mut();
@@ -408,10 +414,10 @@ pub(crate) fn xls_ir_analysis_get_known_bits_for_node_id(
         );
         if success {
             Ok((
-                IrBits {
+                XlsIrBits {
                     ptr: known_mask_out,
                 },
-                IrBits {
+                XlsIrBits {
                     ptr: known_value_out,
                 },
             ))
@@ -520,7 +526,7 @@ pub(crate) fn xls_ir_analysis_implies(
 pub(crate) fn xls_interval_set_get_interval_bounds(
     s: *const CIrIntervalSet,
     i: i64,
-) -> Result<(IrBits, IrBits), XlsynthError> {
+) -> Result<(XlsIrBits, XlsIrBits), XlsynthError> {
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut lo_out: *mut CIrBits = std::ptr::null_mut();
@@ -533,7 +539,7 @@ pub(crate) fn xls_interval_set_get_interval_bounds(
             &mut hi_out,
         );
         if success {
-            Ok((IrBits { ptr: lo_out }, IrBits { ptr: hi_out }))
+            Ok((XlsIrBits { ptr: lo_out }, XlsIrBits { ptr: hi_out }))
         } else {
             Err(XlsynthError(c_str_to_rust(error_out)))
         }
@@ -637,7 +643,7 @@ pub(crate) fn xls_function_builder_add_concat(
 
 pub(crate) fn xls_function_builder_add_literal(
     builder: RwLockWriteGuard<IrFnBuilderPtr>,
-    value: &IrValue,
+    value: &XlsIrValue,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
@@ -840,14 +846,14 @@ pub(crate) fn xls_function_get_name(function: *const CIrFunction) -> Result<Stri
 pub(crate) fn xls_interpret_function(
     _package_guard: &RwLockReadGuard<IrPackagePtr>,
     function: *const CIrFunction,
-    args: &[IrValue],
-) -> Result<IrValue, XlsynthError> {
+    args: &[XlsIrValue],
+) -> Result<XlsIrValue, XlsynthError> {
     let args_ptrs: Vec<*const CIrValue> =
         args.iter().map(|v| -> *const CIrValue { v.ptr }).collect();
     let argc = args_ptrs.len();
     let mut result_out: *mut CIrValue = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_interpret_function, function, argc, args_ptrs.as_ptr(); result_out)?;
-    Ok(IrValue { ptr: result_out })
+    Ok(XlsIrValue { ptr: result_out })
 }
 
 pub(crate) fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthError> {
@@ -867,7 +873,7 @@ pub struct TraceMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
-    pub value: IrValue,
+    pub value: XlsIrValue,
     pub trace_messages: Vec<TraceMessage>,
     pub assert_messages: Vec<String>,
 }
@@ -924,7 +930,7 @@ pub(crate) fn xls_make_function_jit(
 pub(crate) fn xls_function_jit_run(
     _package_guard: &RwLockReadGuard<IrPackagePtr>,
     jit: *const CIrFunctionJit,
-    args: &[IrValue],
+    args: &[XlsIrValue],
 ) -> Result<RunResult, XlsynthError> {
     let mut result_out: *mut CIrValue = std::ptr::null_mut();
     let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -958,7 +964,7 @@ pub(crate) fn xls_function_jit_run(
         unsafe { trace_messages_to_rust(trace_messages_out, trace_messages_count) };
     let assert_messages = unsafe { c_strs_to_rust(assert_messages_out, assert_messages_count) };
     Ok(RunResult {
-        value: IrValue { ptr: result_out },
+        value: XlsIrValue { ptr: result_out },
         trace_messages,
         assert_messages,
     })

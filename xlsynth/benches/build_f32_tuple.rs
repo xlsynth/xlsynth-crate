@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use xlsynth::IrValue;
+use xlsynth::XlsIrValue;
 
 /// Benchmarks making 3 bits values and packing them into a tuple (in the shape
 /// of a DSLX `float32::F32`).
 fn bench_build_f32_tuple(c: &mut Criterion) {
     c.bench_function("build_f32_tuple", |b| {
         b.iter(|| {
-            let sign = IrValue::make_ubits(1, 0).unwrap();
-            let bexp = IrValue::make_ubits(8, 127).unwrap();
-            let frac = IrValue::make_ubits(23, 0).unwrap();
-            let f32_tuple = IrValue::make_tuple(&[sign, bexp, frac]);
+            let sign = XlsIrValue::make_ubits(1, 0).unwrap();
+            let bexp = XlsIrValue::make_ubits(8, 127).unwrap();
+            let frac = XlsIrValue::make_ubits(23, 0).unwrap();
+            let f32_tuple = XlsIrValue::make_tuple(&[sign, bexp, frac]);
             black_box(f32_tuple);
         });
     });
@@ -22,10 +22,10 @@ fn bench_build_f32_tuple(c: &mut Criterion) {
 fn bench_unpack_f32_tuple(c: &mut Criterion) {
     let _ = env_logger::builder().is_test(true).try_init();
     c.bench_function("unpack_f32_tuple", |b| {
-        let orig = IrValue::make_tuple(&[
-            IrValue::make_ubits(1, 0).unwrap(),
-            IrValue::make_ubits(8, 127).unwrap(),
-            IrValue::make_ubits(23, 0).unwrap(),
+        let orig = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(1, 0).unwrap(),
+            XlsIrValue::make_ubits(8, 127).unwrap(),
+            XlsIrValue::make_ubits(23, 0).unwrap(),
         ]);
         b.iter(|| {
             let elements = orig.get_elements().unwrap();
@@ -39,10 +39,10 @@ fn bench_unpack_f32_tuple(c: &mut Criterion) {
 
 fn bench_clone_f32_tuple(c: &mut Criterion) {
     c.bench_function("clone_f32_tuple", |b| {
-        let orig = IrValue::make_tuple(&[
-            IrValue::make_ubits(1, 0).unwrap(),
-            IrValue::make_ubits(8, 127).unwrap(),
-            IrValue::make_ubits(23, 0).unwrap(),
+        let orig = XlsIrValue::make_tuple(&[
+            XlsIrValue::make_ubits(1, 0).unwrap(),
+            XlsIrValue::make_ubits(8, 127).unwrap(),
+            XlsIrValue::make_ubits(23, 0).unwrap(),
         ]);
         b.iter(|| {
             let clone = orig.clone();

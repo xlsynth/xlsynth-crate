@@ -18,7 +18,7 @@
 //! that need analysis should project to the XLS basis ops separately (see
 //! `xlsynth_pir::desugar_extensions`).
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_match;
 use xlsynth_pir::ir_match::MatchCtx;

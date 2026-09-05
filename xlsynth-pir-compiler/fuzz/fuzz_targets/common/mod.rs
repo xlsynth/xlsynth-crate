@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::Fn;
 use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
 

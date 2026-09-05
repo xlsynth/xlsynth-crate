@@ -97,7 +97,7 @@ fn literal_as_usize(function: &ir::Fn, node_ref: NodeRef) -> Option<usize> {
         return None;
     };
     let bits = value.to_bits().ok()?;
-    let bytes = bits.to_le_bytes().ok()?;
+    let bytes = bits.to_le_bytes();
     if bytes
         .iter()
         .skip(std::mem::size_of::<usize>())

@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::IrValue;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
-use xlsynth::IrValue;
 
 use crate::ir::{self, PackageMember, Type};
 use crate::ir_parser::Parser;

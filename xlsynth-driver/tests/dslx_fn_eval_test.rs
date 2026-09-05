@@ -3,6 +3,50 @@
 use std::process::Command;
 
 #[test]
+fn test_native_irvals_wide_aggregates_across_eval_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let dslx_path = dir.path().join("wide.x");
+    std::fs::write(
+        &dslx_path,
+        r#"fn f(x: uN[129], ys: u4[2]) -> (uN[129], u4[2]) {
+    assert!(ys[u32:0] == u4:3, "first_is_three");
+    (x, ys)
+}"#,
+    )
+    .unwrap();
+    let irvals_path = dir.path().join("input.irvals");
+    for input in [
+        "(bits[129]:0x1_0000_0000_0000_0000, [bits[4]:3, bits[4]:4])\n",
+        "{ys: [bits[4]:3, bits[4]:4], x: bits[129]:0x1_0000_0000_0000_0000}\n",
+    ] {
+        std::fs::write(&irvals_path, input).unwrap();
+        for mode in ["interp", "jit", "pir-interp"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+                .arg("dslx-fn-eval")
+                .arg("--dslx_input_file")
+                .arg(&dslx_path)
+                .arg("--dslx_top=f")
+                .arg("--input_ir_path")
+                .arg(&irvals_path)
+                .arg("--eval_mode")
+                .arg(mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "mode={mode}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "(bits[129]:0x1_0000_0000_0000_0000, [bits[4]:3, bits[4]:4])\n",
+                "mode={mode}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_dslx_fn_eval_add() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
 

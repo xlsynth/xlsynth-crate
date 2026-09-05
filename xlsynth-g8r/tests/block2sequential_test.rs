@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrBits;
 use xlsynth_g8r::aig_serdes::sequential2ir::sequential_gate_fn_to_pir_block_package;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::block_ir_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
+use xlsynth_pir::IrBits;
 
 fn lower(block_ir: &str) -> xlsynth_g8r::aig::SequentialGateFn {
     block_ir_to_sequential_gate_fn(block_ir, GatifyOptions::all_opts_disabled())

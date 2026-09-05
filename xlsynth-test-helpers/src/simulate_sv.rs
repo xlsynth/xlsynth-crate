@@ -15,7 +15,7 @@ use xlsynth::external_tool::ToolError;
 use tempfile::tempdir;
 
 use crate::assert_valid_sv::FlistEntry;
-use xlsynth::IrBits;
+use xlsynth_pir::{IrBits, IrFormatPreference};
 
 /// Error type returned by [`simulate_sv_flist`] when the simulation cannot be
 /// performed.
@@ -205,8 +205,6 @@ pub fn simulate_pipeline_single_pulse_custom(
     reset_signal: &str,
     reset_active_low: bool,
 ) -> Result<String, SimulateSvError> {
-    use xlsynth::ir_value::IrFormatPreference;
-
     let mut reg_decls = String::new();
     let mut port_conns = Vec::new();
     let mut assign_values = String::new();

@@ -27,7 +27,7 @@
 
 use std::{collections::HashMap, iter::zip};
 
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 use crate::{
     aig::aig_simplify,

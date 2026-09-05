@@ -12,7 +12,7 @@
 use crate::aig::gate::{AigNode, GateFn};
 use core::simd::u64x4;
 use std::ops::{BitAnd, Not};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 /// A fixed-width boolean vector with 256 lanes.
 ///

@@ -5,7 +5,6 @@
 use libfuzzer_sys::fuzz_target;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_package;
 use xlsynth_pir::ir::{
     self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload,
@@ -17,6 +16,7 @@ use xlsynth_pir::random_inputs::{
     BitValuePattern, generate_corner_irbits, generate_flat_bitvector_argument_sets_with_rng,
     generate_pattern_irbits,
 };
+use xlsynth_pir::{IrBits, IrValue};
 
 const PACKAGE_NAME: &str = "sample";
 const FUNCTION_NAME: &str = "main";

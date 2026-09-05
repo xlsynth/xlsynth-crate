@@ -8,11 +8,11 @@ use std::mem;
 
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
-use xlsynth::{IrBits, IrValue};
-#[allow(unused_imports)]
 use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
 #[allow(unused_imports)]
 use xlsynth_pir::ir_utils::{Users, compute_users, remap_payload_with};
+#[allow(unused_imports)]
+use xlsynth_pir::{IrBits, IrValue};
 
 mod add_fission;
 mod add_sign_ext_u1_to_sub_zero_ext_u1;

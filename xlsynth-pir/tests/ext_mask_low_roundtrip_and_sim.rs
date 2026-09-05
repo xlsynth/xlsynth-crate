@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::desugar_extensions::{
     ExtensionEmitMode, desugar_extensions_in_fn, emit_package_with_extension_mode,
 };
@@ -38,7 +38,7 @@ fn eval_success(f: &Fn, count_width: usize, count: u64) -> IrValue {
 
 fn expected_mask(output_width: usize, count: usize) -> IrValue {
     let bits = (0..output_width).map(|i| count > i).collect::<Vec<bool>>();
-    IrValue::from_bits(&xlsynth::IrBits::from_lsb_is_0(&bits))
+    IrValue::from_bits(&xlsynth_pir::IrBits::from_lsb_is_0(&bits))
 }
 
 #[test]

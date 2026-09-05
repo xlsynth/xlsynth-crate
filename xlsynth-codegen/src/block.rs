@@ -2,8 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use xlsynth::IrValue;
-use xlsynth::ir_value::IrFormatPreference;
 use xlsynth::vast_helpers::{RegisterDefinition, RegisterScope, Reset};
 use xlsynth_pir::ir::{
     Binop, BlockMetadata, Fn, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
@@ -11,6 +9,7 @@ use xlsynth_pir::ir::{
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
 use xlsynth_pir::ir_verify::verify_package;
+use xlsynth_pir::{IrFormatPreference, IrValue};
 use xlsynth_vast::{
     Expr, IndexableExpr, LiteralFormat, LogicRef, VastDataType, VastFile, VastFileType, VastModule,
 };
@@ -1113,13 +1112,13 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
         match ty {
             Type::Bits(_) => {
-                let formatted = value.to_string_fmt(IrFormatPreference::Hex)?;
+                let formatted = value.to_string_fmt(IrFormatPreference::Hex);
                 Ok(Some(
                     self.file.make_literal(&formatted, &LiteralFormat::Hex)?,
                 ))
             }
             Type::Tuple(types) => {
-                let values = value.get_elements()?;
+                let values = value.as_elements()?;
                 let mut expressions = Vec::new();
                 for (value, ty) in values.iter().zip(types) {
                     if let Some(expression) = self.literal(value, ty)? {
@@ -1129,7 +1128,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 Ok(self.concat_or_only(&expressions))
             }
             Type::Array(array) => {
-                let values = value.get_elements()?;
+                let values = value.as_elements()?;
                 let mut expressions = Vec::new();
                 for value in values.iter().rev() {
                     if let Some(expression) = self.literal(value, &array.element_type)? {

@@ -13,7 +13,7 @@ use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir_parser::Parser;
 
 /// Flattens a small bits or tuple result in SystemVerilog port packing order.
-pub(super) fn flatten_reference_value(value: &xlsynth::IrValue, ty: &Type) -> u64 {
+pub(super) fn flatten_reference_value(value: &xlsynth_pir::IrValue, ty: &Type) -> u64 {
     match ty {
         Type::Bits(_) => value.to_u64().expect("reference bits value fits in u64"),
         Type::Tuple(elements) => elements.iter().enumerate().fold(0, |packed, (index, ty)| {

@@ -16,7 +16,7 @@ mod multithread;
 fn load_and_invoke(
     dslx_relpath: &str,
     func: &str,
-) -> Result<xlsynth::IrValue, Box<dyn std::error::Error>> {
+) -> Result<xlsynth::XlsIrValue, Box<dyn std::error::Error>> {
     let dslx_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dslx_relpath);
     log::info!("reading DSLX program from: {:?}", dslx_path);
     let dslx = std::fs::read_to_string(&dslx_path)?;
@@ -51,7 +51,7 @@ fn load_and_invoke(
 fn validate_mol() -> Result<(), Box<dyn std::error::Error>> {
     let file = "src/sample.x";
     let result = load_and_invoke(file, "mol")?;
-    let want = xlsynth::IrValue::parse_typed("bits[32]:42")?;
+    let want = xlsynth::XlsIrValue::parse_typed("bits[32]:42")?;
     assert_eq!(result, want);
     Ok(())
 }
@@ -59,7 +59,7 @@ fn validate_mol() -> Result<(), Box<dyn std::error::Error>> {
 fn validate_use_popcount() -> Result<(), Box<dyn std::error::Error>> {
     let file = "src/sample_with_stdlib.x";
     let result = load_and_invoke(file, "use_popcount")?;
-    let want = xlsynth::IrValue::parse_typed("bits[32]:11")?;
+    let want = xlsynth::XlsIrValue::parse_typed("bits[32]:11")?;
     assert_eq!(result, want);
     Ok(())
 }
@@ -88,7 +88,7 @@ fn validate_fail() -> Result<(), Box<dyn std::error::Error>> {
 fn validate_use() -> Result<(), Box<dyn std::error::Error>> {
     let file = "src/sample_with_use.x";
     let result = load_and_invoke(file, "main")?;
-    let want = xlsynth::IrValue::parse_typed("bits[32]:4294967295")?;
+    let want = xlsynth::XlsIrValue::parse_typed("bits[32]:4294967295")?;
     assert_eq!(result, want);
     Ok(())
 }
@@ -101,8 +101,8 @@ fn validate_add_invert_via_ir_builder() -> Result<(), Box<dyn std::error::Error>
     let invert = builder.not(&a, Some("invert"));
     let result: xlsynth::IrFunction = builder.build_with_return_value(&invert)?;
 
-    let xlsynth_false = xlsynth::IrValue::make_ubits(1, 0)?;
-    let xlsynth_true = xlsynth::IrValue::make_ubits(1, 1)?;
+    let xlsynth_false = xlsynth::XlsIrValue::make_ubits(1, 0)?;
+    let xlsynth_true = xlsynth::XlsIrValue::make_ubits(1, 1)?;
 
     assert_eq!(
         result.interpret(std::slice::from_ref(&xlsynth_false))?,

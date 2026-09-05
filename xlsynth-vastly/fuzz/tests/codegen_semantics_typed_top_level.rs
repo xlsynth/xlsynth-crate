@@ -7,7 +7,9 @@ use vastly_fuzz::codegen_semantics::make_vastly_input_map;
 use vastly_fuzz::codegen_semantics::pack_ir_value_to_value4;
 use vastly_fuzz::codegen_semantics::packed_signature;
 use vastly_fuzz::codegen_semantics::parse_pir_top_fn;
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
@@ -204,13 +206,15 @@ fn pack_ir_value_matches_codegen_packed_port_order() {
 #[test]
 fn typed_top_level_codegen_matches_ir_and_oracles() {
     let ir_text = canonical_compound_shapes_ir();
-    let top = parse_pir_top_fn(&ir_text, "compound_shapes").unwrap();
-    let sig = packed_signature(&top).unwrap();
+    let pkg = Parser::new(&ir_text).parse_and_verify_package().unwrap();
+    let top = pkg.get_fn("compound_shapes").unwrap();
+    let sig = packed_signature(top).unwrap();
     let args = make_compound_shapes_args();
 
-    let pkg = xlsynth::IrPackage::parse_ir(&ir_text, None).unwrap();
-    let f = pkg.get_function("compound_shapes").unwrap();
-    let ir_result = f.interpret(&args).unwrap();
+    let ir_result = match eval_fn_in_package(&pkg, top, &args) {
+        FnEvalResult::Success(success) => success.value,
+        failure => panic!("PIR reference evaluation failed: {failure:?}"),
+    };
     let want = pack_ir_value_to_value4(&sig.ret_ty, &ir_result).unwrap();
 
     let input_map = make_vastly_input_map(&sig, &args).unwrap();

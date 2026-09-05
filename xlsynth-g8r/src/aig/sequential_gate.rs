@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 

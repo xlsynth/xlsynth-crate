@@ -428,7 +428,7 @@ impl Solver for EasySmtSolver {
         &mut self,
         bit_vec: &BitVec<SExpr>,
         ty: &ir::Type,
-    ) -> io::Result<xlsynth::IrValue> {
+    ) -> io::Result<xlsynth_pir::IrValue> {
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         match bit_vec {

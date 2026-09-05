@@ -42,3 +42,9 @@ impl From<xlsynth::XlsynthError> for BlockCodegenError {
         Self::Emission(error.to_string())
     }
 }
+
+impl From<xlsynth_pir::ValueError> for BlockCodegenError {
+    fn from(error: xlsynth_pir::ValueError) -> Self {
+        Self::Emission(error.to_string())
+    }
+}

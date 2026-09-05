@@ -43,13 +43,13 @@ struct Args {
     threads: Option<usize>,
 }
 
-fn bits_from_counter(nbits: usize, mut ctr: u128) -> xlsynth::IrBits {
+fn bits_from_counter(nbits: usize, mut ctr: u128) -> xlsynth_pir::IrBits {
     let mut v: Vec<bool> = Vec::with_capacity(nbits);
     for _ in 0..nbits {
         v.push((ctr & 1) != 0);
         ctr >>= 1;
     }
-    xlsynth::IrBits::from_lsb_is_0(&v)
+    xlsynth_pir::IrBits::from_lsb_is_0(&v)
 }
 
 fn main() -> anyhow::Result<()> {

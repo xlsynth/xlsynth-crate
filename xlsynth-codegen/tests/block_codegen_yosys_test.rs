@@ -7,9 +7,10 @@ mod support;
 use cases::*;
 use std::collections::BTreeMap;
 use std::time::Duration;
-use xlsynth::{IrBits, IrValue};
 use xlsynth_codegen::BlockCodegenOptions;
 use xlsynth_g8r::netlist::yosys::YosysToolchain;
+use xlsynth_pir::IrBits;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::PackageMember;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 
@@ -129,11 +130,13 @@ fn narrow_slice_update_matches_pir_for_all_inputs_with_yosys() {
     let mut expected = Vec::new();
     for a in 0..8 {
         for b in 0..8 {
+            let args = [
+                IrValue::make_ubits(3, a).unwrap(),
+                IrValue::make_ubits(3, b).unwrap(),
+            ];
             let a = IrBits::make_ubits(3, a).unwrap();
             let b = IrBits::make_ubits(3, b).unwrap();
-            let FnEvalResult::Success(result) =
-                eval_fn(func, &[IrValue::from_bits(&a), IrValue::from_bits(&b)])
-            else {
+            let FnEvalResult::Success(result) = eval_fn(func, &args) else {
                 panic!("PIR evaluation failed");
             };
             expected.push(BTreeMap::from([(

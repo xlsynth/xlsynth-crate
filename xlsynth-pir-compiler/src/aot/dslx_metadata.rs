@@ -1235,7 +1235,7 @@ impl BridgeBuilder for TypedConcreteParametricStructCollector<'_> {
         _dslx_name: &str,
         _is_signed: bool,
         _underlying_bit_count: usize,
-        _members: &[(String, xlsynth::IrValue)],
+        _members: &[(String, xlsynth::XlsIrValue)],
     ) -> Result<(), XlsynthError> {
         Ok(())
     }
@@ -1291,7 +1291,7 @@ impl BridgeBuilder for TypedConcreteParametricStructCollector<'_> {
         _name: &str,
         _constant_def: &dslx::ConstantDef,
         _ty: &dslx::Type,
-        _ir_value: &xlsynth::IrValue,
+        _ir_value: &xlsynth::XlsIrValue,
     ) -> Result<(), XlsynthError> {
         Ok(())
     }

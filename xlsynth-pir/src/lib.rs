@@ -38,8 +38,10 @@ pub mod ir_rebase_ids;
 pub mod ir_rewrite;
 pub mod ir_utils;
 pub mod ir_value_utils;
+pub mod ir_values;
 pub mod ir_verify;
 pub mod ir_verify_parity;
+pub mod libxls_bridge;
 pub mod localized_eco2;
 pub mod matching_ged;
 pub mod math;
@@ -48,9 +50,15 @@ pub mod prove_equiv_via_toolchain;
 pub mod random_inputs;
 pub mod simple_rebase;
 pub mod structural_similarity;
+pub mod value;
 
 pub use aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
 pub use ir_inline::{IrInlineBackend, IrInlineOptions, run_ir_inline_over_ir_text};
+pub use ir_values::{
+    IrValuesFile, IrValuesFileKind, NamedIrValue, NamedIrValueSet, parse_ir_values,
+    parse_ir_values_file,
+};
+pub use value::{IrArray, IrBits, IrFormatPreference, IrValue, ValueError};
 
 #[cfg(test)]
 pub mod test_utils;

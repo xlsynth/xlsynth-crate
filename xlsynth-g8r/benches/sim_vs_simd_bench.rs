@@ -5,10 +5,10 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use xlsynth::IrBits;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::aig_sim::gate_simd;
 use xlsynth_g8r::test_utils::{Opt, load_bf16_add_sample};
+use xlsynth_pir::IrBits;
 
 /// Number of samples that the SIMD evaluator expects (one per bit lane).
 const BATCH: usize = 256;

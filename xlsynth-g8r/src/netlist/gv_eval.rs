@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use xlsynth::{IrBits, IrValue};
+use xlsynth_pir::{IrBits, IrValue};
 
 use crate::aig::{AigOperand, SequentialGateFn};
 use crate::aig_sim::count_toggles;

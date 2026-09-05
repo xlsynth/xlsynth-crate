@@ -251,7 +251,7 @@ impl GateFnFragment {
 mod tests {
     use super::*;
     use crate::aig_sim::gate_sim;
-    use xlsynth::IrBits;
+    use xlsynth_pir::IrBits;
 
     fn gate_fn_to_tt16(g: &GateFn) -> TruthTable16 {
         // Evaluate for all 16 assignments with 1-bit inputs.

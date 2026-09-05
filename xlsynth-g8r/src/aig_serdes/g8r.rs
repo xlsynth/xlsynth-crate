@@ -7,8 +7,8 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use xlsynth::ir_value::IrFormatPreference;
-use xlsynth::{IrBits, IrValue};
+use xlsynth_pir::IrFormatPreference;
+use xlsynth_pir::{IrBits, IrValue};
 
 use crate::aig::{
     ClockPort, GateFn, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,

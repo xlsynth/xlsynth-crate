@@ -30,9 +30,7 @@ use std::time::Instant;
 
 use clap::ValueEnum;
 
-use xlsynth::IrBits;
 use xlsynth::IrPackage;
-use xlsynth::IrValue;
 use xlsynth_g8r::aig::get_summary_stats;
 use xlsynth_g8r::aig::get_summary_stats::AigStats;
 use xlsynth_g8r::aig::graph_logical_effort::GraphLogicalEffortOptions;
@@ -67,6 +65,7 @@ use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
 use xlsynth_pir::structural_similarity::collect_structural_entries;
+use xlsynth_pir::{IrBits, IrValue};
 
 pub mod driver_cli;
 pub mod transforms;
@@ -84,9 +83,26 @@ pub fn parse_irvals_file_for_fn(path: &Path, f: &IrFn) -> Result<Vec<IrValue>> {
         .iter()
         .map(|param| param.name.clone())
         .collect::<Vec<_>>();
-    xlsynth::parse_ir_values_file(path)?
+    let values = xlsynth_pir::parse_ir_values_file(path)?
         .into_positional_values(&argument_names)
-        .map_err(anyhow::Error::new)
+        .map_err(anyhow::Error::new)?;
+    let tuple_type = PirType::Tuple(
+        f.params
+            .iter()
+            .map(|param| Box::new(param.ty.clone()))
+            .collect(),
+    );
+    for (index, value) in values.iter().enumerate() {
+        let observed_type = value.type_();
+        anyhow::ensure!(
+            observed_type == tuple_type,
+            "IR values sample {} type mismatch: expected {}, got {}",
+            index + 1,
+            tuple_type,
+            observed_type
+        );
+    }
+    Ok(values)
 }
 
 // We want invalid-IR candidates (esp. bit_slice bounds) to be visible, since
@@ -5760,17 +5776,44 @@ top fn f(x: bits[8] id=1) -> bits[8] {
         let path = dir.path().join("named.irvals");
         std::fs::write(
             &path,
-            "{b: bits[2]:3, a: bits[1]:0}\n{a: bits[1]:1, b: bits[2]:1}\n",
+            "{b: bits[2]:3, a: bits[1]:0}\n{a: bits[1]:1, b: bits[2]:1}\n{a: bits[1]:0, b: bits[2]:2}\n",
         )
         .unwrap();
         let values = parse_irvals_file_for_fn(&path, &f).unwrap();
+        assert_eq!(values.len(), 3);
         assert_eq!(values[0].to_string(), "(bits[1]:0, bits[2]:3)");
         assert_eq!(values[1].to_string(), "(bits[1]:1, bits[2]:1)");
+        assert_eq!(values[2].to_string(), "(bits[1]:0, bits[2]:2)");
 
         std::fs::write(&path, "{a: bits[1]:0, wrong: bits[2]:3}\n").unwrap();
         let error = parse_irvals_file_for_fn(&path, &f).unwrap_err().to_string();
         assert!(error.contains("missing [\"b\"]"), "{error}");
         assert!(error.contains("unknown [\"wrong\"]"), "{error}");
+    }
+
+    #[test]
+    fn parse_irvals_file_for_fn_rejects_type_and_shape_mismatches() {
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[2] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(a, id=3)
+}"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.irvals");
+        for (text, observed_type) in [
+            ("{b: bits[3]:3, a: bits[1]:0}", "(bits[1], bits[3])"),
+            ("(bits[1]:0)", "(bits[1])"),
+            ("[bits[1]:0, bits[1]:1]", "bits[1][2]"),
+            ("bits[1]:0", "bits[1]"),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(
+                parse_irvals_file_for_fn(&path, &f).unwrap_err().to_string(),
+                format!(
+                    "IR values sample 1 type mismatch: expected (bits[1], bits[2]), got {observed_type}"
+                )
+            );
+        }
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 use super::support::TestRtl;
 use std::collections::BTreeMap;
-use xlsynth::IrBits;
 use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
+use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::Package;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_test_helpers::rtl_sim::LogicValue;

@@ -2,15 +2,15 @@
 
 use std::cmp::Ordering;
 
+use crate::{IrBits, IrFormatPreference};
 use xlsynth::IrAnalysis;
-use xlsynth::ir_value::IrFormatPreference;
 
 use crate::desugar_extensions;
 use crate::ir;
 use crate::ir_parser;
-use crate::ir_range_info::IrRangeInfo;
+use crate::ir_range_info::{Interval, IrRangeInfo, KnownBits};
 
-fn format_known_bits_binary(k: &xlsynth::KnownBits) -> String {
+fn format_known_bits_binary(k: &KnownBits) -> String {
     let w = k.mask.get_bit_count();
     let mut s = String::with_capacity(2 + w);
     s.push_str("0b");
@@ -26,14 +26,14 @@ fn format_known_bits_binary(k: &xlsynth::KnownBits) -> String {
     s
 }
 
-fn format_irbits_unsigned_decimal(bits: &xlsynth::IrBits) -> String {
+fn format_irbits_unsigned_decimal(bits: &IrBits) -> String {
     bits.to_string_fmt(
         IrFormatPreference::UnsignedDecimal,
         /* include_bit_count= */ false,
     )
 }
 
-fn cmp_irbits_unsigned(a: &xlsynth::IrBits, b: &xlsynth::IrBits) -> Ordering {
+fn cmp_irbits_unsigned(a: &IrBits, b: &IrBits) -> Ordering {
     if a.ult(b) {
         Ordering::Less
     } else if b.ult(a) {
@@ -43,7 +43,7 @@ fn cmp_irbits_unsigned(a: &xlsynth::IrBits, b: &xlsynth::IrBits) -> Ordering {
     }
 }
 
-fn format_intervals(intervals: &[xlsynth::Interval]) -> String {
+fn format_intervals(intervals: &[Interval]) -> String {
     // Ensure deterministic output ordering regardless of libxls enumeration
     // order.
     let mut idxs: Vec<usize> = (0..intervals.len()).collect();

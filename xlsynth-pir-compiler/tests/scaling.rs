@@ -5,7 +5,8 @@ use std::fmt::Write;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use xlsynth::{IrFunctionJit, IrPackage, IrValue};
+use xlsynth::{IrFunctionJit, IrPackage, XlsIrValue};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
@@ -235,10 +236,10 @@ fn compiles_and_executes_varied_ten_thousand_node_function() {
     }
 }
 
-struct BackendTiming {
+struct BackendTiming<T> {
     compilation: Duration,
     execution: Duration,
-    value: IrValue,
+    value: T,
 }
 
 /// Compiles and repeatedly executes a large live function through Cranelift.
@@ -303,9 +304,9 @@ fn measure_varied_function_xls(instruction_count: usize, execution_count: usize)
     let ir = make_large_varied_function(instruction_count);
     let generation = generation_start.elapsed();
     let args = [
-        IrValue::make_ubits(32, 0x1234_5678).unwrap(),
-        IrValue::make_ubits(32, 0x89ab_cdef).unwrap(),
-        IrValue::make_ubits(2, 1).unwrap(),
+        XlsIrValue::make_ubits(32, 0x1234_5678).unwrap(),
+        XlsIrValue::make_ubits(32, 0x89ab_cdef).unwrap(),
+        XlsIrValue::make_ubits(2, 1).unwrap(),
     ];
 
     let parse_start = Instant::now();

@@ -8,6 +8,9 @@
 use std::path::Path;
 
 use std::io::Write;
+use xlsynth_pir::ir::Type;
+use xlsynth_pir::libxls_bridge::{value_from_libxls, value_to_libxls};
+use xlsynth_pir::{IrValue, IrValuesFile};
 
 struct DumpNodeValuesObserver<'a> {
     out: &'a mut dyn Write,
@@ -20,7 +23,7 @@ impl xlsynth_pir::ir_eval::EvalObserver for DumpNodeValuesObserver<'_> {
         &mut self,
         _node_ref: xlsynth_pir::ir::NodeRef,
         node_text_id: usize,
-        value: &xlsynth::IrValue,
+        value: &xlsynth_pir::IrValue,
     ) {
         writeln!(
             self.out,
@@ -89,11 +92,7 @@ fn requires_implicit_token_via_dslx(
     Ok(requires)
 }
 
-fn unpack_return_value(
-    pkg: &xlsynth::IrPackage,
-    v: xlsynth::IrValue,
-    is_itok: bool,
-) -> xlsynth::IrValue {
+fn unpack_return_value(v: IrValue, is_itok: bool) -> IrValue {
     if !is_itok {
         return v;
     }
@@ -105,20 +104,20 @@ fn unpack_return_value(
         "implicit-token return tuple must have at least 2 elements"
     );
     let first = v.get_element(0).expect("tuple el0 present");
-    let tok_ty = pkg.get_type_for_value(&first).expect("type for el0");
-    let token_ty = pkg.get_token_type();
-    let is_token = pkg.types_eq(&tok_ty, &token_ty).expect("types_eq");
     assert!(
-        is_token,
+        first == IrValue::Token,
         "first tuple element must be token for itok return"
     );
     v.get_element(1).expect("tuple el1 present")
 }
 
 enum DslxFnEvaluator {
-    Interp,
+    Interp {
+        return_type: Type,
+    },
     Jit {
         jit: xlsynth::IrFunctionJit,
+        return_type: Type,
     },
     PirInterp {
         pir_pkg: xlsynth_pir::ir::Package,
@@ -132,12 +131,15 @@ impl DslxFnEvaluator {
         pkg: &xlsynth::IrPackage,
         func: &xlsynth::IrFunction,
     ) -> anyhow::Result<Self> {
+        let return_type =
+            crate::fn_type_arg::parse_type_text(&func.get_type()?.return_type().to_string())
+                .map_err(anyhow::Error::msg)?;
         Ok(match mode {
-            EvalMode::Interp => DslxFnEvaluator::Interp,
+            EvalMode::Interp => DslxFnEvaluator::Interp { return_type },
             EvalMode::Jit => {
                 let jit = xlsynth::IrFunctionJit::new(func)
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                DslxFnEvaluator::Jit { jit }
+                DslxFnEvaluator::Jit { jit, return_type }
             }
             EvalMode::PirInterp => {
                 let ir_text = pkg.to_string();
@@ -153,35 +155,54 @@ impl DslxFnEvaluator {
 
     fn run(
         &self,
-        args: &[xlsynth::IrValue],
-        pkg: &xlsynth::IrPackage,
+        args: &[IrValue],
         func: &xlsynth::IrFunction,
         is_itok: bool,
         pir_dump_node_values: bool,
         out: &mut dyn Write,
-    ) -> anyhow::Result<xlsynth::IrValue> {
+    ) -> anyhow::Result<IrValue> {
         match self {
-            DslxFnEvaluator::Interp => {
+            DslxFnEvaluator::Interp { return_type } => {
+                let args = args
+                    .iter()
+                    .map(value_to_libxls)
+                    .collect::<Result<Vec<_>, _>>()?;
                 let v = func
-                    .interpret(args)
+                    .interpret(&args)
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(unpack_return_value(pkg, v, is_itok))
+                Ok(unpack_return_value(
+                    value_from_libxls(&v, return_type)?,
+                    is_itok,
+                ))
             }
-            DslxFnEvaluator::Jit { jit } => {
-                let rr = jit.run(args).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            DslxFnEvaluator::Jit { jit, return_type } => {
+                let args = args
+                    .iter()
+                    .map(value_to_libxls)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let rr = jit.run(&args).map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 if !rr.assert_messages.is_empty() {
                     return Err(anyhow::anyhow!(format!(
                         "assertion failure(s): {}",
                         rr.assert_messages.join("; ")
                     )));
                 }
-                Ok(unpack_return_value(pkg, rr.value.clone(), is_itok))
+                Ok(unpack_return_value(
+                    value_from_libxls(&rr.value, return_type)?,
+                    is_itok,
+                ))
             }
             DslxFnEvaluator::PirInterp { pir_pkg, fn_name } => {
                 let pir_fn = pir_pkg
                     .get_fn(fn_name)
                     .ok_or_else(|| anyhow::anyhow!("PIR function lookup failed"))?;
-
+                if args.len() != pir_fn.params.len() {
+                    return Err(anyhow::anyhow!(
+                        "PIR argument count mismatch: expected {}, got {}",
+                        pir_fn.params.len(),
+                        args.len()
+                    ));
+                }
                 let mut maybe_observer = if pir_dump_node_values {
                     Some(DumpNodeValuesObserver { out })
                 } else {
@@ -199,7 +220,9 @@ impl DslxFnEvaluator {
                     xlsynth_pir::ir_eval::eval_fn_in_package(pir_pkg, &pir_fn, args)
                 };
                 match result {
-                    xlsynth_pir::ir_eval::FnEvalResult::Success(s) => Ok(s.value),
+                    xlsynth_pir::ir_eval::FnEvalResult::Success(s) => {
+                        Ok(unpack_return_value(s.value, is_itok))
+                    }
                     xlsynth_pir::ir_eval::FnEvalResult::Failure(f) => {
                         let labels: Vec<String> = f
                             .assertion_failures
@@ -217,37 +240,40 @@ impl DslxFnEvaluator {
     }
 }
 
+/// Validates a native argument tuple and inserts implicit-token arguments.
 fn build_args_for_call(
-    pkg: &xlsynth::IrPackage,
-    f: &xlsynth::IrFunction,
-    logical_tuple: &xlsynth::IrValue,
+    parameter_types: &[Type],
+    logical_tuple: &IrValue,
     is_itok: bool,
-) -> anyhow::Result<Vec<xlsynth::IrValue>> {
-    let fty = f.get_type().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+) -> anyhow::Result<Vec<IrValue>> {
     // Require input as tuple for uniformity.
-    let logical_elems = logical_tuple
-        .get_elements()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let IrValue::Tuple(logical_elems) = logical_tuple else {
+        return Err(anyhow::anyhow!(
+            "input is not a tuple: {}",
+            logical_tuple.type_()
+        ));
+    };
 
     // Activation (u1) immediately follows token when present in the IR
     // signature.
     if is_itok {
         assert!(
-            fty.param_count() >= 2,
+            parameter_types.len() >= 2,
             "implicit-token calling convention requires exactly (token, activation, ...) parameters"
         );
-        let p1_ty = fty
-            .param_type(1)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let one = xlsynth::IrValue::make_ubits(1, 1).expect("make u1");
-        let bits1_ty = pkg.get_type_for_value(&one).expect("type for u1");
-        let is_u1 = pkg
-            .types_eq(&bits1_ty, &p1_ty)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        assert!(is_u1, "activation parameter must be bits[1]");
+        assert_eq!(
+            parameter_types[0],
+            Type::Token,
+            "first parameter must be token"
+        );
+        assert_eq!(
+            parameter_types[1],
+            Type::Bits(1),
+            "activation parameter must be bits[1]"
+        );
     }
     let logical_param_start = if is_itok { 2 } else { 0 };
-    let logical_param_count = fty.param_count() - logical_param_start;
+    let logical_param_count = parameter_types.len() - logical_param_start;
     if logical_elems.len() != logical_param_count {
         return Err(anyhow::anyhow!(format!(
             "arity mismatch: function expects {} logical params; got {}",
@@ -258,16 +284,9 @@ fn build_args_for_call(
 
     // Type-check each logical arg against the function param type.
     for (i, val) in logical_elems.iter().enumerate() {
-        let expected_ty = fty
-            .param_type(logical_param_start + i)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let got_ty = pkg
-            .get_type_for_value(val)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let matches = pkg
-            .types_eq(&expected_ty, &got_ty)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        if !matches {
+        let expected_ty = &parameter_types[logical_param_start + i];
+        let got_ty = val.type_();
+        if *expected_ty != got_ty {
             return Err(anyhow::anyhow!(format!(
                 "type mismatch for param {}: expected {}, observed {}",
                 i, expected_ty, got_ty
@@ -275,20 +294,20 @@ fn build_args_for_call(
         }
     }
 
-    let mut args: Vec<xlsynth::IrValue> = Vec::new();
+    let mut args: Vec<IrValue> = Vec::new();
     if is_itok {
         // Prepend token and activation=1.
-        args.push(xlsynth::IrValue::make_token());
-        args.push(xlsynth::IrValue::make_ubits(1, 1).expect("u1:1"));
+        args.push(IrValue::make_token());
+        args.push(IrValue::make_ubits(1, 1).expect("u1:1"));
     }
-    args.extend(logical_elems);
+    args.extend(logical_elems.iter().cloned());
     Ok(args)
 }
 
 pub fn evaluate_dslx_function_over_ir_values(
     dslx_file: &Path,
     top_function: &str,
-    input_values: xlsynth::IrValuesFile,
+    input_values: IrValuesFile,
     mode: EvalMode,
     opts: &DslxFnEvalOptions,
     pir_dump_node_values: bool,
@@ -337,6 +356,12 @@ pub fn evaluate_dslx_function_over_ir_values(
     let function_type = func
         .get_type()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let parameter_types = (0..function_type.param_count())
+        .map(|index| {
+            crate::fn_type_arg::parse_type_text(&function_type.param_type(index)?.to_string())
+                .map_err(anyhow::Error::msg)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let argument_names = (logical_param_start..function_type.param_count())
         .map(|index| {
             func.param_name(index)
@@ -356,19 +381,10 @@ pub fn evaluate_dslx_function_over_ir_values(
     // Evaluate each positional tuple, including tuples bound from named input
     // records.
     for (lineno, tuple_val) in input_values.iter().enumerate() {
-        // Enforce that the value is a tuple (unary requires (v,)).
-        tuple_val.get_elements().map_err(|e| {
-            anyhow::anyhow!(format!(
-                "input at line {} is not a tuple: {}",
-                lineno + 1,
-                e
-            ))
-        })?;
+        let args = build_args_for_call(&parameter_types, tuple_val, requires_itok)
+            .map_err(|e| anyhow::anyhow!(format!("invalid input at line {}: {}", lineno + 1, e)))?;
 
-        let args = build_args_for_call(&pkg, &func, &tuple_val, requires_itok)?;
-
-        let out_val =
-            evaluator.run(&args, &pkg, &func, requires_itok, pir_dump_node_values, out)?;
+        let out_val = evaluator.run(&args, &func, requires_itok, pir_dump_node_values, out)?;
 
         writeln!(out, "{}", out_val).expect("write output value");
     }

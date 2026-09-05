@@ -496,7 +496,7 @@ mod tests {
     use super::*;
     use env_logger;
     #[cfg(feature = "iverilog-tests")]
-    use xlsynth::ir_value::IrBits;
+    use xlsynth_pir::IrBits;
     use xlsynth_test_helpers::{self, compare_golden_sv};
 
     fn default_test_options(output_module_name: &str) -> StitchPipelineOptions<'_> {

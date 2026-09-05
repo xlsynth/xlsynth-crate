@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, NodePayload, NodeRef, Type};
+use xlsynth_pir::{IrBits, IrValue};
 
 use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
