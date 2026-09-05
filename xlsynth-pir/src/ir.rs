@@ -78,6 +78,22 @@ impl Type {
         }
     }
 
+    /// Returns the flattened width, or `None` if aggregate size arithmetic
+    /// overflows.
+    pub fn checked_bit_count(&self) -> Option<usize> {
+        match self {
+            Type::Token => Some(0),
+            Type::Bits(width) => Some(*width),
+            Type::Tuple(types) => types.iter().try_fold(0usize, |width, ty| {
+                width.checked_add(ty.checked_bit_count()?)
+            }),
+            Type::Array(array) => array
+                .element_type
+                .checked_bit_count()?
+                .checked_mul(array.element_count),
+        }
+    }
+
     /// Returns the start and limit bits for our bitwise representation of a
     /// tuple access at the given index.
     ///
@@ -1977,6 +1993,27 @@ mod tests {
     use crate::ir_utils::operands;
 
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn checked_type_width_handles_aggregates_and_overflow() {
+        assert_eq!(Type::Token.checked_bit_count(), Some(0));
+        assert_eq!(Type::nil().checked_bit_count(), Some(0));
+        assert_eq!(Type::Bits(usize::MAX).checked_bit_count(), Some(usize::MAX));
+        let fields = Type::Tuple(vec![Box::new(Type::Bits(65)), Box::new(Type::Bits(129))]);
+        assert_eq!(Type::new_array(fields, 3).checked_bit_count(), Some(582));
+        assert_eq!(
+            Type::new_array(Type::Bits(usize::MAX), 2).checked_bit_count(),
+            None
+        );
+        assert_eq!(
+            Type::Tuple(vec![
+                Box::new(Type::Bits(usize::MAX)),
+                Box::new(Type::Bits(1))
+            ])
+            .checked_bit_count(),
+            None
+        );
+    }
 
     // -- Helpers
     fn assert_round_trip_fn(ir_text: &str) {

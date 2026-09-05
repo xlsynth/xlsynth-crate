@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::FnBuilder;
-use xlsynth::IrPackage;
-use xlsynth::XlsIrValue;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::test_utils::Opt;
+use xlsynth_pir::FnBuilder;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 
@@ -74,38 +73,37 @@ const CMP_BINOPS: &[ir::Binop] = &[
 ];
 
 fn build_8b_cmp_ir_text(kind: ir::Binop, rhs_spec: RhsSpec) -> String {
-    let mut package = IrPackage::new("sample").expect("create package");
     let kind_name = ir::binop_to_operator(kind);
     let fn_name = format!("cmp_{}_8b_{}", kind_name, rhs_spec.name());
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
+    let mut fb = FnBuilder::new(&fn_name);
 
-    let ty_u8 = package.get_bits_type(8);
-    let lhs = fb.param("lhs", &ty_u8);
+    let ty_u8 = ir::Type::Bits(8);
+    let lhs = fb.param("lhs", ty_u8.clone()).expect("build parameter");
 
     let rhs = match rhs_spec {
-        RhsSpec::Param => fb.param("rhs", &ty_u8),
+        RhsSpec::Param => fb.param("rhs", ty_u8.clone()).expect("build parameter"),
         RhsSpec::Zero => {
-            let v = XlsIrValue::make_ubits(8, 0).expect("make_ubits");
-            fb.literal(&v, Some("rhs"))
+            let v = IrValue::make_ubits(8, 0).expect("make_ubits");
+            fb.literal(v).expect("build literal")
         }
         RhsSpec::One => {
-            let v = XlsIrValue::make_ubits(8, 1).expect("make_ubits");
-            fb.literal(&v, Some("rhs"))
+            let v = IrValue::make_ubits(8, 1).expect("make_ubits");
+            fb.literal(v).expect("build literal")
         }
         RhsSpec::AllOnes => {
-            let v = XlsIrValue::make_ubits(8, 0xff).expect("make_ubits");
-            fb.literal(&v, Some("rhs"))
+            let v = IrValue::make_ubits(8, 0xff).expect("make_ubits");
+            fb.literal(v).expect("build literal")
         }
         RhsSpec::LowHalfOnes => {
             // High half bits are zero; low half bits are ones: 0b0000_1111 for
             // u8.
-            let v = XlsIrValue::make_ubits(8, 0x0f).expect("make_ubits");
-            fb.literal(&v, Some("rhs"))
+            let v = IrValue::make_ubits(8, 0x0f).expect("make_ubits");
+            fb.literal(v).expect("build literal")
         }
         RhsSpec::Pow2 { bit_index } => {
             assert!(bit_index < 8, "bit_index must be < 8 for 8-bit pow2");
-            let v = XlsIrValue::make_ubits(8, 1u64 << bit_index).expect("make_ubits");
-            fb.literal(&v, Some("rhs"))
+            let v = IrValue::make_ubits(8, 1u64 << bit_index).expect("make_ubits");
+            fb.literal(v).expect("build literal")
         }
         RhsSpec::Pow2Minus1 { bit_index } => {
             assert!(
@@ -113,47 +111,44 @@ fn build_8b_cmp_ir_text(kind: ir::Binop, rhs_spec: RhsSpec) -> String {
                 "bit_index must be in 1..=8 for 8-bit pow2minus1"
             );
             let value = (1u64 << bit_index) - 1;
-            let v = XlsIrValue::make_ubits(8, value).expect("make_ubits");
-            fb.literal(&v, Some("rhs"))
+            let v = IrValue::make_ubits(8, value).expect("make_ubits");
+            fb.literal(v).expect("build literal")
         }
     };
 
     let out = match kind {
-        ir::Binop::Eq => fb.eq(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ne => fb.ne(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ult => fb.ult(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ule => fb.ule(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ugt => fb.ugt(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Uge => fb.uge(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Slt => fb.slt(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Sle => fb.sle(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Sgt => fb.sgt(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Sge => fb.sge(&lhs, &rhs, Some("cmp")),
+        ir::Binop::Eq => fb.eq(lhs, rhs).expect("build eq"),
+        ir::Binop::Ne => fb.ne(lhs, rhs).expect("build ne"),
+        ir::Binop::Ult => fb.ult(lhs, rhs).expect("build ult"),
+        ir::Binop::Ule => fb.ule(lhs, rhs).expect("build ule"),
+        ir::Binop::Ugt => fb.ugt(lhs, rhs).expect("build ugt"),
+        ir::Binop::Uge => fb.uge(lhs, rhs).expect("build uge"),
+        ir::Binop::Slt => fb.slt(lhs, rhs).expect("build slt"),
+        ir::Binop::Sle => fb.sle(lhs, rhs).expect("build sle"),
+        ir::Binop::Sgt => fb.sgt(lhs, rhs).expect("build sgt"),
+        ir::Binop::Sge => fb.sge(lhs, rhs).expect("build sge"),
         other => panic!("unexpected binop for cmp sweep: {other:?}"),
     };
 
-    let _ = fb.build_with_return_value(&out).expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let package = fb.build_package(out, "sample").expect("build function");
     package.to_string()
 }
 
 fn build_64b_slt_rhs_u32_max_ir_text() -> String {
-    let mut package = IrPackage::new("sample").expect("create package");
     let fn_name = "cmp_slt_64b_u32_max";
-    let mut fb = FnBuilder::new(&mut package, fn_name, /* should_verify= */ true);
+    let mut fb = FnBuilder::new(fn_name);
 
-    let ty_u64 = package.get_bits_type(64);
-    let lhs = fb.param("leaf_5", &ty_u64);
+    let ty_u64 = ir::Type::Bits(64);
+    let lhs = fb.param("leaf_5", ty_u64.clone()).expect("build parameter");
 
     // 0x0000_0000_FFFF_FFFF, i.e. 2^32-1 (non-negative as a signed 64-bit
     // value).
-    let v = XlsIrValue::make_ubits(64, 0xffff_ffff).expect("make_ubits");
-    let rhs = fb.literal(&v, Some("rhs"));
+    let v = IrValue::make_ubits(64, 0xffff_ffff).expect("make_ubits");
+    let rhs = fb.literal(v).expect("build literal");
 
-    let out = fb.slt(&lhs, &rhs, Some("cmp"));
+    let out = fb.slt(lhs, rhs).expect("build slt");
 
-    let _ = fb.build_with_return_value(&out).expect("build function");
-    package.set_top_by_name(fn_name).expect("set top");
+    let package = fb.build_package(out, "sample").expect("build function");
     package.to_string()
 }
 

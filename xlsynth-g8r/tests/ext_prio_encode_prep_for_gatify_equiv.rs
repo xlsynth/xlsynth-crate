@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::FnBuilder;
-use xlsynth::IrPackage;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use xlsynth_pir::FnBuilder;
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -28,42 +27,36 @@ fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
 }
 
 fn build_encode_one_hot_ir_text(bit_count: u32, lsb_prio: bool) -> String {
-    let mut package = IrPackage::new("sample").expect("create package");
     let fn_name = match lsb_prio {
         true => format!("encode_one_hot_lsb_{bit_count}b"),
         false => format!("encode_one_hot_msb_{bit_count}b"),
     };
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
+    let mut fb = FnBuilder::new(&fn_name);
 
-    let ty_bits = package.get_bits_type(u64::from(bit_count));
-    let input = fb.param("input", &ty_bits);
-    let one_hot = fb.one_hot(&input, lsb_prio, Some("one_hot"));
-    let encoded = fb.encode(&one_hot, Some("encode"));
+    let ty_bits = ir::Type::Bits(bit_count as usize);
+    let input = fb.param("input", ty_bits.clone()).expect("build parameter");
+    let one_hot = fb.one_hot(input, lsb_prio).expect("build one_hot");
+    let encoded = fb.encode(one_hot).expect("build encode");
 
-    let _ = fb
-        .build_with_return_value(&encoded)
-        .expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let package = fb.build_package(encoded, "sample").expect("build function");
     package.to_string()
 }
 
 fn build_encode_one_hot_with_extra_user_ir_text(bit_count: u32, lsb_prio: bool) -> String {
-    let mut package = IrPackage::new("sample").expect("create package");
     let fn_name = match lsb_prio {
         true => format!("encode_one_hot_with_extra_user_lsb_{bit_count}b"),
         false => format!("encode_one_hot_with_extra_user_msb_{bit_count}b"),
     };
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
+    let mut fb = FnBuilder::new(&fn_name);
 
-    let ty_bits = package.get_bits_type(u64::from(bit_count));
-    let input = fb.param("input", &ty_bits);
-    let one_hot = fb.one_hot(&input, lsb_prio, Some("one_hot"));
-    let encoded = fb.encode(&one_hot, Some("encode"));
-    let any = fb.or_reduce(&one_hot, Some("any"));
-    let result = fb.tuple(&[&encoded, &any], Some("result"));
+    let ty_bits = ir::Type::Bits(bit_count as usize);
+    let input = fb.param("input", ty_bits.clone()).expect("build parameter");
+    let one_hot = fb.one_hot(input, lsb_prio).expect("build one_hot");
+    let encoded = fb.encode(one_hot).expect("build encode");
+    let any = fb.or_reduce(one_hot).expect("build or_reduce");
+    let result = fb.tuple(&[encoded, any]).expect("build tuple");
 
-    let _ = fb.build_with_return_value(&result).expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let package = fb.build_package(result, "sample").expect("build function");
     package.to_string()
 }
 

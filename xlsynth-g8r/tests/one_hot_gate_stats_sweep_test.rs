@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::FnBuilder;
-use xlsynth::IrPackage;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -10,6 +8,7 @@ use xlsynth_g8r::ir2gate_utils::{
     PrefixScanStrategy, gatify_one_hot_with_nonzero_flag_prefix_strategy,
 };
 use xlsynth_g8r::test_utils::Opt;
+use xlsynth_pir::FnBuilder;
 use xlsynth_pir::ir_parser;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,19 +20,17 @@ struct OneHotRow {
 }
 
 fn build_one_hot_ir_text(bit_count: u32, lsb_prio: bool) -> String {
-    let mut package = IrPackage::new("sample").expect("create package");
     let fn_name = match lsb_prio {
         true => format!("one_hot_lsb_{bit_count}b"),
         false => format!("one_hot_msb_{bit_count}b"),
     };
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
+    let mut fb = FnBuilder::new(&fn_name);
 
-    let ty_bits = package.get_bits_type(u64::from(bit_count));
-    let input = fb.param("input", &ty_bits);
-    let out = fb.one_hot(&input, lsb_prio, Some("one_hot"));
+    let ty_bits = xlsynth_pir::ir::Type::Bits(bit_count as usize);
+    let input = fb.param("input", ty_bits.clone()).expect("build parameter");
+    let out = fb.one_hot(input, lsb_prio).expect("build one_hot");
 
-    let _ = fb.build_with_return_value(&out).expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let package = fb.build_package(out, "sample").expect("build function");
     package.to_string()
 }
 

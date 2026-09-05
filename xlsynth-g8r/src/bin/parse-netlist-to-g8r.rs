@@ -11,7 +11,7 @@ use xlsynth_g8r::liberty::cell_formula::{self, Term};
 // Use the crate's prost-generated proto module
 use xlsynth_g8r::liberty_model;
 
-use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_pir;
 use xlsynth_g8r::netlist::io::load_liberty_from_path;
 use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
@@ -115,7 +115,7 @@ fn main() {
     println!("GateFn:\n{}", gate_fn.to_string());
     // Convert to XLS IR and print
     let flat_type = gate_fn.get_flat_type();
-    let ir_pkg = gate_fn_to_xlsynth_ir(&gate_fn, "gate", &flat_type).unwrap();
+    let ir_pkg = gate_fn_to_pir(&gate_fn, "gate", &flat_type).unwrap();
     println!("XLS IR:\n{}", ir_pkg.to_string());
     println!("Done parsing netlist.");
 }

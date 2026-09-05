@@ -18,6 +18,7 @@ pub mod greedy_matching_ged;
 pub mod ir;
 pub mod ir_annotate_ranges;
 pub mod ir_bool_cones;
+pub mod ir_builder;
 pub mod ir_corpus;
 pub mod ir_deduce;
 pub mod ir_eval;
@@ -53,6 +54,9 @@ pub mod structural_similarity;
 pub mod value;
 
 pub use aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
+pub use ir_builder::{
+    BValue, BuilderError, FnBuilder, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions,
+};
 pub use ir_inline::{IrInlineBackend, IrInlineOptions, run_ir_inline_over_ir_text};
 pub use ir_values::{
     IrValuesFile, IrValuesFileKind, NamedIrValue, NamedIrValueSet, parse_ir_values,

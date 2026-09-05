@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::FnBuilder;
-use xlsynth::IrPackage;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::test_utils::Opt;
+use xlsynth_pir::FnBuilder;
 use xlsynth_pir::ir_parser;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,19 +15,17 @@ struct ShraRow {
 }
 
 fn build_shra_ir_text(width: u32, amount_width: u32) -> String {
-    let mut package = IrPackage::new("sample").expect("create package");
     let fn_name = format!("shra_w{width}_amt{amount_width}");
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
+    let mut fb = FnBuilder::new(&fn_name);
 
-    let ty_x = package.get_bits_type(u64::from(width));
-    let ty_amt = package.get_bits_type(u64::from(amount_width));
+    let ty_x = xlsynth_pir::ir::Type::Bits(width as usize);
+    let ty_amt = xlsynth_pir::ir::Type::Bits(amount_width as usize);
 
-    let x = fb.param("x", &ty_x);
-    let amt = fb.param("amt", &ty_amt);
+    let x = fb.param("x", ty_x.clone()).expect("build parameter");
+    let amt = fb.param("amt", ty_amt.clone()).expect("build parameter");
 
-    let out = fb.shra(&x, &amt, Some("shra"));
-    let _ = fb.build_with_return_value(&out).expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let out = fb.shra(x, amt).expect("build shra");
+    let package = fb.build_package(out, "sample").expect("build function");
     package.to_string()
 }
 

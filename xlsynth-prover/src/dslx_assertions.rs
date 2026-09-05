@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use xlsynth::dslx::{self, MatchableModuleMember, TypecheckedModule};
 use xlsynth::{DslxCallingConvention, DslxConvertOptions};
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::{self, Node, NodePayload, NodeRef, PackageMember, ParamId, Type};
+use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::ir_utils::next_text_id;
 
+use crate::prover::property_fn::add_assertion_dependency_property;
 use crate::prover::prover_for_choice;
 use crate::prover::types::{
     BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
@@ -134,34 +134,6 @@ fn typecheck_request(
         .map_err(|e| format!("DSLX parse/typecheck failed: {}", e))
 }
 
-fn push_node(
-    nodes: &mut Vec<Node>,
-    next_id: &mut usize,
-    name: Option<String>,
-    ty: Type,
-    payload: NodePayload,
-) -> NodeRef {
-    let text_id = *next_id;
-    *next_id += 1;
-    let index = nodes.len();
-    nodes.push(Node {
-        text_id,
-        name,
-        ty,
-        payload,
-        pos: None,
-    });
-    NodeRef { index }
-}
-
-fn clone_param_with_new_id(param: &ir::Param, id: usize) -> ir::Param {
-    ir::Param {
-        name: param.name.clone(),
-        ty: param.ty.clone(),
-        id: ParamId::new(id),
-    }
-}
-
 fn prover_for_assertions(choice: SolverChoice) -> Result<Box<dyn Prover>, String> {
     match choice {
         SolverChoice::Toolchain => {
@@ -177,91 +149,7 @@ pub fn add_assertions_property_function(
     package: &mut ir::Package,
     top_name: &str,
 ) -> Result<String, String> {
-    let top_fn = package
-        .get_fn(top_name)
-        .ok_or_else(|| format!("IR function '{}' not found", top_name))?;
-    let property_name = format!("__assertions_property__{}", top_name);
-    if package.get_fn(&property_name).is_some() {
-        return Ok(property_name);
-    }
-
-    let mut nodes = vec![Node {
-        text_id: 0,
-        name: Some("reserved_zero_node".to_string()),
-        ty: Type::nil(),
-        payload: NodePayload::Nil,
-        pos: None,
-    }];
-    let mut params = Vec::with_capacity(top_fn.params.len());
-    let mut arg_refs = Vec::with_capacity(top_fn.params.len());
-    let mut next_id = next_text_id(package);
-
-    for param in &top_fn.params {
-        let new_param = clone_param_with_new_id(param, next_id);
-        let param_name = new_param.name.clone();
-        let param_ty = new_param.ty.clone();
-        let param_id = new_param.id;
-        let param_ref = push_node(
-            &mut nodes,
-            &mut next_id,
-            Some(param_name),
-            param_ty,
-            NodePayload::GetParam(param_id),
-        );
-        params.push(new_param);
-        arg_refs.push(param_ref);
-    }
-
-    let invoke_ref = push_node(
-        &mut nodes,
-        &mut next_id,
-        Some(format!("assertions_invoke__{}", top_name)),
-        top_fn.ret_ty.clone(),
-        NodePayload::Invoke {
-            to_apply: top_fn.name.clone(),
-            operands: arg_refs,
-        },
-    );
-    let true_ref = push_node(
-        &mut nodes,
-        &mut next_id,
-        Some("assertions_true".to_string()),
-        Type::Bits(1),
-        NodePayload::Literal(IrValue::make_ubits(1, 1).expect("make true literal")),
-    );
-    let pair_ty = Type::Tuple(vec![
-        Box::new(top_fn.ret_ty.clone()),
-        Box::new(Type::Bits(1)),
-    ]);
-    let pair_ref = push_node(
-        &mut nodes,
-        &mut next_id,
-        Some("assertions_pair".to_string()),
-        pair_ty,
-        NodePayload::Tuple(vec![invoke_ref, true_ref]),
-    );
-    let ret_ref = push_node(
-        &mut nodes,
-        &mut next_id,
-        Some("assertions_result".to_string()),
-        Type::Bits(1),
-        NodePayload::TupleIndex {
-            tuple: pair_ref,
-            index: 1,
-        },
-    );
-
-    let property_fn = ir::Fn {
-        name: property_name.clone(),
-        params,
-        ret_ty: Type::Bits(1),
-        nodes,
-        ret_node_ref: Some(ret_ref),
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
-    };
-    package.members.push(PackageMember::Function(property_fn));
-    Ok(property_name)
+    add_assertion_dependency_property(package, top_name, "assertions")
 }
 
 /// Proves that all selected assertions reachable from a DSLX top hold.
@@ -338,6 +226,7 @@ pub fn run_dslx_assertions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsynth_pir::ir::NodePayload;
 
     #[test]
     fn property_function_depends_on_invoke_result() {

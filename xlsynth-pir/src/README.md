@@ -37,6 +37,52 @@ understand `NodeRef` indices can work without a special case.
 For more detail, consult the tests referenced above—they are a concise,
 executable reference for the invariants described here.
 
+## Function builder
+
+`xlsynth_pir::FnBuilder` constructs `ir::Fn` objects. Create it with a function
+name, add all parameters using owned `ir::Type` values, then add operations using
+cheap, copyable `BValue` handles.
+Literal nodes take `IrValue`s. Every operation returns a `Result`,
+checks its operands immediately, and rejects handles from other builders.
+Failed operations do not poison the builder or consume node IDs.
+
+Body nodes have deterministic generated names; `set_name` can assign a unique
+identifier. `build(return_value)` consumes the builder and verifies the
+function. `build_package(return_value, package_name)` additionally wraps it in a
+one-function package with that function marked as top. The returned structures
+can be interpreted, compiled by Cranelift, rewritten, or serialized directly.
+For an existing package, use `build_into_package(return_value, &mut package)`;
+it rebases IDs to avoid collisions, rejects duplicate member names, and leaves
+the package's top selection unchanged. Parameters retain their signature order
+and node indices, but their textual IDs change together with the other nodes.
+ID allocation includes block port metadata and the output IDs the block emitter
+generates when metadata omits them. Checked rebasing updates the completed
+function in place, without cloning its nodes.
+
+`invoke(&callee, &arguments)` accepts an existing function's signature.
+`counted_for(init, trip_count, stride, &body, &invariants)` checks the loop body's
+induction width, carry type, and invariant types before adding the node. Calls
+require package-aware finalization: `build_in_package(return_value, &package)`
+returns an insertion-ready function, or `build_into_package` appends it. Callees
+must already exist in a valid package and match their supplied signatures;
+forward references and recursive calls are rejected. Failed finalization leaves
+the package unchanged. Standalone `build` remains appropriate for functions
+without calls.
+
+The default `umul` and `smul` operations preserve their equal-width operands'
+width. Use `umul_with_width` or `smul_with_width` for an explicit result width.
+`clz` and `ctz` return the count
+in the input width and lower to ordinary XLS-compatible nodes. Typed empty
+arrays are represented by literals.
+
+The function surface includes partial-product multiplies, n-ary bitwise
+operations, token ordering with `after_all`, assertions, traces, and coverage
+events. The `ext_*` methods explicitly construct PIR extension operations;
+`NaryAddTerm`, `NaryAddOptions`, and `NormalizeLeftOptions` provide typed
+configuration for the larger extension signatures. Desugar extensions before
+passing their IR to upstream XLS tools. Block registers, ports, instantiations,
+and proc construction are outside this function builder's scope.
+
 ## Extension ops
 
 PIR extension op syntax, semantics, desugaring, FFI-wrapper metadata and

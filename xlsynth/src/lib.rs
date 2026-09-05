@@ -4,7 +4,6 @@ pub mod dslx;
 pub mod dslx_bridge;
 pub mod external_tool;
 pub mod ir_analysis;
-pub mod ir_builder;
 pub mod ir_package;
 pub mod ir_value;
 mod lib_support;
@@ -24,8 +23,6 @@ use lib_support::{
 };
 
 pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownBits};
-pub use ir_builder::BValue;
-pub use ir_builder::FnBuilder;
 pub use ir_package::IrFunction;
 pub use ir_package::IrFunctionJit;
 pub use ir_package::IrPackage;

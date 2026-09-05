@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::XlsIrValue;
-use xlsynth::{FnBuilder, IrPackage};
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
+use xlsynth_pir::FnBuilder;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser;
@@ -16,7 +15,6 @@ struct BuiltIr {
 }
 
 fn build_cmp_ir(bit_count: usize, binop: ir::Binop, lhs_is_const: bool, rhs_const: u64) -> BuiltIr {
-    let mut package = IrPackage::new("sample").expect("create package");
     let op = ir::binop_to_operator(binop);
     let fn_name = format!(
         "cmp_{}_{}b_{}_0x{:x}",
@@ -30,41 +28,40 @@ fn build_cmp_ir(bit_count: usize, binop: ir::Binop, lhs_is_const: bool, rhs_cons
         rhs_const
     );
 
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
-    let ty = package.get_bits_type(bit_count as u64);
-    let x = fb.param("x", &ty);
+    let mut fb = FnBuilder::new(&fn_name);
+    let ty = ir::Type::Bits(bit_count);
+    let x = fb.param("x", ty.clone()).expect("build parameter");
     let c = {
-        let v = XlsIrValue::make_ubits(bit_count, rhs_const).expect("make_ubits");
-        fb.literal(&v, Some("c"))
+        let v = IrValue::make_ubits(bit_count, rhs_const).expect("make_ubits");
+        fb.literal(v).expect("build literal")
     };
 
     let out = match (binop, lhs_is_const) {
-        (ir::Binop::Eq, false) => fb.eq(&x, &c, Some("cmp")),
-        (ir::Binop::Ne, false) => fb.ne(&x, &c, Some("cmp")),
-        (ir::Binop::Ult, false) => fb.ult(&x, &c, Some("cmp")),
-        (ir::Binop::Ule, false) => fb.ule(&x, &c, Some("cmp")),
-        (ir::Binop::Ugt, false) => fb.ugt(&x, &c, Some("cmp")),
-        (ir::Binop::Uge, false) => fb.uge(&x, &c, Some("cmp")),
-        (ir::Binop::Slt, false) => fb.slt(&x, &c, Some("cmp")),
-        (ir::Binop::Sle, false) => fb.sle(&x, &c, Some("cmp")),
-        (ir::Binop::Sgt, false) => fb.sgt(&x, &c, Some("cmp")),
-        (ir::Binop::Sge, false) => fb.sge(&x, &c, Some("cmp")),
+        (ir::Binop::Eq, false) => fb.eq(x, c).expect("build eq"),
+        (ir::Binop::Ne, false) => fb.ne(x, c).expect("build ne"),
+        (ir::Binop::Ult, false) => fb.ult(x, c).expect("build ult"),
+        (ir::Binop::Ule, false) => fb.ule(x, c).expect("build ule"),
+        (ir::Binop::Ugt, false) => fb.ugt(x, c).expect("build ugt"),
+        (ir::Binop::Uge, false) => fb.uge(x, c).expect("build uge"),
+        (ir::Binop::Slt, false) => fb.slt(x, c).expect("build slt"),
+        (ir::Binop::Sle, false) => fb.sle(x, c).expect("build sle"),
+        (ir::Binop::Sgt, false) => fb.sgt(x, c).expect("build sgt"),
+        (ir::Binop::Sge, false) => fb.sge(x, c).expect("build sge"),
 
-        (ir::Binop::Eq, true) => fb.eq(&c, &x, Some("cmp")),
-        (ir::Binop::Ne, true) => fb.ne(&c, &x, Some("cmp")),
-        (ir::Binop::Ult, true) => fb.ult(&c, &x, Some("cmp")),
-        (ir::Binop::Ule, true) => fb.ule(&c, &x, Some("cmp")),
-        (ir::Binop::Ugt, true) => fb.ugt(&c, &x, Some("cmp")),
-        (ir::Binop::Uge, true) => fb.uge(&c, &x, Some("cmp")),
-        (ir::Binop::Slt, true) => fb.slt(&c, &x, Some("cmp")),
-        (ir::Binop::Sle, true) => fb.sle(&c, &x, Some("cmp")),
-        (ir::Binop::Sgt, true) => fb.sgt(&c, &x, Some("cmp")),
-        (ir::Binop::Sge, true) => fb.sge(&c, &x, Some("cmp")),
+        (ir::Binop::Eq, true) => fb.eq(c, x).expect("build eq"),
+        (ir::Binop::Ne, true) => fb.ne(c, x).expect("build ne"),
+        (ir::Binop::Ult, true) => fb.ult(c, x).expect("build ult"),
+        (ir::Binop::Ule, true) => fb.ule(c, x).expect("build ule"),
+        (ir::Binop::Ugt, true) => fb.ugt(c, x).expect("build ugt"),
+        (ir::Binop::Uge, true) => fb.uge(c, x).expect("build uge"),
+        (ir::Binop::Slt, true) => fb.slt(c, x).expect("build slt"),
+        (ir::Binop::Sle, true) => fb.sle(c, x).expect("build sle"),
+        (ir::Binop::Sgt, true) => fb.sgt(c, x).expect("build sgt"),
+        (ir::Binop::Sge, true) => fb.sge(c, x).expect("build sge"),
         (other, _) => panic!("unexpected binop for cmp-const test: {other:?}"),
     };
 
-    let _ = fb.build_with_return_value(&out).expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let package = fb.build_package(out, "sample").expect("build function");
     BuiltIr {
         ir_text: package.to_string(),
         top_name: fn_name,

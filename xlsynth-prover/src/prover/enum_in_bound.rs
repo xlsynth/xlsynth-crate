@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::property_fn::add_assertion_dependency_property;
 use super::types::{BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics};
 use crate::prover::Prover;
 
 use std::collections::HashMap;
 use xlsynth_pir::IrValue;
 
-use xlsynth_pir::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, ParamId, Type};
+use xlsynth_pir::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, Type};
 use xlsynth_pir::ir_utils::{
     next_text_id, param_node_ref_by_index, param_node_ref_by_name, param_type_by_name,
 };
@@ -228,116 +229,9 @@ fn instrument_function_for_enum_bounds(
     Ok(())
 }
 
-fn clone_param_with_new_id(param: &ir::Param, id: usize) -> ir::Param {
-    ir::Param {
-        name: param.name.clone(),
-        ty: param.ty.clone(),
-        id: ParamId::new(id),
-    }
-}
-
-pub fn add_property_function(
-    pkg: &mut ir::Package,
-    top_name: &str,
-    next_id_hint: usize,
-) -> Result<String, String> {
-    let top_fn = pkg
-        .get_fn(top_name)
-        .ok_or_else(|| format!("IR function '{}' not found", top_name))?;
-
-    let property_name = format!("__enum_in_bound_property__{}", top_name);
-    if pkg.get_fn(&property_name).is_some() {
-        return Ok(property_name);
-    }
-
-    let mut nodes = vec![Node {
-        text_id: 0,
-        name: Some("reserved_zero_node".to_string()),
-        ty: Type::nil(),
-        payload: NodePayload::Nil,
-        pos: None,
-    }];
-
-    let mut params: Vec<ir::Param> = Vec::with_capacity(top_fn.params.len());
-    let mut arg_refs: Vec<NodeRef> = Vec::with_capacity(top_fn.params.len());
-
-    let mut next_id = next_id_hint;
-
-    for param in &top_fn.params {
-        let new_param = clone_param_with_new_id(param, next_id);
-        let param_name = new_param.name.clone();
-        let param_ty = new_param.ty.clone();
-        let param_id = new_param.id;
-        let node_ref = push_node_with_offset(
-            &mut nodes,
-            0,
-            &mut next_id,
-            Some(param_name),
-            param_ty,
-            NodePayload::GetParam(param_id),
-        );
-        params.push(new_param);
-        arg_refs.push(node_ref);
-    }
-
-    let invoke_ref = push_node_with_offset(
-        &mut nodes,
-        0,
-        &mut next_id,
-        Some(format!("enum_in_bound_invoke__{}", top_name)),
-        top_fn.ret_ty.clone(),
-        NodePayload::Invoke {
-            to_apply: top_fn.name.clone(),
-            operands: arg_refs.clone(),
-        },
-    );
-
-    let bool_ref = push_node_with_offset(
-        &mut nodes,
-        0,
-        &mut next_id,
-        Some("enum_in_bound_true".to_string()),
-        Type::Bits(1),
-        NodePayload::Literal(IrValue::make_ubits(1, 1).expect("make bool literal")),
-    );
-
-    let tuple_ty = Type::Tuple(vec![
-        Box::new(top_fn.ret_ty.clone()),
-        Box::new(Type::Bits(1)),
-    ]);
-    let tuple_ref = push_node_with_offset(
-        &mut nodes,
-        0,
-        &mut next_id,
-        Some("enum_in_bound_pair".to_string()),
-        tuple_ty,
-        NodePayload::Tuple(vec![invoke_ref, bool_ref]),
-    );
-
-    let ret_ref = push_node_with_offset(
-        &mut nodes,
-        0,
-        &mut next_id,
-        Some("enum_in_bound_result".to_string()),
-        Type::Bits(1),
-        NodePayload::TupleIndex {
-            tuple: tuple_ref,
-            index: 1,
-        },
-    );
-
-    let property_fn = ir::Fn {
-        name: property_name.clone(),
-        params,
-        ret_ty: Type::Bits(1),
-        nodes,
-        ret_node_ref: Some(ret_ref),
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
-    };
-
-    pkg.members.push(ir::PackageMember::Function(property_fn));
-    Ok(property_name)
+/// Adds a true-valued property that retains the top function's assertions.
+pub fn add_property_function(pkg: &mut ir::Package, top_name: &str) -> Result<String, String> {
+    add_assertion_dependency_property(pkg, top_name, "enum_in_bound")
 }
 
 pub fn prepare_package_for_enum_in_bound(
@@ -356,7 +250,7 @@ pub fn prepare_package_for_enum_in_bound(
         instrument_function_for_enum_bounds(func, domains, &mut next_id_hint)?;
     }
 
-    add_property_function(pkg, top_name, next_id_hint)
+    add_property_function(pkg, top_name)
 }
 
 pub fn prove_enum_in_bound(

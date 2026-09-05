@@ -1,11 +1,94 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir::{Fn as IrFn, NodePayload, ParamId};
+use crate::ir::{Fn as IrFn, NodePayload, Package, PackageMember, ParamId};
 
-fn add_base(value: usize, base: usize) -> usize {
-    value
-        .checked_add(base)
-        .expect("rebasing ids overflowed usize")
+/// A checked ID allocation or rebasing operation exceeded the ID space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdRebaseError;
+
+impl std::fmt::Display for IdRebaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("node ID allocation or rebasing overflows usize")
+    }
+}
+
+impl std::error::Error for IdRebaseError {}
+
+/// Rebases IDs without cloning the function, leaving it unchanged on overflow.
+///
+/// A zero base is allowed. Node indices, parameter order, and the reserved Nil
+/// node's ID are unchanged; parameter IDs and their GetParam nodes move
+/// together.
+pub fn rebase_fn_ids_in_place(f: &mut IrFn, base: usize) -> Result<(), IdRebaseError> {
+    for param in &f.params {
+        param
+            .id
+            .get_wrapped_id()
+            .checked_add(base)
+            .ok_or(IdRebaseError)?;
+    }
+    for node in &f.nodes {
+        let id = match node.payload {
+            NodePayload::Nil => continue,
+            NodePayload::GetParam(id) => id.get_wrapped_id(),
+            _ => node.text_id,
+        };
+        id.checked_add(base).ok_or(IdRebaseError)?;
+    }
+    for param in &mut f.params {
+        param.id = ParamId::new(param.id.get_wrapped_id() + base);
+    }
+    for node in &mut f.nodes {
+        match &mut node.payload {
+            NodePayload::GetParam(id) => {
+                *id = ParamId::new(id.get_wrapped_id() + base);
+                node.text_id = id.get_wrapped_id();
+            }
+            NodePayload::Nil => {
+                // The synthetic sentinel is not emitted and never needs
+                // rebasing.
+            }
+            _ => node.text_id += base,
+        }
+    }
+    Ok(())
+}
+
+/// Finds the highest allocated/emitted ID, including synthetic block ports.
+///
+/// Block output IDs can live only in metadata. Missing output IDs are emitted
+/// consecutively after that block's highest node ID, so reserve those too.
+pub fn package_max_emitted_node_id(package: &Package) -> Result<usize, IdRebaseError> {
+    let mut highest = 0;
+    for member in &package.members {
+        let (function, metadata) = match member {
+            PackageMember::Function(function) => (function, None),
+            PackageMember::Block { func, metadata } => (func, Some(metadata)),
+        };
+        let node_max = function
+            .nodes
+            .iter()
+            .map(|node| node.text_id)
+            .max()
+            .unwrap_or(0);
+        highest = highest.max(node_max);
+        if let Some(metadata) = metadata {
+            for id in metadata
+                .input_port_ids
+                .values()
+                .chain(metadata.output_port_ids.values())
+            {
+                highest = highest.max(*id);
+            }
+            let missing_outputs = metadata
+                .output_names
+                .iter()
+                .filter(|name| !metadata.output_port_ids.contains_key(*name))
+                .count();
+            highest = highest.max(node_max.checked_add(missing_outputs).ok_or(IdRebaseError)?);
+        }
+    }
+    Ok(highest)
 }
 
 /// Returns a clone of `f` with all ParamIds and node text ids rebased by
@@ -22,34 +105,13 @@ pub fn rebase_fn_ids(f: &IrFn, base: usize) -> IrFn {
     assert!(base >= 1, "base must be at least 1, got {}", base);
 
     let mut rebased = f.clone();
-
-    for param in &mut rebased.params {
-        let new_id = add_base(param.id.get_wrapped_id(), base);
-        param.id = ParamId::new(new_id);
-    }
-
-    for node in &mut rebased.nodes {
-        match &mut node.payload {
-            NodePayload::GetParam(param_id) => {
-                let rebased_id = add_base(param_id.get_wrapped_id(), base);
-                *param_id = ParamId::new(rebased_id);
-                node.text_id = rebased_id;
-            }
-            NodePayload::Nil => {
-                // Reserved Nil node retains text_id 0.
-            }
-            _ => {
-                node.text_id = add_base(node.text_id, base);
-            }
-        }
-    }
-
+    rebase_fn_ids_in_place(&mut rebased, base).expect("rebasing ids overflowed usize");
     rebased
 }
 
 #[cfg(test)]
 mod tests {
-    use super::rebase_fn_ids;
+    use super::{rebase_fn_ids, rebase_fn_ids_in_place};
     use crate::ir::{self, NodePayload};
     use crate::ir_parser::Parser;
     use crate::ir_verify::verify_function_in_package;
@@ -97,6 +159,21 @@ fn no_params() -> bits[32] {
 }
 "#,
         )
+    }
+
+    #[test]
+    fn in_place_rebase_is_atomic_and_does_not_reallocate_nodes() {
+        let mut function = sample_two_param_function();
+        let before = function.to_string();
+        assert!(rebase_fn_ids_in_place(&mut function, usize::MAX).is_err());
+        assert_eq!(function.to_string(), before);
+        let nodes = function.nodes.as_ptr();
+        rebase_fn_ids_in_place(&mut function, 0).unwrap();
+        assert_eq!(function.to_string(), before);
+        rebase_fn_ids_in_place(&mut function, 7).unwrap();
+        assert_eq!(function.nodes.as_ptr(), nodes);
+        assert_eq!(function.params[0].id.get_wrapped_id(), 8);
+        assert_eq!(function.nodes.last().unwrap().text_id, 47);
     }
 
     fn assert_structure_preserved_except_ids(original: &ir::Fn, rebased: &ir::Fn, base: usize) {

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::{
-    GateFnInterfaceSchema, gate_fn_to_xlsynth_ir, repack_gate_fn_interface_with_schema,
+    GateFnInterfaceSchema, gate_fn_to_pir, repack_gate_fn_interface_with_schema,
 };
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
@@ -60,7 +60,7 @@ pub fn handle_aig2ir(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
         std::process::exit(2)
     });
 
-    let ir_pkg = gate_fn_to_xlsynth_ir(&gate_fn, "gate", &function_type).unwrap_or_else(|e| {
+    let ir_pkg = gate_fn_to_pir(&gate_fn, "gate", &function_type).unwrap_or_else(|e| {
         eprintln!(
             "aig2ir error: failed to convert AIGER {} to XLS IR: {}",
             aig_input_file, e

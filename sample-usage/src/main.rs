@@ -2,6 +2,9 @@
 
 use multithread::validate_all_threads_compute_add1;
 use xlsynth::DslxConvertOptions;
+use xlsynth_pir::ir::Type;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::{FnBuilder, IrValue};
 
 // Show that the API works even if the Rust (caller) program is using an
 // alternative allocator.
@@ -93,25 +96,22 @@ fn validate_use() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Builds and interprets a PIR function.
 fn validate_add_invert_via_ir_builder() -> Result<(), Box<dyn std::error::Error>> {
-    let mut package = xlsynth::IrPackage::new("sample_package")?;
-    let mut builder = xlsynth::FnBuilder::new(&mut package, "add_invert", true);
-    let u1: xlsynth::IrType = package.get_bits_type(1);
-    let a = builder.param("a", &u1);
-    let invert = builder.not(&a, Some("invert"));
-    let result: xlsynth::IrFunction = builder.build_with_return_value(&invert)?;
+    let mut builder = FnBuilder::new("add_invert");
+    let a = builder.param("a", Type::Bits(1))?;
+    let invert = builder.not(a)?;
+    builder.set_name(invert, "invert")?;
+    let function = builder.build(invert)?;
 
-    let xlsynth_false = xlsynth::XlsIrValue::make_ubits(1, 0)?;
-    let xlsynth_true = xlsynth::XlsIrValue::make_ubits(1, 1)?;
-
-    assert_eq!(
-        result.interpret(std::slice::from_ref(&xlsynth_false))?,
-        xlsynth_true
-    );
-    assert_eq!(
-        result.interpret(std::slice::from_ref(&xlsynth_true))?,
-        xlsynth_false
-    );
+    let false_value = IrValue::make_ubits(1, 0)?;
+    let true_value = IrValue::make_ubits(1, 1)?;
+    for (input, expected) in [(&false_value, &true_value), (&true_value, &false_value)] {
+        let FnEvalResult::Success(result) = eval_fn(&function, std::slice::from_ref(input)) else {
+            return Err("PIR evaluation unexpectedly failed".into());
+        };
+        assert_eq!(&result.value, expected);
+    }
 
     Ok(())
 }
