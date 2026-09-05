@@ -64,7 +64,7 @@ repos:
       - id: clippy-core-crates
         name: clippy (xlsynth, xlsynth-test-helpers)
         description: Run cargo clippy on core crates with warnings as errors
-        entry: cargo clippy --offline -p xlsynth -p xlsynth-test-helpers --all-targets --features clap --no-deps
+        entry: cargo clippy --offline -p xlsynth -p xlsynth-test-helpers --all-targets --no-deps
         language: system
         pass_filenames: false
 

@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use xlsynth::dslx::{self, MatchableModuleMember, TypecheckedModule};
-use xlsynth::{DslxCallingConvention, DslxConvertOptions, IrValue};
+use xlsynth::{DslxCallingConvention, DslxConvertOptions};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{self, Node, NodePayload, NodeRef, PackageMember, ParamId, Type};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::next_text_id;
@@ -49,7 +50,12 @@ fn collect_enum_values(tcm: &TypecheckedModule, enum_def: &xlsynth::dslx::EnumDe
         let interp = owner_type_info
             .get_const_expr(&expr)
             .expect("enum member constexpr");
-        values.push(interp.convert_to_ir().expect("enum member to IR value"));
+        let ir_value = interp.convert_to_ir().expect("enum member to IR value");
+        let bits = ir_value.to_bits().expect("enum values are bits-typed");
+        values.push(IrValue::from_bits(
+            &xlsynth_pir::libxls_bridge::bits_from_libxls(&bits)
+                .expect("enum bits should convert to native storage"),
+        ));
     }
     values
 }

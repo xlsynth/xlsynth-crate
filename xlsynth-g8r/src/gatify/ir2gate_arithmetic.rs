@@ -122,10 +122,10 @@ fn match_selected_negate_term(
 
 /// Resizes a literal term to the `ExtNaryAdd` output width.
 fn resize_literal_bits_for_ext_nary_add(
-    bits: &xlsynth::IrBits,
+    bits: &xlsynth_pir::IrBits,
     output_width: usize,
     signed: bool,
-) -> xlsynth::IrBits {
+) -> xlsynth_pir::IrBits {
     match bits.get_bit_count().cmp(&output_width) {
         std::cmp::Ordering::Less => {
             let fill_bit = signed && bits.get_bit_count() != 0 && bits.msb();
@@ -137,7 +137,7 @@ fn resize_literal_bits_for_ext_nary_add(
                 );
             }
             resized_bits.resize(output_width, fill_bit);
-            xlsynth::IrBits::from_lsb_is_0(&resized_bits)
+            xlsynth_pir::IrBits::from_lsb_is_0(&resized_bits)
         }
         std::cmp::Ordering::Equal => bits.clone(),
         std::cmp::Ordering::Greater => bits.width_slice(0, output_width as i64),
@@ -146,8 +146,8 @@ fn resize_literal_bits_for_ext_nary_add(
 
 /// Adds one literal contribution into the `ExtNaryAdd` constant accumulator.
 fn accumulate_ext_nary_add_literal(
-    literal_sum: &mut xlsynth::IrBits,
-    term_bits: &xlsynth::IrBits,
+    literal_sum: &mut xlsynth_pir::IrBits,
+    term_bits: &xlsynth_pir::IrBits,
     output_width: usize,
     signed: bool,
     negated: bool,
@@ -158,7 +158,7 @@ fn accumulate_ext_nary_add_literal(
 }
 
 /// Returns whether `bits` is exactly the unsigned value 1.
-fn is_one(bits: &xlsynth::IrBits) -> bool {
+fn is_one(bits: &xlsynth_pir::IrBits) -> bool {
     if bits.get_bit_count() == 0 {
         return false;
     }
@@ -228,7 +228,7 @@ fn match_unit_delta_from_base_bits(
             }
             ir::NodePayload::ExtNaryAdd { terms, .. } if terms.len() == 2 => {
                 let mut dynamic_term = None;
-                let mut literal_sum = xlsynth::IrBits::zero(output_width);
+                let mut literal_sum = xlsynth_pir::IrBits::zero(output_width);
                 for term in terms {
                     if let Some(literal_bits) = literal_bits_if_bits_node(f, term.operand) {
                         accumulate_ext_nary_add_literal(
@@ -405,7 +405,7 @@ fn normalize_add_literal_rhs(
     f: &ir::Fn,
     a: ir::NodeRef,
     b: ir::NodeRef,
-) -> Option<(ir::NodeRef, xlsynth::IrBits)> {
+) -> Option<(ir::NodeRef, xlsynth_pir::IrBits)> {
     let a_lit = literal_bits_if_bits_node(f, a);
     let b_lit = literal_bits_if_bits_node(f, b);
 
@@ -457,7 +457,7 @@ fn gatify_add_const_pow2_with_mapping(
 }
 
 /// Recognizes literals with one contiguous run of 1s and zeros elsewhere.
-fn get_single_ones_run(bits: &xlsynth::IrBits) -> Option<Range<usize>> {
+fn get_single_ones_run(bits: &xlsynth_pir::IrBits) -> Option<Range<usize>> {
     let bit_count = bits.get_bit_count();
     let mut run_start = 0usize;
     while run_start < bit_count
@@ -490,7 +490,7 @@ fn get_single_ones_run(bits: &xlsynth::IrBits) -> Option<Range<usize>> {
 }
 
 /// Returns the one-hot bit position if `bits` is exactly `1 << k`.
-fn get_single_one_bit_position(bits: &xlsynth::IrBits) -> Option<usize> {
+fn get_single_one_bit_position(bits: &xlsynth_pir::IrBits) -> Option<usize> {
     let mut one_bit_position = None;
     for i in 0..bits.get_bit_count() {
         if !bits
@@ -556,7 +556,7 @@ fn gatify_add_const_single_ones_run(
 fn gatify_add_literal_to_dynamic_sum(
     gb: &mut GateBuilder,
     sum_bits: &AigBitVector,
-    literal_bits: &xlsynth::IrBits,
+    literal_bits: &xlsynth_pir::IrBits,
     adder_mapping: AdderMapping,
 ) -> AigBitVector {
     assert_eq!(sum_bits.get_bit_count(), literal_bits.get_bit_count());
@@ -665,15 +665,15 @@ fn classify_ext_nary_add_unit_correction(
 }
 
 /// Adds 1 modulo the bit width of `literal_sum`.
-fn increment_literal_sum_by_one(literal_sum: &mut xlsynth::IrBits) {
-    let one_bits = xlsynth::IrBits::make_ubits(literal_sum.get_bit_count(), 1)
+fn increment_literal_sum_by_one(literal_sum: &mut xlsynth_pir::IrBits) {
+    let one_bits = xlsynth_pir::IrBits::make_ubits(literal_sum.get_bit_count(), 1)
         .expect("bits[output_width]:1 should construct");
     *literal_sum = literal_sum.add(&one_bits);
 }
 
 /// Subtracts 1 modulo the bit width of `literal_sum`.
-fn decrement_literal_sum_by_one(literal_sum: &mut xlsynth::IrBits) {
-    let one_bits = xlsynth::IrBits::make_ubits(literal_sum.get_bit_count(), 1)
+fn decrement_literal_sum_by_one(literal_sum: &mut xlsynth_pir::IrBits) {
+    let one_bits = xlsynth_pir::IrBits::make_ubits(literal_sum.get_bit_count(), 1)
         .expect("bits[output_width]:1 should construct");
     *literal_sum = literal_sum.add(&one_bits.negate());
 }
@@ -682,7 +682,7 @@ fn decrement_literal_sum_by_one(literal_sum: &mut xlsynth::IrBits) {
 fn try_fuse_ext_nary_add_unit_correction_into_carry_in(
     gb: &mut GateBuilder,
     unit_correction: ExtNaryAddUnitCorrection,
-    literal_sum: &mut xlsynth::IrBits,
+    literal_sum: &mut xlsynth_pir::IrBits,
     carry_in: &mut Option<AigOperand>,
 ) -> bool {
     if unit_correction.weight_shift != 0 || carry_in.is_some() {
@@ -703,7 +703,7 @@ fn push_ext_nary_add_unit_correction_as_dense_term(
     output_width: usize,
     unit_correction: ExtNaryAddUnitCorrection,
     lowered_terms: &mut Vec<AigBitVector>,
-    literal_sum: &mut xlsynth::IrBits,
+    literal_sum: &mut xlsynth_pir::IrBits,
 ) {
     if unit_correction.weight_shift >= output_width {
         return;
@@ -722,7 +722,7 @@ fn push_ext_nary_add_unit_correction_as_dense_term(
 fn gatify_dense_ext_nary_add_terms(
     gb: &mut GateBuilder,
     mut lowered_terms: Vec<AigBitVector>,
-    literal_sum: &xlsynth::IrBits,
+    literal_sum: &xlsynth_pir::IrBits,
     carry_in: Option<AigOperand>,
     adder_mapping: AdderMapping,
 ) -> AigBitVector {
@@ -735,7 +735,7 @@ fn gatify_dense_ext_nary_add_terms(
 
     let mut literal_sum = literal_sum.clone();
     let carry_in = if carry_in.is_none() && is_one(&literal_sum) && !lowered_terms.is_empty() {
-        literal_sum = xlsynth::IrBits::zero(literal_sum.get_bit_count());
+        literal_sum = xlsynth_pir::IrBits::zero(literal_sum.get_bit_count());
         Some(gb.get_true())
     } else {
         carry_in
@@ -922,7 +922,7 @@ pub(super) fn gatify_ext_nary_add(
         );
     }
 
-    let mut literal_sum = xlsynth::IrBits::zero(output_width);
+    let mut literal_sum = xlsynth_pir::IrBits::zero(output_width);
     let mut lowered_terms: Vec<AigBitVector> = Vec::with_capacity(terms.len());
     let mut carry_in: Option<AigOperand> = None;
     for (term, selected_negate) in terms.iter().zip(selected_negates) {

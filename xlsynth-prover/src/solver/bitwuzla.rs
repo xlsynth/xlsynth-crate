@@ -850,7 +850,7 @@ impl Solver for Bitwuzla {
         &mut self,
         bit_vec: &BitVec<Self::Term>,
         ty: &ir::Type,
-    ) -> io::Result<xlsynth::IrValue> {
+    ) -> io::Result<xlsynth_pir::IrValue> {
         match bit_vec {
             BitVec::BitVec { rep, .. } => unsafe {
                 let val = bitwuzla_get_value(self.bitwuzla.raw, rep.raw);

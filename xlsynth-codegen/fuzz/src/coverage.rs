@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use xlsynth::external_tool::ToolError;
-use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r_fuzz::random_block::block_output_refs;
 use xlsynth_pir::ir::{Binop, BlockMetadata, Fn, NodePayload, NodeRef, Package, Type};
 use xlsynth_pir::ir_random::gather_block_stats;
 use xlsynth_pir::ir_utils::operands;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize_in_range;
+use xlsynth_pir::{IrBits, IrValue};
 
 use crate::{block_options, operations, top_block};
 

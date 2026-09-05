@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 /// User-facing gate-level formal proof backend selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

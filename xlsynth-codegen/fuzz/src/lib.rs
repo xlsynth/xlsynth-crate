@@ -15,9 +15,9 @@ pub mod yosys;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use xlsynth::IrValue;
 use xlsynth::external_tool::ToolError;
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{BlockMetadata, Fn, Package, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_random::{

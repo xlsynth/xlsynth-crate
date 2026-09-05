@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, hash_map::OccupiedError};
 
-use xlsynth::{IrValue, ir_value::IrFormatPreference};
+use crate::{IrFormatPreference, IrValue};
 
 use crate::{ir, ir_parser, ir_utils::operands};
 
@@ -807,11 +807,9 @@ impl NodePayload {
             NodePayload::Unop(_, arg) => vec![format_operand(*arg)],
             NodePayload::Literal(value) => {
                 let value_str = if opts.inline_literals {
-                    value.to_string_fmt(IrFormatPreference::Hex).unwrap()
+                    value.to_string_fmt(IrFormatPreference::Hex)
                 } else {
-                    value
-                        .to_string_fmt_no_prefix(IrFormatPreference::Default)
-                        .unwrap()
+                    value.to_string_fmt_no_prefix(IrFormatPreference::Default)
                 };
                 vec![format!("value={}", value_str)]
             }
@@ -1064,7 +1062,7 @@ fn operand_to_string(f: &Fn, nr: NodeRef, opts: &NodeRenderOptions) -> String {
     let name = node_textual_id(f, nr);
     if opts.inline_literals {
         if let NodePayload::Literal(value) = &node.payload {
-            let value_text = value.to_string_fmt(IrFormatPreference::Hex).unwrap();
+            let value_text = value.to_string_fmt(IrFormatPreference::Hex);
             return format!("{}: {}", name, value_text);
         }
     }

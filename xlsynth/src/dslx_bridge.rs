@@ -7,7 +7,7 @@
 //! module and generate corresponding Rust code that can be `use`'d into a Rust
 //! module.
 
-use crate::{IrValue, XlsynthError, dslx};
+use crate::{XlsIrValue, XlsynthError, dslx};
 
 /// Encapsulates information that the bridge builder gets about a struct member
 /// -- the name, type annotation AST node, and deduced concrete type that the
@@ -70,7 +70,7 @@ pub trait BridgeBuilder {
         dslx_name: &str,
         is_signed: bool,
         underlying_bit_count: usize,
-        members: &[(String, IrValue)],
+        members: &[(String, XlsIrValue)],
     ) -> Result<(), XlsynthError>;
 
     /// Adds a DSLX struct definition to the current bridge module.
@@ -131,14 +131,14 @@ pub trait BridgeBuilder {
 
     /// Adds a DSLX constant definition to the current bridge module.
     ///
-    /// The constant expression has already been evaluated to an `IrValue`.
+    /// The constant expression has already been evaluated to an `XlsIrValue`.
     /// Builders that do not expose constants can implement this as a no-op.
     fn add_constant(
         &mut self,
         name: &str,
         constant_def: &dslx::ConstantDef,
         ty: &dslx::Type,
-        ir_value: &IrValue,
+        ir_value: &XlsIrValue,
     ) -> Result<(), XlsynthError>;
 
     /// Invoked for function signatures when a builder wants callable metadata.
@@ -168,7 +168,7 @@ pub trait BridgeBuilder {
     }
 }
 
-fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
+fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, XlsIrValue)> {
     let mut tups = vec![];
     for i in 0..enum_def.get_member_count() {
         let member = enum_def.get_member(i);

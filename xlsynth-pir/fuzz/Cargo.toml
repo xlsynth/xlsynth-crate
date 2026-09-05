@@ -20,7 +20,7 @@ pretty_assertions = "1.4.1"
 # Local crates
 xlsynth-pir = { path = ".." }
 # Match the other fuzz packages' xlsynth features for shared build reuse.
-xlsynth = { path = "../../xlsynth", features = ["clap"] }
+xlsynth = { path = "../../xlsynth" }
 xlsynth-autocov = { path = "../../xlsynth-autocov" }
 xlsynth-prover = { path = "../../xlsynth-prover" }
 tempfile = "3"

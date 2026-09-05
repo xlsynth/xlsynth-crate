@@ -11,10 +11,10 @@ use cases::*;
 use snapshots::assert_golden_sv;
 use std::collections::BTreeMap;
 use support::{ClockedInputs, CycleInputs, TestRtl, run_icarus_cycles};
-use xlsynth::{IrBits, IrValue};
 use xlsynth_codegen::{BlockCodegenOptions, Layout};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::math::ceil_log2;
+use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_test_helpers::rtl_sim::LogicValue;
 
 #[test]
@@ -2524,11 +2524,11 @@ top block classify(data: bits[{input_width}], out: bits[{output_width}]) {{
                     .prepare()
                     .unwrap_or_else(|error| panic!("{ir}\n{generated}\n{error:?}"));
                 for bits in &samples {
-                    let expected =
-                        match eval_fn_in_package(&package, func, &[IrValue::from_bits(bits)]) {
-                            FnEvalResult::Success(result) => result.value.to_bits().unwrap(),
-                            failure => panic!("{failure:?}"),
-                        };
+                    let arg = IrValue::from_bits(bits);
+                    let expected = match eval_fn_in_package(&package, func, &[arg]) {
+                        FnEvalResult::Success(result) => result.value.to_bits().unwrap(),
+                        failure => panic!("{failure:?}"),
+                    };
                     let inputs = if input_width == 0 {
                         BTreeMap::new()
                     } else {

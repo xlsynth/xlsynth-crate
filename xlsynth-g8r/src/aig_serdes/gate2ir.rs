@@ -10,7 +10,7 @@ use std::iter::zip;
 
 use crate::aig::gate::{self, AigBitVector, AigNode, AigOperand, Input, Output};
 use xlsynth;
-use xlsynth::{BValue, FnBuilder, IrType, IrValue, XlsynthError};
+use xlsynth::{BValue, FnBuilder, IrType, XlsIrValue, XlsynthError};
 use xlsynth_pir::ir::{self, ArrayTypeData};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,7 +384,7 @@ fn flatten(param: &BValue, ty: &ir::Type, fb: &mut FnBuilder) -> BValue {
             // reverse array iteration here to keep element 0 at the
             // least-significant bits.
             for i in (0..*element_count).rev() {
-                let index = fb.literal(&IrValue::u32(i as u32), None);
+                let index = fb.literal(&XlsIrValue::u32(i as u32), None);
                 let element = fb.array_index(param, &index, None);
                 elements.push(flatten(&element, element_type, fb));
             }
@@ -395,7 +395,7 @@ fn flatten(param: &BValue, ty: &ir::Type, fb: &mut FnBuilder) -> BValue {
             // Tokens are zero bits so the nearest definition that makes sense
             // for flattening is that we make a zero-bit literal
             // value.
-            fb.literal(&IrValue::make_ubits(0, 0).unwrap(), None)
+            fb.literal(&XlsIrValue::make_ubits(0, 0).unwrap(), None)
         }
     }
 }
@@ -580,7 +580,7 @@ pub fn gate_fn_to_xlsynth_ir(
                 );
             }
             (negated, AigNode::Literal { value, .. }) => {
-                let result = fb.literal(&IrValue::make_ubits(1, *value as u64).unwrap(), None);
+                let result = fb.literal(&XlsIrValue::make_ubits(1, *value as u64).unwrap(), None);
                 let result = if negated {
                     fb.not(&result, None)
                 } else {

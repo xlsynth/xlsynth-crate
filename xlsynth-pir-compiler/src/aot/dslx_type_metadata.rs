@@ -2,7 +2,9 @@
 
 //! DSLX type naming helpers used while constructing native AOT metadata.
 
-use xlsynth::{IrValue, XlsynthError, dslx, ir_value::IrFormatPreference};
+use xlsynth::{XlsynthError, dslx};
+use xlsynth_pir::libxls_bridge::bits_from_libxls;
+use xlsynth_pir::{IrBits, IrFormatPreference};
 
 /// Resolves typed DSLX annotations to the canonical generated Rust type path.
 pub(crate) struct DslxTypeMetadata;
@@ -184,11 +186,11 @@ impl DslxTypeMetadata {
                 ))
             })?;
             let is_signed = typed_literal_text_is_signed(&expr.to_text());
-            let value = const_parametric_expr_value(type_info, &expr)?;
+            let value = const_parametric_expr_bits(type_info, &expr)?;
             parts.push(format!(
                 "{}_{}",
                 sanitize_type_parametric_segment(&binding.get_identifier()),
-                rust_type_parametric_value_suffix(&value, is_signed)?
+                rust_type_parametric_value_suffix(&value, is_signed)
             ));
         }
         Ok(format!("__{}", parts.join("__")))
@@ -430,16 +432,20 @@ impl ConcreteDslxTypeShapeParser<'_> {
     }
 }
 
-fn const_parametric_expr_value(
+/// Evaluates a DSLX parametric expression and copies its bits at the XLS
+/// boundary.
+fn const_parametric_expr_bits(
     type_info: &dslx::TypeInfo,
     expr: &dslx::Expr,
-) -> Result<IrValue, XlsynthError> {
-    if let Ok(value) =
+) -> Result<IrBits, XlsynthError> {
+    let value = if let Ok(value) =
         dslx::InterpValue::from_string(&expr.to_text()).and_then(|value| value.convert_to_ir())
     {
-        return Ok(value);
-    }
-    type_info.get_const_expr(expr)?.convert_to_ir()
+        value
+    } else {
+        type_info.get_const_expr(expr)?.convert_to_ir()?
+    };
+    bits_from_libxls(&value.to_bits()?).map_err(|error| XlsynthError(error.to_string()))
 }
 
 fn typed_literal_text_is_signed(text: &str) -> bool {
@@ -526,17 +532,15 @@ fn sanitize_type_parametric_segment(segment: &str) -> String {
     if out.is_empty() { "P".to_string() } else { out }
 }
 
-fn rust_type_parametric_value_suffix(
-    value: &IrValue,
-    is_signed: bool,
-) -> Result<String, XlsynthError> {
+/// Formats native parametric bits as a signedness-aware Rust identifier suffix.
+fn rust_type_parametric_value_suffix(value: &IrBits, is_signed: bool) -> String {
     let format = if is_signed {
         IrFormatPreference::SignedDecimal
     } else {
         IrFormatPreference::UnsignedDecimal
     };
-    let value = value.to_string_fmt_no_prefix(format)?;
-    Ok(sanitize_type_parametric_value_segment(&value))
+    let value = value.to_string_fmt(format, false);
+    sanitize_type_parametric_value_segment(&value)
 }
 
 fn sanitize_type_parametric_value_segment(value: &str) -> String {
@@ -560,4 +564,28 @@ fn sanitize_type_parametric_value_atom(value: &str) -> String {
         })
         .collect::<String>();
     if out.is_empty() { "P".to_string() } else { out }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_parametric_suffix_preserves_wide_values_and_signedness() {
+        let signed = IrBits::make_sbits(129, -3).unwrap();
+        assert_eq!(rust_type_parametric_value_suffix(&signed, true), "m3");
+        let high_bit = IrBits::signed_min_value(129);
+        assert_eq!(
+            rust_type_parametric_value_suffix(&high_bit, false),
+            "340282366920938463463374607431768211456"
+        );
+        assert_eq!(
+            rust_type_parametric_value_suffix(&high_bit, true),
+            "m340282366920938463463374607431768211456"
+        );
+        assert_eq!(
+            rust_type_parametric_value_suffix(&IrBits::zero(0), false),
+            "0"
+        );
+    }
 }

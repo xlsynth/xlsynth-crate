@@ -2,8 +2,8 @@
 
 //! Shared casez helpers for leading-bit classification and normalization.
 
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Fn, Node, NodePayload, NodeRef, Type};
+use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::{Expr, LogicRef};
 
 use crate::BlockCodegenError;

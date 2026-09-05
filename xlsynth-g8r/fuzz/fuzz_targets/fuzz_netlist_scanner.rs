@@ -10,8 +10,8 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth::IrValue;
 use xlsynth_g8r::netlist::parse::{AnnotationValue, Keyword, TokenPayload, TokenScanner};
+use xlsynth_pir::IrValue;
 
 #[derive(Debug, Clone, Arbitrary)]
 enum ArbPunct {

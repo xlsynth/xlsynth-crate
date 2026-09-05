@@ -11,6 +11,7 @@ use xlsynth_prover::prover::corner_prover::{
 };
 
 use clap::{Parser, ValueEnum};
+use xlsynth_pir::{IrValue, IrValuesFileKind, parse_ir_values};
 
 #[derive(Debug, Parser)]
 #[command(name = "xlsynth-autocov-play-corpus")]
@@ -134,7 +135,7 @@ impl ShowBoolsAccumulator {
     fn on_sample(
         &mut self,
         sample_idx: usize,
-        v: &xlsynth::IrValue,
+        v: &xlsynth_pir::IrValue,
         ok: bool,
         bool_events: &BTreeSet<xlsynth_autocov::BoolEventId>,
         bool_nodes: &BTreeSet<usize>,
@@ -346,7 +347,7 @@ impl RunAccumulator {
     fn on_sample_result(
         &mut self,
         sample_idx: usize,
-        v: &xlsynth::IrValue,
+        v: &xlsynth_pir::IrValue,
         ok: bool,
         corner_events: BTreeSet<xlsynth_autocov::CornerEventId>,
         bool_events: BTreeSet<xlsynth_autocov::BoolEventId>,
@@ -367,7 +368,7 @@ impl RunAccumulator {
 
 fn eval_one_sample(
     engine: &xlsynth_autocov::AutocovEngine,
-    v: &xlsynth::IrValue,
+    v: &xlsynth_pir::IrValue,
 ) -> Result<
     (
         bool,
@@ -385,8 +386,8 @@ fn eval_one_sample(
 fn parse_corpus_sample(
     text: &str,
     argument_names: &[String],
-) -> anyhow::Result<(xlsynth::IrValue, xlsynth::IrValuesFileKind)> {
-    let parsed = xlsynth::parse_ir_values(text)?;
+) -> anyhow::Result<(IrValue, IrValuesFileKind)> {
+    let parsed = parse_ir_values(text)?;
     let kind = parsed.kind();
     let mut values = parsed.into_positional_values(argument_names)?;
     let value = values
@@ -697,7 +698,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(kind, xlsynth::IrValuesFileKind::Named);
+        assert_eq!(kind, IrValuesFileKind::Named);
         assert_eq!(value.to_string(), "(bits[8]:2, bits[1]:1)");
     }
 
@@ -711,5 +712,35 @@ mod tests {
 
         assert!(error.to_string().contains("missing [\"y\"]"));
         assert!(error.to_string().contains("unknown [\"z\"]"));
+    }
+
+    #[test]
+    fn replay_corpus_rejects_native_type_mismatches_for_files_and_directories() {
+        let engine = xlsynth_autocov::AutocovEngine::from_ir_text(
+            r#"package test
+fn f(x: bits[8] id=1) -> bits[8] {
+  ret identity.2: bits[8] = identity(x, id=2)
+}
+"#,
+            None,
+            "f",
+            xlsynth_autocov::AutocovConfig {
+                seed: 0,
+                max_iters: Some(1),
+                max_corpus_len: None,
+            },
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.irvals");
+        let bool_nodes = BTreeSet::new();
+        for text in ["{x: bits[7]:1}", "(bits[7]:1)", "[bits[8]:1]", "bits[8]:1"] {
+            std::fs::write(&path, text).unwrap();
+            for corpus in [CorpusInput::File(&path), CorpusInput::Dir(dir.path())] {
+                let mut acc = RunAccumulator::new(ShowBoolsAccumulator::Quiet);
+                assert!(replay_corpus(corpus, None, &engine, &bool_nodes, &mut acc).is_err());
+                assert_eq!(acc.samples_total, 0);
+            }
+        }
     }
 }

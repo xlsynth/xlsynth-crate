@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 
 use super::types::{
     Assertion, AssertionSemantics, AssertionViolation, EquivResult, FnInput, FnInputs, FnOutput,
@@ -583,7 +583,7 @@ pub mod test_utils {
 
     use std::collections::HashMap;
 
-    use xlsynth::IrValue;
+    use xlsynth_pir::IrValue;
 
     use super::{align_fn_inputs, get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv};
     use crate::prover::types::{AssertionSemantics, EquivResult, FnInputs, ParamDomains, ProverFn};
@@ -2754,8 +2754,8 @@ pub mod test_utils {
         doms.insert(
             "x".to_string(),
             vec![
-                xlsynth::IrValue::make_ubits(2, 0).unwrap(),
-                xlsynth::IrValue::make_ubits(2, 1).unwrap(),
+                xlsynth_pir::IrValue::make_ubits(2, 0).unwrap(),
+                xlsynth_pir::IrValue::make_ubits(2, 1).unwrap(),
             ],
         );
 

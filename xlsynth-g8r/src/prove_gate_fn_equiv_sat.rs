@@ -19,7 +19,7 @@ use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::topo::extract_cone;
 use crate::propose_equiv::EquivNode;
 pub use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 pub struct ValidationResult {
     /// Sets that were proven equivalent, i.e. any value in set i can be

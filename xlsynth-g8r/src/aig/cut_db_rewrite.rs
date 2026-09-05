@@ -2584,7 +2584,7 @@ mod tests {
     use crate::cut_db::serdes::CanonEntry;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::use_count::get_id_to_use_count;
-    use xlsynth::IrBits;
+    use xlsynth_pir::IrBits;
 
     fn live_and_count_from_use_counts(
         g: &GateFn,

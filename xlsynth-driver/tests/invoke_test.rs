@@ -8,7 +8,6 @@ use std::io::Read;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
-use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::{
     AigBitVector, AigOperand, ClockPort, GateFn, RegisterBinding, SequentialGateFn,
     TransitionInputId, TransitionOutputId,
@@ -19,6 +18,7 @@ use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary, parse_g8r};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vastly::PipelineCycle;
 use xlsynth_vastly::PipelineStimulus;
 use xlsynth_vastly::Signedness;
@@ -3229,7 +3229,7 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
         "corpus form changed while appending:\n{}",
         corpus_text
     );
-    let values = xlsynth::parse_ir_values(&corpus_text)
+    let values = xlsynth_pir::parse_ir_values(&corpus_text)
         .unwrap()
         .into_positional_values(&["sel".to_string(), "a".to_string(), "b".to_string()])
         .unwrap();

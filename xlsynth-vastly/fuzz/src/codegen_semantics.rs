@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use xlsynth::IrValue;
-use xlsynth::XlsynthError;
+use xlsynth_pir::IrValue;
+use xlsynth_pir::ValueError;
 use xlsynth_pir::ir::Type as PirType;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
@@ -79,7 +79,10 @@ pub fn contains_token(ty: &PirType) -> bool {
     }
 }
 
-fn append_ir_bits_lsb(bits: &xlsynth::IrBits, out: &mut Vec<LogicBit>) -> Result<(), XlsynthError> {
+fn append_ir_bits_lsb(
+    bits: &xlsynth_pir::IrBits,
+    out: &mut Vec<LogicBit>,
+) -> Result<(), ValueError> {
     for i in 0..bits.get_bit_count() {
         let b = bits.get_bit(i)?;
         out.push(if b { LogicBit::One } else { LogicBit::Zero });
@@ -87,13 +90,13 @@ fn append_ir_bits_lsb(bits: &xlsynth::IrBits, out: &mut Vec<LogicBit>) -> Result
     Ok(())
 }
 
-pub fn pack_ir_value_to_value4(ty: &PirType, value: &IrValue) -> Result<Value4, XlsynthError> {
+pub fn pack_ir_value_to_value4(ty: &PirType, value: &IrValue) -> Result<Value4, ValueError> {
     let width = packed_width(ty)
-        .ok_or_else(|| XlsynthError(format!("unsupported top-level type for packing: {ty}")))?;
+        .ok_or_else(|| ValueError(format!("unsupported top-level type for packing: {ty}")))?;
     let mut out = Vec::with_capacity(width as usize);
     append_packed_bits_lsb(ty, value, &mut out)?;
     if out.len() != width as usize {
-        return Err(XlsynthError(format!(
+        return Err(ValueError(format!(
             "packed width mismatch for type {ty}: expected {width}, got {}",
             out.len()
         )));
@@ -104,12 +107,12 @@ pub fn pack_ir_value_to_value4(ty: &PirType, value: &IrValue) -> Result<Value4, 
 pub fn make_vastly_input_map(
     sig: &PackedSig,
     args: &[IrValue],
-) -> Result<BTreeMap<String, Value4>, XlsynthError> {
+) -> Result<BTreeMap<String, Value4>, ValueError> {
     let mut out = BTreeMap::new();
     for (param, arg) in sig.params.iter().zip(args.iter()) {
         let packed = pack_ir_value_to_value4(&param.ty, arg)?;
         if packed.width != param.width {
-            return Err(XlsynthError(format!(
+            return Err(ValueError(format!(
                 "packed arg width mismatch for `{}`: expected {}, got {}",
                 param.name, param.width, packed.width
             )));
@@ -123,13 +126,13 @@ fn append_packed_bits_lsb(
     ty: &PirType,
     value: &IrValue,
     out: &mut Vec<LogicBit>,
-) -> Result<(), XlsynthError> {
+) -> Result<(), ValueError> {
     match ty {
-        PirType::Token => Err(XlsynthError("cannot pack token value".to_string())),
+        PirType::Token => Err(ValueError("cannot pack token value".to_string())),
         PirType::Bits(width) => {
             let bits = value.to_bits()?;
             if bits.get_bit_count() != *width {
-                return Err(XlsynthError(format!(
+                return Err(ValueError(format!(
                     "bits width mismatch while packing: type says bits[{width}] but value is bits[{}]",
                     bits.get_bit_count()
                 )));
@@ -140,7 +143,7 @@ fn append_packed_bits_lsb(
         PirType::Tuple(fields) => {
             let elements = value.get_elements()?;
             if elements.len() != fields.len() {
-                return Err(XlsynthError(format!(
+                return Err(ValueError(format!(
                     "tuple arity mismatch while packing: type has {} fields, value has {}",
                     fields.len(),
                     elements.len()
@@ -154,7 +157,7 @@ fn append_packed_bits_lsb(
         PirType::Array(data) => {
             let elements = value.get_elements()?;
             if elements.len() != data.element_count {
-                return Err(XlsynthError(format!(
+                return Err(ValueError(format!(
                     "array length mismatch while packing: type has {} elements, value has {}",
                     data.element_count,
                     elements.len()

@@ -29,6 +29,7 @@ tempfile = "3.20"
 log = "0.4"
 env_logger = "0.11"
 xlsynth = { version = "0.69.0", path = "../xlsynth" }
+xlsynth-pir = { version = "0.69.0", path = "../xlsynth-pir" }
 xlsynth-prover = { version = "0.69.0", path = "../xlsynth-prover" }
 arbitrary = { version = "1.3", features = ["derive"] }
 pretty_assertions = "1.4.1"

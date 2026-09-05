@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::{IrBits, IrValue};
+use xlsynth_pir::{IrBits, IrValue};
+
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, parse_liberty_files_with_payload_options,

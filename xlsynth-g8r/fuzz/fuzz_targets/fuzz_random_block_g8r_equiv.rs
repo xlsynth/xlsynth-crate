@@ -7,11 +7,11 @@
 use libfuzzer_sys::fuzz_target;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use xlsynth::IrValue;
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{BlockMetadata, Fn};
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,

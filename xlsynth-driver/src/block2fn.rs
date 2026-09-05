@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use clap::ArgMatches;
 
 use crate::toolchain_config::ToolchainConfig;
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::block2fn::{Block2FnOptions, block_package_to_fn};
 use xlsynth_pir::ir::{FileTable, MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::{IrBits, IrValue};
 
 pub fn handle_block2fn(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("block_ir").unwrap();

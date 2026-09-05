@@ -367,7 +367,7 @@ impl Solver for Boolector {
         &mut self,
         bit_vec: &BitVec<Self::Term>,
         ty: &ir::Type,
-    ) -> io::Result<xlsynth::IrValue> {
+    ) -> io::Result<xlsynth_pir::IrValue> {
         match bit_vec {
             BitVec::BitVec { rep, .. } => unsafe {
                 let s = boolector_bv_assignment(self.raw_btor(), rep.raw);

@@ -2,7 +2,7 @@
 
 use std::process::Command;
 use std::time::{Duration, Instant};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 use xlsynth_test_helpers::rtl_sim::{LogicValue, run_checked};
 
 #[test]

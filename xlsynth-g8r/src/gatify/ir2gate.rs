@@ -13,6 +13,7 @@ use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_term
 use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use std::collections::HashMap;
 use std::sync::Arc;
+use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
@@ -117,7 +118,7 @@ fn get_impossible_in_bounds_sel_case_indices(
 
     let mut impossible: Vec<usize> = Vec::new();
     for i in 0..cases_len {
-        let value_bits = xlsynth::IrBits::make_ubits(width, i as u64).unwrap();
+        let value_bits = IrBits::make_ubits(width, i as u64).unwrap();
         let mut possible = false;
         for it in intervals {
             if it.lo.ule(&value_bits) && value_bits.ule(&it.hi) {
@@ -413,8 +414,8 @@ fn gatify_priority_sel_masking(
     gb.add_or_vec_nary(&masked_cases, ReductionKind::Tree)
 }
 
-fn bits_to_usize_if_representable(bits: &xlsynth::IrBits) -> Option<usize> {
-    let bytes = bits.to_bytes().ok()?;
+fn bits_to_usize_if_representable(bits: &IrBits) -> Option<usize> {
+    let bytes = bits.to_bytes();
     let mut value = 0usize;
     for (byte_index, byte) in bytes.into_iter().enumerate() {
         if byte_index >= std::mem::size_of::<usize>() {
@@ -441,7 +442,7 @@ fn gatify_literal_array_index(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
     array_bits: &AigBitVector,
-    literal_index: &xlsynth::IrBits,
+    literal_index: &IrBits,
     assumed_in_bounds: bool,
 ) -> AigBitVector {
     let element_bit_count = array_ty.element_type.bit_count();
@@ -873,8 +874,7 @@ fn gatify_array_slice_bit_shift(
         // bits[2]:7.
         start_bits.clone()
     } else {
-        let last_idx_bits =
-            gb.add_literal(&xlsynth::IrBits::make_ubits(start_w, last_idx as u64).unwrap());
+        let last_idx_bits = gb.add_literal(&IrBits::make_ubits(start_w, last_idx as u64).unwrap());
         let start_le_last = gatify_ule_via_bit_tests(gb, text_id, start_bits, &last_idx_bits);
         gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits)
     };
@@ -902,8 +902,7 @@ fn gatify_array_slice_bit_shift(
         tmp >>= 1;
     }
     let start_scaled_w = start_w + extra;
-    let e_const =
-        gb.add_literal(&xlsynth::IrBits::make_ubits(start_scaled_w, e_bits as u64).unwrap());
+    let e_const = gb.add_literal(&IrBits::make_ubits(start_scaled_w, e_bits as u64).unwrap());
     let start_ext = if start_scaled_w > start_w {
         let zeros = AigBitVector::zeros(start_scaled_w - start_w);
         AigBitVector::concat(zeros, clamped_start_bits.clone())
@@ -1149,7 +1148,7 @@ fn gatify_smul_baugh_wooley_partial_products(
 
     if correction_constant.iter().any(|bit| *bit) {
         let correction = twos_complement_mod(&correction_constant);
-        partial_products.push(gb.add_literal(&xlsynth::IrBits::from_lsb_is_0(&correction)));
+        partial_products.push(gb.add_literal(&IrBits::from_lsb_is_0(&correction)));
     }
     partial_products
 }
@@ -1402,7 +1401,7 @@ fn usize_as_aig_bits(value: usize, bit_count: usize, gb: &mut GateBuilder) -> Ai
 
 fn gatify_umul_const_via_csd(
     multiplicand_bits: &AigBitVector,
-    constant_bits: &xlsynth::IrBits,
+    constant_bits: &IrBits,
     output_bit_count: usize,
     mul_adder_mapping: AdderMapping,
     gb: &mut GateBuilder,
@@ -1435,7 +1434,7 @@ fn gatify_umul_const_via_csd(
 
 fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
     let inverted = gb.add_not_vec(bits);
-    let one = gb.add_literal(&xlsynth::IrBits::make_ubits(bits.get_bit_count(), 1).unwrap());
+    let one = gb.add_literal(&IrBits::make_ubits(bits.get_bit_count(), 1).unwrap());
     let (_carry, sum) = gatify_add_ripple_carry(&inverted, &one, gb.get_false(), None, gb);
     sum
 }
@@ -1823,17 +1822,14 @@ pub enum CmpKind {
     Gt,
 }
 
-pub(super) fn literal_bits_if_bits_node(
-    f: &ir::Fn,
-    node_ref: ir::NodeRef,
-) -> Option<xlsynth::IrBits> {
+pub(super) fn literal_bits_if_bits_node(f: &ir::Fn, node_ref: ir::NodeRef) -> Option<IrBits> {
     match &f.get_node(node_ref).payload {
         ir::NodePayload::Literal(literal) => literal.to_bits().ok(),
         _ => None,
     }
 }
 
-fn is_all_zeros(bits: &xlsynth::IrBits) -> bool {
+fn is_all_zeros(bits: &IrBits) -> bool {
     for i in 0..bits.get_bit_count() {
         if bits.get_bit(i).unwrap() {
             return false;
@@ -1842,7 +1838,7 @@ fn is_all_zeros(bits: &xlsynth::IrBits) -> bool {
     true
 }
 
-fn is_all_ones(bits: &xlsynth::IrBits) -> bool {
+fn is_all_ones(bits: &IrBits) -> bool {
     for i in 0..bits.get_bit_count() {
         if !bits.get_bit(i).unwrap() {
             return false;
@@ -1851,7 +1847,7 @@ fn is_all_ones(bits: &xlsynth::IrBits) -> bool {
     true
 }
 
-fn get_pow2_lsb_index(bits: &xlsynth::IrBits) -> Option<usize> {
+fn get_pow2_lsb_index(bits: &IrBits) -> Option<usize> {
     // Recognizes non-zero values with exactly one bit set.
     let mut found: Option<usize> = None;
     for i in 0..bits.get_bit_count() {
@@ -1866,7 +1862,7 @@ fn get_pow2_lsb_index(bits: &xlsynth::IrBits) -> Option<usize> {
     found
 }
 
-pub(super) fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
+pub(super) fn get_pow2_minus1_k(bits: &xlsynth_pir::IrBits) -> Option<usize> {
     // Recognizes values of the form (1<<k)-1, i.e. k low bits are 1 and the
     // rest are 0. k=0 => 0, k=bit_count => all ones.
     let bit_count = bits.get_bit_count();
@@ -1886,7 +1882,7 @@ fn normalize_umul_literal_rhs(
     f: &ir::Fn,
     a: ir::NodeRef,
     b: ir::NodeRef,
-) -> Option<(ir::NodeRef, xlsynth::IrBits)> {
+) -> Option<(ir::NodeRef, IrBits)> {
     let a_lit = literal_bits_if_bits_node(f, a);
     let b_lit = literal_bits_if_bits_node(f, b);
     match (a_lit, b_lit) {
@@ -1897,7 +1893,7 @@ fn normalize_umul_literal_rhs(
     }
 }
 
-fn get_neg_pow2_k(bits: &xlsynth::IrBits) -> Option<usize> {
+fn get_neg_pow2_k(bits: &xlsynth_pir::IrBits) -> Option<usize> {
     // Recognizes values of the form -2^k in two's complement, i.e. high bits
     // are 1 and the low k bits are 0. k=0 => all ones, k=bit_count-1 =>
     // int_min.
@@ -1935,7 +1931,7 @@ fn simplify_ugt_all_ones_above_k(
     gb.add_and_binary(upper_is_all_ones, low_is_nonzero)
 }
 
-fn is_int_min(bits: &xlsynth::IrBits) -> bool {
+fn is_int_min(bits: &IrBits) -> bool {
     let bit_count = bits.get_bit_count();
     assert!(bit_count > 0);
     if !bits.get_bit(bit_count - 1).unwrap() {
@@ -1949,7 +1945,7 @@ fn is_int_min(bits: &xlsynth::IrBits) -> bool {
     true
 }
 
-fn is_int_max(bits: &xlsynth::IrBits) -> bool {
+fn is_int_max(bits: &IrBits) -> bool {
     let bit_count = bits.get_bit_count();
     assert!(bit_count > 0);
     if bits.get_bit(bit_count - 1).unwrap() {
@@ -1963,7 +1959,7 @@ fn is_int_max(bits: &xlsynth::IrBits) -> bool {
     true
 }
 
-fn is_non_negative_signed(bits: &xlsynth::IrBits) -> bool {
+fn is_non_negative_signed(bits: &IrBits) -> bool {
     let bit_count = bits.get_bit_count();
     assert!(bit_count > 0);
     !bits.get_bit(bit_count - 1).unwrap()
@@ -1992,7 +1988,7 @@ struct NormalizedCmpLiteralRhs {
     binop: ir::Binop,
     lhs: ir::NodeRef,
     rhs: ir::NodeRef, // literal node
-    rhs_bits: xlsynth::IrBits,
+    rhs_bits: IrBits,
 }
 
 fn normalize_cmp_literal_rhs(
@@ -2031,7 +2027,7 @@ fn try_simplify_cmp_literal_rhs(
     binop: ir::Binop,
     lhs_bits: &AigBitVector,
     rhs_bits_vec: &AigBitVector,
-    rhs_bits: &xlsynth::IrBits,
+    rhs_bits: &IrBits,
 ) -> Option<AigOperand> {
     assert_eq!(lhs_bits.get_bit_count(), rhs_bits_vec.get_bit_count());
     if lhs_bits.get_bit_count() == 0 {
@@ -2320,7 +2316,7 @@ fn gatify_ucmp_literal_rhs_best_effort(
     binop: ir::Binop,
     lhs_bits: &AigBitVector,
     rhs_bits_vec: &AigBitVector,
-    rhs_bits: &xlsynth::IrBits,
+    rhs_bits: &IrBits,
 ) -> AigOperand {
     assert!(
         matches!(
@@ -2350,7 +2346,7 @@ struct UcmpConstResult {
 fn gatify_eq_literal_rhs(
     gb: &mut GateBuilder,
     lhs_bits: &AigBitVector,
-    rhs_bits: &xlsynth::IrBits,
+    rhs_bits: &IrBits,
 ) -> AigOperand {
     let bit_count = lhs_bits.get_bit_count();
     assert_eq!(
@@ -2378,7 +2374,7 @@ fn gatify_eq_literal_rhs(
 fn gatify_ucmp_const_threshold(
     gb: &mut GateBuilder,
     lhs_bits: &AigBitVector,
-    rhs_bits: &xlsynth::IrBits,
+    rhs_bits: &IrBits,
 ) -> UcmpConstResult {
     let bit_count = lhs_bits.get_bit_count();
     assert_eq!(
@@ -2443,7 +2439,7 @@ fn try_gatify_ucmp_literal_rhs_threshold(
     gb: &mut GateBuilder,
     binop: ir::Binop,
     lhs_bits: &AigBitVector,
-    rhs_bits: &xlsynth::IrBits,
+    rhs_bits: &IrBits,
 ) -> Option<AigOperand> {
     match binop {
         ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge => {}
@@ -2757,8 +2753,7 @@ fn gatify_decode_naive(
     );
     let mut bits = Vec::new();
     for i in 0..output_width {
-        let literal_bits =
-            gb.add_literal(&xlsynth::IrBits::make_ubits(input_bit_count, i as u64).unwrap());
+        let literal_bits = gb.add_literal(&IrBits::make_ubits(input_bit_count, i as u64).unwrap());
         let is_selected = gb.add_eq_vec(&input_bits, &literal_bits, ReductionKind::Tree);
         bits.push(is_selected);
     }
@@ -2776,8 +2771,7 @@ fn gatify_encode_naive(
     for i in 0..input_bit_count {
         let gate_i_set = arg_bits.get_lsb(i);
         let gate_i_mask = gb.replicate(*gate_i_set, output_bit_count);
-        let on_selected =
-            gb.add_literal(&xlsynth::IrBits::make_ubits(output_bit_count, i as u64).unwrap());
+        let on_selected = gb.add_literal(&IrBits::make_ubits(output_bit_count, i as u64).unwrap());
         let masked = gb.add_and_vec(&gate_i_mask, &on_selected);
         to_or_reduce.push(masked);
     }
@@ -3011,7 +3005,7 @@ fn gatify_shra(
 }
 
 fn flatten_literal_to_bits(
-    literal: &xlsynth::IrValue,
+    literal: &xlsynth_pir::IrValue,
     ty: &ir::Type,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
@@ -3294,8 +3288,8 @@ fn gatify_node(
                 .get_bit_vector(*arg)
                 .expect("unop arg should be present");
             let not_arg = g8_builder.add_not_vec(&arg_gates);
-            let zero = g8_builder
-                .add_literal(&xlsynth::IrBits::make_ubits(arg_gates.get_bit_count(), 0).unwrap());
+            let zero =
+                g8_builder.add_literal(&IrBits::make_ubits(arg_gates.get_bit_count(), 0).unwrap());
             let neg_tag = format!("neg_{}", node.text_id);
             let (_, result) = gatify_add_with_mapping(
                 options.adder_mapping,
@@ -4650,7 +4644,8 @@ mod tests {
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
     use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
     use crate::ir2gate_utils::{AdderMapping, Direction, gatify_barrel_shifter};
-    use xlsynth::{IrBits, IrValue};
+    use xlsynth_pir::IrBits;
+    use xlsynth_pir::IrValue;
     use xlsynth_pir::ir;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser;
@@ -6608,9 +6603,9 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
 
         let eval = |start: u64, a: u64, b: u64| {
             let inputs = vec![
-                xlsynth::IrBits::make_ubits(4, start).unwrap(),
-                xlsynth::IrBits::make_ubits(8, a).unwrap(),
-                xlsynth::IrBits::make_ubits(8, b).unwrap(),
+                IrBits::make_ubits(4, start).unwrap(),
+                IrBits::make_ubits(8, a).unwrap(),
+                IrBits::make_ubits(8, b).unwrap(),
             ];
             gate_sim::eval(&gatify_output.gate_fn, &inputs, gate_sim::Collect::None).outputs[0]
                 .clone()
@@ -7467,7 +7462,7 @@ top fn f(a: bits[1][2][2][2] id=1, replacement: bits[1] id=2, i: bits[1] id=3, j
     }
 
     fn gate_eval_1bit(gate_fn: &GateFn, lhs: u64, lhs_width: usize) -> bool {
-        let inputs = vec![xlsynth::IrBits::make_ubits(lhs_width, lhs).unwrap()];
+        let inputs = vec![IrBits::make_ubits(lhs_width, lhs).unwrap()];
         gate_sim::eval(gate_fn, &inputs, gate_sim::Collect::None).outputs[0]
             .get_bit(0)
             .unwrap()
@@ -7908,7 +7903,7 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         let mut bits = Vec::with_capacity(array_len * element_width);
         for i in 0..array_len {
             let value_bits = gb.add_literal(
-                &xlsynth::IrBits::make_ubits(element_width, (i % distinct_values) as u64).unwrap(),
+                &IrBits::make_ubits(element_width, (i % distinct_values) as u64).unwrap(),
             );
             bits.extend(value_bits.iter_lsb_to_msb().copied());
         }
@@ -7985,9 +7980,8 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         );
         let array_bits = gb.add_input("arr".to_string(), array_len);
         let index_bits = gb.add_input("idx".to_string(), index_width);
-        let padded_last_bits = gb.add_literal(
-            &xlsynth::IrBits::make_ubits(index_width, (padded_count - 1) as u64).unwrap(),
-        );
+        let padded_last_bits =
+            gb.add_literal(&IrBits::make_ubits(index_width, (padded_count - 1) as u64).unwrap());
         let idx_le_padded_last =
             super::gatify_ule_via_bit_tests(&mut gb, 0, &index_bits, &padded_last_bits);
         let clamped_index = gb.add_mux2_vec(&idx_le_padded_last, &index_bits, &padded_last_bits);

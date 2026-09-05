@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::corners::CornerKind;
 use xlsynth_pir::ir;
 

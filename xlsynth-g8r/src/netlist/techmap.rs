@@ -20,7 +20,7 @@ use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructuralTechMapOptions {

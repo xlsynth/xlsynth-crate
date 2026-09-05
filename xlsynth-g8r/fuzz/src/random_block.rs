@@ -4,7 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use xlsynth::{IrBits, IrValue};
+use xlsynth_pir::IrBits;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{BlockMetadata, Fn, NodePayload, NodeRef, Type};
 use xlsynth_pir::ir_eval::{self, EvalObserver, FnEvalResult, SelectEvent};
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;

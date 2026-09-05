@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 use xlsynth_test_helpers::rtl_sim::{Bindings, Icarus, Interface, LogicValue, Port, StateSignal};
 
 #[test]

@@ -16,7 +16,7 @@ use z3::{
     ast::{Ast, Bool},
 };
 
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 /// Context object that allows the caller to reuse a Z3 configuration across
 /// calls.  Currently this is a light-weight placeholder – we allocate a fresh

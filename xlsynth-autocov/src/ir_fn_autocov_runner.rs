@@ -9,8 +9,8 @@ use std::time::Instant;
 use signal_hook::SigId;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::low_level as siglow;
-use xlsynth::{IrValue, IrValuesFileKind, NamedIrValueSet, parse_ir_values};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::{IrValue, IrValuesFileKind, NamedIrValueSet, parse_ir_values};
 
 use crate::{
     AutocovConfig, AutocovEngine, AutocovProgress, AutocovReport, CorpusSink, MuxNodeKind,

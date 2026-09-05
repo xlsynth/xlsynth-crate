@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+use crate::{IrBits, IrValue};
 use rand::RngCore;
-use xlsynth::{IrBits, IrValue};
 
 use crate::ir::{
     Binop, BlockMetadata, BlockResetMetadata, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable,

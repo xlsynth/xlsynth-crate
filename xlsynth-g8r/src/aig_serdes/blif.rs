@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 use crate::aig::sequential_gate::{
     canonical_register_d_name, canonical_register_q_name, canonical_transition_name,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::desugar_extensions::{ExtensionEmitMode, emit_package_with_extension_mode};
 use xlsynth_pir::ir::{ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, NodePayload};
 use xlsynth_pir::ir_eval::eval_fn;

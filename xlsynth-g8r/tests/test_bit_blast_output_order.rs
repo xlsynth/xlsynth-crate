@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::{IrBits, IrPackage, IrValue};
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::test_utils::{
     interesting_ir_output_ordering_cases, load_interesting_ir_output_ordering_case,
 };
+use xlsynth_pir::IrBits;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_value_utils::{
     flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
 };
@@ -55,9 +57,6 @@ fn make_one_hot_param_samples(params: &[ir::Param]) -> Vec<Vec<IrValue>> {
 fn test_bit_blast_outputs_follow_verilog_layout_for_interesting_signatures() {
     for case in interesting_ir_output_ordering_cases() {
         let sample = load_interesting_ir_output_ordering_case(&case);
-        let xlsynth_pkg =
-            IrPackage::parse_ir(&case.ir_text, Some(case.name)).expect("IR should parse");
-        let xlsynth_fn = xlsynth_pkg.get_function("main").expect("main should exist");
 
         for args in make_one_hot_param_samples(&sample.g8r_fn.params) {
             let gate_inputs: Vec<IrBits> = args
@@ -68,9 +67,10 @@ fn test_bit_blast_outputs_follow_verilog_layout_for_interesting_signatures() {
             let gate_result = gate_sim::eval(&sample.gate_fn, &gate_inputs, Collect::None);
             let got_bits = flatten_gate_outputs_lsb0(&gate_result.outputs);
 
-            let expected_value = xlsynth_fn
-                .interpret(&args)
-                .expect("IR interpret should succeed");
+            let expected_value = match eval_fn_in_package(&sample.g8r_pkg, &sample.g8r_fn, &args) {
+                FnEvalResult::Success(success) => success.value,
+                failure => panic!("PIR reference evaluation failed: {failure:?}"),
+            };
             let expected_bits =
                 flatten_value_for_verilog_layout(&expected_value, &sample.g8r_fn.ret_ty);
 

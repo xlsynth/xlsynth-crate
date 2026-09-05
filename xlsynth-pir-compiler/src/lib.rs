@@ -22,9 +22,9 @@ use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::{OperatingSystem, Triple, Vendor};
 use thiserror::Error;
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_utils::{is_observable_effect_root, operands};
+use xlsynth_pir::{IrBits, IrValue};
 pub use xlsynth_pir_compiler_runtime::{
     AssertionFailure, AssumptionFailure, AssumptionFailureKind, CompiledEntrypoint,
     CompiledFunctionMetadata, CoverCount, EventKind, EventSiteMetadata, ExecutionContext,
@@ -1350,6 +1350,12 @@ impl NativeValueStorage {
     }
 
     fn from_ir_value(layout: &NativeValueLayout, value: &IrValue) -> Result<Self, CompilerError> {
+        if NativeValueLayout::from_type(&value.type_())? != *layout {
+            return Err(CompilerError::InvalidArgument(format!(
+                "value type {} does not match native layout {layout:?}",
+                value.type_()
+            )));
+        }
         let mut storage = Self::zeroed(layout);
         // SAFETY: storage is sized from `layout` and aligned to at least all
         // currently supported scalar and aggregate layouts.
@@ -1379,7 +1385,7 @@ unsafe fn write_ir_value_to_native(
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let bits = value
-                .to_bits()
+                .as_bits()
                 .map_err(|error| CompilerError::Value(error.to_string()))?;
             if bits.get_bit_count() != scalar.bit_count {
                 return Err(CompilerError::InvalidArgument(format!(
@@ -1402,7 +1408,7 @@ unsafe fn write_ir_value_to_native(
         }
         NativeValueLayout::WideBits(wide) => {
             let bits = value
-                .to_bits()
+                .as_bits()
                 .map_err(|error| CompilerError::Value(error.to_string()))?;
             if bits.get_bit_count() != wide.bit_count {
                 return Err(CompilerError::InvalidArgument(format!(
@@ -1411,23 +1417,14 @@ unsafe fn write_ir_value_to_native(
                     bits.get_bit_count()
                 )));
             }
-            let bytes = bits
-                .to_le_bytes()
-                .map_err(|error| CompilerError::Value(error.to_string()))?;
-            for limb_index in 0..wide.limb_count {
-                let start = limb_index * std::mem::size_of::<u64>();
-                let mut limb_bytes = [0u8; std::mem::size_of::<u64>()];
-                if start < bytes.len() {
-                    let end = bytes.len().min(start + std::mem::size_of::<u64>());
-                    limb_bytes[..end - start].copy_from_slice(&bytes[start..end]);
-                }
-                // SAFETY: storage is sized and aligned for the described limbs.
-                unsafe {
-                    destination
-                        .add(start)
-                        .cast::<u64>()
-                        .write(u64::from_le_bytes(limb_bytes));
-                }
+            // SAFETY: storage is sized and aligned for these canonical limbs
+            // and is separate from the borrowed native value's storage.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    bits.limbs().as_ptr(),
+                    destination.cast::<u64>(),
+                    wide.limb_count,
+                );
             }
         }
         NativeValueLayout::Array {
@@ -1435,7 +1432,7 @@ unsafe fn write_ir_value_to_native(
             element_count,
         } => {
             let elements = value
-                .get_elements()
+                .as_elements()
                 .map_err(|error| CompilerError::InvalidArgument(error.to_string()))?;
             if elements.len() != *element_count {
                 return Err(CompilerError::InvalidArgument(format!(
@@ -1456,7 +1453,7 @@ unsafe fn write_ir_value_to_native(
         }
         NativeValueLayout::Tuple { fields, .. } => {
             let elements = value
-                .get_elements()
+                .as_elements()
                 .map_err(|error| CompilerError::InvalidArgument(error.to_string()))?;
             if elements.len() != fields.len() {
                 return Err(CompilerError::InvalidArgument(format!(
@@ -2372,7 +2369,7 @@ fn trace_layout_from_native(layout: &NativeValueLayout) -> TraceValueLayout {
 /// Returns a literal bits value as `usize` when it fits in the host address
 /// space.
 fn literal_bits_as_usize(value: &IrValue) -> Option<usize> {
-    let bytes = value.to_bits().ok()?.to_le_bytes().ok()?;
+    let bytes = value.as_bits().ok()?.to_le_bytes();
     let mut result = 0usize;
     for (index, byte) in bytes.into_iter().enumerate() {
         if index >= std::mem::size_of::<usize>() {
@@ -6643,11 +6640,9 @@ fn lower_literal_to_storage(
         }
         NativeValueLayout::WideBits(wide) => {
             let bits = literal
-                .to_bits()
+                .as_bits()
                 .map_err(|error| CompilerError::Value(error.to_string()))?;
-            let bytes = bits
-                .to_le_bytes()
-                .map_err(|error| CompilerError::Value(error.to_string()))?;
+            let bytes = bits.to_le_bytes();
             for limb_index in 0..wide.limb_count {
                 let start = limb_index * std::mem::size_of::<u64>();
                 let mut limb_bytes = [0u8; std::mem::size_of::<u64>()];
@@ -6671,7 +6666,7 @@ fn lower_literal_to_storage(
             element_count,
         } => {
             let elements = literal
-                .get_elements()
+                .as_elements()
                 .map_err(|error| CompilerError::Value(error.to_string()))?;
             if elements.len() != *element_count {
                 return Err(CompilerError::InvalidFunction(
@@ -6685,7 +6680,7 @@ fn lower_literal_to_storage(
         }
         NativeValueLayout::Tuple { fields, .. } => {
             let elements = literal
-                .get_elements()
+                .as_elements()
                 .map_err(|error| CompilerError::Value(error.to_string()))?;
             if elements.len() != fields.len() {
                 return Err(CompilerError::InvalidFunction(

@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use rayon::prelude::*;
 use xlsynth::DslxConvertOptions;
 use xlsynth::IrPackage;
-use xlsynth::IrValue;
+use xlsynth::XlsIrValue;
 
 fn load_package(cargo_relpath: &str) -> IrPackage {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
@@ -33,7 +33,7 @@ lazy_static! {
 }
 
 fn run_dslx_add1(x: u32) -> u32 {
-    let x_ir = IrValue::u32(x);
+    let x_ir = XlsIrValue::u32(x);
     let result = ADD1_FUNCTION.interpret(&[x_ir]).unwrap();
     result.to_u32().unwrap()
 }

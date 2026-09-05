@@ -643,7 +643,7 @@ pub fn discover_quickcheck_tests(
 mod test_utils {
     use super::*;
     use crate::prover::types::{ParamDomains, ProverFn};
-    use xlsynth::IrValue;
+    use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_parser::Parser;
 
     /// Assert that `prove_ir_fn_quickcheck` returns `Proved`.
@@ -714,7 +714,7 @@ mod test_utils {
                     },
                 ) => {}
                 (true, other) => panic!("Expected AssertionViolation, got {:?}", other),
-                (false, other) => panic!("Expected Value, got {:?}", other),
+                (false, other) => panic!("Expected IrValue, got {:?}", other),
             },
             _ => panic!("Expected Disproved result"),
         }

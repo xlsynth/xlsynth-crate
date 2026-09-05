@@ -10,7 +10,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 pub type PortId = SymbolU32;
 pub type NetId = SymbolU32;
@@ -275,7 +275,7 @@ impl fmt::Display for AnnotationValue {
                 write!(f, "\"{}\"", s)
             }
             AnnotationValue::VerilogInt { width, value } => {
-                let v = xlsynth::IrValue::from_bits(value).to_u32().unwrap();
+                let v = xlsynth_pir::IrValue::from_bits(value).to_u32().unwrap();
                 match width {
                     Some(w) => write!(f, "{}'d{}", w, v),
                     None => write!(f, "{}", v),
@@ -323,7 +323,7 @@ impl fmt::Display for TokenPayload {
                 write!(f, "(* {} = {} *)", key, value)
             }
             TokenPayload::VerilogInt { width, value } => {
-                let v = xlsynth::IrValue::from_bits(value).to_u32().unwrap();
+                let v = xlsynth_pir::IrValue::from_bits(value).to_u32().unwrap();
                 match width {
                     Some(w) => write!(f, "{}'d{}", w, v),
                     None => write!(f, "{}", v),
@@ -680,7 +680,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                     } else {
                         base_and_value.clone()
                     };
-                    let value = xlsynth::IrValue::parse_typed(&irbits_str)
+                    let value = xlsynth_pir::IrValue::parse_typed(&irbits_str)
                         .unwrap()
                         .to_bits()
                         .unwrap();
@@ -1027,7 +1027,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                         span: Span { start, limit },
                     }));
                 }
-                let value = xlsynth::IrValue::parse_typed(&irbits_str)
+                let value = xlsynth_pir::IrValue::parse_typed(&irbits_str)
                     .unwrap()
                     .to_bits()
                     .unwrap();
@@ -1038,7 +1038,7 @@ impl<R: Read + 'static> TokenScanner<R> {
             } else {
                 // Parse as IrBits (decimal, width 32 per Verilog standard)
                 let irbits_str = format!("bits[32]:{}", num);
-                let value = match xlsynth::IrValue::parse_typed(&irbits_str) {
+                let value = match xlsynth_pir::IrValue::parse_typed(&irbits_str) {
                     Ok(v) => v.to_bits().unwrap(),
                     Err(e) => {
                         let line = (self.line_lookup)(start.lineno)
@@ -1306,7 +1306,7 @@ impl<R: Read + 'static> Parser<R> {
                         })?;
                         let msb = match msb_tok.payload {
                             TokenPayload::VerilogInt { value, .. } => {
-                                xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                                xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
                             }
                             _ => {
                                 return Err(ScanError {
@@ -1336,7 +1336,7 @@ impl<R: Read + 'static> Parser<R> {
                                 })?;
                                 let lsb = match lsb_tok.payload {
                                     TokenPayload::VerilogInt { value, .. } => {
-                                        xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
                                     }
                                     _ => {
                                         return Err(ScanError {
@@ -2131,7 +2131,7 @@ impl<R: Read + 'static> Parser<R> {
                 })?;
                 let msb = match msb_tok.payload {
                     TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
                     }
                     _ => {
                         return Err(ScanError {
@@ -2162,7 +2162,7 @@ impl<R: Read + 'static> Parser<R> {
                 })?;
                 let lsb = match lsb_tok.payload {
                     TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
                     }
                     _ => {
                         return Err(ScanError {
@@ -2271,7 +2271,7 @@ impl<R: Read + 'static> Parser<R> {
                 })?;
                 let msb = match msb_tok.payload {
                     TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
                     }
                     _ => {
                         return Err(ScanError {
@@ -2302,7 +2302,7 @@ impl<R: Read + 'static> Parser<R> {
                 })?;
                 let lsb = match lsb_tok.payload {
                     TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
                     }
                     _ => {
                         return Err(ScanError {

@@ -1615,9 +1615,10 @@ impl Parser {
         &mut self,
         ty: &ir::Type,
         ctx: &str,
-    ) -> Result<xlsynth::IrValue, ParseError> {
+    ) -> Result<crate::IrValue, ParseError> {
         let value = self.pop_number_string_or_error(ctx)?;
-        Ok(xlsynth::IrValue::parse_typed(&format!("{}:{}", ty, value)).unwrap())
+        crate::IrValue::parse_typed(&format!("{}:{}", ty, value))
+            .map_err(|error| ParseError::new(format!("invalid literal value: {error}")))
     }
 
     fn peek_is(&self, s: &str) -> bool {
@@ -1930,7 +1931,7 @@ impl Parser {
         }
         self.drop_or_error("(")?;
         let reg_ty = self.parse_type()?;
-        let mut reset_value: Option<xlsynth::IrValue> = None;
+        let mut reset_value: Option<crate::IrValue> = None;
         if self.try_drop(",") {
             self.drop_whitespace_and_comments();
             if self.peek_is("reset_value=") {
@@ -2154,21 +2155,22 @@ impl Parser {
         &mut self,
         ty: &ir::Type,
         ctx: &str,
-    ) -> Result<xlsynth::IrValue, ParseError> {
+    ) -> Result<crate::IrValue, ParseError> {
         match ty {
             ir::Type::Bits(_width) => self.pop_bits_value_or_error(&ty, ctx),
             ir::Type::Array(ArrayTypeData { element_type, .. }) => {
                 self.drop_or_error_with_ctx("[", "start of array literal")?;
                 let mut values = Vec::new();
                 while !self.try_drop("]") {
-                    let value: xlsynth::IrValue = self.parse_value_with_ty(element_type, ctx)?;
+                    let value: crate::IrValue = self.parse_value_with_ty(element_type, ctx)?;
                     values.push(value);
                     if !self.try_drop(",") {
                         self.drop_or_error("]")?;
                         break;
                     }
                 }
-                Ok(xlsynth::IrValue::make_array(&values).unwrap())
+                crate::IrValue::make_array_typed((**element_type).clone(), &values)
+                    .map_err(|error| ParseError::new(format!("invalid array literal: {error}")))
             }
             ir::Type::Tuple(element_tys) => {
                 self.drop_or_error("(")?;
@@ -2181,7 +2183,7 @@ impl Parser {
                     values.push(element);
                 }
                 self.drop_or_error(")")?;
-                Ok(xlsynth::IrValue::make_tuple(&values))
+                Ok(crate::IrValue::make_tuple(&values))
             }
             ir::Type::Token => {
                 // Expect the keyword `token` for token literals.
@@ -2194,7 +2196,7 @@ impl Parser {
                         self.rest()
                     )));
                 }
-                Ok(xlsynth::IrValue::make_token())
+                Ok(crate::IrValue::make_token())
             }
         }
     }
@@ -4392,9 +4394,8 @@ pub fn emit_fn_as_block(
         }
         for reg in &pi.registers {
             if let Some(reset_value) = &reg.reset_value {
-                let reset_str = reset_value
-                    .to_string_fmt_no_prefix(xlsynth::ir_value::IrFormatPreference::Default)
-                    .unwrap();
+                let reset_str =
+                    reset_value.to_string_fmt_no_prefix(crate::IrFormatPreference::Default);
                 lines.push(format!(
                     "  reg {}({}, reset_value={})",
                     reg.name, reg.ty, reset_str
@@ -4526,7 +4527,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsynth::ir_value::IrFormatPreference;
+    use crate::IrFormatPreference;
 
     #[test]
     fn test_parse_simple_fn() {
@@ -4716,10 +4717,7 @@ file_number 2 "a\"b\\c\n\141\u03bb"
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut IrNodeEnv::new()).unwrap();
         if let ir::NodePayload::Literal(value) = node.payload {
-            assert_eq!(
-                value.to_string_fmt(IrFormatPreference::Hex).unwrap(),
-                "bits[8]:0x2a"
-            );
+            assert_eq!(value.to_string_fmt(IrFormatPreference::Hex), "bits[8]:0x2a");
         } else {
             panic!("expected literal node");
         }
@@ -4745,7 +4743,7 @@ fn foo() -> bits[65] {
         let f = pkg.get_fn("foo").unwrap();
         if let ir::NodePayload::Literal(v) = &f.nodes[1].payload {
             assert_eq!(
-                v.to_string_fmt(IrFormatPreference::Hex).unwrap(),
+                v.to_string_fmt(IrFormatPreference::Hex),
                 "bits[65]:0x1_ffff_ffff_ffff_fffe"
             );
         } else {
@@ -4774,26 +4772,20 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
 
         let f = pkg.get_fn("foo").unwrap();
         if let ir::NodePayload::Literal(v) = &f.nodes[1].payload {
-            assert_eq!(
-                v.to_string_fmt(IrFormatPreference::Hex).unwrap(),
-                "bits[8]:0x2a"
-            );
+            assert_eq!(v.to_string_fmt(IrFormatPreference::Hex), "bits[8]:0x2a");
         } else {
             panic!("expected literal");
         }
         if let ir::NodePayload::Literal(v) = &f.nodes[2].payload {
             assert_eq!(
-                v.to_string_fmt(IrFormatPreference::Binary).unwrap(),
+                v.to_string_fmt(IrFormatPreference::Binary),
                 "bits[8]:0b1100"
             );
         } else {
             panic!("expected literal");
         }
         if let ir::NodePayload::Literal(v) = &f.nodes[3].payload {
-            assert_eq!(
-                v.to_string_fmt(IrFormatPreference::Default).unwrap(),
-                "bits[8]:5"
-            );
+            assert_eq!(v.to_string_fmt(IrFormatPreference::Default), "bits[8]:5");
         } else {
             panic!("expected literal");
         }

@@ -2129,7 +2129,7 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
             text_id: 2,
             name: Some("one.2".to_string()),
             ty: ir::Type::Bits(8),
-            payload: ir::NodePayload::Literal(xlsynth::IrValue::make_ubits(8, 1).unwrap()),
+            payload: ir::NodePayload::Literal(crate::IrValue::make_ubits(8, 1).unwrap()),
             pos: None,
         };
         let f = ir::Fn {

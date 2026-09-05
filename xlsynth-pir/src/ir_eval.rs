@@ -13,10 +13,10 @@ use crate::ir_value_utils::{
     deep_or_ir_values_for_type, ir_bits_to_usize, ir_bits_to_usize_in_range, zero_ir_value_for_type,
 };
 use crate::math::ceil_log2;
+use crate::{IrBits, IrValue};
 use num_bigint::{BigInt, BigUint, Sign};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use xlsynth::{IrBits, IrValue};
 
 struct DenseEvalEnv {
     values: Vec<Option<IrValue>>,
@@ -826,26 +826,24 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
         }
         ir::NodePayload::Array(_) => {
             let values: Vec<IrValue> = operand_values.iter().map(|v| (*v).clone()).collect();
-            IrValue::make_array(&values).unwrap()
+            IrValue::make_array_typed(n.ty.get_array_element_type().clone(), &values).unwrap()
         }
         ir::NodePayload::ArrayConcat(_) => {
             let mut elements: Vec<IrValue> = Vec::new();
             for operand_value in operand_values {
-                let count = operand_value
-                    .get_element_count()
+                let children = operand_value
+                    .as_elements()
                     .expect("array_concat operand must be an array");
-                for index in 0..count {
-                    elements.push(operand_value.get_element(index).unwrap());
-                }
+                elements.extend_from_slice(children);
             }
-            IrValue::make_array(&elements)
+            IrValue::make_array_typed(n.ty.get_array_element_type().clone(), &elements)
                 .expect("array_concat operands must have matching element types")
         }
         ir::NodePayload::ArraySlice { width, .. } => {
-            let arr = operand_values[0].clone();
-            let start_bits = operand_values[1].to_bits().unwrap();
-            let start_u = ir_bits_to_usize(&start_bits);
-            let len = arr.get_element_count().unwrap();
+            let elements = operand_values[0].as_elements().unwrap();
+            let start_bits = operand_values[1].as_bits().unwrap();
+            let start_u = ir_bits_to_usize(start_bits);
+            let len = elements.len();
             assert!(len > 0, "ArraySlice: empty array not supported");
             let mut out_elems: Vec<IrValue> = Vec::with_capacity(width);
             for j in 0..width {
@@ -853,10 +851,9 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     .and_then(|start_u| start_u.checked_add(j))
                     .unwrap_or(usize::MAX);
                 let clamped = if idx >= len { len - 1 } else { idx };
-                let v = arr.get_element(clamped).unwrap();
-                out_elems.push(v);
+                out_elems.push(elements[clamped].clone());
             }
-            IrValue::make_array(&out_elems).unwrap()
+            IrValue::make_array_typed(n.ty.get_array_element_type().clone(), &out_elems).unwrap()
         }
         ir::NodePayload::ArrayUpdate {
             ref indices,
@@ -870,30 +867,30 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     return new_value.clone();
                 }
                 let idx = idxs[0];
-                let count = base.get_element_count().unwrap();
-                let mut elems: Vec<IrValue> = Vec::with_capacity(count);
-                for i in 0..count {
-                    let elem_i = base.get_element(i).unwrap();
+                let children = base.as_elements().unwrap();
+                let mut elems: Vec<IrValue> = Vec::with_capacity(children.len());
+                for (i, elem_i) in children.iter().enumerate() {
                     if i == idx {
-                        elems.push(update_at_indices(&elem_i, &idxs[1..], new_value));
+                        elems.push(update_at_indices(elem_i, &idxs[1..], new_value));
                     } else {
-                        elems.push(elem_i);
+                        elems.push(elem_i.clone());
                     }
                 }
-                IrValue::make_array(&elems).unwrap()
+                IrValue::make_array_typed(base.type_().get_array_element_type().clone(), &elems)
+                    .unwrap()
             }
 
-            let base = operand_values[0].clone();
-            let new_value = operand_values[1].clone();
+            let base = operand_values[0];
+            let new_value = operand_values[1];
             let idxs: Vec<usize> = indices
                 .iter()
                 .zip(operand_values[2..].iter())
                 .map(|(_r, value)| {
-                    let bits = value.to_bits().unwrap();
-                    ir_bits_to_usize(&bits).unwrap_or(usize::MAX)
+                    let bits = value.as_bits().unwrap();
+                    ir_bits_to_usize(bits).unwrap_or(usize::MAX)
                 })
                 .collect();
-            update_at_indices(&base, &idxs, &new_value)
+            update_at_indices(base, &idxs, new_value)
         }
         ir::NodePayload::ArrayIndex {
             ref indices,
@@ -905,16 +902,17 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             // this helper does not surface `assumed_in_bounds`
             // errors (those are handled in `eval_fn_with_observer`,
             // which can return Failure).
-            let mut value = operand_values[0].clone();
+            let mut value = operand_values[0];
             for (_idx_ref, idx_value) in indices.iter().zip(operand_values[1..].iter()) {
-                let idx_bits = idx_value.to_bits().unwrap();
-                let idx = ir_bits_to_usize(&idx_bits).unwrap_or(usize::MAX);
-                let count = value.get_element_count().unwrap();
+                let idx_bits = idx_value.as_bits().unwrap();
+                let idx = ir_bits_to_usize(idx_bits).unwrap_or(usize::MAX);
+                let elements = value.as_elements().unwrap();
+                let count = elements.len();
                 assert!(count > 0, "ArrayIndex: empty array not supported");
                 let clamped = if idx >= count { count - 1 } else { idx };
-                value = value.get_element(clamped).unwrap();
+                value = &elements[clamped];
             }
-            value
+            value.clone()
         }
         ir::NodePayload::DynamicBitSlice { width, .. } => {
             let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
@@ -1179,36 +1177,36 @@ pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) 
 
 fn observed_type_string_for_expected(expected: &ir::Type, value: &IrValue) -> String {
     match expected {
-        ir::Type::Bits(_) => match value.to_bits() {
+        ir::Type::Bits(_) => match value.as_bits() {
             Ok(bits) => format!("bits[{}]", bits.get_bit_count()),
             Err(_) => "<non-bits>".to_string(),
         },
-        ir::Type::Tuple(member_types) => match value.get_element_count() {
-            Ok(count) => {
-                let mut parts: Vec<String> = Vec::with_capacity(count);
-                for i in 0..count {
-                    let elem = value.get_element(i).unwrap();
+        ir::Type::Tuple(member_types) => match value.as_elements() {
+            Ok(elements) => {
+                let mut parts: Vec<String> = Vec::with_capacity(elements.len());
+                for (i, elem) in elements.iter().enumerate() {
                     // If we have fewer expected entries than elements, just
                     // reuse last expected kind.
                     let ety = member_types
                         .get(i)
                         .unwrap_or_else(|| member_types.last().unwrap());
-                    parts.push(observed_type_string_for_expected(ety, &elem));
+                    parts.push(observed_type_string_for_expected(ety, elem));
                 }
                 format!("({})", parts.join(", "))
             }
             Err(_) => "(<non-composite>)".to_string(),
         },
-        ir::Type::Array(arr) => match value.get_element_count() {
-            Ok(count) => {
+        ir::Type::Array(arr) => match value.as_elements() {
+            Ok(elements) => {
+                let count = elements.len();
                 if count == 0 {
                     format!(
                         "{}[0]",
                         observed_type_string_for_expected(&arr.element_type, value)
                     )
                 } else {
-                    let first = value.get_element(0).unwrap();
-                    let elem_ty = observed_type_string_for_expected(&arr.element_type, &first);
+                    let elem_ty =
+                        observed_type_string_for_expected(&arr.element_type, &elements[0]);
                     format!("{}[{}]", elem_ty, count)
                 }
             }
@@ -1225,7 +1223,7 @@ fn assert_value_conforms_to_type(expected: &ir::Type, value: &IrValue, node: &ir
     match expected {
         ir::Type::Bits(width) => {
             let bits = value
-                .to_bits()
+                .as_bits()
                 .expect("expected bits value to conform to bits type");
             let got_w = bits.get_bit_count();
             assert!(
@@ -1237,39 +1235,33 @@ fn assert_value_conforms_to_type(expected: &ir::Type, value: &IrValue, node: &ir
             );
         }
         ir::Type::Tuple(member_types) => {
-            let count = value
-                .get_element_count()
+            let elements = value
+                .as_elements()
                 .expect("expected tuple value to have elements");
             assert!(
-                count == member_types.len(),
+                elements.len() == member_types.len(),
                 "type mismatch at node id={}: expected={}, observed={}",
                 node.text_id,
                 expected,
                 observed_type_string_for_expected(expected, value)
             );
-            for (i, mt) in member_types.iter().enumerate() {
-                let elem = value
-                    .get_element(i)
-                    .expect("tuple element should be accessible");
-                assert_value_conforms_to_type(mt, &elem, node);
+            for (mt, elem) in member_types.iter().zip(elements) {
+                assert_value_conforms_to_type(mt, elem, node);
             }
         }
         ir::Type::Array(arr) => {
-            let count = value
-                .get_element_count()
+            let elements = value
+                .as_elements()
                 .expect("expected array value to have elements");
             assert!(
-                count == arr.element_count,
+                elements.len() == arr.element_count,
                 "type mismatch at node id={}: expected={}, observed={}",
                 node.text_id,
                 expected,
                 observed_type_string_for_expected(expected, value)
             );
-            for i in 0..arr.element_count {
-                let elem = value
-                    .get_element(i)
-                    .expect("array element should be accessible");
-                assert_value_conforms_to_type(&arr.element_type, &elem, node);
+            for elem in elements {
+                assert_value_conforms_to_type(&arr.element_type, elem, node);
             }
         }
         ir::Type::Token => {
@@ -1414,20 +1406,22 @@ fn format_trace_value(value: &IrValue, ty: &ir::Type, preference: TraceFormatPre
     match ty {
         ir::Type::Bits(bit_count) => {
             let bytes = value
-                .to_bits()
+                .as_bits()
                 .expect("trace bits value must have bits representation")
-                .to_le_bytes()
-                .expect("trace bits payload must convert to bytes");
+                .to_le_bytes();
             format_trace_bits(BigUint::from_bytes_le(&bytes), *bit_count, preference)
         }
         ir::Type::Tuple(fields) => {
+            let children = value
+                .as_elements()
+                .expect("trace tuple value must have elements");
             let elements = fields
                 .iter()
                 .enumerate()
                 .map(|(index, field_ty)| {
                     format_trace_value(
-                        &value
-                            .get_element(index)
+                        children
+                            .get(index)
                             .expect("trace tuple value must have expected field"),
                         field_ty,
                         preference,
@@ -1437,11 +1431,14 @@ fn format_trace_value(value: &IrValue, ty: &ir::Type, preference: TraceFormatPre
             format!("({})", elements.join(", "))
         }
         ir::Type::Array(array) => {
+            let children = value
+                .as_elements()
+                .expect("trace array value must have elements");
             let elements = (0..array.element_count)
                 .map(|index| {
                     format_trace_value(
-                        &value
-                            .get_element(index)
+                        children
+                            .get(index)
                             .expect("trace array value must have expected element"),
                         &array.element_type,
                         preference,
@@ -2299,21 +2296,22 @@ fn eval_fn_impl<'a>(
                 // maximum in-bounds index for the respective
                 // dimension. `assumed_in_bounds` makes
                 // an OOB access observable without changing that safe value.
-                let mut value = env.get(array).expect("array must be evaluated").clone();
+                let mut value = env.get(array).expect("array must be evaluated");
                 let mut clamped_any = false;
                 for idx_ref in indices.iter() {
                     let idx = env
                         .get(idx_ref)
                         .expect("index must be evaluated")
-                        .to_bits()
+                        .as_bits()
                         .unwrap();
-                    let count = value.get_element_count().expect("array must have elements");
+                    let elements = value.as_elements().expect("array must have elements");
+                    let count = elements.len();
                     assert!(count > 0, "ArrayIndex: empty array not supported");
-                    if let Some(idx) = ir_bits_to_usize_in_range(&idx, count) {
-                        value = value.get_element(idx).unwrap();
+                    if let Some(idx) = ir_bits_to_usize_in_range(idx, count) {
+                        value = &elements[idx];
                     } else {
                         clamped_any = true;
-                        value = value.get_element(count - 1).unwrap();
+                        value = &elements[count - 1];
                     }
                 }
                 if clamped_any && *assumed_in_bounds {
@@ -2346,7 +2344,7 @@ fn eval_fn_impl<'a>(
                         });
                     }
                 }
-                value
+                value.clone()
             }
             P::ArrayUpdate {
                 array,
@@ -2358,8 +2356,8 @@ fn eval_fn_impl<'a>(
                 // identical to the input array.
                 // `assumed_in_bounds` additionally reports an
                 // observable contract violation.
-                let arr = env.get(array).expect("array must be evaluated").clone();
-                let val = env.get(value).expect("value must be evaluated").clone();
+                let arr = env.get(array).expect("array must be evaluated");
+                let val = env.get(value).expect("value must be evaluated");
                 // Gather concrete indices, preserving values that exceed host
                 // width as OOB.
                 let mut idxs: Vec<Option<usize>> = Vec::with_capacity(indices.len());
@@ -2382,25 +2380,25 @@ fn eval_fn_impl<'a>(
                     if path.is_empty() {
                         return Some(new_val.clone());
                     }
-                    let count = cur.get_element_count().ok()?;
+                    let children = cur.as_elements().ok()?;
+                    let count = children.len();
                     let idx = path[0]?;
                     if idx >= count {
                         return None;
                     }
                     let mut elems: Vec<IrValue> = Vec::with_capacity(count);
-                    for i in 0..count {
-                        let child = cur.get_element(i).ok()?;
+                    for (i, child) in children.iter().enumerate() {
                         if i == idx {
-                            let updated = set_at_path(&child, &path[1..], new_val)?;
+                            let updated = set_at_path(child, &path[1..], new_val)?;
                             elems.push(updated);
                         } else {
-                            elems.push(child);
+                            elems.push(child.clone());
                         }
                     }
                     IrValue::make_array(&elems).ok()
                 }
 
-                match set_at_path(&arr, &idxs, &val) {
+                match set_at_path(arr, &idxs, val) {
                     Some(updated) => updated,
                     None => {
                         if *assumed_in_bounds {
@@ -2420,7 +2418,7 @@ fn eval_fn_impl<'a>(
                             });
                         }
                         // An OOB update leaves the original array unchanged.
-                        arr
+                        arr.clone()
                     }
                 }
             }
@@ -2622,7 +2620,14 @@ mod tests {
             .expect("pir parse+validate");
         let pir_f = pir_pkg.get_fn(fn_name).expect("pir function");
 
-        let xls_got = xls_f.interpret(args).expect("xls interpret");
+        let xls_args = args
+            .iter()
+            .map(crate::libxls_bridge::value_to_libxls)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("native arguments should convert to libxls");
+        let xls_got = xls_f.interpret(&xls_args).expect("xls interpret");
+        let xls_got = crate::libxls_bridge::value_from_libxls(&xls_got, &pir_f.ret_ty)
+            .expect("libxls result should convert to native");
         let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, args) {
             FnEvalResult::Success(success) => success.value,
             other => panic!("expected success, got {:?}", other),
@@ -2645,7 +2650,14 @@ mod tests {
         let pir_f = pir_pkg.get_fn(fn_name).expect("pir function");
 
         for args in cases {
-            let xls_got = xls_f.interpret(&args).expect("xls interpret");
+            let xls_args = args
+                .iter()
+                .map(crate::libxls_bridge::value_to_libxls)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("native arguments should convert to libxls");
+            let xls_got = xls_f.interpret(&xls_args).expect("xls interpret");
+            let xls_got = crate::libxls_bridge::value_from_libxls(&xls_got, &pir_f.ret_ty)
+                .expect("libxls result should convert to native");
             let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
                 FnEvalResult::Success(success) => success.value,
                 other => panic!("expected success, got {:?}", other),
@@ -4515,7 +4527,14 @@ fn f(x: bits[8] id=1) -> bits[3] {
             let x = IrValue::make_ubits(8, *x).unwrap();
             let want_v = IrValue::make_ubits(3, *want).unwrap();
             let args = vec![x.clone()];
-            let xls_got = xls_f.interpret(&args).expect("xls interpret");
+            let xls_args = args
+                .iter()
+                .map(crate::libxls_bridge::value_to_libxls)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("native arguments should convert to libxls");
+            let xls_got = xls_f.interpret(&xls_args).expect("xls interpret");
+            let xls_got = crate::libxls_bridge::value_from_libxls(&xls_got, &pir_f.ret_ty)
+                .expect("libxls result should convert to native");
             let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
                 FnEvalResult::Success(s) => s.value,
                 other => panic!("expected success, got {:?}", other),
@@ -4552,7 +4571,14 @@ fn f(x: bits[6] id=1) -> bits[3] {
         let pir_f = pir_pkg.get_fn("f").expect("pir f");
 
         let args = vec![IrValue::make_ubits(6, 6).unwrap()];
-        let xls_got = xls_f.interpret(&args).expect("xls interpret");
+        let xls_args = args
+            .iter()
+            .map(crate::libxls_bridge::value_to_libxls)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("native arguments should convert to libxls");
+        let xls_got = xls_f.interpret(&xls_args).expect("xls interpret");
+        let xls_got = crate::libxls_bridge::value_from_libxls(&xls_got, &pir_f.ret_ty)
+            .expect("libxls result should convert to native");
         let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
             FnEvalResult::Success(s) => s.value,
             other => panic!("expected success, got {:?}", other),

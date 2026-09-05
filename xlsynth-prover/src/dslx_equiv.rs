@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use xlsynth::IrValue;
 use xlsynth::dslx::{self, MatchableModuleMember, TypecheckedModule};
 use xlsynth::{DslxConvertOptions, IrPackage, mangle_dslx_name, optimize_ir};
+use xlsynth_pir::IrValue;
 
 use crate::ir_utils;
 use crate::prover::types::{
@@ -476,7 +476,11 @@ fn collect_enum_values(tcm: &TypecheckedModule, enum_def: &xlsynth::dslx::EnumDe
             .expect("imported type info");
         let interp = owner_type_info.get_const_expr(&expr).expect("constexpr");
         let ir_value = interp.convert_to_ir().expect("convert to IR");
-        values.push(ir_value);
+        let bits = ir_value.to_bits().expect("enum values are bits-typed");
+        values.push(IrValue::from_bits(
+            &xlsynth_pir::libxls_bridge::bits_from_libxls(&bits)
+                .expect("enum bits should convert to native storage"),
+        ));
     }
     values
 }

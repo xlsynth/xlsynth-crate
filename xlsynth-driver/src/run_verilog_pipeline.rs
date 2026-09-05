@@ -8,7 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::tempdir;
-use xlsynth::ir_value::{IrFormatPreference, IrValue};
+use xlsynth_pir::{IrFormatPreference, IrValue};
 
 /// Describes a port found in the module header.
 #[derive(Debug, Clone)]
@@ -415,7 +415,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     };
 
     // Map each data input port to a corresponding IrBits value.
-    let mut input_port_bits: Vec<(&PortInfo, xlsynth::IrBits)> = Vec::new();
+    let mut input_port_bits: Vec<(&PortInfo, xlsynth_pir::IrBits)> = Vec::new();
     if data_inputs.len() == 1 {
         // Expect a single bits value.
         match input_value.to_bits() {

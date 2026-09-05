@@ -3,9 +3,10 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text, IrFnAutocovGenerateConfig};
+use xlsynth_autocov::{IrFnAutocovGenerateConfig, generate_ir_fn_corpus_from_ir_text};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::libxls_bridge::{value_from_libxls, value_to_libxls};
 use xlsynth_pir_fuzz::generate_upstream_eval_random_pir_package;
-use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
 
 const AUTOCOV_MAX_ITERS: u64 = 256;
 const AUTOCOV_MAX_CORPUS_LEN: usize = 64;
@@ -77,9 +78,16 @@ fuzz_target!(|data: &[u8]| {
             FnEvalResult::Success(success) => success.value,
             other => panic!("expected PIR evaluator success, got {:?}", other),
         };
+        let xls_args = args
+            .iter()
+            .map(value_to_libxls)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("generated corpus values should convert to libxls");
         let theirs = xls_fn
-            .interpret(&args)
+            .interpret(&xls_args)
             .expect("xlsynth interpreter should succeed on autocov corpus values");
+        let theirs = value_from_libxls(&theirs, &parsed_fn.ret_ty)
+            .expect("libxls result should match the function return type");
         assert_eq!(
             ours, theirs,
             "eval_fn result disagrees with xlsynth interpreter for corpus sample {tuple_value}"

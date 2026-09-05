@@ -13,7 +13,7 @@ use crate::ir_parser;
 use crate::random_inputs::{
     BitValuePattern, generate_biased_irbits_with_rng, generate_pattern_irbits,
 };
-use xlsynth::{IrBits, IrValue};
+use crate::{IrBits, IrValue};
 
 /// Deterministically "quickchecks" equivalence of two PIR functions by
 /// evaluating both on a mixture of edge cases and pseudo-random samples.

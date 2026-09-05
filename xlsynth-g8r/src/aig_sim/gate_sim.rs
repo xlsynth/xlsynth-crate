@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use bitvec::vec::BitVec;
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 use crate::aig::topo::postorder_for_aig_refs_node_only;
 use crate::aig::{AigNode, AigOperand, AigRef, GateFn};

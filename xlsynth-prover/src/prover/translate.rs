@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 
 use super::types::{
     Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, SmtFnWithNodeTerms, UfRegistry,

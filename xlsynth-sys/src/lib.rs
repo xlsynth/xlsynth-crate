@@ -445,7 +445,7 @@ unsafe extern "C" {
     ) -> bool;
 
     // Creates a bits value (via an unsigned integer) that is boxed in an
-    // IrValue.
+    // XlsIrValue.
     pub fn xls_value_make_ubits(
         bit_count: i64,
         value: u64,
@@ -453,7 +453,8 @@ unsafe extern "C" {
         result_out: *mut *mut CIrValue,
     ) -> bool;
 
-    // Creates a bits value (via a signed integer) that is boxed in an IrValue.
+    // Creates a bits value (via a signed integer) that is boxed in an
+    // XlsIrValue.
     pub fn xls_value_make_sbits(
         bit_count: i64,
         value: i64,

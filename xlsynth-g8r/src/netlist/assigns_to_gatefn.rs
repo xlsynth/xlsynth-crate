@@ -777,7 +777,7 @@ mod tests {
     use super::*;
     use crate::aig_sim::gate_sim::{self, Collect};
     use crate::netlist::parse::{Parser, TokenScanner};
-    use xlsynth::IrBits;
+    use xlsynth_pir::IrBits;
 
     fn parse_single_module(
         src: &str,

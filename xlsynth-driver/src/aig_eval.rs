@@ -3,7 +3,6 @@
 use std::{io::Write, path::Path};
 
 use clap::ArgMatches;
-use xlsynth::{IrBits, IrValue, parse_ir_values_file};
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::{
     GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
@@ -17,6 +16,7 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_value_utils::{
     flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
 };
+use xlsynth_pir::{IrBits, IrValue, parse_ir_values_file};
 
 use crate::fn_type_arg::parse_function_type_text;
 use crate::toolchain_config::ToolchainConfig;
@@ -43,6 +43,10 @@ fn flatten_outputs_lsb_is_0(outputs: &[IrBits]) -> Result<IrBits, String> {
 }
 
 fn flatten_value_lsb_is_0_for_type(ty: &ir::Type, value: &IrValue) -> Result<IrBits, String> {
+    let observed_type = value.type_();
+    if observed_type != *ty {
+        return Err(format!("expected {ty}, got {observed_type}"));
+    }
     let mut flat_lsb_is_0 = Vec::with_capacity(ty.bit_count());
     flatten_ir_value_to_lsb0_bits_for_type(value, ty, &mut flat_lsb_is_0)
         .map_err(|e| format!("failed to flatten value for type {}: {}", ty, e))?;
@@ -284,5 +288,20 @@ pub fn handle_aig_eval(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
             eprintln!("aig-eval error: {e}");
             std::process::exit(1);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_input_validation_preserves_aggregate_kind_and_token_checks() {
+        let tuple = IrValue::parse_typed("(bits[8]:1, bits[8]:2)").unwrap();
+        let array = IrValue::parse_typed("[bits[8]:1, bits[8]:2]").unwrap();
+        assert!(flatten_value_lsb_is_0_for_type(&tuple.type_(), &array).is_err());
+        assert!(flatten_value_lsb_is_0_for_type(&array.type_(), &tuple).is_err());
+        assert!(flatten_value_lsb_is_0_for_type(&ir::Type::Token, &tuple).is_err());
+        assert!(flatten_value_lsb_is_0_for_type(&tuple.type_(), &tuple).is_ok());
     }
 }

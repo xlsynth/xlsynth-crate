@@ -32,7 +32,7 @@
 //!     --input_valid_signal=input_valid \
 //!     --output_valid_signal=output_valid
 //! $ cargo run -- \
-//!     dslx2sv-types ../tests/structure_zoo.x \
+//!     dslx2sv-types ../xlsynth-codegen/tests/structure_zoo.x \
 //!     --sv_enum_case_naming_policy=unqualified
 //! ```
 
@@ -142,7 +142,7 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
-use xlsynth::sv_bridge_builder::{SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy};
+use xlsynth_codegen::sv_bridge_builder::{SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy};
 use xlsynth_g8r::aig::cut_db_rewrite::CutDbRewriteMode;
 use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;

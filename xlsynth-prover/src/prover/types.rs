@@ -3,7 +3,7 @@
 use crate::solver::Uf;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, collections::HashMap, fmt, str::FromStr, time::Duration};
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EquivParallelism {
@@ -321,11 +321,11 @@ impl std::fmt::Display for FnOutput {
         if let Some(violation) = &self.assertion_violation {
             write!(
                 f,
-                "Value: {:?}, Assertion violation: {} (label: {})",
+                "IrValue: {:?}, Assertion violation: {} (label: {})",
                 self.value, violation.message, violation.label
             )
         } else {
-            write!(f, "Value: {:?}", self.value)
+            write!(f, "IrValue: {:?}", self.value)
         }
     }
 }

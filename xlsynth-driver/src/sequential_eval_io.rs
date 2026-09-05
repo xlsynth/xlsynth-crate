@@ -5,9 +5,9 @@
 use std::path::Path;
 
 use clap::ArgMatches;
-use xlsynth::{IrBits, IrValue, NamedIrValueSet, parse_ir_values_file};
 use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::aig_sim::sequential::SequentialState;
+use xlsynth_pir::{IrBits, IrValue, NamedIrValueSet, parse_ir_values_file};
 
 fn lower_tuple_to_bits(
     tuple: &IrValue,

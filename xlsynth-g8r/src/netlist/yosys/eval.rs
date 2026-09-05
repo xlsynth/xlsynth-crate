@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use xlsynth::external_tool::ToolError;
-use xlsynth::ir_value::IrFormatPreference;
-use xlsynth::{IrBits, IrValue};
+use xlsynth_pir::IrFormatPreference;
+use xlsynth_pir::{IrBits, IrValue};
 
 use super::{YosysToolchain, format_yosys_invocation_context, is_simple_yosys_identifier};
 

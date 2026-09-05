@@ -5,9 +5,8 @@
 use crate::ir;
 use crate::ir_utils;
 use crate::ir_utils::Users;
+use crate::{IrBits, IrValue};
 use std::collections::HashMap;
-use xlsynth::IrBits;
-use xlsynth::IrValue;
 
 mod parser;
 

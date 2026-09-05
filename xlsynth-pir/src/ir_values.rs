@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parsing and formatting for newline-delimited XLS IR value sequences.
+//! Native parsing and formatting for newline-delimited XLS IR value sequences.
+//!
+//! Both positional and named records use Rust-owned values without libxls
+//! calls.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
-use crate::{IrValue, XlsynthError};
+use crate::{IrValue, ValueError};
 
 /// One name/value entry in a named evaluator input record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,11 +33,11 @@ pub enum IrValuesFileKind {
 
 impl NamedIrValueSet {
     /// Creates a named value set, rejecting duplicate names.
-    pub fn new(entries: Vec<NamedIrValue>) -> Result<Self, XlsynthError> {
+    pub fn new(entries: Vec<NamedIrValue>) -> Result<Self, ValueError> {
         let mut names = BTreeSet::new();
         for entry in &entries {
             if !names.insert(entry.name.as_str()) {
-                return Err(XlsynthError(format!(
+                return Err(ValueError(format!(
                     "duplicate name '{}' in named IR value set",
                     entry.name
                 )));
@@ -47,15 +50,15 @@ impl NamedIrValueSet {
     pub fn from_positional_tuple(
         argument_names: &[String],
         tuple_value: &IrValue,
-    ) -> Result<Self, XlsynthError> {
-        let elements = tuple_value.get_elements().map_err(|e| {
-            XlsynthError(format!(
+    ) -> Result<Self, ValueError> {
+        let IrValue::Tuple(elements) = tuple_value else {
+            return Err(ValueError(format!(
                 "cannot create named IR value set from a non-tuple value: {}",
-                e
-            ))
-        })?;
+                tuple_value.type_()
+            )));
+        };
         if elements.len() != argument_names.len() {
-            return Err(XlsynthError(format!(
+            return Err(ValueError(format!(
                 "positional tuple arity mismatch: expected {}, got {}",
                 argument_names.len(),
                 elements.len()
@@ -64,7 +67,7 @@ impl NamedIrValueSet {
         let entries = argument_names
             .iter()
             .cloned()
-            .zip(elements)
+            .zip(elements.iter().cloned())
             .map(|(name, value)| NamedIrValue { name, value })
             .collect();
         Self::new(entries)
@@ -107,7 +110,7 @@ impl IrValuesFile {
     pub fn into_positional_values(
         self,
         argument_names: &[String],
-    ) -> Result<Vec<IrValue>, XlsynthError> {
+    ) -> Result<Vec<IrValue>, ValueError> {
         let sets = match self {
             Self::ValueSequence(values) => return Ok(values),
             Self::NamedValueSequence(sets) => sets,
@@ -115,7 +118,7 @@ impl IrValuesFile {
 
         let expected = argument_names.iter().cloned().collect::<BTreeSet<_>>();
         if expected.len() != argument_names.len() {
-            return Err(XlsynthError(
+            return Err(ValueError(
                 "evaluator interface contains duplicate argument names".to_string(),
             ));
         }
@@ -132,7 +135,7 @@ impl IrValuesFile {
                 let missing = expected.difference(&observed).cloned().collect::<Vec<_>>();
                 let unknown = observed.difference(&expected).cloned().collect::<Vec<_>>();
                 if !missing.is_empty() || !unknown.is_empty() {
-                    return Err(XlsynthError(format!(
+                    return Err(ValueError(format!(
                         "named input sample {} does not match evaluator arguments: missing {:?}, unknown {:?}",
                         sample_index + 1,
                         missing,
@@ -154,7 +157,7 @@ impl IrValuesFile {
 }
 
 /// Parses an `.irvals` sequence from text.
-pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, XlsynthError> {
+pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, ValueError> {
     enum FileForm {
         Values,
         NamedValues,
@@ -167,7 +170,7 @@ pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, XlsynthError> {
         let line_number = line_index + 1;
         let line = raw_line.trim();
         if line.is_empty() {
-            return Err(XlsynthError(format!(
+            return Err(ValueError(format!(
                 "empty line {} in IR values file is not allowed",
                 line_number
             )));
@@ -182,13 +185,13 @@ pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, XlsynthError> {
                 });
             }
             Some(FileForm::Values) if line_is_named => {
-                return Err(XlsynthError(format!(
+                return Err(ValueError(format!(
                     "IR values file mixes positional and named records at line {}",
                     line_number
                 )));
             }
             Some(FileForm::NamedValues) if !line_is_named => {
-                return Err(XlsynthError(format!(
+                return Err(ValueError(format!(
                     "IR values file mixes named and positional records at line {}",
                     line_number
                 )));
@@ -203,7 +206,7 @@ pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, XlsynthError> {
             named_values.push(parse_named_value_set(line, line_number)?);
         } else {
             values.push(IrValue::parse_typed(line).map_err(|e| {
-                XlsynthError(format!(
+                ValueError(format!(
                     "failed to parse typed IR value at line {}: {}",
                     line_number, e
                 ))
@@ -218,9 +221,9 @@ pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, XlsynthError> {
 }
 
 /// Reads and parses an `.irvals` file.
-pub fn parse_ir_values_file(path: &Path) -> Result<IrValuesFile, XlsynthError> {
+pub fn parse_ir_values_file(path: &Path) -> Result<IrValuesFile, ValueError> {
     let text = std::fs::read_to_string(path).map_err(|e| {
-        XlsynthError(format!(
+        ValueError(format!(
             "failed to read IR values file '{}': {}",
             path.display(),
             e
@@ -230,12 +233,12 @@ pub fn parse_ir_values_file(path: &Path) -> Result<IrValuesFile, XlsynthError> {
 }
 
 /// Parses one `{name: value, ...}` record.
-fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueSet, XlsynthError> {
+fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueSet, ValueError> {
     let Some(inner) = line
         .strip_prefix('{')
         .and_then(|contents| contents.strip_suffix('}'))
     else {
-        return Err(XlsynthError(format!(
+        return Err(ValueError(format!(
             "named IR value record at line {} must end with '}}'",
             line_number
         )));
@@ -244,7 +247,7 @@ fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueS
     let mut entries = Vec::with_capacity(raw_entries.len());
     for raw_entry in raw_entries {
         let Some(separator) = find_name_separator(raw_entry) else {
-            return Err(XlsynthError(format!(
+            return Err(ValueError(format!(
                 "named IR value entry '{}' at line {} is missing ':'",
                 raw_entry.trim(),
                 line_number
@@ -253,14 +256,14 @@ fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueS
         let raw_name = raw_entry[..separator].trim();
         let raw_value = raw_entry[separator + 1..].trim();
         if raw_value.is_empty() {
-            return Err(XlsynthError(format!(
+            return Err(ValueError(format!(
                 "named IR value '{}' at line {} has no value",
                 raw_name, line_number
             )));
         }
         let name = parse_value_name(raw_name, line_number)?;
         let value = IrValue::parse_typed(raw_value).map_err(|e| {
-            XlsynthError(format!(
+            ValueError(format!(
                 "failed to parse value for '{}' at line {}: {}",
                 name, line_number, e
             ))
@@ -268,7 +271,7 @@ fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueS
         entries.push(NamedIrValue { name, value });
     }
     NamedIrValueSet::new(entries).map_err(|e| {
-        XlsynthError(format!(
+        ValueError(format!(
             "invalid named IR value record at line {}: {}",
             line_number, e.0
         ))
@@ -276,7 +279,7 @@ fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueS
 }
 
 /// Splits entries at commas outside strings, tuples, and arrays.
-fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, XlsynthError> {
+fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, ValueError> {
     if inner.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -302,7 +305,7 @@ fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, Xls
             '(' => paren_depth += 1,
             ')' => {
                 paren_depth = paren_depth.checked_sub(1).ok_or_else(|| {
-                    XlsynthError(format!(
+                    ValueError(format!(
                         "unmatched ')' in named IR value record at line {}",
                         line_number
                     ))
@@ -311,7 +314,7 @@ fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, Xls
             '[' => bracket_depth += 1,
             ']' => {
                 bracket_depth = bracket_depth.checked_sub(1).ok_or_else(|| {
-                    XlsynthError(format!(
+                    ValueError(format!(
                         "unmatched ']' in named IR value record at line {}",
                         line_number
                     ))
@@ -320,7 +323,7 @@ fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, Xls
             ',' if paren_depth == 0 && bracket_depth == 0 => {
                 let entry = inner[start..index].trim();
                 if entry.is_empty() {
-                    return Err(XlsynthError(format!(
+                    return Err(ValueError(format!(
                         "empty named IR value entry at line {}",
                         line_number
                     )));
@@ -328,17 +331,20 @@ fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, Xls
                 entries.push(entry);
                 start = index + ch.len_utf8();
             }
-            _ => {}
+            _ => {
+                // Ordinary value/name characters do not affect entry
+                // boundaries.
+            }
         }
     }
     if in_string || escaped {
-        return Err(XlsynthError(format!(
+        return Err(ValueError(format!(
             "unterminated quoted name in named IR value record at line {}",
             line_number
         )));
     }
     if paren_depth != 0 || bracket_depth != 0 {
-        return Err(XlsynthError(format!(
+        return Err(ValueError(format!(
             "unclosed aggregate in named IR value record at line {}",
             line_number
         )));
@@ -350,6 +356,7 @@ fn split_named_entries(inner: &str, line_number: usize) -> Result<Vec<&str>, Xls
     Ok(entries)
 }
 
+/// Finds the colon after the name, ignoring colons inside JSON-quoted names.
 fn find_name_separator(entry: &str) -> Option<usize> {
     let mut in_string = false;
     let mut escaped = false;
@@ -367,16 +374,20 @@ fn find_name_separator(entry: &str) -> Option<usize> {
         match ch {
             '"' => in_string = true,
             ':' => return Some(index),
-            _ => {}
+            _ => {
+                // Only quotes and the first unquoted colon affect the
+                // separator.
+            }
         }
     }
     None
 }
 
-fn parse_value_name(raw_name: &str, line_number: usize) -> Result<String, XlsynthError> {
+/// Decodes a bare identifier or JSON-quoted name.
+fn parse_value_name(raw_name: &str, line_number: usize) -> Result<String, ValueError> {
     if raw_name.starts_with('"') {
         return serde_json::from_str(raw_name).map_err(|e| {
-            XlsynthError(format!(
+            ValueError(format!(
                 "invalid quoted name '{}' at line {}: {}",
                 raw_name, line_number, e
             ))
@@ -385,12 +396,13 @@ fn parse_value_name(raw_name: &str, line_number: usize) -> Result<String, Xlsynt
     if is_bare_name(raw_name) {
         return Ok(raw_name.to_string());
     }
-    Err(XlsynthError(format!(
+    Err(ValueError(format!(
         "invalid name '{}' at line {}; use a JSON-quoted name for punctuation",
         raw_name, line_number
     )))
 }
 
+/// Returns whether a name can be written without JSON quoting.
 fn is_bare_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -546,5 +558,128 @@ mod tests {
             parse_ir_values("{x: bits[1]:0}\n").unwrap().kind(),
             IrValuesFileKind::Named
         );
+    }
+
+    #[test]
+    fn parses_wide_bits_tokens_and_escaped_names() {
+        let text = r#"{"a,:[\"\\]": (token, bits[0]:0, bits[129]:0x1_0000_0000_0000_0000), arr: [(bits[7]:127), (bits[7]:0)]}
+"#;
+        let file = parse_ir_values(text).unwrap();
+        let IrValuesFile::NamedValueSequence(sets) = &file else {
+            panic!("expected named records");
+        };
+        assert_eq!(sets[0].entries()[0].name, "a,:[\"\\]");
+        assert_eq!(parse_ir_values(&file.to_string()).unwrap(), file);
+        let values = file
+            .into_positional_values(&["arr".to_string(), "a,:[\"\\]".to_string()])
+            .unwrap();
+        assert_eq!(
+            values[0].type_(),
+            crate::ir::Type::Tuple(vec![
+                Box::new(crate::ir::Type::new_array(
+                    crate::ir::Type::Tuple(vec![Box::new(crate::ir::Type::Bits(7))]),
+                    2,
+                )),
+                Box::new(crate::ir::Type::Tuple(vec![
+                    Box::new(crate::ir::Type::Token),
+                    Box::new(crate::ir::Type::Bits(0)),
+                    Box::new(crate::ir::Type::Bits(129)),
+                ])),
+            ])
+        );
+    }
+
+    #[test]
+    fn preserves_empty_records_and_trailing_commas() {
+        assert_eq!(
+            parse_ir_values("").unwrap(),
+            IrValuesFile::ValueSequence(vec![])
+        );
+        assert_eq!(
+            parse_ir_values("{}\n{}\n")
+                .unwrap()
+                .into_positional_values(&[])
+                .unwrap(),
+            vec![IrValue::make_tuple(&[]); 2]
+        );
+        assert_eq!(
+            parse_ir_values("{a: bits[1]:0,}\n").unwrap(),
+            parse_ir_values("{a: bits[1]:0}\n").unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_record_structure_with_line_numbers() {
+        for (text, expected) in [
+            (
+                "bits[1]:0\n\n",
+                "empty line 2 in IR values file is not allowed",
+            ),
+            (
+                "{x: bits[1]:0}\nbits[1]:1",
+                "IR values file mixes named and positional records at line 2",
+            ),
+            (
+                "{x: bits[1]:0",
+                "named IR value record at line 1 must end with '}'",
+            ),
+            ("{x:}", "named IR value 'x' at line 1 has no value"),
+            ("{x}", "named IR value entry 'x' at line 1 is missing ':'"),
+            ("{x: bits[1]:0,,}", "empty named IR value entry at line 1"),
+            (
+                "{x: (bits[1]:0}",
+                "unclosed aggregate in named IR value record at line 1",
+            ),
+            (
+                "{x: bits[1]:0)}",
+                "unmatched ')' in named IR value record at line 1",
+            ),
+            (
+                "{x: bits[1]:0]}",
+                "unmatched ']' in named IR value record at line 1",
+            ),
+            (
+                "{\"x: bits[1]:0}",
+                "unterminated quoted name in named IR value record at line 1",
+            ),
+            (
+                "{a-b: bits[1]:0}",
+                "invalid name 'a-b' at line 1; use a JSON-quoted name for punctuation",
+            ),
+        ] {
+            assert_eq!(parse_ir_values(text).unwrap_err().0, expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_expected_names_and_non_tuple_binding() {
+        let parsed = parse_ir_values("{x: bits[1]:0}").unwrap();
+        assert_eq!(
+            parsed
+                .into_positional_values(&["x".to_string(), "x".to_string()])
+                .unwrap_err()
+                .0,
+            "evaluator interface contains duplicate argument names"
+        );
+        let array = IrValue::parse_typed("[bits[1]:0]").unwrap();
+        assert_eq!(
+            NamedIrValueSet::from_positional_tuple(&["x".to_string()], &array)
+                .unwrap_err()
+                .0,
+            "cannot create named IR value set from a non-tuple value: bits[1][1]"
+        );
+    }
+
+    #[test]
+    fn reads_native_ir_values_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.irvals");
+        let text = "{x: bits[65]:0x1_0000_0000_0000_0000}\n";
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(
+            parse_ir_values_file(&path).unwrap(),
+            parse_ir_values(text).unwrap()
+        );
+        assert!(parse_ir_values_file(&dir.path().join("missing.irvals")).is_err());
     }
 }

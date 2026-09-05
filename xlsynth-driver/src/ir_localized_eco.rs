@@ -10,10 +10,11 @@ use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use rand::SeedableRng;
 use std::path::Path;
-use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir::{self as ir_mod, BlockMetadata, MemberType, PackageMember};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
 use xlsynth_pir::random_inputs::{
     BitValuePattern, generate_biased_arguments_with_rng, generate_pattern_arguments,
@@ -675,6 +676,35 @@ fn build_random_args_value(f: &ir::Fn, rng: &mut rand::rngs::StdRng) -> IrValue 
     IrValue::make_tuple(&generate_biased_arguments_with_rng(rng, f))
 }
 
+/// Checks replay arguments before invoking the native evaluator on verified IR.
+fn eval_pir_for_replay(
+    pkg: &ir::Package,
+    f: &ir::Fn,
+    args: &[IrValue],
+) -> Result<FnEvalResult, String> {
+    if args.len() != f.params.len() {
+        return Err(format!(
+            "function '{}' expects {} arguments, got {}",
+            f.name,
+            f.params.len(),
+            args.len()
+        ));
+    }
+    for (arg, param) in args.iter().zip(&f.params) {
+        if arg.type_() != param.ty {
+            return Err(format!(
+                "argument '{}' expects {}, got {}",
+                param.name,
+                param.ty,
+                arg.type_()
+            ));
+        }
+    }
+    Ok(eval_fn_in_package(pkg, f, args))
+}
+
+/// Compares native PIR results while excluding samples that violate runtime
+/// contracts.
 fn sanity_check_interpret(
     new_ir_text: &str,
     new_fn: &ir::Fn,
@@ -685,17 +715,21 @@ fn sanity_check_interpret(
     if has_token_param(new_fn) {
         return Err("token parameters not supported in interpreter sanity check".to_string());
     }
-    let patched_pkg = xlsynth::IrPackage::parse_ir_from_path(patched_ir_path)
+    let patched_text = std::fs::read_to_string(patched_ir_path)
+        .map_err(|e| format!("read patched IR failed: {}", e))?;
+    let patched_pkg = ir_parser::Parser::new(&patched_text)
+        .parse_and_verify_package()
         .map_err(|e| format!("parse patched IR failed: {}", e))?;
-    let new_pkg = xlsynth::IrPackage::parse_ir(new_ir_text, None)
+    let new_pkg = ir_parser::Parser::new(new_ir_text)
+        .parse_and_verify_package()
         .map_err(|e| format!("parse new IR failed: {}", e))?;
     let top_name = &new_fn.name;
     let patched_f = patched_pkg
-        .get_function(top_name)
-        .map_err(|e| format!("get patched top failed: {}", e))?;
+        .get_fn(top_name)
+        .ok_or_else(|| format!("get patched top failed: function '{top_name}' not found"))?;
     let new_f = new_pkg
-        .get_function(top_name)
-        .map_err(|e| format!("get new top failed: {}", e))?;
+        .get_fn(top_name)
+        .ok_or_else(|| format!("get new top failed: function '{top_name}' not found"))?;
 
     let zeros_tuple = build_zero_args_value(new_fn);
     let ones_tuple = build_ones_args_value(new_fn);
@@ -707,29 +741,41 @@ fn sanity_check_interpret(
         .map_err(|e| format!("decompose ones tuple failed: {}", e))?;
     let mut skipped_due_to_asserts: usize = 0;
     // zeros
-    let zv_p_res = patched_f.interpret(&zeros_args);
-    let zv_n_res = new_f.interpret(&zeros_args);
-    let zeros_assert = zv_p_res.is_err() || zv_n_res.is_err();
-    if zeros_assert {
-        skipped_due_to_asserts += 1;
-    } else {
-        let zv_p = zv_p_res.unwrap();
-        let zv_n = zv_n_res.unwrap();
-        if zv_p != zv_n {
-            return Err(format!("mismatch on zeros: patched={} new={}", zv_p, zv_n));
+    match (
+        eval_pir_for_replay(&patched_pkg, patched_f, &zeros_args)?,
+        eval_pir_for_replay(&new_pkg, new_f, &zeros_args)?,
+    ) {
+        (FnEvalResult::Success(patched), FnEvalResult::Success(new)) => {
+            if patched.value != new.value {
+                return Err(format!(
+                    "mismatch on zeros: patched={} new={}",
+                    patched.value, new.value
+                ));
+            }
+        }
+        _ => {
+            // Samples violating either function's runtime contracts are not
+            // comparable.
+            skipped_due_to_asserts += 1;
         }
     }
     // ones
-    let ov_p_res = patched_f.interpret(&ones_args);
-    let ov_n_res = new_f.interpret(&ones_args);
-    let ones_assert = ov_p_res.is_err() || ov_n_res.is_err();
-    if ones_assert {
-        skipped_due_to_asserts += 1;
-    } else {
-        let ov_p = ov_p_res.unwrap();
-        let ov_n = ov_n_res.unwrap();
-        if ov_p != ov_n {
-            return Err(format!("mismatch on ones: patched={} new={}", ov_p, ov_n));
+    match (
+        eval_pir_for_replay(&patched_pkg, patched_f, &ones_args)?,
+        eval_pir_for_replay(&new_pkg, new_f, &ones_args)?,
+    ) {
+        (FnEvalResult::Success(patched), FnEvalResult::Success(new)) => {
+            if patched.value != new.value {
+                return Err(format!(
+                    "mismatch on ones: patched={} new={}",
+                    patched.value, new.value
+                ));
+            }
+        }
+        _ => {
+            // Samples violating either function's runtime contracts are not
+            // comparable.
+            skipped_due_to_asserts += 1;
         }
     }
 
@@ -745,19 +791,24 @@ fn sanity_check_interpret(
             let args = arg_tuple
                 .get_elements()
                 .map_err(|e| format!("decompose random tuple failed: {}", e))?;
-            let pv_res = patched_f.interpret(&args);
-            let nv_res = new_f.interpret(&args);
-            if pv_res.is_err() || nv_res.is_err() {
-                skipped_due_to_asserts += 1;
-                continue;
-            }
-            let pv = pv_res.unwrap();
-            let nv = nv_res.unwrap();
-            if pv != nv {
-                return Err(format!(
-                    "mismatch on random input {}: patched={} new={}",
-                    arg_text, pv, nv
-                ));
+            match (
+                eval_pir_for_replay(&patched_pkg, patched_f, &args)?,
+                eval_pir_for_replay(&new_pkg, new_f, &args)?,
+            ) {
+                (FnEvalResult::Success(patched), FnEvalResult::Success(new)) => {
+                    if patched.value != new.value {
+                        return Err(format!(
+                            "mismatch on random input {}: patched={} new={}",
+                            arg_text, patched.value, new.value
+                        ));
+                    }
+                }
+                _ => {
+                    // Assertion-failing samples are skipped without masking
+                    // invalid argument types.
+                    skipped_due_to_asserts += 1;
+                    continue;
+                }
             }
             valid_done += 1;
         }
@@ -770,6 +821,7 @@ fn sanity_check_interpret(
     Ok(())
 }
 
+/// Replays a typed counterexample against both verified PIR packages.
 fn try_interpret_cex(
     new_ir_text: &str,
     new_fn: &ir::Fn,
@@ -779,103 +831,36 @@ fn try_interpret_cex(
     if has_token_param(new_fn) {
         return Err("token parameters present".to_string());
     }
-    let patched_pkg = xlsynth::IrPackage::parse_ir_from_path(patched_ir_path)
+    let patched_text = std::fs::read_to_string(patched_ir_path)
+        .map_err(|e| format!("read patched IR failed: {}", e))?;
+    let patched_pkg = ir_parser::Parser::new(&patched_text)
+        .parse_and_verify_package()
         .map_err(|e| format!("parse patched IR failed: {}", e))?;
-    let new_pkg = xlsynth::IrPackage::parse_ir(new_ir_text, None)
+    let new_pkg = ir_parser::Parser::new(new_ir_text)
+        .parse_and_verify_package()
         .map_err(|e| format!("parse new IR failed: {}", e))?;
     let top_name = &new_fn.name;
     let patched_f = patched_pkg
-        .get_function(top_name)
-        .map_err(|e| format!("get patched top failed: {}", e))?;
+        .get_fn(top_name)
+        .ok_or_else(|| format!("get patched top failed: function '{top_name}' not found"))?;
     let new_f = new_pkg
-        .get_function(top_name)
-        .map_err(|e| format!("get new top failed: {}", e))?;
+        .get_fn(top_name)
+        .ok_or_else(|| format!("get new top failed: function '{top_name}' not found"))?;
     // Extract the top-level tuple text after "input:" using balanced
     // paren/bracket parsing.
     let tuple_text = extract_tuple_text(arg_text)
         .ok_or_else(|| "could not extract tuple from counterexample text".to_string())?;
-    let arg_tuple = xlsynth::IrValue::parse_typed(&tuple_text)
+    let arg_tuple = IrValue::parse_typed(&tuple_text)
         .map_err(|e| format!("parse cex arg tuple failed: {}", e))?;
-    // Prefer type-based mapping of the parsed value to function parameters.
-    let f_type = new_f
-        .get_type()
-        .map_err(|e| format!("get new fn type failed: {}", e))?;
-    let param_count = f_type.param_count();
-    let expected_args_type: xlsynth::IrType = if param_count == 0 {
-        new_pkg.get_tuple_type(&[])
-    } else if param_count == 1 {
-        f_type
-            .param_type(0)
-            .map_err(|e| format!("get param type failed: {}", e))?
-    } else {
-        let expected_param_types: Vec<xlsynth::IrType> = (0..param_count)
-            .map(|i| {
-                f_type
-                    .param_type(i)
-                    .map_err(|e| format!("get param type failed: {}", e))
-            })
-            .collect::<Result<_, _>>()?;
-        new_pkg.get_tuple_type(&expected_param_types)
+    let args = counterexample_args(&arg_tuple, &new_fn.params)?;
+    let pv = match eval_pir_for_replay(&patched_pkg, patched_f, &args)? {
+        FnEvalResult::Success(success) => success.value,
+        failure => return Err(format!("patched interpret failed: {failure:?}")),
     };
-    let candidate_type = new_pkg
-        .get_type_for_value(&arg_tuple)
-        .map_err(|e| format!("get type for cex value failed: {}", e))?;
-    let args: Vec<IrValue> = if param_count == 0 {
-        Vec::new()
-    } else if param_count == 1 {
-        // Single-parameter function: allow the whole value to be the argument.
-        vec![arg_tuple]
-    } else if new_pkg
-        .types_eq(&candidate_type, &expected_args_type)
-        .unwrap_or(false)
-    {
-        // Top value is a tuple exactly matching the param tuple type.
-        arg_tuple
-            .get_elements()
-            .map_err(|e| format!("decompose cex tuple failed: {}", e))?
-    } else if let Ok(top_elems) = arg_tuple.get_elements() {
-        // If the top-level is a singleton that itself matches the arg tuple
-        // type, unwrap it.
-        if top_elems.len() == 1 {
-            let inner = &top_elems[0];
-            if let Ok(inner_ty) = new_pkg.get_type_for_value(inner) {
-                if new_pkg
-                    .types_eq(&inner_ty, &expected_args_type)
-                    .unwrap_or(false)
-                {
-                    inner
-                        .get_elements()
-                        .map_err(|e| format!("decompose inner tuple failed: {}", e))?
-                } else {
-                    // Fallback: try reshaping from flat sequence.
-                    reshape_args_to_params(&top_elems, &new_fn.params)
-                        .map_err(|e| format!("reshape cex args failed: {}", e))?
-                }
-            } else {
-                reshape_args_to_params(&top_elems, &new_fn.params)
-                    .map_err(|e| format!("reshape cex args failed: {}", e))?
-            }
-        } else if top_elems.len() == new_fn.params.len() {
-            top_elems
-        } else {
-            reshape_args_to_params(&top_elems, &new_fn.params)
-                .map_err(|e| format!("reshape cex args failed: {}", e))?
-        }
-    } else {
-        // Last resort: treat the parsed tuple elements as a flat list and try
-        // to assemble by type.
-        let flat = arg_tuple
-            .get_elements()
-            .map_err(|e| format!("decompose cex tuple failed: {}", e))?;
-        reshape_args_to_params(&flat, &new_fn.params)
-            .map_err(|e| format!("reshape cex args failed: {}", e))?
+    let nv = match eval_pir_for_replay(&new_pkg, new_f, &args)? {
+        FnEvalResult::Success(success) => success.value,
+        failure => return Err(format!("new interpret failed: {failure:?}")),
     };
-    let pv = patched_f
-        .interpret(&args)
-        .map_err(|e| format!("patched interpret failed: {}", e))?;
-    let nv = new_f
-        .interpret(&args)
-        .map_err(|e| format!("new interpret failed: {}", e))?;
     if pv == nv {
         println!("    interpreter replay: outputs equal: {}", pv);
     } else {
@@ -920,19 +905,53 @@ fn extract_tuple_text(s: &str) -> Option<String> {
     None
 }
 
+/// Maps a counterexample's tuple or flattened leaves to native function
+/// arguments.
+fn counterexample_args(value: &IrValue, params: &[ir::Param]) -> Result<Vec<IrValue>, String> {
+    let expected = Type::Tuple(
+        params
+            .iter()
+            .map(|param| Box::new(param.ty.clone()))
+            .collect(),
+    );
+    if params.len() == 1 && value.type_() == params[0].ty {
+        return Ok(vec![value.clone()]);
+    }
+    let IrValue::Tuple(elements) = value else {
+        return Err(format!(
+            "expected counterexample argument tuple, got {}",
+            value.type_()
+        ));
+    };
+    if value.type_() == expected {
+        return Ok(elements.to_vec());
+    }
+    if elements.len() == 1 && elements[0].type_() == expected {
+        return elements[0]
+            .get_elements()
+            .map_err(|error| error.to_string());
+    }
+    reshape_args_to_params(elements, params)
+}
+
+/// Reconstructs one native argument by consuming values according to its type.
 fn consume_value_for_type(
     expected: &Type,
     flat: &[IrValue],
     idx: &mut usize,
 ) -> Result<IrValue, String> {
+    if let Some(value) = flat.get(*idx) {
+        if value.type_() == *expected {
+            *idx += 1;
+            return Ok(value.clone());
+        }
+    }
     match expected {
         Type::Bits(_w) => {
             if *idx >= flat.len() {
                 return Err("ran out of values while matching bits param".to_string());
             }
-            let v = flat[*idx].clone();
-            *idx += 1;
-            Ok(v)
+            Err(format!("expected {expected}, got {}", flat[*idx].type_()))
         }
         Type::Tuple(elems) => {
             // Build tuple by consuming elements for each field type.
@@ -949,12 +968,14 @@ fn consume_value_for_type(
                 let ev = consume_value_for_type(&arr.element_type, flat, idx)?;
                 elems.push(ev);
             }
-            IrValue::make_array(&elems).map_err(|e| format!("make_array failed: {}", e))
+            IrValue::make_array_typed((*arr.element_type).clone(), &elems)
+                .map_err(|e| format!("make_array failed: {}", e))
         }
         Type::Token => Err("token parameter not supported".to_string()),
     }
 }
 
+/// Reconstructs native arguments and rejects unconsumed counterexample values.
 fn reshape_args_to_params(flat: &[IrValue], params: &[ir::Param]) -> Result<Vec<IrValue>, String> {
     let mut idx: usize = 0;
     let mut out: Vec<IrValue> = Vec::with_capacity(params.len());
@@ -962,5 +983,234 @@ fn reshape_args_to_params(flat: &[IrValue], params: &[ir::Param]) -> Result<Vec<
         let v = consume_value_for_type(&p.ty, flat, &mut idx)?;
         out.push(v);
     }
+    if idx != flat.len() {
+        return Err(format!(
+            "{} unconsumed counterexample values",
+            flat.len() - idx
+        ));
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
+    use xlsynth_pir::IrBits;
+    use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
+
+    const REPLAY_CALLS_IR: &str = r#"package replay
+
+fn inc(x: bits[129] id=1) -> bits[129] {
+  one: bits[129] = literal(value=1, id=2)
+  ret sum: bits[129] = add(x, one, id=3)
+}
+
+fn body(i: bits[2] id=4, carry: bits[129] id=5) -> bits[129] {
+  ret next: bits[129] = invoke(carry, to_apply=inc, id=6)
+}
+
+top fn main(x: bits[129] id=7) -> bits[129] {
+  initial: bits[129] = invoke(x, to_apply=inc, id=8)
+  ret loop: bits[129] = counted_for(initial, trip_count=3, stride=1, body=body, id=9)
+}
+"#;
+
+    const REPLAY_ASSERT_IR: &str = r#"package replay
+
+fn checked(x: bits[1] id=1) -> bits[1] {
+  t: token = after_all(id=2)
+  checked: token = assert(t, x, message="x must be set", label="x_set", id=3)
+  ret result: bits[1] = identity(x, id=4)
+}
+
+top fn main(x: bits[1] id=5) -> bits[1] {
+  call: bits[1] = invoke(x, to_apply=checked, id=6)
+  one: bits[1] = literal(value=1, id=7)
+  ret result: bits[1] = identity(call, id=8)
+}
+"#;
+
+    #[test]
+    fn replay_evaluates_package_calls_loops_and_wide_values() {
+        let pkg = ir_parser::Parser::new(REPLAY_CALLS_IR)
+            .parse_and_verify_package()
+            .unwrap();
+        let f = pkg.get_top_fn().unwrap();
+        let args = [
+            IrValue::parse_typed("bits[129]:0x1_0000_0000_0000_0000_0000_0000_0000_0000").unwrap(),
+        ];
+        let FnEvalResult::Success(result) = eval_pir_for_replay(&pkg, f, &args).unwrap() else {
+            panic!("valid replay must succeed");
+        };
+        assert_eq!(
+            result.value,
+            IrValue::parse_typed("bits[129]:0x1_0000_0000_0000_0000_0000_0000_0000_0004").unwrap()
+        );
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("patched.ir");
+        std::fs::write(&path, REPLAY_CALLS_IR).unwrap();
+        sanity_check_interpret(REPLAY_CALLS_IR, f, &path, 8, 42).unwrap();
+        let cex = format!("input: {}", IrValue::make_tuple(&args));
+        try_interpret_cex(REPLAY_CALLS_IR, f, &path, &cex).unwrap();
+
+        std::fs::write(&path, REPLAY_CALLS_IR.replace("value=1", "value=2")).unwrap();
+        assert_eq!(
+            sanity_check_interpret(REPLAY_CALLS_IR, f, &path, 0, 42).unwrap_err(),
+            "mismatch on zeros: patched=bits[129]:0x8 new=bits[129]:0x4"
+        );
+    }
+
+    #[test]
+    fn replay_skips_assertion_samples_but_rejects_invalid_arguments() {
+        let pkg = ir_parser::Parser::new(REPLAY_ASSERT_IR)
+            .parse_and_verify_package()
+            .unwrap();
+        let f = pkg.get_top_fn().unwrap();
+        let failed = eval_pir_for_replay(&pkg, f, &[IrValue::make_ubits(1, 0).unwrap()]).unwrap();
+        let FnEvalResult::Failure(failure) = failed else {
+            panic!("callee assertion must be propagated");
+        };
+        assert_eq!(failure.assertion_failures.len(), 1);
+        assert_eq!(failure.assertion_failures[0].label, "x_set");
+        assert_eq!(
+            eval_pir_for_replay(&pkg, f, &[]).unwrap_err(),
+            "function 'main' expects 1 arguments, got 0"
+        );
+        assert_eq!(
+            eval_pir_for_replay(&pkg, f, &[IrValue::make_ubits(2, 0).unwrap()]).unwrap_err(),
+            "argument 'x' expects bits[1], got bits[2]"
+        );
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("patched.ir");
+        let patched = REPLAY_ASSERT_IR.replace("identity(call, id=8)", "or(call, one, id=8)");
+        std::fs::write(&path, &patched).unwrap();
+        // Only assertion-failing inputs differ; they must be excluded from the
+        // sanity check.
+        sanity_check_interpret(REPLAY_ASSERT_IR, f, &path, 8, 42).unwrap();
+        try_interpret_cex(REPLAY_ASSERT_IR, f, &path, "input: (bits[1]:1)").unwrap();
+        let patched_pkg = ir_parser::Parser::new(&patched)
+            .parse_and_verify_package()
+            .unwrap();
+        let patched_failure = eval_pir_for_replay(
+            &patched_pkg,
+            patched_pkg.get_top_fn().unwrap(),
+            &[IrValue::make_ubits(1, 0).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            try_interpret_cex(REPLAY_ASSERT_IR, f, &path, "input: (bits[1]:0)").unwrap_err(),
+            format!("patched interpret failed: {patched_failure:?}")
+        );
+    }
+
+    fn params(types: &[Type]) -> Vec<ir::Param> {
+        types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| ir::Param {
+                name: format!("p{index}"),
+                ty: ty.clone(),
+                id: ir::ParamId::new(index + 1),
+            })
+            .collect()
+    }
+
+    /// Flattens aggregates to typed leaves using only native value storage.
+    fn leaves(value: &IrValue, out: &mut Vec<IrValue>) {
+        match value {
+            IrValue::Bits(_) | IrValue::Token => out.push(value.clone()),
+            IrValue::Tuple(_) | IrValue::Array(_) => {
+                for element in value.as_elements().unwrap() {
+                    leaves(element, out);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn counterexamples_preserve_shared_scalar_and_aggregate_signatures() {
+        for case in interesting_ir_roundtrip_cases() {
+            let package = ir_parser::Parser::new(case.ir_text)
+                .parse_and_validate_package()
+                .unwrap();
+            let f = package.get_top_fn().unwrap();
+            for args in generate_argument_sets_from_seed(&f, 42, 8) {
+                let tuple = IrValue::make_tuple(&args);
+                let parsed = IrValue::parse_typed(&tuple.to_string()).unwrap();
+                assert_eq!(
+                    counterexample_args(&parsed, &f.params).unwrap(),
+                    args,
+                    "{}",
+                    case.name
+                );
+                let wrapped = IrValue::make_tuple(&[tuple.clone()]);
+                assert_eq!(
+                    counterexample_args(&wrapped, &f.params).unwrap(),
+                    args,
+                    "{}",
+                    case.name
+                );
+                let mut flat = Vec::new();
+                leaves(&tuple, &mut flat);
+                assert_eq!(
+                    reshape_args_to_params(&flat, &f.params).unwrap(),
+                    args,
+                    "{}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reshapes_wide_nested_values_and_typed_empty_arrays() {
+        let wide = IrValue::from_bits(&IrBits::all_ones(129));
+        let element = IrValue::make_ubits(65, 7).unwrap();
+        let array = IrValue::make_array(&[element.clone(), element]).unwrap();
+        let nested = IrValue::make_tuple(&[wide.clone(), array.clone()]);
+        let empty = IrValue::make_array_typed(Type::Bits(257), &[]).unwrap();
+        let expected = vec![nested.clone(), empty];
+        let params = params(&expected.iter().map(IrValue::type_).collect::<Vec<_>>());
+        let mut flat = Vec::new();
+        leaves(&nested, &mut flat);
+        assert_eq!(reshape_args_to_params(&flat, &params).unwrap(), expected);
+        assert_eq!(
+            counterexample_args(&nested, &params[..1]).unwrap(),
+            vec![nested]
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_width_missing_extra_and_non_tuple_arguments() {
+        let params = params(&[Type::Bits(129), Type::Bits(1)]);
+        let wide = IrValue::make_ubits(129, 0).unwrap();
+        let bit = IrValue::make_ubits(1, 0).unwrap();
+        assert_eq!(
+            reshape_args_to_params(&[bit.clone(), bit.clone()], &params).unwrap_err(),
+            "expected bits[129], got bits[1]"
+        );
+        assert_eq!(
+            reshape_args_to_params(&[wide.clone()], &params).unwrap_err(),
+            "ran out of values while matching bits param"
+        );
+        assert_eq!(
+            reshape_args_to_params(&[wide.clone(), bit.clone(), bit.clone()], &params).unwrap_err(),
+            "1 unconsumed counterexample values"
+        );
+        assert_eq!(
+            counterexample_args(&wide, &params).unwrap_err(),
+            "expected counterexample argument tuple, got bits[129]"
+        );
+        assert_eq!(
+            counterexample_args(&IrValue::make_tuple(&[]), &[]).unwrap(),
+            Vec::<IrValue>::new()
+        );
+        assert_eq!(
+            counterexample_args(&IrValue::make_tuple(&[bit]), &[]).unwrap_err(),
+            "1 unconsumed counterexample values"
+        );
+    }
 }

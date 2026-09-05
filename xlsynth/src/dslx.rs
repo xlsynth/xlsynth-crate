@@ -16,7 +16,7 @@ use std::{
 use log::debug;
 use xlsynth_sys::{self as sys, CDslxImportData};
 
-use crate::{IrValue, XlsynthError, c_str_to_rust, c_str_to_rust_no_dealloc};
+use crate::{XlsIrValue, XlsynthError, c_str_to_rust, c_str_to_rust_no_dealloc};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TypeDefinitionKind {
@@ -1619,7 +1619,7 @@ impl InterpValue {
             }
         }
     }
-    pub fn convert_to_ir(&self) -> Result<IrValue, XlsynthError> {
+    pub fn convert_to_ir(&self) -> Result<XlsIrValue, XlsynthError> {
         unsafe {
             let mut error_out = std::ptr::null_mut();
             let mut result_out = std::ptr::null_mut();
@@ -1628,7 +1628,7 @@ impl InterpValue {
             if success {
                 assert!(error_out.is_null());
                 assert!(!result_out.is_null());
-                Ok(IrValue { ptr: result_out })
+                Ok(XlsIrValue { ptr: result_out })
             } else {
                 assert!(!error_out.is_null());
                 Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
@@ -1646,7 +1646,7 @@ impl InterpValue {
     pub fn make_enum(
         def: &EnumDef,
         is_signed: bool,
-        bits: &crate::IrBits,
+        bits: &crate::XlsIrBits,
     ) -> Result<Self, crate::XlsynthError> {
         unsafe {
             let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -1935,7 +1935,7 @@ impl fmt::Display for ParametricEnv {
 #[cfg(test)]
 mod param_env_and_interp_value_tests {
     use super::*;
-    use crate::{DslxCallingConvention, IrBits, IrValue, mangle_dslx_name_with_env};
+    use crate::{DslxCallingConvention, XlsIrBits, XlsIrValue, mangle_dslx_name_with_env};
 
     #[test]
     fn test_interp_value_make_bits_and_convert() {
@@ -1982,7 +1982,7 @@ mod param_env_and_interp_value_tests {
         let module = tcm.get_module();
         let enum_def = module.get_type_definition_as_enum_def(0).expect("enum def");
 
-        let bits = IrBits::make_ubits(8, 7).expect("bits");
+        let bits = XlsIrBits::make_ubits(8, 7).expect("bits");
         let iv = InterpValue::make_enum(&enum_def, false, &bits).expect("make enum");
         let ir = iv.convert_to_ir().expect("convert enum to IR");
         assert_eq!(ir.to_string(), "bits[8]:7");

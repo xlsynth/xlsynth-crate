@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use xlsynth::ir_value::IrFormatPreference;
+use crate::IrFormatPreference;
 
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, ParamId, Type, Unop};
 use crate::ir_parser;
@@ -402,17 +402,15 @@ fn array_literal_expr_for_type(ty: &Type, elements: &[String]) -> Result<String,
     Ok(format!("{}:[{}]", ty_str, elements.join(", ")))
 }
 
-fn literal_value_to_dslx(value: &xlsynth::IrValue, ty: &Type) -> Result<String, IrFnToDslxError> {
+fn literal_value_to_dslx(value: &crate::IrValue, ty: &Type) -> Result<String, IrFnToDslxError> {
     match ty {
         Type::Bits(w) => {
-            let value = value
-                .to_string_fmt_no_prefix(IrFormatPreference::Default)
-                .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
+            let value = value.to_string_fmt_no_prefix(IrFormatPreference::Default);
             Ok(format!("uN[{}]:{}", w, value))
         }
         Type::Tuple(members) => {
             let elements = value
-                .get_elements()
+                .as_elements()
                 .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
             if elements.len() != members.len() {
                 return Err(IrFnToDslxError::Internal(format!(
@@ -429,22 +427,19 @@ fn literal_value_to_dslx(value: &xlsynth::IrValue, ty: &Type) -> Result<String, 
             Ok(render_tuple_expr(&rendered))
         }
         Type::Array(data) => {
-            let count = value
-                .get_element_count()
+            let elements = value
+                .as_elements()
                 .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
+            let count = elements.len();
             if count != data.element_count {
                 return Err(IrFnToDslxError::Internal(format!(
                     "array literal element count mismatch: expected {}, got {}",
                     data.element_count, count
                 )));
             }
-            let rendered = (0..count)
-                .map(|i| {
-                    let elem = value
-                        .get_element(i)
-                        .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
-                    literal_value_to_dslx(&elem, &data.element_type)
-                })
+            let rendered = elements
+                .iter()
+                .map(|elem| literal_value_to_dslx(elem, &data.element_type))
                 .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
             array_literal_expr_for_type(ty, &rendered)
         }

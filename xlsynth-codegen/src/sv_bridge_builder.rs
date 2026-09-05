@@ -5,11 +5,13 @@
 
 use std::collections::HashSet;
 
-use crate::{
-    IrValue, XlsynthError, dslx,
+use xlsynth::{
+    XlsIrValue, XlsynthError, dslx,
     dslx_bridge::{BridgeBuilder, StructMemberData},
-    ir_value::IrFormatPreference,
 };
+use xlsynth_pir::ir::Type;
+use xlsynth_pir::libxls_bridge::{bits_from_libxls, value_from_libxls};
+use xlsynth_pir::{IrFormatPreference, IrValue};
 
 /// The suffix used when we typedef logic to a type name.
 const LOGIC_ALIAS_SUFFIX: &str = "_t";
@@ -30,8 +32,8 @@ const TYPE_ALIAS_SUFFIX: &str = "_t";
 /// `OpType_Read`); it does not change the emitted enum typedef name. The bridge
 /// still applies the existing case-normalization rules to each component before
 /// combining them.
-#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[cfg_attr(feature = "clap", value(rename_all = "snake_case"))]
+#[derive(clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SvEnumCaseNamingPolicy {
     /// Emit only the normalized case name (for example `Read`).
@@ -49,8 +51,8 @@ pub enum SvEnumCaseNamingPolicy {
 /// therefore changes the generated wire contract, not just the textual output
 /// order. This does not change the DSLX-side type model or the enum naming
 /// policy.
-#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[cfg_attr(feature = "clap", value(rename_all = "snake_case"))]
+#[derive(clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SvStructFieldOrderingPolicy {
     /// Emit members in the same order they are declared in DSLX.
@@ -117,16 +119,30 @@ fn is_screaming_snake_case(name: &str) -> bool {
 
 /// Formats an evaluated bits value as a width- and signedness-preserving SV
 /// literal.
-fn format_bits_constant(
-    ir_value: &IrValue,
-    is_signed: bool,
-    bit_count: usize,
-) -> Result<String, XlsynthError> {
+fn format_bits_constant(ir_value: &IrValue, is_signed: bool, bit_count: usize) -> String {
     let hex_prefix = if is_signed { "sh" } else { "h" };
     let hex_digits = ir_value
-        .to_string_fmt_no_prefix(IrFormatPreference::ZeroPaddedHex)?
+        .to_string_fmt_no_prefix(IrFormatPreference::ZeroPaddedHex)
         .replace('_', "");
-    Ok(format!("{bit_count}'{hex_prefix}{hex_digits}"))
+    format!("{bit_count}'{hex_prefix}{hex_digits}")
+}
+
+/// Lowers the supported DSLX constant shapes to native IR types at the
+/// boundary.
+fn native_constant_type(ty: &dslx::Type) -> Result<Type, XlsynthError> {
+    match dslx_type_to_matchable(ty)?.matchable_ty {
+        MatchableDslxType::BitsLike { bit_count, .. } => Ok(Type::Bits(bit_count)),
+        MatchableDslxType::Enum(_) => Ok(Type::Bits(ty.get_total_bit_count()?)),
+        MatchableDslxType::Struct(_) => {
+            let fields = (0..ty.get_struct_member_count())
+                .map(|index| native_constant_type(&ty.get_struct_member_type(index)).map(Box::new))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Type::Tuple(fields))
+        }
+        MatchableDslxType::Array { element_ty, size } => {
+            Ok(Type::new_array(native_constant_type(&element_ty.ty)?, size))
+        }
+    }
 }
 
 /// Formats assignment-pattern entries with one indented entry per line.
@@ -465,17 +481,23 @@ impl SvBridgeBuilder {
             MatchableDslxType::BitsLike {
                 is_signed,
                 bit_count,
-            } => format_bits_constant(ir_value, is_signed, bit_count),
+            } => Ok(format_bits_constant(ir_value, is_signed, bit_count)),
             MatchableDslxType::Enum(enum_def) => {
                 let enum_type = type_annotation
                     .and_then(|annotation| get_extern_type_ref(annotation, ty))
                     .unwrap_or_else(|| enum_name_to_sv(&enum_def.get_identifier()));
-                let literal = format_bits_constant(ir_value, false, ir_value.bit_count()?)?;
+                let bit_count = ir_value
+                    .bit_count()
+                    .map_err(|error| XlsynthError(error.to_string()))?;
+                let literal = format_bits_constant(ir_value, false, bit_count);
                 Ok(format!("{enum_type}'({literal})"))
             }
             MatchableDslxType::Struct(struct_def) => {
                 let member_count = struct_def.get_member_count();
-                let value_count = ir_value.get_element_count()?;
+                let values = ir_value
+                    .as_elements()
+                    .map_err(|error| XlsynthError(error.to_string()))?;
+                let value_count = values.len();
                 if member_count != value_count {
                     return Err(XlsynthError(format!(
                         "DSLX struct constant `{}` has {member_count} fields but its evaluated value has {value_count} elements",
@@ -484,14 +506,13 @@ impl SvBridgeBuilder {
                 }
 
                 let mut fields = Vec::with_capacity(member_count);
-                for index in 0..member_count {
+                for (index, member_value) in values.iter().enumerate() {
                     let member = struct_def.get_member(index);
                     let member_type = ty.get_struct_member_type(index);
                     let member_annotation = member.get_type();
-                    let member_value = ir_value.get_element(index)?;
                     let initializer = self.format_constant_value(
                         &member_type,
-                        &member_value,
+                        member_value,
                         Some(&member_annotation),
                         indent_level + 1,
                     )?;
@@ -500,7 +521,10 @@ impl SvBridgeBuilder {
                 Ok(format_assignment_pattern(&fields, indent_level))
             }
             MatchableDslxType::Array { element_ty, size } => {
-                let value_count = ir_value.get_element_count()?;
+                let values = ir_value
+                    .as_elements()
+                    .map_err(|error| XlsynthError(error.to_string()))?;
+                let value_count = values.len();
                 if size != value_count {
                     return Err(XlsynthError(format!(
                         "DSLX array constant has {size} elements in its type but {value_count} evaluated values"
@@ -511,11 +535,10 @@ impl SvBridgeBuilder {
                     .and_then(dslx::TypeAnnotation::to_array_type_annotation)
                     .map(|annotation| annotation.get_element_type());
                 let mut elements = Vec::with_capacity(size);
-                for index in 0..size {
-                    let element_value = ir_value.get_element(index)?;
+                for (index, element_value) in values.iter().enumerate() {
                     let initializer = self.format_constant_value(
                         &element_ty.ty,
-                        &element_value,
+                        element_value,
                         element_annotation.as_ref(),
                         indent_level + 1,
                     )?;
@@ -543,7 +566,7 @@ impl BridgeBuilder for SvBridgeBuilder {
         dslx_name: &str,
         is_signed: bool,
         underlying_bit_count: usize,
-        members: &[(String, IrValue)],
+        members: &[(String, XlsIrValue)],
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
         let sv_name = enum_name_to_sv(dslx_name);
@@ -553,13 +576,14 @@ impl BridgeBuilder for SvBridgeBuilder {
         ));
         let ctx = format!("DSLX enum `{dslx_name}`");
         for (i, (member_name, member_value)) in members.iter().enumerate() {
+            let member_value = bits_from_libxls(&member_value.to_bits()?)
+                .map_err(|error| XlsynthError(error.to_string()))?;
             let format = if is_signed {
                 IrFormatPreference::SignedDecimal
             } else {
                 IrFormatPreference::UnsignedDecimal
             };
-            let member_value_str = member_value.to_string_fmt(format)?;
-            let digits = member_value_str.split(':').nth(1).expect("split success");
+            let digits = member_value.to_string_fmt(format, false);
             let maybe_comma = if i < members.len() - 1 { "," } else { "" };
             let sv_member_name = self.enum_member_name_to_sv(dslx_name, member_name);
             self.define_or_error(&sv_member_name, &ctx)?;
@@ -622,35 +646,38 @@ impl BridgeBuilder for SvBridgeBuilder {
         name: &str,
         _constant_def: &dslx::ConstantDef,
         ty: &dslx::Type,
-        ir_value: &IrValue,
+        ir_value: &XlsIrValue,
     ) -> Result<(), XlsynthError> {
+        if dslx_type_to_matchable(ty).is_err() {
+            // Constants outside the bridge's supported type vocabulary are not
+            // emitted.
+            log::warn!("Unsupported constant type: {ir_value:?}");
+            return Ok(());
+        }
+        let ir_value = value_from_libxls(ir_value, &native_constant_type(ty)?)
+            .map_err(|error| XlsynthError(error.to_string()))?;
         let sv_name = if is_screaming_snake_case(name) {
             screaming_snake_to_upper_camel(name)
         } else {
             name.to_string()
         };
         let declaration = if let Some((is_signed, bit_count)) = ty.is_bits_like() {
-            let value_str = format_bits_constant(ir_value, is_signed, bit_count)?;
-            Some(format!(
+            let value_str = format_bits_constant(&ir_value, is_signed, bit_count);
+            format!(
                 "localparam bit {signedness} [{}:0] {name} = {value_str};\n",
                 bit_count - 1,
                 name = sv_name,
                 signedness = if is_signed { "signed" } else { "unsigned" }
-            ))
-        } else if dslx_type_to_matchable(ty).is_ok() {
-            let sv_type = convert_type(ty, None)?;
-            let initializer = self.format_constant_value(ty, ir_value, None, 0)?;
-            Some(format!("localparam {sv_type} {sv_name} = {initializer};\n"))
+            )
         } else {
-            log::warn!("Unsupported constant type: {ir_value:?}");
-            None
+            let sv_type = convert_type(ty, None)?;
+            let initializer = self.format_constant_value(ty, &ir_value, None, 0)?;
+            format!("localparam {sv_type} {sv_name} = {initializer};\n")
         };
 
-        if let Some(declaration) = declaration {
-            let ctx = format!("DSLX constant `{name}`");
-            self.define_or_error(&sv_name, &ctx)?;
-            self.lines.push(declaration);
-        }
+        let ctx = format!("DSLX constant `{name}`");
+        self.define_or_error(&sv_name, &ctx)?;
+        self.lines.push(declaration);
         Ok(())
     }
 }
@@ -659,9 +686,23 @@ impl BridgeBuilder for SvBridgeBuilder {
 mod tests {
     use std::str::FromStr;
 
-    use crate::dslx_bridge::{convert_imported_module, convert_leaf_module};
+    use xlsynth::dslx_bridge::{convert_imported_module, convert_leaf_module};
 
     use super::*;
+
+    #[test]
+    fn formats_native_wide_bits_without_dslx_evaluation() {
+        let value = IrValue::parse_typed("bits[65]:0x1_0000_0000_0000_0000").unwrap();
+        assert_eq!(
+            format_bits_constant(&value, false, 65),
+            "65'h10000000000000000"
+        );
+        let value = IrValue::make_sbits(129, -1).unwrap();
+        assert_eq!(
+            format_bits_constant(&value, true, 129),
+            "129'sh1ffffffffffffffffffffffffffffffff"
+        );
+    }
 
     /// Reusable scaffolding for converting a single DSLX module contents to SV.
     fn simple_convert_for_test(dslx: &str) -> Result<String, XlsynthError> {

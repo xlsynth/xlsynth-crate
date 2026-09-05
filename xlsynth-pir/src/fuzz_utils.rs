@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::ir_value::IrBits;
+use crate::IrBits;
 
 use crate::random_inputs::generate_uniform_irbits_with_rng;
 

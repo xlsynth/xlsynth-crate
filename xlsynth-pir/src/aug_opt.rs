@@ -28,13 +28,13 @@
 //! to the regular optimizer instead of hiding it inside a general dynamic shift
 //! cone.
 
+use crate::IrValue;
 use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
 use crate::ir_utils;
 use crate::ir_value_utils::ir_bits_to_usize;
-use xlsynth::IrValue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AugOptMode {
@@ -2646,9 +2646,9 @@ fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IrValue;
     use crate::ir_eval::{FnEvalResult, eval_fn};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
-    use xlsynth::IrValue;
 
     fn resolve_identity<'a>(f: &'a ir::Fn, mut nr: NodeRef) -> &'a ir::Node {
         loop {

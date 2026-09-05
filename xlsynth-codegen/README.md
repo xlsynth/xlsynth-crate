@@ -36,6 +36,17 @@ cargo run -p xlsynth-driver -- block2sv /path/to/public_block.ir
 cargo run -p xlsynth-driver -- block2sv --layout pipeline /path/to/public_block.ir
 ```
 
+## DSLX type bridges
+
+`xlsynth_codegen::sv_bridge_builder::SvBridgeBuilder` emits SystemVerilog enums,
+structs, aliases, and constants through `xlsynth::dslx_bridge`. DSLX evaluation
+still uses XLS, but each evaluated value is copied into native PIR storage at
+the callback boundary. Literal formatting and aggregate value traversal use
+`xlsynth_pir::IrValue` and `IrBits`.
+
+The `dslx2sv-types` driver command uses this builder. Enum naming and packed
+struct field ordering policies are exported from the same module.
+
 ## Supported block features
 
 - Scalar XLS arithmetic, comparisons, shifts, reductions, selectors, partial

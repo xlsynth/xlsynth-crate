@@ -2,9 +2,7 @@
 
 use std::io;
 
-use xlsynth::IrValue;
-
-use xlsynth_pir::ir;
+use xlsynth_pir::{IrValue, ir};
 
 #[cfg(feature = "has-bitwuzla")]
 pub mod bitwuzla;
@@ -1144,10 +1142,10 @@ macro_rules! test_solver {
                     Box::new(ir::Type::Bits(1)),
                     Box::new(ir::Type::Bits(5))
                 ]),
-                xlsynth::IrValue::make_tuple(&[
-                    xlsynth::IrValue::make_ubits(2, 0b01).unwrap(),
-                    xlsynth::IrValue::make_ubits(1, 0b0).unwrap(),
-                    xlsynth::IrValue::make_ubits(5, 0b10011).unwrap(),
+                xlsynth_pir::IrValue::make_tuple(&[
+                    xlsynth_pir::IrValue::make_ubits(2, 0b01).unwrap(),
+                    xlsynth_pir::IrValue::make_ubits(1, 0b0).unwrap(),
+                    xlsynth_pir::IrValue::make_ubits(5, 0b10011).unwrap(),
                 ])
             );
 
@@ -2282,7 +2280,7 @@ macro_rules! test_solver {
                 solver.pop().unwrap();
             }
 
-            use xlsynth::IrValue;
+            use xlsynth_pir::IrValue;
             use xlsynth_pir::ir;
 
             /// Tests that we can handle single-bit values converting to/from the solver

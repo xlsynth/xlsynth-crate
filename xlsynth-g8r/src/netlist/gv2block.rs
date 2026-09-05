@@ -14,7 +14,7 @@ use crate::netlist::sequential_liberty::get_sequential_ff_clock_spec;
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use xlsynth::IrValue;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{
     BlockMetadata, BlockResetMetadata, Fn as PirFn, Instantiation, NaryOp, Node, NodePayload,
     NodeRef, Package, PackageMember, Param, ParamId, Register, Type, Unop,

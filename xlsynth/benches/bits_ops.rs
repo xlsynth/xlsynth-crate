@@ -2,14 +2,14 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use xlsynth::{IrBits, IrValue};
+use xlsynth::{XlsIrBits, XlsIrValue};
 
 /// Benchmarks creating a single boolean `false` value via the Bits creation
 /// machinery.
 fn bench_make_bits(c: &mut Criterion) {
     c.bench_function("make_bits", |b| {
         b.iter(|| {
-            let bits = IrBits::make_ubits(1, 0).unwrap();
+            let bits = XlsIrBits::make_ubits(1, 0).unwrap();
             black_box(bits);
         });
     });
@@ -17,7 +17,7 @@ fn bench_make_bits(c: &mut Criterion) {
 
 /// Benchmarks getting the bit count of a bits value.
 fn bench_get_bit_count(c: &mut Criterion) {
-    let bits = IrBits::make_ubits(1, 0).unwrap();
+    let bits = XlsIrBits::make_ubits(1, 0).unwrap();
     c.bench_function("get_bit_count", |b| {
         b.iter(|| {
             black_box(bits.get_bit_count());
@@ -25,9 +25,9 @@ fn bench_get_bit_count(c: &mut Criterion) {
     });
 }
 
-/// Benchmarks getting the bit count of an IrValue that holds bits.
+/// Benchmarks getting the bit count of an XlsIrValue that holds bits.
 fn bench_get_bit_count_of_value(c: &mut Criterion) {
-    let value = IrValue::make_ubits(1, 0).unwrap();
+    let value = XlsIrValue::make_ubits(1, 0).unwrap();
     c.bench_function("get_bit_count_of_value", |b| {
         b.iter(|| {
             let bit_count: usize = value.bit_count().unwrap();

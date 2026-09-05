@@ -2,9 +2,9 @@
 
 //! Faithful lowering of standard XLS scalar and aggregate operations.
 
-use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::math::ceil_log2;
+use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::{Expr, GenerateLoop, LiteralFormat, LogicRef};
 
 use crate::BlockCodegenError;

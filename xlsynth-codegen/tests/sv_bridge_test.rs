@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use pretty_assertions::assert_eq;
-use xlsynth::{
-    dslx,
-    dslx_bridge::convert_imported_module,
-    sv_bridge_builder::{SvBridgeBuilder, SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy},
+use xlsynth::{dslx, dslx_bridge::convert_imported_module};
+use xlsynth_codegen::sv_bridge_builder::{
+    SvBridgeBuilder, SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy,
 };
 
 /// Tests that we can convert the whole "structure_zoo.x" file to SystemVerilog.

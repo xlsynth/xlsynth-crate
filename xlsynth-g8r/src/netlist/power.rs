@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 use crate::aig::{AigNode, AigOperand, GateFn};
 use crate::aig_sim::gate_simd;

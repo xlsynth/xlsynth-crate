@@ -81,7 +81,7 @@ impl Trace {
                     .iter()
                     .position(|p| p.name == reset.port_name)
                     .unwrap();
-                inputs[position] = xlsynth::IrValue::from_bits(&xlsynth::IrBits::from_lsb_is_0(&[
+                inputs[position] = xlsynth_pir::IrValue::from_bits(&xlsynth_pir::IrBits::from_lsb_is_0(&[
                     asserted ^ reset.active_low,
                 ]));
             }

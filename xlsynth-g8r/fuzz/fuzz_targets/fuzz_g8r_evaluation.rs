@@ -2,10 +2,10 @@
 
 #![no_main]
 
+use xlsynth_pir::IrBits;
 use libfuzzer_sys::fuzz_target;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use xlsynth::IrBits;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r_fuzz::generate_full_g8r_fuzz_case;

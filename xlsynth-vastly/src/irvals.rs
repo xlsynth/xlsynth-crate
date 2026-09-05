@@ -2,11 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use xlsynth::IrBits;
-use xlsynth::IrValue;
-use xlsynth::IrValuesFileKind;
-use xlsynth::XlsynthError;
-use xlsynth::parse_ir_values;
+use xlsynth_pir::IrBits;
+use xlsynth_pir::IrValue;
+use xlsynth_pir::IrValuesFileKind;
+use xlsynth_pir::ValueError;
+use xlsynth_pir::parse_ir_values;
 
 use crate::Error;
 use crate::LogicBit;
@@ -144,7 +144,7 @@ fn zero_cycle(input_ports: &[Port], decls: &BTreeMap<String, DeclInfo>) -> Resul
     Ok(PipelineCycle { inputs })
 }
 
-fn flatten_irvalue_to_bits(v: &IrValue) -> std::result::Result<Vec<IrBits>, XlsynthError> {
+fn flatten_irvalue_to_bits(v: &IrValue) -> std::result::Result<Vec<IrBits>, ValueError> {
     if let Ok(bits) = v.to_bits() {
         return Ok(vec![bits]);
     }

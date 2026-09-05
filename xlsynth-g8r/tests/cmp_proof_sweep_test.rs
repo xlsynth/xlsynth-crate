@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::{FnBuilder, IrBits, IrPackage, IrValue};
+use xlsynth::XlsIrValue;
+use xlsynth::{FnBuilder, IrPackage};
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_pir::ir;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::{IrBits, IrValue};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RhsSpec {
@@ -109,7 +112,7 @@ fn build_cmp_ir_text(
             // Literal-on-LHS form: exercise normalization/commutation paths.
             let x = fb.param("x", &ty);
             let c = spec.literal_value(bit_count).expect("literal value");
-            let v = IrValue::make_ubits(bit_count, c).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(bit_count, c).expect("make_ubits");
             let lit = fb.literal(&v, Some("c"));
             (lit, x)
         }
@@ -117,7 +120,7 @@ fn build_cmp_ir_text(
             // Normal literal-on-RHS form.
             let x = fb.param("x", &ty);
             let c = spec.literal_value(bit_count).expect("literal value");
-            let v = IrValue::make_ubits(bit_count, c).expect("make_ubits");
+            let v = XlsIrValue::make_ubits(bit_count, c).expect("make_ubits");
             let lit = fb.literal(&v, Some("c"));
             (x, lit)
         }
@@ -153,7 +156,7 @@ fn assert_ir_gate_equivalent_for_built(
 ) {
     let mut parser = ir_parser::Parser::new(&built.ir_text);
     let ir_pkg = parser.parse_and_validate_package().unwrap();
-    let ir_fn = ir_pkg.get_top_fn().unwrap();
+    let ir_fn = ir_pkg.get_fn(&built.top_name).unwrap();
 
     let gatified = gatify(
         &ir_fn,
@@ -164,19 +167,18 @@ fn assert_ir_gate_equivalent_for_built(
     )
     .unwrap();
 
-    let interp_pkg = IrPackage::parse_ir(&built.ir_text, None).unwrap();
-    let interp_fn = interp_pkg.get_function(&built.top_name).unwrap();
-
     let max_val = 1u64 << bit_count;
     if rhs_spec == RhsSpec::Param {
         for lhs in 0..max_val {
             for rhs in 0..max_val {
-                let ir_out = interp_fn
-                    .interpret(&[
-                        IrValue::make_ubits(bit_count, lhs).unwrap(),
-                        IrValue::make_ubits(bit_count, rhs).unwrap(),
-                    ])
-                    .unwrap();
+                let args = [
+                    IrValue::make_ubits(bit_count, lhs).unwrap(),
+                    IrValue::make_ubits(bit_count, rhs).unwrap(),
+                ];
+                let ir_out = match eval_fn_in_package(&ir_pkg, ir_fn, &args) {
+                    FnEvalResult::Success(success) => success.value,
+                    failure => panic!("PIR reference evaluation failed: {failure:?}"),
+                };
                 let ir_bit = ir_out.to_bits().unwrap().get_bit(0).unwrap();
 
                 let gate_out = gate_sim::eval(
@@ -199,9 +201,11 @@ fn assert_ir_gate_equivalent_for_built(
         }
     } else {
         for x in 0..max_val {
-            let ir_out = interp_fn
-                .interpret(&[IrValue::make_ubits(bit_count, x).unwrap()])
-                .unwrap();
+            let args = [IrValue::make_ubits(bit_count, x).unwrap()];
+            let ir_out = match eval_fn_in_package(&ir_pkg, ir_fn, &args) {
+                FnEvalResult::Success(success) => success.value,
+                failure => panic!("PIR reference evaluation failed: {failure:?}"),
+            };
             let ir_bit = ir_out.to_bits().unwrap().get_bit(0).unwrap();
 
             let gate_out = gate_sim::eval(

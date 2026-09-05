@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::iverilog::{IcarusToolchain, required_iverilog_toolchain};
 use tempfile::TempDir;
-use xlsynth::IrBits;
 pub use xlsynth::external_tool::run_checked;
 use xlsynth::external_tool::{ToolError, kill_process_group, set_process_group};
+use xlsynth_pir::IrBits;
 
 pub type Bindings = BTreeMap<String, LogicValue>;
 type WriteRequest = (String, Sender<std::io::Result<()>>);

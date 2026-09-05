@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-use xlsynth::IrBits;
+use xlsynth_pir::IrBits;
 
 use crate::netlist::bit_ref::{self, NetBit, NetBitRef};
 use crate::netlist::io::ParsedNetlist;

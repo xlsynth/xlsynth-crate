@@ -2,11 +2,11 @@
 
 //! Shared external Yosys/Liberty oracles for public block codegen targets.
 
+use xlsynth_pir::IrBits;
 use std::collections::BTreeMap;
 
 use xlsynth::external_tool::ToolError;
 
-use xlsynth::IrBits;
 use xlsynth_codegen::BlockCodegenOptions;
 use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;

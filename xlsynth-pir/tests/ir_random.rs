@@ -2757,7 +2757,14 @@ fn probabilistic_expanded_standard_generation_matches_libxls_interpreter() {
         let xls_package = xlsynth::IrPackage::parse_ir(&ir_text, None)
             .unwrap_or_else(|error| panic!("libxls rejected generated PIR:\n{ir_text}\n{error}"));
         let xls_function = xls_package.get_function(&function.name).unwrap();
-        let expected = xls_function.interpret(&args).unwrap();
+        let xls_args = args
+            .iter()
+            .map(xlsynth_pir::libxls_bridge::value_to_libxls)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let expected = xls_function.interpret(&xls_args).unwrap();
+        let expected =
+            xlsynth_pir::libxls_bridge::value_from_libxls(&expected, &function.ret_ty).unwrap();
         let actual = match eval_fn_in_package(&package, function, &args) {
             FnEvalResult::Success(success) => success.value,
             other => panic!("PIR evaluation failed for generated IR:\n{ir_text}\n{other:?}"),

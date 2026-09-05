@@ -325,7 +325,7 @@ fn block2sv_extension_operators_match_pir_evaluation() {
                     parameter.name
                 ));
                 arguments.push(
-                    xlsynth::IrValue::make_ubits(width, value)
+                    xlsynth_pir::IrValue::make_ubits(width, value)
                         .expect("construct extension evaluator input"),
                 );
             }
