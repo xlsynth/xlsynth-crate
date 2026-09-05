@@ -54,7 +54,13 @@ fn parse_rust_sys_binding_names(sys_lib_rs_source: &str) -> BTreeSet<String> {
 
 /// Returns whether an exported libxls symbol still requires a Rust FFI binding.
 fn requires_rust_sys_binding(symbol: &str) -> bool {
-    symbol.starts_with("xls_") && !symbol.starts_with("xls_vast_")
+    // These APIs are implemented in Rust. The shipped DSO still exports their
+    // legacy entry points, but Rust intentionally no longer binds them.
+    symbol.starts_with("xls_")
+        && !symbol.starts_with("xls_vast_")
+        && !symbol.starts_with("xls_function_builder_")
+        && !symbol.starts_with("xls_builder_base_")
+        && symbol != "xls_bvalue_free"
 }
 
 #[test]
@@ -70,25 +76,48 @@ fn native_vast_exports_do_not_require_rust_sys_bindings() {
 }
 
 #[test]
-fn rust_sys_bindings_do_not_include_native_vast_symbols() {
-    let binding_names = parse_rust_sys_binding_names(include_str!("../src/lib.rs"));
-    assert!(!binding_names.is_empty(), "expected non-VAST XLS bindings");
+fn builder_exports_do_not_require_rust_sys_bindings() {
+    for symbol in [
+        "xls_function_builder_create",
+        "xls_function_builder_build_with_return_value",
+        "xls_builder_base_add_add",
+        "xls_builder_base_get_type",
+        "xls_bvalue_free",
+    ] {
+        assert!(!requires_rust_sys_binding(symbol), "{symbol}");
+    }
+    for symbol in [
+        "xls_function_get_type",
+        "xls_function_jit_run",
+        "xls_value_free",
+        "xls_function_builderish_reference",
+        "xls_builder_baseline_reference",
+        "xls_bvalue_free_extra",
+    ] {
+        assert!(requires_rust_sys_binding(symbol), "{symbol}");
+    }
+}
 
-    let vast_bindings = binding_names
+#[test]
+fn rust_sys_bindings_do_not_include_replaced_apis() {
+    let binding_names = parse_rust_sys_binding_names(include_str!("../src/lib.rs"));
+    assert!(!binding_names.is_empty(), "expected remaining XLS bindings");
+
+    let replaced_bindings = binding_names
         .iter()
-        .filter(|name| name.starts_with("xls_vast_"))
+        .filter(|name| !requires_rust_sys_binding(name))
         .collect::<Vec<_>>();
     assert!(
-        vast_bindings.is_empty(),
-        "VAST is implemented natively and must not have FFI bindings: {vast_bindings:?}"
+        replaced_bindings.is_empty(),
+        "APIs replaced by Rust implementations must not have FFI bindings: {replaced_bindings:?}"
     );
 }
 
 #[test]
-fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
-    // Only implemented/validated on Linux for now.
-    if !cfg!(target_os = "linux") {
-        eprintln!("Skipping DSO symbol coverage test on non-Linux target.");
+fn all_required_dso_xls_symbols_are_bound_in_sys() {
+    // nm invocation and symbol normalization are supported for ELF and Mach-O.
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        eprintln!("Skipping DSO symbol coverage test on unsupported target.");
         return;
     }
 
@@ -121,9 +150,13 @@ fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
 
     // Use nm to enumerate exported symbols. We rely on nm being available in
     // CI.
+    let nm_args = if cfg!(target_os = "macos") {
+        ["-g", "-U"]
+    } else {
+        ["-D", "--defined-only"]
+    };
     let output = Command::new("nm")
-        .arg("-D")
-        .arg("--defined-only")
+        .args(nm_args)
         .arg(dso_path)
         .output()
         .expect("failed to execute nm to list DSO symbols");
@@ -140,17 +173,20 @@ fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
         // Format: "<addr> <type> <name>" or variations; take last field.
         let maybe_name = line.split_whitespace().last();
         if let Some(name) = maybe_name {
-            // The DSO still exports VAST, but xlsynth-vast implements it
-            // entirely in Rust, so those legacy symbols
-            // intentionally have no FFI bindings.
-            if requires_rust_sys_binding(name) {
+            // Mach-O prefixes C symbol names with an underscore.
+            let name = if cfg!(target_os = "macos") {
+                name.strip_prefix('_').unwrap_or(name)
+            } else {
+                name
+            };
+            if name.starts_with("xls_") {
                 dso_symbols.insert(name.to_string());
             }
         }
     }
     assert!(
         !dso_symbols.is_empty(),
-        "No non-VAST xls_* symbols found in DSO {}; nm output was:\n{}",
+        "No xls_* symbols found in DSO {}; nm output was:\n{}",
         dso_path.display(),
         nm_stdout
     );
@@ -167,13 +203,14 @@ fn all_non_vast_dso_xls_symbols_are_bound_in_sys() {
     // declarations.
     let missing: Vec<&String> = dso_symbols
         .iter()
+        .filter(|name| requires_rust_sys_binding(name))
         .filter(|name| !binding_names.contains(*name))
         .collect();
 
     if !missing.is_empty() {
         let mut report = String::new();
         report
-            .push_str("Missing non-VAST xls_* symbols (present in DSO, absent in Rust externs):\n");
+            .push_str("Missing required xls_* symbols (present in DSO, absent in Rust externs):\n");
         for name in &missing {
             report.push_str("  ");
             report.push_str(name);

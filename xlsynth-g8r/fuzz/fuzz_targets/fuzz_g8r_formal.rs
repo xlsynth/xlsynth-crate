@@ -65,19 +65,12 @@ fuzz_target!(|data: &[u8]| {
         .expect("generated package should retain its top function");
     let exported_source_ir = emit_package_as_xls_ir_text(&case.source_package)
         .expect("generated PIR should export to standard XLS IR");
-    let gate_ir = gate2ir::gate_fn_to_xlsynth_ir(
-        &case.gate_fn,
-        "fuzz_g8r_formal_gate",
-        &source_fn.get_type(),
-    )
-    .expect("optimized GateFn should export to XLS IR")
-    .to_string();
-    if !prove_equivalence(
-        &exported_source_ir,
-        &case.source_top,
-        &gate_ir,
-        &case.gate_fn.name,
-    ) {
+    let gate_pkg =
+        gate2ir::gate_fn_to_pir(&case.gate_fn, "fuzz_g8r_formal_gate", &source_fn.get_type())
+            .expect("optimized GateFn should export to XLS IR");
+    let gate_ir = gate_pkg.to_string();
+    let gate_top = &gate_pkg.get_top_fn().expect("lifted function is top").name;
+    if !prove_equivalence(&exported_source_ir, &case.source_top, &gate_ir, gate_top) {
         // A configured solver time or memory limit can make hard samples
         // inconclusive; those samples are not g8r correctness failures.
         return;

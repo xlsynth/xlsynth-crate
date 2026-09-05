@@ -114,10 +114,9 @@ pub fn validate_same_fn_with_solver(
     tool_path: Option<&Path>,
 ) -> Result<(), String> {
     let orig_ir_fn_text: String = orig_fn.to_string();
-    let xlsynth_package_ir: String =
-        gate2ir::gate_fn_to_xlsynth_ir(gate_fn, "gate", &orig_fn.get_type())
-            .unwrap()
-            .to_string();
+    let xlsynth_package_ir: String = gate2ir::gate_fn_to_pir(gate_fn, "gate", &orig_fn.get_type())
+        .unwrap()
+        .to_string();
     log::info!("xlsynth_package_ir:\n{}", xlsynth_package_ir);
     let orig_ir_pkg_text: String = format!("package orig\n\ntop {}", orig_ir_fn_text);
     check_equivalence_with_top_and_solver(
@@ -182,8 +181,8 @@ pub fn prove_same_gate_fn_via_ir_status_with_solver(
     if lhs_type != rhs_type {
         return IrCheckResult::OtherProcessError("type mismatch".to_string());
     }
-    let lhs_ir: xlsynth::IrPackage = gate2ir::gate_fn_to_xlsynth_ir(lhs, "lhs", &lhs_type).unwrap();
-    let rhs_ir: xlsynth::IrPackage = gate2ir::gate_fn_to_xlsynth_ir(rhs, "rhs", &rhs_type).unwrap();
+    let lhs_ir = gate2ir::gate_fn_to_pir(lhs, "lhs", &lhs_type).unwrap();
+    let rhs_ir = gate2ir::gate_fn_to_pir(rhs, "rhs", &rhs_type).unwrap();
 
     let prover = prover_for_choice(solver, tool_path);
     map_equiv_result(prover.prove_ir_pkg_text_equiv(&lhs_ir.to_string(), &rhs_ir.to_string(), None))

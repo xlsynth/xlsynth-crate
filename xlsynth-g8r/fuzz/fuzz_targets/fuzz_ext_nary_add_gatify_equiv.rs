@@ -142,11 +142,11 @@ fuzz_target!(|data: &[u8]| {
     );
     let gate_ir_start = Instant::now();
     let gate_ir_text =
-        gate2ir::gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, FUNCTION_NAME, &pir_fn.get_type())
-            .expect("gate_fn_to_xlsynth_ir should succeed")
+        gate2ir::gate_fn_to_pir(&gatify_output.gate_fn, FUNCTION_NAME, &pir_fn.get_type())
+            .expect("gate_fn_to_pir should succeed")
             .to_string();
     log::info!(
-        "gate_fn_to_xlsynth_ir completed in {:?} ({} bytes)",
+        "gate_fn_to_pir completed in {:?} ({} bytes)",
         gate_ir_start.elapsed(),
         gate_ir_text.len()
     );

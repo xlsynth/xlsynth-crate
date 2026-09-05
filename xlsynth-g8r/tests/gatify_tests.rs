@@ -913,30 +913,31 @@ fn make_priority_sel_ir_text(output_bit_count: usize, operand_count: usize) -> S
         operand_count
     );
 
-    let mut package = xlsynth::IrPackage::new("sample")
-        .expect("should be able to create an IR package for the sweep test");
     let function_name = format!("do_priority_sel_{}_ops", operand_count);
-    let mut fb =
-        xlsynth::FnBuilder::new(&mut package, &function_name, /* should_verify= */ true);
+    let mut fb = xlsynth_pir::FnBuilder::new(&function_name);
 
-    let selector_type = package.get_bits_type(operand_count as u64);
-    let output_type = package.get_bits_type(output_bit_count as u64);
+    let selector_type = xlsynth_pir::ir::Type::Bits(operand_count);
+    let output_type = xlsynth_pir::ir::Type::Bits(output_bit_count);
 
-    let selector = fb.param("sel", &selector_type);
+    let selector = fb.param("sel", selector_type).expect("build selector");
 
-    let mut cases: Vec<xlsynth::BValue> = Vec::with_capacity(operand_count);
+    let mut cases = Vec::with_capacity(operand_count);
     for i in 0..operand_count {
-        cases.push(fb.param(&format!("a{}", i), &output_type));
+        cases.push(
+            fb.param(&format!("a{}", i), output_type.clone())
+                .expect("build case"),
+        );
     }
-    let default_value = fb.param("default_value", &output_type);
+    let default_value = fb
+        .param("default_value", output_type)
+        .expect("build default");
 
-    let result = fb.priority_select(&selector, &cases, &default_value, Some("result"));
-    let _ = fb
-        .build_with_return_value(&result)
+    let result = fb
+        .priority_select(selector, &cases, default_value)
+        .expect("build priority select");
+    let package = fb
+        .build_package(result, "sample")
         .expect("should be able to build priority select function for sweep test");
-    package
-        .set_top_by_name(&function_name)
-        .expect("should be able to mark the sweep function as top");
     package.to_string()
 }
 

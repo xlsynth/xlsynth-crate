@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use xlsynth_g8r::aig_serdes::g8r::load_sequential_gate_fn_from_path;
-use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_pir;
 
 pub fn handle_g8r2ir_fn(matches: &clap::ArgMatches) -> Result<(), String> {
     let input_file = matches.get_one::<String>("g8r_input_file").unwrap();
@@ -15,7 +15,7 @@ pub fn handle_g8r2ir_fn(matches: &clap::ArgMatches) -> Result<(), String> {
         )
     })?;
     let flat_type = gate_fn.get_flat_type();
-    let package = gate_fn_to_xlsynth_ir(&gate_fn, "gate", &flat_type).map_err(|e| {
+    let package = gate_fn_to_pir(&gate_fn, "gate", &flat_type).map_err(|e| {
         format!(
             "g8r2ir-fn error: failed to convert GateFn to XLS function IR for {}: {}",
             input_file, e

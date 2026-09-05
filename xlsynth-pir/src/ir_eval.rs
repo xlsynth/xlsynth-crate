@@ -1077,7 +1077,6 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
         ir::NodePayload::OneHot { lsb_prio, .. } => {
             let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
             let w = arg_bits.get_bit_count();
-            assert!(w > 0, "OneHot: width must be > 0");
             let mut prior_clear = true;
             let mut outs: Vec<bool> = Vec::with_capacity(w + 1);
             // Generate w one-hot bits according to priority
@@ -1091,7 +1090,7 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             if !lsb_prio {
                 outs.reverse();
             }
-            // Final bit is set when arg == 0
+            // Final bit is set when arg == 0, including the bits[0] input.
             outs.push(prior_clear);
             let out_bits = IrBits::from_lsb_is_0(&outs);
             IrValue::from_bits(&out_bits)

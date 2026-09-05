@@ -612,12 +612,17 @@ pub(crate) fn verify_node_xls_semantics(f: &Fn, node_index: usize) -> Result<(),
             token,
             activated,
             format,
+            verbosity,
             operands,
-            ..
         } => {
             expect_type(ty(*token), &Type::Token, "trace token operand")?;
             expect_type(ty(*activated), &Type::Bits(1), "trace condition")?;
             expect_type(&node.ty, &Type::Token, "trace result")?;
+            if *verbosity < 0 {
+                return Err(format!(
+                    "trace verbosity must be nonnegative, got {verbosity}"
+                ));
+            }
             let expected_operands = trace_operand_count(format)?;
             if operands.len() != expected_operands {
                 return Err(format!(
@@ -752,13 +757,17 @@ pub(crate) fn verify_node_xls_semantics(f: &Fn, node_index: usize) -> Result<(),
             }
             Ok(())
         }
-        NodePayload::Cover { predicate, .. } => {
+        NodePayload::Cover { predicate, label } => {
             expect_type(ty(*predicate), &Type::Bits(1), "cover predicate")?;
+            if label.is_empty() {
+                return Err("cover label must not be empty".to_string());
+            }
             expect_type(&node.ty, &Type::nil(), "cover result")
         }
         NodePayload::Decode { arg, width } => {
             let arg_width = expect_bits_width(ty(*arg), "decode operand")?;
-            if let Some(max_width) = 1usize.checked_shl(arg_width as u32) {
+            if arg_width < usize::BITS as usize {
+                let max_width = 1usize << arg_width;
                 if *width > max_width {
                     return Err(format!(
                         "decode result width {} exceeds 2^{}",

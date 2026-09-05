@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use xlsynth_g8r::aig::GateFn;
-use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_pir;
 use xlsynth_prover::prover::SolverChoice;
 
 use crate::ir_equiv::{EquivOutcome, IrEquivRequest, IrModule, dispatch_ir_equiv};
@@ -27,18 +27,26 @@ pub fn prove_gate_fns_equiv_via_ir(
         ));
     }
 
-    let lhs_ir = gate_fn_to_xlsynth_ir(lhs, "lhs", &lhs_type)
+    let lhs_ir = gate_fn_to_pir(lhs, "lhs", &lhs_type)
         .map_err(|e| format!("failed to convert LHS GateFn to XLS IR: {}", e))?;
-    let rhs_ir = gate_fn_to_xlsynth_ir(rhs, "rhs", &rhs_type)
+    let rhs_ir = gate_fn_to_pir(rhs, "rhs", &rhs_type)
         .map_err(|e| format!("failed to convert RHS GateFn to XLS IR: {}", e))?;
     let lhs_ir_text = lhs_ir.to_string();
     let rhs_ir_text = rhs_ir.to_string();
-    let lhs_top = lhs.name.clone();
-    let rhs_top = rhs.name.clone();
+    let lhs_top = lhs_ir
+        .get_top_fn()
+        .expect("lifted function is top")
+        .name
+        .as_str();
+    let rhs_top = rhs_ir
+        .get_top_fn()
+        .expect("lifted function is top")
+        .name
+        .as_str();
 
     let request = IrEquivRequest::new(
-        IrModule::new(&lhs_ir_text).with_top(Some(lhs_top.as_str())),
-        IrModule::new(&rhs_ir_text).with_top(Some(rhs_top.as_str())),
+        IrModule::new(&lhs_ir_text).with_top(Some(lhs_top)),
+        IrModule::new(&rhs_ir_text).with_top(Some(rhs_top)),
     )
     .with_solver(solver)
     .with_tool_path(tool_path);

@@ -373,8 +373,6 @@ impl IrFunctionJit {
 
 #[cfg(test)]
 mod tests {
-    use crate::FnBuilder;
-
     use super::*;
 
     /// Verifies that formatting the parsed IR yields the exact original text.
@@ -444,13 +442,13 @@ mod tests {
 
     #[test]
     fn test_ir_package_set_top_by_name() {
-        let mut package = IrPackage::new("test_package").unwrap();
-        // Build the identity function inside of the package that is not marked
-        // as top.
-        let u32 = package.get_bits_type(32);
-        let mut builder = FnBuilder::new(&mut package, "f", true);
-        let x = builder.param("x", &u32);
-        let _f = builder.build_with_return_value(&x);
+        let ir = r#"package test_package
+
+fn f(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
+}
+"#;
+        let mut package = IrPackage::parse_ir(ir, None).expect("parse success");
 
         assert_eq!(
             package.to_string(),
@@ -471,16 +469,17 @@ mod tests {
 
     #[test]
     fn test_ir_package_get_functions() {
-        let mut package = IrPackage::new("test_package").unwrap();
-        let u32 = package.get_bits_type(32);
+        let ir = r#"package test_package
 
-        let mut builder = FnBuilder::new(&mut package, "alpha", true);
-        let x = builder.param("x", &u32);
-        builder.build_with_return_value(&x).unwrap();
+fn alpha(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
+}
 
-        let mut builder = FnBuilder::new(&mut package, "beta", true);
-        let y = builder.param("y", &u32);
-        builder.build_with_return_value(&y).unwrap();
+fn beta(y: bits[32] id=2) -> bits[32] {
+  ret y: bits[32] = param(name=y, id=2)
+}
+"#;
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
 
         let mut names: Vec<String> = package
             .get_functions()
@@ -528,24 +527,19 @@ fn f(x: bits[8] id=1) -> bits[8] {
     }
 
     #[test]
-    fn test_ir_package_verify_fails_when_builder_skips_checks() {
-        let mut package = IrPackage::new("test_package").unwrap();
-        let u32 = package.get_bits_type(32);
+    fn test_ir_package_parse_rejects_mismatched_operand_types() {
+        // The C parser verifies the package before returning it, so invalid
+        // operand types must be rejected at this boundary.
+        let ir = r#"package test_package
 
-        // Construct a function with mismatched operand types using a builder
-        // that does not verify nodes as they are added. The package
-        // verifier should catch this mismatch.
-        let mut builder = FnBuilder::new(&mut package, "bad", false);
-        let x = builder.param("x", &u32);
-        let wide_literal = XlsIrValue::parse_typed("bits[64]:1").unwrap();
-        let literal = builder.literal(&wide_literal, None);
-        let sum = builder.add(&x, &literal, None);
-
-        builder
-            .build_with_return_value(&sum)
-            .expect("builder should succeed without verification");
-
-        let error = package.verify().expect_err("verify should fail");
+fn bad(x: bits[32] id=1) -> bits[32] {
+  wide_literal: bits[64] = literal(value=1, id=2)
+  ret sum: bits[32] = add(x, wide_literal, id=3)
+}
+"#;
+        let error = IrPackage::parse_ir(ir, None)
+            .err()
+            .expect("parsing mismatched operand types should fail");
         assert!(
             error.to_string().contains("type") || error.to_string().contains("Type"),
             "unexpected error: {}",

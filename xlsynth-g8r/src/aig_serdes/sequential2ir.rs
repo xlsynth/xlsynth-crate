@@ -8,11 +8,10 @@ use xlsynth_pir::ir::{
     self, BlockMetadata, FileTable, MemberType, Node, NodePayload, NodeRef, Package, PackageMember,
     Register, Type,
 };
-use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_verify;
 
 use crate::aig::SequentialGateFn;
-use crate::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use crate::aig_serdes::gate2ir::gate_fn_to_pir;
 
 /// Lifts a `SequentialGateFn` into a package whose top member is an XLS block.
 ///
@@ -38,16 +37,12 @@ pub fn sequential_gate_fn_to_pir_block_package(
         ));
     }
 
-    let lifted_ir = gate_fn_to_xlsynth_ir(
+    let lifted_package = gate_fn_to_pir(
         &design.transition,
         package_name,
         &design.transition.get_flat_type(),
     )
     .map_err(|e| format!("sequential2ir: failed to lift transition GateFn: {e}"))?;
-    let mut parser = Parser::new(&lifted_ir.to_string());
-    let lifted_package = parser
-        .parse_and_validate_package()
-        .map_err(|e| format!("sequential2ir: failed to parse lifted transition IR: {e}"))?;
     let mut block = lifted_package
         .get_top_fn()
         .ok_or_else(|| "sequential2ir: lifted transition package has no top function".to_string())?

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use crate::aig_serdes::gate2ir::gate_fn_to_pir;
 use crate::netlist::gatefn_from_netlist::{
     GateFnProjectOptions, project_gatefn_from_netlist_and_liberty_with_options,
 };
@@ -141,6 +141,6 @@ pub fn convert_gv2ir_paths_with_options(
     // Convert to IR text
     gate_fn.name = output_function_name;
     let flat_type = gate_fn.get_flat_type();
-    let ir_pkg = gate_fn_to_xlsynth_ir(&gate_fn, "gate", &flat_type)?;
+    let ir_pkg = gate_fn_to_pir(&gate_fn, "gate", &flat_type)?;
     Ok(ir_pkg.to_string())
 }

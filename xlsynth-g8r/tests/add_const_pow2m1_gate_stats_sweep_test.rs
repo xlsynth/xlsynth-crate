@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::FnBuilder;
-use xlsynth::IrPackage;
-use xlsynth::XlsIrValue;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::test_utils::Opt;
+use xlsynth_pir::FnBuilder;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_parser;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,26 +34,24 @@ fn stats_for_ir_text(ir_text: &str, opt: Opt) -> SummaryStats {
 }
 
 fn build_add_ir_text(bit_count: u32, rhs_literal: Option<u64>) -> String {
-    let mut package = IrPackage::new("sample").expect("create package");
     let fn_name = match rhs_literal {
         Some(rhs) => format!("add_{}b_rhs_{rhs}", bit_count),
         None => format!("add_{}b_rhs_param", bit_count),
     };
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
+    let mut fb = FnBuilder::new(&fn_name);
 
-    let ty_bits = package.get_bits_type(u64::from(bit_count));
-    let lhs = fb.param("lhs", &ty_bits);
+    let ty_bits = xlsynth_pir::ir::Type::Bits(bit_count as usize);
+    let lhs = fb.param("lhs", ty_bits.clone()).expect("build parameter");
     let rhs = match rhs_literal {
         Some(rhs) => {
-            let v = XlsIrValue::make_ubits(bit_count as usize, rhs).expect("make ubits");
-            fb.literal(&v, Some("rhs"))
+            let v = IrValue::make_ubits(bit_count as usize, rhs).expect("make ubits");
+            fb.literal(v).expect("build literal")
         }
-        None => fb.param("rhs", &ty_bits),
+        None => fb.param("rhs", ty_bits.clone()).expect("build parameter"),
     };
 
-    let out = fb.add(&lhs, &rhs, Some("sum"));
-    let _ = fb.build_with_return_value(&out).expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let out = fb.add(lhs, rhs).expect("build add");
+    let package = fb.build_package(out, "sample").expect("build function");
     package.to_string()
 }
 

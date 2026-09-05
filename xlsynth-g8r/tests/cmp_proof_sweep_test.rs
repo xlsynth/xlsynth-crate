@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::XlsIrValue;
-use xlsynth::{FnBuilder, IrPackage};
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
+use xlsynth_pir::FnBuilder;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser;
@@ -89,7 +88,6 @@ fn build_cmp_ir_text(
     rhs_spec: RhsSpec,
     swap_const: bool,
 ) -> BuiltIr {
-    let mut package = IrPackage::new("sample").expect("create package");
     let op = ir::binop_to_operator(binop);
     let fn_name = format!(
         "cmp_proof_{}_{}b_{}_{}",
@@ -99,49 +97,48 @@ fn build_cmp_ir_text(
         if swap_const { "swap" } else { "normal" }
     );
 
-    let mut fb = FnBuilder::new(&mut package, &fn_name, /* should_verify= */ true);
-    let ty = package.get_bits_type(bit_count as u64);
+    let mut fb = FnBuilder::new(&fn_name);
+    let ty = ir::Type::Bits(bit_count);
 
     let (lhs, rhs) = match (rhs_spec, swap_const) {
         (RhsSpec::Param, _) => {
-            let lhs = fb.param("lhs", &ty);
-            let rhs = fb.param("rhs", &ty);
+            let lhs = fb.param("lhs", ty.clone()).expect("build parameter");
+            let rhs = fb.param("rhs", ty.clone()).expect("build parameter");
             (lhs, rhs)
         }
         (spec, true) => {
             // Literal-on-LHS form: exercise normalization/commutation paths.
-            let x = fb.param("x", &ty);
+            let x = fb.param("x", ty.clone()).expect("build parameter");
             let c = spec.literal_value(bit_count).expect("literal value");
-            let v = XlsIrValue::make_ubits(bit_count, c).expect("make_ubits");
-            let lit = fb.literal(&v, Some("c"));
+            let v = IrValue::make_ubits(bit_count, c).expect("make_ubits");
+            let lit = fb.literal(v).expect("build literal");
             (lit, x)
         }
         (spec, false) => {
             // Normal literal-on-RHS form.
-            let x = fb.param("x", &ty);
+            let x = fb.param("x", ty.clone()).expect("build parameter");
             let c = spec.literal_value(bit_count).expect("literal value");
-            let v = XlsIrValue::make_ubits(bit_count, c).expect("make_ubits");
-            let lit = fb.literal(&v, Some("c"));
+            let v = IrValue::make_ubits(bit_count, c).expect("make_ubits");
+            let lit = fb.literal(v).expect("build literal");
             (x, lit)
         }
     };
 
     let out = match binop {
-        ir::Binop::Eq => fb.eq(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ne => fb.ne(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ult => fb.ult(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ule => fb.ule(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Ugt => fb.ugt(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Uge => fb.uge(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Slt => fb.slt(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Sle => fb.sle(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Sgt => fb.sgt(&lhs, &rhs, Some("cmp")),
-        ir::Binop::Sge => fb.sge(&lhs, &rhs, Some("cmp")),
+        ir::Binop::Eq => fb.eq(lhs, rhs).expect("build eq"),
+        ir::Binop::Ne => fb.ne(lhs, rhs).expect("build ne"),
+        ir::Binop::Ult => fb.ult(lhs, rhs).expect("build ult"),
+        ir::Binop::Ule => fb.ule(lhs, rhs).expect("build ule"),
+        ir::Binop::Ugt => fb.ugt(lhs, rhs).expect("build ugt"),
+        ir::Binop::Uge => fb.uge(lhs, rhs).expect("build uge"),
+        ir::Binop::Slt => fb.slt(lhs, rhs).expect("build slt"),
+        ir::Binop::Sle => fb.sle(lhs, rhs).expect("build sle"),
+        ir::Binop::Sgt => fb.sgt(lhs, rhs).expect("build sgt"),
+        ir::Binop::Sge => fb.sge(lhs, rhs).expect("build sge"),
         other => panic!("unexpected binop in proof sweep: {other:?}"),
     };
 
-    let _ = fb.build_with_return_value(&out).expect("build function");
-    package.set_top_by_name(&fn_name).expect("set top");
+    let package = fb.build_package(out, "sample").expect("build function");
     BuiltIr {
         ir_text: package.to_string(),
         top_name: fn_name,

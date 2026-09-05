@@ -56,10 +56,14 @@ fn prove_orig_vs_gate_equiv(
     fn_type: &ir::FunctionType,
     gate_output: &GatifyOutput,
 ) -> bool {
-    let gate_ir = gate2ir::gate_fn_to_xlsynth_ir(&gate_output.gate_fn, "gate_pkg", fn_type)
-        .expect("gate_fn_to_xlsynth_ir should succeed")
-        .to_string();
-    let gate_top = gate_output.gate_fn.name.as_str();
+    let gate_pkg = gate2ir::gate_fn_to_pir(&gate_output.gate_fn, "gate_pkg", fn_type)
+        .expect("gate_fn_to_pir should succeed");
+    let gate_ir = gate_pkg.to_string();
+    let gate_top = gate_pkg
+        .get_top_fn()
+        .expect("lifted function is top")
+        .name
+        .as_str();
     let request = IrEquivRequest::new(
         IrModule::new(orig_ir).with_top(Some(orig_top)),
         IrModule::new(&gate_ir).with_top(Some(gate_top)),

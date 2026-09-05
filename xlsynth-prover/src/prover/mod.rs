@@ -9,6 +9,7 @@ pub mod corner_prover;
 pub mod enum_in_bound;
 pub mod external_prover;
 pub mod ir_equiv;
+pub(crate) mod property_fn;
 pub mod quickcheck;
 pub mod translate;
 pub mod types;

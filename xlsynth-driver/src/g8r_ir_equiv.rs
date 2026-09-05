@@ -6,7 +6,7 @@ use crate::ir_equiv::{IrEquivRequest, IrModule, dispatch_ir_equiv};
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
-use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_pir;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_prover::prover::SolverChoice;
@@ -140,7 +140,7 @@ pub fn handle_g8r_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
         std::process::exit(2)
     });
 
-    let lifted_pkg = gate_fn_to_xlsynth_ir(&gate_fn, "g8r", &rhs_fn_type).unwrap_or_else(|e| {
+    let lifted_pkg = gate_fn_to_pir(&gate_fn, "g8r", &rhs_fn_type).unwrap_or_else(|e| {
         eprintln!(
             "{} error: failed to convert {} to IR: {}",
             SUBCOMMAND,
@@ -150,7 +150,11 @@ pub fn handle_g8r_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
         std::process::exit(2)
     });
     let lhs_ir_text = lifted_pkg.to_string();
-    let lhs_top = gate_fn.name.as_str();
+    let lhs_top = lifted_pkg
+        .get_top_fn()
+        .expect("lifted function is top")
+        .name
+        .as_str();
     let rhs_top_name = rhs_fn.name.as_str();
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
