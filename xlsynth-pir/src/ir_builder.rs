@@ -164,7 +164,7 @@ impl FnBuilder {
     /// Creates an empty builder; the function name is checked when building.
     pub fn new(name: &str) -> Self {
         let id = NEXT_BUILDER_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .expect("function builder identity space exhausted");
         Self {
             id,
