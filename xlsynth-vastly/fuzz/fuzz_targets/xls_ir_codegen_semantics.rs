@@ -10,7 +10,9 @@ use std::time::SystemTime;
 
 use libfuzzer_sys::fuzz_target;
 
+use vastly_fuzz::codegen_semantics::MAX_PIPELINE_MULTIPLY_CHAIN_DEPTH;
 use vastly_fuzz::codegen_semantics::make_vastly_input_map;
+use vastly_fuzz::codegen_semantics::max_multiply_chain_depth;
 use vastly_fuzz::codegen_semantics::pack_ir_value_to_value4;
 use vastly_fuzz::codegen_semantics::packed_signature;
 use xlsynth::XlsynthError;
@@ -275,6 +277,16 @@ fuzz_target!(|data: &[u8]| {
                 &stimulus_ordinal,
             );
         }
+    }
+
+    if (include_stage1_pipeline_oracle() || include_stage2_pipeline_oracle())
+        && max_multiply_chain_depth(pir_top) > MAX_PIPELINE_MULTIPLY_CHAIN_DEPTH
+    {
+        // Early-return rationale: deeply composed multiplications can make
+        // upstream XLS pipeline scheduling consume minutes and gigabytes. The
+        // combo semantics were checked above, so exceeding this resource budget
+        // is not a semantic failure of the sample.
+        return;
     }
 
     let mut stage1_retired: Option<(String, Vec<Value4>)> = None;

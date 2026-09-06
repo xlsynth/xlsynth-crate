@@ -1827,7 +1827,7 @@ use xlsynth_pir_compiler_runtime::{{
     AssumptionFailureKind, CompiledFunctionMetadata, EventKind, EventSiteMetadata,
     ExecutionContext, RawExecutionContext, TraceTupleFieldLayout, TraceValueLayout,
     xlsynth_pir_record_assert, xlsynth_pir_record_assumption_failure,
-    xlsynth_pir_record_cover, xlsynth_pir_record_trace,
+    xlsynth_pir_record_cover_predicate, xlsynth_pir_record_trace,
     xlsynth_pir_runtime_wide_binop, xlsynth_pir_runtime_wide_bit_slice_update,
     xlsynth_pir_runtime_wide_dynamic_bit_slice, xlsynth_pir_runtime_wide_mulp,
     xlsynth_pir_runtime_wide_unary_op,
@@ -1852,7 +1852,7 @@ static FUNCTION_METADATA: LazyLock<CompiledFunctionMetadata> =
     std::hint::black_box([
         xlsynth_pir_record_assert as *const () as usize,
         xlsynth_pir_record_assumption_failure as *const () as usize,
-        xlsynth_pir_record_cover as *const () as usize,
+        xlsynth_pir_record_cover_predicate as *const () as usize,
         xlsynth_pir_record_trace as *const () as usize,
         xlsynth_pir_runtime_wide_binop as *const () as usize,
         xlsynth_pir_runtime_wide_dynamic_bit_slice as *const () as usize,

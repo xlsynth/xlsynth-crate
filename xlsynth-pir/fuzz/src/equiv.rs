@@ -57,7 +57,8 @@ pub fn compute_forward_equivalences(lhs: &Fn, rhs: &Fn) -> Equivalences {
         by_hash_rhs.entry(*h).or_default().push(idx);
     }
 
-    // Produce dense maps including keys for nodes with no equivalents (empty vecs).
+    // Produce dense maps including keys for nodes with no equivalents (empty
+    // vecs).
     let mut lhs_to_rhs: HashMap<usize, Vec<usize>> = HashMap::new();
     for (idx, h) in lhs_hashes.iter().enumerate() {
         let mut v = by_hash_rhs.get(h).cloned().unwrap_or_default();
@@ -79,17 +80,18 @@ pub fn compute_forward_equivalences(lhs: &Fn, rhs: &Fn) -> Equivalences {
 }
 
 /// Computes the sets of nodes in `lhs` that are reverse equivalent to nodes in
-/// `rhs` and vice versa. A node is reverse equivalent to another node if it is
-/// structurally identical with respect to the return node. Dead nodes are
-/// ignored.
-pub fn compute_reverse_equivalences_to_return(lhs: &Fn, rhs: &Fn) -> Equivalences {
+/// `rhs` and vice versa. A node is reverse equivalent to another node if it has
+/// the same local structure and live-user structure leading to the return or
+/// observable effects. Pure dead nodes are ignored, and the return is distinct
+/// from otherwise identical non-return nodes.
+pub fn compute_reverse_equivalences_to_observable_roots(lhs: &Fn, rhs: &Fn) -> Equivalences {
     assert!(
         lhs.ret_node_ref.is_some(),
-        "compute_reverse_equivalences_to_return: old function has no return node"
+        "compute_reverse_equivalences_to_observable_roots: old function has no return node"
     );
     assert!(
         rhs.ret_node_ref.is_some(),
-        "compute_reverse_equivalences_to_return: new function has no return node"
+        "compute_reverse_equivalences_to_observable_roots: new function has no return node"
     );
 
     fn compute_backward_hashes_filter_dead(f: &Fn) -> (Vec<BwdHash>, HashSet<usize>) {
@@ -162,7 +164,8 @@ pub fn compute_reverse_equivalences_to_return(lhs: &Fn, rhs: &Fn) -> Equivalence
         by_hash_rhs.entry(bh).or_default().push(idx);
     }
 
-    // Produce dense maps including keys for nodes with no equivalents (empty vecs).
+    // Produce dense maps including keys for nodes with no equivalents (empty
+    // vecs).
     let mut lhs_to_rhs: HashMap<usize, Vec<usize>> = HashMap::new();
     for (idx, bh) in lhs_bwd.iter().copied().enumerate() {
         let mut v: Vec<usize> = if lhs_dead.contains(&idx) {
@@ -239,6 +242,31 @@ mod tests {
     }
 
     #[test]
+    fn reverse_equivalences_include_disconnected_effects() {
+        let lhs = parse_fn(
+            r#"fn f(p: () id=1) -> token {
+  pred: bits[1] = eq(p, p, id=2)
+  observed: () = cover(pred, label="observed", id=3)
+  ret result: token = literal(value=token, id=4)
+}"#,
+        );
+        let rhs = parse_fn(
+            r#"fn f(p: () id=1) -> token {
+  pred: bits[1] = ne(p, p, id=2)
+  observed: () = cover(pred, label="observed", id=3)
+  other: () = cover(pred, label="other", id=4)
+  ret result: token = literal(value=token, id=5)
+}"#,
+        );
+        let eq = compute_reverse_equivalences_to_observable_roots(&lhs, &rhs);
+        let lhs_observed = index_by_name(&lhs, "observed");
+        let rhs_observed = index_by_name(&rhs, "observed");
+        assert_eq!(eq.lhs_to_rhs[&lhs_observed], vec![rhs_observed]);
+        assert_eq!(eq.rhs_to_lhs[&rhs_observed], vec![lhs_observed]);
+        assert!(eq.rhs_to_lhs[&index_by_name(&rhs, "other")].is_empty());
+    }
+
+    #[test]
     fn reverse_equivalences_return_is_unique_even_with_dead_clone() {
         // Both sides have same params; rhs has a dead node identical to return.
         // Ensure the dead node is not reverse-equivalent to the return value.
@@ -256,11 +284,12 @@ mod tests {
   b: bits[8] = param(name=b, id=2)
   sum: bits[8] = add(a, b, id=20)
   ret r: bits[8] = identity(sum, id=21)
+  dead_sum: bits[8] = add(a, b, id=30)
   dead_r: bits[8] = identity(dead_sum, id=31)
 }"#,
         );
 
-        let eq = compute_reverse_equivalences_to_return(&lhs, &rhs);
+        let eq = compute_reverse_equivalences_to_observable_roots(&lhs, &rhs);
         let lhs_ret = lhs.ret_node_ref.unwrap().index;
         let rhs_ret = rhs.ret_node_ref.unwrap().index;
         let rhs_dead_r = index_by_name(&rhs, "dead_r");

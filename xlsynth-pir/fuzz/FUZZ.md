@@ -48,10 +48,12 @@ cargo fuzz run fuzz_greedy_matching_ged
 Essential property under test:
 
 - The greedy matcher’s produced edits, when applied, should transform the old function into one isomorphic to the new function (modulo ids/names).
+- Unambiguous forward- or reverse-equivalent nodes should be reused by the greedy matcher. Reverse matching includes observable effects disconnected from the return value, such as covers, assertions, and traces.
 
 Main failure modes surfaced:
 
 - Incorrect edit planning or application that yields a non-isomorphic result.
+- Missed equivalent-node matches that unnecessarily delete and recreate reusable nodes, including observable effect roots.
 - Crashes or panics during greedy selection or edit conversion.
 - Constrained-signature direct PIR construction fails unexpectedly.
 

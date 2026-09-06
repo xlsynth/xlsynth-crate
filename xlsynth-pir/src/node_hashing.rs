@@ -2,6 +2,7 @@
 
 //! Helpers for computing structural hashes of XLS IR nodes.
 
+use crate::dce::get_dead_nodes;
 use crate::ir::{self, Fn, NodePayload, NodeRef, Type};
 use crate::ir_utils::{get_topological, is_observable_effect_root, operands};
 
@@ -457,6 +458,48 @@ pub fn compute_node_backward_structural_hash(
     BwdHash(hasher.finalize())
 }
 
+/// Hashes live user structure, including operand slots and user multiplicity.
+///
+/// Pure dead nodes have no hash and do not contribute as users. The return has
+/// a distinct implicit user, so otherwise identical non-return nodes cannot
+/// share its hash. Observable effects remain live even outside the return cone.
+pub fn compute_live_backward_structural_hashes(f: &Fn) -> Vec<Option<BwdHash>> {
+    let mut live = vec![true; f.nodes.len()];
+    for node in get_dead_nodes(f) {
+        live[node.index] = false;
+    }
+    let mut users = vec![Vec::new(); f.nodes.len()];
+    for (index, node) in f.nodes.iter().enumerate() {
+        if !live[index] {
+            continue;
+        }
+        for (slot, operand) in operands(&node.payload).into_iter().enumerate() {
+            users[operand.index].push((index, slot));
+        }
+    }
+    let return_sink = BwdHash(blake3::hash(b"__xlsynth_return_sink__"));
+    let mut hashes = vec![None; f.nodes.len()];
+    for node in get_topological(f).into_iter().rev() {
+        if !live[node.index] {
+            continue;
+        }
+        let mut user_pairs: Vec<_> = users[node.index]
+            .iter()
+            .map(|&(user, slot)| {
+                (
+                    hashes[user].expect("live users must be hashed before operands"),
+                    slot,
+                )
+            })
+            .collect();
+        if f.ret_node_ref == Some(node) {
+            user_pairs.push((return_sink, usize::MAX));
+        }
+        hashes[node.index] = Some(compute_node_backward_structural_hash(f, node, &user_pairs));
+    }
+    hashes
+}
+
 fn observable_effect_hashes(f: &Fn, forward_hashes: &[FwdHash]) -> Vec<FwdHash> {
     let mut hashes: Vec<FwdHash> = f
         .nodes
@@ -597,6 +640,86 @@ mod tests {
         let mut p = Parser::new(ir_pkg_text);
         let pkg = p.parse_and_validate_package().unwrap();
         pkg.get_top_fn().unwrap().clone()
+    }
+
+    #[test]
+    fn live_backward_hashes_distinguish_user_multisets() {
+        let f = parse_top_fn(
+            r#"package test
+top fn f(p: bits[1] id=1, tok: token id=2) -> token {
+  repeated: token = trace(tok, p, format="event", data_operands=[], verbosity=0, id=3)
+  repeated0: token = trace(repeated, p, format="event", data_operands=[], verbosity=0, id=4)
+  repeated1: token = trace(repeated, p, format="event", data_operands=[], verbosity=0, id=5)
+  single: token = trace(tok, p, format="event", data_operands=[], verbosity=0, id=6)
+  single0: token = trace(single, p, format="event", data_operands=[], verbosity=0, id=7)
+  mixed: token = trace(tok, p, format="event", data_operands=[], verbosity=0, id=8)
+  mixed0: token = trace(mixed, p, format="event", data_operands=[], verbosity=0, id=9)
+  mixed1: token = trace(mixed, p, format="other", data_operands=[], verbosity=0, id=10)
+  ret result: token = literal(value=token, id=11)
+}
+"#,
+        );
+        let hashes = compute_live_backward_structural_hashes(&f);
+        let hash = |name: &str| {
+            hashes[f
+                .nodes
+                .iter()
+                .position(|n| n.name.as_deref() == Some(name))
+                .unwrap()]
+            .unwrap()
+        };
+        assert_ne!(hash("repeated"), hash("single"));
+        assert_ne!(hash("repeated"), hash("mixed"));
+        assert_eq!(hash("repeated0"), hash("single0"));
+    }
+
+    #[test]
+    fn live_backward_hashes_ignore_dead_users_and_distinguish_returns() {
+        let f = parse_top_fn(
+            r#"package test
+top fn f(p: bits[1] id=1, tok: token id=2, unused: bits[1] id=3) -> bits[1] {
+  ret result: bits[1] = identity(p, id=4)
+  other: bits[1] = identity(p, id=5)
+  trace0: token = trace(tok, result, format="event", data_operands=[], verbosity=0, id=6)
+  trace1: token = trace(tok, other, format="event", data_operands=[], verbosity=0, id=7)
+  dead: bits[1] = not(result, id=8)
+}
+"#,
+        );
+        let hashes = compute_live_backward_structural_hashes(&f);
+        let index = |name: &str| {
+            f.nodes
+                .iter()
+                .position(|n| n.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        assert_eq!(hashes[index("unused")], None);
+        assert_eq!(hashes[index("dead")], None);
+        assert!(hashes[index("other")].is_some());
+        assert_eq!(hashes[index("trace0")], hashes[index("trace1")]);
+        assert_ne!(hashes[index("result")], hashes[index("other")]);
+
+        let dce = crate::dce::remove_dead_nodes(&f);
+        let dce_hashes = compute_live_backward_structural_hashes(&dce);
+        assert_eq!(
+            hashes[f.ret_node_ref.unwrap().index],
+            dce_hashes[dce.ret_node_ref.unwrap().index]
+        );
+    }
+
+    #[test]
+    fn live_backward_hashes_preserve_operand_slots() {
+        let f = parse_top_fn(
+            r#"package test
+top fn f() -> bits[8] {
+  lhs: bits[8] = literal(value=0, id=1)
+  rhs: bits[8] = literal(value=0, id=2)
+  ret result: bits[8] = sub(lhs, rhs, id=3)
+}
+"#,
+        );
+        let hashes = compute_live_backward_structural_hashes(&f);
+        assert_ne!(hashes[1], hashes[2]);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::matching_ged::{
     DepGraph, MatchAction, MatchSelector, NewNodeRef, NodeSide, OldNodeRef, ReadyNode,
     build_dependency_graph,
 };
-use crate::node_hashing::FwdHash;
+use crate::node_hashing::{BwdHash, FwdHash, compute_live_backward_structural_hashes};
 use log::{Level, debug, log_enabled, trace};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,10 +18,11 @@ use std::marker::PhantomData;
 
 /// Base of the fixed-point score scale used by greedy matching.
 const SCORE_BASE: i32 = 1000;
-/// Score for a perfect forward match or reverse match. Bias towards reverse
-/// matches because reverse matches are computed once globally, while
-/// forward matches are computed as the algorithm progresses so "perfect"
-/// forward matches may be due to imprecise heuristic matches done earlier.
+/// Score for a perfect forward match or mutually unique perfect reverse match.
+/// Bias towards unambiguous reverse matches because reverse matches are
+/// computed once globally, while forward matches are computed as the algorithm
+/// progresses so "perfect" forward matches may be due to imprecise heuristic
+/// matches done earlier.
 const PERFECT_FORWARD_MATCH_SCORE: i32 = SCORE_BASE * 100;
 const PERFECT_REVERSE_MATCH_SCORE: i32 = SCORE_BASE * 200;
 
@@ -419,6 +420,9 @@ pub struct GreedyMatchSelector {
     equivalents: EquivalentNodeSet,
     /// Reverse-direction similarity scores for candidate node pairs.
     reverse_scores: NodePairMap<i32>,
+    /// Perfect reverse pairs with no alternative perfect partner on either
+    /// side.
+    unique_perfect_reverse_matches: NodeVector<OldNodeRef, Option<NewNodeRef>>,
     forward_score_cache: ForwardScoreCache,
     unready_match_score_cache: UnreadyMatchScoreCache,
 
@@ -439,6 +443,10 @@ impl GreedyMatchSelector {
         let reverse_scores = compute_reverse_match_scores(&old_graph, &new_graph);
         let old_len = old_graph.nodes.len();
         let new_len = new_graph.nodes.len();
+        let unique_perfect_reverse_matches = find_unique_perfect_reverse_matches(
+            &compute_live_backward_structural_hashes(old),
+            &compute_live_backward_structural_hashes(new),
+        );
         let forward_score_cache = ForwardScoreCache::new(&old_graph, &new_graph);
         let unready_match_score_cache = UnreadyMatchScoreCache::new(&old_graph, &new_graph);
         Self {
@@ -446,6 +454,7 @@ impl GreedyMatchSelector {
             new_graph,
             equivalents,
             reverse_scores,
+            unique_perfect_reverse_matches,
             forward_score_cache,
             unready_match_score_cache,
             ready_old: NodeVector::new(old_len, false),
@@ -517,7 +526,9 @@ impl GreedyMatchSelector {
             fwd
         };
         let rev = self.reverse_scores.get(*a, *b).copied().unwrap_or(0);
-        let rev = if rev == SCORE_BASE {
+        // Ambiguous reverse matches retain their ordinary similarity score;
+        // they must not displace an unambiguous perfect forward match.
+        let rev = if *self.unique_perfect_reverse_matches.get(*a) == Some(*b) {
             PERFECT_REVERSE_MATCH_SCORE
         } else {
             rev
@@ -758,6 +769,38 @@ impl MatchSelector for GreedyMatchSelector {
     }
 }
 
+/// Finds exact reverse matches that are unique in both directions.
+fn find_unique_perfect_reverse_matches(
+    old_hashes: &[Option<BwdHash>],
+    new_hashes: &[Option<BwdHash>],
+) -> NodeVector<OldNodeRef, Option<NewNodeRef>> {
+    // The approximate score can reuse a user when comparing two user lists.
+    // Only multiset structural equality establishes a perfect reverse match.
+    let mut old_counts = HashMap::<BwdHash, usize>::new();
+    for hash in old_hashes.iter().flatten() {
+        *old_counts.entry(*hash).or_default() += 1;
+    }
+    let mut unique_new = HashMap::new();
+    for (index, hash) in new_hashes.iter().enumerate() {
+        if let Some(hash) = hash {
+            unique_new
+                .entry(*hash)
+                .and_modify(|node| *node = None)
+                .or_insert(Some(NewNodeRef(index)));
+        }
+    }
+    let mut matches = NodeVector::new(old_hashes.len(), None);
+    for (index, hash) in old_hashes.iter().enumerate() {
+        if let Some(hash) = hash
+            && old_counts[hash] == 1
+            && let Some(&Some(new)) = unique_new.get(hash)
+        {
+            matches.set(OldNodeRef(index), Some(new));
+        }
+    }
+    matches
+}
+
 /// Computes reverse-direction similarity scores M(A,B) for compatible node
 /// pairs.
 fn compute_reverse_match_scores(
@@ -773,25 +816,48 @@ fn compute_reverse_match_scores(
     let mut m_scores: NodePairMap<i32> =
         NodePairMap::new(old_graph.nodes.len(), new_graph.nodes.len(), None);
 
-    // Worklist seeded with all compatible sink pairs (nodes with no users).
+    // Returns and observable effects are implicit users, even when the nodes
+    // also have explicit users. Seed both so effects disconnected from the
+    // return value can anchor matches in their own dependency cones.
     let mut worklist: VecDeque<(OldNodeRef, NewNodeRef)> = VecDeque::new();
     let mut on_worklist: HashSet<(OldNodeRef, NewNodeRef)> = HashSet::new();
-    // Just seed the worklist with the return values.
-    worklist.push_back((old_graph.return_value, new_graph.return_value));
-    on_worklist.insert((old_graph.return_value, new_graph.return_value));
+    for (oi, old_node) in old_graph.nodes.iter().enumerate() {
+        if !old_node.is_return && !old_node.is_observable_effect_root {
+            continue;
+        }
+        for (ni, new_node) in new_graph.nodes.iter().enumerate() {
+            if (new_node.is_return || new_node.is_observable_effect_root)
+                && old_node.is_return == new_node.is_return
+                && shapes_equal(OldNodeRef(oi), NewNodeRef(ni))
+            {
+                let pair = (OldNodeRef(oi), NewNodeRef(ni));
+                worklist.push_back(pair);
+                on_worklist.insert(pair);
+            }
+        }
+    }
 
     let recompute_score = |a: OldNodeRef, b: NewNodeRef, m: &NodePairMap<i32>| -> i32 {
-        if !shapes_equal(a, b) {
+        let old_node = old_graph.get_node(a);
+        let new_node = new_graph.get_node(b);
+        if !shapes_equal(a, b) || old_node.is_return != new_node.is_return {
             return 0;
         }
+        let old_implicit_user = old_node.is_return || old_node.is_observable_effect_root;
+        let new_implicit_user = new_node.is_return || new_node.is_observable_effect_root;
         let z = std::cmp::max(
-            old_graph.get_node(a).users.len(),
-            new_graph.get_node(b).users.len(),
+            old_node.users.len() + usize::from(old_implicit_user),
+            new_node.users.len() + usize::from(new_implicit_user),
         );
         if z == 0 {
-            return SCORE_BASE;
+            // A disconnected pure sink is not an observable matching anchor.
+            return 0;
         }
-        let mut sum: i32 = 0;
+        let mut sum: i32 = if old_implicit_user && new_implicit_user {
+            SCORE_BASE
+        } else {
+            0
+        };
         for &(u_a, slot) in old_graph.get_node(a).users.iter() {
             let mut best: i32 = 0;
             for &(u_b, slot_b) in new_graph.get_node(b).users.iter() {
@@ -847,12 +913,298 @@ mod tests {
     use crate::ir_parser::Parser;
     use crate::matching_ged::{
         IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_fn_edits,
-        compute_fn_edit,
+        compute_fn_edit, compute_fn_match, convert_match_set_to_edit_set,
     };
 
     fn parse_ir_from_string(s: &str) -> crate::ir::Package {
         let mut parser = Parser::new(s);
         parser.parse_and_validate_package().unwrap()
+    }
+
+    fn named_node_index(f: &crate::ir::Fn, name: &str) -> usize {
+        f.nodes
+            .iter()
+            .position(|node| node.name.as_deref() == Some(name))
+            .expect("node by name not found")
+    }
+
+    #[test]
+    fn unique_reverse_match_preserves_user_multiplicity() {
+        let old_pkg = parse_ir_from_string(
+            r#"package old
+top fn f(p: bits[1] id=1, tok: token id=2) -> token {
+  pred: bits[1] = ne(p, p, id=3)
+  observed: token = trace(tok, pred, format="event", data_operands=[], verbosity=0, id=4)
+  user0: token = trace(observed, pred, format="event", data_operands=[], verbosity=0, id=5)
+  user1: token = trace(observed, pred, format="event", data_operands=[], verbosity=0, id=6)
+  ret result: token = literal(value=token, id=7)
+}
+"#,
+        );
+        for extra_user in [
+            "",
+            r#"decoy1: token = trace(decoy, pred, format="other", data_operands=[], verbosity=0, id=7)"#,
+        ] {
+            let new_pkg = parse_ir_from_string(&format!(
+                r#"package new
+top fn f(p: bits[1] id=1, tok: token id=2) -> token {{
+  inverted: bits[1] = not(p, id=3)
+  pred: bits[1] = ne(inverted, inverted, id=4)
+  decoy: token = trace(tok, pred, format="event", data_operands=[], verbosity=0, id=5)
+  decoy0: token = trace(decoy, pred, format="event", data_operands=[], verbosity=0, id=6)
+  {extra_user}
+  prefix: token = trace(tok, pred, format="prefix", data_operands=[], verbosity=0, id=8)
+  observed: token = trace(prefix, pred, format="event", data_operands=[], verbosity=0, id=9)
+  user0: token = trace(observed, pred, format="event", data_operands=[], verbosity=0, id=10)
+  user1: token = trace(observed, pred, format="event", data_operands=[], verbosity=0, id=11)
+  ret result: token = literal(value=token, id=12)
+}}
+"#
+            ));
+            let old_fn = old_pkg.get_top_fn().unwrap();
+            let new_fn = new_pkg.get_top_fn().unwrap();
+            let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
+            let matches = compute_fn_match(old_fn, new_fn, &mut selector).unwrap();
+            let old_observed = OldNodeRef(named_node_index(old_fn, "observed"));
+            let new_observed = NewNodeRef(named_node_index(new_fn, "observed"));
+            assert!(
+                matches.matches.iter().any(|action| matches!(
+                    action,
+                    MatchAction::MatchNodes { old_index, new_index, .. }
+                        if *old_index == old_observed && *new_index == new_observed
+                )),
+                "unique reverse-equivalent trace was not reused: {matches:?}"
+            );
+            let edits = convert_match_set_to_edit_set(old_fn, new_fn, &matches);
+            let patched = apply_fn_edits(old_fn, &edits).unwrap();
+            assert!(crate::node_hashing::functions_structurally_equivalent(
+                &patched, new_fn
+            ));
+        }
+    }
+
+    #[test]
+    fn perfect_reverse_match_bonus_requires_mutual_uniqueness() {
+        let a = Some(BwdHash(blake3::hash(b"a")));
+        let b = Some(BwdHash(blake3::hash(b"b")));
+        let c = Some(BwdHash(blake3::hash(b"c")));
+        let matches = find_unique_perfect_reverse_matches(&[a, b, b, c, None], &[a, a, b, c, None]);
+        assert_eq!(
+            matches.data,
+            vec![None, None, None, Some(NewNodeRef(3)), None]
+        );
+    }
+
+    #[test]
+    fn unique_forward_match_outweighs_ambiguous_reverse_effect_matches() {
+        let isolated = parse_ir_from_string(
+            r#"package isolated
+top fn f(p: bits[1] id=1, t0: token id=2, t1: token id=3) -> token {
+  observed: token = trace(t0, p, format="event", data_operands=[], verbosity=0, id=4)
+  ret result: token = literal(value=token, id=5)
+}
+"#,
+        );
+        let chained = parse_ir_from_string(
+            r#"package chained
+top fn f(p: bits[1] id=1, t0: token id=2, t1: token id=3) -> token {
+  other: token = trace(t1, p, format="event", data_operands=[], verbosity=0, id=4)
+  observed: token = trace(t0, p, format="event", data_operands=[], verbosity=0, id=5)
+  sink0: token = trace(other, p, format="event", data_operands=[], verbosity=0, id=6)
+  sink1: token = trace(observed, p, format="event", data_operands=[], verbosity=0, id=7)
+  ret result: token = literal(value=token, id=8)
+}
+"#,
+        );
+        // Exercise ambiguity on both sides of the matching relation.
+        for (old_fn, new_fn) in [
+            (
+                isolated.get_top_fn().unwrap(),
+                chained.get_top_fn().unwrap(),
+            ),
+            (
+                chained.get_top_fn().unwrap(),
+                isolated.get_top_fn().unwrap(),
+            ),
+        ] {
+            let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
+            let matches = compute_fn_match(old_fn, new_fn, &mut selector).unwrap();
+            let old_observed = OldNodeRef(named_node_index(old_fn, "observed"));
+            let new_observed = NewNodeRef(named_node_index(new_fn, "observed"));
+            assert!(
+                matches.matches.iter().any(|action| matches!(
+                    action,
+                    MatchAction::MatchNodes { old_index, new_index, .. }
+                        if *old_index == old_observed && *new_index == new_observed
+                )),
+                "unique forward-equivalent trace was not reused: {matches:?}"
+            );
+            let edits = convert_match_set_to_edit_set(old_fn, new_fn, &matches);
+            let patched = apply_fn_edits(old_fn, &edits).unwrap();
+            assert!(crate::node_hashing::functions_structurally_equivalent(
+                &patched, new_fn
+            ));
+        }
+    }
+
+    #[test]
+    fn matches_disconnected_observable_effect_roots() {
+        for (effect_type, effect, other_effect) in [
+            (
+                "()",
+                r#"cover(pred, label="observed", id=4)"#,
+                r#"cover(pred, label="other", id=5)"#,
+            ),
+            (
+                "token",
+                r#"assert(tok, pred, message="observed", label="observed", id=4)"#,
+                r#"assert(tok, pred, message="other", label="other", id=5)"#,
+            ),
+            (
+                "token",
+                r#"trace(tok, pred, format="observed={}", data_operands=[p], verbosity=0, id=4)"#,
+                r#"trace(tok, pred, format="other={}", data_operands=[p], verbosity=0, id=5)"#,
+            ),
+        ] {
+            let old_pkg = parse_ir_from_string(&format!(
+                r#"package old
+top fn f(p: bits[1] id=1, tok: token id=2) -> token {{
+  pred: bits[1] = eq(p, p, id=3)
+  observed: {effect_type} = {effect}
+  ret result: token = literal(value=token, id=6)
+}}
+"#
+            ));
+            let new_pkg = parse_ir_from_string(&format!(
+                r#"package new
+top fn f(p: bits[1] id=1, tok: token id=2) -> token {{
+  pred: bits[1] = ne(p, p, id=3)
+  observed: {effect_type} = {effect}
+  other: {effect_type} = {other_effect}
+  ret result: token = literal(value=token, id=6)
+}}
+"#
+            ));
+            let old_fn = old_pkg.get_top_fn().unwrap();
+            let new_fn = new_pkg.get_top_fn().unwrap();
+            let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
+            let matches = compute_fn_match(old_fn, new_fn, &mut selector).unwrap();
+            let old_effect = OldNodeRef(named_node_index(old_fn, "observed"));
+            let new_effect = NewNodeRef(named_node_index(new_fn, "observed"));
+            assert!(
+                matches.matches.iter().any(|action| matches!(
+                    action,
+                    MatchAction::MatchNodes { old_index, new_index, .. }
+                        if *old_index == old_effect && *new_index == new_effect
+                )),
+                "disconnected effect was not reused: {effect}\n{matches:?}"
+            );
+
+            let edits = convert_match_set_to_edit_set(old_fn, new_fn, &matches);
+            let patched = apply_fn_edits(old_fn, &edits).unwrap();
+            assert!(crate::node_hashing::functions_structurally_equivalent(
+                &patched, new_fn
+            ));
+        }
+    }
+
+    #[test]
+    fn reverse_scores_anchor_returns_with_explicit_users() {
+        let old_pkg = parse_ir_from_string(
+            r#"package old
+top fn f(p: bits[1] id=1) -> bits[1] {
+  ret result: bits[1] = identity(p, id=2)
+  observed: () = cover(result, label="old", id=3)
+}
+"#,
+        );
+        let new_pkg = parse_ir_from_string(
+            r#"package new
+top fn f(p: bits[1] id=1) -> bits[1] {
+  ret result: bits[1] = identity(p, id=2)
+  observed: () = cover(result, label="new", id=3)
+}
+"#,
+        );
+        let old_fn = old_pkg.get_top_fn().unwrap();
+        let new_fn = new_pkg.get_top_fn().unwrap();
+        let old_graph = build_dependency_graph::<OldNodeRef>(old_fn);
+        let new_graph = build_dependency_graph::<NewNodeRef>(new_fn);
+        let reverse = compute_reverse_match_scores(&old_graph, &new_graph);
+        assert_eq!(
+            reverse.get(old_graph.return_value, new_graph.return_value),
+            Some(&(SCORE_BASE / 2))
+        );
+
+        // Equal explicit users eventually contribute as well as the return's
+        // implicit user, even if the return was processed first.
+        let identical_graph = build_dependency_graph::<NewNodeRef>(old_fn);
+        let identical_reverse = compute_reverse_match_scores(&old_graph, &identical_graph);
+        assert_eq!(
+            identical_reverse.get(old_graph.return_value, identical_graph.return_value),
+            Some(&SCORE_BASE)
+        );
+    }
+
+    #[test]
+    fn reverse_scores_do_not_anchor_disconnected_pure_sinks() {
+        let pkg = parse_ir_from_string(
+            r#"package p
+top fn f(p: bits[1] id=1, q: bits[1] id=2) -> bits[1] {
+  unused: bits[1] = identity(q, id=3)
+  ret result: bits[1] = identity(p, id=4)
+}
+"#,
+        );
+        let f = pkg.get_top_fn().unwrap();
+        let old_graph = build_dependency_graph::<OldNodeRef>(f);
+        let new_graph = build_dependency_graph::<NewNodeRef>(f);
+        let reverse = compute_reverse_match_scores(&old_graph, &new_graph);
+        let unused = named_node_index(f, "unused");
+        assert_eq!(reverse.get(OldNodeRef(unused), NewNodeRef(unused)), None);
+        assert_eq!(
+            reverse.get(old_graph.return_value, NewNodeRef(unused)),
+            None
+        );
+        assert_eq!(
+            reverse.get(OldNodeRef(unused), new_graph.return_value),
+            None
+        );
+        assert_eq!(
+            reverse.get(old_graph.return_value, new_graph.return_value),
+            Some(&SCORE_BASE)
+        );
+    }
+
+    #[test]
+    fn reverse_scores_distinguish_returned_and_unreturned_effects() {
+        let old_pkg = parse_ir_from_string(
+            r#"package old
+top fn f(p: bits[1] id=1) -> () {
+  ret observed: () = cover(p, label="observed", id=2)
+}
+"#,
+        );
+        let new_pkg = parse_ir_from_string(
+            r#"package new
+top fn f(p: bits[1] id=1) -> () {
+  observed: () = cover(p, label="observed", id=2)
+  ret result: () = tuple(id=3)
+}
+"#,
+        );
+        let old_fn = old_pkg.get_top_fn().unwrap();
+        let new_fn = new_pkg.get_top_fn().unwrap();
+        let old_graph = build_dependency_graph::<OldNodeRef>(old_fn);
+        let new_graph = build_dependency_graph::<NewNodeRef>(new_fn);
+        let reverse = compute_reverse_match_scores(&old_graph, &new_graph);
+        assert_eq!(
+            reverse.get(
+                old_graph.return_value,
+                NewNodeRef(named_node_index(new_fn, "observed"))
+            ),
+            None
+        );
     }
 
     #[test]

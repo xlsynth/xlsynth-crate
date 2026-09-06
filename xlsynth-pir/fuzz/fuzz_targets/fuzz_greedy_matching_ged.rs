@@ -12,7 +12,7 @@ use xlsynth_pir::matching_ged::{
 };
 use xlsynth_pir::node_hashing::functions_structurally_equivalent;
 use xlsynth_pir_fuzz::equiv::{
-    compute_forward_equivalences, compute_reverse_equivalences_to_return,
+    compute_forward_equivalences, compute_reverse_equivalences_to_observable_roots,
 };
 use xlsynth_pir_fuzz::generate_full_random_pir_pair;
 
@@ -50,14 +50,14 @@ fn unique_forward_equivalent_pairs(
     (pairs, has_multiple_forward_equivalents)
 }
 
-// Returns the pairs of nodes which are reverse structurallyequivalent between
-// old and new graphs. Only unique pairs are returned. If a node is equivalent
+// Returns pairs with identical reverse structure leading to the return or
+// observable effects. Only unique pairs are returned. If a node is equivalent
 // to multiple nodes in the other graph then it is not included.
 fn unique_reverse_equivalent_pairs(
     old_fn: &xlsynth_pir::ir::Fn,
     new_fn: &xlsynth_pir::ir::Fn,
 ) -> Vec<(usize, usize)> {
-    let eq = compute_reverse_equivalences_to_return(old_fn, new_fn);
+    let eq = compute_reverse_equivalences_to_observable_roots(old_fn, new_fn);
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (oi, news) in eq.lhs_to_rhs.iter() {
         if news.len() != 1 {
@@ -96,9 +96,9 @@ fn assert_equivalent_nodes_are_matched(
     let (fwd_pairs, has_multiple_forward_equivalents) =
         unique_forward_equivalent_pairs(old_fn, new_fn);
 
-    // If there are nodes with multiple forward equivalents (CSE equivalence), then
-    // it is not guaranteed that equivalent node pairs in old/new graphs will be
-    // matched.
+    // If there are nodes with multiple forward equivalents (CSE equivalence),
+    // then it is not guaranteed that equivalent node pairs in old/new
+    // graphs will be matched.
     if has_multiple_forward_equivalents {
         return;
     }
