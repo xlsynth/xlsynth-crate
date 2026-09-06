@@ -293,7 +293,7 @@ fn verify_origin_alignment(
         "ir2g8r".to_string(),
         scored_ir.display().to_string(),
         "--top".to_string(),
-        scoring_input.top_fn.name,
+        scoring_input.top_fn.graph.name,
         "--aiger-out".to_string(),
         raw_aig.display().to_string(),
         "--stats-out".to_string(),

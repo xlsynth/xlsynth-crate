@@ -3,7 +3,7 @@
 use clap::ArgMatches;
 use xlsynth_pir::{
     ir,
-    ir_parser::{self, Parser, emit_fn_as_block},
+    ir_parser::{self, Parser, emit_block},
 };
 
 /// Implements the "ir-round-trip" subcommand: parse IR and write it back to
@@ -23,25 +23,23 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
             ir_parser::parse_path_to_package(ir_path).expect("parse IR package should succeed");
         if strip_pos {
             pkg.file_table = ir::FileTable::new();
-            pkg.for_each_fn_mut(|f| {
-                for n in f.nodes.iter_mut() {
+            for member in &mut pkg.members {
+                for n in &mut member.graph_mut().nodes {
                     n.pos = None;
                 }
-            });
+            }
         }
         print!("{}", pkg);
     } else {
         // Treat as a standalone block (allowing outer attributes).
         let mut parser = Parser::new(&ir_text);
-        let (mut f, metadata) = parser
-            .parse_block_to_fn_with_ports()
-            .expect("parse block IR should succeed");
+        let mut block = parser.parse_block().expect("parse block IR should succeed");
         if strip_pos {
-            for n in f.nodes.iter_mut() {
+            for n in block.nodes.iter_mut() {
                 n.pos = None;
             }
         }
-        let block_text = emit_fn_as_block(&f, None, Some(&metadata), false);
+        let block_text = emit_block(&block, false);
         print!("{}", block_text);
     }
 }

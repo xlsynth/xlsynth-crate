@@ -2,7 +2,7 @@
 
 //! Direct construction of random, typed PIR functions.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -10,8 +10,8 @@ use crate::{IrBits, IrValue};
 use rand::RngCore;
 
 use crate::ir::{
-    Binop, BlockMetadata, BlockResetMetadata, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable,
-    Fn, MemberType, NaryOp, Node, NodePayload, NodeRef, Package, PackageMember, Param, ParamId,
+    Binop, Block, BlockPort, BlockReset, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, Fn,
+    MemberType, NaryOp, Node, NodePayload, NodeRef, Package, PackageMember, Param, ParamId,
     Register, Type, Unop,
 };
 use crate::ir_rebase_ids::rebase_fn_ids;
@@ -783,7 +783,7 @@ impl RandomBlockOptions {
             )));
         }
 
-        let min_output_tuple_node = usize::from(self.min_output_ports != 1);
+        let min_output_port_nodes = self.min_output_ports;
         let min_seed_node = usize::from(
             self.min_output_ports > 0 && self.min_input_ports == 0 && minimum_registers == 0,
         );
@@ -793,7 +793,7 @@ impl RandomBlockOptions {
             .min_input_ports
             .saturating_add(minimum_registers.saturating_mul(2))
             .saturating_add(min_reset_port_node)
-            .saturating_add(min_output_tuple_node)
+            .saturating_add(min_output_port_nodes)
             .saturating_add(min_seed_node);
         if required_nodes > self.function_options.max_nodes {
             return Err(GenerationError::InvalidOptions(format!(
@@ -808,22 +808,18 @@ impl RandomBlockOptions {
 /// A directly constructed PIR block and its generation statistics.
 #[derive(Debug, Clone)]
 pub struct GeneratedBlock {
-    pub function: Fn,
-    pub metadata: BlockMetadata,
+    pub block: Block,
     pub stats: GeneratedFnStats,
 }
 
 impl GeneratedBlock {
     /// Moves the generated block into a package with that block marked top.
     pub fn into_top_package(self, package_name: impl Into<String>) -> Package {
-        let block_name = self.function.name.clone();
+        let block_name = self.block.name.clone();
         Package {
             name: package_name.into(),
             file_table: FileTable::new(),
-            members: vec![PackageMember::Block {
-                func: self.function,
-                metadata: self.metadata,
-            }],
+            members: vec![PackageMember::Block(self.block)],
             top: Some((block_name, MemberType::Block)),
         }
     }
@@ -988,41 +984,30 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
 
     fn generate_block(&mut self, name: String) -> Result<GeneratedBlock, GenerationError> {
         let mut generator = FunctionGenerator::new(&self.options.function_options);
-        let mut metadata = BlockMetadata {
-            clock_port_name: None,
-            port_order: Vec::new(),
-            port_sv_types: std::collections::BTreeMap::new(),
-            input_port_ids: HashMap::new(),
-            output_port_ids: HashMap::new(),
-            output_names: Vec::new(),
-            reset: None,
-            registers: Vec::new(),
-            instantiations: Vec::new(),
-        };
+        let mut block = Block::new(&name);
 
         let input_count = self.choose_input_count()?;
         for index in 0..input_count {
             let ty = self.choose_interface_type(&generator);
-            self.add_block_param(&mut generator, &mut metadata, format!("in{index}"), ty);
+            self.add_block_input(&mut generator, &mut block, format!("in{index}"), ty);
         }
 
         let register_count = self.choose_register_count(generator.params.len())?;
-        let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
+        let output_port_reserve = self.options.min_output_ports;
         let reset_ref = self.maybe_add_reset_port(
             &mut generator,
-            &mut metadata,
+            &mut block,
             register_count,
-            output_tuple_reserve,
+            output_port_reserve,
         )?;
-        let registers =
-            self.add_registers(&mut generator, &mut metadata, register_count, reset_ref);
+        let registers = self.add_registers(&mut generator, &mut block, register_count, reset_ref);
 
         let staged_writes = if self.options.topology == BlockTopology::FeedForwardPipeline
             && register_count != 0
         {
-            Some(self.generate_pipeline_body(&mut generator, &registers, output_tuple_reserve)?)
+            Some(self.generate_pipeline_body(&mut generator, &registers, output_port_reserve)?)
         } else {
-            self.generate_body(&mut generator, register_count, output_tuple_reserve)?;
+            self.generate_body(&mut generator, register_count, output_port_reserve)?;
             None
         };
 
@@ -1044,12 +1029,6 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             writes
         };
 
-        // For zero or multiple outputs, the synthetic tuple return is omitted
-        // when the function is emitted as a block. Keep it out of the register
-        // D-value candidate set so register writes cannot reference that
-        // suppressed internal node.
-        let ret_node_ref = self.materialize_block_return(&mut generator, &output_refs)?;
-
         for (register, write) in registers.iter().zip(register_writes) {
             generator.add_node(
                 Type::nil(),
@@ -1063,21 +1042,15 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             );
         }
 
-        self.populate_output_metadata(&generator, &mut metadata, output_count);
-        let mut function = generator.finish_with_return(ret_node_ref)?;
-        function.name = name;
-        let stats = gather_block_stats(&function);
-
-        Ok(GeneratedBlock {
-            function,
-            metadata,
-            stats,
-        })
+        self.materialize_output_ports(&mut generator, &mut block, &output_refs);
+        block.graph.nodes = generator.nodes;
+        let stats = gather_block_stats(&block);
+        Ok(GeneratedBlock { block, stats })
     }
 
     fn choose_input_count(&mut self) -> Result<usize, GenerationError> {
         let minimum_registers = self.options.minimum_registers();
-        let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
+        let output_port_reserve = self.options.min_output_ports;
         let reset_port_reserve =
             usize::from(self.options.require_reset_on_all_registers && minimum_registers > 0);
         let reserved_nodes = self
@@ -1085,7 +1058,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             .minimum_registers()
             .saturating_mul(2)
             .saturating_add(reset_port_reserve)
-            .saturating_add(output_tuple_reserve);
+            .saturating_add(output_port_reserve);
         let max_by_nodes = self
             .options
             .function_options
@@ -1119,11 +1092,11 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         if self.options.topology == BlockTopology::Combinational {
             return Ok(0);
         }
-        let output_tuple_reserve = usize::from(self.options.min_output_ports != 1);
+        let output_port_reserve = self.options.min_output_ports;
         let reset_port_reserve = usize::from(self.options.require_reset_on_all_registers);
         let max_by_nodes = self.options.function_options.max_nodes.saturating_sub(
             input_count
-                .saturating_add(output_tuple_reserve)
+                .saturating_add(output_port_reserve)
                 .saturating_add(reset_port_reserve),
         ) / 2;
         let max_register_count = if self.options.require_reset_on_all_registers
@@ -1146,28 +1119,38 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         ))
     }
 
-    fn add_block_param(
+    fn add_block_input(
         &mut self,
         generator: &mut FunctionGenerator<'_>,
-        metadata: &mut BlockMetadata,
+        block: &mut Block,
         name: String,
         ty: Type,
     ) -> NodeRef {
-        let node_ref = generator.add_named_param(name.clone(), ty);
-        metadata.input_port_ids.insert(
-            name.clone(),
-            generator.params.last().unwrap().id.get_wrapped_id(),
+        let node_ref = generator.add_node(
+            ty.clone(),
+            NodePayload::InputPort {
+                name: name.clone(),
+                sv_type: None,
+            },
+            Some(name.clone()),
         );
-        metadata.port_order.push(name);
+        // The construction pool retains input signature facts for budgeting
+        // and stage-local type selection, without constructing a function.
+        generator.params.push(Param {
+            name,
+            ty,
+            id: ParamId::new(generator.nodes[node_ref.index].text_id),
+        });
+        block.ports.push(BlockPort::Input(node_ref));
         node_ref
     }
 
     fn maybe_add_reset_port(
         &mut self,
         generator: &mut FunctionGenerator<'_>,
-        metadata: &mut BlockMetadata,
+        block: &mut Block,
         register_count: usize,
-        output_tuple_reserve: usize,
+        output_port_reserve: usize,
     ) -> Result<Option<NodeRef>, GenerationError> {
         let reset_required = self.options.require_reset_on_all_registers && register_count > 0;
         if register_count == 0
@@ -1179,7 +1162,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         let used_nodes = generator.nodes.len().saturating_sub(1);
         let reserved_nodes = register_count
             .saturating_mul(2)
-            .saturating_add(output_tuple_reserve);
+            .saturating_add(output_port_reserve);
         if generator.params.len() >= self.options.function_options.max_params
             || used_nodes.saturating_add(1).saturating_add(reserved_nodes)
                 > self.options.function_options.max_nodes
@@ -1192,14 +1175,14 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             return Ok(None);
         }
 
-        let reset_ref = self.add_block_param(generator, metadata, "rst".to_string(), Type::Bits(1));
+        let reset_ref = self.add_block_input(generator, block, "rst".to_string(), Type::Bits(1));
         let asynchronous = match self.options.reset_timing {
             RandomBlockResetTiming::Synchronous => false,
             RandomBlockResetTiming::Asynchronous => true,
             RandomBlockResetTiming::Either => self.source.take_u64() & 1 != 0,
         };
-        metadata.reset = Some(BlockResetMetadata {
-            port_name: "rst".to_string(),
+        block.reset = Some(BlockReset {
+            port: reset_ref,
             asynchronous,
             active_low: self.source.take_u64() & 1 != 0,
         });
@@ -1209,13 +1192,12 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
     fn add_registers(
         &mut self,
         generator: &mut FunctionGenerator<'_>,
-        metadata: &mut BlockMetadata,
+        block: &mut Block,
         register_count: usize,
         reset_ref: Option<NodeRef>,
     ) -> Vec<GeneratedRegisterState> {
         if register_count != 0 {
-            metadata.clock_port_name = Some("clk".to_string());
-            metadata.port_order.insert(0, "clk".to_string());
+            block.ports.insert(0, BlockPort::Clock("clk".to_string()));
         }
 
         let reset_enabled = self.choose_register_reset_enabled(register_count, reset_ref);
@@ -1233,7 +1215,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
                 None
             };
             let reset_value = register_reset_ref.map(|_| generate_uniform_value(self.source, &ty));
-            metadata.registers.push(Register {
+            block.registers.push(Register {
                 name: name.clone(),
                 ty: ty.clone(),
                 reset_value,
@@ -1275,10 +1257,10 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         &mut self,
         generator: &mut FunctionGenerator<'_>,
         registers: &[GeneratedRegisterState],
-        output_tuple_reserve: usize,
+        output_port_reserve: usize,
     ) -> Result<Vec<GeneratedRegisterWrite>, GenerationError> {
         let capacity = self.options.function_options.max_nodes.saturating_sub(
-            generator.nodes.len().saturating_sub(1) + registers.len() + output_tuple_reserve,
+            generator.nodes.len().saturating_sub(1) + registers.len() + output_port_reserve,
         );
         let reads: Vec<_> = generator
             .nodes
@@ -1294,7 +1276,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             .iter()
             .enumerate()
             .filter_map(|(index, node)| {
-                matches!(node.payload, NodePayload::GetParam(_)).then_some(NodeRef { index })
+                matches!(node.payload, NodePayload::InputPort { .. }).then_some(NodeRef { index })
             })
             .collect();
         let mut writes = Vec::new();
@@ -1379,10 +1361,10 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         &mut self,
         generator: &mut FunctionGenerator<'_>,
         register_count: usize,
-        output_tuple_reserve: usize,
+        output_port_reserve: usize,
     ) -> Result<(), GenerationError> {
         let used_nodes = generator.nodes.len().saturating_sub(1);
-        let reserved_nodes = register_count.saturating_add(output_tuple_reserve);
+        let reserved_nodes = register_count.saturating_add(output_port_reserve);
         let body_capacity = self
             .options
             .function_options
@@ -1448,10 +1430,13 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
                 .is_empty();
         let (min_output_count, max_output_count) = if !data_available {
             (self.options.min_output_ports, 0)
-        } else if remaining_after_register_writes == 0 {
-            (self.options.min_output_ports.max(1), 1)
         } else {
-            (self.options.min_output_ports, self.options.max_output_ports)
+            (
+                self.options.min_output_ports,
+                self.options
+                    .max_output_ports
+                    .min(remaining_after_register_writes),
+            )
         };
         if max_output_count < min_output_count {
             return Err(GenerationError::Construction(format!(
@@ -1499,25 +1484,6 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
             .collect())
     }
 
-    fn materialize_block_return(
-        &mut self,
-        generator: &mut FunctionGenerator<'_>,
-        output_refs: &[NodeRef],
-    ) -> Result<NodeRef, GenerationError> {
-        if output_refs.len() == 1 {
-            return Ok(output_refs[0]);
-        }
-        let fields = output_refs
-            .iter()
-            .map(|node_ref| Box::new(generator.get_node(*node_ref).ty.clone()))
-            .collect();
-        Ok(generator.add_node(
-            Type::Tuple(fields),
-            NodePayload::Tuple(output_refs.to_vec()),
-            Some("outputs".to_string()),
-        ))
-    }
-
     fn choose_register_next_ref(
         &mut self,
         generator: &FunctionGenerator<'_>,
@@ -1546,30 +1512,28 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         index.checked_sub(1).map(|index| refs[index])
     }
 
-    fn populate_output_metadata(
+    fn materialize_output_ports(
         &self,
-        generator: &FunctionGenerator<'_>,
-        metadata: &mut BlockMetadata,
-        output_count: usize,
+        generator: &mut FunctionGenerator<'_>,
+        block: &mut Block,
+        outputs: &[NodeRef],
     ) {
-        metadata.output_names = if output_count == 1 {
-            vec!["out".to_string()]
-        } else {
-            (0..output_count)
-                .map(|index| format!("out{index}"))
-                .collect()
-        };
-        let mut next_id = generator
-            .nodes
-            .iter()
-            .map(|node| node.text_id)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        for name in &metadata.output_names {
-            metadata.output_port_ids.insert(name.clone(), next_id);
-            metadata.port_order.push(name.clone());
-            next_id = next_id.saturating_add(1);
+        for (index, arg) in outputs.iter().enumerate() {
+            let name = if outputs.len() == 1 {
+                "out".to_string()
+            } else {
+                format!("out{index}")
+            };
+            let port = generator.add_node(
+                Type::nil(),
+                NodePayload::OutputPort {
+                    name: name.clone(),
+                    arg: *arg,
+                    sv_type: None,
+                },
+                Some(name),
+            );
+            block.ports.push(BlockPort::Output(port));
         }
     }
 }
@@ -4191,13 +4155,15 @@ impl<'a> FunctionGenerator<'a> {
     fn finish_with_return(self, ret_node_ref: NodeRef) -> Result<Fn, GenerationError> {
         let ret_ty = self.nodes[ret_node_ref.index].ty.clone();
         let function = Fn {
-            name: "random_fn".to_string(),
+            graph: crate::ir::NodeGraph {
+                name: "random_fn".to_string(),
+                nodes: self.nodes,
+                outer_attrs: Vec::new(),
+                inner_attrs: Vec::new(),
+            },
             params: self.params,
             ret_ty,
-            nodes: self.nodes,
             ret_node_ref: Some(ret_node_ref),
-            outer_attrs: Vec::new(),
-            inner_attrs: Vec::new(),
         };
         function
             .check_pir_layout_invariants()
@@ -4207,26 +4173,30 @@ impl<'a> FunctionGenerator<'a> {
 }
 
 fn gather_stats(function: &Fn) -> GeneratedFnStats {
-    gather_stats_with_roots(function, |payload| is_observable_effect_root(payload))
+    gather_stats_with_roots(
+        function,
+        vec![
+            function
+                .ret_node_ref
+                .expect("generated function has a return"),
+        ],
+        |payload| is_observable_effect_root(payload),
+    )
 }
 
 /// Measures generated and live operations, treating register writes as roots.
-pub fn gather_block_stats(function: &Fn) -> GeneratedFnStats {
-    gather_stats_with_roots(function, |payload| {
+pub fn gather_block_stats(block: &Block) -> GeneratedFnStats {
+    gather_stats_with_roots(block, block.output_ports().collect(), |payload| {
         is_observable_effect_root(payload) || matches!(payload, NodePayload::RegisterWrite { .. })
     })
 }
 
 fn gather_stats_with_roots(
-    function: &Fn,
+    function: &crate::ir::NodeGraph,
+    mut pending: Vec<NodeRef>,
     is_extra_root: impl std::ops::Fn(&NodePayload) -> bool,
 ) -> GeneratedFnStats {
     let mut live_indices = HashSet::new();
-    let mut pending = vec![
-        function
-            .ret_node_ref
-            .expect("generated function always has a return node"),
-    ];
     pending.extend(
         function
             .nodes
@@ -4257,7 +4227,10 @@ fn gather_stats_with_roots(
             stats.live_node_count += 1;
             record_bits_widths(&node.ty, &mut stats.live_bits_widths);
         }
-        if matches!(node.payload, NodePayload::GetParam(_)) {
+        if matches!(
+            node.payload,
+            NodePayload::GetParam(_) | NodePayload::InputPort { .. }
+        ) {
             continue;
         }
         let operator = node.payload.get_operator().to_string();

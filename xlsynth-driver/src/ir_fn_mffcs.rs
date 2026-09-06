@@ -202,7 +202,7 @@ pub fn handle_ir_fn_mffcs(matches: &ArgMatches, _config: &Option<ToolchainConfig
                         continue;
                     }
                 }
-                xlsynth_pir::ir::PackageMember::Block { .. } => {
+                xlsynth_pir::ir::PackageMember::Block(_) => {
                     // Extraction here always emits a function package member.
                 }
             }

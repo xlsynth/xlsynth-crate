@@ -2784,9 +2784,8 @@ fn emit_pkg_text_toposorted(pkg: &PirPackage) -> Result<String> {
                 compact_and_toposort_in_place(f)
                     .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
             }
-            PirPackageMember::Block { func, .. } => {
-                compact_and_toposort_in_place(func)
-                    .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
+            PirPackageMember::Block(block) => {
+                block.compact_and_toposort().map_err(anyhow::Error::msg)?;
             }
         }
     }

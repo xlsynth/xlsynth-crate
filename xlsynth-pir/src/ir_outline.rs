@@ -601,13 +601,15 @@ pub fn outline_with_ordering(
     });
 
     let inner_fn = IrFn {
-        name: new_inner_name.to_string(),
+        graph: crate::ir::NodeGraph {
+            name: new_inner_name.to_string(),
+            nodes: remapped_inner_nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params: inner_params.clone(),
         ret_ty: inner_ret_ty,
-        nodes: remapped_inner_nodes,
         ret_node_ref: remapped_inner_ret,
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     };
 
     // Build the new outer: clone and then splice in an invoke that replaces the
@@ -773,13 +775,15 @@ pub fn outline_with_ordering(
     });
 
     let new_outer = IrFn {
-        name: new_outer_name.to_string(),
+        graph: crate::ir::NodeGraph {
+            name: new_outer_name.to_string(),
+            nodes: remapped_outer_nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params: outer.params.clone(),
         ret_ty: outer.ret_ty.clone(),
-        nodes: remapped_outer_nodes,
         ret_node_ref: outer_ret_ref,
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     };
 
     // Register both functions in the package for caller convenience.

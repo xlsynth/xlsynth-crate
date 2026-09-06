@@ -61,6 +61,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
         match &node.payload {
             NodePayload::Nil => {}
             NodePayload::GetParam(_) => {}
+            NodePayload::InputPort { .. } => {}
             NodePayload::Tuple(elems)
             | NodePayload::Array(elems)
             | NodePayload::ArrayConcat(elems)
@@ -72,6 +73,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
                 }
             }
             NodePayload::TupleIndex { tuple, .. }
+            | NodePayload::OutputPort { arg: tuple, .. }
             | NodePayload::Unop(_, tuple)
             | NodePayload::Decode { arg: tuple, .. }
             | NodePayload::Encode { arg: tuple }
@@ -1168,13 +1170,15 @@ fn build_inner_with_union_user_slots(
     };
 
     Fn {
-        name: fname.to_string(),
+        graph: crate::ir::NodeGraph {
+            name: fname.to_string(),
+            nodes: inner_nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params: inner_params,
         ret_ty,
-        nodes: inner_nodes,
         ret_node_ref: ret_ref_opt,
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     }
 }
 pub struct DualDifferenceExtraction {

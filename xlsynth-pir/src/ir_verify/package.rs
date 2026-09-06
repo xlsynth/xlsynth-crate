@@ -5,8 +5,8 @@
 use std::collections::HashSet;
 
 use crate::ir::{
-    Binop, BlockMetadata, Fn, InstantiationKind, MemberType, NaryOp, NodePayload, NodeRef, Package,
-    PackageMember, Type,
+    Binop, Block, BlockPort, Fn, InstantiationKind, MemberType, NaryOp, NodeGraph, NodePayload,
+    NodeRef, Package, PackageMember, Type,
 };
 use crate::ir_deduce::deduce_result_type_with_registers;
 use crate::ir_utils::operands;
@@ -97,6 +97,8 @@ pub enum ValidationError {
     },
     /// A block's reset metadata does not identify a bits[1] input port.
     InvalidBlockResetPort { block: String, port: String },
+    /// A block's declared resources violate a structural invariant.
+    BlockInvariantViolation { block: String, reason: String },
     /// A declared register does not have exactly one register_read operation.
     RegisterReadCountMismatch {
         block: String,
@@ -177,12 +179,6 @@ pub enum ValidationError {
         missing: Vec<String>,
         direction: InstantiationPortDirection,
     },
-    /// Block output arity mismatch when mapping ports.
-    BlockOutputArityMismatch {
-        func: String,
-        expected: usize,
-        actual: usize,
-    },
     /// Bitwise n-ary ops (and/or/xor/nand/nor) must have identical bits-typed
     /// operands.
     NaryBitwiseOperandTypeMismatch { func: String, node_index: usize },
@@ -261,6 +257,9 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ValidationError::BlockInvariantViolation { block, reason } => {
+                write!(f, "block '{block}' violates a resource invariant: {reason}")
+            }
             ValidationError::DuplicateMemberName(name) => {
                 write!(f, "duplicate member name '{}'", name)
             }
@@ -555,17 +554,6 @@ impl std::fmt::Display for ValidationError {
                     func, instantiation, direction, missing
                 )
             }
-            ValidationError::BlockOutputArityMismatch {
-                func,
-                expected,
-                actual,
-            } => {
-                write!(
-                    f,
-                    "function '{}' output arity mismatch: expected {} outputs, got {}",
-                    func, expected, actual
-                )
-            }
             ValidationError::NaryBitwiseOperandTypeMismatch { func, node_index } => {
                 write!(
                     f,
@@ -737,7 +725,7 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     for member in &p.members {
         let (name, member_type) = match member {
             PackageMember::Function(f) => (f.name.clone(), MemberType::Function),
-            PackageMember::Block { func, .. } => (func.name.clone(), MemberType::Block),
+            PackageMember::Block(block) => (block.name.clone(), MemberType::Block),
         };
         if !names.insert((name.clone(), member_type)) {
             return Err(ValidationError::DuplicateMemberName(name));
@@ -753,7 +741,7 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     for (idx, member) in p.members.iter().enumerate() {
         match member {
             PackageMember::Function(f) => validate_fn(f, p)?,
-            PackageMember::Block { func, metadata } => validate_block(func, metadata, p, idx)?,
+            PackageMember::Block(block) => validate_block(block, p, idx)?,
         }
     }
     validate_function_call_graph(p)?;
@@ -762,28 +750,13 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     // nodes).
     let mut seen_ids: HashSet<usize> = HashSet::new();
     for member in &p.members {
-        let (f, synthetic_block_ret) = match member {
-            PackageMember::Function(f) => (f, None),
-            PackageMember::Block { func, metadata } => (
-                func,
-                if metadata.output_names.len() != 1 {
-                    func.ret_node_ref
-                } else {
-                    None
-                },
-            ),
+        let f: &NodeGraph = match member {
+            PackageMember::Function(f) => f,
+            PackageMember::Block(block) => block,
         };
-        for (node_index, node) in f.nodes.iter().enumerate() {
-            // Skip synthetic Nil node at index 0 which is never emitted to IR
-            // text.
+        for node in &f.nodes {
             if matches!(node.payload, NodePayload::Nil) {
-                continue;
-            }
-            // Multi-output and output-less blocks use an internal tuple return
-            // node that is not emitted to XLS IR text.
-            if synthetic_block_ret == Some(crate::ir::NodeRef { index: node_index })
-                && matches!(node.payload, NodePayload::Tuple(_))
-            {
+                // The reserved sentinel is not emitted.
                 continue;
             }
             if !seen_ids.insert(node.text_id) {
@@ -867,13 +840,14 @@ pub(super) fn validate_standalone_fn(f: &Fn) -> Result<(), ValidationError> {
 }
 
 pub fn validate_block(
-    f: &Fn,
-    metadata: &BlockMetadata,
+    f: &Block,
     parent: &Package,
     member_index: usize,
 ) -> Result<(), ValidationError> {
+    validate_block_ports(f)?;
+    validate_block_resources(f)?;
     let prior_blocks = collect_prior_blocks(parent, member_index);
-    for inst in metadata.instantiations.iter() {
+    for inst in f.instantiations.iter() {
         match inst.kind {
             InstantiationKind::Block if !prior_blocks.contains_key(&inst.block) => {
                 return Err(ValidationError::InstantiationBlockNotFound {
@@ -895,14 +869,14 @@ pub fn validate_block(
             }
         }
     }
-    let instantiation_info = build_instantiation_info(metadata, &prior_blocks, parent)?;
-    validate_fn_with(
+    let instantiation_info = build_instantiation_info(f, &prior_blocks, parent)?;
+    validate_graph_with(
         f,
+        &[],
         Some(parent),
         |name: &str| parent.get_fn_type(name).map(|ft| ft.return_type),
         |register| {
-            metadata
-                .registers
+            f.registers
                 .iter()
                 .find(|r| r.name == register)
                 .map(|r| r.ty.clone())
@@ -910,25 +884,163 @@ pub fn validate_block(
         Some(&instantiation_info),
         true,
     )?;
-    validate_block_registers(f, metadata)
+    validate_block_registers(f)
+}
+
+/// Checks declarations before any resolver indexes resources by name.
+fn validate_block_resources(block: &Block) -> Result<(), ValidationError> {
+    let violation = |reason| ValidationError::BlockInvariantViolation {
+        block: block.name.clone(),
+        reason,
+    };
+    if !block.registers.is_empty() && block.clock_port_name().is_none() {
+        return Err(violation("registers require a clock port".to_string()));
+    }
+    let mut names = HashSet::new();
+    for register in &block.registers {
+        if !names.insert(register.name.as_str()) {
+            return Err(violation(format!("duplicate register '{}'", register.name)));
+        }
+        if let Some(value) = &register.reset_value {
+            if value.type_() != register.ty {
+                return Err(violation(format!(
+                    "reset value for register '{}' has type {}, expected {}",
+                    register.name,
+                    value.type_(),
+                    register.ty
+                )));
+            }
+            if block.reset.is_none() {
+                return Err(violation(format!(
+                    "register '{}' has a reset value but the block has no reset port",
+                    register.name
+                )));
+            }
+        }
+    }
+    names.clear();
+    for instance in &block.instantiations {
+        if !names.insert(instance.name.as_str()) {
+            return Err(violation(format!(
+                "duplicate instantiation '{}'",
+                instance.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks that the ordered block interface names each actual port exactly once.
+fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
+    let violation = |node_index, reason: String| ValidationError::NodeSemanticViolation {
+        func: block.name.clone(),
+        node_index,
+        reason,
+    };
+    if !block
+        .nodes
+        .first()
+        .is_some_and(|node| matches!(node.payload, NodePayload::Nil))
+    {
+        return Err(violation(
+            0,
+            "block graph must start with a Nil sentinel".to_string(),
+        ));
+    }
+    let mut names = HashSet::new();
+    let mut port_nodes = HashSet::new();
+    let mut clock_seen = false;
+    for port in &block.ports {
+        let (name, node_index) = match port {
+            BlockPort::Clock(name) => {
+                if clock_seen {
+                    return Err(violation(
+                        0,
+                        "block has more than one clock port".to_string(),
+                    ));
+                }
+                clock_seen = true;
+                (name.as_str(), 0)
+            }
+            BlockPort::Input(reference) | BlockPort::Output(reference) => {
+                let node = block.nodes.get(reference.index).ok_or_else(|| {
+                    violation(
+                        reference.index,
+                        "block port references a missing node".to_string(),
+                    )
+                })?;
+                let name = match (port, &node.payload) {
+                    (BlockPort::Input(_), NodePayload::InputPort { name, .. })
+                    | (BlockPort::Output(_), NodePayload::OutputPort { name, .. }) => name,
+                    _ => {
+                        return Err(violation(
+                            reference.index,
+                            "block port direction does not match its node".to_string(),
+                        ));
+                    }
+                };
+                if !port_nodes.insert(*reference) {
+                    return Err(violation(
+                        reference.index,
+                        "block port is listed more than once".to_string(),
+                    ));
+                }
+                (name.as_str(), reference.index)
+            }
+        };
+        if name.is_empty() || !names.insert(name) {
+            return Err(violation(
+                node_index,
+                format!("empty or duplicate block port name '{name}'"),
+            ));
+        }
+    }
+    for (index, node) in block.nodes.iter().enumerate() {
+        match node.payload {
+            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
+                if !port_nodes.contains(&NodeRef { index }) {
+                    return Err(violation(
+                        index,
+                        "port node is missing from the block interface".to_string(),
+                    ));
+                }
+            }
+            NodePayload::GetParam(_) => {
+                return Err(violation(
+                    index,
+                    "blocks must use input ports, not function parameters".to_string(),
+                ));
+            }
+            _ => {
+                // Ordinary graph nodes are not part of the declared interface.
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Applies the reset and register-write invariants required by XLS blocks.
-fn validate_block_registers(f: &Fn, metadata: &BlockMetadata) -> Result<(), ValidationError> {
-    if let Some(reset) = &metadata.reset {
-        let valid_reset = f
-            .params
-            .iter()
-            .any(|param| param.name == reset.port_name && param.ty == Type::Bits(1));
+fn validate_block_registers(f: &Block) -> Result<(), ValidationError> {
+    if let Some(reset) = &f.reset {
+        let valid_reset = f.input_ports().any(|port| port == reset.port)
+            && f.get_node(reset.port).ty == Type::Bits(1);
         if !valid_reset {
             return Err(ValidationError::InvalidBlockResetPort {
                 block: f.name.clone(),
-                port: reset.port_name.clone(),
+                port: f
+                    .nodes
+                    .get(reset.port.index)
+                    .map(|node| {
+                        node.name
+                            .clone()
+                            .unwrap_or_else(|| node.text_id.to_string())
+                    })
+                    .unwrap_or_else(|| format!("node {}", reset.port.index)),
             });
         }
     }
 
-    let definitions = metadata
+    let definitions = f
         .registers
         .iter()
         .map(|register| (register.name.as_str(), register))
@@ -968,7 +1080,7 @@ fn validate_block_registers(f: &Fn, metadata: &BlockMetadata) -> Result<(), Vali
         }
     }
 
-    for register in &metadata.registers {
+    for register in &f.registers {
         let read_count = reads.get(register.name.as_str()).copied().unwrap_or(0);
         if read_count != 1 {
             return Err(ValidationError::RegisterReadCountMismatch {
@@ -978,7 +1090,10 @@ fn validate_block_registers(f: &Fn, metadata: &BlockMetadata) -> Result<(), Vali
             });
         }
         let Some(register_writes) = writes.get(register.name.as_str()) else {
-            continue;
+            return Err(ValidationError::BlockInvariantViolation {
+                block: f.name.clone(),
+                reason: format!("register '{}' has no write", register.name),
+            });
         };
         if register_writes.len() > 1 {
             let first_reset = register_writes[0].2;
@@ -1017,6 +1132,47 @@ where
     F: std::ops::Fn(&str) -> Option<Type>,
     R: std::ops::Fn(&str) -> Option<Type>,
 {
+    validate_graph_with(
+        f,
+        &f.params,
+        parent,
+        callee_ret_type_resolver,
+        register_type_resolver,
+        instantiation_info,
+        allow_registers,
+    )?;
+    let ret_node_ref = f
+        .ret_node_ref
+        .ok_or_else(|| ValidationError::MissingReturnNode(f.name.clone()))?;
+    let ret_node = f
+        .nodes
+        .get(ret_node_ref.index)
+        .filter(|node| !matches!(node.payload, NodePayload::Nil))
+        .ok_or_else(|| ValidationError::MissingReturnNode(f.name.clone()))?;
+    if ret_node.ty != f.ret_ty {
+        return Err(ValidationError::ReturnTypeMismatch {
+            func: f.name.clone(),
+            expected: f.ret_ty.clone(),
+            actual: ret_node.ty.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_graph_with<F, R>(
+    f: &NodeGraph,
+    params: &[crate::ir::Param],
+    parent: Option<&Package>,
+    callee_ret_type_resolver: F,
+    register_type_resolver: R,
+    instantiation_info: Option<&std::collections::HashMap<String, InstantiationInfo>>,
+    allow_registers: bool,
+) -> Result<(), ValidationError>
+where
+    F: std::ops::Fn(&str) -> Option<Type>,
+    R: std::ops::Fn(&str) -> Option<Type>,
+{
     // Track ids used by non-parameter nodes to ensure uniqueness.
     let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
     let mut used_instantiation_inputs: std::collections::HashMap<String, HashSet<String>> =
@@ -1035,7 +1191,7 @@ where
     // and check name uniqueness.
     let mut param_name_to_id: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
-    for p in &f.params {
+    for p in params {
         let name = p.name.as_str();
         if param_name_to_id.contains_key(name) {
             return Err(ValidationError::DuplicateParamName {
@@ -1079,7 +1235,24 @@ where
             }
         }
         match &node.payload {
+            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } if !allow_registers => {
+                return Err(ValidationError::NodeSemanticViolation {
+                    func: f.name.clone(),
+                    node_index: i,
+                    reason: "port nodes are only permitted in blocks".to_string(),
+                });
+            }
             NodePayload::GetParam(pid) => {
+                if let Some(param) = params.iter().find(|param| param.id == *pid) {
+                    if node.ty != param.ty {
+                        return Err(ValidationError::NodeTypeMismatch {
+                            func: f.name.clone(),
+                            node_index: i,
+                            deduced: param.ty.clone(),
+                            actual: node.ty.clone(),
+                        });
+                    }
+                }
                 let declared = node
                     .name
                     .as_ref()
@@ -1649,7 +1822,7 @@ where
         }
     }
     // Ensure every declared parameter has a corresponding GetParam node.
-    for p in &f.params {
+    for p in params {
         let pid = p.id.get_wrapped_id();
         if !seen_param_ids.contains(&pid) {
             return Err(ValidationError::MissingParamNode {
@@ -1660,41 +1833,29 @@ where
         }
     }
 
-    let ret_node_ref = f
-        .ret_node_ref
-        .ok_or_else(|| ValidationError::MissingReturnNode(f.name.clone()))?;
-    let ret_node = f.get_node(ret_node_ref);
-    if ret_node.ty != f.ret_ty {
-        return Err(ValidationError::ReturnTypeMismatch {
-            func: f.name.clone(),
-            expected: f.ret_ty.clone(),
-            actual: ret_node.ty.clone(),
-        });
-    }
-
     Ok(())
 }
 
 fn collect_prior_blocks<'a>(
     p: &'a Package,
     member_index: usize,
-) -> std::collections::HashMap<String, (&'a Fn, &'a BlockMetadata)> {
+) -> std::collections::HashMap<String, &'a Block> {
     let mut prior = std::collections::HashMap::new();
     for member in p.members.iter().take(member_index) {
-        if let PackageMember::Block { func, metadata } = member {
-            prior.insert(func.name.clone(), (func, metadata));
+        if let PackageMember::Block(block) = member {
+            prior.insert(block.name.clone(), block);
         }
     }
     prior
 }
 
 fn build_instantiation_info(
-    metadata: &BlockMetadata,
-    prior_blocks: &std::collections::HashMap<String, (&Fn, &BlockMetadata)>,
+    block: &Block,
+    prior_blocks: &std::collections::HashMap<String, &Block>,
     parent: &Package,
 ) -> Result<std::collections::HashMap<String, InstantiationInfo>, ValidationError> {
     let mut info_map = std::collections::HashMap::new();
-    for inst in metadata.instantiations.iter() {
+    for inst in block.instantiations.iter() {
         if inst.kind == InstantiationKind::Extern {
             let foreign_function = parent
                 .get_fn(&inst.block)
@@ -1715,44 +1876,27 @@ fn build_instantiation_info(
             );
             continue;
         }
-        let (callee_fn, callee_meta) = prior_blocks
+        let callee = prior_blocks
             .get(&inst.block)
             .expect("prior block missing after check");
-        let mut input_types = std::collections::HashMap::new();
-        for p in callee_fn.params.iter() {
-            input_types.insert(p.name.clone(), p.ty.clone());
-        }
-        let mut output_types = std::collections::HashMap::new();
-        if callee_meta.output_names.is_empty() {
-            // no outputs
-        } else if callee_meta.output_names.len() == 1 {
-            output_types.insert(
-                callee_meta.output_names[0].clone(),
-                callee_fn.ret_ty.clone(),
-            );
-        } else {
-            match &callee_fn.ret_ty {
-                Type::Tuple(tys) => {
-                    if tys.len() != callee_meta.output_names.len() {
-                        return Err(ValidationError::BlockOutputArityMismatch {
-                            func: callee_fn.name.clone(),
-                            expected: callee_meta.output_names.len(),
-                            actual: tys.len(),
-                        });
-                    }
-                    for (name, ty) in callee_meta.output_names.iter().zip(tys.iter()) {
-                        output_types.insert(name.clone(), (**ty).clone());
-                    }
-                }
-                _ => {
-                    return Err(ValidationError::BlockOutputArityMismatch {
-                        func: callee_fn.name.clone(),
-                        expected: callee_meta.output_names.len(),
-                        actual: 1,
-                    });
-                }
-            }
-        }
+        let input_types = callee
+            .input_ports()
+            .map(|port| {
+                (
+                    callee.port_name(port).to_string(),
+                    callee.port_type(port).clone(),
+                )
+            })
+            .collect();
+        let output_types = callee
+            .output_ports()
+            .map(|port| {
+                (
+                    callee.port_name(port).to_string(),
+                    callee.port_type(port).clone(),
+                )
+            })
+            .collect();
         info_map.insert(
             inst.name.clone(),
             InstantiationInfo {
@@ -1803,6 +1947,129 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
     fn valid_resettable_register_passes_structural_validation() {
         let package = Parser::new(VALID_REGISTER_BLOCK).parse_package().unwrap();
         assert_eq!(validate_package(&package), Ok(()));
+    }
+
+    /// Mutates an otherwise valid block without letting the parser preempt
+    /// checks.
+    fn verify_mutated_register_block(
+        mutate: impl FnOnce(&mut Block),
+    ) -> Result<(), ValidationError> {
+        let mut package = Parser::new(VALID_REGISTER_BLOCK).parse_package().unwrap();
+        let PackageMember::Block(block) = &mut package.members[0] else {
+            unreachable!()
+        };
+        mutate(block);
+        validate_package(&package)
+    }
+
+    #[test]
+    fn block_declarations_require_unique_resources_clock_writes_and_typed_resets() {
+        let check = |result, reason: &str| {
+            assert_eq!(
+                result,
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "register_block".to_string(),
+                    reason: reason.to_string(),
+                })
+            )
+        };
+        check(
+            verify_mutated_register_block(|block| {
+                block
+                    .ports
+                    .retain(|port| !matches!(port, BlockPort::Clock(_)));
+            }),
+            "registers require a clock port",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                block.registers.push(block.registers[0].clone());
+            }),
+            "duplicate register 'state'",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                block.registers[0].reset_value = Some(crate::IrValue::make_ubits(7, 0).unwrap());
+            }),
+            "reset value for register 'state' has type bits[7], expected bits[8]",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                let node = block
+                    .nodes
+                    .iter_mut()
+                    .find(|node| matches!(node.payload, NodePayload::RegisterWrite { .. }))
+                    .unwrap();
+                node.payload = NodePayload::Tuple(Vec::new());
+            }),
+            "register 'state' has no write",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                let instance = crate::ir::Instantiation {
+                    name: "child".to_string(),
+                    block: "target".to_string(),
+                    kind: InstantiationKind::Block,
+                };
+                block.instantiations = vec![instance.clone(), instance];
+            }),
+            "duplicate instantiation 'child'",
+        );
+    }
+
+    #[test]
+    fn invalid_port_lists_and_duplicate_output_ids_are_rejected() {
+        let check = |result: Result<(), ValidationError>, expected: &str| {
+            let Err(ValidationError::NodeSemanticViolation { reason, .. }) = result else {
+                panic!("expected a port invariant failure: {result:?}")
+            };
+            assert_eq!(reason, expected);
+        };
+        check(
+            verify_mutated_register_block(|block| {
+                let port = block.input_ports().next().unwrap();
+                block.ports.push(BlockPort::Input(port));
+            }),
+            "block port is listed more than once",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                block
+                    .ports
+                    .retain(|port| !matches!(port, BlockPort::Output(_)));
+            }),
+            "port node is missing from the block interface",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                block
+                    .ports
+                    .push(BlockPort::Output(NodeRef { index: usize::MAX }));
+            }),
+            "block port references a missing node",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                let output = block.output_ports().next().unwrap();
+                for port in &mut block.ports {
+                    if *port == BlockPort::Output(output) {
+                        *port = BlockPort::Input(output);
+                    }
+                }
+            }),
+            "block port direction does not match its node",
+        );
+        assert_eq!(
+            verify_mutated_register_block(|block| {
+                let output = block.output_ports().next().unwrap();
+                let input = block.input_ports().next().unwrap();
+                block.get_node_mut(output).text_id = block.get_node(input).text_id;
+            }),
+            Err(ValidationError::DuplicateTextId {
+                func: "register_block".to_string(),
+                text_id: 1
+            })
+        );
     }
 
     #[test]
@@ -1871,24 +2138,34 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
     }
 
     #[test]
-    fn resettable_register_without_block_metadata_is_allowed_before_lowering() {
+    fn resettable_register_requires_a_declared_block_reset_port() {
         let ir = VALID_REGISTER_BLOCK.replace(
             "  #![reset(port=\"rst\", asynchronous=false, active_low=false)]\n",
             "",
         );
         let package = Parser::new(&ir).parse_package().unwrap();
-        assert_eq!(validate_package(&package), Ok(()));
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::BlockInvariantViolation {
+                block: "register_block".to_string(),
+                reason: "register 'state' has a reset value but the block has no reset port"
+                    .to_string(),
+            })
+        );
     }
 
     #[test]
     fn block_reset_metadata_requires_a_single_bit_input() {
-        let missing = VALID_REGISTER_BLOCK.replace("port=\"rst\"", "port=\"missing\"");
-        let package = Parser::new(&missing).parse_package().unwrap();
+        let mut package = Parser::new(VALID_REGISTER_BLOCK).parse_package().unwrap();
+        let PackageMember::Block(block) = &mut package.members[0] else {
+            unreachable!()
+        };
+        block.reset.as_mut().unwrap().port = block.get_input_port("data").unwrap();
         assert_eq!(
             validate_package(&package),
             Err(ValidationError::InvalidBlockResetPort {
                 block: "register_block".to_owned(),
-                port: "missing".to_owned(),
+                port: "data".to_owned(),
             })
         );
     }
@@ -2133,22 +2410,24 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
             pos: None,
         };
         let f = ir::Fn {
-            name: "f".to_string(),
+            graph: ir::NodeGraph {
+                name: "f".to_string(),
+                nodes: vec![
+                    ir::Node {
+                        text_id: 0,
+                        name: Some("reserved_zero_node".to_string()),
+                        ty: ir::Type::nil(),
+                        payload: ir::NodePayload::Nil,
+                        pos: None,
+                    },
+                    lit_node,
+                ],
+                outer_attrs: Vec::new(),
+                inner_attrs: Vec::new(),
+            },
             params: Vec::new(),
             ret_ty: ir::Type::Bits(8),
-            nodes: vec![
-                ir::Node {
-                    text_id: 0,
-                    name: Some("reserved_zero_node".to_string()),
-                    ty: ir::Type::nil(),
-                    payload: ir::NodePayload::Nil,
-                    pos: None,
-                },
-                lit_node,
-            ],
             ret_node_ref: Some(ir::NodeRef { index: 1 }),
-            outer_attrs: Vec::new(),
-            inner_attrs: Vec::new(),
         };
         pkg.members.push(ir::PackageMember::Function(f.clone()));
         let fref = pkg.get_top_fn().unwrap();

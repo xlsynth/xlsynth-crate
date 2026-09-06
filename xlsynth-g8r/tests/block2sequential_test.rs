@@ -98,6 +98,61 @@ top block top(a: bits[1]) {
 }
 
 #[test]
+fn lowers_interleaved_input_nodes_and_a_single_tuple_output_port() {
+    let block_ir = r#"package aggregate
+
+top block top(a: bits[2], out: (bits[2], bits[3]), b: bits[3]) {
+  a: bits[2] = input_port(name=a, id=11)
+  unused: bits[1] = literal(value=0, id=12)
+  b: bits[3] = input_port(name=b, id=21)
+  pair: (bits[2], bits[3]) = tuple(a, b, id=31)
+  out: () = output_port(pair, name=out, id=41)
+}
+"#;
+    let design = lower(block_ir);
+    assert_eq!(design.inputs.len(), 2);
+    assert_eq!(design.outputs.len(), 1);
+    assert_eq!(design.transition.outputs[0].name, "out");
+    for a in 0..4 {
+        for b in 0..8 {
+            let result = gate_sim::eval(
+                &design.transition,
+                &[
+                    IrBits::make_ubits(2, a).unwrap(),
+                    IrBits::make_ubits(3, b).unwrap(),
+                ],
+                Collect::None,
+            );
+            assert_eq!(
+                result.outputs,
+                vec![IrBits::make_ubits(5, (a << 3) | b).unwrap()]
+            );
+        }
+    }
+}
+
+#[test]
+fn output_port_unit_values_remain_usable_by_graph_nodes() {
+    let block_ir = r#"package output_unit
+
+top block top(x: bits[1], probe: bits[1], out: ((), bits[1])) {
+  x: bits[1] = input_port(name=x, id=1)
+  probe: () = output_port(x, name=probe, id=2)
+  pair: ((), bits[1]) = tuple(probe, x, id=3)
+  out: () = output_port(pair, name=out, id=4)
+}
+"#;
+    let design = lower(block_ir);
+    for value in [false, true] {
+        let result = gate_sim::eval(&design.transition, &[IrBits::bool(value)], Collect::None);
+        assert_eq!(
+            result.outputs,
+            vec![IrBits::bool(value), IrBits::bool(value)]
+        );
+    }
+}
+
+#[test]
 fn lowers_register_load_enable_and_synchronous_reset_into_effective_d() {
     let block_ir = r#"package pipeline
 
@@ -201,7 +256,7 @@ top block pipe(clk: clock, rst: bits[1], data: bits[8], le: bits[1], out: bits[8
 fn lowers_registers_after_inlining_block_instantiations() {
     let block_ir = r#"package hierarchical
 
-block stage(data: bits[1], out: bits[1]) {
+block stage(clk: clock, data: bits[1], out: bits[1]) {
   reg state(bits[1])
   data: bits[1] = input_port(name=data, id=1)
   state_q: bits[1] = register_read(register=state, id=2)
@@ -373,7 +428,7 @@ top block top(clk: clock, rst: bits[1], data: bits[1], out: bits[1]) {
         block_ir_to_sequential_gate_fn(block_ir, GatifyOptions::all_opts_disabled()).unwrap_err();
     assert_eq!(
         error,
-        "block2sequential: register 'state' has a reset write but the block has no reset metadata"
+        "parse block IR: ValidationError: block 'top' violates a resource invariant: register 'state' has a reset value but the block has no reset port"
     );
 }
 

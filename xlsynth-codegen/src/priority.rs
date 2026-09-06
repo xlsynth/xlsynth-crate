@@ -2,7 +2,7 @@
 
 //! Shared casez helpers for leading-bit classification and normalization.
 
-use xlsynth_pir::ir::{Fn, Node, NodePayload, NodeRef, Type};
+use xlsynth_pir::ir::{Node, NodeGraph, NodePayload, NodeRef, Type};
 use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::{Expr, LogicRef};
 
@@ -42,7 +42,10 @@ enum PriorityKind {
 
 impl BlockEmitter<'_, '_> {
     /// Emits each needed helper once, before its callers and pipeline sections.
-    pub(crate) fn emit_priority_helpers(&mut self, function: &Fn) -> Result<(), BlockCodegenError> {
+    pub(crate) fn emit_priority_helpers(
+        &mut self,
+        function: &NodeGraph,
+    ) -> Result<(), BlockCodegenError> {
         for node in &function.nodes {
             let Some((helper, _)) = PriorityHelper::for_node(function, node) else {
                 continue;
@@ -148,14 +151,14 @@ impl BlockEmitter<'_, '_> {
         &mut self,
         node_ref: NodeRef,
     ) -> Result<Expr, BlockCodegenError> {
-        let (helper, arg) = PriorityHelper::for_node(self.func, self.func.get_node(node_ref))
+        let (helper, arg) = PriorityHelper::for_node(self.block, self.block.get_node(node_ref))
             .expect("priority operation has a representable result");
         if helper.input_width == 0 {
             return self.priority_result(helper, None, None);
         }
         let mut arguments = vec![self.required_value(arg)?.expr];
         if let NodePayload::PrioritySel { cases, default, .. } =
-            &self.func.get_node(node_ref).payload
+            &self.block.get_node(node_ref).payload
         {
             for operand in cases.iter().chain(default.iter()) {
                 arguments.push(self.required_value(*operand)?.expr);
@@ -259,7 +262,7 @@ fn count_bits(width: usize, value: usize) -> IrBits {
 
 impl PriorityHelper {
     /// Extracts the specialization parameters and operand of a priority node.
-    fn for_node(function: &Fn, node: &Node) -> Option<(Self, NodeRef)> {
+    fn for_node(function: &NodeGraph, node: &Node) -> Option<(Self, NodeRef)> {
         if node.ty.bit_count() == 0 {
             return None;
         }

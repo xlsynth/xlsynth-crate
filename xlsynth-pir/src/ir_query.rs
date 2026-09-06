@@ -464,7 +464,7 @@ fn validate_operand_match_mode(expr: &QueryExpr) -> Result<(), String> {
 }
 
 /// Finds all node references in `f` that satisfy the query expression.
-pub fn find_matching_nodes(f: &ir::Fn, query: &QueryExpr) -> Vec<ir::NodeRef> {
+pub fn find_matching_nodes(f: &ir::NodeGraph, query: &QueryExpr) -> Vec<ir::NodeRef> {
     validate_query(query).expect("invalid query AST");
     let users = ir_utils::compute_users(f);
     let mut matches = Vec::new();
@@ -480,7 +480,7 @@ pub fn find_matching_nodes(f: &ir::Fn, query: &QueryExpr) -> Vec<ir::NodeRef> {
 
 /// Returns true if `query` matches the given node. This is expensive: O(n) with
 /// the number of nodes in the function.
-pub fn matches_node(f: &ir::Fn, query: &QueryExpr, node_ref: ir::NodeRef) -> bool {
+pub fn matches_node(f: &ir::NodeGraph, query: &QueryExpr, node_ref: ir::NodeRef) -> bool {
     validate_query(query).expect("invalid query AST");
     let users = ir_utils::compute_users(f);
     let bindings = HashMap::new();
@@ -501,7 +501,7 @@ pub(crate) type QueryBindings = HashMap<String, Binding>;
 /// Returns all binding environments that satisfy `query` at `node_ref`.
 pub(crate) fn find_root_query_bindings(
     query: &QueryExpr,
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     users: &Users,
     node_ref: ir::NodeRef,
 ) -> Vec<QueryBindings> {
@@ -514,7 +514,7 @@ pub(crate) fn find_root_query_bindings(
 /// starting from `bindings`.
 fn match_solutions(
     expr: &QueryExpr,
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     users: &Users,
     node_ref: ir::NodeRef,
     bindings: &Bindings,
@@ -667,7 +667,7 @@ fn match_solutions(
 fn match_matcher_args_solutions(
     matcher: &MatcherExpr,
     operands: &[ir::NodeRef],
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     users: &Users,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -866,8 +866,8 @@ fn literal_is_mask_low(value: &IrValue, low_bits: usize) -> bool {
     true
 }
 
-fn eval_numeric_expr(expr: &NumericExpr, f: &ir::Fn, bindings: &Bindings) -> Option<usize> {
-    fn eval_inner(expr: &NumericExpr, f: &ir::Fn, bindings: &Bindings) -> Option<i64> {
+fn eval_numeric_expr(expr: &NumericExpr, f: &ir::NodeGraph, bindings: &Bindings) -> Option<usize> {
+    fn eval_inner(expr: &NumericExpr, f: &ir::NodeGraph, bindings: &Bindings) -> Option<i64> {
         match expr {
             NumericExpr::Number(number) => i64::try_from(*number).ok(),
             NumericExpr::Width(placeholder) => {
@@ -906,7 +906,7 @@ fn eval_numeric_expr(expr: &NumericExpr, f: &ir::Fn, bindings: &Bindings) -> Opt
 fn match_args_solutions(
     args: &[QueryExpr],
     operands: &[ir::NodeRef],
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     users: &Users,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -943,7 +943,7 @@ fn match_args_solutions(
 fn match_args_with_ellipsis_solutions(
     pattern: &[QueryExpr],
     operands: &[ir::NodeRef],
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     users: &Users,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -956,7 +956,7 @@ fn match_args_with_ellipsis_solutions(
     fn go(
         pattern: &[QueryExpr],
         operands: &[ir::NodeRef],
-        f: &ir::Fn,
+        f: &ir::NodeGraph,
         users: &Users,
         pi: usize,
         oi: usize,
@@ -1040,7 +1040,7 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
     }
 }
 
-fn matches_msb_slice(f: &ir::Fn, payload: &ir::NodePayload) -> bool {
+fn matches_msb_slice(f: &ir::NodeGraph, payload: &ir::NodePayload) -> bool {
     match payload {
         ir::NodePayload::BitSlice { arg, start, width } => {
             if *width != 1 {
@@ -1059,7 +1059,7 @@ fn matches_msb_slice(f: &ir::Fn, payload: &ir::NodePayload) -> bool {
 fn match_named_args_solutions(
     named_args: &[NamedArg],
     payload: &ir::NodePayload,
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     users: &Users,
     node_ref: ir::NodeRef,
     bindings: &Bindings,
@@ -1156,7 +1156,7 @@ fn match_named_args_solutions(
 fn match_numeric_named_arg(
     value: &NamedArgValue,
     actual: usize,
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     match value {
@@ -1219,7 +1219,7 @@ fn match_select_named_arg(
     selector: ir::NodeRef,
     cases: &[ir::NodeRef],
     default: &Option<ir::NodeRef>,
-    f: &ir::Fn,
+    f: &ir::NodeGraph,
     users: &Users,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -1274,10 +1274,9 @@ fn match_select_named_arg(
 mod tests {
     use super::*;
     use crate::ir;
-    use crate::ir::PackageMember;
     use crate::ir_parser::Parser;
 
-    fn node_ref_by_textual_id(f: &ir::Fn, id: &str) -> ir::NodeRef {
+    fn node_ref_by_textual_id(f: &ir::NodeGraph, id: &str) -> ir::NodeRef {
         f.nodes
             .iter()
             .enumerate()
@@ -1641,7 +1640,7 @@ fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
     fn find_matches_register_read_write_name_named_arg() {
         let pkg_text = r#"package test
 
-block top(x: bits[1], y: bits[1]) {
+block top(clk: clock, x: bits[1], y: bits[1]) {
   reg r(bits[1])
   x: bits[1] = input_port(name=x, id=1)
   r_q: bits[1] = register_read(register=r, id=2)
@@ -1651,9 +1650,7 @@ block top(x: bits[1], y: bits[1]) {
 "#;
         let mut parser = Parser::new(pkg_text);
         let pkg = parser.parse_and_validate_package().expect("parse package");
-        let PackageMember::Block { func: f, .. } = pkg.get_block("top").unwrap() else {
-            panic!("expected block");
-        };
+        let f = pkg.get_block("top").unwrap();
 
         let read_query = parse_query("register_read(name=\"r_q\")").unwrap();
         let read_matches = find_matching_nodes(f, &read_query);

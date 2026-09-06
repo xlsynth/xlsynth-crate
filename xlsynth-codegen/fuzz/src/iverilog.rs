@@ -16,29 +16,28 @@ use crate::{INPUT_SAMPLE_COUNT, deterministic_rng, top_block};
 
 /// Derives testbench bindings from block IR without parsing the emitted RTL.
 pub fn interface(package: &Package, module_name: Option<&str>) -> Interface {
-    let (block, metadata) = top_block(package);
-    let types = block_output_types(block, metadata);
+    let block = top_block(package);
+    let types = block_output_types(block);
     Interface {
         module: module_name.unwrap_or(&block.name).to_owned(),
         inputs: block
-            .params
-            .iter()
+            .input_ports()
             .map(|p| Port {
-                name: p.name.clone(),
-                width: p.ty.bit_count(),
+                name: block.port_name(p).to_string(),
+                width: block.port_type(p).bit_count(),
             })
             .collect(),
-        outputs: metadata
-            .output_names
-            .iter()
+        outputs: block
+            .output_ports()
+            .map(|port| block.port_name(port))
             .zip(types)
             .map(|(name, ty)| Port {
-                name: name.clone(),
+                name: name.to_string(),
                 width: ty.bit_count(),
             })
             .collect(),
-        clock: metadata.clock_port_name.clone(),
-        state: metadata
+        clock: block.clock_port_name().map(str::to_string),
+        state: block
             .registers
             .iter()
             .filter(|r| r.ty.bit_count() != 0)

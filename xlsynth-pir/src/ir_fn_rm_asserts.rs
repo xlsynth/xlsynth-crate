@@ -143,7 +143,7 @@ fn resolve_target_fn_name(
                 .iter()
                 .filter_map(|member| match member {
                     PackageMember::Function(f) => Some(f.name.clone()),
-                    PackageMember::Block { .. } => None,
+                    PackageMember::Block(_) => None,
                 })
                 .collect();
             match function_names.as_slice() {

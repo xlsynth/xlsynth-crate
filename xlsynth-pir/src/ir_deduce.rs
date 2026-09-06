@@ -133,7 +133,8 @@ where
 {
     match payload {
         NodePayload::Nil => Ok(Some(Type::nil())),
-        NodePayload::GetParam(_) => Ok(None),
+        NodePayload::GetParam(_) | NodePayload::InputPort { .. } => Ok(None),
+        NodePayload::OutputPort { .. } => Ok(Some(Type::nil())),
 
         NodePayload::Tuple(_) => {
             let mut elems: Vec<Box<Type>> = Vec::with_capacity(operand_types.len());

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::IrPackage as XlsIrPackage;
-use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser as PirParser;
 use xlsynth_pir::ir_verify;
 use xlsynth_pir::ir_verify_parity::{categorize_pir_error, categorize_xls_error_text};
@@ -26,11 +25,12 @@ fn ir_text_has_extension_ops(ir_text: &str) -> bool {
     let Ok(pkg) = p.parse_package() else {
         return false;
     };
-    pkg.members.iter().any(|member| match member {
-        ir::PackageMember::Function(f) => f.nodes.iter().any(|n| n.payload.is_extension_op()),
-        ir::PackageMember::Block { func, .. } => {
-            func.nodes.iter().any(|n| n.payload.is_extension_op())
-        }
+    pkg.members.iter().any(|member| {
+        member
+            .graph()
+            .nodes
+            .iter()
+            .any(|n| n.payload.is_extension_op())
     })
 }
 

@@ -8,7 +8,6 @@ use fixtures::*;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
-use xlsynth_pir::ir::PackageMember;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 
@@ -271,10 +270,12 @@ fn block2sv_extension_operators_match_pir_evaluation() {
         let package = Parser::new(&fixture.source)
             .parse_package()
             .expect("parse extension package");
-        let Some(PackageMember::Block { func, metadata }) = package.get_top_block() else {
+        let Some(block) = package.get_top_block() else {
             panic!("extension fixture has no top block");
         };
-        assert_eq!(metadata.output_names.len(), 1);
+        assert_eq!(block.output_ports().count(), 1);
+        let function = xlsynth_pir::block2fn::combinational_block_to_fn(block).unwrap();
+        let func = &function;
         let generated = execute_golden_fixture(&fixture).expect("generate extension RTL");
 
         let output_width = func.ret_ty.bit_count();
@@ -292,7 +293,10 @@ fn block2sv_extension_operators_match_pir_evaluation() {
             ));
             connections.push(format!(".{}(stimulus_{})", parameter.name, parameter.name));
         }
-        connections.push(format!(".{}(actual)", metadata.output_names[0]));
+        connections.push(format!(
+            ".{}(actual)",
+            block.port_name(block.output_ports().next().unwrap())
+        ));
         testbench.push_str(&format!(
             "  {} dut({});\n  initial begin\n",
             func.name,

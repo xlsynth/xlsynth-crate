@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir::{Fn as IrFn, NodePayload, Package, PackageMember, ParamId};
+use crate::ir::{Fn as IrFn, NodePayload, Package, ParamId};
 
 /// A checked ID allocation or rebasing operation exceeded the ID space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,41 +54,33 @@ pub fn rebase_fn_ids_in_place(f: &mut IrFn, base: usize) -> Result<(), IdRebaseE
     Ok(())
 }
 
-/// Finds the highest allocated/emitted ID, including synthetic block ports.
-///
-/// Block output IDs can live only in metadata. Missing output IDs are emitted
-/// consecutively after that block's highest node ID, so reserve those too.
-pub fn package_max_emitted_node_id(package: &Package) -> Result<usize, IdRebaseError> {
-    let mut highest = 0;
-    for member in &package.members {
-        let (function, metadata) = match member {
-            PackageMember::Function(function) => (function, None),
-            PackageMember::Block { func, metadata } => (func, Some(metadata)),
-        };
-        let node_max = function
-            .nodes
-            .iter()
-            .map(|node| node.text_id)
-            .max()
-            .unwrap_or(0);
-        highest = highest.max(node_max);
-        if let Some(metadata) = metadata {
-            for id in metadata
-                .input_port_ids
-                .values()
-                .chain(metadata.output_port_ids.values())
-            {
-                highest = highest.max(*id);
-            }
-            let missing_outputs = metadata
-                .output_names
-                .iter()
-                .filter(|name| !metadata.output_port_ids.contains_key(*name))
-                .count();
-            highest = highest.max(node_max.checked_add(missing_outputs).ok_or(IdRebaseError)?);
+/// Finds the highest allocated ID across all function and block nodes.
+pub fn package_max_emitted_node_id(package: &Package) -> usize {
+    package
+        .members
+        .iter()
+        .flat_map(|member| &member.graph().nodes)
+        .map(|node| node.text_id)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Rebases all block node IDs without changing graph or interface references.
+pub fn rebase_block_ids_in_place(
+    block: &mut crate::ir::Block,
+    base: usize,
+) -> Result<(), IdRebaseError> {
+    for node in &block.nodes {
+        if !matches!(node.payload, NodePayload::Nil) {
+            node.text_id.checked_add(base).ok_or(IdRebaseError)?;
         }
     }
-    Ok(highest)
+    for node in &mut block.nodes {
+        if !matches!(node.payload, NodePayload::Nil) {
+            node.text_id += base;
+        }
+    }
+    Ok(())
 }
 
 /// Returns a clone of `f` with all ParamIds and node text ids rebased by
@@ -111,10 +103,61 @@ pub fn rebase_fn_ids(f: &IrFn, base: usize) -> IrFn {
 
 #[cfg(test)]
 mod tests {
-    use super::{rebase_fn_ids, rebase_fn_ids_in_place};
+    use super::{rebase_block_ids_in_place, rebase_fn_ids, rebase_fn_ids_in_place};
     use crate::ir::{self, NodePayload};
     use crate::ir_parser::Parser;
     use crate::ir_verify::verify_function_in_package;
+
+    #[test]
+    fn block_rebase_includes_port_nodes_and_is_atomic() {
+        let mut block = crate::ir::Block::new("b");
+        let input = block.add_input_port("x", crate::ir::Type::Bits(8)).unwrap();
+        let output = block.add_output_port("y", input).unwrap();
+        let original = block.to_string();
+        let nodes_ptr = block.nodes.as_ptr();
+        assert!(rebase_block_ids_in_place(&mut block, usize::MAX).is_err());
+        assert_eq!(block.to_string(), original);
+        rebase_block_ids_in_place(&mut block, 10).unwrap();
+        assert_eq!(block.nodes.as_ptr(), nodes_ptr);
+        assert_eq!(block.get_node(input).text_id, 11);
+        assert_eq!(block.get_node(output).text_id, 12);
+        assert_eq!(block.nodes[0].text_id, 0);
+        assert_eq!(block.output_value(output), input);
+        assert_eq!(
+            block.ports,
+            vec![
+                crate::ir::BlockPort::Input(input),
+                crate::ir::BlockPort::Output(output)
+            ]
+        );
+    }
+
+    #[test]
+    fn package_id_validation_includes_block_output_nodes() {
+        let mut builder = crate::FnBuilder::new("f");
+        let parameter = builder.param("x", crate::ir::Type::Bits(8)).unwrap();
+        let function = builder.build(parameter).unwrap();
+        let mut block = crate::ir::Block::new("b");
+        let input = block.add_input_port("x", crate::ir::Type::Bits(8)).unwrap();
+        let output = block.add_output_port("y", input).unwrap();
+        rebase_block_ids_in_place(&mut block, 1).unwrap();
+        let mut package = crate::ir::Package {
+            name: "p".to_string(),
+            file_table: crate::ir::FileTable::new(),
+            top: None,
+            members: vec![
+                crate::ir::PackageMember::Function(function),
+                crate::ir::PackageMember::Block(block),
+            ],
+        };
+        crate::ir_verify::verify_package(&package).unwrap();
+        package
+            .get_block_mut("b")
+            .unwrap()
+            .get_node_mut(output)
+            .text_id = 1;
+        assert!(crate::ir_verify::verify_package(&package).is_err());
+    }
 
     fn parse_function(ir: &str) -> ir::Fn {
         let mut parser = Parser::new(ir);

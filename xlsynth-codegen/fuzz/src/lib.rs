@@ -18,7 +18,7 @@ use rand::{Rng, SeedableRng};
 use xlsynth::external_tool::ToolError;
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::{BlockMetadata, Fn, Package, PackageMember};
+use xlsynth_pir::ir::{Block, Package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_random::{
     ArrayAssumptionMode, BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions,
@@ -161,12 +161,11 @@ pub fn check_trace(
     iverilog::assert_rtl_trace(package, &rtl, options.module_name.as_deref(), trace)
 }
 
-/// Returns the selected generated block and its structural metadata.
-pub fn top_block(package: &Package) -> (&Fn, &BlockMetadata) {
-    let Some(PackageMember::Block { func, metadata }) = package.get_top_block() else {
-        panic!("generated package should have a top block:\n{package}");
-    };
-    (func, metadata)
+/// Returns the selected generated block.
+pub fn top_block(package: &Package) -> &Block {
+    package
+        .get_top_block()
+        .unwrap_or_else(|| panic!("generated package should have a top block:\n{package}"))
 }
 
 /// Derives deterministic value stimuli from the graph, not fuzzer entropy.
@@ -175,28 +174,25 @@ pub fn deterministic_rng(ir: &str) -> StdRng {
 }
 
 /// Draws one correctly typed value for each visible generated input port.
-pub fn generate_inputs(block: &Fn, rng: &mut StdRng) -> Vec<IrValue> {
+pub fn generate_inputs(block: &Block, rng: &mut StdRng) -> Vec<IrValue> {
     block
-        .params
-        .iter()
-        .map(|param| generate_uniform_value_with_rng(rng, &param.ty))
+        .input_ports()
+        .map(|param| generate_uniform_value_with_rng(rng, block.port_type(param)))
         .collect()
 }
 
 /// Draws a reset-aware deterministic input vector for one clock cycle.
 pub fn generate_cycle_inputs(
-    block: &Fn,
-    metadata: &BlockMetadata,
+    block: &Block,
     rng: &mut StdRng,
     cycle: usize,
     require_initial_reset: bool,
 ) -> Vec<IrValue> {
     block
-        .params
-        .iter()
+        .input_ports()
         .map(|param| {
-            if let Some(reset) = &metadata.reset
-                && param.name == reset.port_name
+            if let Some(reset) = &block.reset
+                && param == reset.port
             {
                 let asserted = if require_initial_reset {
                     cycle == 0
@@ -213,7 +209,7 @@ pub fn generate_cycle_inputs(
                 return IrValue::make_ubits(1, u64::from(high))
                     .expect("reset signal should fit in bits[1]");
             }
-            generate_uniform_value_with_rng(rng, &param.ty)
+            generate_uniform_value_with_rng(rng, block.port_type(param))
         })
         .collect()
 }

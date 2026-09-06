@@ -2003,11 +2003,12 @@ fn rewrite_add_xor_and_to_or(f: &mut ir::Fn) -> usize {
             continue;
         };
 
+        let result_type = f.get_node_ty(NodeRef { index: node_index }).clone();
         ir_utils::replace_node_payload(
             f,
             NodeRef { index: node_index },
             NodePayload::Nary(NaryOp::Or, vec![a, b]),
-            Some(f.get_node_ty(NodeRef { index: node_index }).clone()),
+            Some(result_type),
         )
         .expect("prep_for_gatify: rewriting add(xor, and) to or failed");
         rewrites += 1;

@@ -12,10 +12,11 @@ use rand::SeedableRng;
 use std::path::Path;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_pir::IrValue;
+use xlsynth_pir::block2fn::{combinational_block_to_fn, replace_combinational_block_logic};
 use xlsynth_pir::ir::Type;
-use xlsynth_pir::ir::{self as ir_mod, BlockMetadata, MemberType, PackageMember};
+use xlsynth_pir::ir::{self as ir_mod, Block};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
-use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
+use xlsynth_pir::ir_parser::{self, emit_block};
 use xlsynth_pir::random_inputs::{
     BitValuePattern, generate_biased_arguments_with_rng, generate_pattern_arguments,
 };
@@ -118,21 +119,12 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     };
 
     // If both packages contain at least one block member, operate on blocks.
-    if let (Some((old_block_fn, old_ports)), Some((new_block_fn, new_ports))) = (
+    if let (Some(old_block), Some(new_block)) = (
         select_block_from_package(&old_pkg, old_ir_top.as_deref().map(|x| x.as_str())),
         select_block_from_package(&new_pkg, new_ir_top.as_deref().map(|x| x.as_str())),
     ) {
         return handle_ir_localized_eco_blocks_in_packages(
-            matches,
-            old_path,
-            new_path,
-            &old_text,
-            &new_text,
-            old_block_fn,
-            old_ports,
-            new_block_fn,
-            new_ports,
-            solver,
+            matches, old_path, new_path, &old_text, &new_text, old_block, new_block, solver,
             tool_path,
         );
     }
@@ -252,10 +244,10 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
 
     // Run local validations on the 'new' function (mirrors patched IR) to catch
     // common issues like duplicate IDs before invoking the external toolchain.
-    if let Err(e) = ir_verify::verify_fn_unique_node_ids(new_fn) {
+    if let Err(e) = ir_verify::verify_graph_unique_node_ids(new_fn) {
         println!("  WARNING: verification failed (duplicate IDs): {}", e);
     }
-    if let Err(e) = ir_verify::verify_fn_operand_indices_in_bounds(new_fn) {
+    if let Err(e) = ir_verify::verify_graph_operand_indices_in_bounds(new_fn) {
         println!("  WARNING: verification failed (operand indices): {}", e);
     }
 
@@ -382,58 +374,14 @@ fn truncate_for_cli(s: &str, max_len: usize) -> String {
     format!("{} ... [{} bytes truncated]", &s[..cut], s.len() - cut)
 }
 
-fn get_output_types_for_emission(f: &ir_mod::Fn, expected_outputs: usize) -> Vec<ir_mod::Type> {
-    if expected_outputs == 0 {
-        return Vec::new();
-    }
-    if let Some(ret_nr) = f.ret_node_ref {
-        let ret_node = f.get_node(ret_nr);
-        if expected_outputs == 1 {
-            return vec![ret_node.ty.clone()];
-        }
-        match &ret_node.payload {
-            ir_mod::NodePayload::Tuple(_elems) => {
-                if let ir_mod::Type::Tuple(tys) = &ret_node.ty {
-                    return tys.iter().map(|t| (**t).clone()).collect();
-                }
-                vec![ret_node.ty.clone()]
-            }
-            _ => vec![ret_node.ty.clone()],
-        }
-    } else {
-        Vec::new()
-    }
-}
-
 fn select_block_from_package<'a>(
     pkg: &'a ir_mod::Package,
     name_opt: Option<&str>,
-) -> Option<(&'a ir_mod::Fn, &'a BlockMetadata)> {
+) -> Option<&'a Block> {
     if let Some(name) = name_opt {
-        for m in pkg.members.iter() {
-            if let PackageMember::Block { func, metadata } = m {
-                if func.name == name {
-                    return Some((func, metadata));
-                }
-            }
-        }
-        return None;
+        return pkg.get_block(name);
     }
-    if let Some((top_name, MemberType::Block)) = &pkg.top {
-        for m in pkg.members.iter() {
-            if let PackageMember::Block { func, metadata } = m {
-                if &func.name == top_name {
-                    return Some((func, metadata));
-                }
-            }
-        }
-    }
-    for m in pkg.members.iter() {
-        if let PackageMember::Block { func, metadata } = m {
-            return Some((func, metadata));
-        }
-    }
-    None
+    pkg.get_top_block()
 }
 
 fn handle_ir_localized_eco_blocks_in_packages(
@@ -442,16 +390,21 @@ fn handle_ir_localized_eco_blocks_in_packages(
     _new_path: &std::path::Path,
     _old_text: &str,
     _new_text: &str,
-    old_fn: &ir_mod::Fn,
-    old_ports: &BlockMetadata,
-    new_fn: &ir_mod::Fn,
-    new_ports: &BlockMetadata,
+    old_block: &Block,
+    new_block: &Block,
     solver: SolverChoice,
     tool_path: Option<&Path>,
 ) {
     // Summaries (rebase-based): will compute added_count after building
     // applied.
     let added_ops: Vec<AddedOpsSummaryItem> = Vec::new();
+
+    let old_fn = combinational_block_to_fn(old_block).unwrap_or_else(|error| {
+        report_cli_error_and_exit(&error, Some("ir-localized-eco"), vec![])
+    });
+    let new_fn = combinational_block_to_fn(new_block).unwrap_or_else(|error| {
+        report_cli_error_and_exit(&error, Some("ir-localized-eco"), vec![])
+    });
 
     // Prepare output directory.
     let out_dir = if let Some(dir_str) = matches.get_one::<String>("output_dir") {
@@ -470,25 +423,15 @@ fn handle_ir_localized_eco_blocks_in_packages(
 
     // Build patched(old) via structural rebase.
     println!("  Building patched block via structural rebase...");
-    let applied = localized_eco2::compute_localized_eco(old_fn, new_fn);
+    let applied = localized_eco2::compute_localized_eco(&old_fn, &new_fn);
     let added_count: usize = applied.nodes.len().saturating_sub(old_fn.nodes.len());
 
-    // Validate output arity compatibility with old block port info.
-    let applied_out_types = get_output_types_for_emission(&applied, old_ports.output_names.len());
-    if old_ports.output_names.len() != applied_out_types.len() {
-        let msg = format!(
-            "output arity mismatch: old block had output ports {:?}; function outputs are {:?} ({}).",
-            old_ports.output_names,
-            applied_out_types
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>(),
-            applied_out_types.len()
-        );
-        report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![]);
-    }
+    let applied_block = replace_combinational_block_logic(old_block, applied.clone())
+        .unwrap_or_else(|error| {
+            report_cli_error_and_exit(&error, Some("ir-localized-eco"), vec![])
+        });
     println!("  Emitting patched block text...");
-    let patched_block_text = emit_fn_as_block(&applied, None, Some(old_ports), false);
+    let patched_block_text = emit_block(&applied_block, false);
     let patched_ir_path = out_dir.join("patched_old.block.ir");
     std::fs::write(&patched_ir_path, patched_block_text.as_bytes()).unwrap();
     println!("  Patched IR written to: {}", patched_ir_path.display());
@@ -496,8 +439,8 @@ fn handle_ir_localized_eco_blocks_in_packages(
     // Copy old/new for convenience: write ONLY the selected blocks.
     let old_copy_path = out_dir.join("old.ir");
     let new_copy_path = out_dir.join("new.ir");
-    let old_block_text = emit_fn_as_block(old_fn, None, Some(old_ports), false);
-    let new_block_text = emit_fn_as_block(new_fn, None, Some(new_ports), false);
+    let old_block_text = emit_block(old_block, false);
+    let new_block_text = emit_block(new_block, false);
     std::fs::write(&old_copy_path, old_block_text.as_bytes()).unwrap();
     std::fs::write(&new_copy_path, new_block_text.as_bytes()).unwrap();
     println!("  Old IR copied to: {}", old_copy_path.display());

@@ -169,19 +169,21 @@ impl FnBuilder {
         Self {
             id,
             function: ir::Fn {
-                name: name.to_string(),
+                graph: crate::ir::NodeGraph {
+                    name: name.to_string(),
+                    nodes: vec![Node {
+                        text_id: 0,
+                        name: None,
+                        ty: Type::nil(),
+                        payload: NodePayload::Nil,
+                        pos: None,
+                    }],
+                    outer_attrs: Vec::new(),
+                    inner_attrs: Vec::new(),
+                },
                 params: Vec::new(),
                 ret_ty: Type::nil(),
-                nodes: vec![Node {
-                    text_id: 0,
-                    name: None,
-                    ty: Type::nil(),
-                    payload: NodePayload::Nil,
-                    pos: None,
-                }],
                 ret_node_ref: None,
-                outer_attrs: Vec::new(),
-                inner_attrs: Vec::new(),
             },
             names: HashMap::new(),
             callees: BTreeMap::new(),
@@ -390,12 +392,11 @@ impl FnBuilder {
         package: &ir::Package,
     ) -> Result<ir::Fn, BuilderError> {
         check_name(&package.name)?;
-        if package.members.iter().any(|member| match member {
-            ir::PackageMember::Function(function)
-            | ir::PackageMember::Block { func: function, .. } => {
-                function.name == self.function.name
-            }
-        }) {
+        if package
+            .members
+            .iter()
+            .any(|member| member.graph().name == self.function.name)
+        {
             return Err(BuilderError::DuplicateName(self.function.name.clone()));
         }
         self.set_return(return_value)?;
@@ -413,8 +414,7 @@ impl FnBuilder {
         }
         verify_function_in_package(&self.function, package)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        let base = package_max_emitted_node_id(package)
-            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
+        let base = package_max_emitted_node_id(package);
         rebase_fn_ids_in_place(&mut self.function, base)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
         Ok(self.function)

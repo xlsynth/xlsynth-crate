@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use xlsynth_pir::ir::{BlockMetadata, Fn, InstantiationKind, NodePayload, NodeRef};
+use xlsynth_pir::ir::{Block, InstantiationKind, NodePayload};
 use xlsynth_pir::ir_utils::operands;
 
 use crate::BlockCodegenError;
@@ -13,18 +13,16 @@ type OutputDependencies = BTreeMap<String, BTreeSet<String>>;
 
 /// Rejects combinational cycles without treating registered child paths as
 /// feedback.
-pub(crate) fn verify_hierarchy(
-    ordered_blocks: &[(&Fn, &BlockMetadata)],
-) -> Result<(), BlockCodegenError> {
+pub(crate) fn verify_hierarchy(ordered_blocks: &[&Block]) -> Result<(), BlockCodegenError> {
     let mut dependencies = BTreeMap::<&str, OutputDependencies>::new();
 
-    for &(func, metadata) in ordered_blocks {
-        let mut successors = vec![BTreeSet::new(); func.nodes.len()];
-        let mut incoming_counts = vec![0usize; func.nodes.len()];
+    for &block in ordered_blocks {
+        let mut successors = vec![BTreeSet::new(); block.nodes.len()];
+        let mut incoming_counts = vec![0usize; block.nodes.len()];
         let mut instance_inputs = BTreeMap::<(&str, &str), usize>::new();
         let mut instance_outputs = Vec::<(&str, &str, usize)>::new();
 
-        for (index, node) in func.nodes.iter().enumerate() {
+        for (index, node) in block.nodes.iter().enumerate() {
             for operand in operands(&node.payload) {
                 add_edge(&mut successors, &mut incoming_counts, operand.index, index);
             }
@@ -51,14 +49,14 @@ pub(crate) fn verify_hierarchy(
         }
 
         for (instance_name, output_name, output_node) in instance_outputs {
-            let instance = metadata
+            let instance = block
                 .instantiations
                 .iter()
                 .find(|instance| instance.name == instance_name)
                 .ok_or_else(|| {
                     BlockCodegenError::InvalidBlock(format!(
                         "block `{}` references undeclared instance `{instance_name}`",
-                        func.name
+                        block.name
                     ))
                 })?;
             if instance.kind == InstantiationKind::Extern {
@@ -71,7 +69,7 @@ pub(crate) fn verify_hierarchy(
                 dependencies.get(instance.block.as_str()).ok_or_else(|| {
                     BlockCodegenError::InvalidBlock(format!(
                         "block `{}` instantiates child `{}` before its dependencies are available",
-                        func.name, instance.block
+                        block.name, instance.block
                     ))
                 })?;
             let output_dependencies = child_dependencies.get(output_name).ok_or_else(|| {
@@ -101,13 +99,11 @@ pub(crate) fn verify_hierarchy(
             }
         }
 
-        let parameter_indices = func
-            .params
-            .iter()
-            .enumerate()
-            .map(|(index, parameter)| (parameter.id.get_wrapped_id(), index))
+        let input_names = block
+            .input_ports()
+            .map(|node| (node.index, block.port_name(node)))
             .collect::<BTreeMap<_, _>>();
-        let mut node_dependencies = vec![BTreeSet::<usize>::new(); func.nodes.len()];
+        let mut node_dependencies = vec![BTreeSet::<usize>::new(); block.nodes.len()];
         let mut ready = incoming_counts
             .iter()
             .enumerate()
@@ -117,12 +113,8 @@ pub(crate) fn verify_hierarchy(
 
         while let Some(index) = ready.pop_front() {
             visited += 1;
-            if let NodePayload::GetParam(parameter_id) = &func.nodes[index].payload {
-                if let Some(&parameter_index) =
-                    parameter_indices.get(&parameter_id.get_wrapped_id())
-                {
-                    node_dependencies[index].insert(parameter_index);
-                }
+            if input_names.contains_key(&index) {
+                node_dependencies[index].insert(index);
             }
 
             let inherited = std::mem::take(&mut node_dependencies[index]);
@@ -136,14 +128,14 @@ pub(crate) fn verify_hierarchy(
             node_dependencies[index] = inherited;
         }
 
-        if visited != func.nodes.len() {
+        if visited != block.nodes.len() {
             let index = incoming_counts
                 .iter()
                 .enumerate()
                 .find(|&(index, &count)| {
                     count != 0
                         && matches!(
-                            func.nodes[index].payload,
+                            block.nodes[index].payload,
                             NodePayload::InstantiationInput { .. }
                                 | NodePayload::InstantiationOutput { .. }
                         )
@@ -156,7 +148,7 @@ pub(crate) fn verify_hierarchy(
                 })
                 .map(|(index, _)| index)
                 .expect("an unvisited node has a nonzero incoming count");
-            let node = &func.nodes[index];
+            let node = &block.nodes[index];
             let node_name = node
                 .name
                 .clone()
@@ -164,25 +156,22 @@ pub(crate) fn verify_hierarchy(
             return Err(BlockCodegenError::InvalidBlock(format!(
                 "block `{}` contains a combinational cycle through its block hierarchy \
                  at node `{node_name}`",
-                func.name
+                block.name
             )));
         }
 
         let mut outputs = OutputDependencies::new();
-        for (name, node) in metadata
-            .output_names
-            .iter()
-            .zip(output_nodes(func, metadata)?)
-        {
+        for port in block.output_ports() {
+            let node = block.output_value(port);
             outputs.insert(
-                name.clone(),
+                block.port_name(port).to_string(),
                 node_dependencies[node.index]
                     .iter()
-                    .map(|&index| func.params[index].name.clone())
+                    .map(|&index| input_names[&index].to_string())
                     .collect(),
             );
         }
-        dependencies.insert(func.name.as_str(), outputs);
+        dependencies.insert(block.name.as_str(), outputs);
     }
 
     Ok(())
@@ -200,37 +189,9 @@ fn add_edge(
     }
 }
 
-/// Resolves source output nodes in their declared block-port order.
-fn output_nodes(func: &Fn, metadata: &BlockMetadata) -> Result<Vec<NodeRef>, BlockCodegenError> {
-    if metadata.output_names.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let returned = func.ret_node_ref.ok_or_else(|| {
-        BlockCodegenError::InvalidBlock(format!(
-            "block `{}` declares outputs but has no return node",
-            func.name
-        ))
-    })?;
-    if metadata.output_names.len() == 1 {
-        return Ok(vec![returned]);
-    }
-
-    match &func.get_node(returned).payload {
-        NodePayload::Tuple(nodes) if nodes.len() == metadata.output_names.len() => {
-            Ok(nodes.clone())
-        }
-        _ => Err(BlockCodegenError::InvalidBlock(format!(
-            "block `{}` has {} outputs but its return node is not a matching tuple",
-            func.name,
-            metadata.output_names.len()
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use xlsynth_pir::ir::{BlockMetadata, Fn, Package, PackageMember};
+    use xlsynth_pir::ir::{Block, Package, PackageMember};
     use xlsynth_pir::ir_parser::Parser;
 
     use super::verify_hierarchy;
@@ -244,12 +205,12 @@ mod tests {
     }
 
     /// Collects package blocks in their already-verified declaration order.
-    fn ordered_blocks(package: &Package) -> Vec<(&Fn, &BlockMetadata)> {
+    fn ordered_blocks(package: &Package) -> Vec<&Block> {
         package
             .members
             .iter()
             .filter_map(|member| match member {
-                PackageMember::Block { func, metadata } => Some((func, metadata)),
+                PackageMember::Block(block) => Some(block),
                 PackageMember::Function(_) => None,
             })
             .collect()

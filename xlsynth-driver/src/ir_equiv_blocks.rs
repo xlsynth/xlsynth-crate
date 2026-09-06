@@ -4,9 +4,8 @@ use crate::ir_equiv::{IrEquivRequest, IrModule, dispatch_ir_equiv};
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_prover::prover::types::EquivParallelism;
 
-use xlsynth_pir::ir::{
-    self as ir_mod, BlockMetadata, FileTable, MemberType, Package, PackageMember,
-};
+use xlsynth_pir::block2fn::combinational_block_to_fn;
+use xlsynth_pir::ir::{self as ir_mod, Block, FileTable, MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser;
 use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::prover::types::AssertionSemantics;
@@ -93,35 +92,14 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
     fn select_block_from_package<'a>(
         pkg: &'a ir_mod::Package,
         name_opt: Option<&str>,
-    ) -> Option<(&'a ir_mod::Fn, &'a BlockMetadata)> {
+    ) -> Option<&'a Block> {
         if let Some(name) = name_opt {
-            for m in pkg.members.iter() {
-                if let PackageMember::Block { func, metadata } = m {
-                    if func.name == name {
-                        return Some((func, metadata));
-                    }
-                }
-            }
-            return None;
+            return pkg.get_block(name);
         }
-        if let Some((top_name, MemberType::Block)) = &pkg.top {
-            for m in pkg.members.iter() {
-                if let PackageMember::Block { func, metadata } = m {
-                    if &func.name == top_name {
-                        return Some((func, metadata));
-                    }
-                }
-            }
-        }
-        for m in pkg.members.iter() {
-            if let PackageMember::Block { func, metadata } = m {
-                return Some((func, metadata));
-            }
-        }
-        None
+        pkg.get_top_block()
     }
 
-    let (lhs_fn_ref, _lhs_ports) = match select_block_from_package(&lhs_pkg_parsed, lhs_top) {
+    let lhs_block = match select_block_from_package(&lhs_pkg_parsed, lhs_top) {
         Some(pair) => pair,
         None => {
             eprintln!(
@@ -131,7 +109,7 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
             std::process::exit(1);
         }
     };
-    let (rhs_fn_ref, _rhs_ports) = match select_block_from_package(&rhs_pkg_parsed, rhs_top) {
+    let rhs_block = match select_block_from_package(&rhs_pkg_parsed, rhs_top) {
         Some(pair) => pair,
         None => {
             eprintln!(
@@ -142,10 +120,16 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         }
     };
 
-    // Clone selected blocks as functions and build single-fn packages for
-    // equivalence.
-    let mut lhs_fn = lhs_fn_ref.clone();
-    let mut rhs_fn = rhs_fn_ref.clone();
+    // Explicitly lower combinational interfaces for the function equivalence
+    // checker; sequential blocks need a separate state-transition lowering.
+    let lower = |block| {
+        combinational_block_to_fn(block).unwrap_or_else(|error| {
+            eprintln!("[{SUBCOMMAND}] Cannot lower block for equivalence: {error}");
+            std::process::exit(1);
+        })
+    };
+    let mut lhs_fn = lower(lhs_block);
+    let mut rhs_fn = lower(rhs_block);
 
     if let Some(name) = lhs_top {
         lhs_fn.name = name.to_string();
@@ -162,13 +146,13 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         name: "lhs_pkg".to_string(),
         file_table: FileTable::new(),
         members: vec![PackageMember::Function(lhs_fn.clone())],
-        top: Some((lhs_fn.name.clone(), MemberType::Block)),
+        top: Some((lhs_fn.name.clone(), MemberType::Function)),
     };
     let rhs_pkg = Package {
         name: "rhs_pkg".to_string(),
         file_table: FileTable::new(),
         members: vec![PackageMember::Function(rhs_fn.clone())],
-        top: Some((rhs_fn.name.clone(), MemberType::Block)),
+        top: Some((rhs_fn.name.clone(), MemberType::Function)),
     };
     let lhs_pkg_text = lhs_pkg.to_string();
     let rhs_pkg_text = rhs_pkg.to_string();

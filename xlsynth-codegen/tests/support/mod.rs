@@ -35,28 +35,16 @@ impl TestRtl {
             .top
             .as_deref()
             .or_else(|| package.top.as_ref().map(|p| p.0.as_str()));
-        let (block, metadata) = package
+        let block = package
             .members
             .iter()
             .find_map(|m| match m {
-                PackageMember::Block { func, metadata }
-                    if selected.is_none_or(|s| s == func.name) =>
-                {
-                    Some((func, metadata))
+                PackageMember::Block(block) if selected.is_none_or(|s| s == block.name) => {
+                    Some(block)
                 }
                 _ => None,
             })
             .expect("selected test block");
-        let outputs = if metadata.output_names.len() == 1 {
-            vec![block.get_node(block.ret_node_ref.unwrap()).ty.clone()]
-        } else {
-            let xlsynth_pir::ir::Type::Tuple(fields) =
-                &block.get_node(block.ret_node_ref.unwrap()).ty
-            else {
-                panic!("multiple outputs require synthetic tuple");
-            };
-            fields.iter().map(|f| (**f).clone()).collect()
-        };
         let interface = Interface {
             module: options
                 .module_name
@@ -64,24 +52,21 @@ impl TestRtl {
                 .unwrap_or(&block.name)
                 .to_owned(),
             inputs: block
-                .params
-                .iter()
+                .input_ports()
                 .map(|p| Port {
-                    name: p.name.clone(),
-                    width: p.ty.bit_count(),
+                    name: block.port_name(p).to_string(),
+                    width: block.port_type(p).bit_count(),
                 })
                 .collect(),
-            outputs: metadata
-                .output_names
-                .iter()
-                .zip(outputs)
-                .map(|(name, ty)| Port {
-                    name: name.clone(),
-                    width: ty.bit_count(),
+            outputs: block
+                .output_ports()
+                .map(|port| Port {
+                    name: block.port_name(port).to_string(),
+                    width: block.port_type(port).bit_count(),
                 })
                 .collect(),
-            clock: metadata.clock_port_name.clone(),
-            state: metadata
+            clock: block.clock_port_name().map(str::to_string),
+            state: block
                 .registers
                 .iter()
                 .filter(|r| r.ty.bit_count() != 0)

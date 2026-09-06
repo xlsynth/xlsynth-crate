@@ -203,9 +203,8 @@ fn make_pkg_template_toposorted(pkg: &Package) -> Result<Package> {
                 compact_and_toposort_in_place(f)
                     .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
             }
-            PackageMember::Block { func, .. } => {
-                compact_and_toposort_in_place(func)
-                    .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
+            PackageMember::Block(block) => {
+                block.compact_and_toposort().map_err(anyhow::Error::msg)?;
             }
         }
     }
@@ -217,17 +216,8 @@ fn replace_fn_in_pkg(pkg: &mut Package, new_fn: xlsynth_pir::ir::Fn) {
         *f = new_fn;
         return;
     }
-    if let Some(block) = pkg.get_block_mut(&new_fn.name) {
-        match block {
-            PackageMember::Block { func, .. } => {
-                *func = new_fn;
-                return;
-            }
-            PackageMember::Function(_) => unreachable!("get_block_mut must return a block"),
-        }
-    }
     panic!(
-        "Expected to find function/block '{}' in template package",
+        "Expected to find function '{}' in template package",
         new_fn.name
     );
 }

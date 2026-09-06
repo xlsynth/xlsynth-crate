@@ -2,11 +2,9 @@
 
 //! Conversion from a sequential gate-level representation into XLS block IR.
 
-use std::collections::HashMap;
-
 use xlsynth_pir::ir::{
-    self, BlockMetadata, FileTable, MemberType, Node, NodePayload, NodeRef, Package, PackageMember,
-    Register, Type,
+    self, Block, BlockPort, FileTable, MemberType, Node, NodePayload, NodeRef, Package,
+    PackageMember, Register, Type,
 };
 use xlsynth_pir::ir_verify;
 
@@ -43,24 +41,36 @@ pub fn sequential_gate_fn_to_pir_block_package(
         &design.transition.get_flat_type(),
     )
     .map_err(|e| format!("sequential2ir: failed to lift transition GateFn: {e}"))?;
-    let mut block = lifted_package
+    let transition = lifted_package
         .get_top_fn()
         .ok_or_else(|| "sequential2ir: lifted transition package has no top function".to_string())?
         .clone();
-    block.name = design.name.clone();
-
-    let original_params = block.params.clone();
+    let original_params = transition.params.clone();
     let transition_return_tuple = (design.transition.outputs.len() > 1)
-        .then_some(block.ret_node_ref)
+        .then_some(transition.ret_node_ref)
         .flatten();
     let transition_outputs =
-        split_transition_return_values(&block, design.transition.outputs.len())?;
+        split_transition_return_values(&transition, design.transition.outputs.len())?;
+    let mut block = Block::new(&design.name);
+    block.graph = transition.graph;
+    block.name = design.name.clone();
     replace_register_q_params(&mut block, design, &original_params)?;
-    block.params = design
-        .inputs
-        .iter()
-        .map(|id| original_params[id.index()].clone())
-        .collect();
+    if let Some(clock) = &design.clock {
+        block.ports.push(BlockPort::Clock(clock.name.clone()));
+    }
+    for id in &design.inputs {
+        let param = &original_params[id.index()];
+        let index = block
+            .nodes
+            .iter()
+            .position(|node| node.payload == NodePayload::GetParam(param.id))
+            .ok_or_else(|| format!("sequential2ir: input parameter '{}' is missing", param.name))?;
+        block.nodes[index].payload = NodePayload::InputPort {
+            name: param.name.clone(),
+            sv_type: None,
+        };
+        block.ports.push(BlockPort::Input(NodeRef { index }));
+    }
 
     let mut next_text_id = block
         .nodes
@@ -95,51 +105,27 @@ pub fn sequential_gate_fn_to_pir_block_package(
         block.nodes[tuple_ref.index].payload = NodePayload::Nil;
         block.nodes[tuple_ref.index].ty = Type::nil();
     }
-    set_block_return_value(&mut block, &external_outputs, &mut next_text_id);
-
     let output_names = design
         .outputs
         .iter()
         .map(|id| design.transition.outputs[id.index()].name.clone())
         .collect::<Vec<String>>();
-    let output_port_ids = output_names
+    for (name, value) in output_names.iter().zip(external_outputs) {
+        block.add_output_port(name, value)?;
+    }
+    block.registers = design
+        .registers
         .iter()
-        .map(|name| {
-            let id = next_text_id;
-            next_text_id += 1;
-            (name.clone(), id)
+        .map(|register| Register {
+            name: register.name.clone(),
+            ty: Type::Bits(design.transition.inputs[register.q.index()].get_bit_count()),
+            reset_value: None,
         })
-        .collect::<HashMap<String, usize>>();
-    let metadata = BlockMetadata {
-        clock_port_name: design.clock.as_ref().map(|clock| clock.name.clone()),
-        port_order: Vec::new(),
-        port_sv_types: Default::default(),
-        input_port_ids: block
-            .params
-            .iter()
-            .map(|param| (param.name.clone(), param.id.get_wrapped_id()))
-            .collect(),
-        output_port_ids,
-        output_names,
-        reset: None,
-        registers: design
-            .registers
-            .iter()
-            .map(|register| Register {
-                name: register.name.clone(),
-                ty: Type::Bits(design.transition.inputs[register.q.index()].get_bit_count()),
-                reset_value: None,
-            })
-            .collect(),
-        instantiations: vec![],
-    };
+        .collect();
     let package = Package {
         name: package_name.to_string(),
         file_table: FileTable::new(),
-        members: vec![PackageMember::Block {
-            func: block,
-            metadata,
-        }],
+        members: vec![PackageMember::Block(block)],
         top: Some((design.name.clone(), MemberType::Block)),
     };
     ir_verify::verify_package(&package)
@@ -180,7 +166,7 @@ fn split_transition_return_values(
 }
 
 fn replace_register_q_params(
-    block: &mut ir::Fn,
+    block: &mut Block,
     design: &SequentialGateFn,
     original_params: &[ir::Param],
 ) -> Result<(), String> {
@@ -207,38 +193,4 @@ fn replace_register_q_params(
         };
     }
     Ok(())
-}
-
-fn set_block_return_value(block: &mut ir::Fn, outputs: &[NodeRef], next_text_id: &mut usize) {
-    match outputs {
-        [] => {
-            block.ret_ty = Type::nil();
-            block.ret_node_ref = None;
-        }
-        [output] => {
-            block.ret_ty = block.nodes[output.index].ty.clone();
-            block.ret_node_ref = Some(*output);
-        }
-        _ => {
-            let ty = Type::Tuple(
-                outputs
-                    .iter()
-                    .map(|output| Box::new(block.nodes[output.index].ty.clone()))
-                    .collect(),
-            );
-            let tuple_ref = NodeRef {
-                index: block.nodes.len(),
-            };
-            block.nodes.push(Node {
-                text_id: *next_text_id,
-                name: None,
-                ty: ty.clone(),
-                payload: NodePayload::Tuple(outputs.to_vec()),
-                pos: None,
-            });
-            *next_text_id += 1;
-            block.ret_ty = ty;
-            block.ret_node_ref = Some(tuple_ref);
-        }
-    }
 }

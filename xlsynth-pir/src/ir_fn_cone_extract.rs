@@ -244,15 +244,17 @@ pub fn extract_fn_cone_to_params(
     })?;
 
     let func = ir::Fn {
-        name: "cone".to_string(),
+        graph: crate::ir::NodeGraph {
+            name: "cone".to_string(),
+            nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params: used_params.clone(),
         ret_ty: f.nodes[sink_idx].ty.clone(),
-        nodes,
         ret_node_ref: Some(ir::NodeRef {
             index: new_sink_idx,
         }),
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     };
 
     let package = ir::Package {
@@ -327,7 +329,7 @@ mod tests {
         };
         let cone_fn = match member {
             ir::PackageMember::Function(f) => f,
-            ir::PackageMember::Block { .. } => panic!("expected function member"),
+            ir::PackageMember::Block(_) => panic!("expected function member"),
         };
 
         assert_eq!(
@@ -362,7 +364,7 @@ mod tests {
         };
         let cone_fn = match member {
             ir::PackageMember::Function(f) => f,
-            ir::PackageMember::Block { .. } => panic!("expected function member"),
+            ir::PackageMember::Block(_) => panic!("expected function member"),
         };
 
         assert_eq!(
@@ -394,7 +396,7 @@ mod tests {
         };
         let cone_fn = match member {
             ir::PackageMember::Function(f) => f,
-            ir::PackageMember::Block { .. } => panic!("expected function member"),
+            ir::PackageMember::Block(_) => panic!("expected function member"),
         };
 
         assert_eq!(

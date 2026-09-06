@@ -8,6 +8,8 @@ use crate::{IrFormatPreference, IrValue};
 
 use crate::{ir, ir_parser, ir_utils::operands};
 
+pub use crate::ir_block::{Block, BlockPort, BlockReset};
+
 /// Strongly-typed wrapper for parameter IDs.
 ///
 /// Note: This is *not* a general node id. This is an ordinal referring to the
@@ -397,6 +399,18 @@ pub struct ExtNaryAddTerm {
 pub enum NodePayload {
     Nil,
     GetParam(ParamId),
+    /// A block input; unlike a function parameter it has no signature ordinal.
+    InputPort {
+        name: String,
+        sv_type: Option<String>,
+    },
+    /// A block output sink. Its node type is `()`, and its port type is the
+    /// type of `arg`.
+    OutputPort {
+        name: String,
+        arg: NodeRef,
+        sv_type: Option<String>,
+    },
     Tuple(Vec<NodeRef>),
     Array(Vec<NodeRef>),
     /// Concatenates one or more same-element-typed arrays.
@@ -616,6 +630,8 @@ impl NodePayload {
         match self {
             NodePayload::Nil => "nil",
             NodePayload::GetParam(_) => "get_param",
+            NodePayload::InputPort { .. } => "input_port",
+            NodePayload::OutputPort { .. } => "output_port",
             NodePayload::Tuple(_) => "tuple",
             NodePayload::Array(_) => "array",
             NodePayload::ArrayConcat(_) => "array_concat",
@@ -657,7 +673,7 @@ impl NodePayload {
         }
     }
 
-    pub fn validate(&self, f: &Fn) -> Result<(), String> {
+    pub fn validate(&self, f: &NodeGraph) -> Result<(), String> {
         match self {
             NodePayload::Nil => Ok(()),
             NodePayload::GetParam(_) => Ok(()),
@@ -735,7 +751,7 @@ impl NodePayload {
             _ => Ok(()),
         }
     }
-    fn to_string_components(&self, f: &Fn, opts: &NodeRenderOptions) -> Option<Vec<String>> {
+    fn to_string_components(&self, f: &NodeGraph, opts: &NodeRenderOptions) -> Option<Vec<String>> {
         let format_operand = |node_ref: NodeRef| -> String { operand_to_string(f, node_ref, opts) };
         let format_operands = |node_refs: &[NodeRef]| -> Vec<String> {
             node_refs
@@ -744,6 +760,20 @@ impl NodePayload {
                 .collect()
         };
         let result = match self {
+            NodePayload::InputPort { name, sv_type } => {
+                let mut parts = vec![format!("name={name}")];
+                if let Some(sv_type) = sv_type {
+                    parts.push(format!("sv_type=\"{}\"", escape_xls_ir_string(sv_type)));
+                }
+                parts
+            }
+            NodePayload::OutputPort { name, arg, sv_type } => {
+                let mut parts = vec![format_operand(*arg), format!("name={name}")];
+                if let Some(sv_type) = sv_type {
+                    parts.push(format!("sv_type=\"{}\"", escape_xls_ir_string(sv_type)));
+                }
+                parts
+            }
             NodePayload::Tuple(nodes) => format_operands(nodes),
             NodePayload::Array(nodes) => format_operands(nodes),
             NodePayload::ArrayConcat(nodes) => format_operands(nodes),
@@ -1034,7 +1064,7 @@ impl NodePayload {
 /// - For `get_param` nodes, returns the parameter's name.
 /// - For other nodes, returns the node's `name` if present, otherwise
 ///   `"<operator>.<text_id>"`.
-pub fn node_textual_id(f: &Fn, nr: NodeRef) -> String {
+pub fn node_textual_id(f: &NodeGraph, nr: NodeRef) -> String {
     let node = f.get_node(nr);
     match node.payload {
         NodePayload::GetParam(_) => node.name.clone().expect("GetParam node should have a name"),
@@ -1073,7 +1103,7 @@ impl Default for NodeRenderOptions {
     }
 }
 
-fn operand_to_string(f: &Fn, nr: NodeRef, opts: &NodeRenderOptions) -> String {
+fn operand_to_string(f: &NodeGraph, nr: NodeRef, opts: &NodeRenderOptions) -> String {
     let node = f.get_node(nr);
     let name = node_textual_id(f, nr);
     if opts.inline_literals {
@@ -1102,11 +1132,15 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn to_string(&self, f: &Fn) -> Option<String> {
+    pub fn to_string(&self, f: &NodeGraph) -> Option<String> {
         self.to_string_with_options(f, &NodeRenderOptions::default())
     }
 
-    pub fn to_string_with_options(&self, f: &Fn, opts: &NodeRenderOptions) -> Option<String> {
+    pub fn to_string_with_options(
+        &self,
+        f: &NodeGraph,
+        opts: &NodeRenderOptions,
+    ) -> Option<String> {
         let name_str = if let Some(name) = &self.name {
             format!("{}", name)
         } else {
@@ -1134,7 +1168,7 @@ impl Node {
         Some(format!("{}: {} = {}", name_str, self.ty, payload_str))
     }
 
-    pub fn to_signature_string(&self, f: &Fn) -> String {
+    pub fn to_signature_string(&self, f: &NodeGraph) -> String {
         let operands_str = operands(&self.payload)
             .iter()
             .map(|o| f.get_node(*o).ty.to_string())
@@ -1199,22 +1233,29 @@ pub struct FunctionType {
     pub return_type: Type,
 }
 
+/// The shared operation graph, independent of function or block interfaces.
 #[derive(Debug, Clone)]
-pub struct Fn {
+pub struct NodeGraph {
     pub name: String,
-    pub params: Vec<Param>,
-    pub ret_ty: Type,
     pub nodes: Vec<Node>,
-    pub ret_node_ref: Option<NodeRef>,
     pub outer_attrs: Vec<String>,
     pub inner_attrs: Vec<String>,
 }
 
-impl Fn {
-    pub fn get_type(&self) -> FunctionType {
-        FunctionType {
-            param_types: self.params.iter().map(|p| p.ty.clone()).collect(),
-            return_type: self.ret_ty.clone(),
+impl NodeGraph {
+    /// Creates an empty graph with the reserved non-emitted sentinel node.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            nodes: vec![Node {
+                text_id: 0,
+                name: None,
+                ty: Type::nil(),
+                payload: NodePayload::Nil,
+                pos: None,
+            }],
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
         }
     }
 
@@ -1234,6 +1275,38 @@ impl Fn {
 
     pub fn get_node_mut(&mut self, node_ref: NodeRef) -> &mut Node {
         &mut self.nodes[node_ref.index]
+    }
+}
+
+/// A function interface and return value over an operation graph.
+#[derive(Debug, Clone)]
+pub struct Fn {
+    pub graph: NodeGraph,
+    pub params: Vec<Param>,
+    pub ret_ty: Type,
+    pub ret_node_ref: Option<NodeRef>,
+}
+
+impl std::ops::Deref for Fn {
+    type Target = NodeGraph;
+
+    fn deref(&self) -> &Self::Target {
+        &self.graph
+    }
+}
+
+impl std::ops::DerefMut for Fn {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.graph
+    }
+}
+
+impl Fn {
+    pub fn get_type(&self) -> FunctionType {
+        FunctionType {
+            param_types: self.params.iter().map(|p| p.ty.clone()).collect(),
+            return_type: self.ret_ty.clone(),
+        }
     }
 
     /// Checks PIR layout invariants:
@@ -1593,13 +1666,13 @@ where
                 let func_text = override_fn(func, is_top).unwrap_or_else(|| emit_fn(func, is_top));
                 out.push_str(&func_text);
             }
-            PackageMember::Block { func, metadata } => {
+            PackageMember::Block(block) => {
                 let is_top = match &pkg.top {
-                    Some((top_name, MemberType::Block)) => func.name == top_name.as_str(),
+                    Some((top_name, MemberType::Block)) => block.name == top_name.as_str(),
                     _ => false,
                 };
                 // Emit as a block using helper from the parser module.
-                let block_text = ir_parser::emit_fn_as_block(func, None, Some(metadata), is_top);
+                let block_text = ir_parser::emit_block(block, is_top);
                 out.push_str(&block_text);
             }
         }
@@ -1731,7 +1804,25 @@ pub struct Package {
 #[derive(Debug, Clone)]
 pub enum PackageMember {
     Function(Fn),
-    Block { func: Fn, metadata: BlockMetadata },
+    Block(Block),
+}
+
+impl PackageMember {
+    /// Returns the shared graph without treating blocks as functions.
+    pub fn graph(&self) -> &NodeGraph {
+        match self {
+            Self::Function(function) => &function.graph,
+            Self::Block(block) => &block.graph,
+        }
+    }
+
+    /// Returns the shared graph for interface-independent node operations.
+    pub fn graph_mut(&mut self) -> &mut NodeGraph {
+        match self {
+            Self::Function(function) => &mut function.graph,
+            Self::Block(block) => &mut block.graph,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1756,28 +1847,6 @@ pub struct Instantiation {
     pub kind: InstantiationKind,
 }
 
-#[derive(Debug, Clone)]
-pub struct BlockResetMetadata {
-    pub port_name: String,
-    pub asynchronous: bool,
-    pub active_low: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct BlockMetadata {
-    pub clock_port_name: Option<String>,
-    /// Complete block-header port order, including the optional clock.
-    pub port_order: Vec<String>,
-    /// Optional SystemVerilog type annotations keyed by port name.
-    pub port_sv_types: std::collections::BTreeMap<String, String>,
-    pub input_port_ids: std::collections::HashMap<String, usize>,
-    pub output_port_ids: std::collections::HashMap<String, usize>,
-    pub output_names: Vec<String>,
-    pub reset: Option<BlockResetMetadata>,
-    pub registers: Vec<Register>,
-    pub instantiations: Vec<Instantiation>,
-}
-
 impl Package {
     /// Sets the package top to the given function name, if it exists.
     pub fn set_top_fn(&mut self, name: &str) -> Result<(), String> {
@@ -1796,7 +1865,7 @@ impl Package {
     /// Sets the package top to the given block name, if it exists.
     pub fn set_top_block(&mut self, name: &str) -> Result<(), String> {
         let exists = self.members.iter().any(|m| match m {
-            PackageMember::Block { func, .. } => func.name == name,
+            PackageMember::Block(block) => block.name == name,
             _ => false,
         });
         if exists {
@@ -1815,7 +1884,7 @@ impl Package {
                 .iter()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => Some(f),
-                    PackageMember::Block { .. } => None,
+                    PackageMember::Block(_) => None,
                 })
                 .find(|f| f.name == *name),
             None => self
@@ -1823,7 +1892,7 @@ impl Package {
                 .iter()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => Some(f),
-                    PackageMember::Block { .. } => None,
+                    PackageMember::Block(_) => None,
                 })
                 .next(),
         }
@@ -1837,7 +1906,7 @@ impl Package {
                 .iter_mut()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => Some(f),
-                    PackageMember::Block { .. } => None,
+                    PackageMember::Block(_) => None,
                 })
                 .find(|f| f.name == *name),
             None => self
@@ -1845,13 +1914,13 @@ impl Package {
                 .iter_mut()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => Some(f),
-                    PackageMember::Block { .. } => None,
+                    PackageMember::Block(_) => None,
                 })
                 .next(),
         }
     }
 
-    pub fn get_top_block(&self) -> Option<&PackageMember> {
+    pub fn get_top_block(&self) -> Option<&Block> {
         match &self.top {
             Some((_, MemberType::Function)) => None,
             Some((name, MemberType::Block)) => self
@@ -1859,9 +1928,9 @@ impl Package {
                 .iter()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => None,
-                    PackageMember::Block { func, .. } => {
-                        if func.name == *name {
-                            Some(m)
+                    PackageMember::Block(block) => {
+                        if block.name == *name {
+                            Some(block)
                         } else {
                             None
                         }
@@ -1873,13 +1942,13 @@ impl Package {
                 .iter()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => None,
-                    PackageMember::Block { func, .. } => Some(m),
+                    PackageMember::Block(block) => Some(block),
                 })
                 .next(),
         }
     }
 
-    pub fn get_top_block_mut(&mut self) -> Option<&mut PackageMember> {
+    pub fn get_top_block_mut(&mut self) -> Option<&mut Block> {
         match &mut self.top {
             Some((_, MemberType::Function)) => None,
             Some((name, MemberType::Block)) => self
@@ -1887,9 +1956,9 @@ impl Package {
                 .iter_mut()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => None,
-                    PackageMember::Block { func, .. } => {
-                        if func.name == *name {
-                            Some(m)
+                    PackageMember::Block(block) => {
+                        if block.name == *name {
+                            Some(block)
                         } else {
                             None
                         }
@@ -1901,7 +1970,7 @@ impl Package {
                 .iter_mut()
                 .filter_map(|m| match m {
                     PackageMember::Function(f) => None,
-                    PackageMember::Block { func, .. } => Some(m),
+                    PackageMember::Block(block) => Some(block),
                 })
                 .next(),
         }
@@ -1909,7 +1978,7 @@ impl Package {
     pub fn get_fn(&self, name: &str) -> Option<&Fn> {
         self.members.iter().find_map(|m| match m {
             PackageMember::Function(f) if f.name == name => Some(f),
-            PackageMember::Block { .. } => None,
+            PackageMember::Block(_) => None,
             _ => None,
         })
     }
@@ -1917,24 +1986,23 @@ impl Package {
     pub fn get_fn_mut(&mut self, name: &str) -> Option<&mut Fn> {
         self.members.iter_mut().find_map(|m| match m {
             PackageMember::Function(f) if f.name == name => Some(f),
-            PackageMember::Block { .. } => None,
+            PackageMember::Block(_) => None,
             _ => None,
         })
     }
 
-    /// Returns the block member (as a `PackageMember::Block`) whose internal
-    /// function name equals `name`.
-    pub fn get_block(&self, name: &str) -> Option<&PackageMember> {
+    /// Returns the block named `name`.
+    pub fn get_block(&self, name: &str) -> Option<&Block> {
         self.members.iter().find_map(|m| match m {
-            PackageMember::Block { func, .. } if func.name == name => Some(m),
+            PackageMember::Block(block) if block.name == name => Some(block),
             _ => None,
         })
     }
 
     /// Mutable variant of `get_block`.
-    pub fn get_block_mut(&mut self, name: &str) -> Option<&mut PackageMember> {
+    pub fn get_block_mut(&mut self, name: &str) -> Option<&mut Block> {
         self.members.iter_mut().find_map(|m| match m {
-            PackageMember::Block { func, .. } if func.name == name => Some(m),
+            PackageMember::Block(block) if block.name == name => Some(block),
             _ => None,
         })
     }
@@ -1943,7 +2011,10 @@ impl Package {
         for m in self.members.iter_mut() {
             match m {
                 PackageMember::Function(func) => f(func),
-                PackageMember::Block { func, .. } => f(func),
+                PackageMember::Block(_) => {
+                    // Function transforms must not silently rewrite block
+                    // interfaces.
+                }
             }
         }
     }
@@ -1954,19 +2025,13 @@ impl Package {
         self.get_fn(name).map(|f| f.get_type())
     }
 
-    /// Replaces a `PackageMember::Block` whose internal function name equals
-    /// `name` with `new_block`. Returns an error if no such block exists, or if
-    /// `new_block` is not a block.
-    pub fn replace_block(&mut self, name: &str, new_block: PackageMember) -> Result<(), String> {
-        match &new_block {
-            PackageMember::Block { .. } => {}
-            _ => return Err("replace_block requires a Block package member".to_string()),
-        }
+    /// Replaces the block named `name`, or errors if no such block exists.
+    pub fn replace_block(&mut self, name: &str, new_block: Block) -> Result<(), String> {
         if let Some((idx, _)) = self.members.iter().enumerate().find(|(_, m)| match m {
-            PackageMember::Block { func, .. } => func.name == name,
+            PackageMember::Block(block) => block.name == name,
             _ => false,
         }) {
-            self.members[idx] = new_block;
+            self.members[idx] = PackageMember::Block(new_block);
             Ok(())
         } else {
             Err(format!("replace_block: block '{}' not found", name))

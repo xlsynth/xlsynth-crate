@@ -484,14 +484,13 @@ block identity(x: bits[8], out: bits[8]) {
     )
     .parse_and_validate_package()
     .unwrap();
-    for explicit_id in [true, false] {
+    for output_id in [2, 77] {
         let mut package = original.clone();
-        if !explicit_id {
-            let ir::PackageMember::Block { metadata, .. } = &mut package.members[0] else {
-                panic!("expected a block");
-            };
-            metadata.output_port_ids.clear();
-        }
+        let ir::PackageMember::Block(block) = &mut package.members[0] else {
+            panic!("expected a block");
+        };
+        let output = block.output_ports().next().unwrap();
+        block.get_node_mut(output).text_id = output_id;
         let mut b = FnBuilder::new("function");
         let x = b.param("x", Type::Bits(65)).unwrap();
         let result = b.not(x).unwrap();

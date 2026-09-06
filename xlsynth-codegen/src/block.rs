@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::vast_helpers::{RegisterDefinition, RegisterScope, Reset};
 use xlsynth_pir::ir::{
-    Binop, BlockMetadata, Fn, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
+    Binop, Block, BlockPort, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
     PackageMember, Register, Type, Unop,
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
@@ -100,8 +100,7 @@ impl Value {
 pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) package: &'a Package,
     pub(crate) options: &'a BlockCodegenOptions,
-    pub(crate) func: &'a Fn,
-    pub(crate) metadata: &'a BlockMetadata,
+    pub(crate) block: &'a Block,
     pub(crate) file: &'file mut VastFile,
     pub(crate) module: VastModule,
     pub(crate) values: Vec<Option<Value>>,
@@ -130,14 +129,14 @@ pub(crate) fn emit_package(
     let mut visited = BTreeSet::new();
     let mut visiting = BTreeSet::new();
     collect_dependencies(package, top, &mut ordered, &mut visited, &mut visiting)?;
-    for &(func, metadata) in &ordered {
-        validate_register_structure(func, metadata)?;
+    for &block in &ordered {
+        validate_single_register_writes(block)?;
     }
     crate::hierarchy::verify_hierarchy(&ordered)?;
     if let Some(module_name) = options.module_name.as_deref()
         && ordered
             .iter()
-            .any(|(func, _)| func.name != top && func.name == module_name)
+            .any(|block| block.name != top && block.name == module_name)
     {
         return Err(BlockCodegenError::InvalidBlock(format!(
             "top module name `{module_name}` conflicts with an instantiated child block; \
@@ -146,15 +145,15 @@ pub(crate) fn emit_package(
     }
 
     let mut file = VastFile::new(VastFileType::SystemVerilog);
-    for (func, metadata) in ordered {
-        let module_name = if func.name == top {
-            options.module_name.as_deref().unwrap_or(&func.name)
+    for block in ordered {
+        let module_name = if block.name == top {
+            options.module_name.as_deref().unwrap_or(&block.name)
         } else {
-            &func.name
+            &block.name
         };
         validate_external_identifier(module_name, "module")?;
         let module = file.add_module(module_name);
-        let mut emitter = BlockEmitter::new(package, options, func, metadata, &mut file, module);
+        let mut emitter = BlockEmitter::new(package, options, block, &mut file, module);
         emitter.emit()?;
     }
 
@@ -163,82 +162,22 @@ pub(crate) fn emit_package(
     })
 }
 
-/// Enforces complete register structure at the SystemVerilog emission boundary.
-fn validate_register_structure(
-    func: &Fn,
-    metadata: &BlockMetadata,
-) -> Result<(), BlockCodegenError> {
-    if !metadata.registers.is_empty() && metadata.clock_port_name.is_none() {
-        return Err(BlockCodegenError::InvalidBlock(format!(
-            "block `{}` has registers but no clock port",
-            func.name
-        )));
-    }
-
-    if let Some(reset) = &metadata.reset {
-        let reset_port = func
-            .params
-            .iter()
-            .find(|parameter| parameter.name == reset.port_name)
-            .ok_or_else(|| {
-                BlockCodegenError::InvalidBlock(format!(
-                    "block `{}` has no reset port `{}`",
-                    func.name, reset.port_name
-                ))
-            })?;
-        if reset_port.ty != Type::Bits(1) {
-            return Err(BlockCodegenError::InvalidBlock(format!(
-                "reset port `{}` in block `{}` must have type bits[1]",
-                reset.port_name, func.name
-            )));
+/// Rejects multiple enabled writes, which PIR permits but codegen cannot emit.
+fn validate_single_register_writes(block: &Block) -> Result<(), BlockCodegenError> {
+    let mut write_counts = BTreeMap::<&str, usize>::new();
+    for node in &block.nodes {
+        if let NodePayload::RegisterWrite { register, .. } = &node.payload {
+            *write_counts.entry(register.as_str()).or_default() += 1;
         }
     }
 
-    let mut access_counts = metadata
-        .registers
-        .iter()
-        .map(|register| (register.name.as_str(), (0usize, 0usize)))
-        .collect::<BTreeMap<_, _>>();
-    for node in &func.nodes {
-        match &node.payload {
-            NodePayload::RegisterRead { register } => {
-                if let Some((reads, _)) = access_counts.get_mut(register.as_str()) {
-                    *reads += 1;
-                }
-            }
-            NodePayload::RegisterWrite { register, .. } => {
-                if let Some((_, writes)) = access_counts.get_mut(register.as_str()) {
-                    *writes += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for register in &metadata.registers {
-        let (reads, writes) = access_counts[register.name.as_str()];
-        if reads != 1 {
-            return Err(BlockCodegenError::InvalidBlock(format!(
-                "register `{}` in block `{}` requires exactly one read, found {reads}",
-                register.name, func.name
-            )));
-        }
-        if writes == 0 {
-            return Err(BlockCodegenError::InvalidBlock(format!(
-                "register `{}` in block `{}` has no write",
-                register.name, func.name
-            )));
-        }
+    for register in &block.registers {
+        // Package verification already established at least one write.
+        let writes = write_counts[register.name.as_str()];
         if writes != 1 {
             return Err(BlockCodegenError::InvalidBlock(format!(
                 "register `{}` in block `{}` requires exactly one write, found {writes}",
-                register.name, func.name
-            )));
-        }
-        if register.reset_value.is_some() && metadata.reset.is_none() {
-            return Err(BlockCodegenError::InvalidBlock(format!(
-                "register `{}` in block `{}` has a reset value but the block has no reset port",
-                register.name, func.name
+                register.name, block.name
             )));
         }
     }
@@ -247,25 +186,25 @@ fn validate_register_structure(
 }
 
 /// Rejects operations that must be lowered before SystemVerilog emission.
-fn validate_supported_nodes(func: &Fn) -> Result<(), BlockCodegenError> {
-    if func
+fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
+    if block
         .nodes
         .iter()
         .any(|node| matches!(node.payload, NodePayload::CountedFor { .. }))
     {
         return Err(BlockCodegenError::Unsupported(format!(
             "counted_for is not supported in `{}`; unroll loops before block2sv code generation",
-            func.name
+            block.name
         )));
     }
-    if func
+    if block
         .nodes
         .iter()
         .any(|node| matches!(node.payload, NodePayload::Invoke { .. }))
     {
         return Err(BlockCodegenError::Unsupported(format!(
             "invoke is not supported in `{}`; inline function calls before block2sv code generation",
-            func.name
+            block.name
         )));
     }
     Ok(())
@@ -280,7 +219,7 @@ fn select_top<'a>(
         .members
         .iter()
         .filter_map(|member| match member {
-            PackageMember::Block { func, .. } => Some(func.name.as_str()),
+            PackageMember::Block(block) => Some(block.name.as_str()),
             PackageMember::Function(_) => None,
         })
         .collect::<Vec<_>>();
@@ -323,7 +262,7 @@ fn select_top<'a>(
 fn collect_dependencies<'a>(
     package: &'a Package,
     name: &'a str,
-    ordered: &mut Vec<(&'a Fn, &'a BlockMetadata)>,
+    ordered: &mut Vec<&'a Block>,
     visited: &mut BTreeSet<&'a str>,
     visiting: &mut BTreeSet<&'a str>,
 ) -> Result<(), BlockCodegenError> {
@@ -335,11 +274,11 @@ fn collect_dependencies<'a>(
             "block instantiation cycle includes `{name}`"
         )));
     }
-    let (func, metadata) = package
+    let block = package
         .members
         .iter()
         .find_map(|member| match member {
-            PackageMember::Block { func, metadata } if func.name == name => Some((func, metadata)),
+            PackageMember::Block(block) if block.name == name => Some(block),
             _ => None,
         })
         .ok_or_else(|| {
@@ -348,14 +287,14 @@ fn collect_dependencies<'a>(
             ))
         })?;
 
-    for instance in &metadata.instantiations {
+    for instance in &block.instantiations {
         if instance.kind == InstantiationKind::Block {
             collect_dependencies(package, &instance.block, ordered, visited, visiting)?;
         }
     }
     visiting.remove(name);
     visited.insert(name);
-    ordered.push((func, metadata));
+    ordered.push(block);
     Ok(())
 }
 
@@ -364,13 +303,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     fn new(
         package: &'a Package,
         options: &'a BlockCodegenOptions,
-        func: &'a Fn,
-        metadata: &'a BlockMetadata,
+        block: &'a Block,
         file: &'file mut VastFile,
         module: VastModule,
     ) -> Self {
-        let mut users = vec![Vec::new(); func.nodes.len()];
-        for (index, node) in func.nodes.iter().enumerate() {
+        let mut users = vec![Vec::new(); block.nodes.len()];
+        for (index, node) in block.nodes.iter().enumerate() {
             for operand in operands(&node.payload) {
                 users[operand.index].push(NodeRef { index });
             }
@@ -378,11 +316,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         Self {
             package,
             options,
-            func,
-            metadata,
+            block,
             file,
             module,
-            values: vec![None; func.nodes.len()],
+            values: vec![None; block.nodes.len()],
             ports: BTreeMap::new(),
             register_refs: BTreeMap::new(),
             users,
@@ -399,12 +336,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits ports, logic, state, output assignments, and child instances.
     fn emit(&mut self) -> Result<(), BlockCodegenError> {
-        validate_supported_nodes(self.func)?;
+        validate_supported_nodes(self.block)?;
         self.reserve_fixed_names()?;
         self.emit_ports()?;
         self.emit_arithmetic_helpers()?;
         self.emit_slice_helpers()?;
-        self.emit_priority_helpers(self.func)?;
+        self.emit_priority_helpers(self.block)?;
         match self.options.layout {
             Layout::None => self.emit_flat()?,
             Layout::Pipeline => self.emit_pipeline()?,
@@ -423,28 +360,23 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             if let Some(previous) = fixed_names.insert(name.to_owned(), kind) {
                 return Err(BlockCodegenError::InvalidBlock(format!(
                     "SystemVerilog name collision in block `{}`: `{name}` is used by both {previous} and {kind}",
-                    self.func.name
+                    self.block.name
                 )));
             }
             Ok(())
         };
-        if let Some(clock) = &self.metadata.clock_port_name {
+        if let Some(clock) = self.block.clock_port_name() {
             reserve(clock, "port")?;
         }
-        for parameter in &self.func.params {
-            if parameter.ty.bit_count() != 0 {
-                reserve(&parameter.name, "port")?;
+        for port in self.block.input_ports().chain(self.block.output_ports()) {
+            if self.block.port_type(port).bit_count() != 0 {
+                reserve(self.block.port_name(port), "port")?;
             }
         }
-        for (name, node) in self.metadata.output_names.iter().zip(self.output_nodes()?) {
-            if self.func.get_node_ty(node).bit_count() != 0 {
-                reserve(name, "port")?;
-            }
-        }
-        for instance in &self.metadata.instantiations {
+        for instance in &self.block.instantiations {
             reserve(&instance.name, "instance")?;
         }
-        for node in &self.func.nodes {
+        for node in &self.block.nodes {
             match &node.payload {
                 NodePayload::Assert { label, .. }
                     if self.options.emit_asserts && !label.is_empty() =>
@@ -464,71 +396,45 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits representable ports in the source block's original header order.
     fn emit_ports(&mut self) -> Result<(), BlockCodegenError> {
-        let outputs = self.output_nodes()?;
-        let output_types = self
-            .metadata
-            .output_names
-            .iter()
-            .zip(outputs)
-            .map(|(name, node)| (name.as_str(), &self.func.get_node(node).ty))
-            .collect::<BTreeMap<_, _>>();
-
-        let order = if self.metadata.port_order.is_empty() {
-            self.metadata
-                .clock_port_name
-                .iter()
-                .chain(self.func.params.iter().map(|param| &param.name))
-                .chain(self.metadata.output_names.iter())
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            self.metadata.port_order.clone()
-        };
-
-        for name in order {
+        for port in &self.block.ports {
+            let (name, ir_type, sv_type, is_output) = match port {
+                BlockPort::Clock(name) => (name.clone(), Type::Bits(1), None, false),
+                BlockPort::Input(node) | BlockPort::Output(node) => {
+                    let sv_type = match &self.block.get_node(*node).payload {
+                        NodePayload::InputPort { sv_type, .. }
+                        | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
+                        _ => unreachable!("verified block data port"),
+                    };
+                    (
+                        self.block.port_name(*node).to_string(),
+                        self.block.port_type(*node).clone(),
+                        sv_type,
+                        matches!(port, BlockPort::Output(_)),
+                    )
+                }
+            };
             if self.ports.contains_key(&name) {
                 continue;
             }
-            let is_clock = self.metadata.clock_port_name.as_deref() == Some(name.as_str());
-            let input = self.func.params.iter().find(|param| param.name == name);
-            let output = output_types.get(name.as_str());
-            let width = if is_clock {
-                1
-            } else if let Some(param) = input {
-                param.ty.bit_count()
-            } else if let Some(ty) = output {
-                ty.bit_count()
-            } else {
-                return Err(BlockCodegenError::InvalidBlock(format!(
-                    "port `{name}` in block `{}` has no input or output declaration",
-                    self.func.name
-                )));
-            };
+            let width = ir_type.bit_count();
             if width == 0 {
                 continue;
             }
             validate_external_identifier(&name, "port")?;
-            let ir_type = if let Some(param) = input {
-                &param.ty
-            } else if let Some(ty) = output {
-                ty
-            } else {
-                &Type::Bits(1)
-            };
             let data_type = if self.options.emit_sv_types {
-                if let Some(sv_type) = self.metadata.port_sv_types.get(&name) {
+                if let Some(sv_type) = sv_type {
                     if let Some((package, ty)) = sv_type.rsplit_once("::") {
                         self.file.make_extern_package_type(package, ty)
                     } else {
                         self.file.make_extern_type(sv_type)
                     }
                 } else {
-                    self.value_type(ir_type)
+                    self.value_type(&ir_type)
                 }
             } else {
-                self.value_type(ir_type)
+                self.value_type(&ir_type)
             };
-            let signal = if output.is_some() && !is_clock && input.is_none() {
+            let signal = if is_output {
                 self.file.add_logic_output(self.module, &name, &data_type)
             } else {
                 self.file.add_logic_input(self.module, &name, &data_type)
@@ -536,21 +442,15 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.ports.insert(name, signal);
         }
 
-        for (index, node) in self.func.nodes.iter().enumerate() {
-            if let NodePayload::GetParam(param_id) = node.payload {
-                if let Some(param) = self.func.params.iter().find(|param| param.id == param_id) {
-                    if let Some(signal) = self.ports.get(&param.name).copied() {
-                        let value = Value::signal(signal).with_width(node.ty.bit_count());
-                        self.values[index] = Some(
-                            if self.options.emit_sv_types
-                                && self.metadata.port_sv_types.contains_key(&param.name)
-                            {
-                                value
-                            } else {
-                                value.with_type(&node.ty)
-                            },
-                        );
-                    }
+        for (index, node) in self.block.nodes.iter().enumerate() {
+            if let NodePayload::InputPort { name, sv_type } = &node.payload {
+                if let Some(signal) = self.ports.get(name).copied() {
+                    let value = Value::signal(signal).with_width(node.ty.bit_count());
+                    self.values[index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
+                        value
+                    } else {
+                        value.with_type(&node.ty)
+                    });
                 }
             }
         }
@@ -561,23 +461,22 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     fn emit_flat(&mut self) -> Result<(), BlockCodegenError> {
         let start = self.file.module_member_count(self.module);
         self.emit_input_array_views()?;
-        for register in &self.metadata.registers {
+        for register in &self.block.registers {
             self.declare_register(register)?;
         }
         let mut writes = Vec::new();
-        for node_ref in get_topological(self.func) {
-            if self.metadata.output_names.len() != 1 && self.func.ret_node_ref == Some(node_ref) {
-                continue;
-            }
-            match &self.func.get_node(node_ref).payload {
-                NodePayload::Nil | NodePayload::GetParam(_) => {
+        for node_ref in get_topological(self.block) {
+            match &self.block.get_node(node_ref).payload {
+                NodePayload::Nil
+                | NodePayload::InputPort { .. }
+                | NodePayload::OutputPort { .. } => {
                     // Reserved nodes and parameters are represented by module
                     // ports.
                 }
                 NodePayload::RegisterRead { register } => {
                     if let Some(signal) = self.register_refs.get(register).copied() {
                         self.values[node_ref.index] =
-                            Some(Value::signal(signal).with_type(self.func.get_node_ty(node_ref)));
+                            Some(Value::signal(signal).with_type(self.block.get_node_ty(node_ref)));
                     }
                 }
                 NodePayload::RegisterWrite { .. } => writes.push(node_ref),
@@ -591,7 +490,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits register-delimited comments without altering sequential behavior.
     fn emit_pipeline(&mut self) -> Result<(), BlockCodegenError> {
-        let layout = reconstruct_stages(self.package, self.func, self.metadata)?;
+        let layout = reconstruct_stages(self.package, self.block)?;
         let mut emitted_visible_stage = false;
         for (stage_index, stage) in layout.stages.iter().enumerate() {
             self.current_stage = Some(stage_index);
@@ -617,10 +516,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     /// Emits one reconstructed stage and the registers written at its end.
     fn emit_stage(&mut self, stage: &Stage, stage_index: usize) -> Result<(), BlockCodegenError> {
         for &node_ref in &stage.register_reads {
-            if let NodePayload::RegisterRead { register } = &self.func.get_node(node_ref).payload {
+            if let NodePayload::RegisterRead { register } = &self.block.get_node(node_ref).payload {
                 if let Some(signal) = self.register_refs.get(register).copied() {
                     self.values[node_ref.index] =
-                        Some(Value::signal(signal).with_type(self.func.get_node_ty(node_ref)));
+                        Some(Value::signal(signal).with_type(self.block.get_node_ty(node_ref)));
                 }
             }
         }
@@ -641,17 +540,17 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.file.add_member_comment(self.module, comment);
             for &node_ref in &stage.register_writes {
                 if let NodePayload::RegisterWrite { register, .. } =
-                    &self.func.get_node(node_ref).payload
+                    &self.block.get_node(node_ref).payload
                 {
                     let definition = self
-                        .metadata
+                        .block
                         .registers
                         .iter()
                         .find(|definition| definition.name == *register)
                         .ok_or_else(|| {
                             BlockCodegenError::InvalidBlock(format!(
                                 "register `{register}` has no declaration in block `{}`",
-                                self.func.name
+                                self.block.name
                             ))
                         })?;
                     self.declare_register(definition)?;
@@ -684,7 +583,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 register,
                 load_enable,
                 reset,
-            } = &self.func.get_node(node_ref).payload
+            } = &self.block.get_node(node_ref).payload
             else {
                 continue;
             };
@@ -692,7 +591,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 continue;
             };
             let definition = self
-                .metadata
+                .block
                 .registers
                 .iter()
                 .find(|definition| definition.name == *register)
@@ -729,10 +628,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         if ordinary.is_empty() && resettable.is_empty() {
             return Ok(());
         }
-        let clock_name = self.metadata.clock_port_name.as_ref().ok_or_else(|| {
+        let clock_name = self.block.clock_port_name().ok_or_else(|| {
             BlockCodegenError::InvalidBlock(format!(
                 "block `{}` has registers but no clock port",
-                self.func.name
+                self.block.name
             ))
         })?;
         let clock = self
@@ -741,7 +640,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             .ok_or_else(|| {
                 BlockCodegenError::InvalidBlock(format!(
                     "block `{}` has no declared clock port `{clock_name}`",
-                    self.func.name
+                    self.block.name
                 ))
             })?
             .to_expr();
@@ -757,10 +656,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             )?;
         }
         if !resettable.is_empty() {
-            let reset_metadata = self.metadata.reset.as_ref().ok_or_else(|| {
+            let reset_metadata = self.block.reset.as_ref().ok_or_else(|| {
                 BlockCodegenError::InvalidBlock(format!(
                     "block `{}` has resettable registers but no reset metadata",
-                    self.func.name
+                    self.block.name
                 ))
             })?;
             let mut groups = Vec::<ResettableRegisterGroup>::new();
@@ -794,7 +693,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                                     "block `{}` has asynchronous reset; custom reset-register ",
                                     "templates cannot guarantee the required reset edge semantics"
                                 ),
-                                self.func.name
+                                self.block.name
                             )));
                         }
                     }
@@ -857,35 +756,11 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         Ok(())
     }
 
-    /// Returns the node driving each logical output in declared output order.
-    fn output_nodes(&self) -> Result<Vec<NodeRef>, BlockCodegenError> {
-        if self.metadata.output_names.is_empty() {
-            return Ok(Vec::new());
-        }
-        let node = self.func.ret_node_ref.ok_or_else(|| {
-            BlockCodegenError::InvalidBlock(format!(
-                "block `{}` declares outputs but has no return node",
-                self.func.name
-            ))
-        })?;
-        if self.metadata.output_names.len() == 1 {
-            return Ok(vec![node]);
-        }
-        match &self.func.get_node(node).payload {
-            NodePayload::Tuple(outputs) if outputs.len() == self.metadata.output_names.len() => {
-                Ok(outputs.clone())
-            }
-            _ => Err(BlockCodegenError::InvalidBlock(format!(
-                "block `{}` has {} outputs but its return node is not a matching tuple",
-                self.func.name,
-                self.metadata.output_names.len()
-            ))),
-        }
-    }
-
     /// Connects representable output ports after their driving logic exists.
     fn emit_outputs(&mut self) -> Result<(), BlockCodegenError> {
-        for (name, node_ref) in self.metadata.output_names.iter().zip(self.output_nodes()?) {
+        for port in self.block.output_ports() {
+            let name = self.block.port_name(port);
+            let node_ref = self.block.output_value(port);
             let Some(signal) = self.ports.get(name).copied() else {
                 continue;
             };
@@ -901,7 +776,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits deterministic child connections after all connection nodes exist.
     fn emit_instantiations(&mut self) -> Result<(), BlockCodegenError> {
-        if self.metadata.instantiations.is_empty() {
+        if self.block.instantiations.is_empty() {
             return Ok(());
         }
         if self.options.layout == Layout::Pipeline {
@@ -911,7 +786,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.file.add_member_comment(self.module, comment);
         }
 
-        for instance in &self.metadata.instantiations {
+        for instance in &self.block.instantiations {
             validate_external_identifier(&instance.name, "instance")?;
             let mut connections = self
                 .instance_inputs
@@ -927,36 +802,40 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     .members
                     .iter()
                     .find_map(|member| match member {
-                        PackageMember::Block { func, metadata } if func.name == instance.block => {
-                            Some(metadata)
-                        }
+                        PackageMember::Block(block) if block.name == instance.block => Some(block),
                         _ => None,
                     })
                     .expect("validated child block exists");
-                if let Some(clock_name) = &child.clock_port_name {
+                if let Some(clock_name) = child.clock_port_name() {
                     if !connections.iter().any(|(name, _)| name == clock_name) {
                         if let Some(parent_clock) = self
-                            .metadata
-                            .clock_port_name
-                            .as_ref()
+                            .block
+                            .clock_port_name()
                             .and_then(|name| self.ports.get(name))
                         {
-                            connections.push((clock_name.clone(), parent_clock.to_expr()));
+                            connections.push((clock_name.to_string(), parent_clock.to_expr()));
                         } else {
                             return Err(BlockCodegenError::InvalidBlock(format!(
                                 "instance `{}` of block `{}` requires clock port \
                                  `{clock_name}`, but parent block `{}` has no clock",
-                                instance.name, instance.block, self.func.name
+                                instance.name, instance.block, self.block.name
                             )));
                         }
                     }
                 }
-                let order = &child.port_order;
+                let order = child
+                    .ports
+                    .iter()
+                    .map(|port| match port {
+                        BlockPort::Clock(name) => name.as_str(),
+                        BlockPort::Input(node) | BlockPort::Output(node) => child.port_name(*node),
+                    })
+                    .collect::<Vec<_>>();
                 connections.sort_by_key(|(name, _)| {
                     (
                         order
                             .iter()
-                            .position(|port| port == name)
+                            .position(|port| *port == name)
                             .unwrap_or(usize::MAX),
                         name.clone(),
                     )
@@ -1071,8 +950,8 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     /// Gives custom-typed array input ports shaped views without changing
     /// their explicitly requested SystemVerilog types.
     fn emit_input_array_views(&mut self) -> Result<(), BlockCodegenError> {
-        for (index, node) in self.func.nodes.iter().enumerate() {
-            if matches!(node.payload, NodePayload::GetParam(_))
+        for (index, node) in self.block.nodes.iter().enumerate() {
+            if matches!(node.payload, NodePayload::InputPort { .. })
                 && matches!(node.ty, Type::Array(_))
                 && let Some(value) = self.values[index]
                 && value.array_rank == 0
@@ -1089,14 +968,14 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         self.values[node.index].ok_or_else(|| {
             BlockCodegenError::InvalidBlock(format!(
                 "node `{}` in block `{}` has no representable SystemVerilog value",
-                self.func.get_node(node).name.clone().unwrap_or_else(|| {
+                self.block.get_node(node).name.clone().unwrap_or_else(|| {
                     format!(
                         "{}.{}",
-                        self.func.get_node(node).payload.get_operator(),
-                        self.func.get_node(node).text_id
+                        self.block.get_node(node).payload.get_operator(),
+                        self.block.get_node(node).text_id
                     )
                 }),
-                self.func.name
+                self.block.name
             ))
         })
     }
@@ -1181,13 +1060,13 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     ) -> Result<LogicRef, BlockCodegenError> {
         let name = self.node_name(node_ref);
         let unique = self.unique_name(&name);
-        let ty = self.value_type(self.func.get_node_ty(node_ref));
+        let ty = self.value_type(self.block.get_node_ty(node_ref));
         Ok(self.file.add_logic(self.module, &unique, &ty)?)
     }
 
     /// Builds the requested node name in the current source-layout scope.
     pub(crate) fn node_name(&self, node_ref: NodeRef) -> String {
-        let node = self.func.get_node(node_ref);
+        let node = self.block.get_node(node_ref);
         let original_name = node
             .name
             .clone()
@@ -1212,20 +1091,20 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             .make_continuous_assignment(&signal.to_expr(), &expression);
         self.file
             .add_member_continuous_assignment(self.module, assignment);
-        Ok(Value::signal(signal).with_type(self.func.get_node_ty(node_ref)))
+        Ok(Value::signal(signal).with_type(self.block.get_node_ty(node_ref)))
     }
 
     /// Returns whether this node should be assigned a dedicated named signal.
     pub(crate) fn should_assign(&self, node_ref: NodeRef, depth: usize) -> bool {
         self.must_assign(node_ref)
-            || self.func.get_node(node_ref).name.is_some()
+            || self.block.get_node(node_ref).name.is_some()
             || self.users[node_ref.index].len() > 1
             || depth > self.options.max_inline_depth
     }
 
     /// Preserves fixed-width and indexability boundaries required by lowering.
     fn must_assign(&self, node_ref: NodeRef) -> bool {
-        let node = self.func.get_node(node_ref);
+        let node = self.block.get_node(node_ref);
         matches!(node.ty, Type::Array(_))
             || matches!(
                 node.payload,
@@ -1256,12 +1135,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Identifies operand roles whose lowering requires a declared signal.
     fn operand_must_be_named_reference(&self, user: NodeRef, operand: NodeRef) -> bool {
-        match &self.func.get_node(user).payload {
+        match &self.block.get_node(user).payload {
             NodePayload::RegisterWrite { .. } => true,
             NodePayload::BitSlice { arg, .. } => *arg == operand,
             NodePayload::TupleIndex { tuple, .. } => *tuple == operand,
             NodePayload::SignExt { arg, .. } => {
-                *arg == operand && self.func.get_node_ty(operand).bit_count() > 1
+                *arg == operand && self.block.get_node_ty(operand).bit_count() > 1
             }
             NodePayload::ExtNaryAdd { terms, .. } => {
                 terms.iter().any(|term| term.operand == operand)
@@ -1272,7 +1151,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             | NodePayload::ExtClz { arg, .. }
             | NodePayload::ExtNormalizeLeft { arg, .. }
             | NodePayload::Unop(Unop::Reverse, arg) => {
-                *arg == operand && self.func.get_node_ty(operand).bit_count() > 1
+                *arg == operand && self.block.get_node_ty(operand).bit_count() > 1
             }
             NodePayload::Sel {
                 selector, cases, ..

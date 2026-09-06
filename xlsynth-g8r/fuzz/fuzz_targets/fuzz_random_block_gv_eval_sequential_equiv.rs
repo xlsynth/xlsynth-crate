@@ -4,8 +4,8 @@
 
 //! Differentially checks sequential block IR against Yosys-mapped gv-eval.
 
-use xlsynth_pir::IrBits;
 use std::collections::BTreeMap;
+use xlsynth_pir::IrBits;
 
 use libfuzzer_sys::fuzz_target;
 use rand::SeedableRng;
@@ -24,7 +24,7 @@ use xlsynth_g8r::verilog_version::VerilogVersion;
 use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosys_context};
 use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::{BlockMetadata, Fn};
+use xlsynth_pir::ir::Block;
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
     RandomOperation, StopPolicy, generate_block_package,
@@ -55,26 +55,20 @@ fn fuzz_block_options() -> RandomBlockOptions {
     }
 }
 
-fn generate_initial_state(metadata: &BlockMetadata, rng: &mut StdRng) -> Vec<IrValue> {
-    metadata
+fn generate_initial_state(block: &Block, rng: &mut StdRng) -> Vec<IrValue> {
+    block
         .registers
         .iter()
         .map(|register| generate_uniform_value_with_rng(rng, &register.ty))
         .collect()
 }
 
-fn generate_cycle_inputs(
-    block: &Fn,
-    metadata: &BlockMetadata,
-    rng: &mut StdRng,
-    cycle: usize,
-) -> Vec<IrValue> {
+fn generate_cycle_inputs(block: &Block, rng: &mut StdRng, cycle: usize) -> Vec<IrValue> {
     block
-        .params
-        .iter()
+        .input_ports()
         .map(|param| {
-            if let Some(reset) = metadata.reset.as_ref()
-                && param.name == reset.port_name
+            if let Some(reset) = block.reset.as_ref()
+                && param == reset.port
             {
                 let asserted = cycle == 0;
                 let signal_high = if reset.active_low {
@@ -85,7 +79,7 @@ fn generate_cycle_inputs(
                 return IrValue::make_ubits(1, u64::from(signal_high))
                     .expect("bits[1] reset input should construct");
             }
-            generate_uniform_value_with_rng(rng, &param.ty)
+            generate_uniform_value_with_rng(rng, block.port_type(param))
         })
         .collect()
 }
@@ -114,14 +108,13 @@ fn external_output_shapes(design: &SequentialGateFn) -> BTreeMap<String, usize> 
 
 fn remap_inputs_for_design(
     design: &SequentialGateFn,
-    block: &Fn,
+    block: &Block,
     input_bits: &[IrBits],
 ) -> Vec<IrBits> {
     let by_name = block
-        .params
-        .iter()
+        .input_ports()
         .zip(input_bits)
-        .map(|(param, bits)| (param.name.as_str(), bits))
+        .map(|(param, bits)| (block.port_name(param), bits))
         .collect::<BTreeMap<_, _>>();
     design
         .inputs
@@ -138,14 +131,14 @@ fn remap_inputs_for_design(
 
 fn remap_outputs_for_design(
     design: &SequentialGateFn,
-    metadata: &BlockMetadata,
+    block: &Block,
     output_bits: &[IrBits],
 ) -> Vec<IrBits> {
-    let by_name = metadata
-        .output_names
-        .iter()
+    let by_name = block
+        .output_ports()
+        .map(|port| block.port_name(port))
         .zip(output_bits)
-        .map(|(name, bits)| (name.as_str(), bits))
+        .map(|(name, bits)| (name, bits))
         .collect::<BTreeMap<_, _>>();
     design
         .outputs
@@ -181,18 +174,15 @@ fuzz_target!(init: {
         .package
         .get_top_block()
         .expect("generated package should have a top block");
-    let xlsynth_pir::ir::PackageMember::Block { func, metadata } = block else {
-        unreachable!("generated package top should be a block");
-    };
     assert!(
-        metadata
+        block
             .reset
             .as_ref()
             .is_some_and(|reset| !reset.asynchronous),
         "sequential gv-eval generation requires a synchronous reset:\n{block_ir}"
     );
     assert!(
-        metadata
+        block
             .registers
             .iter()
             .all(|register| register.reset_value.is_some()),
@@ -246,22 +236,18 @@ fuzz_target!(init: {
     });
     let mapped_design = &mapped_model.sequential_gate_fn;
 
-    let source_input_shapes = func
-        .params
-        .iter()
-        .map(|param| (param.name.clone(), param.ty.bit_count()))
+    let source_input_shapes = block.input_ports()
+        .map(|param| (block.port_name(param).to_string(), block.port_type(param).bit_count()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         external_input_shapes(mapped_design),
         source_input_shapes,
         "Yosys changed sequential block input shape:\nIR:\n{block_ir}\nGV:\n{mapped_gv}"
     );
-    let output_types = block_output_types(func, metadata);
-    let source_output_shapes = metadata
-        .output_names
-        .iter()
+    let output_types = block_output_types(block);
+    let source_output_shapes = block.output_ports().map(|port| block.port_name(port))
         .zip(&output_types)
-        .map(|(name, ty)| (name.clone(), ty.bit_count()))
+        .map(|(name, ty)| (name.to_string(), ty.bit_count()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         external_output_shapes(mapped_design),
@@ -272,20 +258,20 @@ fuzz_target!(init: {
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(blake3::hash(block_ir.as_bytes()).as_bytes());
     let mut rng = StdRng::from_seed(seed);
-    let mut block_state = generate_initial_state(metadata, &mut rng);
+    let mut block_state = generate_initial_state(block, &mut rng);
     let mut mapped_inputs = Vec::with_capacity(CYCLE_COUNT);
     let mut expected_outputs = Vec::with_capacity(CYCLE_COUNT);
     for cycle in 0..CYCLE_COUNT {
-        let inputs = generate_cycle_inputs(func, metadata, &mut rng, cycle);
+        let inputs = generate_cycle_inputs(block, &mut rng, cycle);
         let input_bits = inputs
             .iter()
-            .zip(&func.params)
-            .map(|(value, param)| flatten_value(value, &param.ty))
+            .zip(block.input_ports())
+            .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
-        mapped_inputs.push(remap_inputs_for_design(mapped_design, func, &input_bits));
+        mapped_inputs.push(remap_inputs_for_design(mapped_design, block, &input_bits));
 
         let (outputs, next_state) =
-            evaluate_block_cycle(func, metadata, &inputs, &block_state, &block_ir);
+            evaluate_block_cycle(block, &inputs, &block_state, &block_ir);
         let output_bits = outputs
             .iter()
             .zip(&output_types)
@@ -293,7 +279,7 @@ fuzz_target!(init: {
             .collect::<Vec<_>>();
         expected_outputs.push(remap_outputs_for_design(
             mapped_design,
-            metadata,
+            block,
             &output_bits,
         ));
         block_state = next_state;

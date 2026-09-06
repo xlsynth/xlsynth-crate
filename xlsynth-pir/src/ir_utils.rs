@@ -2,7 +2,7 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::ir::{self, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
+use crate::ir::{self, Fn, Node, NodeGraph, NodePayload, NodeRef, Package, Type};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -210,6 +210,8 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     match payload {
         Nil => vec![],
         GetParam(_) => vec![],
+        InputPort { .. } => vec![],
+        OutputPort { arg, .. } => vec![*arg],
         Tuple(elems) => elems.clone(),
         Array(elems) => elems.clone(),
         ArrayConcat(elems) => elems.clone(),
@@ -437,12 +439,7 @@ fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     order
 }
 
-pub fn get_topological(f: &Fn) -> Vec<NodeRef> {
-    debug_assert!(
-        f.check_pir_layout_invariants().is_ok(),
-        "PIR layout invariants violated for function '{}'",
-        f.name
-    );
+pub fn get_topological(f: &NodeGraph) -> Vec<NodeRef> {
     topo_from_nodes(&f.nodes)
 }
 
@@ -455,10 +452,7 @@ pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
 pub fn next_text_id(pkg: &Package) -> usize {
     pkg.members
         .iter()
-        .flat_map(|member| match member {
-            PackageMember::Function(f) => &f.nodes,
-            PackageMember::Block { func, .. } => &func.nodes,
-        })
+        .flat_map(|member| &member.graph().nodes)
         .map(|n| n.text_id)
         .max()
         .unwrap_or(0)
@@ -503,7 +497,7 @@ pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
 }
 
 /// Returns Err with a cycle description if any exist.
-pub fn verify_no_cycle(f: &Fn) -> Result<(), String> {
+pub fn verify_no_cycle(f: &NodeGraph) -> Result<(), String> {
     let n = f.nodes.len();
     if n == 0 {
         return Ok(());
@@ -523,6 +517,9 @@ pub fn verify_no_cycle(f: &Fn) -> Result<(), String> {
             let deps = operands(&f.nodes[node_idx].payload);
             if next_child < deps.len() {
                 let child = deps[next_child].index;
+                if child >= n {
+                    return Err(format!("node {node_idx} references missing node {child}"));
+                }
                 stack.push((node_idx, next_child + 1));
                 if state[child] == 0 {
                     state[child] = 1;
@@ -554,7 +551,7 @@ pub fn verify_no_cycle(f: &Fn) -> Result<(), String> {
 }
 
 /// Returns the `NodeRef` corresponding to the node named `name` in `f`, if any.
-pub fn find_node_by_name(f: &Fn, name: &str) -> Option<NodeRef> {
+pub fn find_node_by_name(f: &NodeGraph, name: &str) -> Option<NodeRef> {
     f.nodes.iter().enumerate().find_map(|(idx, node)| {
         if node.name.as_deref() == Some(name) {
             Some(NodeRef { index: idx })
@@ -580,6 +577,47 @@ pub fn find_node_by_name(f: &Fn, name: &str) -> Option<NodeRef> {
 /// Returns `Err` if remapping encounters a reference to a removed (Nil) node.
 pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
     compact_and_toposort_with_mapping_in_place(f).map(|_| ())
+}
+
+/// Compacts an interface-independent graph, returning a mapping for its owner's
+/// external references (such as ordered block ports and reset).
+pub fn compact_graph_and_toposort_with_mapping_in_place(
+    graph: &mut NodeGraph,
+) -> Result<Vec<Option<NodeRef>>, String> {
+    if graph
+        .nodes
+        .first()
+        .is_some_and(|node| !matches!(node.payload, NodePayload::Nil))
+    {
+        return Err("graph node zero must be the reserved Nil sentinel".to_string());
+    }
+    verify_no_cycle(graph)?;
+    let mut order = get_topological(graph);
+    order.retain(|nr| nr.index == 0 || !matches!(graph.get_node(*nr).payload, NodePayload::Nil));
+    let mut mapping = vec![None; graph.nodes.len()];
+    for (index, nr) in order.iter().enumerate() {
+        mapping[nr.index] = Some(NodeRef { index });
+    }
+    let mut nodes = Vec::with_capacity(order.len());
+    for nr in order {
+        let node = graph.get_node(nr);
+        for operand in operands(&node.payload) {
+            if mapping[operand.index].is_none() {
+                return Err(format!(
+                    "node {} refers to removed node {}",
+                    nr.index, operand.index
+                ));
+            }
+        }
+        nodes.push(Node {
+            payload: remap_payload_with(&node.payload, |(_, dep)| {
+                mapping[dep.index].expect("operand mapping was checked")
+            }),
+            ..node.clone()
+        });
+    }
+    graph.nodes = nodes;
+    Ok(mapping)
 }
 
 /// Compacts away non-reserved `Nil` nodes, topologically reorders the body,
@@ -747,7 +785,7 @@ impl Users {
 /// Each list is sorted and deduplicated, so a node that references the same
 /// operand multiple times is still recorded as one direct user of that operand.
 /// Nodes with no users map to an empty list.
-pub fn compute_users(f: &Fn) -> Users {
+pub fn compute_users(f: &NodeGraph) -> Users {
     let n = f.nodes.len();
     let mut users: Vec<UserList> = (0..n).map(|_| UserList::new()).collect();
 
@@ -775,7 +813,7 @@ pub fn compute_users(f: &Fn) -> Users {
 /// This leaves the node index and any users untouched; callers that want to
 /// redirect users to a different node should use `replace_node_with_ref`.
 pub fn replace_node_payload(
-    f: &mut Fn,
+    f: &mut NodeGraph,
     target: NodeRef,
     new_payload: NodePayload,
     new_type: Option<Type>,
@@ -816,6 +854,20 @@ pub fn replace_node_with_ref(
     target: NodeRef,
     replacement: NodeRef,
 ) -> Result<(), String> {
+    replace_graph_node_with_ref(&mut f.graph, target, replacement)?;
+    if f.ret_node_ref == Some(target) {
+        f.ret_node_ref = Some(replacement);
+    }
+    Ok(())
+}
+
+/// Redirects graph operands and removes the replaced node. Owners must update
+/// any interface references separately.
+pub fn replace_graph_node_with_ref(
+    f: &mut NodeGraph,
+    target: NodeRef,
+    replacement: NodeRef,
+) -> Result<(), String> {
     if target.index >= f.nodes.len() {
         return Err(format!(
             "replace_node_with_ref: target index {} out of bounds (len={})",
@@ -842,9 +894,6 @@ pub fn replace_node_with_ref(
         ));
     }
 
-    if f.ret_node_ref == Some(target) {
-        f.ret_node_ref = Some(replacement);
-    }
     for (idx, node) in f.nodes.iter_mut().enumerate() {
         if idx == target.index {
             continue;
@@ -866,7 +915,7 @@ pub fn replace_node_with_ref(
 /// This leaves all other users of the original operand untouched and does not
 /// compact/toposort; callers should run compaction after batching edits.
 pub fn replace_operand_with_ref(
-    f: &mut Fn,
+    f: &mut NodeGraph,
     target: NodeRef,
     operand_slot: usize,
     replacement: NodeRef,
@@ -927,6 +976,15 @@ where
     match payload {
         NodePayload::Nil => NodePayload::Nil,
         NodePayload::GetParam(p) => NodePayload::GetParam(*p),
+        NodePayload::InputPort { name, sv_type } => NodePayload::InputPort {
+            name: name.clone(),
+            sv_type: sv_type.clone(),
+        },
+        NodePayload::OutputPort { name, arg, sv_type } => NodePayload::OutputPort {
+            name: name.clone(),
+            arg: map((0, *arg)),
+            sv_type: sv_type.clone(),
+        },
         NodePayload::Tuple(elems) => NodePayload::Tuple(
             elems
                 .iter()
@@ -1257,6 +1315,77 @@ mod tests {
     use super::*;
     use crate::ir::{FileTable, NaryOp, PackageMember, Unop};
     use crate::ir_parser::Parser;
+
+    #[test]
+    fn block_graph_compaction_remaps_ports_reset_and_output_dependencies() {
+        let mut block = ir::Block::new("b");
+        block.nodes.push(Node {
+            text_id: 1,
+            name: None,
+            ty: Type::nil(),
+            payload: NodePayload::Nil,
+            pos: None,
+        });
+        let reset = block.add_input_port("rst", Type::Bits(1)).unwrap();
+        let input = block.add_input_port("x", Type::Bits(8)).unwrap();
+        let output = block.add_output_port("y", input).unwrap();
+        block.ports = vec![
+            ir::BlockPort::Output(output),
+            ir::BlockPort::Clock("clk".to_string()),
+            ir::BlockPort::Input(input),
+            ir::BlockPort::Input(reset),
+        ];
+        block.reset = Some(ir::BlockReset {
+            port: reset,
+            asynchronous: false,
+            active_low: true,
+        });
+        assert_eq!(compute_users(&block).get(&input).unwrap(), &[output]);
+
+        block.compact_and_toposort().unwrap();
+        let reset = block.get_input_port("rst").unwrap();
+        let input = block.get_input_port("x").unwrap();
+        let output = block.get_output_port("y").unwrap();
+        assert_eq!(reset.index, 1);
+        assert_eq!(block.reset.as_ref().unwrap().port, reset);
+        assert_eq!(block.output_value(output), input);
+        assert_eq!(block.get_node(output).text_id, 4);
+        assert_eq!(
+            block.ports,
+            vec![
+                ir::BlockPort::Output(output),
+                ir::BlockPort::Clock("clk".to_string()),
+                ir::BlockPort::Input(input),
+                ir::BlockPort::Input(reset)
+            ]
+        );
+        assert_eq!(compute_users(&block).get(&input).unwrap(), &[output]);
+        let package = Package {
+            name: "p".to_string(),
+            file_table: FileTable::new(),
+            members: vec![PackageMember::Block(block)],
+            top: None,
+        };
+        crate::ir_verify::verify_package(&package).unwrap();
+    }
+
+    #[test]
+    fn graph_compaction_rejects_invalid_operands_without_mutating() {
+        let mut graph = NodeGraph::new("invalid");
+        graph.nodes.push(Node {
+            text_id: 1,
+            name: None,
+            ty: Type::Bits(8),
+            payload: NodePayload::Unop(Unop::Identity, NodeRef { index: 2 }),
+            pos: None,
+        });
+        let before = format!("{graph:?}");
+        assert_eq!(
+            compact_graph_and_toposort_with_mapping_in_place(&mut graph).unwrap_err(),
+            "node 1 references missing node 2"
+        );
+        assert_eq!(format!("{graph:?}"), before);
+    }
 
     fn parse_fn(ir: &str) -> Fn {
         let pkg_text = format!("package test\n\n{}\n", ir);

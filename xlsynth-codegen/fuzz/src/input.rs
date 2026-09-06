@@ -16,7 +16,9 @@ use crate::semantics::Trace;
 use crate::{block_options, generate};
 
 pub const FORMAT_VERSION: u8 = 1;
-pub const GENERATOR_VERSION: u32 = 3;
+// Graph-resident block ports change emitted IR and node-budget accounting;
+// the byte-level reproducer format itself is unchanged.
+pub const GENERATOR_VERSION: u32 = 4;
 pub const HEADER_BYTES: usize = 48;
 const MAGIC: &[u8; 4] = b"XBCF";
 
@@ -288,7 +290,7 @@ mod tests {
             assert_eq!(a.stimulus_seed, b.stimulus_seed);
             assert_eq!(format!("{:?}", a.options), format!("{:?}", b.options));
             xlsynth_pir::ir_verify::verify_package(&a.package).unwrap();
-            let (block, _) = top_block(&a.package);
+            let block = top_block(&a.package);
             assert!(block.nodes.len() - 1 <= 48);
             emit(&a.package, &a.options);
         }
@@ -355,9 +357,9 @@ mod tests {
             mark_versioned(&mut bytes);
             bytes[40] |= 3;
             let case = FuzzCase::decode(&bytes).unwrap();
-            let (_, metadata) = top_block(&case.package);
-            assert!(metadata.registers.len() >= 2);
-            saw_aggregate |= metadata
+            let block = top_block(&case.package);
+            assert!(block.registers.len() >= 2);
+            saw_aggregate |= block
                 .registers
                 .iter()
                 .any(|r| !matches!(r.ty, xlsynth_pir::ir::Type::Bits(_)));

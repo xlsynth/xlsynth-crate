@@ -586,10 +586,7 @@ fn optimize_dslx_aot_pir_text(
     let original_event_labels = original_package
         .members
         .iter()
-        .flat_map(|member| match member {
-            PackageMember::Function(function) => function.nodes.iter(),
-            PackageMember::Block { func, .. } => func.nodes.iter(),
-        })
+        .flat_map(|member| member.graph().nodes.iter())
         .filter_map(|node| match &node.payload {
             NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => {
                 Some(label.clone())
@@ -606,10 +603,7 @@ fn optimize_dslx_aot_pir_text(
         .parse_and_validate_package()
         .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
     for member in &mut optimized_package.members {
-        let function = match member {
-            PackageMember::Function(function) => function,
-            PackageMember::Block { func, .. } => func,
-        };
+        let function = member.graph_mut();
         for node in &mut function.nodes {
             let label = match &mut node.payload {
                 NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => label,
@@ -731,10 +725,7 @@ fn package_max_text_id(package: &xlsynth_pir::ir::Package) -> usize {
     package
         .members
         .iter()
-        .flat_map(|member| match member {
-            PackageMember::Function(function) => function.nodes.iter(),
-            PackageMember::Block { func, .. } => func.nodes.iter(),
-        })
+        .flat_map(|member| member.graph().nodes.iter())
         .map(|node| node.text_id)
         .max()
         .unwrap_or(0)

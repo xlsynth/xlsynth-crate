@@ -14,11 +14,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, Node, NodePayload, NodeRef, Package,
-    PackageMember, Type, Unop,
+    Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, Node, NodeGraph, NodePayload, NodeRef,
+    Package, PackageMember, Type, Unop,
 };
 use crate::ir::{Param, ParamId};
-use crate::ir_rebase_ids::rebase_fn_ids;
+use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids};
 use crate::ir_utils::compact_and_toposort_in_place;
 use crate::math::ceil_log2;
 use crate::{IrBits, IrValue};
@@ -60,7 +60,7 @@ pub enum ExtensionEmitMode {
     AsFfiFunction,
 }
 
-fn next_text_id(f: &Fn) -> usize {
+fn next_text_id(f: &NodeGraph) -> usize {
     f.nodes
         .iter()
         .map(|n| n.text_id)
@@ -69,7 +69,7 @@ fn next_text_id(f: &Fn) -> usize {
         .saturating_add(1)
 }
 
-fn expect_bits_width(f: &Fn, r: NodeRef, ctx: &str) -> Result<usize, DesugarError> {
+fn expect_bits_width(f: &NodeGraph, r: NodeRef, ctx: &str) -> Result<usize, DesugarError> {
     let ty = f.get_node_ty(r);
     match ty {
         Type::Bits(w) => Ok(*w),
@@ -88,7 +88,7 @@ struct ExtCarryOutShape {
 /// Validates `ext_carry_out` operands and returns the shared shape info used by
 /// both inline lowering and FFI wrapper synthesis.
 fn analyze_ext_carry_out(
-    f: &Fn,
+    f: &NodeGraph,
     lhs: NodeRef,
     rhs: NodeRef,
     c_in: NodeRef,
@@ -114,7 +114,7 @@ fn analyze_ext_carry_out(
 /// Appends the basis-op implementation of `ext_carry_out` and returns the
 /// lowered carry-out bit node.
 fn append_lowered_ext_carry_out(
-    f: &mut Fn,
+    f: &mut NodeGraph,
     lhs: NodeRef,
     rhs: NodeRef,
     c_in: NodeRef,
@@ -221,7 +221,7 @@ impl ExtNormalizeLeftShape {
 /// Validates `ext_prio_encode` operands and returns the shared shape info used
 /// by both inline lowering and FFI wrapper synthesis.
 fn analyze_ext_prio_encode(
-    f: &Fn,
+    f: &NodeGraph,
     arg: NodeRef,
     lsb_prio: bool,
 ) -> Result<ExtPrioEncodeShape, DesugarError> {
@@ -232,7 +232,7 @@ fn analyze_ext_prio_encode(
 /// Validates `ext_clz` operands and returns the shared shape info used by both
 /// inline lowering and FFI wrapper synthesis.
 fn analyze_ext_clz(
-    f: &Fn,
+    f: &NodeGraph,
     nr: NodeRef,
     arg: NodeRef,
     offset: usize,
@@ -252,7 +252,7 @@ fn analyze_ext_clz(
 /// Validates `ext_normalize_left` operands and returns the shared shape info
 /// used by both inline lowering and FFI wrapper synthesis.
 fn analyze_ext_normalize_left(
-    f: &Fn,
+    f: &NodeGraph,
     nr: NodeRef,
     arg: NodeRef,
     shift_offset: usize,
@@ -290,7 +290,7 @@ struct ExtMaskLowShape {
 /// Validates `ext_mask_low` shape and returns the widths needed by both inline
 /// lowering and FFI wrapper synthesis.
 fn analyze_ext_mask_low(
-    f: &Fn,
+    f: &NodeGraph,
     result: NodeRef,
     count: NodeRef,
 ) -> Result<ExtMaskLowShape, DesugarError> {
@@ -312,7 +312,11 @@ fn analyze_ext_mask_low(
 
 /// Appends the basis-op implementation of `ext_prio_encode` and returns the
 /// lowered encoded-result node.
-fn append_lowered_ext_prio_encode(f: &mut Fn, arg: NodeRef, shape: ExtPrioEncodeShape) -> NodeRef {
+fn append_lowered_ext_prio_encode(
+    f: &mut NodeGraph,
+    arg: NodeRef,
+    shape: ExtPrioEncodeShape,
+) -> NodeRef {
     let one_hot_width = shape.input_width.saturating_add(1);
     let one_hot = push_node(
         f,
@@ -332,7 +336,7 @@ fn append_lowered_ext_prio_encode(f: &mut Fn, arg: NodeRef, shape: ExtPrioEncode
 /// Appends the basis-op implementation of `ext_clz` and returns the lowered
 /// encoded-result node.
 fn append_lowered_ext_clz(
-    f: &mut Fn,
+    f: &mut NodeGraph,
     arg: NodeRef,
     shape: ExtClzShape,
 ) -> Result<NodeRef, DesugarError> {
@@ -376,7 +380,7 @@ fn append_lowered_ext_clz(
 /// Appends the basis-op implementation of `ext_normalize_left` and returns the
 /// lowered normalized value or `(normalized, raw_clz)` tuple.
 fn append_lowered_ext_normalize_left(
-    f: &mut Fn,
+    f: &mut NodeGraph,
     arg: NodeRef,
     shape: ExtNormalizeLeftShape,
 ) -> Result<NodeRef, DesugarError> {
@@ -416,7 +420,7 @@ fn append_lowered_ext_normalize_left(
     ))
 }
 
-fn push_node(f: &mut Fn, ty: Type, payload: NodePayload) -> NodeRef {
+fn push_node(f: &mut NodeGraph, ty: Type, payload: NodePayload) -> NodeRef {
     let text_id = next_text_id(f);
     let new_index = f.nodes.len();
     f.nodes.push(Node {
@@ -429,7 +433,7 @@ fn push_node(f: &mut Fn, ty: Type, payload: NodePayload) -> NodeRef {
     NodeRef { index: new_index }
 }
 
-fn make_zero_bits_literal(f: &mut Fn, width: usize) -> NodeRef {
+fn make_zero_bits_literal(f: &mut NodeGraph, width: usize) -> NodeRef {
     push_node(
         f,
         Type::Bits(width),
@@ -437,7 +441,7 @@ fn make_zero_bits_literal(f: &mut Fn, width: usize) -> NodeRef {
     )
 }
 
-fn make_ubits_literal(f: &mut Fn, width: usize, value: u64) -> NodeRef {
+fn make_ubits_literal(f: &mut NodeGraph, width: usize, value: u64) -> NodeRef {
     push_node(
         f,
         Type::Bits(width),
@@ -445,7 +449,7 @@ fn make_ubits_literal(f: &mut Fn, width: usize, value: u64) -> NodeRef {
     )
 }
 
-fn make_usize_bits_literal(f: &mut Fn, width: usize, value: usize) -> NodeRef {
+fn make_usize_bits_literal(f: &mut NodeGraph, width: usize, value: usize) -> NodeRef {
     let mut bits = vec![false; width];
     for (i, bit) in bits.iter_mut().enumerate() {
         if i < usize::BITS as usize {
@@ -461,7 +465,11 @@ fn make_usize_bits_literal(f: &mut Fn, width: usize, value: usize) -> NodeRef {
 
 /// Appends the basis-op implementation of `ext_mask_low` and returns the
 /// lowered mask node.
-fn append_lowered_ext_mask_low(f: &mut Fn, count: NodeRef, shape: ExtMaskLowShape) -> NodeRef {
+fn append_lowered_ext_mask_low(
+    f: &mut NodeGraph,
+    count: NodeRef,
+    shape: ExtMaskLowShape,
+) -> NodeRef {
     if shape.output_width == 0 {
         return make_zero_bits_literal(f, 0);
     }
@@ -480,7 +488,7 @@ fn append_lowered_ext_mask_low(f: &mut Fn, count: NodeRef, shape: ExtMaskLowShap
 
 /// Sign- or zero-extends, or truncates, a bits-typed value to `output_width`.
 fn extend_or_truncate_to_width(
-    f: &mut Fn,
+    f: &mut NodeGraph,
     operand: NodeRef,
     output_width: usize,
     signed: bool,
@@ -520,7 +528,7 @@ fn extend_or_truncate_to_width(
     }
 }
 
-fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_carry_out_in_graph(f: &mut NodeGraph) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     // Snapshot length so we only visit original nodes; desugaring appends
@@ -559,7 +567,7 @@ struct ExtNaryAddShape {
 /// Validates `ext_nary_add` shape and returns the widths needed by both inline
 /// lowering and FFI wrapper synthesis.
 fn analyze_ext_nary_add(
-    f: &Fn,
+    f: &NodeGraph,
     result: NodeRef,
     terms: &[ExtNaryAddTerm],
     arch: Option<ExtNaryAddArchitecture>,
@@ -597,7 +605,7 @@ fn analyze_ext_nary_add(
 /// Appends the basis-op implementation of `ext_nary_add` and returns the
 /// lowered sum node.
 fn append_lowered_ext_nary_add(
-    f: &mut Fn,
+    f: &mut NodeGraph,
     terms: &[ExtNaryAddTerm],
     output_width: usize,
 ) -> Result<NodeRef, DesugarError> {
@@ -892,13 +900,15 @@ fn make_helper_with_params(name: String, params: Vec<Param>, ret_ty: Type, key: 
         });
     }
     Fn {
-        name,
+        graph: NodeGraph {
+            name,
+            nodes,
+            outer_attrs: vec![format_ffi_proto_outer_attr(&helper_code_template(key))],
+            inner_attrs: Vec::new(),
+        },
         params,
         ret_ty,
-        nodes,
         ret_node_ref: None,
-        outer_attrs: vec![format_ffi_proto_outer_attr(&helper_code_template(key))],
-        inner_attrs: Vec::new(),
     }
 }
 
@@ -1093,19 +1103,8 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
     }
 }
 
-fn max_text_id_in_fn(f: &Fn) -> usize {
+fn max_text_id_in_graph(f: &NodeGraph) -> usize {
     f.nodes.iter().map(|node| node.text_id).max().unwrap_or(0)
-}
-
-fn max_text_id_in_package(pkg: &Package) -> usize {
-    pkg.members
-        .iter()
-        .map(|member| match member {
-            PackageMember::Function(f) => max_text_id_in_fn(f),
-            PackageMember::Block { func, .. } => max_text_id_in_fn(func),
-        })
-        .max()
-        .unwrap_or(0)
 }
 
 fn get_or_create_helper_name(
@@ -1125,14 +1124,14 @@ fn get_or_create_helper_name(
     } else {
         rebase_fn_ids(&helper, *current_max_text_id)
     };
-    *current_max_text_id = max_text_id_in_fn(&rebased_helper);
+    *current_max_text_id = max_text_id_in_graph(&rebased_helper);
     helper_names.insert(key.clone(), name.clone());
     helper_fns.push(rebased_helper);
     name
 }
 
-fn wrap_extensions_in_fn(
-    f: &mut Fn,
+fn wrap_extensions_in_graph(
+    f: &mut NodeGraph,
     helper_names: &mut BTreeMap<FfiWrapKey, String>,
     helper_fns: &mut Vec<Fn>,
     existing_names: &mut BTreeSet<String>,
@@ -1302,36 +1301,20 @@ fn wrap_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
     let mut existing_names: BTreeSet<String> = pkg
         .members
         .iter()
-        .map(|member| match member {
-            PackageMember::Function(f) => f.name.clone(),
-            PackageMember::Block { func, .. } => func.name.clone(),
-        })
+        .map(|member| member.graph().name.clone())
         .collect();
     let mut helper_names: BTreeMap<FfiWrapKey, String> = BTreeMap::new();
     let mut helper_fns: Vec<Fn> = Vec::new();
-    let mut current_max_text_id = max_text_id_in_package(pkg);
+    let mut current_max_text_id = package_max_emitted_node_id(pkg);
 
     for member in pkg.members.iter_mut() {
-        match member {
-            PackageMember::Function(f) => {
-                let _changed = wrap_extensions_in_fn(
-                    f,
-                    &mut helper_names,
-                    &mut helper_fns,
-                    &mut existing_names,
-                    &mut current_max_text_id,
-                )?;
-            }
-            PackageMember::Block { func, .. } => {
-                let _changed = wrap_extensions_in_fn(
-                    func,
-                    &mut helper_names,
-                    &mut helper_fns,
-                    &mut existing_names,
-                    &mut current_max_text_id,
-                )?;
-            }
-        }
+        let _changed = wrap_extensions_in_graph(
+            member.graph_mut(),
+            &mut helper_names,
+            &mut helper_fns,
+            &mut existing_names,
+            &mut current_max_text_id,
+        )?;
     }
 
     if !helper_fns.is_empty() {
@@ -1345,7 +1328,7 @@ fn wrap_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
     Ok(())
 }
 
-fn desugar_ext_nary_add_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_nary_add_in_graph(f: &mut NodeGraph) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     let original_len = f.nodes.len();
@@ -1368,7 +1351,7 @@ fn desugar_ext_nary_add_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
-fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_prio_encode_in_graph(f: &mut NodeGraph) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     // Snapshot length so we only visit original nodes; desugaring appends
@@ -1395,7 +1378,7 @@ fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
-fn desugar_ext_clz_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_clz_in_graph(f: &mut NodeGraph) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     let original_len = f.nodes.len();
@@ -1423,7 +1406,7 @@ fn desugar_ext_clz_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
-fn desugar_ext_normalize_left_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_normalize_left_in_graph(f: &mut NodeGraph) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     let original_len = f.nodes.len();
@@ -1462,7 +1445,7 @@ fn desugar_ext_normalize_left_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
-fn desugar_ext_mask_low_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_mask_low_in_graph(f: &mut NodeGraph) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     let original_len = f.nodes.len();
@@ -1489,13 +1472,19 @@ fn desugar_ext_mask_low_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 ///
 /// This function also normalizes the node list into a valid topological order.
 pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
-    let _changed = desugar_ext_carry_out_in_fn(f)?
-        | desugar_ext_clz_in_fn(f)?
-        | desugar_ext_normalize_left_in_fn(f)?
-        | desugar_ext_mask_low_in_fn(f)?
-        | desugar_ext_nary_add_in_fn(f)?
-        | desugar_ext_prio_encode_in_fn(f)?;
+    desugar_extensions_in_graph(&mut f.graph)?;
     compact_and_toposort_in_place(f).map_err(DesugarError::new)?;
+    Ok(())
+}
+
+/// Lowers extension nodes without imposing function interface or root rules.
+fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError> {
+    let _changed = desugar_ext_carry_out_in_graph(f)?
+        | desugar_ext_clz_in_graph(f)?
+        | desugar_ext_normalize_left_in_graph(f)?
+        | desugar_ext_mask_low_in_graph(f)?
+        | desugar_ext_nary_add_in_graph(f)?
+        | desugar_ext_prio_encode_in_graph(f)?;
     Ok(())
 }
 
@@ -1504,7 +1493,10 @@ pub fn desugar_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarErr
     for member in pkg.members.iter_mut() {
         match member {
             PackageMember::Function(f) => desugar_extensions_in_fn(f)?,
-            PackageMember::Block { func, .. } => desugar_extensions_in_fn(func)?,
+            PackageMember::Block(block) => {
+                desugar_extensions_in_graph(&mut block.graph)?;
+                block.compact_and_toposort().map_err(DesugarError::new)?;
+            }
         }
     }
     Ok(())

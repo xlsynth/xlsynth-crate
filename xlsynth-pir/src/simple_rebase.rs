@@ -188,13 +188,15 @@ pub fn rebase_onto(
     });
 
     IrFn {
-        name: result_fn_name.to_string(),
+        graph: crate::ir::NodeGraph {
+            name: result_fn_name.to_string(),
+            nodes: remapped_nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params: result_params,
         ret_ty: result_ret_ty,
-        nodes: remapped_nodes,
         ret_node_ref: remapped_ret,
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     }
 }
 

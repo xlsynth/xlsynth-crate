@@ -55,9 +55,9 @@ For an existing package, use `build_into_package(return_value, &mut package)`;
 it rebases IDs to avoid collisions, rejects duplicate member names, and leaves
 the package's top selection unchanged. Parameters retain their signature order
 and node indices, but their textual IDs change together with the other nodes.
-ID allocation includes block port metadata and the output IDs the block emitter
-generates when metadata omits them. Checked rebasing updates the completed
-function in place, without cloning its nodes.
+ID allocation includes every function and block node, including block input and
+output ports. Checked rebasing updates the completed function in place, without
+cloning its nodes.
 
 `invoke(&callee, &arguments)` accepts an existing function's signature.
 `counted_for(init, trip_count, stride, &body, &invariants)` checks the loop body's
@@ -82,6 +82,23 @@ events. The `ext_*` methods explicitly construct PIR extension operations;
 configuration for the larger extension signatures. Desugar extensions before
 passing their IR to upstream XLS tools. Block registers, ports, instantiations,
 and proc construction are outside this function builder's scope.
+
+## Blocks and shared graphs
+
+`ir::Fn` and `ir::Block` are separate owners of an `ir::NodeGraph`. Functions
+add a parameter signature and return reference; blocks add an ordered port
+interface, reset descriptor, registers, and instantiations. Shared graph
+operations use `NodeGraph` or `PackageMember::graph()` / `graph_mut()`.
+
+Block input and output ports are real nodes. An output port has type `()` and
+references its driving value; `Block::port_type` returns the external port type.
+Clock declarations live only in the ordered interface. Blocks have no synthetic
+return tuple or function parameters. Use `Block::compact_and_toposort()` to
+reorder a block while keeping its port and reset references synchronized.
+
+When an algorithm needs a function, use an explicit conversion such as
+`block2fn::combinational_block_to_fn`. Its inverse for logic replacement,
+`replace_combinational_block_logic`, preserves the template's physical interface.
 
 ## Extension ops
 

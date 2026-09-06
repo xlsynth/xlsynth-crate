@@ -36,11 +36,11 @@ impl Trace {
 
     /// Uses stimulus entropy that can be mutated without changing the graph.
     pub fn with_seed(package: &Package, seed: [u8; 32]) -> Self {
-        let (block, metadata) = top_block(package);
-        let output_types = block_output_types(block, metadata);
+        let block = top_block(package);
+        let output_types = block_output_types(block);
         let mut rng = StdRng::from_seed(seed);
         let bounds = crate::stimulus::relevant_bounds(block);
-        let mut state = metadata
+        let mut state = block
             .registers
             .iter()
             .map(|r| {
@@ -48,7 +48,7 @@ impl Trace {
                 crate::stimulus::value(&r.ty, &mut rng, pattern, &bounds)
             })
             .collect::<Vec<_>>();
-        let initial_state = metadata
+        let initial_state = block
             .registers
             .iter()
             .zip(&state)
@@ -60,9 +60,9 @@ impl Trace {
                 )
             })
             .collect();
-        let sequential = !metadata.registers.is_empty();
+        let sequential = !block.registers.is_empty();
         let mut samples = Vec::new();
-        let live = crate::coverage::live_nodes(block, metadata);
+        let live = crate::coverage::live_nodes(block);
         let mut observed_live_behaviors = BTreeMap::new();
         for sample in 0..if sequential {
             CYCLE_COUNT
@@ -70,58 +70,53 @@ impl Trace {
             INPUT_SAMPLE_COUNT
         } {
             let mut inputs = crate::stimulus::inputs(block, &mut rng, sample, &bounds);
-            if let Some(reset) = &metadata.reset {
+            if let Some(reset) = &block.reset {
                 assert!(
                     !reset.asynchronous,
                     "cycle trace does not model asynchronous reset events"
                 );
                 let asserted = matches!(sample % 12, 2 | 3 | 9);
-                let position = block
-                    .params
-                    .iter()
-                    .position(|p| p.name == reset.port_name)
-                    .unwrap();
-                inputs[position] = xlsynth_pir::IrValue::from_bits(&xlsynth_pir::IrBits::from_lsb_is_0(&[
-                    asserted ^ reset.active_low,
-                ]));
+                let position = block.input_ports().position(|p| p == reset.port).unwrap();
+                inputs[position] =
+                    xlsynth_pir::IrValue::from_bits(&xlsynth_pir::IrBits::from_lsb_is_0(&[
+                        asserted ^ reset.active_low,
+                    ]));
             }
             let bindings = block
-                .params
-                .iter()
+                .input_ports()
                 .zip(&inputs)
-                .filter(|(p, _)| p.ty.bit_count() != 0)
+                .filter(|(p, _)| block.port_type(*p).bit_count() != 0)
                 .map(|(p, value)| {
                     (
-                        p.name.clone(),
-                        LogicValue::from_bits(&flatten_value(value, &p.ty)),
+                        block.port_name(p).to_string(),
+                        LogicValue::from_bits(&flatten_value(value, block.port_type(p))),
                     )
                 })
                 .collect();
-            let evaluated = evaluate_block_cycle_observed(block, metadata, &inputs, &state);
+            let evaluated = evaluate_block_cycle_observed(block, &inputs, &state);
             crate::coverage::record_behaviors(
                 block,
-                metadata,
                 &evaluated.node_values,
                 &live,
                 &mut observed_live_behaviors,
             );
             let outputs = evaluated.outputs;
             let next_state = evaluated.next_state;
-            let outputs = metadata
-                .output_names
-                .iter()
+            let outputs = block
+                .output_ports()
+                .map(|port| block.port_name(port))
                 .zip(&output_types)
                 .zip(&outputs)
                 .filter(|((_, ty), _)| ty.bit_count() != 0)
                 .map(|((name, ty), value)| {
                     (
-                        name.clone(),
+                        name.to_string(),
                         LogicValue::from_bits(&flatten_value(value, ty)),
                     )
                 })
                 .collect();
             let next_bindings = sequential.then(|| {
-                metadata
+                block
                     .registers
                     .iter()
                     .zip(&next_state)

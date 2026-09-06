@@ -11,7 +11,6 @@ use xlsynth_codegen::BlockCodegenOptions;
 use xlsynth_g8r::netlist::yosys::YosysToolchain;
 use xlsynth_pir::IrBits;
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::PackageMember;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 
 /// Narrowing followed by replacement and concatenation exercises width
@@ -123,9 +122,11 @@ fn hierarchical_outputs_evaluate_with_yosys() {
 fn narrow_slice_update_matches_pir_for_all_inputs_with_yosys() {
     let yosys = YosysToolchain::from_env().expect("required Yosys executable");
     let package = package(NARROW_SLICE_UPDATE);
-    let Some(PackageMember::Block { func, .. }) = package.get_top_block() else {
+    let Some(block) = package.get_top_block() else {
         panic!("expected top block");
     };
+    let function = xlsynth_pir::block2fn::combinational_block_to_fn(block).unwrap();
+    let func = &function;
     let mut inputs = Vec::new();
     let mut expected = Vec::new();
     for a in 0..8 {

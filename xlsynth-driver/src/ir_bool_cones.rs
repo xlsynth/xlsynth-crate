@@ -124,7 +124,7 @@ pub fn handle_ir_bool_cones(matches: &ArgMatches, _config: &Option<ToolchainConf
                         continue;
                     }
                 }
-                xlsynth_pir::ir::PackageMember::Block { .. } => {}
+                xlsynth_pir::ir::PackageMember::Block(_) => {}
             }
         }
         let out_path = out_dir_path.join(format!("{}.ir", extracted.sha256_hex));

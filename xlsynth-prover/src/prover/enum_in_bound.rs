@@ -218,7 +218,7 @@ fn instrument_function_for_enum_bounds(
         }
     }
 
-    if let Some(ret_ref) = f.ret_node_ref.as_ref() {
+    if let Some(ret_ref) = f.ret_node_ref {
         if let NodePayload::Tuple(elements) = &mut f.nodes[ret_ref.index].payload {
             if !elements.is_empty() {
                 elements[0] = current_token_ref;

@@ -96,7 +96,7 @@ pub fn is_trivial_param_return_cone(cone: &ExtractedCone) -> bool {
     };
     let f = match member {
         PackageMember::Function(f) => f,
-        PackageMember::Block { .. } => return false,
+        PackageMember::Block(_) => return false,
     };
     if f.params.len() != 1 {
         return false;
@@ -124,7 +124,7 @@ pub fn is_trivial_literal_return_cone(cone: &ExtractedCone) -> bool {
     };
     let f = match member {
         PackageMember::Function(f) => f,
-        PackageMember::Block { .. } => return false,
+        PackageMember::Block(_) => return false,
     };
     if !f.params.is_empty() {
         return false;
@@ -426,13 +426,15 @@ pub fn extract_bool_cone(
     };
 
     let func = ir::Fn {
-        name: "cone".to_string(),
+        graph: crate::ir::NodeGraph {
+            name: "cone".to_string(),
+            nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params,
         ret_ty: f.nodes[sink].ty.clone(),
-        nodes,
         ret_node_ref: Some(new_sink_ref),
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     };
 
     let package = Package {

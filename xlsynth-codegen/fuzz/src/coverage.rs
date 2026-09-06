@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use xlsynth::external_tool::ToolError;
 use xlsynth_g8r_fuzz::random_block::block_output_refs;
-use xlsynth_pir::ir::{Binop, BlockMetadata, Fn, NodePayload, NodeRef, Package, Type};
+use xlsynth_pir::ir::{Binop, Block, NodePayload, NodeRef, Package, Type};
 use xlsynth_pir::ir_random::gather_block_stats;
 use xlsynth_pir::ir_utils::operands;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize_in_range;
@@ -103,9 +103,9 @@ impl CoverageReport {
             }
             Outcome::GeneratedOnly => { /* A corpus census need not execute an oracle. */ }
         }
-        let (block, metadata) = top_block(package);
-        let live = live_nodes(block, metadata);
-        let depth = register_dependency_depth(block, metadata);
+        let block = top_block(package);
+        let live = live_nodes(block);
+        let depth = register_dependency_depth(block);
         *self.register_dependency_depths.entry(depth).or_default() += 1;
         let stats = gather_block_stats(block);
         *self
@@ -114,7 +114,7 @@ impl CoverageReport {
             .or_default() += 1;
         *self
             .register_counts
-            .entry(metadata.registers.len())
+            .entry(block.registers.len())
             .or_default() += 1;
         for (op, count) in stats.emitted_operations {
             *self.generated_operations.entry(op.clone()).or_default() += count as u64;
@@ -280,7 +280,7 @@ impl CoverageReport {
                 _ => { /* The opcode/type census covers other operation families. */ }
             }
         }
-        if let Some(reset) = &metadata.reset {
+        if let Some(reset) = &block.reset {
             *self
                 .attributes
                 .entry(format!("reset_active_low={}", reset.active_low))
@@ -472,7 +472,7 @@ top block behaviors(values: bits[8][3], index: bits[128], data: bits[65], read: 
         assert!(
             report
                 .producer_consumer_pairs
-                .contains_key("get_param -> array_index")
+                .contains_key("input_port -> array_index")
         );
         assert!(
             report
@@ -572,8 +572,8 @@ fn is_data_operand(payload: &NodePayload, position: usize) -> bool {
 }
 
 /// Marks dependencies of observed outputs and all checked register updates.
-pub(crate) fn live_nodes(block: &Fn, metadata: &BlockMetadata) -> Vec<bool> {
-    let mut pending = block_output_refs(block, metadata);
+pub(crate) fn live_nodes(block: &Block) -> Vec<bool> {
+    let mut pending = block_output_refs(block);
     pending.extend(block.nodes.iter().enumerate().filter_map(|(index, node)| {
         matches!(node.payload, NodePayload::RegisterWrite { .. }).then_some(NodeRef { index })
     }));
@@ -588,8 +588,8 @@ pub(crate) fn live_nodes(block: &Fn, metadata: &BlockMetadata) -> Vec<bool> {
 
 /// Reports longest register dependency paths, or feedback including indirect
 /// cycles. Implicit load-enable holds do not count as explicit data feedback.
-fn register_dependency_depth(block: &Fn, metadata: &BlockMetadata) -> String {
-    let names: BTreeMap<_, _> = metadata
+fn register_dependency_depth(block: &Block) -> String {
+    let names: BTreeMap<_, _> = block
         .registers
         .iter()
         .enumerate()
@@ -641,8 +641,7 @@ fn register_dependency_depth(block: &Fn, metadata: &BlockMetadata) -> String {
 /// Classifies actual evaluated operands; static presence is reported
 /// separately.
 pub(crate) fn record_behaviors(
-    block: &Fn,
-    metadata: &BlockMetadata,
+    block: &Block,
     values: &[Option<IrValue>],
     live: &[bool],
     counts: &mut BTreeMap<String, u64>,
@@ -727,9 +726,7 @@ pub(crate) fn record_behaviors(
                     .map(|r| bits(r).get_bit(0).unwrap())
                     .unwrap_or(true);
                 let reset = reset
-                    .map(|r| {
-                        bits(r).get_bit(0).unwrap() ^ metadata.reset.as_ref().unwrap().active_low
-                    })
+                    .map(|r| bits(r).get_bit(0).unwrap() ^ block.reset.as_ref().unwrap().active_low)
                     .unwrap_or(false);
                 format!("enable={enabled},reset={reset}")
             }

@@ -17,7 +17,7 @@ use xlsynth_g8r::verilog_version::VerilogVersion;
 use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosys_context};
 use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_outputs, flatten_value};
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::Fn;
+use xlsynth_pir::ir::Block;
 use xlsynth_pir::ir_random::{
     BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions,
     RandomOperation, StopPolicy, generate_block_package,
@@ -49,11 +49,10 @@ fn fuzz_block_options() -> RandomBlockOptions {
     }
 }
 
-fn generate_inputs(block: &Fn, rng: &mut StdRng) -> Vec<IrValue> {
+fn generate_inputs(block: &Block, rng: &mut StdRng) -> Vec<IrValue> {
     block
-        .params
-        .iter()
-        .map(|param| generate_uniform_value_with_rng(rng, &param.ty))
+        .input_ports()
+        .map(|param| generate_uniform_value_with_rng(rng, block.port_type(param)))
         .collect()
 }
 
@@ -78,11 +77,8 @@ fuzz_target!(init: {
         .package
         .get_top_block()
         .expect("generated package should have a top block");
-    let xlsynth_pir::ir::PackageMember::Block { func, metadata } = block else {
-        unreachable!("generated package top should be a block");
-    };
     assert!(
-        metadata.registers.is_empty(),
+        block.registers.is_empty(),
         "combinational-only generation emitted registers:\n{block_ir}"
     );
 
@@ -167,15 +163,15 @@ fuzz_target!(init: {
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(blake3::hash(block_ir.as_bytes()).as_bytes());
     let mut rng = StdRng::from_seed(seed);
-    let output_types = block_output_types(func, metadata);
+    let output_types = block_output_types(block);
     for sample_index in 0..INPUT_SAMPLE_COUNT {
-        let inputs = generate_inputs(func, &mut rng);
+        let inputs = generate_inputs(block, &mut rng);
         let input_bits = inputs
             .iter()
-            .zip(&func.params)
-            .map(|(value, param)| flatten_value(value, &param.ty))
+            .zip(block.input_ports())
+            .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
-        let expected_output_bits = evaluate_block_outputs(func, metadata, &inputs, &block_ir)
+        let expected_output_bits = evaluate_block_outputs(block, &inputs, &block_ir)
             .iter()
             .zip(&output_types)
             .map(|(value, ty)| flatten_value(value, ty))

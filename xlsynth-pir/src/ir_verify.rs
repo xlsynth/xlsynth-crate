@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Verification routines for PIR functions and packages.
+//! Verification routines for PIR graphs, functions, blocks, and packages.
 
 use std::collections::HashSet;
 
-use crate::ir::{self, Fn, NodePayload, Package, PackageMember, Type};
+use crate::ir::{self, Block, Fn, NodeGraph, NodePayload, Package, PackageMember, Type};
 use crate::ir_deduce::{deduce_result_type, deduce_result_type_with};
 use crate::ir_utils::operands;
 
@@ -23,14 +23,13 @@ pub fn verify_function_in_package(f: &Fn, pkg: &Package) -> Result<(), VerifyErr
     package::validate_fn(f, pkg)
 }
 
-/// Verifies a block with access to package members and block metadata.
+/// Verifies a block's graph, ports, and resources in its package context.
 pub fn verify_block_in_package(
-    f: &Fn,
-    metadata: &ir::BlockMetadata,
+    block: &Block,
     pkg: &Package,
     member_index: usize,
 ) -> Result<(), VerifyError> {
-    package::validate_block(f, metadata, pkg, member_index)
+    package::validate_block(block, pkg, member_index)
 }
 
 /// Verifies an entire PIR package, including function and block context.
@@ -38,13 +37,13 @@ pub fn verify_package(pkg: &Package) -> Result<(), VerifyError> {
     package::validate_package(pkg)
 }
 
-/// Verifies that all node text IDs within a function are unique.
-pub fn verify_fn_unique_node_ids(f: &Fn) -> Result<(), String> {
+/// Verifies that all node text IDs within a graph are unique.
+pub fn verify_graph_unique_node_ids(f: &NodeGraph) -> Result<(), String> {
     let mut seen: HashSet<usize> = HashSet::new();
     for (idx, n) in f.nodes.iter().enumerate() {
         if !seen.insert(n.text_id) {
             return Err(format!(
-                "duplicate node id={} found at node index {} in function '{}'",
+                "duplicate node id={} found at node index {} in graph '{}'",
                 n.text_id, idx, f.name
             ));
         }
@@ -53,12 +52,12 @@ pub fn verify_fn_unique_node_ids(f: &Fn) -> Result<(), String> {
 }
 
 /// Verifies that all NodeRef indices referenced by payloads are within bounds.
-pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
+pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), String> {
     let n = f.nodes.len();
     let check = |nr: ir::NodeRef, ctx: &str| -> Result<(), String> {
         if nr.index >= n {
             return Err(format!(
-                "operand index {} out of bounds in {}; function '{}' has {} nodes",
+                "operand index {} out of bounds in {}; graph '{}' has {} nodes",
                 nr.index, ctx, f.name, n
             ));
         }
@@ -66,7 +65,15 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
     };
     for (i, node) in f.nodes.iter().enumerate() {
         match &node.payload {
-            NodePayload::Nil | NodePayload::GetParam(_) | NodePayload::Literal(_) => {}
+            NodePayload::Nil
+            | NodePayload::GetParam(_)
+            | NodePayload::Literal(_)
+            | NodePayload::InputPort { .. } => {
+                // Leaf nodes do not reference operands.
+            }
+            NodePayload::OutputPort { arg, .. } => {
+                check(*arg, &format!("node {} output_port.arg", i))?;
+            }
             NodePayload::Tuple(nodes)
             | NodePayload::Array(nodes)
             | NodePayload::ArrayConcat(nodes)
@@ -234,7 +241,7 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
 
 /// Verifies that for all nodes we can deduce, the node's `ty` matches the
 /// type anticipated by the deduction routine.
-pub fn verify_fn_types_agree_with_deduction(f: &Fn) -> Result<(), String> {
+pub fn verify_graph_types_agree_with_deduction(f: &NodeGraph) -> Result<(), String> {
     for (i, node) in f.nodes.iter().enumerate() {
         // Gather operand types in operand order.
         let op_refs = operands(&node.payload);
@@ -353,12 +360,12 @@ fn trace_operand_count(format: &str) -> Result<usize, String> {
 /// Unlike package validation, this routine does not require callees, register
 /// declarations, or block instantiation metadata, so it is suitable for a
 /// standalone function compiler.
-pub fn verify_fn_xls_node_semantics(f: &Fn) -> Result<(), String> {
-    verify_fn_operand_indices_in_bounds(f)?;
+pub fn verify_graph_xls_node_semantics(f: &NodeGraph) -> Result<(), String> {
+    verify_graph_operand_indices_in_bounds(f)?;
     for (node_index, node) in f.nodes.iter().enumerate() {
         verify_node_xls_semantics(f, node_index).map_err(|reason| {
             format!(
-                "invalid node {} ({}) in function '{}': {}",
+                "invalid node {} ({}) in graph '{}': {}",
                 node_index,
                 node.payload.get_operator(),
                 f.name,
@@ -369,7 +376,7 @@ pub fn verify_fn_xls_node_semantics(f: &Fn) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn verify_node_xls_semantics(f: &Fn, node_index: usize) -> Result<(), String> {
+pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Result<(), String> {
     let node = &f.nodes[node_index];
     let ty = |node_ref: ir::NodeRef| -> &Type { &f.get_node(node_ref).ty };
 
@@ -386,13 +393,11 @@ pub(crate) fn verify_node_xls_semantics(f: &Fn, node_index: usize) -> Result<(),
         | NodePayload::RegisterWrite { .. }
         | NodePayload::Invoke { .. }
         | NodePayload::CountedFor { .. } => Ok(()),
-        NodePayload::GetParam(param_id) => {
-            if let Some(param) = f.params.iter().find(|param| param.id == *param_id) {
-                expect_type(&node.ty, &param.ty, "parameter node result")
-            } else {
-                Ok(())
-            }
+        NodePayload::GetParam(_) | NodePayload::InputPort { .. } => {
+            // The owning function or block validates the input declaration.
+            Ok(())
         }
+        NodePayload::OutputPort { .. } => expect_type(&node.ty, &Type::nil(), "output_port result"),
         NodePayload::ArraySlice {
             array,
             start,
@@ -789,14 +794,18 @@ pub(crate) fn verify_node_xls_semantics(f: &Fn, node_index: usize) -> Result<(),
 pub fn verify_package_unique_node_ids(pkg: &Package) -> Result<(), String> {
     let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for m in pkg.members.iter() {
-        let f: &Fn = match m {
+        let f: &NodeGraph = match m {
             PackageMember::Function(f) => f,
-            PackageMember::Block { func, .. } => func,
+            PackageMember::Block(block) => block,
         };
         for (idx, n) in f.nodes.iter().enumerate() {
+            if matches!(n.payload, NodePayload::Nil) {
+                // Sentinels are not emitted and can share ID zero.
+                continue;
+            }
             if !seen.insert(n.text_id) {
                 return Err(format!(
-                    "duplicate node id={} found at node index {} in function '{}'",
+                    "duplicate node id={} found at node index {} in graph '{}'",
                     n.text_id, idx, f.name
                 ));
             }
@@ -805,10 +814,13 @@ pub fn verify_package_unique_node_ids(pkg: &Package) -> Result<(), String> {
     Ok(())
 }
 
-/// Like `verify_fn_types_agree_with_deduction`, but allows providing a
+/// Like `verify_graph_types_agree_with_deduction`, but allows providing a
 /// resolver for callee return types so that `invoke` result types can be
 /// checked when package context is available.
-pub fn verify_fn_types_agree_with_deduction_in_pkg(f: &Fn, pkg: &Package) -> Result<(), String> {
+pub fn verify_graph_types_agree_with_deduction_in_pkg(
+    f: &NodeGraph,
+    pkg: &Package,
+) -> Result<(), String> {
     for (i, node) in f.nodes.iter().enumerate() {
         let op_refs = operands(&node.payload);
         let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
@@ -854,7 +866,7 @@ fn foo(x: bits[8] id=1) -> bits[16] {
         let f = parser.parse_fn().expect("parse fn");
         // add node is declared bits[16] but deduction expects bits[8]; should
         // error.
-        assert!(verify_fn_types_agree_with_deduction(&f).is_err());
+        assert!(verify_graph_types_agree_with_deduction(&f).is_err());
     }
 
     #[test]
@@ -881,7 +893,7 @@ fn foo(x: bits[1] id=1) -> bits[1] {
                 _ => None,
             })
             .expect("find foo");
-        assert!(verify_fn_types_agree_with_deduction_in_pkg(&foo_fn, &pkg).is_err());
+        assert!(verify_graph_types_agree_with_deduction_in_pkg(&foo_fn, &pkg).is_err());
     }
 
     #[test]

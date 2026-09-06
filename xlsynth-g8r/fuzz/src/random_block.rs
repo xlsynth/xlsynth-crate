@@ -6,8 +6,10 @@ use std::collections::BTreeMap;
 
 use xlsynth_pir::IrBits;
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::{BlockMetadata, Fn, NodePayload, NodeRef, Type};
+use xlsynth_pir::block2fn::combinational_block_to_fn;
+use xlsynth_pir::ir::{Block, Fn, Node, NodeGraph, NodePayload, NodeRef, Param, ParamId, Type};
 use xlsynth_pir::ir_eval::{self, EvalObserver, FnEvalResult, SelectEvent};
+use xlsynth_pir::ir_utils::remap_payload_with;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
 #[derive(Debug, Clone, Copy)]
@@ -25,6 +27,11 @@ pub struct ObservedBlockCycle {
 
 struct NodeValues(Vec<Option<IrValue>>);
 
+struct CycleEvalFn {
+    function: Fn,
+    block_to_function: Vec<NodeRef>,
+}
+
 impl EvalObserver for NodeValues {
     fn on_select(&mut self, _event: SelectEvent) {
         // Consumers classify events from node values and original block
@@ -40,18 +47,18 @@ impl EvalObserver for NodeValues {
 /// Register Q is substituted with explicit state; reset/enable priority follows
 /// the block semantics independently of either RTL or gate lowering.
 pub fn evaluate_block_cycle_observed(
-    block: &Fn,
-    metadata: &BlockMetadata,
+    block: &Block,
     inputs: &[IrValue],
     state: &[IrValue],
 ) -> ObservedBlockCycle {
-    let cycle_fn = cycle_eval_fn(block, metadata, state);
-    let mut observer = NodeValues(vec![None; block.nodes.len()]);
+    let projection = cycle_eval_fn(block, state);
+    let cycle_fn = &projection.function;
+    let mut observer = NodeValues(vec![None; cycle_fn.nodes.len()]);
     // EvalObserver reports computed values, not parameter and unit nodes.
     for (index, node) in cycle_fn.nodes.iter().enumerate() {
         match &node.payload {
             NodePayload::GetParam(id) => {
-                let position = block
+                let position = cycle_fn
                     .params
                     .iter()
                     .position(|param| param.id == *id)
@@ -62,22 +69,22 @@ pub fn evaluate_block_cycle_observed(
             _ => { /* Computed values arrive through the observer. */ }
         }
     }
-    let result = ir_eval::eval_fn_with_observer(&cycle_fn, inputs, Some(&mut observer));
+    let result = ir_eval::eval_fn_with_observer(cycle_fn, inputs, Some(&mut observer));
     assert!(
         matches!(result, FnEvalResult::Success(_)),
         "block evaluation failed: {result:?}\n{block}"
     );
     let value = |node: NodeRef| {
-        observer.0[node.index]
+        observer.0[projection.block_to_function[node.index].index]
             .as_ref()
             .expect("all block nodes evaluated")
     };
-    let outputs = block_output_refs(block, metadata)
+    let outputs = block_output_refs(block)
         .iter()
         .map(|node| value(*node).clone())
         .collect();
     let writes = collect_register_writes(block);
-    let next_state = metadata
+    let next_state = block
         .registers
         .iter()
         .enumerate()
@@ -96,7 +103,7 @@ pub fn evaluate_block_cycle_observed(
             if let (Some(reset), Some(reset_value), Some(reset_metadata)) = (
                 write.reset,
                 register.reset_value.as_ref(),
-                metadata.reset.as_ref(),
+                block.reset.as_ref(),
             ) && bool_value(value(reset)) ^ reset_metadata.active_low
             {
                 next = reset_value.clone();
@@ -104,110 +111,117 @@ pub fn evaluate_block_cycle_observed(
             next
         })
         .collect();
+    let node_values = projection
+        .block_to_function
+        .iter()
+        .map(|node| observer.0[node.index].clone())
+        .collect();
     ObservedBlockCycle {
         outputs,
         next_state,
-        node_values: observer.0,
+        node_values,
     }
 }
 
-/// Returns visible block output node references in metadata order.
-pub fn block_output_refs(block: &Fn, metadata: &BlockMetadata) -> Vec<NodeRef> {
-    let ret_ref = block
-        .ret_node_ref
-        .expect("generated block should have a return node");
-    match metadata.output_names.len() {
-        0 => Vec::new(),
-        1 => vec![ret_ref],
-        _ => {
-            let NodePayload::Tuple(outputs) = &block.get_node(ret_ref).payload else {
-                panic!("generated multi-output block should return a tuple");
-            };
-            outputs.clone()
-        }
-    }
+/// Returns visible block output values in port declaration order.
+pub fn block_output_refs(block: &Block) -> Vec<NodeRef> {
+    block
+        .output_ports()
+        .map(|port| block.output_value(port))
+        .collect()
 }
 
-/// Returns visible block output types in metadata order.
-pub fn block_output_types<'a>(block: &'a Fn, metadata: &BlockMetadata) -> Vec<&'a Type> {
-    match metadata.output_names.len() {
-        0 => Vec::new(),
-        1 => vec![&block.ret_ty],
-        _ => {
-            let Type::Tuple(types) = &block.ret_ty else {
-                panic!("generated multi-output block should return a tuple type");
-            };
-            types.iter().map(|ty| &**ty).collect()
-        }
-    }
+/// Returns visible block output types in port declaration order.
+pub fn block_output_types(block: &Block) -> Vec<&Type> {
+    block
+        .output_ports()
+        .map(|port| block.port_type(port))
+        .collect()
 }
 
 /// Evaluates visible outputs of one combinational block sample.
-pub fn evaluate_block_outputs(
-    block: &Fn,
-    metadata: &BlockMetadata,
-    inputs: &[IrValue],
-    ir_text: &str,
-) -> Vec<IrValue> {
-    let output_refs = block_output_refs(block, metadata);
-    if output_refs.is_empty() {
-        // Keep outputless samples in the PIR evaluator portion of the property.
-        let ret_ref = block
-            .ret_node_ref
-            .expect("generated block should have a return node");
-        let mut eval_fn = block.clone();
-        let _ = eval_ref(&mut eval_fn, ret_ref, inputs, ir_text);
+pub fn evaluate_block_outputs(block: &Block, inputs: &[IrValue], ir_text: &str) -> Vec<IrValue> {
+    let mut function = combinational_block_to_fn(block).unwrap_or_else(|error| {
+        panic!("combinational block projection failed:\n{ir_text}\n{error}")
+    });
+    let return_ref = function
+        .ret_node_ref
+        .expect("projection has a return value");
+    let result = eval_ref(&mut function, return_ref, inputs, ir_text);
+    if block.output_ports().count() == 1 {
+        vec![result]
+    } else {
+        result
+            .get_elements()
+            .expect("multiple block outputs are returned as a tuple")
     }
-    output_refs
-        .into_iter()
-        .map(|output_ref| {
-            let mut eval_fn = block.clone();
-            eval_ref(&mut eval_fn, output_ref, inputs, ir_text)
-        })
-        .collect()
 }
 
 /// Evaluates visible outputs and committed next state for one block cycle.
 pub fn evaluate_block_cycle(
-    block: &Fn,
-    metadata: &BlockMetadata,
+    block: &Block,
     inputs: &[IrValue],
     state: &[IrValue],
     ir_text: &str,
 ) -> (Vec<IrValue>, Vec<IrValue>) {
-    let output_refs = block_output_refs(block, metadata);
+    let output_refs = block_output_refs(block);
     let writes = collect_register_writes(block);
-    let mut cycle_fn = cycle_eval_fn(block, metadata, state);
+    let CycleEvalFn {
+        function: mut cycle_fn,
+        block_to_function,
+    } = cycle_eval_fn(block, state);
     if output_refs.is_empty() {
         // Keep outputless samples in the PIR evaluator portion of the property.
-        let ret_ref = block
+        let ret_ref = cycle_fn
             .ret_node_ref
             .expect("generated block should have a return node");
         let _ = eval_ref(&mut cycle_fn, ret_ref, inputs, ir_text);
     }
     let outputs = output_refs
         .into_iter()
-        .map(|output_ref| eval_ref(&mut cycle_fn, output_ref, inputs, ir_text))
+        .map(|output_ref| {
+            eval_ref(
+                &mut cycle_fn,
+                block_to_function[output_ref.index],
+                inputs,
+                ir_text,
+            )
+        })
         .collect();
-    let mut next_state = Vec::with_capacity(metadata.registers.len());
+    let mut next_state = Vec::with_capacity(block.registers.len());
 
-    for (register_index, register) in metadata.registers.iter().enumerate() {
+    for (register_index, register) in block.registers.iter().enumerate() {
         let Some(write) = writes.get(&register.name) else {
             next_state.push(state[register_index].clone());
             continue;
         };
-        let mut next_value = eval_ref(&mut cycle_fn, write.arg, inputs, ir_text);
+        let mut next_value = eval_ref(
+            &mut cycle_fn,
+            block_to_function[write.arg.index],
+            inputs,
+            ir_text,
+        );
         if let Some(load_enable_ref) = write.load_enable
-            && !bool_value(&eval_ref(&mut cycle_fn, load_enable_ref, inputs, ir_text))
+            && !bool_value(&eval_ref(
+                &mut cycle_fn,
+                block_to_function[load_enable_ref.index],
+                inputs,
+                ir_text,
+            ))
         {
             next_value = state[register_index].clone();
         }
         if let (Some(reset_ref), Some(reset_value), Some(reset_metadata)) = (
             write.reset,
             register.reset_value.as_ref(),
-            metadata.reset.as_ref(),
+            block.reset.as_ref(),
         ) {
-            let reset_signal = bool_value(&eval_ref(&mut cycle_fn, reset_ref, inputs, ir_text));
+            let reset_signal = bool_value(&eval_ref(
+                &mut cycle_fn,
+                block_to_function[reset_ref.index],
+                inputs,
+                ir_text,
+            ));
             let reset_asserted = if reset_metadata.active_low {
                 !reset_signal
             } else {
@@ -231,7 +245,7 @@ pub fn flatten_value(value: &IrValue, ty: &Type) -> IrBits {
     IrBits::from_lsb_is_0(&bits)
 }
 
-fn collect_register_writes(block: &Fn) -> BTreeMap<String, RegisterWriteRefs> {
+fn collect_register_writes(block: &Block) -> BTreeMap<String, RegisterWriteRefs> {
     block
         .nodes
         .iter()
@@ -254,16 +268,63 @@ fn collect_register_writes(block: &Fn) -> BTreeMap<String, RegisterWriteRefs> {
         .collect()
 }
 
-fn cycle_eval_fn(block: &Fn, metadata: &BlockMetadata, state: &[IrValue]) -> Fn {
-    let state_by_register: BTreeMap<&str, &IrValue> = metadata
+/// Projects ports/state into a temporary function while preserving an observer
+/// map back to the block, whose ports need not occupy a function-style prefix.
+fn cycle_eval_fn(block: &Block, state: &[IrValue]) -> CycleEvalFn {
+    let state_by_register: BTreeMap<&str, &IrValue> = block
         .registers
         .iter()
         .zip(state)
         .map(|(register, value)| (register.name.as_str(), value))
         .collect();
-    let mut result = block.clone();
+    let mut order = vec![NodeRef { index: 0 }];
+    order.extend(block.input_ports());
+    order.extend(block.node_refs().into_iter().filter(|node| {
+        node.index != 0 && !matches!(block.get_node(*node).payload, NodePayload::InputPort { .. })
+    }));
+    let mut block_to_function = vec![NodeRef { index: 0 }; block.nodes.len()];
+    for (index, source) in order.iter().enumerate() {
+        block_to_function[source.index] = NodeRef { index };
+    }
+    let nodes = order
+        .iter()
+        .map(|source| {
+            let node = block.get_node(*source);
+            Node {
+                payload: remap_payload_with(&node.payload, |(_, dependency)| {
+                    block_to_function[dependency.index]
+                }),
+                ..node.clone()
+            }
+        })
+        .collect();
+    let graph = NodeGraph {
+        name: block.name.clone(),
+        nodes,
+        outer_attrs: block.outer_attrs.clone(),
+        inner_attrs: block.inner_attrs.clone(),
+    };
+    let mut result = Fn {
+        graph,
+        params: block
+            .input_ports()
+            .map(|port| Param {
+                name: block.port_name(port).to_string(),
+                ty: block.port_type(port).clone(),
+                id: ParamId::new(block.get_node(port).text_id),
+            })
+            .collect(),
+        ret_ty: Type::nil(),
+        ret_node_ref: None,
+    };
     for node in &mut result.nodes {
         match &node.payload {
+            NodePayload::InputPort { .. } => {
+                node.payload = NodePayload::GetParam(ParamId::new(node.text_id));
+            }
+            NodePayload::OutputPort { .. } => {
+                node.payload = NodePayload::Tuple(Vec::new());
+            }
             NodePayload::RegisterRead { register } => {
                 node.payload = NodePayload::Literal(
                     (*state_by_register
@@ -276,10 +337,33 @@ fn cycle_eval_fn(block: &Fn, metadata: &BlockMetadata, state: &[IrValue]) -> Fn 
                 node.ty = Type::nil();
                 node.payload = NodePayload::Nil;
             }
-            _ => {}
+            _ => {
+                // Ordinary combinational nodes retain their original indices.
+            }
         }
     }
-    result
+    let ret = NodeRef {
+        index: result.nodes.len(),
+    };
+    let text_id = result
+        .nodes
+        .iter()
+        .map(|node| node.text_id)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    result.nodes.push(Node {
+        text_id,
+        name: None,
+        ty: Type::nil(),
+        payload: NodePayload::Tuple(Vec::new()),
+        pos: None,
+    });
+    result.ret_node_ref = Some(ret);
+    CycleEvalFn {
+        function: result,
+        block_to_function,
+    }
 }
 
 fn eval_ref(cycle_fn: &mut Fn, node_ref: NodeRef, inputs: &[IrValue], ir_text: &str) -> IrValue {
@@ -297,4 +381,57 @@ fn bool_value(value: &IrValue) -> bool {
     value
         .to_bool()
         .expect("generated reset/load-enable value should be bits[1]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn cycle_oracle_remaps_header_order_and_preserves_observer_indices() {
+        let source = r#"block registered(b: bits[8], out: bits[8], clk: clock, a: bits[8]) {
+  reg value(bits[8])
+  q: bits[8] = register_read(register=value, id=1)
+  a: bits[8] = input_port(name=a, id=2)
+  b: bits[8] = input_port(name=b, id=3)
+  sum: bits[8] = add(a, b, id=4)
+  update: () = register_write(sum, register=value, id=5)
+  out: () = output_port(q, name=out, id=6)
+}"#;
+        let block = Parser::new(source).parse_block().unwrap();
+        let inputs = [
+            IrValue::make_ubits(8, 9).unwrap(),
+            IrValue::make_ubits(8, 3).unwrap(),
+        ];
+        let state = [IrValue::make_ubits(8, 16).unwrap()];
+        let observed = evaluate_block_cycle_observed(&block, &inputs, &state);
+        let (outputs, next_state) = evaluate_block_cycle(&block, &inputs, &state, source);
+        assert_eq!(observed.outputs, outputs);
+        assert_eq!(outputs, state);
+        assert_eq!(observed.next_state, next_state);
+        assert_eq!(next_state, [IrValue::make_ubits(8, 12).unwrap()]);
+        assert_eq!(
+            observed.node_values[block.get_input_port("a").unwrap().index],
+            Some(inputs[1].clone())
+        );
+        assert_eq!(
+            observed.node_values[block.get_input_port("b").unwrap().index],
+            Some(inputs[0].clone())
+        );
+    }
+
+    #[test]
+    fn combinational_oracle_keeps_one_tuple_output_whole() {
+        let source = r#"block aggregate(data: (bits[8], bits[3]), result: (bits[8], bits[3])) {
+  data: (bits[8], bits[3]) = input_port(name=data, id=1)
+  result: () = output_port(data, name=result, id=2)
+}"#;
+        let block = Parser::new(source).parse_block().unwrap();
+        let inputs = [IrValue::make_tuple(&[
+            IrValue::make_ubits(8, 27).unwrap(),
+            IrValue::make_ubits(3, 5).unwrap(),
+        ])];
+        assert_eq!(evaluate_block_outputs(&block, &inputs, source), inputs);
+    }
 }

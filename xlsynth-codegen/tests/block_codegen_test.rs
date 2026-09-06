@@ -7,7 +7,7 @@ mod cases;
 mod support;
 use cases::*;
 use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
-use xlsynth_pir::ir::PackageMember;
+use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
 
 #[test]
@@ -555,9 +555,12 @@ top block update(values: bits[8][{count}], index: bits[9], replacement: bits[8],
 fn multiple_register_writes_are_rejected_for_every_layout() {
     let ir = multiwrite_register_ir(None);
     assert_stock_xls_accepts(&ir);
+    let parsed = Parser::new(&ir)
+        .parse_and_verify_package()
+        .expect("PIR permits multiple load-enabled writes to one register");
     for layout in [Layout::None, Layout::Pipeline] {
         let error = emit_system_verilog(
-            &package(&ir),
+            &parsed,
             &BlockCodegenOptions {
                 layout,
                 ..BlockCodegenOptions::default()
@@ -578,9 +581,12 @@ fn multiple_register_writes_are_rejected_with_every_reset_configuration() {
         for active_low in [false, true] {
             let ir = multiwrite_register_ir(Some((asynchronous, active_low)));
             assert_stock_xls_accepts(&ir);
+            let parsed = Parser::new(&ir)
+                .parse_and_verify_package()
+                .expect("PIR permits multiple load-enabled writes with matching resets");
             for layout in [Layout::None, Layout::Pipeline] {
                 let error = emit_system_verilog(
-                    &package(&ir),
+                    &parsed,
                     &BlockCodegenOptions {
                         layout,
                         ..BlockCodegenOptions::default()
@@ -690,7 +696,8 @@ top block missing_write(clk: clock, value: bits[8], result: bits[8]) {
 }
 "#;
     assert!(xlsynth::IrPackage::parse_ir(ir, None).is_err());
-    match emit_system_verilog(&package(ir), &BlockCodegenOptions::default()) {
+    let parsed = Parser::new(ir).parse_package().unwrap();
+    match emit_system_verilog(&parsed, &BlockCodegenOptions::default()) {
         Err(BlockCodegenError::InvalidBlock(message)) => {
             assert!(
                 message.contains("state") && message.contains("write"),
@@ -702,20 +709,27 @@ top block missing_write(clk: clock, value: bits[8], result: bits[8]) {
 }
 
 #[test]
-fn backend_rejects_reset_metadata_without_its_declared_input_port() {
+fn backend_rejects_reset_metadata_that_does_not_reference_an_input_port() {
     let ir = r#"package public_invalid_reset
 
 top block missing_reset(clk: clock, value: bits[8], result: bits[8]) {
-  #![reset(port="rst", asynchronous=false, active_low=false)]
   value: bits[8] = input_port(name=value, id=1)
   result: () = output_port(value, name=result, id=2)
 }
 "#;
-    let parsed = Parser::new(ir).parse_package().unwrap();
+    let mut parsed = package(ir);
+    let PackageMember::Block(block) = &mut parsed.members[0] else {
+        panic!("expected block");
+    };
+    block.reset = Some(BlockReset {
+        port: block.get_output_port("result").unwrap(),
+        asynchronous: false,
+        active_low: false,
+    });
     match emit_system_verilog(&parsed, &BlockCodegenOptions::default()) {
         Err(BlockCodegenError::InvalidBlock(message)) => {
             assert!(
-                message.contains("reset") && message.contains("rst"),
+                message.contains("reset") && message.contains("result"),
                 "missing-reset diagnostic must identify the port: {message}"
             );
         }
@@ -730,7 +744,8 @@ fn backend_rejects_resettable_register_without_block_reset_metadata() {
         "",
     );
     assert!(xlsynth::IrPackage::parse_ir(&ir, None).is_err());
-    match emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()) {
+    let parsed = Parser::new(&ir).parse_package().unwrap();
+    match emit_system_verilog(&parsed, &BlockCodegenOptions::default()) {
         Err(BlockCodegenError::InvalidBlock(message)) => {
             assert!(
                 message.contains("state") && message.contains("reset"),
@@ -1392,18 +1407,19 @@ EVENTS
 }
 
 #[test]
-fn fixed_name_validation_also_checks_programmatically_constructed_instances() {
+fn backend_rejects_programmatically_duplicated_instances() {
     let mut parsed = package(HIERARCHY);
-    let PackageMember::Block { metadata, .. } = parsed.members.last_mut().unwrap() else {
+    let PackageMember::Block(block) = parsed.members.last_mut().unwrap() else {
         panic!("expected parent block");
     };
-    metadata
-        .instantiations
-        .push(metadata.instantiations[0].clone());
-    assert_eq!(emit_system_verilog(&parsed, &BlockCodegenOptions::default()),
+    block.instantiations.push(block.instantiations[0].clone());
+    assert_eq!(
+        emit_system_verilog(&parsed, &BlockCodegenOptions::default()),
         Err(BlockCodegenError::InvalidBlock(
-            "SystemVerilog name collision in block `parent`: `left` is used by both instance and instance".to_owned()
-        )));
+            "block 'parent' violates a resource invariant: duplicate instantiation 'left'"
+                .to_owned()
+        ))
+    );
 }
 
 #[test]
