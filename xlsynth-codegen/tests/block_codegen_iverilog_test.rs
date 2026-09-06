@@ -2507,11 +2507,10 @@ top block classify(data: bits[{input_width}], out: bits[{output_width}]) {{
                 output_node = case.output_node
             );
             let package = package(&ir);
-            let xlsynth_pir::ir::PackageMember::Block { func, .. } =
-                package.get_top_block().unwrap()
-            else {
-                unreachable!()
-            };
+            let function =
+                xlsynth_pir::block2fn::combinational_block_to_fn(package.get_top_block().unwrap())
+                    .unwrap();
+            let func = &function;
             for layout in [Layout::None, Layout::Pipeline] {
                 let generated = TestRtl::emit(
                     &package,

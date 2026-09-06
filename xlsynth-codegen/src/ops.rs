@@ -13,7 +13,7 @@ use crate::block::{BlockEmitter, Value, validate_external_identifier};
 impl BlockEmitter<'_, '_> {
     /// Lowers one representable combinational or connectivity operation.
     pub(crate) fn emit_node(&mut self, node_ref: NodeRef) -> Result<(), BlockCodegenError> {
-        let node = self.func.get_node(node_ref);
+        let node = self.block.get_node(node_ref);
         if node.ty.bit_count() != 0 {
             match &node.payload {
                 NodePayload::ArrayUpdate {
@@ -118,7 +118,7 @@ impl BlockEmitter<'_, '_> {
             NodePayload::TupleIndex { tuple, index } => {
                 let source = self.required_value(*tuple)?;
                 let slice = self
-                    .func
+                    .block
                     .get_node_ty(*tuple)
                     .tuple_get_flat_bit_slice_for_index(*index)
                     .map_err(BlockCodegenError::InvalidBlock)?;
@@ -138,7 +138,7 @@ impl BlockEmitter<'_, '_> {
                 ))
             }
             NodePayload::Unop(op, arg) => {
-                if self.func.get_node_ty(*arg).bit_count() == 0 {
+                if self.block.get_node_ty(*arg).bit_count() == 0 {
                     let value = usize::from(matches!(op, Unop::AndReduce));
                     let expression = self.sized_usize(node.ty.bit_count(), value)?;
                     Some(Value::expression(expression, 0))
@@ -152,7 +152,7 @@ impl BlockEmitter<'_, '_> {
                 let value = self.numeric_value(*arg)?;
                 let expression = self.resize_unsigned(
                     value,
-                    self.func.get_node_ty(*arg).bit_count(),
+                    self.block.get_node_ty(*arg).bit_count(),
                     *new_bit_count,
                 )?;
                 Some(Value::expression(expression, value.depth + 1))
@@ -161,7 +161,7 @@ impl BlockEmitter<'_, '_> {
                 let value = self.numeric_value(*arg)?;
                 let expression = self.resize_signed(
                     value,
-                    self.func.get_node_ty(*arg).bit_count(),
+                    self.block.get_node_ty(*arg).bit_count(),
                     *new_bit_count,
                 )?;
                 Some(Value::expression(expression, value.depth + 1))
@@ -271,18 +271,18 @@ impl BlockEmitter<'_, '_> {
             }
             NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
                 let operand_depth = self.operand_depth(&[*lhs, *rhs, *c_in]);
-                let width = self.func.get_node_ty(*lhs).bit_count() + 1;
+                let width = self.block.get_node_ty(*lhs).bit_count() + 1;
                 let lhs_value = self.required_value(*lhs)?;
                 let rhs_value = self.required_value(*rhs)?;
                 let carry_value = self.required_value(*c_in)?;
                 let lhs = self.resize_unsigned(
                     lhs_value,
-                    self.func.get_node_ty(*lhs).bit_count(),
+                    self.block.get_node_ty(*lhs).bit_count(),
                     width,
                 )?;
                 let rhs = self.resize_unsigned(
                     rhs_value,
-                    self.func.get_node_ty(*rhs).bit_count(),
+                    self.block.get_node_ty(*rhs).bit_count(),
                     width,
                 )?;
                 let carry = self.resize_unsigned(carry_value, 1, width)?;
@@ -310,7 +310,10 @@ impl BlockEmitter<'_, '_> {
                 let refs = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
                 Some(Value::expression(expression, self.operand_depth(&refs)))
             }
-            NodePayload::GetParam(_) | NodePayload::RegisterRead { .. } => {
+            NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. }
+            | NodePayload::GetParam(_)
+            | NodePayload::RegisterRead { .. } => {
                 return Err(BlockCodegenError::InvalidBlock(format!(
                     "node `{}` should have been represented by an existing signal",
                     node.payload.get_operator()
@@ -343,7 +346,7 @@ impl BlockEmitter<'_, '_> {
     fn represented_operands(&self, nodes: &[NodeRef]) -> Result<Vec<Expr>, BlockCodegenError> {
         let mut values = Vec::with_capacity(nodes.len());
         for &node in nodes {
-            if self.func.get_node_ty(node).bit_count() != 0 {
+            if self.block.get_node_ty(node).bit_count() != 0 {
                 values.push(self.required_value(node)?.expr);
             }
         }
@@ -352,7 +355,7 @@ impl BlockEmitter<'_, '_> {
 
     /// Represents a zero-width numeric operand by its unique constant value.
     pub(crate) fn numeric_value(&mut self, node: NodeRef) -> Result<Value, BlockCodegenError> {
-        if self.func.get_node_ty(node).bit_count() == 0 {
+        if self.block.get_node_ty(node).bit_count() == 0 {
             Ok(Value::expression(self.zero(1)?, 0).with_width(1))
         } else {
             self.required_value(node)
@@ -465,8 +468,8 @@ impl BlockEmitter<'_, '_> {
     ) -> Result<Expr, BlockCodegenError> {
         let lhs = self.numeric_value(lhs_ref)?;
         let rhs = self.numeric_value(rhs_ref)?;
-        let lhs_width = self.func.get_node_ty(lhs_ref).bit_count();
-        let rhs_width = self.func.get_node_ty(rhs_ref).bit_count();
+        let lhs_width = self.block.get_node_ty(lhs_ref).bit_count();
+        let rhs_width = self.block.get_node_ty(rhs_ref).bit_count();
         let result_width = result_ty.bit_count();
         let expression = match op {
             Binop::Add => self.file.make_add(&lhs.expr, &rhs.expr),
@@ -675,7 +678,7 @@ impl BlockEmitter<'_, '_> {
         assumed_in_bounds: bool,
     ) -> Result<Value, BlockCodegenError> {
         let mut value = self.required_value(array)?;
-        let mut ty = self.func.get_node_ty(array);
+        let mut ty = self.block.get_node_ty(array);
         for (dimension, &index) in indices.iter().enumerate() {
             let Type::Array(array_ty) = ty else {
                 return Err(BlockCodegenError::InvalidBlock(
@@ -686,7 +689,7 @@ impl BlockEmitter<'_, '_> {
             value = self.dynamic_array_element(
                 value,
                 index_value,
-                self.func.get_node_ty(index).bit_count(),
+                self.block.get_node_ty(index).bit_count(),
                 array_ty.element_count,
                 &array_ty.element_type,
                 assumed_in_bounds,
@@ -793,7 +796,7 @@ impl BlockEmitter<'_, '_> {
         let mut source = self.required_value(array)?;
         let replacement = self.required_value(replacement)?;
         let mut dimensions = Vec::with_capacity(indices.len());
-        let mut current = self.func.get_node_ty(array);
+        let mut current = self.block.get_node_ty(array);
         for &index in indices {
             let Type::Array(array_type) = current else {
                 return Err(BlockCodegenError::InvalidBlock(
@@ -808,7 +811,7 @@ impl BlockEmitter<'_, '_> {
             current = &array_type.element_type;
         }
         let signal = self.declare_node(node_ref)?;
-        let target = Value::signal(signal).with_type(self.func.get_node_ty(node_ref));
+        let target = Value::signal(signal).with_type(self.block.get_node_ty(node_ref));
         let mut destination = target;
         let mut parent = None;
         let mut index_matches = None;
@@ -849,8 +852,8 @@ impl BlockEmitter<'_, '_> {
     ) -> Result<(), BlockCodegenError> {
         let source = self.required_value(array)?;
         let start_value = self.numeric_value(start)?;
-        let start_width = self.func.get_node_ty(start).bit_count();
-        let Type::Array(array_type) = self.func.get_node_ty(array) else {
+        let start_width = self.block.get_node_ty(start).bit_count();
+        let Type::Array(array_type) = self.block.get_node_ty(array) else {
             return Err(BlockCodegenError::InvalidBlock(
                 "array_slice source is not an array".to_owned(),
             ));
@@ -861,7 +864,7 @@ impl BlockEmitter<'_, '_> {
             .max(ceil_log2(count.saturating_add(width).saturating_add(1)));
         let widened_start = self.resize_unsigned(start_value, start_width, index_width)?;
         let signal = self.declare_node(node_ref)?;
-        let target = Value::signal(signal).with_type(self.func.get_node_ty(node_ref));
+        let target = Value::signal(signal).with_type(self.block.get_node_ty(node_ref));
         let generated = self.make_array_generate_loop(signal, None, 0, width)?;
         let variable = self.file.generate_genvar(generated).to_expr();
         let bounded_variable = self.width_cast(index_width, variable);
@@ -932,8 +935,8 @@ impl BlockEmitter<'_, '_> {
     ) -> Result<Expr, BlockCodegenError> {
         let source = self.required_value(array)?;
         let start_value = self.numeric_value(start)?;
-        let start_width = self.func.get_node_ty(start).bit_count();
-        let Type::Array(array_ty) = self.func.get_node_ty(array) else {
+        let start_width = self.block.get_node_ty(start).bit_count();
+        let Type::Array(array_ty) = self.block.get_node_ty(array) else {
             return Err(BlockCodegenError::InvalidBlock(
                 "array_slice source is not an array".to_owned(),
             ));
@@ -977,7 +980,7 @@ impl BlockEmitter<'_, '_> {
         default: Option<NodeRef>,
     ) -> Result<Expr, BlockCodegenError> {
         let selected = self.numeric_value(selector)?;
-        let selector_width = self.func.get_node_ty(selector).bit_count();
+        let selector_width = self.block.get_node_ty(selector).bit_count();
         let mut result = if let Some(default) = default {
             self.required_value(default)?.expr
         } else {
@@ -1019,7 +1022,7 @@ impl BlockEmitter<'_, '_> {
     /// Forms each encoded bit from input positions containing that index bit.
     fn emit_encode(&mut self, arg: NodeRef, width: usize) -> Result<Expr, BlockCodegenError> {
         let argument = self.required_value(arg)?;
-        let arg_width = self.func.get_node_ty(arg).bit_count();
+        let arg_width = self.block.get_node_ty(arg).bit_count();
         let mut output_bits = Vec::with_capacity(width);
         for bit in (0..width).rev() {
             let mut result = None;
@@ -1045,7 +1048,7 @@ impl BlockEmitter<'_, '_> {
     /// Builds a dynamic low-bit mask with saturation at the result width.
     fn emit_mask_low(&mut self, count: NodeRef, width: usize) -> Result<Expr, BlockCodegenError> {
         let count_value = self.required_value(count)?;
-        let count_width = self.func.get_node_ty(count).bit_count();
+        let count_width = self.block.get_node_ty(count).bit_count();
         let comparison_width = count_width.max(ceil_log2(width + 1));
         let expanded_count = self.resize_unsigned(count_value, count_width, comparison_width)?;
         let bound = self.sized_usize(comparison_width, width)?;
@@ -1066,7 +1069,7 @@ impl BlockEmitter<'_, '_> {
         let mut result = self.zero(width)?;
         for term in terms {
             let operand = self.required_value(term.operand)?;
-            let operand_width = self.func.get_node_ty(term.operand).bit_count();
+            let operand_width = self.block.get_node_ty(term.operand).bit_count();
             let mut value = if term.signed {
                 self.resize_signed(operand, operand_width, width)?
             } else {
@@ -1099,15 +1102,18 @@ impl BlockEmitter<'_, '_> {
             format!("{label}: ")
         };
         let unknown = format!("$isunknown({predicate})");
-        let disabled = if let Some(reset) = &self.metadata.reset {
+        let disabled = if let Some(reset) = &self.block.reset {
             let inactive = if reset.active_low { "1'b1" } else { "1'b0" };
-            format!("{} !== {inactive} || {unknown}", reset.port_name)
+            format!(
+                "{} !== {inactive} || {unknown}",
+                self.block.port_name(reset.port)
+            )
         } else {
             unknown
         };
-        let statement = if let Some(clock) = &self.metadata.clock_port_name {
+        let statement = if let Some(clock) = self.block.clock_port_name() {
             let disabled = if self
-                .metadata
+                .block
                 .reset
                 .as_ref()
                 .is_some_and(|reset| reset.asynchronous)
@@ -1142,7 +1148,7 @@ impl BlockEmitter<'_, '_> {
         validate_external_identifier(label, "coverage label")?;
         let condition = self.required_value(predicate)?.expr;
         let predicate = self.file.emit_expression(&condition);
-        let statement = if let Some(clock) = &self.metadata.clock_port_name {
+        let statement = if let Some(clock) = self.block.clock_port_name() {
             format!(
                 "`ifndef SYNTHESIS\n{label}: cover property (@(posedge {clock}) {predicate});\n`endif"
             )
@@ -1179,9 +1185,8 @@ impl BlockEmitter<'_, '_> {
             format!(", {}", values.join(", "))
         };
         let trigger = self
-            .metadata
-            .clock_port_name
-            .as_ref()
+            .block
+            .clock_port_name()
             .map(|clock| format!("@(posedge {clock})"))
             .unwrap_or_else(|| "@(*)".to_owned());
         let statement = format!(

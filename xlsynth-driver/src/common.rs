@@ -6,7 +6,7 @@ use std::io::Write;
 use std::process;
 use std::process::Command;
 use xlsynth::mangle_dslx_name;
-use xlsynth_pir::{ir::PackageMember, ir_parser};
+use xlsynth_pir::ir_parser;
 
 // By default in the driver we treat warnings as errors.
 pub const DEFAULT_WARNINGS_AS_ERRORS: bool = true;
@@ -54,15 +54,12 @@ pub fn enforce_extern_verilog_codegen_policy(
         .members
         .iter()
         .filter_map(|member| {
-            let function = match member {
-                PackageMember::Function(function) => function,
-                PackageMember::Block { func, .. } => func,
-            };
-            function
+            let graph = member.graph();
+            graph
                 .outer_attrs
                 .iter()
                 .any(|attr| attr.trim_start().starts_with("#[ffi_proto("))
-                .then(|| function.name.clone())
+                .then(|| graph.name.clone())
         })
         .collect::<Vec<_>>();
 

@@ -77,6 +77,13 @@ pub(crate) fn get_param_ordinal(f: &Fn, param_id: ParamId) -> usize {
 fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::Hasher) {
     match payload {
         NodePayload::Nil => {}
+        NodePayload::InputPort { name, sv_type }
+        | NodePayload::OutputPort { name, sv_type, .. } => {
+            update_hash_string_attribute(hasher, "port_name", name);
+            if let Some(sv_type) = sv_type {
+                update_hash_string_attribute(hasher, "sv_type", sv_type);
+            }
+        }
         NodePayload::GetParam(param_id) => {
             // Use stable ordinal position within the function signature, not
             // the text id.

@@ -227,13 +227,15 @@ fn build_ext_nary_add_package(sample: &ExtNaryAddFnSample) -> Package {
     });
 
     let function = ir::Fn {
-        name: FUNCTION_NAME.to_string(),
+        graph: crate::ir::NodeGraph {
+            name: FUNCTION_NAME.to_string(),
+            nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params,
         ret_ty: Type::Bits(sample.result_width),
-        nodes,
         ret_node_ref: Some(ret_node_ref),
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     };
 
     Package {

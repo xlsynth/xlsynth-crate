@@ -28,8 +28,9 @@ pub(super) fn is_u1(f: &IrFn, r: NodeRef) -> bool {
 
 pub(super) fn push_node(f: &mut IrFn, ty: Type, payload: NodePayload) -> NodeRef {
     let new_index = f.nodes.len();
+    let text_id = next_text_id(f);
     f.nodes.push(Node {
-        text_id: next_text_id(f),
+        text_id,
         name: None,
         ty,
         payload,

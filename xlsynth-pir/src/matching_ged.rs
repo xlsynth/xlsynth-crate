@@ -3,7 +3,7 @@
 //! Library for computing heuristic graph edit distance (GED) between two XLS IR
 //! functions using an incremental node matching approach.
 
-use crate::ir::{self, BlockMetadata, Fn, Node, NodeRef};
+use crate::ir::{self, Fn, Node, NodeRef};
 use crate::ir_utils::{compact_and_toposort_in_place, operands, remap_payload_with};
 use crate::node_hashing::{FwdHash, compute_node_local_structural_hash};
 use std::cmp::Reverse;
@@ -332,35 +332,7 @@ pub fn compute_fn_edit<S: MatchSelector>(
     selector: &mut S,
 ) -> Result<IrEditSet, String> {
     let matches = compute_fn_match(old, new, selector)?;
-    Ok(convert_match_set_to_edit_set(old, new, &matches, None))
-}
-
-/// Computes an edit set required to transform `old` Block into `new` Block
-/// using the provided selector. Operates on the internal function of the block.
-pub fn compute_block_edit<S: MatchSelector>(
-    old: &crate::ir::PackageMember,
-    new: &crate::ir::PackageMember,
-    selector: &mut S,
-) -> Result<IrEditSet, String> {
-    match (old, new) {
-        (
-            crate::ir::PackageMember::Block {
-                func: old_fn,
-                metadata: old_port_info,
-                ..
-            },
-            crate::ir::PackageMember::Block { func: new_fn, .. },
-        ) => {
-            let matches = compute_fn_match(old_fn, new_fn, selector)?;
-            Ok(convert_match_set_to_edit_set(
-                old_fn,
-                new_fn,
-                &matches,
-                Some(old_port_info),
-            ))
-        }
-        _ => Err("compute_block_edit requires Block package members".to_string()),
-    }
+    Ok(convert_match_set_to_edit_set(old, new, &matches))
 }
 
 /// Computes the match actions required to transform `old` into `new`, using an
@@ -495,23 +467,6 @@ pub fn compute_fn_match<S: MatchSelector>(
     Ok(IrMatchSet { matches })
 }
 
-/// Computes the match actions required to transform `old` Block into `new`
-/// Block, using an externally provided selector that controls priority and edit
-/// choice. Operates on the internal function of the block.
-pub fn compute_block_match<S: MatchSelector>(
-    old: &crate::ir::PackageMember,
-    new: &crate::ir::PackageMember,
-    selector: &mut S,
-) -> Result<IrMatchSet, String> {
-    match (old, new) {
-        (
-            crate::ir::PackageMember::Block { func: old_fn, .. },
-            crate::ir::PackageMember::Block { func: new_fn, .. },
-        ) => compute_fn_match(old_fn, new_fn, selector),
-        _ => Err("compute_block_match requires Block package members".to_string()),
-    }
-}
-
 /// Applies a sequence of IrEdits to `old` and returns the result.
 pub fn apply_fn_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
     let mut patched = old.clone();
@@ -572,36 +527,9 @@ pub fn apply_fn_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
     Ok(patched)
 }
 
-/// Applies a sequence of IrEdits to a Block and returns a new Block preserving
-/// the original Block metadata (e.g., port info). Operates on the internal
-/// function of the block.
-pub fn apply_block_edits(
-    old: &crate::ir::PackageMember,
-    edits: &IrEditSet,
-) -> Result<crate::ir::PackageMember, String> {
-    match old {
-        crate::ir::PackageMember::Block {
-            func: old_fn,
-            metadata,
-        } => {
-            let new_fn = apply_fn_edits(old_fn, edits)?;
-            Ok(crate::ir::PackageMember::Block {
-                func: new_fn,
-                metadata: metadata.clone(),
-            })
-        }
-        _ => Err("apply_block_edits requires a Block package member".to_string()),
-    }
-}
-
 /// Converts a set of `MatchAction`s applied to a old/new pair into IrEdits on
 /// old which produce a graph isomorphic to new.
-pub fn convert_match_set_to_edit_set(
-    old: &Fn,
-    new: &Fn,
-    m: &IrMatchSet,
-    old_port_info: Option<&BlockMetadata>,
-) -> IrEditSet {
+pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEditSet {
     // Build cross-reference maps between matched nodes for operand redirection.
     let mut new_to_old: HashMap<usize, usize> = HashMap::new();
     for action in m.matches.iter() {
@@ -627,14 +555,6 @@ pub fn convert_match_set_to_edit_set(
     let mut next_text_id = 0usize;
     for node in old.nodes.iter() {
         next_text_id = std::cmp::max(next_text_id, node.text_id + 1);
-    }
-    if let Some(pi) = old_port_info {
-        for port in pi.input_port_ids.iter() {
-            next_text_id = std::cmp::max(next_text_id, port.1 + 1);
-        }
-        for port in pi.output_port_ids.iter() {
-            next_text_id = std::cmp::max(next_text_id, port.1 + 1);
-        }
     }
     for action in m.matches.iter() {
         match action {

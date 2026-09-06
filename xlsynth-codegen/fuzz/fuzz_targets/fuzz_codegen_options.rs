@@ -20,7 +20,7 @@ fuzz_target!(init: {
     };
     let flags = data.get(42).copied().unwrap_or_default();
     if flags & 1 != 0 {
-        case.options.top = Some(top_block(&case.package).0.name.clone());
+        case.options.top = Some(top_block(&case.package).name.clone());
     }
     if flags & 2 != 0 {
         case.options.module_name = Some(format!("public_module_{flags}"));

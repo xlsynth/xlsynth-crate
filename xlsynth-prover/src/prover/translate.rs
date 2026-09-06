@@ -863,6 +863,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: BitVec::ZeroWidth,
                 }
             }
+            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
+                panic!("Block ports must be lowered before function prover translation");
+            }
             NodePayload::InstantiationInput { .. } => {
                 panic!("InstantiationInput is not supported in prover translation");
             }

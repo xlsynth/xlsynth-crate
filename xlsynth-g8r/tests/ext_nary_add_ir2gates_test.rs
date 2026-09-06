@@ -116,13 +116,15 @@ fn build_single_stage_ext_nary_add_ir_text(result_width: usize, terms: &[Operand
         name: "test".to_string(),
         file_table: FileTable::new(),
         members: vec![PackageMember::Function(xlsynth_pir::ir::Fn {
-            name: "f".to_string(),
+            graph: xlsynth_pir::ir::NodeGraph {
+                name: "f".to_string(),
+                nodes,
+                outer_attrs: Vec::new(),
+                inner_attrs: Vec::new(),
+            },
             params,
             ret_ty: Type::Bits(result_width),
-            nodes,
             ret_node_ref: Some(ret_node_ref),
-            outer_attrs: Vec::new(),
-            inner_attrs: Vec::new(),
         })],
         top: Some(("f".to_string(), MemberType::Function)),
     };

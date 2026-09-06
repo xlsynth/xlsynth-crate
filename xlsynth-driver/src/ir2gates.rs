@@ -82,7 +82,7 @@ fn select_ir2g8r_member(
                         PackageMember::Function(function) => {
                             (function.name.clone(), MemberType::Function)
                         }
-                        PackageMember::Block { func, .. } => (func.name.clone(), MemberType::Block),
+                        PackageMember::Block(block) => (block.name.clone(), MemberType::Block),
                     })
                     .collect::<Vec<(String, MemberType)>>();
                 match candidates.as_slice() {

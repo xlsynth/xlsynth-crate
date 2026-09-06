@@ -162,7 +162,7 @@ fn select_function<'a>(
         .iter()
         .filter_map(|member| match member {
             PackageMember::Function(function) => Some(function),
-            PackageMember::Block { .. } => None,
+            PackageMember::Block(_) => None,
         })
         .collect::<Vec<_>>();
     match functions.as_slice() {

@@ -25,14 +25,14 @@ enum ArithmeticKind {
 impl BlockEmitter<'_, '_> {
     /// Declares each arithmetic specialization before module logic or stages.
     pub(crate) fn emit_arithmetic_helpers(&mut self) -> Result<(), BlockCodegenError> {
-        for node in &self.func.nodes {
+        for node in &self.block.nodes {
             let NodePayload::Binop(op, lhs, rhs) = node.payload else {
                 continue;
             };
             let Some(helper) = ArithmeticHelper::for_operation(
                 op,
-                self.func.get_node_ty(lhs).bit_count(),
-                self.func.get_node_ty(rhs).bit_count(),
+                self.block.get_node_ty(lhs).bit_count(),
+                self.block.get_node_ty(rhs).bit_count(),
                 &node.ty,
             ) else {
                 continue;

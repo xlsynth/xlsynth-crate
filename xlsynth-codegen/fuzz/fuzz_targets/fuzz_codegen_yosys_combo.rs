@@ -32,22 +32,22 @@ fuzz_target!(init: {
     let package = generate(data, &options);
     let ir = package.to_string();
     let mapped = xlsynth_codegen_fuzz::fuzz_tool!(map_combinational(&package, context));
-    let (block, metadata) = top_block(&package);
-    let output_types = block_output_types(block, metadata);
+    let block = top_block(&package);
+    let output_types = block_output_types(block);
     let mut rng = deterministic_rng(&ir);
     for sample in 0..INPUT_SAMPLE_COUNT {
         let inputs = generate_inputs(block, &mut rng);
         let source_inputs = inputs
             .iter()
-            .zip(&block.params)
-            .map(|(value, param)| flatten_value(value, &param.ty))
+            .zip(block.input_ports())
+            .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
         let mapped_inputs = map_combinational_inputs(&mapped.mapped, block, &source_inputs);
-        let expected = evaluate_block_outputs(block, metadata, &inputs, &ir)
+        let expected = evaluate_block_outputs(block, &inputs, &ir)
             .iter()
             .zip(output_types.iter())
-            .zip(metadata.output_names.iter())
-            .map(|((value, ty), name)| (name.as_str(), flatten_value(value, ty)))
+            .zip(block.output_ports().map(|port| block.port_name(port)))
+            .map(|((value, ty), name)| (name, flatten_value(value, ty)))
             .collect::<BTreeMap<_, _>>();
         let actual = mapped
             .mapped

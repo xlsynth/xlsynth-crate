@@ -17,6 +17,7 @@ pub mod fuzz_utils;
 pub mod greedy_matching_ged;
 pub mod ir;
 pub mod ir_annotate_ranges;
+mod ir_block;
 pub mod ir_bool_cones;
 pub mod ir_builder;
 pub mod ir_corpus;

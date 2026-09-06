@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parser for XLS IR (just functions for the time being).
+//! Parser and emitter for XLS IR functions and blocks.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    self, ArrayTypeData, BlockMetadata, FileTable, MemberType, PackageMember, operator_to_nary_op,
+    self, ArrayTypeData, Block, BlockPort, BlockReset, FileTable, MemberType, PackageMember,
+    operator_to_nary_op,
 };
 use crate::ir_node_env::{IrNodeEnv, NameOrId};
 use crate::ir_verify;
@@ -102,6 +103,13 @@ pub struct Parser {
 #[derive(Clone, Copy, Debug)]
 pub struct ParseOptions {
     pub retain_pos_data: bool,
+}
+
+/// Reset attributes refer to names until the block's actual ports are parsed.
+struct ParsedBlockReset {
+    port_name: String,
+    asynchronous: bool,
+    active_low: bool,
 }
 
 impl Default for ParseOptions {
@@ -569,8 +577,8 @@ fn canonicalize_wrapped_extension_helper_spec(
     }
 }
 
-fn convert_ffi_invokes_to_extension_ops_in_fn(
-    f: &mut ir::Fn,
+fn convert_ffi_invokes_to_extension_ops_in_graph(
+    f: &mut ir::NodeGraph,
     wrappers: &BTreeMap<String, WrappedExtensionSpec>,
 ) -> Result<(), ParseError> {
     for idx in 0..f.nodes.len() {
@@ -836,9 +844,11 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
 
     for member in pkg.members.iter_mut() {
         match member {
-            PackageMember::Function(f) => convert_ffi_invokes_to_extension_ops_in_fn(f, &wrappers)?,
-            PackageMember::Block { func, .. } => {
-                convert_ffi_invokes_to_extension_ops_in_fn(func, &wrappers)?
+            PackageMember::Function(f) => {
+                convert_ffi_invokes_to_extension_ops_in_graph(&mut f.graph, &wrappers)?
+            }
+            PackageMember::Block(block) => {
+                convert_ffi_invokes_to_extension_ops_in_graph(&mut block.graph, &wrappers)?
             }
         }
     }
@@ -855,7 +865,7 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
 
     pkg.members.retain(|member| match member {
         PackageMember::Function(f) => !wrapper_names.contains(&f.name),
-        PackageMember::Block { .. } => true,
+        PackageMember::Block(_) => true,
     });
     Ok(())
 }
@@ -2356,7 +2366,61 @@ impl Parser {
         let operator = self.pop_identifier_or_error("node operator")?;
         self.drop_or_error("(")?;
 
+        let mut port_pos = None;
         let (payload, id) = match operator.as_str() {
+            "input_port" | "output_port" => {
+                let arg = if operator == "output_port" {
+                    let arg = self.parse_node_ref(node_env, "output_port value")?;
+                    self.drop_or_error(",")?;
+                    Some(arg)
+                } else {
+                    None
+                };
+                let mut name = None;
+                let mut sv_type = None;
+                let mut saw_id = false;
+                loop {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("name=") {
+                        if name.is_some() {
+                            return Err(ParseError::new(format!("duplicate {operator} name attribute")));
+                        }
+                        self.drop_or_error("name=")?;
+                        name = Some(self.pop_identifier_or_error("port name")?);
+                    } else if self.peek_is("id=") {
+                        if saw_id {
+                            return Err(ParseError::new(format!("duplicate {operator} id attribute")));
+                        }
+                        maybe_id = Some(self.parse_id_attribute()?);
+                        saw_id = true;
+                    } else if self.peek_is("sv_type=") {
+                        if sv_type.is_some() {
+                            return Err(ParseError::new(format!("duplicate {operator} sv_type attribute")));
+                        }
+                        sv_type = Some(self.parse_string_attribute("sv_type")?);
+                    } else if self.peek_is("pos=") {
+                        if port_pos.is_some() {
+                            return Err(ParseError::new(format!("duplicate {operator} pos attribute")));
+                        }
+                        port_pos = self.maybe_drop_pos_attribute()?;
+                    } else {
+                        return Err(ParseError::new(format!("unexpected {operator} attribute; rest: {:?}", self.rest_of_line())));
+                    }
+                    if !self.try_drop(",") {
+                        break;
+                    }
+                }
+                let name = name.ok_or_else(|| ParseError::new(format!("{operator} missing name attribute")))?;
+                let id = maybe_id.ok_or_else(|| ParseError::new(format!("{operator} missing id attribute")))?;
+                if id == 0 {
+                    return Err(ParseError::new(format!("{operator} id must be greater than zero")));
+                }
+                let payload = match arg {
+                    Some(arg) => ir::NodePayload::OutputPort { name, arg, sv_type },
+                    None => ir::NodePayload::InputPort { name, sv_type },
+                };
+                (payload, id)
+            }
             "tuple" => {
                 let members = self.parse_variadic_op(&node_env, &mut maybe_id, "tuple")?;
                 (ir::NodePayload::Tuple(members), maybe_id.unwrap())
@@ -3440,7 +3504,7 @@ impl Parser {
             }
         };
 
-        let pos_attr = self.maybe_drop_pos_attribute()?;
+        let pos_attr = port_pos.or(self.maybe_drop_pos_attribute()?);
         self.drop_or_error_with_ctx(
             ")",
             &format!("end of node: {:?} operator: {:?}", name_or_id, operator),
@@ -3531,9 +3595,9 @@ impl Parser {
     fn extract_block_reset_metadata(
         &self,
         attrs: Vec<String>,
-    ) -> Result<(Vec<String>, Option<ir::BlockResetMetadata>), ParseError> {
+    ) -> Result<(Vec<String>, Option<ParsedBlockReset>), ParseError> {
         let mut filtered: Vec<String> = Vec::new();
-        let mut reset_metadata: Option<ir::BlockResetMetadata> = None;
+        let mut reset_metadata: Option<ParsedBlockReset> = None;
         for attr in attrs.into_iter() {
             if let Some(parsed) = Self::parse_reset_attr(&attr)? {
                 if reset_metadata.is_some() {
@@ -3549,7 +3613,7 @@ impl Parser {
         Ok((filtered, reset_metadata))
     }
 
-    fn parse_reset_attr(attr: &str) -> Result<Option<ir::BlockResetMetadata>, ParseError> {
+    fn parse_reset_attr(attr: &str) -> Result<Option<ParsedBlockReset>, ParseError> {
         let prefix = "#![reset(";
         let suffix = ")]";
         if !attr.starts_with(prefix) {
@@ -3609,7 +3673,7 @@ impl Parser {
             .ok_or_else(|| ParseError::new("reset attribute missing asynchronous".to_string()))?;
         let active_low = active_low
             .ok_or_else(|| ParseError::new("reset attribute missing active_low".to_string()))?;
-        Ok(Some(ir::BlockResetMetadata {
+        Ok(Some(ParsedBlockReset {
             port_name,
             asynchronous,
             active_low,
@@ -3718,13 +3782,15 @@ impl Parser {
         }
 
         Ok(ir::Fn {
-            name: fn_name,
+            graph: ir::NodeGraph {
+                name: fn_name,
+                nodes,
+                outer_attrs,
+                inner_attrs,
+            },
             params,
             ret_ty,
-            nodes,
             ret_node_ref,
-            outer_attrs,
-            inner_attrs,
         })
     }
 
@@ -3732,413 +3798,165 @@ impl Parser {
         self.parse_fn_with_outer(Vec::new())
     }
 
-    /// Parses a combinational `block` and converts it to an equivalent `fn`.
-    ///
-    /// - `input_port` nodes become parameters (GetParam nodes) with matching
-    ///   ids.
-    /// - `output_port` nodes are discarded and the referenced value becomes the
-    ///   function return.
-    /// - Other nodes are parsed as normal IR nodes.
-    pub fn parse_block_to_fn(&mut self) -> Result<ir::Fn, ParseError> {
-        // Backward-compatible API: discard port info.
-        let (f, _) = self.parse_block_to_fn_with_ports()?;
-        Ok(f)
+    /// Parses a block, retaining ports as ordinary graph nodes.
+    pub fn parse_block(&mut self) -> Result<Block, ParseError> {
+        self.parse_block_with_outer(Vec::new())
     }
 
-    pub fn parse_block_to_fn_with_ports_outer(
+    /// Parses a block and attaches attributes preceding its declaration.
+    pub fn parse_block_with_outer(
         &mut self,
         outer_attrs: Vec<String>,
-    ) -> Result<(ir::Fn, BlockMetadata), ParseError> {
+    ) -> Result<Block, ParseError> {
         self.drop_or_error("block")?;
         let block_name = self.pop_identifier_or_error("block name")?;
-        let mut clock_port_name: Option<String> = None;
-
-        // Parse port list from the block header: `name: type, ...` (no ids).
-        let mut header_ports: Vec<(String, ir::Type)> = Vec::new();
-        let mut port_order: Vec<String> = Vec::new();
-        let mut header_port_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut clock_port_name = None;
+        let mut header_ports = BTreeMap::new();
+        let mut port_order = Vec::new();
+        let mut header_port_names = BTreeSet::new();
         self.drop_or_error("(")?;
-        loop {
-            if self.try_drop(")") {
-                break;
-            }
-            let pname = self.pop_identifier_or_error("block port name")?;
-            if !header_port_names.insert(pname.clone()) {
+        while !self.try_drop(")") {
+            let name = self.pop_identifier_or_error("block port name")?;
+            if !header_port_names.insert(name.clone()) {
                 return Err(ParseError::new(format!(
                     "duplicate port '{}' in block '{}'",
-                    pname, block_name
+                    name, block_name
                 )));
             }
-            port_order.push(pname.clone());
+            port_order.push(name.clone());
             self.drop_or_error(":")?;
             if self.try_drop("clock") {
-                if clock_port_name.is_some() {
+                if clock_port_name.replace(name).is_some() {
                     return Err(ParseError::new(format!(
                         "block '{}' has multiple clock ports",
                         block_name
                     )));
                 }
-                clock_port_name = Some(pname);
             } else {
-                let pty = self.parse_type()?;
-                header_ports.push((pname, pty));
+                header_ports.insert(name, self.parse_type()?);
             }
             if !self.try_drop(",") {
                 self.drop_or_error(")")?;
                 break;
             }
         }
-
         self.drop_or_error("{")?;
-
-        // Nodes start with a reserved zero node.
-        let mut nodes = vec![ir::Node {
-            text_id: 0,
-            name: Some("reserved_zero_node".to_string()),
-            ty: ir::Type::nil(),
-            payload: ir::NodePayload::Nil,
-            pos: None,
-        }];
+        let mut block = Block::new(&block_name);
+        block.outer_attrs = outer_attrs;
+        let inner_attrs = self.parse_inner_attributes()?;
+        let (inner_attrs, parsed_reset) = self.extract_block_reset_metadata(inner_attrs)?;
+        block.inner_attrs = inner_attrs;
         let mut node_env = IrNodeEnv::new();
-
-        // Track input parameters discovered in the body: name -> (ty, id)
-        let mut input_params: Vec<(String, ir::Type, usize)> = Vec::new();
-        // Track outputs discovered: (output port name, node ref)
-        let mut outputs: Vec<(String, ir::NodeRef)> = Vec::new();
-        let mut output_ids_by_name: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut port_sv_types: BTreeMap<String, String> = BTreeMap::new();
-
-        // Collect inner attributes at the top of the block body.
-        let inner_attrs: Vec<String> = self.parse_inner_attributes()?;
-        let (inner_attrs, reset_metadata) = self.extract_block_reset_metadata(inner_attrs)?;
-        let mut registers: Vec<ir::Register> = Vec::new();
-        let mut register_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut instantiations: Vec<ir::Instantiation> = Vec::new();
-        let mut instantiation_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-
-        // Parse body lines until '}'.
+        let mut port_nodes = BTreeMap::new();
+        let mut register_names = std::collections::HashSet::new();
+        let mut instantiation_names = std::collections::HashSet::new();
         while !self.try_drop("}") {
             self.drop_whitespace_and_comments();
-            // Handle register declarations.
             if self.try_drop_keyword("reg") {
-                let reg = self.parse_register_decl(&block_name, &mut register_names)?;
-                registers.push(reg);
+                block
+                    .registers
+                    .push(self.parse_register_decl(&block_name, &mut register_names)?);
                 continue;
             }
             if self.try_drop_keyword("instantiation") {
-                let inst = self.parse_instantiation_decl(&block_name, &mut instantiation_names)?;
-                instantiations.push(inst);
+                block
+                    .instantiations
+                    .push(self.parse_instantiation_decl(&block_name, &mut instantiation_names)?);
                 continue;
             }
-            // If this is an input_port or output_port, handle specially.
-            // Peek ahead to capture the operator by temporarily parsing the LHS
-            // name and type. Save current offset to backtrack for
-            // normal node parsing.
-            let saved_offset = self.offset;
-            // If we can't parse a node header (name: type = ...), fall back to
-            // normal parsing which will error with a helpful
-            // message.
-            let parse_port_line = || -> Result<Option<()>, ParseError> {
-                // name or id.
-                let name_or_id = self.pop_node_name_or_error("node name")?;
-                self.drop_or_error(":")?;
-                let node_ty = self.parse_type()?;
-                self.drop_or_error("=")?;
-                let operator = self.pop_identifier_or_error("node operator")?;
-                if operator == "input_port" {
-                    self.drop_or_error("(")?;
-                    self.drop_or_error("name=")?;
-                    let port_name = self.pop_identifier_or_error("input_port name")?;
-                    let mut id_opt: Option<usize> = None;
-                    let mut sv_type: Option<String> = None;
-                    while self.try_drop(",") {
-                        self.drop_whitespace_and_comments();
-                        if self.peek_is("id=") {
-                            if id_opt.is_some() {
-                                return Err(ParseError::new(
-                                    "duplicate input_port id attribute".to_string(),
-                                ));
-                            }
-                            id_opt = Some(self.parse_id_attribute()?);
-                        } else if self.peek_is("sv_type=") {
-                            if sv_type.is_some() {
-                                return Err(ParseError::new(
-                                    "duplicate input_port sv_type attribute".to_string(),
-                                ));
-                            }
-                            sv_type = Some(self.parse_string_attribute("sv_type")?);
-                        } else if self.peek_is("pos=") {
-                            let _ = self.maybe_drop_pos_attribute()?;
-                        } else {
-                            return Err(ParseError::new(format!(
-                                "unexpected input_port attribute; rest_of_line: {:?}",
-                                self.rest_of_line()
-                            )));
-                        }
-                    }
-                    self.drop_or_error(")")?;
-                    // Validate and construct a GetParam node with the given id.
-                    let id_val = id_opt.ok_or_else(|| {
-                        ParseError::new(format!(
-                            "expected id for input_port; rest_of_line: {:?}",
-                            self.rest_of_line()
-                        ))
-                    })?;
-                    // Name must be provided on LHS.
-                    let lhs_name = match name_or_id {
-                        NameOrId::Name(n) => n,
-                        NameOrId::Id(_) => {
-                            return Err(ParseError::new(
-                                "input_port must have a name on LHS".to_string(),
-                            ));
-                        }
-                    };
-                    // Optional consistency check: header declared this port.
-                    let _ = header_ports
-                        .iter()
-                        .find(|(n, _)| n == &lhs_name)
-                        .ok_or_else(|| {
-                            ParseError::new(format!(
-                                "input_port '{}' not found in block header ports",
-                                lhs_name
-                            ))
-                        })?;
-                    if id_val == 0 {
-                        return Err(ParseError::new(
-                            "input_port id must be greater than zero".to_string(),
-                        ));
-                    }
-                    let pid = ir::ParamId::new(id_val);
-                    let node = ir::Node {
-                        text_id: id_val,
-                        name: Some(lhs_name.clone()),
-                        ty: node_ty.clone(),
-                        payload: ir::NodePayload::GetParam(pid),
-                        pos: None,
-                    };
-                    let node_ref = ir::NodeRef { index: nodes.len() };
-                    node_env
-                        .add(node.name.clone(), node.text_id, node_ref)
-                        .map_err(ParseError::new)?;
-                    nodes.push(node);
-                    if let Some(sv_type) = sv_type {
-                        port_sv_types.insert(port_name.clone(), sv_type);
-                    }
-                    // Record input param for fn signature.
-                    input_params.push((port_name, node_ty, id_val));
-                    Ok(Some(()))
-                } else if operator == "output_port" {
-                    self.drop_or_error("(")?;
-                    // First arg is the value being output.
-                    let value_ref = self.parse_node_ref(&node_env, "output_port value")?;
-                    // Consume any additional attributes in any order until we
-                    // hit ')'.
-                    let mut out_name_opt: Option<String> = None;
-                    let mut out_id_opt: Option<usize> = None;
-                    let mut sv_type: Option<String> = None;
-                    loop {
-                        self.drop_whitespace_and_comments();
-                        if !self.try_drop(",") {
-                            break;
-                        }
-                        self.drop_whitespace_and_comments();
-                        if self.peek_is("name=") {
-                            self.drop_or_error("name=")?;
-                            let nm = self.pop_identifier_or_error("output_port name")?;
-                            out_name_opt = Some(nm);
-                            continue;
-                        }
-                        if self.peek_is("id=") {
-                            out_id_opt = Some(self.parse_id_attribute()?);
-                            continue;
-                        }
-                        if self.peek_is("sv_type=") {
-                            if sv_type.is_some() {
-                                return Err(ParseError::new(
-                                    "duplicate output_port sv_type attribute".to_string(),
-                                ));
-                            }
-                            sv_type = Some(self.parse_string_attribute("sv_type")?);
-                            continue;
-                        }
-                        if self.peek_is("pos=") {
-                            let _ = self.maybe_drop_pos_attribute()?;
-                            continue;
-                        }
-                        // Unknown attribute; break and let ')' be checked next.
-                        break;
-                    }
-                    self.drop_or_error(")")?;
-                    let out_name = out_name_opt.ok_or_else(|| {
-                        ParseError::new("output_port missing name attribute".to_string())
-                    })?;
-                    let out_id = out_id_opt.ok_or_else(|| {
-                        ParseError::new("output_port missing id attribute".to_string())
-                    })?;
-                    if let Some(sv_type) = sv_type {
-                        port_sv_types.insert(out_name.clone(), sv_type);
-                    }
-                    outputs.push((out_name.clone(), value_ref));
-                    output_ids_by_name.insert(out_name, out_id);
-                    Ok(Some(()))
-                } else {
-                    Ok(None)
-                }
+            let node = self.parse_node(&mut node_env)?;
+            let node_ref = ir::NodeRef {
+                index: block.nodes.len(),
             };
-
-            let mut parse_port_line = parse_port_line;
-            match parse_port_line() {
-                Ok(Some(())) => {
-                    // handled specially
-                }
-                Ok(None) => {
-                    // Not a special port op; reset and parse as a normal node.
-                    self.offset = saved_offset;
-                    let node = self.parse_node(&mut node_env)?;
-                    let node_ref = ir::NodeRef { index: nodes.len() };
-                    node_env
-                        .add(node.name.clone(), node.text_id, node_ref)
-                        .map_err(ParseError::new)?;
-                    nodes.push(node);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Build function parameters in the order they appear in the header, but
-        // only for inputs.
-        let mut params: Vec<ir::Param> = Vec::new();
-        for (hname, hty) in header_ports.iter() {
-            if let Some((_, _, id)) = input_params.iter().find(|(n, _, _)| n == hname) {
-                if *id == 0 {
-                    return Err(ParseError::new(format!(
-                        "input_port '{}' id must be greater than zero",
-                        hname
-                    )));
-                }
-                params.push(ir::Param {
-                    name: hname.clone(),
-                    ty: hty.clone(),
-                    id: ir::ParamId::new(*id),
-                });
-            }
-        }
-
-        // Outputs are header ports that are not inputs.
-        let header_output_names: Vec<String> = header_ports
-            .iter()
-            .map(|(n, _)| n.clone())
-            .filter(|n| input_params.iter().all(|(inn, _, _)| inn != n))
-            .collect();
-        // Map output_port(name=...) by name.
-        let mut out_map: std::collections::HashMap<String, ir::NodeRef> =
-            std::collections::HashMap::new();
-        for (n, r) in outputs.into_iter() {
-            out_map.insert(n, r);
-        }
-        // Build return node refs and types in header order.
-        let mut ret_nodes_in_order: Vec<ir::NodeRef> = Vec::new();
-        let mut ret_types_in_order: Vec<ir::Type> = Vec::new();
-        for (hn, hty) in header_ports.iter() {
-            if header_output_names.iter().any(|n| n == hn)
-                && input_params.iter().all(|(inn, _, _)| inn != hn)
+            // The environment replaces existing bindings, so reject collisions
+            // before inserting any block node, including actual output ports.
+            if node_env
+                .name_id_to_ref(&NameOrId::Id(node.text_id))
+                .is_some()
             {
-                let nr = out_map.get(hn).ok_or_else(|| {
-                    ParseError::new(format!(
-                        "no output_port for header-declared output '{}'",
-                        hn
-                    ))
-                })?;
-                ret_nodes_in_order.push(*nr);
-                ret_types_in_order.push(hty.clone());
-            }
-        }
-
-        if ret_nodes_in_order.len() == 1 {
-            let ret_node_ref = ret_nodes_in_order[0];
-            let ret_ty = ret_types_in_order.remove(0);
-            let ret_node_ty = nodes[ret_node_ref.index].ty.clone();
-            if ret_node_ty != ret_ty {
                 return Err(ParseError::new(format!(
-                    "return type mismatch; expected: {}, got: {} from node: {}",
-                    ret_ty, ret_node_ty, nodes[ret_node_ref.index].text_id
+                    "duplicate node id {} in block '{}'",
+                    node.text_id, block_name
                 )));
             }
-            return Ok((
-                ir::Fn {
-                    name: block_name,
-                    params,
-                    ret_ty,
-                    nodes,
-                    ret_node_ref: Some(ret_node_ref),
-                    outer_attrs,
-                    inner_attrs,
-                },
-                BlockMetadata {
-                    clock_port_name,
-                    port_order,
-                    port_sv_types,
-                    input_port_ids: input_params
-                        .iter()
-                        .map(|(n, _t, id)| (n.clone(), *id))
-                        .collect(),
-                    output_port_ids: output_ids_by_name,
-                    output_names: header_output_names,
-                    reset: reset_metadata,
-                    registers,
-                    instantiations,
-                },
-            ));
+            if let Some(name) = &node.name {
+                if node_env
+                    .name_id_to_ref(&NameOrId::Name(name.clone()))
+                    .is_some()
+                {
+                    return Err(ParseError::new(format!(
+                        "duplicate node name '{}' in block '{}'",
+                        name, block_name
+                    )));
+                }
+            }
+            let port = match &node.payload {
+                ir::NodePayload::InputPort { name, .. } => {
+                    Some((name, &node.ty, BlockPort::Input(node_ref)))
+                }
+                ir::NodePayload::OutputPort { name, arg, .. } => {
+                    if node.ty != ir::Type::nil() {
+                        return Err(ParseError::new(format!(
+                            "output_port '{}' must have () node type, got {}",
+                            name, node.ty
+                        )));
+                    }
+                    Some((name, block.get_node_ty(*arg), BlockPort::Output(node_ref)))
+                }
+                _ => None,
+            };
+            if let Some((name, ty, port)) = port {
+                let declared_ty = header_ports.get(name).ok_or_else(|| {
+                    ParseError::new(format!("port '{}' not found in block header ports", name))
+                })?;
+                if declared_ty != ty {
+                    return Err(ParseError::new(format!(
+                        "port '{}' type mismatch: header declares {}, node has {}",
+                        name, declared_ty, ty
+                    )));
+                }
+                if port_nodes.insert(name.clone(), port).is_some() {
+                    return Err(ParseError::new(format!(
+                        "duplicate port node '{}' in block '{}'",
+                        name, block_name
+                    )));
+                }
+            }
+            node_env
+                .add(node.name.clone(), node.text_id, node_ref)
+                .map_err(ParseError::new)?;
+            block.nodes.push(node);
         }
-
-        // Multiple outputs: build a tuple node and return it.
-        let ret_ty = ir::Type::Tuple(ret_types_in_order.into_iter().map(Box::new).collect());
-        let next_id = nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
-        let tuple_node = ir::Node {
-            text_id: next_id,
-            name: None,
-            ty: ret_ty.clone(),
-            payload: ir::NodePayload::Tuple(ret_nodes_in_order.clone()),
-            pos: None,
-        };
-        let ret_node_ref = ir::NodeRef { index: nodes.len() };
-        let _ = node_env.add(None, next_id, ret_node_ref);
-        nodes.push(tuple_node);
-
-        Ok((
-            ir::Fn {
-                name: block_name,
-                params,
-                ret_ty,
-                nodes,
-                ret_node_ref: Some(ret_node_ref),
-                outer_attrs,
-                inner_attrs,
-            },
-            BlockMetadata {
-                clock_port_name,
-                port_order,
-                port_sv_types,
-                input_port_ids: input_params
-                    .iter()
-                    .map(|(n, _t, id)| (n.clone(), *id))
-                    .collect(),
-                output_port_ids: output_ids_by_name,
-                output_names: header_output_names,
-                reset: reset_metadata,
-                registers,
-                instantiations,
-            },
-        ))
-    }
-
-    pub fn parse_block_to_fn_with_ports(&mut self) -> Result<(ir::Fn, BlockMetadata), ParseError> {
-        let outer_attrs: Vec<String> = Vec::new();
-        self.parse_block_to_fn_with_ports_outer(outer_attrs)
+        for name in port_order {
+            let port = if clock_port_name.as_ref() == Some(&name) {
+                BlockPort::Clock(name)
+            } else {
+                port_nodes.remove(&name).ok_or_else(|| {
+                    ParseError::new(format!("no port node for header-declared port '{}'", name))
+                })?
+            };
+            block.ports.push(port);
+        }
+        if let Some(reset) = parsed_reset {
+            let port = block.get_input_port(&reset.port_name).ok_or_else(|| {
+                ParseError::new(format!(
+                    "reset port '{}' must name an input port",
+                    reset.port_name
+                ))
+            })?;
+            if block.port_type(port) != &ir::Type::Bits(1) {
+                return Err(ParseError::new(format!(
+                    "reset port '{}' must have bits[1] type",
+                    reset.port_name
+                )));
+            }
+            block.reset = Some(BlockReset {
+                port,
+                asynchronous: reset.asynchronous,
+                active_low: reset.active_low,
+            });
+        }
+        Ok(block)
     }
 
     pub fn parse_package(&mut self) -> Result<ir::Package, ParseError> {
@@ -4172,11 +3990,10 @@ impl Parser {
                     members.push(PackageMember::Function(f));
                 } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
-                    let (f, metadata) = self.parse_block_to_fn_with_ports_outer(
-                        pending_outer_attrs.drain(..).collect(),
-                    )?;
-                    top = Some((f.name.clone(), MemberType::Block));
-                    members.push(PackageMember::Block { func: f, metadata });
+                    let block =
+                        self.parse_block_with_outer(pending_outer_attrs.drain(..).collect())?;
+                    top = Some((block.name.clone(), MemberType::Block));
+                    members.push(PackageMember::Block(block));
                 } else {
                     return Err(ParseError::new(format!(
                         "expected fn or block after top; rest: {:?}",
@@ -4187,9 +4004,8 @@ impl Parser {
                 let f = self.parse_fn_with_outer(pending_outer_attrs.drain(..).collect())?;
                 members.push(PackageMember::Function(f));
             } else if self.peek_keyword_is("block") {
-                let (f, metadata) = self
-                    .parse_block_to_fn_with_ports_outer(pending_outer_attrs.drain(..).collect())?;
-                members.push(PackageMember::Block { func: f, metadata });
+                let block = self.parse_block_with_outer(pending_outer_attrs.drain(..).collect())?;
+                members.push(PackageMember::Block(block));
             } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got proc; rest: {:?}",
@@ -4226,287 +4042,78 @@ impl Parser {
     }
 }
 
-/// Emits a combinational block text from an `ir::Fn`.
-///
-/// If `output_names` is provided, it determines the names and order of outputs
-/// in the block header and `output_port` lines. If not provided, a single
-/// output is named `out`, and multiple outputs are named `out0`, `out1`, ...
-pub fn emit_fn_as_block(
-    f: &ir::Fn,
-    output_names: Option<&[String]>,
-    port_ids: Option<&BlockMetadata>,
-    is_top: bool,
-) -> String {
-    // Helper to get reference name for a node as used in operand positions.
-    let get_ref_name = |nr: ir::NodeRef| -> String {
-        let n = f.get_node(nr);
-        match n.payload {
-            ir::NodePayload::GetParam(_) => n.name.clone().unwrap(),
-            _ => {
-                if let Some(ref name) = n.name {
-                    name.clone()
-                } else {
-                    format!("{}.{}", n.payload.get_operator(), n.text_id)
-                }
+/// Emits a block with its declared port order and ordinary graph-node IDs.
+pub fn emit_block(block: &Block, is_top: bool) -> String {
+    let header_parts: Vec<String> = block
+        .ports
+        .iter()
+        .map(|port| match port {
+            BlockPort::Input(nr) | BlockPort::Output(nr) => {
+                format!("{}: {}", block.port_name(*nr), block.port_type(*nr))
             }
-        }
-    };
-
-    // Determine outputs, guided by provided port ids if present.
-    let (ret_nodes, ret_types, ret_tuple_index): (Vec<ir::NodeRef>, Vec<ir::Type>, Option<usize>) =
-        if let Some(pi) = port_ids {
-            let expected = pi.output_names.len();
-            if expected == 0 {
-                (Vec::new(), Vec::new(), f.ret_node_ref.map(|nr| nr.index))
-            } else if expected == 1 {
-                if let Some(ret_nr) = f.ret_node_ref {
-                    let ret_node = f.get_node(ret_nr);
-                    (vec![ret_nr], vec![ret_node.ty.clone()], None)
-                } else {
-                    (Vec::new(), Vec::new(), None)
-                }
-            } else {
-                if let Some(ret_nr) = f.ret_node_ref {
-                    let ret_node = f.get_node(ret_nr);
-                    match &ret_node.payload {
-                        ir::NodePayload::Tuple(elems) => {
-                            let mut types = Vec::new();
-                            if let ir::Type::Tuple(tys) = &ret_node.ty {
-                                for t in tys.iter() {
-                                    types.push((**t).clone());
-                                }
-                            } else {
-                                panic!("tuple return node must have tuple type");
-                            }
-                            (elems.clone(), types, Some(ret_nr.index))
-                        }
-                        _ => panic!(
-                            "expected tuple return matching {} outputs, found non-tuple",
-                            expected
-                        ),
-                    }
-                } else {
-                    (Vec::new(), Vec::new(), None)
-                }
-            }
-        } else if let Some(ret_nr) = f.ret_node_ref {
-            let ret_node = f.get_node(ret_nr);
-            match &ret_node.payload {
-                ir::NodePayload::Tuple(elems) => {
-                    let mut types = Vec::new();
-                    if let ir::Type::Tuple(tys) = &ret_node.ty {
-                        for t in tys.iter() {
-                            types.push((**t).clone());
-                        }
-                    } else {
-                        // Strong invariant: tuple payload must have tuple type.
-                        panic!("tuple return node must have tuple type");
-                    }
-                    (elems.clone(), types, Some(ret_nr.index))
-                }
-                _ => (vec![ret_nr], vec![ret_node.ty.clone()], None),
-            }
-        } else {
-            // No explicit return node; treat as zero outputs.
-            (Vec::new(), Vec::new(), None)
-        };
-
-    // Decide output names.
-    let decided_out_names: Vec<String> = if let Some(names) = output_names {
-        assert!(
-            names.len() == ret_nodes.len(),
-            "output_names length must match number of outputs"
-        );
-        names.to_vec()
-    } else if let Some(pi) = port_ids {
-        assert!(
-            pi.output_names.len() == ret_nodes.len(),
-            "BlockMetadata.output_names length must match number of outputs"
-        );
-        pi.output_names.clone()
-    } else if ret_nodes.len() == 1 {
-        vec!["out".to_string()]
-    } else {
-        (0..ret_nodes.len()).map(|i| format!("out{}", i)).collect()
-    };
-
-    // Preserve the full source port order when block metadata provides it.
-    let mut header_parts: Vec<String> = Vec::new();
-    if let Some(pi) = port_ids.filter(|pi| !pi.port_order.is_empty()) {
-        let mut emitted_names = BTreeSet::new();
-        for name in &pi.port_order {
-            if pi.clock_port_name.as_ref() == Some(name) {
-                header_parts.push(format!("{}: clock", name));
-                emitted_names.insert(name.clone());
-            } else if let Some(param) = f.params.iter().find(|param| param.name == *name) {
-                header_parts.push(format!("{}: {}", param.name, param.ty));
-                emitted_names.insert(name.clone());
-            } else if let Some(index) = pi.output_names.iter().position(|output| output == name) {
-                if let (Some(output_name), Some(ty)) =
-                    (decided_out_names.get(index), ret_types.get(index))
-                {
-                    header_parts.push(format!("{}: {}", output_name, ty));
-                    emitted_names.insert(output_name.clone());
-                }
-            }
-        }
-        if let Some(clock) = &pi.clock_port_name {
-            if emitted_names.insert(clock.clone()) {
-                header_parts.push(format!("{}: clock", clock));
-            }
-        }
-        for param in &f.params {
-            if emitted_names.insert(param.name.clone()) {
-                header_parts.push(format!("{}: {}", param.name, param.ty));
-            }
-        }
-        for (index, ty) in ret_types.iter().enumerate() {
-            if emitted_names.insert(decided_out_names[index].clone()) {
-                header_parts.push(format!("{}: {}", decided_out_names[index], ty));
-            }
-        }
-    } else {
-        if let Some(clock) = port_ids.and_then(|metadata| metadata.clock_port_name.as_ref()) {
-            header_parts.push(format!("{}: clock", clock));
-        }
-        for param in &f.params {
-            header_parts.push(format!("{}: {}", param.name, param.ty));
-        }
-        for (index, ty) in ret_types.iter().enumerate() {
-            header_parts.push(format!("{}: {}", decided_out_names[index], ty));
-        }
+            BlockPort::Clock(name) => format!("{}: clock", name),
+        })
+        .collect();
+    let mut lines: Vec<String> = block
+        .inner_attrs
+        .iter()
+        .map(|attr| format!("  {}", attr))
+        .collect();
+    if let Some(reset) = &block.reset {
+        lines.push(format!(
+            "  #![reset(port=\"{}\", asynchronous={}, active_low={})]",
+            ir::escape_xls_ir_string(block.port_name(reset.port)),
+            reset.asynchronous,
+            reset.active_low,
+        ));
     }
-
-    // Emit body lines.
-    let mut lines: Vec<String> = Vec::new();
-    // Inner attributes preserved at the top of the block body.
-    for attr in &f.inner_attrs {
-        lines.push(format!("  {}", attr));
-    }
-    if let Some(pi) = port_ids {
-        if let Some(reset) = &pi.reset {
+    for reg in &block.registers {
+        if let Some(reset_value) = &reg.reset_value {
             lines.push(format!(
-                "  #![reset(port=\"{}\", asynchronous={}, active_low={})]",
-                ir::escape_xls_ir_string(&reset.port_name),
-                reset.asynchronous,
-                reset.active_low
+                "  reg {}({}, reset_value={})",
+                reg.name,
+                reg.ty,
+                reset_value.to_string_fmt_no_prefix(crate::IrFormatPreference::Default),
             ));
-        }
-        for reg in &pi.registers {
-            if let Some(reset_value) = &reg.reset_value {
-                let reset_str =
-                    reset_value.to_string_fmt_no_prefix(crate::IrFormatPreference::Default);
-                lines.push(format!(
-                    "  reg {}({}, reset_value={})",
-                    reg.name, reg.ty, reset_str
-                ));
-            } else {
-                lines.push(format!("  reg {}({})", reg.name, reg.ty));
-            }
-        }
-        for inst in &pi.instantiations {
-            match inst.kind {
-                ir::InstantiationKind::Block => lines.push(format!(
-                    "  instantiation {}(block={}, kind=block)",
-                    inst.name, inst.block
-                )),
-                ir::InstantiationKind::Extern => lines.push(format!(
-                    "  instantiation {}(foreign_function={}, kind=extern)",
-                    inst.name, inst.block
-                )),
-            }
-        }
-    }
-    // input_port lines for each param (in order).
-    for p in f.params.iter() {
-        let input_id = if let Some(pi) = port_ids {
-            *pi.input_port_ids
-                .get(&p.name)
-                .expect("input id missing in BlockMetadata for parameter")
         } else {
-            p.id.get_wrapped_id()
-        };
-        let sv_type = port_ids
-            .and_then(|metadata| metadata.port_sv_types.get(&p.name))
-            .map(|ty| format!(", sv_type=\"{}\"", ir::escape_xls_ir_string(ty)))
-            .unwrap_or_default();
-        lines.push(format!(
-            "  {}: {} = input_port(name={}{}, id={})",
-            p.name, p.ty, p.name, sv_type, input_id
-        ));
-    }
-    // Emit non-param nodes as IR lines.
-    for (i, n) in f.nodes.iter().enumerate() {
-        if i == 0 {
-            continue;
-        }
-        if matches!(n.payload, ir::NodePayload::GetParam(_)) {
-            continue;
-        }
-        if let Some(idx) = ret_tuple_index {
-            if i == idx {
-                continue;
-            }
-        }
-        if let Some(s) = n.to_string(f) {
-            lines.push(format!("  {}", s));
+            lines.push(format!("  reg {}({})", reg.name, reg.ty));
         }
     }
-
-    // Compute output ids: prefer provided ids; otherwise choose fresh ids after
-    // max. If a provided BlockMetadata is missing a name we decided, allocate
-    // a fresh id for that output instead of panicking.
-    let mut next_id: usize = f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
-    for (i, nr) in ret_nodes.iter().enumerate() {
-        let out_name = &decided_out_names[i];
-        let val_name = get_ref_name(*nr);
-        let out_id = if let Some(pi) = port_ids {
-            match pi.output_port_ids.get(out_name) {
-                Some(id) => *id,
-                None => {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                }
-            }
-        } else {
-            let id = next_id;
-            next_id += 1;
-            id
-        };
-        let sv_type = port_ids
-            .and_then(|metadata| metadata.port_sv_types.get(out_name))
-            .map(|ty| format!(", sv_type=\"{}\"", ir::escape_xls_ir_string(ty)))
-            .unwrap_or_default();
-        lines.push(format!(
-            "  {}: () = output_port({}, name={}{}, id={})",
-            out_name, val_name, out_name, sv_type, out_id
-        ));
+    for inst in &block.instantiations {
+        lines.push(match inst.kind {
+            ir::InstantiationKind::Block => format!(
+                "  instantiation {}(block={}, kind=block)",
+                inst.name, inst.block
+            ),
+            ir::InstantiationKind::Extern => format!(
+                "  instantiation {}(foreign_function={}, kind=extern)",
+                inst.name, inst.block
+            ),
+        });
     }
-
-    // Prepend any preserved outer attributes before the block header.
+    for node in &block.nodes {
+        if let Some(line) = node.to_string(&block.graph) {
+            lines.push(format!("  {}", line));
+        }
+    }
     let mut out = String::new();
-    for attr in &f.outer_attrs {
+    for attr in &block.outer_attrs {
         out.push_str(attr);
         out.push('\n');
     }
     if is_top {
         out.push_str("top ");
     }
-    if lines.is_empty() {
-        out.push_str(&format!(
-            "block {}({}) {{\n}}",
-            f.name,
-            header_parts.join(", ")
-        ));
-    } else {
-        out.push_str(&format!(
-            "block {}({}) {{\n{}\n}}",
-            f.name,
-            header_parts.join(", "),
-            lines.join("\n")
-        ));
+    out.push_str(&format!(
+        "block {}({}) {{\n",
+        block.name,
+        header_parts.join(", ")
+    ));
+    if !lines.is_empty() {
+        out.push_str(&lines.join("\n"));
+        out.push('\n');
     }
+    out.push('}');
     out
 }
 
@@ -5674,7 +5281,7 @@ fn id(x: bits[1] id=1) -> bits[1] {
     }
 
     #[test]
-    fn test_parse_block_to_fn_simple() {
+    fn test_parse_block_preserves_provenance() {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = r#"block my_main(x: bits[8], out: bits[8]) {
   #![provenance(name="my_main", kind="function")]
@@ -5684,13 +5291,8 @@ fn id(x: bits[1] id=1) -> bits[1] {
   out: () = output_port(add.7, name=out, id=8)
 }"#;
         let mut parser = Parser::new(input);
-        let f = parser.parse_block_to_fn().unwrap();
-        let want = r#"fn my_main(x: bits[8] id=5) -> bits[8] {
-  #![provenance(name="my_main", kind="function")]
-  one: bits[8] = literal(value=1, id=6)
-  ret add.7: bits[8] = add(x, one, id=7)
-}"#;
-        assert_eq!(f.to_string(), want);
+        let block = parser.parse_block().unwrap();
+        assert_eq!(block.to_string(), input);
     }
 
     // -- Test constants for round-trip
@@ -5787,45 +5389,48 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
 
     #[test]
     fn test_roundtrip_block_preserves_interleaved_ports_and_systemverilog_types() {
-        let mut parser = Parser::new(BLK_INTERLEAVED_PORTS_AND_TYPES);
-        let (function, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
-        assert_eq!(metadata.port_order, ["in", "out", "clk", "enable"]);
-        assert_eq!(metadata.clock_port_name.as_deref(), Some("clk"));
-        assert_eq!(
-            metadata.port_sv_types.get("in").map(String::as_str),
-            Some("types::input_t")
+        let block = Parser::new(BLK_INTERLEAVED_PORTS_AND_TYPES)
+            .parse_block()
+            .unwrap();
+        let names: Vec<&str> = block
+            .ports
+            .iter()
+            .map(|port| match port {
+                BlockPort::Input(nr) | BlockPort::Output(nr) => block.port_name(*nr),
+                BlockPort::Clock(name) => name,
+            })
+            .collect();
+        assert_eq!(names, ["in", "out", "clk", "enable"]);
+        assert_eq!(block.clock_port_name(), Some("clk"));
+        let input = block.get_node(block.get_input_port("in").unwrap());
+        let output = block.get_node(block.get_output_port("out").unwrap());
+        assert!(
+            matches!(&input.payload, ir::NodePayload::InputPort { sv_type: Some(ty), .. } if ty == "types::input_t")
         );
-        assert_eq!(
-            metadata.port_sv_types.get("out").map(String::as_str),
-            Some("types::output_t")
+        assert!(
+            matches!(&output.payload, ir::NodePayload::OutputPort { sv_type: Some(ty), .. } if ty == "types::output_t")
         );
-        assert_eq!(
-            emit_fn_as_block(&function, None, Some(&metadata), false),
-            BLK_INTERLEAVED_PORTS_AND_TYPES
-        );
+        assert_eq!(emit_block(&block, false), BLK_INTERLEAVED_PORTS_AND_TYPES);
     }
 
     #[test]
     fn test_roundtrip_external_instantiation_with_nested_tuple_ports() {
-        let mut parser = Parser::new(PKG_EXTERNAL_TUPLE_INSTANTIATION);
-        let package = parser.parse_and_validate_package().unwrap();
-        let PackageMember::Block { metadata, .. } = package.get_top_block().unwrap() else {
-            panic!("expected top block");
-        };
-        assert_eq!(metadata.instantiations.len(), 1);
-        assert_eq!(metadata.instantiations[0].name, "external_instance");
-        assert_eq!(metadata.instantiations[0].block, "external_pair");
-        assert_eq!(
-            metadata.instantiations[0].kind,
-            ir::InstantiationKind::Extern
-        );
+        let package = Parser::new(PKG_EXTERNAL_TUPLE_INSTANTIATION)
+            .parse_and_validate_package()
+            .unwrap();
+        let block = package.get_top_block().unwrap();
+        assert_eq!(block.instantiations.len(), 1);
+        assert_eq!(block.instantiations[0].name, "external_instance");
+        assert_eq!(block.instantiations[0].block, "external_pair");
+        assert_eq!(block.instantiations[0].kind, ir::InstantiationKind::Extern);
         assert_eq!(package.to_string(), PKG_EXTERNAL_TUPLE_INSTANTIATION);
     }
 
     #[test]
     fn test_block_rejects_multiple_clock_ports() {
-        let mut parser = Parser::new("block invalid(clk0: clock, clk1: clock) {} ");
-        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        let error = Parser::new("block invalid(clk0: clock, clk1: clock) {} ")
+            .parse_block()
+            .unwrap_err();
         assert_eq!(
             error.to_string(),
             "ParseError: block 'invalid' has multiple clock ports"
@@ -5834,8 +5439,9 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
 
     #[test]
     fn test_block_rejects_duplicate_port_names() {
-        let mut parser = Parser::new("block invalid(value: bits[8], value: bits[8]) {} ");
-        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        let error = Parser::new("block invalid(value: bits[8], value: bits[8]) {} ")
+            .parse_block()
+            .unwrap_err();
         assert_eq!(
             error.to_string(),
             "ParseError: duplicate port 'value' in block 'invalid'"
@@ -5847,8 +5453,7 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
         let input = r#"block invalid() {
   instantiation external_instance(kind=extern)
 }"#;
-        let mut parser = Parser::new(input);
-        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        let error = Parser::new(input).parse_block().unwrap_err();
         assert_eq!(
             error.to_string(),
             "ParseError: external instantiation missing foreign_function attribute"
@@ -5860,8 +5465,7 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
         let input = r#"block invalid() {
   instantiation instance(block=child, foreign_function=external, kind=block)
 }"#;
-        let mut parser = Parser::new(input);
-        let error = parser.parse_block_to_fn_with_ports().unwrap_err();
+        let error = Parser::new(input).parse_block().unwrap_err();
         assert_eq!(
             error.to_string(),
             "ParseError: block instantiation cannot have a foreign_function attribute"
@@ -5869,127 +5473,153 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
     }
 
     #[test]
-    fn test_roundtrip_block_parse_then_emit_single_output() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        // Parse -> Fn
-        let mut parser = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
-        let f = parser.parse_block_to_fn().unwrap();
-        // Emit -> block text (provide output name to match header)
-        // When parsing from block, preserve original port ids via
-        // BlockMetadata.
-        let mut parser2 = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
-        let (_f2, metadata) = parser2.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
-        assert_eq!(emitted, BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
+    fn test_roundtrip_blocks_preserve_real_nodes() {
+        for source in [
+            BLK_ADD_TWO_INPUTS_ONE_OUTPUT,
+            BLK_TWO_INPUTS_TWO_OUTPUTS_RT,
+            BLK_INPUT_WITH_NO_OUTPUTS,
+            BLK_WITH_NO_PORTS,
+            BLK_REG_LOAD_ENABLE,
+            BLK_REG_RESET,
+            BLK_REG_RESET_AND_LOAD_ENABLE,
+            BLK_WITH_INSTANTIATION,
+        ] {
+            let block = Parser::new(source).parse_block().unwrap();
+            assert_eq!(emit_block(&block, false), source);
+            assert!(
+                !block
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node.payload, ir::NodePayload::GetParam(_)))
+            );
+        }
     }
 
     #[test]
-    fn test_roundtrip_block_parse_then_emit_multi_output() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut parser = Parser::new(BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
-        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(
-            &f,
-            Some(&["a_out".to_string(), "b_out".to_string()]),
-            Some(&metadata),
-            false,
+    fn test_blocks_without_outputs_have_no_synthetic_return() {
+        for (source, node_count) in [(BLK_INPUT_WITH_NO_OUTPUTS, 2), (BLK_WITH_NO_PORTS, 1)] {
+            let block = Parser::new(source).parse_block().unwrap();
+            assert_eq!(block.nodes.len(), node_count);
+            assert_eq!(block.output_ports().count(), 0);
+            let package_text = format!("package test\n\n{}\n", source);
+            let package = Parser::new(&package_text)
+                .parse_and_validate_package()
+                .unwrap();
+            assert_eq!(package.to_string(), package_text);
+        }
+    }
+
+    #[test]
+    fn test_multiple_outputs_are_sinks_not_a_synthetic_tuple() {
+        let block = Parser::new(BLK_TWO_INPUTS_TWO_OUTPUTS_RT)
+            .parse_block()
+            .unwrap();
+        assert_eq!(block.nodes.len(), 5);
+        let outputs: Vec<_> = block.output_ports().collect();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(block.get_node(outputs[0]).text_id, 5);
+        assert_eq!(block.get_node(outputs[1]).text_id, 6);
+        assert!(
+            !block
+                .nodes
+                .iter()
+                .any(|node| matches!(node.payload, ir::NodePayload::Tuple(_)))
         );
-        assert_eq!(emitted, BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
     }
 
     #[test]
-    fn test_roundtrip_block_parse_then_emit_no_outputs() {
-        let mut parser = Parser::new(BLK_INPUT_WITH_NO_OUTPUTS);
-        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
-        assert!(f.ret_ty.is_nil());
-        assert!(f.ret_node_ref.is_some());
-        let emitted = emit_fn_as_block(&f, Some(&[]), Some(&metadata), false);
-        assert_eq!(emitted, BLK_INPUT_WITH_NO_OUTPUTS);
-
-        let package_text = format!("package test\n\n{}\n", BLK_INPUT_WITH_NO_OUTPUTS);
-        let mut parser = Parser::new(&package_text);
-        let package = parser.parse_and_validate_package().unwrap();
-        assert_eq!(package.to_string(), package_text);
+    fn test_tuple_typed_output_is_not_split() {
+        let source = r#"block aggregate(data: (bits[8], bits[3]), result: (bits[8], bits[3])) {
+  data: (bits[8], bits[3]) = input_port(name=data, id=1)
+  result: () = output_port(data, name=result, id=2)
+}"#;
+        let block = Parser::new(source).parse_block().unwrap();
+        assert_eq!(block.nodes.len(), 3);
+        assert_eq!(block.output_ports().count(), 1);
+        assert_eq!(emit_block(&block, false), source);
     }
 
     #[test]
-    fn test_roundtrip_block_parse_then_emit_no_ports() {
-        let package_text = format!("package test\n\n{}\n", BLK_WITH_NO_PORTS);
-        let mut parser = Parser::new(&package_text);
-        let package = parser.parse_and_validate_package().unwrap();
-        assert_eq!(package.to_string(), package_text);
-    }
-
-    #[test]
-    fn test_roundtrip_block_parse_then_emit_register_load_enable() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut parser = Parser::new(BLK_REG_LOAD_ENABLE);
-        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
-        assert_eq!(emitted, BLK_REG_LOAD_ENABLE);
-    }
-
-    #[test]
-    fn test_roundtrip_block_parse_then_emit_register_reset() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut parser = Parser::new(BLK_REG_RESET);
-        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
-        assert_eq!(emitted, BLK_REG_RESET);
-    }
-
-    #[test]
-    fn test_roundtrip_block_parse_then_emit_register_reset_and_load_enable() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut parser = Parser::new(BLK_REG_RESET_AND_LOAD_ENABLE);
-        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
-        assert_eq!(emitted, BLK_REG_RESET_AND_LOAD_ENABLE);
-    }
-
-    #[test]
-    fn test_roundtrip_block_parse_then_emit_instantiation() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut parser = Parser::new(BLK_WITH_INSTANTIATION);
-        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(
-            &f,
-            Some(&["out0".to_string(), "out1".to_string()]),
-            Some(&metadata),
-            false,
+    fn test_port_positions_and_alias_names_roundtrip() {
+        let source = r#"block aliases(data: bits[8], result: bits[8]) {
+  input_port.3: bits[8] = input_port(name=data, id=3, pos=[(0,1,2)])
+  output_port.8: () = output_port(input_port.3, name=result, id=8, pos=[(0,2,3)])
+}"#;
+        let block = Parser::new(source).parse_block().unwrap();
+        assert_eq!(
+            block
+                .get_node(block.get_input_port("data").unwrap())
+                .pos
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
         );
-        assert_eq!(emitted, BLK_WITH_INSTANTIATION);
-    }
-    #[test]
-    fn test_parse_block_to_fn_add_two_inputs_one_output() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let input = r#"block my_block(a: bits[32], b: bits[32], out: bits[32]) {
-  a: bits[32] = input_port(name=a, id=1)
-  b: bits[32] = input_port(name=b, id=2)
-  add.3: bits[32] = add(a, b, id=3)
-  out: () = output_port(add.3, name=out, id=4)
-}"#;
-        let mut parser = Parser::new(input);
-        let f = parser.parse_block_to_fn().unwrap();
-        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=2) -> bits[32] {\n  ret add.3: bits[32] = add(a, b, id=3)\n}";
-        assert_eq!(f.to_string(), want);
+        assert_eq!(
+            block
+                .get_node(block.get_output_port("result").unwrap())
+                .pos
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(emit_block(&block, false), source);
     }
 
     #[test]
-    fn test_parse_block_to_fn_multi_output_tuple_return() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let input = r#"block my_block(a: bits[32], a_out: bits[32], b: bits[32], b_out: bits[32]) {
-  a: bits[32] = input_port(name=a, id=1)
-  b: bits[32] = input_port(name=b, id=3)
-  a_out: () = output_port(a, name=a_out, id=2)
-  b_out: () = output_port(b, name=b_out, id=4)
+    fn test_block_port_positions_obey_parser_options() {
+        let source = r#"block passthrough(data: bits[8], result: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1, pos=[(0,1,2)])
+  result: () = output_port(data, name=result, id=2, pos=[(0,2,3)])
 }"#;
-        let mut parser = Parser::new(input);
-        let f = parser.parse_block_to_fn().unwrap();
-        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=3) -> (bits[32], bits[32]) {
-  ret tuple.4: (bits[32], bits[32]) = tuple(a, b, id=4)
-}";
-        assert_eq!(f.to_string(), want);
+        let block = Parser::new_with_options(
+            source,
+            ParseOptions {
+                retain_pos_data: false,
+            },
+        )
+        .parse_block()
+        .unwrap();
+        assert!(block.nodes.iter().all(|node| node.pos.is_none()));
+        assert_eq!(
+            emit_block(&block, false),
+            r#"block passthrough(data: bits[8], result: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  result: () = output_port(data, name=result, id=2)
+}"#
+        );
+    }
+
+    #[test]
+    fn test_block_rejects_port_type_mismatch_or_missing_definition() {
+        for source in [
+            "block bad(x: bits[8]) { x: bits[7] = input_port(name=x, id=1) }",
+            "block bad(x: bits[8], y: bits[7]) { x: bits[8] = input_port(name=x, id=1) y: () = output_port(x, name=y, id=2) }",
+            "block bad(x: bits[8], y: bits[8]) { x: bits[8] = input_port(name=x, id=1) y: bits[8] = output_port(x, name=y, id=2) }",
+            "block bad(x: bits[8]) {}",
+            "block bad(x: bits[8], y: bits[8]) { x: bits[8] = input_port(name=x, id=1) y: () = output_port(x, name=y, id=1) }",
+            "block bad(x: bits[8]) { x: bits[8] = input_port(name=x, id=1) alias: bits[8] = input_port(name=x, id=2) }",
+        ] {
+            assert!(
+                Parser::new(source).parse_block().is_err(),
+                "accepted {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_block_rejects_node_ids_and_aliases_that_would_shadow_ports() {
+        for source in [
+            "block bad(x: bits[8], y: bits[8]) { x: bits[8] = input_port(name=x, id=1) y: () = output_port(x, name=y, id=2) literal.2: bits[8] = literal(value=0, id=2) }",
+            "block bad(x: bits[8], y: bits[8]) { x: bits[8] = input_port(name=x, id=1) x: () = output_port(x, name=y, id=2) }",
+            "block bad(x: bits[8]) { x: bits[8] = input_port(name=x, id=1) x: bits[8] = literal(value=0, id=2) }",
+        ] {
+            assert!(
+                Parser::new(source).parse_block().is_err(),
+                "accepted {source}"
+            );
+        }
     }
 
     #[test]

@@ -16,9 +16,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{
-    BlockMetadata, BlockResetMetadata, Fn as PirFn, Instantiation, NaryOp, Node, NodePayload,
-    NodeRef, Package, PackageMember, Param, ParamId, Register, Type, Unop,
+    Block, BlockPort, BlockReset, Instantiation, NaryOp, Node, NodePayload, NodeRef, Package,
+    PackageMember, Register, Type, Unop,
 };
+use xlsynth_pir::ir_rebase_ids::{package_max_emitted_node_id, rebase_block_ids_in_place};
 
 pub fn convert_gv2block_paths(netlist_path: &Path, liberty_proto_path: &Path) -> Result<Package> {
     let parsed = parse_netlist_from_path(netlist_path)?;
@@ -277,7 +278,7 @@ impl BitDrivers {
         Ok(())
     }
 
-    fn materialize_bit(&self, bit_idx: BitIndex, b: &mut PirFnBuilder) -> Option<NodeRef> {
+    fn materialize_bit(&self, bit_idx: BitIndex, b: &mut PirBlockConstruction) -> Option<NodeRef> {
         let driver = self.drivers.get(bit_idx).copied().flatten()?;
         Some(match driver {
             BitDriver::Node(node) => node,
@@ -577,7 +578,7 @@ fn apply_clock_gate_passthroughs(
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
     bit_drivers: &mut BitDrivers,
-    b: &mut PirFnBuilder,
+    b: &mut PirBlockConstruction,
 ) -> Result<HashSet<BitIndex>> {
     let mut pending_passthroughs = passthroughs.to_vec();
     let mut unresolved_passthrough_output_bits = HashSet::new();
@@ -643,7 +644,7 @@ fn build_package_from_normalized_netlist(
         }
     }
 
-    let mut cell_blocks: Vec<(String, PirFn, BlockMetadata)> = Vec::new();
+    let mut cell_blocks: Vec<Block> = Vec::new();
     for cell_name in needed_cells.iter() {
         let cell = lib_indexed
             .get_cell(cell_name)
@@ -651,79 +652,56 @@ fn build_package_from_normalized_netlist(
         if get_clock_gate_passthrough_spec(cell, lib_indexed.library())?.is_some() {
             continue;
         }
-        let (f, meta) = build_cell_block(cell, lib_indexed)?;
-        cell_blocks.push((cell_name.to_string(), f, meta));
+        cell_blocks.push(build_cell_block(cell, lib_indexed)?);
     }
-    cell_blocks.sort_by(|a, b| a.0.cmp(&b.0));
+    cell_blocks.sort_by(|a, b| a.name.cmp(&b.name));
 
-    for (_name, f, meta) in &cell_blocks {
-        pkg.members.push(PackageMember::Block {
-            func: f.clone(),
-            metadata: meta.clone(),
-        });
+    for mut block in cell_blocks {
+        let base = package_max_emitted_node_id(&pkg);
+        rebase_block_ids_in_place(&mut block, base)?;
+        pkg.members.push(PackageMember::Block(block));
     }
 
-    let (top_fn, top_meta) = build_top_block(module, parsed, lib_indexed, normalized, &wiring)?;
-    pkg.members.push(PackageMember::Block {
-        func: top_fn.clone(),
-        metadata: top_meta,
-    });
-    pkg.set_top_block(&top_fn.name).map_err(|e| anyhow!(e))?;
+    let mut top = build_top_block(module, parsed, lib_indexed, normalized, &wiring)?;
+    rebase_block_ids_in_place(&mut top, package_max_emitted_node_id(&pkg))?;
+    let top_name = top.name.clone();
+    pkg.members.push(PackageMember::Block(top));
+    pkg.set_top_block(&top_name).map_err(|e| anyhow!(e))?;
 
     Ok(pkg)
 }
 
-struct PirFnBuilder {
-    name: String,
-    params: Vec<Param>,
-    nodes: Vec<Node>,
+struct PirBlockConstruction {
+    block: Block,
     next_text_id: usize,
 }
 
-impl PirFnBuilder {
+impl PirBlockConstruction {
     fn new(name: &str) -> Self {
-        let mut nodes = Vec::new();
-        nodes.push(Node {
-            text_id: 0,
-            name: None,
-            ty: Type::Tuple(vec![]),
-            payload: NodePayload::Nil,
-            pos: None,
-        });
         Self {
-            name: name.to_string(),
-            params: Vec::new(),
-            nodes,
+            block: Block::new(name),
             next_text_id: 1,
         }
     }
 
-    fn add_param(&mut self, name: &str, ty: Type) -> NodeRef {
-        let param_id = ParamId::new(self.params.len() + 1);
-        self.params.push(Param {
-            name: name.to_string(),
-            ty: ty.clone(),
-            id: param_id,
-        });
-        let node_ref = NodeRef {
-            index: self.nodes.len(),
-        };
-        self.nodes.push(Node {
-            text_id: self.next_text_id,
-            name: Some(name.to_string()),
+    fn add_input(&mut self, name: &str, ty: Type) -> NodeRef {
+        let node_ref = self.add_node(
+            NodePayload::InputPort {
+                name: name.to_string(),
+                sv_type: None,
+            },
             ty,
-            payload: NodePayload::GetParam(param_id),
-            pos: None,
-        });
-        self.next_text_id += 1;
+            Some(name),
+        );
+        self.block.ports.push(BlockPort::Input(node_ref));
         node_ref
     }
 
     fn add_node(&mut self, payload: NodePayload, ty: Type, name: Option<&str>) -> NodeRef {
         let node_ref = NodeRef {
-            index: self.nodes.len(),
+            index: self.block.nodes.len(),
         };
-        self.nodes.push(Node {
+        self.block.nodes.push(Node {
             text_id: self.next_text_id,
             name: name.map(|s| s.to_string()),
             ty,
@@ -739,22 +717,27 @@ impl PirFnBuilder {
         self.add_node(NodePayload::Literal(lit), Type::Bits(width), None)
     }
 
-    fn finish(self, ret_ty: Type, ret_node_ref: Option<NodeRef>) -> PirFn {
-        PirFn {
-            name: self.name,
-            params: self.params,
-            ret_ty,
-            nodes: self.nodes,
-            ret_node_ref,
-            outer_attrs: Vec::new(),
-            inner_attrs: Vec::new(),
-        }
+    fn add_output(&mut self, name: &str, value: NodeRef) {
+        let node = self.add_node(
+            NodePayload::OutputPort {
+                name: name.to_string(),
+                arg: value,
+                sv_type: None,
+            },
+            Type::nil(),
+            Some(name),
+        );
+        self.block.ports.push(BlockPort::Output(node));
+    }
+
+    fn finish(self) -> Block {
+        self.block
     }
 }
 
-fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn, BlockMetadata)> {
+fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<Block> {
     let library = lib_indexed.library();
-    let mut b = PirFnBuilder::new(&cell.name);
+    let mut b = PirBlockConstruction::new(&cell.name);
     let mut input_map: HashMap<String, NodeRef> = HashMap::new();
     let mut output_names: Vec<String> = Vec::new();
 
@@ -779,12 +762,12 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         if clock_pin.as_ref().is_some_and(|clock| clock == pin_name) {
             continue;
         }
-        let nr = b.add_param(pin_name, Type::Bits(1));
+        let nr = b.add_input(pin_name, Type::Bits(1));
         input_map.insert(pin_name.to_string(), nr);
     }
 
     let mut registers: Vec<Register> = Vec::new();
-    let mut reset_meta: Option<BlockResetMetadata> = None;
+    let mut reset_meta: Option<BlockReset> = None;
     let mut state_var_name: Option<String> = None;
     let mut complementary_state_var_name: Option<String> = None;
     let mut state_ref: Option<NodeRef> = None;
@@ -832,7 +815,7 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
             };
             let (port_name, active_low) = parse_simple_reset_expr(expr)?;
             if !input_map.contains_key(&port_name) {
-                let nr = b.add_param(&port_name, Type::Bits(1));
+                let nr = b.add_input(&port_name, Type::Bits(1));
                 input_map.insert(port_name.clone(), nr);
             }
             let reset_ref = input_map
@@ -840,8 +823,8 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
                 .copied()
                 .ok_or_else(|| anyhow!(format!("reset port '{}' not found", port_name)))?;
             reset_node_ref = Some(reset_ref);
-            reset_meta = Some(BlockResetMetadata {
-                port_name: port_name.clone(),
+            reset_meta = Some(BlockReset {
+                port: reset_ref,
                 asynchronous: true,
                 active_low,
             });
@@ -923,33 +906,15 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         output_nodes.push(node);
     }
 
-    let (ret_ty, ret_node_ref) = build_return_node(&mut b, &output_nodes);
-
-    let mut input_port_ids: HashMap<String, usize> = HashMap::new();
-    for p in &b.params {
-        input_port_ids.insert(p.name.clone(), p.id.get_wrapped_id());
+    if let Some(clock) = clock_pin {
+        b.block.ports.insert(0, BlockPort::Clock(clock));
     }
-
-    let mut output_port_ids: HashMap<String, usize> = HashMap::new();
-    let mut next_out_id = b.nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
-    for name in &output_names {
-        output_port_ids.insert(name.clone(), next_out_id);
-        next_out_id += 1;
+    for (name, value) in output_names.iter().zip(output_nodes) {
+        b.add_output(name, value);
     }
-
-    let meta = BlockMetadata {
-        clock_port_name: clock_pin,
-        port_order: Vec::new(),
-        port_sv_types: Default::default(),
-        input_port_ids,
-        output_port_ids,
-        output_names,
-        reset: reset_meta,
-        registers,
-        instantiations: Vec::new(),
-    };
-
-    Ok((b.finish(ret_ty, ret_node_ref), meta))
+    b.block.reset = reset_meta;
+    b.block.registers = registers;
+    Ok(b.finish())
 }
 
 fn add_input_bit_driver(
@@ -967,7 +932,7 @@ fn add_input_bit_driver(
     )
 }
 
-fn add_literal_bit(b: &mut PirFnBuilder, value: bool) -> NodeRef {
+fn add_literal_bit(b: &mut PirBlockConstruction, value: bool) -> NodeRef {
     b.add_literal_bits(1, if value { 1 } else { 0 })
 }
 
@@ -977,7 +942,7 @@ fn resolved_wiring_source_to_node(
     unresolved_passthrough_output_bits: &HashSet<BitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
-    b: &mut PirFnBuilder,
+    b: &mut PirBlockConstruction,
     allow_undriven_zero: bool,
 ) -> Result<NodeRef> {
     match source {
@@ -1011,7 +976,7 @@ fn materialize_sources_to_node(
     unresolved_passthrough_output_bits: &HashSet<BitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
-    b: &mut PirFnBuilder,
+    b: &mut PirBlockConstruction,
     allow_undriven_zero: bool,
 ) -> Result<NodeRef> {
     if sources.is_empty() {
@@ -1049,7 +1014,7 @@ fn materialize_bits_to_node(
     unresolved_passthrough_output_bits: &HashSet<BitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
-    b: &mut PirFnBuilder,
+    b: &mut PirBlockConstruction,
     allow_undriven_zero: bool,
 ) -> Result<NodeRef> {
     let sources: Vec<BitSource> = bits.iter().copied().map(BitSource::Bit).collect();
@@ -1106,10 +1071,10 @@ fn build_top_block(
     lib_indexed: &IndexedLibrary,
     normalized: &NormalizedNetlistModule<'_>,
     wiring: &WiringAssignResolver,
-) -> Result<(PirFn, BlockMetadata)> {
+) -> Result<Block> {
     let module_name_raw = parsed.interner.resolve(module.name).unwrap_or("top");
     let module_name = sanitize_to_xls_identifier(module_name_raw);
-    let mut b = PirFnBuilder::new(&module_name);
+    let mut b = PirBlockConstruction::new(&module_name);
 
     let mut bit_drivers = BitDrivers::new(normalized.bit_count());
     let mut top_port_name_legalizer = IdentifierLegalizer::default();
@@ -1207,7 +1172,7 @@ fn build_top_block(
         }
         let name = top_port_name_legalizer.legalize(&name_raw);
         let width = port.bits.len();
-        let port_node = b.add_param(&name, Type::Bits(width));
+        let port_node = b.add_input(&name, Type::Bits(width));
         for (bit_offset, bit_idx) in port.bits.iter().copied().enumerate() {
             add_input_bit_driver(
                 bit_idx,
@@ -1419,55 +1384,23 @@ fn build_top_block(
         output_nodes.push(node);
     }
 
-    let (ret_ty, ret_node_ref) = build_return_node(&mut b, &output_nodes);
-
-    let mut input_port_ids = HashMap::new();
-    for param in &b.params {
-        input_port_ids.insert(param.name.clone(), param.id.get_wrapped_id());
-    }
-
     let clock_port_name = selected_clock_port_name_raw
         .as_ref()
         .map(|name| top_port_name_legalizer.legalize(name));
 
-    let meta = BlockMetadata {
-        clock_port_name,
-        port_order: Vec::new(),
-        port_sv_types: Default::default(),
-        input_port_ids,
-        output_port_ids: HashMap::new(),
-        output_names,
-        reset: None,
-        registers: Vec::new(),
-        instantiations,
-    };
-
-    Ok((b.finish(ret_ty, ret_node_ref), meta))
-}
-
-fn build_return_node(b: &mut PirFnBuilder, outputs: &[NodeRef]) -> (Type, Option<NodeRef>) {
-    if outputs.is_empty() {
-        let tuple_type = Type::Tuple(vec![]);
-        let tuple_node = b.add_node(NodePayload::Tuple(vec![]), tuple_type.clone(), None);
-        return (tuple_type, Some(tuple_node));
+    if let Some(clock) = clock_port_name {
+        b.block.ports.insert(0, BlockPort::Clock(clock));
     }
-    if outputs.len() == 1 {
-        let ty = b.nodes[outputs[0].index].ty.clone();
-        return (ty, Some(outputs[0]));
+    for (name, value) in output_names.iter().zip(output_nodes) {
+        b.add_output(name, value);
     }
-    let tys = outputs
-        .iter()
-        .map(|nr| b.nodes[nr.index].ty.clone())
-        .map(|t| Box::new(t))
-        .collect::<Vec<_>>();
-    let tuple_ty = Type::Tuple(tys);
-    let tuple_node = b.add_node(NodePayload::Tuple(outputs.to_vec()), tuple_ty.clone(), None);
-    (tuple_ty, Some(tuple_node))
+    b.block.instantiations = instantiations;
+    Ok(b.finish())
 }
 
 fn emit_term_as_pir(
     term: &Term,
-    b: &mut PirFnBuilder,
+    b: &mut PirBlockConstruction,
     input_map: &HashMap<String, NodeRef>,
     ctx: &FormulaEmitContext<'_>,
 ) -> Result<NodeRef> {

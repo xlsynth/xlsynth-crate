@@ -58,7 +58,7 @@ fn load_gate_fn(path: &Path, subcommand: &str) -> Result<GateFn, String> {
     }
 }
 
-fn load_selected_ir_fn(path: &Path, top: Option<&str>) -> Result<ir::Fn, String> {
+fn load_selected_ir_member(path: &Path, top: Option<&str>) -> Result<ir::PackageMember, String> {
     let pkg = ir_parser::parse_and_validate_path_to_package(path).map_err(|e| {
         format!(
             "failed to parse/validate PIR package {}: {}",
@@ -69,10 +69,10 @@ fn load_selected_ir_fn(path: &Path, top: Option<&str>) -> Result<ir::Fn, String>
 
     if let Some(name) = top {
         if let Some(f) = pkg.get_fn(name) {
-            return Ok(f.clone());
+            return Ok(ir::PackageMember::Function(f.clone()));
         }
-        if let Some(ir::PackageMember::Block { func, .. }) = pkg.get_block(name) {
-            return Ok(func.clone());
+        if let Some(block) = pkg.get_block(name) {
+            return Ok(ir::PackageMember::Block(block.clone()));
         }
         return Err(format!(
             "top IR member '{}' not found in {}",
@@ -82,10 +82,10 @@ fn load_selected_ir_fn(path: &Path, top: Option<&str>) -> Result<ir::Fn, String>
     }
 
     if let Some(f) = pkg.get_top_fn() {
-        return Ok(f.clone());
+        return Ok(ir::PackageMember::Function(f.clone()));
     }
-    if let Some(ir::PackageMember::Block { func, .. }) = pkg.get_top_block() {
-        return Ok(func.clone());
+    if let Some(block) = pkg.get_top_block() {
+        return Ok(ir::PackageMember::Block(block.clone()));
     }
     Err(format!(
         "no top function or block found in {}",
@@ -386,7 +386,7 @@ fn handle_g8r_attribution_table(
         );
         std::process::exit(2);
     }
-    let ir_fn = load_selected_ir_fn(ir_path, ir_top).unwrap_or_else(|e| {
+    let ir_fn = load_selected_ir_member(ir_path, ir_top).unwrap_or_else(|e| {
         eprintln!("{} error: {}", subcommand, e);
         std::process::exit(2)
     });
@@ -416,7 +416,9 @@ fn handle_g8r_attribution_table(
     for pir_node_id in report.missing_pir_node_ids() {
         eprintln!(
             "{} warning: PIR node id {} was referenced by selected AIG provenance but was not found in IR member '{}'; its weight was added to the unattributed row.",
-            subcommand, pir_node_id, ir_fn.name
+            subcommand,
+            pir_node_id,
+            ir_fn.graph().name
         );
     }
 

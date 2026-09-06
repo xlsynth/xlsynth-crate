@@ -2,7 +2,7 @@
 
 //! Width-specialized dynamic slicing with explicit range and sizing boundaries.
 
-use xlsynth_pir::ir::{Fn, Node, NodePayload, NodeRef, Type};
+use xlsynth_pir::ir::{Node, NodeGraph, NodePayload, NodeRef, Type};
 use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::Expr;
 
@@ -26,8 +26,8 @@ pub(crate) enum SliceHelper {
 impl BlockEmitter<'_, '_> {
     /// Emits one typed function per specialization before its callers.
     pub(crate) fn emit_slice_helpers(&mut self) -> Result<(), BlockCodegenError> {
-        for node in &self.func.nodes {
-            let Some(helper) = SliceHelper::for_node(self.func, node) else {
+        for node in &self.block.nodes {
+            let Some(helper) = SliceHelper::for_node(self.block, node) else {
                 continue;
             };
             if self.slice_helpers.contains_key(&helper) {
@@ -54,10 +54,10 @@ impl BlockEmitter<'_, '_> {
     /// Calls a typed helper, folding empty operands without zero-width SV
     /// types.
     pub(crate) fn emit_slice_call(&mut self, node_ref: NodeRef) -> Result<Expr, BlockCodegenError> {
-        let node = self.func.get_node(node_ref);
+        let node = self.block.get_node(node_ref);
         let operands = match node.payload {
             NodePayload::DynamicBitSlice { arg, start, width } => {
-                if self.func.get_node_ty(arg).bit_count() == 0 {
+                if self.block.get_node_ty(arg).bit_count() == 0 {
                     return self.zero(width);
                 }
                 vec![arg, start]
@@ -67,14 +67,14 @@ impl BlockEmitter<'_, '_> {
                 start,
                 update_value,
             } => {
-                if self.func.get_node_ty(update_value).bit_count() == 0 {
+                if self.block.get_node_ty(update_value).bit_count() == 0 {
                     return Ok(self.required_value(arg)?.expr);
                 }
                 vec![arg, start, update_value]
             }
             _ => unreachable!("slice call requires a dynamic slice or update"),
         };
-        let helper = SliceHelper::for_node(self.func, node).expect("nonempty slice helper");
+        let helper = SliceHelper::for_node(self.block, node).expect("nonempty slice helper");
         let arguments = operands
             .into_iter()
             .map(|operand| self.numeric_value(operand).map(|value| value.expr))
@@ -186,7 +186,7 @@ impl BlockEmitter<'_, '_> {
 
 impl SliceHelper {
     /// Omits operations whose empty result or operand requires no helper.
-    fn for_node(function: &Fn, node: &Node) -> Option<Self> {
+    fn for_node(function: &NodeGraph, node: &Node) -> Option<Self> {
         if node.ty.bit_count() == 0 {
             return None;
         }

@@ -57,7 +57,12 @@ fn append_operand_values<'a>(
     };
 
     match payload {
-        Nil | GetParam(_) | Literal(_) | InstantiationOutput { .. } | RegisterRead { .. } => {}
+        Nil
+        | GetParam(_)
+        | InputPort { .. }
+        | Literal(_)
+        | InstantiationOutput { .. }
+        | RegisterRead { .. } => {}
         Tuple(elems) | Array(elems) | ArrayConcat(elems) | AfterAll(elems) | Nary(_, elems) => {
             for elem in elems {
                 push(elem);
@@ -83,6 +88,7 @@ fn append_operand_values<'a>(
         | Decode { arg, .. }
         | Encode { arg, .. }
         | InstantiationInput { arg, .. }
+        | OutputPort { arg, .. }
         | Cover { predicate: arg, .. } => push(arg),
         ArrayUpdate {
             array,
@@ -2721,50 +2727,52 @@ fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
         let bits8 = ir::Type::Bits(8);
         let param_id = ir::ParamId::new(1);
         let f = ir::Fn {
-            name: "f".to_string(),
+            graph: crate::ir::NodeGraph {
+                name: "f".to_string(),
+                nodes: vec![
+                    ir::Node {
+                        text_id: 0,
+                        name: Some("reserved_zero_node".to_string()),
+                        ty: ir::Type::nil(),
+                        payload: ir::NodePayload::Nil,
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 1,
+                        name: Some("x".to_string()),
+                        ty: bits8.clone(),
+                        payload: ir::NodePayload::GetParam(param_id),
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 3,
+                        name: Some("sum".to_string()),
+                        ty: bits8.clone(),
+                        payload: ir::NodePayload::Binop(
+                            ir::Binop::Add,
+                            ir::NodeRef { index: 1 },
+                            ir::NodeRef { index: 3 },
+                        ),
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 2,
+                        name: Some("seven".to_string()),
+                        ty: bits8.clone(),
+                        payload: ir::NodePayload::Literal(IrValue::make_ubits(8, 7).unwrap()),
+                        pos: None,
+                    },
+                ],
+                outer_attrs: Vec::new(),
+                inner_attrs: Vec::new(),
+            },
             params: vec![ir::Param {
                 name: "x".to_string(),
                 ty: bits8.clone(),
                 id: param_id,
             }],
             ret_ty: bits8.clone(),
-            nodes: vec![
-                ir::Node {
-                    text_id: 0,
-                    name: Some("reserved_zero_node".to_string()),
-                    ty: ir::Type::nil(),
-                    payload: ir::NodePayload::Nil,
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 1,
-                    name: Some("x".to_string()),
-                    ty: bits8.clone(),
-                    payload: ir::NodePayload::GetParam(param_id),
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 3,
-                    name: Some("sum".to_string()),
-                    ty: bits8.clone(),
-                    payload: ir::NodePayload::Binop(
-                        ir::Binop::Add,
-                        ir::NodeRef { index: 1 },
-                        ir::NodeRef { index: 3 },
-                    ),
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 2,
-                    name: Some("seven".to_string()),
-                    ty: bits8,
-                    payload: ir::NodePayload::Literal(IrValue::make_ubits(8, 7).unwrap()),
-                    pos: None,
-                },
-            ],
             ret_node_ref: Some(ir::NodeRef { index: 2 }),
-            outer_attrs: Vec::new(),
-            inner_attrs: Vec::new(),
         };
 
         assert!(!is_node_index_topological(&f));

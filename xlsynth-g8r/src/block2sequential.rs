@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::dce::remove_dead_nodes;
-use xlsynth_pir::ir::{self, BlockMetadata, MemberType, NodePayload, NodeRef, PackageMember, Type};
+use xlsynth_pir::ir::{
+    self, Block, MemberType, NodeGraph, NodePayload, NodeRef, PackageMember, Type,
+};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::{get_topological, operands, remap_payload_with};
 use xlsynth_pir::ir_verify;
@@ -73,23 +75,19 @@ pub fn block_package_to_sequential_gate_fn(
     ir_verify::verify_package(&inlined_package)
         .map_err(|e| format!("block2sequential: inlined package validation failed: {e}"))?;
 
-    let PackageMember::Block { func, metadata } = inlined_package
+    let block = inlined_package
         .get_top_block()
-        .ok_or_else(|| "block2sequential: package has no selected block".to_string())?
-    else {
-        return Err("block2sequential: selected member is not a block".to_string());
-    };
-    lower_block_to_sequential_gate_fn(func, metadata, gatify_options)
+        .ok_or_else(|| "block2sequential: package has no selected block".to_string())?;
+    lower_block_to_sequential_gate_fn(block, gatify_options)
 }
 
 /// Lowers an already flattened/inlined block into a sequential gate function,
 /// rejecting asynchronous reset behavior.
 pub fn lower_block_to_sequential_gate_fn(
-    block: &ir::Fn,
-    metadata: &BlockMetadata,
+    block: &Block,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
-    if !metadata.instantiations.is_empty() {
+    if !block.instantiations.is_empty() {
         return Err(
             "block2sequential: block contains instantiations; lower a package so they can be inlined"
                 .to_string(),
@@ -99,17 +97,14 @@ pub fn lower_block_to_sequential_gate_fn(
     let validation_package = ir::Package {
         name: "block2sequential_validate".to_string(),
         file_table: ir::FileTable::new(),
-        members: vec![PackageMember::Block {
-            func: block.clone(),
-            metadata: metadata.clone(),
-        }],
+        members: vec![PackageMember::Block(block.clone())],
         top: Some((block.name.clone(), MemberType::Block)),
     };
     ir_verify::verify_package(&validation_package)
         .map_err(|e| format!("block2sequential: block validation failed: {e}"))?;
 
     let (transition_fn, endpoints, pending_registers, external_input_count, clock) =
-        build_transition_function(block, metadata)?;
+        build_transition_function(block)?;
     let mut transition = gatify(&transition_fn, gatify_options)
         .map_err(|e| format!("block2sequential: gatify transition function failed: {e}"))?
         .gate_fn;
@@ -131,7 +126,7 @@ pub fn lower_block_to_sequential_gate_fn(
         (0..external_input_count)
             .map(TransitionInputId::new)
             .collect(),
-        (0..metadata.output_names.len())
+        (0..block.output_ports().count())
             .map(TransitionOutputId::new)
             .collect(),
         clock,
@@ -152,7 +147,7 @@ fn selected_block_name(package: &ir::Package) -> Result<String, String> {
                 .members
                 .iter()
                 .filter_map(|member| match member {
-                    PackageMember::Block { func, .. } => Some(func.name.clone()),
+                    PackageMember::Block(block) => Some(block.name.clone()),
                     PackageMember::Function(_) => None,
                 })
                 .collect();
@@ -174,14 +169,14 @@ fn validate_hierarchical_sequential_metadata(
     package: &ir::Package,
     top_name: &str,
 ) -> Result<(), String> {
-    let (_, top_metadata) = get_block(package, top_name)?;
+    let top_block = get_block(package, top_name)?;
     let mut has_registers_memo = BTreeMap::new();
     let mut has_reset_writes_memo = BTreeMap::new();
     validate_instantiated_sequential_metadata(
         package,
         top_name,
         top_name,
-        top_metadata,
+        top_block,
         &mut has_registers_memo,
         &mut has_reset_writes_memo,
     )
@@ -191,18 +186,18 @@ fn validate_instantiated_sequential_metadata(
     package: &ir::Package,
     block_name: &str,
     path: &str,
-    top_metadata: &BlockMetadata,
+    top_block: &Block,
     has_registers_memo: &mut BTreeMap<String, bool>,
     has_reset_writes_memo: &mut BTreeMap<String, bool>,
 ) -> Result<(), String> {
-    let (_, metadata) = get_block(package, block_name)?;
-    for instantiation in &metadata.instantiations {
-        let (_, child_metadata) = get_block(package, &instantiation.block)?;
+    let block = get_block(package, block_name)?;
+    for instantiation in &block.instantiations {
+        let child_block = get_block(package, &instantiation.block)?;
         let child_path = format!("{path}.{}", instantiation.name);
 
         if subtree_has_registers(package, &instantiation.block, has_registers_memo)? {
-            if let Some(child_clock) = child_metadata.clock_port_name.as_deref() {
-                match top_metadata.clock_port_name.as_deref() {
+            if let Some(child_clock) = child_block.clock_port_name() {
+                match top_block.clock_port_name() {
                     Some(top_clock) if child_clock == top_clock => {}
                     Some(top_clock) => {
                         return Err(format!(
@@ -221,8 +216,8 @@ fn validate_instantiated_sequential_metadata(
         }
 
         if subtree_has_reset_writes(package, &instantiation.block, has_reset_writes_memo)? {
-            if let Some(child_reset) = child_metadata.reset.as_ref() {
-                match top_metadata.reset.as_ref() {
+            if let Some(child_reset) = child_block.reset.as_ref() {
+                match top_block.reset.as_ref() {
                     Some(top_reset)
                         if child_reset.asynchronous == top_reset.asynchronous
                             && child_reset.active_low == top_reset.active_low => {}
@@ -251,7 +246,7 @@ fn validate_instantiated_sequential_metadata(
             package,
             &instantiation.block,
             &child_path,
-            top_metadata,
+            top_block,
             has_registers_memo,
             has_reset_writes_memo,
         )?;
@@ -267,9 +262,9 @@ fn subtree_has_registers(
     if let Some(has_registers) = memo.get(block_name) {
         return Ok(*has_registers);
     }
-    let (_, metadata) = get_block(package, block_name)?;
-    let mut has_registers = !metadata.registers.is_empty();
-    for instantiation in &metadata.instantiations {
+    let block = get_block(package, block_name)?;
+    let mut has_registers = !block.registers.is_empty();
+    for instantiation in &block.instantiations {
         has_registers |= subtree_has_registers(package, &instantiation.block, memo)?;
     }
     memo.insert(block_name.to_string(), has_registers);
@@ -284,26 +279,23 @@ fn subtree_has_reset_writes(
     if let Some(has_reset_writes) = memo.get(block_name) {
         return Ok(*has_reset_writes);
     }
-    let (block, metadata) = get_block(package, block_name)?;
+    let block = get_block(package, block_name)?;
     let mut has_reset_writes = block.nodes.iter().any(|node| {
         matches!(
             &node.payload,
             NodePayload::RegisterWrite { reset: Some(_), .. }
         )
     });
-    for instantiation in &metadata.instantiations {
+    for instantiation in &block.instantiations {
         has_reset_writes |= subtree_has_reset_writes(package, &instantiation.block, memo)?;
     }
     memo.insert(block_name.to_string(), has_reset_writes);
     Ok(has_reset_writes)
 }
 
-fn get_block<'a>(
-    package: &'a ir::Package,
-    block_name: &str,
-) -> Result<(&'a ir::Fn, &'a BlockMetadata), String> {
+fn get_block<'a>(package: &'a ir::Package, block_name: &str) -> Result<&'a Block, String> {
     match package.get_block(block_name) {
-        Some(PackageMember::Block { func, metadata }) => Ok((func, metadata)),
+        Some(block) => Ok(block),
         _ => Err(format!(
             "block2sequential: referenced block '{}' is unavailable",
             block_name
@@ -312,8 +304,7 @@ fn get_block<'a>(
 }
 
 fn build_transition_function(
-    block: &ir::Fn,
-    metadata: &BlockMetadata,
+    block: &Block,
 ) -> Result<
     (
         ir::Fn,
@@ -324,17 +315,13 @@ fn build_transition_function(
     ),
     String,
 > {
-    block
-        .check_pir_layout_invariants()
-        .map_err(|e| format!("block2sequential: invalid block layout: {e}"))?;
-
-    let original_outputs = collect_block_outputs(block, metadata)?;
+    let original_outputs = collect_block_outputs(block);
     let register_writes = collect_register_writes(block)?;
-    let external_input_count = block.params.len();
+    let input_ports = block.input_ports().collect::<Vec<_>>();
+    let external_input_count = input_ports.len();
     let mut used_param_names: BTreeSet<String> = block
-        .params
-        .iter()
-        .map(|param| param.name.clone())
+        .input_ports()
+        .map(|port| block.port_name(port).to_string())
         .collect();
     let mut used_output_names: BTreeSet<String> = BTreeSet::new();
     let mut max_text_id = block
@@ -345,31 +332,35 @@ fn build_transition_function(
         .unwrap_or(0);
 
     let mut transition = ir::Fn {
-        name: canonical_transition_name(&block.name),
-        params: block.params.clone(),
+        graph: NodeGraph::new(&canonical_transition_name(&block.name)),
+        params: Vec::new(),
         ret_ty: Type::nil(),
-        nodes: vec![block.nodes[0].clone()],
         ret_node_ref: None,
-        outer_attrs: vec![],
-        inner_attrs: vec![],
     };
     let mut old_to_new: Vec<Option<NodeRef>> = vec![None; block.nodes.len()];
     old_to_new[0] = Some(NodeRef { index: 0 });
-    for (index, param) in block.params.iter().enumerate() {
-        let old_ref = NodeRef { index: index + 1 };
+    for old_ref in input_ports {
+        let old_node = block.get_node(old_ref);
+        let param_id = ir::ParamId::new(old_node.text_id);
+        let name = block.port_name(old_ref).to_string();
+        transition.params.push(ir::Param {
+            name: name.clone(),
+            ty: old_node.ty.clone(),
+            id: param_id,
+        });
         let new_ref = NodeRef {
             index: transition.nodes.len(),
         };
-        transition.nodes.push(block.nodes[old_ref.index].clone());
+        transition.nodes.push(ir::Node {
+            payload: NodePayload::GetParam(param_id),
+            name: Some(name),
+            ..old_node.clone()
+        });
         old_to_new[old_ref.index] = Some(new_ref);
-        debug_assert_eq!(
-            transition.nodes[new_ref.index].payload,
-            NodePayload::GetParam(param.id)
-        );
     }
 
     let mut register_q_refs: BTreeMap<String, (NodeRef, TransitionInputId)> = BTreeMap::new();
-    for register in &metadata.registers {
+    for register in &block.registers {
         max_text_id += 1;
         let q_name = uniquify_transition_port_name(
             &canonical_register_q_name(&register.name),
@@ -398,7 +389,7 @@ fn build_transition_function(
     }
 
     for old_ref in get_topological(block) {
-        if old_ref.index == 0 || (1..=block.params.len()).contains(&old_ref.index) {
+        if old_to_new[old_ref.index].is_some() {
             continue;
         }
         let node = block.get_node(old_ref);
@@ -414,6 +405,19 @@ fn build_transition_function(
             }
             NodePayload::RegisterWrite { .. } => {
                 // Register writes become named transition outputs below.
+            }
+            NodePayload::OutputPort { .. } => {
+                // A port sink's own value is unit, even when another node uses
+                // that value; the external output is taken from its driver.
+                let new_ref = NodeRef {
+                    index: transition.nodes.len(),
+                };
+                transition.nodes.push(ir::Node {
+                    payload: NodePayload::Tuple(Vec::new()),
+                    name: None,
+                    ..node.clone()
+                });
+                old_to_new[old_ref.index] = Some(new_ref);
             }
             NodePayload::InstantiationInput { .. } | NodePayload::InstantiationOutput { .. } => {
                 return Err(
@@ -468,9 +472,9 @@ fn build_transition_function(
         });
     }
 
-    let reset_metadata = metadata.reset.as_ref();
-    let mut pending_registers = Vec::with_capacity(metadata.registers.len());
-    for register in &metadata.registers {
+    let reset_metadata = block.reset.as_ref();
+    let mut pending_registers = Vec::with_capacity(block.registers.len());
+    for register in &block.registers {
         let (q_ref, q_input) = *register_q_refs
             .get(&register.name)
             .expect("Q parameter was created for each register");
@@ -580,10 +584,9 @@ fn build_transition_function(
 
     set_transition_return(&mut transition, &endpoints, &mut max_text_id);
     let transition = remove_dead_nodes(&transition);
-    let clock = metadata
-        .clock_port_name
-        .as_ref()
-        .map(|name| ClockPort { name: name.clone() });
+    let clock = block.clock_port_name().map(|name| ClockPort {
+        name: name.to_string(),
+    });
     Ok((
         transition,
         endpoints,
@@ -593,48 +596,18 @@ fn build_transition_function(
     ))
 }
 
-fn collect_block_outputs(
-    block: &ir::Fn,
-    metadata: &BlockMetadata,
-) -> Result<Vec<TransitionEndpoint>, String> {
-    if metadata.output_names.is_empty() {
-        return Ok(Vec::new());
-    }
-    let ret_ref = block
-        .ret_node_ref
-        .ok_or_else(|| "block2sequential: block has no return node".to_string())?;
-    if metadata.output_names.len() == 1 {
-        return Ok(vec![TransitionEndpoint {
-            name: metadata.output_names[0].clone(),
-            node_ref: ret_ref,
-            ty: block.ret_ty.clone(),
-        }]);
-    }
-    let NodePayload::Tuple(elements) = &block.get_node(ret_ref).payload else {
-        return Err(
-            "block2sequential: multiple block outputs require a tuple return node".to_string(),
-        );
-    };
-    let Type::Tuple(types) = &block.ret_ty else {
-        return Err("block2sequential: multiple block outputs require a tuple type".to_string());
-    };
-    if elements.len() != metadata.output_names.len() || types.len() != elements.len() {
-        return Err("block2sequential: block output arity mismatch".to_string());
-    }
-    Ok(metadata
-        .output_names
-        .iter()
-        .zip(elements)
-        .zip(types)
-        .map(|((name, node_ref), ty)| TransitionEndpoint {
-            name: name.clone(),
-            node_ref: *node_ref,
-            ty: (**ty).clone(),
+fn collect_block_outputs(block: &Block) -> Vec<TransitionEndpoint> {
+    block
+        .output_ports()
+        .map(|port| TransitionEndpoint {
+            name: block.port_name(port).to_string(),
+            node_ref: block.output_value(port),
+            ty: block.port_type(port).clone(),
         })
-        .collect())
+        .collect()
 }
 
-fn collect_register_writes(block: &ir::Fn) -> Result<BTreeMap<String, RegisterWriteRefs>, String> {
+fn collect_register_writes(block: &Block) -> Result<BTreeMap<String, RegisterWriteRefs>, String> {
     let mut writes = BTreeMap::new();
     for node in &block.nodes {
         if let NodePayload::RegisterWrite {

@@ -4,7 +4,6 @@
 
 use libfuzzer_sys::fuzz_target;
 use std::sync::Once;
-use xlsynth_pir::ir;
 use xlsynth_pir::ir_verify_parity::{
     ErrorCategory, categorize_pir_error, categorize_xls_error_text,
 };
@@ -39,11 +38,12 @@ fuzz_target!(|ir_text: String| {
         }
     };
 
-    if pkg.members.iter().any(|member| match member {
-        ir::PackageMember::Function(f) => f.nodes.iter().any(|n| n.payload.is_extension_op()),
-        ir::PackageMember::Block { func, .. } => {
-            func.nodes.iter().any(|n| n.payload.is_extension_op())
-        }
+    if pkg.members.iter().any(|member| {
+        member
+            .graph()
+            .nodes
+            .iter()
+            .any(|n| n.payload.is_extension_op())
     }) {
         // Early-return rationale: this fuzz target checks verification parity
         // between PIR and upstream XLS IR. Upstream does not understand PIR

@@ -283,9 +283,6 @@ fn apply_pir_rewrites_to_ir_text(
             ir::PackageMember::Function(f) if f.name == top_name => {
                 *f = rewritten_top.clone();
             }
-            ir::PackageMember::Block { func, .. } if func.name == top_name => {
-                *func = rewritten_top.clone();
-            }
             _ => {}
         }
     }
@@ -322,9 +319,6 @@ fn canonicalize_masks_to_sel_for_xls_opt_in_ir_text(
         match member {
             ir::PackageMember::Function(f) if f.name == top_name => {
                 *f = rewritten_top.clone();
-            }
-            ir::PackageMember::Block { func, .. } if func.name == top_name => {
-                *func = rewritten_top.clone();
             }
             _ => {}
         }
@@ -3178,7 +3172,74 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
         // XLS rejects a useless default on a bits[1] selector with two cases,
         // so build this graph directly to isolate the `default: Some(_)` guard.
         let mut default_f = ir::Fn {
-            name: "selected_sub_qor".to_string(),
+            graph: crate::ir::NodeGraph {
+                name: "selected_sub_qor".to_string(),
+                nodes: vec![
+                    ir::Node {
+                        text_id: 0,
+                        name: None,
+                        ty: Type::nil(),
+                        payload: NodePayload::Nil,
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 1,
+                        name: Some("p".to_string()),
+                        ty: Type::Bits(1),
+                        payload: NodePayload::GetParam(ir::ParamId::new(1)),
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 2,
+                        name: Some("a".to_string()),
+                        ty: Type::Bits(8),
+                        payload: NodePayload::GetParam(ir::ParamId::new(2)),
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 3,
+                        name: Some("b".to_string()),
+                        ty: Type::Bits(8),
+                        payload: NodePayload::GetParam(ir::ParamId::new(3)),
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 4,
+                        name: Some("ba".to_string()),
+                        ty: Type::Bits(8),
+                        payload: NodePayload::Binop(
+                            Binop::Sub,
+                            NodeRef { index: 3 },
+                            NodeRef { index: 2 },
+                        ),
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 5,
+                        name: Some("ab".to_string()),
+                        ty: Type::Bits(8),
+                        payload: NodePayload::Binop(
+                            Binop::Sub,
+                            NodeRef { index: 2 },
+                            NodeRef { index: 3 },
+                        ),
+                        pos: None,
+                    },
+                    ir::Node {
+                        text_id: 6,
+                        name: Some("out".to_string()),
+                        ty: Type::Bits(8),
+                        payload: NodePayload::Sel {
+                            selector: NodeRef { index: 1 },
+                            cases: vec![NodeRef { index: 4 }, NodeRef { index: 5 }],
+                            default: Some(NodeRef { index: 2 }),
+                        },
+                        pos: None,
+                    },
+                ],
+                outer_attrs: Vec::new(),
+                inner_attrs: Vec::new(),
+            },
             params: vec![
                 ir::Param {
                     name: "p".to_string(),
@@ -3197,72 +3258,7 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
                 },
             ],
             ret_ty: Type::Bits(8),
-            nodes: vec![
-                ir::Node {
-                    text_id: 0,
-                    name: None,
-                    ty: Type::nil(),
-                    payload: NodePayload::Nil,
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 1,
-                    name: Some("p".to_string()),
-                    ty: Type::Bits(1),
-                    payload: NodePayload::GetParam(ir::ParamId::new(1)),
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 2,
-                    name: Some("a".to_string()),
-                    ty: Type::Bits(8),
-                    payload: NodePayload::GetParam(ir::ParamId::new(2)),
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 3,
-                    name: Some("b".to_string()),
-                    ty: Type::Bits(8),
-                    payload: NodePayload::GetParam(ir::ParamId::new(3)),
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 4,
-                    name: Some("ba".to_string()),
-                    ty: Type::Bits(8),
-                    payload: NodePayload::Binop(
-                        Binop::Sub,
-                        NodeRef { index: 3 },
-                        NodeRef { index: 2 },
-                    ),
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 5,
-                    name: Some("ab".to_string()),
-                    ty: Type::Bits(8),
-                    payload: NodePayload::Binop(
-                        Binop::Sub,
-                        NodeRef { index: 2 },
-                        NodeRef { index: 3 },
-                    ),
-                    pos: None,
-                },
-                ir::Node {
-                    text_id: 6,
-                    name: Some("out".to_string()),
-                    ty: Type::Bits(8),
-                    payload: NodePayload::Sel {
-                        selector: NodeRef { index: 1 },
-                        cases: vec![NodeRef { index: 4 }, NodeRef { index: 5 }],
-                        default: Some(NodeRef { index: 2 }),
-                    },
-                    pos: None,
-                },
-            ],
             ret_node_ref: Some(NodeRef { index: 6 }),
-            outer_attrs: Vec::new(),
-            inner_attrs: Vec::new(),
         };
         assert_eq!(rewrite_selected_opposite_subtracts(&mut default_f), 0);
         assert!(matches!(

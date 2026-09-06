@@ -116,10 +116,6 @@ fn apply_formal_array_alias_analysis(
                     *function = outcome.rewrite.rewritten_fn.clone();
                     return Ok(());
                 }
-                ir::PackageMember::Block { func, .. } if func.name == top_fn_name => {
-                    *func = outcome.rewrite.rewritten_fn.clone();
-                    return Ok(());
-                }
                 _ => {
                     // Only the selected top function participates in
                     // gatification.

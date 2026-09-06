@@ -1,0 +1,12 @@
+package aliases
+
+top block sample(a: bits[8], out: bits[8], port_alias_2: clock) {
+  port_alias: bits[8] = input_port(name=a, id=10)
+  port_alias_3: bits[8] = not(port_alias, id=2)
+  port_alias_1: bits[8] = identity(port_alias_3, id=3)
+  output_alias_2: bits[8] = not(port_alias_1, id=4)
+  output_alias_1: bits[8] = identity(output_alias_2, id=5)
+  out_1: bits[8] = identity(output_alias_1, id=6)
+  add.7: bits[8] = add(out_1, port_alias, id=7)
+  output_alias: () = output_port(add.7, name=out, id=20)
+}

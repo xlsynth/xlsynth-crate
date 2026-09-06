@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use rand::RngCore;
 use rand_pcg::Pcg64Mcg;
 use xlsynth_pir::ir::{
-    Binop, BlockMetadata, ExtNaryAddArchitecture, FileTable, Fn, MemberType, NaryOp, NodePayload,
-    NodeRef, Package, PackageMember, Type, Unop,
+    Binop, Block, ExtNaryAddArchitecture, FileTable, MemberType, NaryOp, NodePayload, NodeRef,
+    Package, PackageMember, Type, Unop,
 };
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
@@ -45,7 +45,7 @@ fn validate_generated_block_package(package: &Package) {
     assert_eq!(reparsed.to_string(), ir_text);
 }
 
-fn node_depends_on(function: &Fn, start: NodeRef, target: NodeRef) -> bool {
+fn node_depends_on(function: &xlsynth_pir::ir::NodeGraph, start: NodeRef, target: NodeRef) -> bool {
     let mut pending = vec![start];
     let mut seen = HashSet::new();
     while let Some(node_ref) = pending.pop() {
@@ -59,23 +59,22 @@ fn node_depends_on(function: &Fn, start: NodeRef, target: NodeRef) -> bool {
     false
 }
 
-fn block_output_types<'a>(function: &'a Fn, output_count: usize) -> Vec<&'a Type> {
-    if output_count == 1 {
-        return vec![&function.ret_ty];
-    }
-    let Type::Tuple(fields) = &function.ret_ty else {
-        panic!("multi-output generated block should return a tuple");
-    };
-    fields.iter().map(|field| &**field).collect()
+fn block_output_types(block: &Block, output_count: usize) -> Vec<&Type> {
+    let types = block
+        .output_ports()
+        .map(|port| block.port_type(port))
+        .collect::<Vec<_>>();
+    assert_eq!(types.len(), output_count);
+    types
 }
 
-fn assert_generated_block_register_wiring(function: &Fn, metadata: &BlockMetadata) {
+fn assert_generated_block_register_wiring(block: &Block) {
     assert_eq!(
-        metadata.clock_port_name.is_some(),
-        !metadata.registers.is_empty()
+        block.clock_port_name().is_some(),
+        !block.registers.is_empty()
     );
-    for register in &metadata.registers {
-        let read_count = function
+    for register in &block.registers {
+        let read_count = block
             .nodes
             .iter()
             .filter(|node| {
@@ -86,7 +85,7 @@ fn assert_generated_block_register_wiring(function: &Fn, metadata: &BlockMetadat
                 )
             })
             .count();
-        let writes: Vec<_> = function
+        let writes: Vec<_> = block
             .nodes
             .iter()
             .filter_map(|node| match &node.payload {
@@ -102,7 +101,7 @@ fn assert_generated_block_register_wiring(function: &Fn, metadata: &BlockMetadat
 
         assert_eq!(read_count, 1);
         assert_eq!(writes.len(), 1);
-        assert_eq!(function.get_node(writes[0].0).ty, register.ty);
+        assert_eq!(block.get_node(writes[0].0).ty, register.ty);
         assert_eq!(writes[0].1.is_some(), register.reset_value.is_some());
     }
 }
@@ -362,27 +361,21 @@ fn depleted_entropy_constructs_a_minimal_deterministic_block() {
     validate_generated_block_package(&first.package);
     validate_generated_block_package(&second.package);
     assert_eq!(first.package.to_string(), second.package.to_string());
-    let PackageMember::Block { metadata, .. } = first.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    assert!(metadata.registers.is_empty());
-    assert!(metadata.output_names.is_empty());
-    let PackageMember::Block { func, .. } = first.package.get_top_block().unwrap() else {
-        unreachable!("generated package top should be a block");
-    };
-    let ret_ref = func.ret_node_ref.unwrap();
-    assert!(matches!(
-        &func.get_node(ret_ref).payload,
-        NodePayload::Tuple(outputs) if outputs.is_empty()
-    ));
+    let block = first.package.get_top_block().unwrap();
+    assert!(block.registers.is_empty());
+    assert!(block.output_ports().next().is_none());
+    assert_eq!(
+        block.nodes.len(),
+        1,
+        "no synthetic return in an empty block"
+    );
 }
 
 #[test]
 fn empty_tuple_values_can_supply_required_block_outputs() {
     for (inputs, registers, pipeline) in [(0, 0, false), (1, 0, false), (1, 2, true)] {
         for output_count in [1, 2] {
-            let max_nodes =
-                inputs + 2 * registers + usize::from(inputs == 0) + usize::from(output_count != 1);
+            let max_nodes = inputs + 2 * registers + usize::from(inputs == 0) + output_count;
             let options = RandomBlockOptions {
                 min_input_ports: inputs,
                 max_input_ports: inputs,
@@ -414,19 +407,15 @@ fn empty_tuple_values_can_supply_required_block_outputs() {
             )
             .unwrap();
             validate_generated_block_package(&generated.package);
-            let PackageMember::Block { func, metadata } =
-                generated.package.get_top_block().unwrap()
-            else {
-                unreachable!()
-            };
-            assert_eq!(metadata.output_names.len(), output_count);
+            let func = generated.package.get_top_block().unwrap();
+            assert_eq!(func.output_ports().count(), output_count);
             assert!(
                 block_output_types(func, output_count)
                     .iter()
                     .all(|ty| ty.is_nil())
             );
             assert!(func.nodes.len() - 1 <= max_nodes);
-            assert!(func.ret_node_ref.unwrap().index > 0);
+            assert!(func.output_ports().all(|port| port.index > 0));
             for node in func.nodes.iter().skip(1) {
                 assert!(!matches!(node.payload, NodePayload::Nil));
                 assert!(
@@ -479,14 +468,14 @@ fn reserved_wiring_header_mutates_connections_without_changing_the_body() {
             format!(
                 "{:?}",
                 block
-                    .function
+                    .block
                     .nodes
                     .iter()
                     .enumerate()
-                    .filter(
-                        |(index, node)| *index != block.function.ret_node_ref.unwrap().index
-                            && !matches!(node.payload, NodePayload::RegisterWrite { .. })
-                    )
+                    .filter(|(_, node)| !matches!(
+                        node.payload,
+                        NodePayload::OutputPort { .. } | NodePayload::RegisterWrite { .. }
+                    ))
                     .collect::<Vec<_>>()
             )
         };
@@ -504,14 +493,24 @@ fn reserved_wiring_header_mutates_connections_without_changing_the_body() {
                 body(&variant),
                 "wiring slot {slot} changed body nodes"
             );
-            assert_eq!(base.metadata.port_order, variant.metadata.port_order);
-            assert_eq!(base.metadata.output_names, variant.metadata.output_names);
+            assert_eq!(base.block.ports, variant.block.ports);
+            assert_eq!(
+                base.block
+                    .output_ports()
+                    .map(|port| base.block.port_name(port))
+                    .collect::<Vec<_>>(),
+                variant
+                    .block
+                    .output_ports()
+                    .map(|port| variant.block.port_name(port))
+                    .collect::<Vec<_>>()
+            );
             assert_ne!(
-                base.function.to_string(),
-                variant.function.to_string(),
+                base.block.to_string(),
+                variant.block.to_string(),
                 "wiring slot {slot} did not change a connection"
             );
-            assert_generated_block_register_wiring(&variant.function, &variant.metadata);
+            assert_generated_block_register_wiring(&variant.block);
             validate_generated_block_package(&variant.into_top_package("test"));
         }
     }
@@ -544,7 +543,7 @@ fn promised_in_bounds_indices_preserve_feed_forward_register_dependencies() {
             StopPolicy::ExactBodyNodes(48),
         )
         .unwrap();
-        let function = &generated.function;
+        let function = &generated.block;
         for node in &function.nodes {
             saw_promised_index |= matches!(
                 node.payload,
@@ -563,19 +562,19 @@ fn promised_in_bounds_indices_preserve_feed_forward_register_dependencies() {
                 continue;
             };
             let position = generated
-                .metadata
+                .block
                 .registers
                 .iter()
                 .position(|item| &item.name == register)
                 .unwrap();
-            for later in &generated.metadata.registers[position..] {
+            for later in &generated.block.registers[position..] {
                 let read = function.nodes.iter().position(|node| matches!(&node.payload, NodePayload::RegisterRead { register } if register == &later.name)).unwrap();
                 for operand in std::iter::once(arg).chain(load_enable.iter()) {
                     assert!(
                         !node_depends_on(function, *operand, NodeRef { index: read }),
                         "seed={seed}: {register} depends on its own or later stage {}\n{}",
                         later.name,
-                        generated.function
+                        generated.block
                     );
                 }
             }
@@ -964,7 +963,7 @@ fn safe_array_assumptions_hold_for_arbitrary_inputs() {
 }
 
 #[test]
-fn generated_zero_output_block_does_not_write_synthetic_return() {
+fn generated_zero_output_block_keeps_register_feedback_without_synthetic_return() {
     let options = RandomBlockOptions {
         max_input_ports: 0,
         max_registers: 1,
@@ -979,19 +978,17 @@ fn generated_zero_output_block_does_not_write_synthetic_return() {
         },
         ..RandomBlockOptions::default()
     };
-    // The header would select the synthetic return if it were a D candidate;
-    // the body selects an empty-tuple register with the same type as that
-    // return.
+    // Exercise unit-valued state without any output sink or synthetic return.
     let entropy_bytes: Vec<u8> = [1_u64, 0, 1, 0]
         .into_iter()
         .flat_map(u64::to_le_bytes)
         .collect();
     let mut entropy = DepletableBytes::new(&entropy_bytes);
     let generated = generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-    assert_eq!(generated.metadata.registers[0].ty, Type::Tuple(vec![]));
-    let ret_ref = generated.function.ret_node_ref.unwrap();
+    assert_eq!(generated.block.registers[0].ty, Type::Tuple(vec![]));
+    assert_eq!(generated.block.output_ports().count(), 0);
     let write_arg = generated
-        .function
+        .block
         .nodes
         .iter()
         .find_map(|node| match &node.payload {
@@ -1000,12 +997,15 @@ fn generated_zero_output_block_does_not_write_synthetic_return() {
         })
         .unwrap();
 
-    assert_ne!(write_arg, ret_ref);
+    assert!(matches!(
+        generated.block.get_node(write_arg).payload,
+        NodePayload::RegisterRead { .. }
+    ));
     validate_generated_block_package(&generated.into_top_package("zero_output_register_package"));
 }
 
 #[test]
-fn generated_block_populates_multi_output_metadata() {
+fn generated_block_populates_explicit_output_port_nodes() {
     let options = RandomBlockOptions {
         min_input_ports: 1,
         max_input_ports: 1,
@@ -1014,7 +1014,7 @@ fn generated_block_populates_multi_output_metadata() {
         topology: BlockTopology::Combinational,
         max_registers: 0,
         function_options: RandomFnOptions {
-            max_nodes: 3,
+            max_nodes: 4,
             max_bit_width: 8,
             ..RandomFnOptions::default()
         },
@@ -1024,26 +1024,27 @@ fn generated_block_populates_multi_output_metadata() {
     for _ in 0..128 {
         let generated =
             generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-        let func = &generated.function;
-        let metadata = &generated.metadata;
+        let block = &generated.block;
+        let outputs = block.output_ports().collect::<Vec<_>>();
         assert_eq!(
-            metadata.output_names,
-            vec!["out0".to_string(), "out1".to_string(), "out2".to_string()]
+            outputs
+                .iter()
+                .map(|port| block.port_name(*port))
+                .collect::<Vec<_>>(),
+            ["out0", "out1", "out2"]
         );
-        assert_eq!(metadata.output_port_ids.len(), 3);
         assert_eq!(
-            metadata
-                .output_port_ids
-                .values()
+            outputs
+                .iter()
+                .map(|port| block.get_node(*port).text_id)
                 .collect::<HashSet<_>>()
                 .len(),
             3
         );
-        let ret_ref = func.ret_node_ref.unwrap();
-        assert!(matches!(
-            &func.get_node(ret_ref).payload,
-            NodePayload::Tuple(outputs) if outputs.len() == 3
-        ));
+        assert!(outputs.iter().all(|port| matches!(
+            block.get_node(*port).payload,
+            NodePayload::OutputPort { .. }
+        )));
     }
 }
 
@@ -1077,7 +1078,7 @@ fn random_block_reset_timing_option_controls_generated_metadata() {
         for _ in 0..256 {
             let generated =
                 generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(0)).unwrap();
-            let Some(reset) = generated.metadata.reset.as_ref() else {
+            let Some(reset) = generated.block.reset.as_ref() else {
                 continue;
             };
             saw_reset = true;
@@ -1116,24 +1117,24 @@ fn random_block_required_register_resets_option_controls_samples() {
     for _ in 0..256 {
         let generated =
             generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(8)).unwrap();
-        assert!(!generated.metadata.registers.is_empty());
+        assert!(!generated.block.registers.is_empty());
         assert!(
             generated
-                .metadata
+                .block
                 .reset
                 .as_ref()
                 .is_some_and(|reset| !reset.asynchronous)
         );
         assert!(
             generated
-                .metadata
+                .block
                 .registers
                 .iter()
                 .all(|register| register.reset_value.is_some())
         );
         assert!(
             generated
-                .function
+                .block
                 .nodes
                 .iter()
                 .filter_map(|node| match &node.payload {
@@ -1191,13 +1192,12 @@ fn random_block_zero_width_interface_option_controls_samples() {
         for _ in 0..1_024 {
             let generated =
                 generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(4)).unwrap();
-            let function = &generated.function;
-            let metadata = &generated.metadata;
-            let output_types = block_output_types(function, metadata.output_names.len());
+            let function = &generated.block;
+            let metadata = &generated.block;
+            let output_types = block_output_types(function, metadata.output_ports().count());
             for ty in function
-                .params
-                .iter()
-                .map(|param| &param.ty)
+                .input_ports()
+                .map(|port| function.port_type(port))
                 .chain(metadata.registers.iter().map(|register| &register.ty))
                 .chain(output_types.iter().copied())
             {
@@ -1243,11 +1243,11 @@ fn probabilistic_default_sequential_block_generation_covers_shapes_state_and_typ
     for _ in 0..2_000 {
         let generated =
             generate_block(&mut entropy, &options, StopPolicy::ExactBodyNodes(20)).unwrap();
-        let function = &generated.function;
-        let metadata = &generated.metadata;
+        let function = &generated.block;
+        let metadata = &generated.block;
         let reset_port_count = usize::from(metadata.reset.is_some());
-        let data_input_count = function.params.len() - reset_port_count;
-        let output_count = metadata.output_names.len();
+        let data_input_count = function.input_ports().count() - reset_port_count;
+        let output_count = metadata.output_ports().count();
 
         saw_min_registers |= metadata.registers.len() == 1;
         saw_max_registers |= metadata.registers.len() == options.max_registers;
@@ -1288,13 +1288,12 @@ fn probabilistic_default_sequential_block_generation_covers_shapes_state_and_typ
             }
         }
 
-        assert_generated_block_register_wiring(function, metadata);
+        assert_generated_block_register_wiring(function);
         let output_types = block_output_types(function, output_count);
         assert!(
             function
-                .params
-                .iter()
-                .all(|param| param.ty.bit_count() != 0)
+                .input_ports()
+                .all(|port| function.port_type(port).bit_count() != 0)
         );
         assert!(output_types.iter().all(|ty| ty.bit_count() != 0));
         assert!(
@@ -1304,15 +1303,13 @@ fn probabilistic_default_sequential_block_generation_covers_shapes_state_and_typ
                 .all(|register| register.ty.bit_count() != 0)
         );
         saw_tuple_port |= function
-            .params
-            .iter()
-            .map(|param| &param.ty)
+            .input_ports()
+            .map(|port| function.port_type(port))
             .chain(output_types.iter().copied())
             .any(type_has_tuple);
         saw_array_port |= function
-            .params
-            .iter()
-            .map(|param| &param.ty)
+            .input_ports()
+            .map(|port| function.port_type(port))
             .chain(output_types.iter().copied())
             .any(type_has_array);
 
@@ -1400,9 +1397,9 @@ fn registered_block_feedback_can_feed_next_state() {
     let package = generated.clone().into_top_package("feedback_block_package");
 
     validate_generated_block_package(&package);
-    let register = &generated.metadata.registers[0];
+    let register = &generated.block.registers[0];
     let read_index = generated
-        .function
+        .block
         .nodes
         .iter()
         .position(|node| {
@@ -1414,7 +1411,7 @@ fn registered_block_feedback_can_feed_next_state() {
         })
         .unwrap();
     let write_arg = generated
-        .function
+        .block
         .nodes
         .iter()
         .find_map(|node| match &node.payload {

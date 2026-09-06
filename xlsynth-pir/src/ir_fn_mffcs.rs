@@ -467,13 +467,15 @@ pub fn extract_mffc(
     };
 
     let func = ir::Fn {
-        name: "cone".to_string(),
+        graph: crate::ir::NodeGraph {
+            name: "cone".to_string(),
+            nodes,
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        },
         params,
         ret_ty: f.nodes[root].ty.clone(),
-        nodes,
         ret_node_ref: Some(new_root_ref),
-        outer_attrs: Vec::new(),
-        inner_attrs: Vec::new(),
     };
 
     let package = Package {

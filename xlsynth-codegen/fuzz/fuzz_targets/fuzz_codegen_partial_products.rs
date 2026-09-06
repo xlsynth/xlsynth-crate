@@ -34,18 +34,16 @@ fuzz_target!(init: {
         Icarus::new(&rtl, interface(&package, None))
             .map_err(|error| error.with_context(format!("Icarus compilation failed:\n{ir}")))
     );
-    let (block, _) = top_block(&package);
+    let block = top_block(&package);
     let mut rng = deterministic_rng(&ir);
     for sample in 0..INPUT_SAMPLE_COUNT {
         let inputs = generate_inputs(block, &mut rng);
-        let input_map = block
-            .params
-            .iter()
+        let input_map = block.input_ports()
             .zip(inputs.iter())
             .map(|(param, value)| {
                 (
-                    param.name.clone(),
-                    LogicValue::from_bits(&flatten_value(value, &param.ty)),
+                    block.port_name(param).to_string(),
+                    LogicValue::from_bits(&flatten_value(value, block.port_type(param))),
                 )
             })
             .collect::<BTreeMap<_, _>>();

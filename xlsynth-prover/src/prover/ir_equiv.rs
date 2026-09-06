@@ -382,8 +382,8 @@ fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
     let slice_ref = NodeRef {
         index: nf.nodes.len(),
     };
-    nf.nodes.push(Node {
-        text_id: nf.nodes.len(),
+    nf.graph.nodes.push(Node {
+        text_id: nf.graph.nodes.len(),
         name: None,
         ty: Type::Bits(1),
         payload: NodePayload::BitSlice {

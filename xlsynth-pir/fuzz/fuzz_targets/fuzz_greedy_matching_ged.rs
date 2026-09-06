@@ -196,7 +196,7 @@ fuzz_target!(|data: &[u8]| {
     assert_equivalent_nodes_are_matched(&old_dce, &new_dce, &matches);
 
     // Convert matches to edits and verify isomorphism on editted graph.
-    let edits_dce = convert_match_set_to_edit_set(&old_dce, &new_dce, &matches, None);
+    let edits_dce = convert_match_set_to_edit_set(&old_dce, &new_dce, &matches);
     let patched_dce = apply_fn_edits(&old_dce, &edits_dce)
         .expect("apply_function_edits returned Err (AFTER DCE)");
     debug!("PATCHED IR (AFTER DCE):\n{}", patched_dce);

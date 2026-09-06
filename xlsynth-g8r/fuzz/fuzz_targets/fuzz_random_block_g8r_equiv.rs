@@ -12,7 +12,7 @@ use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::{BlockMetadata, Fn};
+use xlsynth_pir::ir::Block;
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
     RandomOperation, StopPolicy, generate_block_package,
@@ -42,8 +42,8 @@ fn fuzz_block_options() -> RandomBlockOptions {
     }
 }
 
-fn generate_initial_state(metadata: &BlockMetadata, rng: &mut StdRng) -> Vec<IrValue> {
-    metadata
+fn generate_initial_state(block: &Block, rng: &mut StdRng) -> Vec<IrValue> {
+    block
         .registers
         .iter()
         .map(|register| {
@@ -55,18 +55,12 @@ fn generate_initial_state(metadata: &BlockMetadata, rng: &mut StdRng) -> Vec<IrV
         .collect()
 }
 
-fn generate_cycle_inputs(
-    block: &Fn,
-    metadata: &BlockMetadata,
-    rng: &mut StdRng,
-    cycle: usize,
-) -> Vec<IrValue> {
+fn generate_cycle_inputs(block: &Block, rng: &mut StdRng, cycle: usize) -> Vec<IrValue> {
     block
-        .params
-        .iter()
+        .input_ports()
         .map(|param| {
-            if let Some(reset) = metadata.reset.as_ref()
-                && param.name == reset.port_name
+            if let Some(reset) = block.reset.as_ref()
+                && param == reset.port
             {
                 let asserted = if cycle == 0 {
                     rng.gen_bool(0.5)
@@ -81,7 +75,7 @@ fn generate_cycle_inputs(
                 return IrValue::make_ubits(1, u64::from(signal_high))
                     .expect("bits[1] reset input should construct");
             }
-            generate_uniform_value_with_rng(rng, &param.ty)
+            generate_uniform_value_with_rng(rng, block.port_type(param))
         })
         .collect()
 }
@@ -99,15 +93,8 @@ fuzz_target!(|data: &[u8]| {
         .package
         .get_top_block()
         .expect("generated package should have a top block");
-    let xlsynth_pir::ir::PackageMember::Block { func, metadata } = block else {
-        unreachable!("generated package top should be a block");
-    };
 
-    if metadata
-        .reset
-        .as_ref()
-        .is_some_and(|reset| reset.asynchronous)
-    {
+    if block.reset.as_ref().is_some_and(|reset| reset.asynchronous) {
         panic!("synchronous-only block generation emitted an asynchronous reset:\n{block_ir}");
     }
 
@@ -119,25 +106,25 @@ fuzz_target!(|data: &[u8]| {
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(blake3::hash(block_ir.as_bytes()).as_bytes());
     let mut rng = StdRng::from_seed(seed);
-    let mut block_state = generate_initial_state(metadata, &mut rng);
+    let mut block_state = generate_initial_state(block, &mut rng);
     let initial_g8r_state = block_state
         .iter()
-        .zip(&metadata.registers)
+        .zip(&block.registers)
         .map(|(value, register)| flatten_value(value, &register.ty))
         .collect();
     let mut g8r_state = SequentialState::from_register_values(&design, initial_g8r_state)
         .expect("generated initial register state should match lowered G8R");
-    let output_types = block_output_types(func, metadata);
+    let output_types = block_output_types(block);
 
     for cycle in 0..CYCLE_COUNT {
-        let inputs = generate_cycle_inputs(func, metadata, &mut rng, cycle);
+        let inputs = generate_cycle_inputs(block, &mut rng, cycle);
         let g8r_inputs = inputs
             .iter()
-            .zip(&func.params)
-            .map(|(value, param)| flatten_value(value, &param.ty))
+            .zip(block.input_ports())
+            .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
         let (expected_outputs, next_block_state) =
-            evaluate_block_cycle(func, metadata, &inputs, &block_state, &block_ir);
+            evaluate_block_cycle(block, &inputs, &block_state, &block_ir);
         let expected_output_bits = expected_outputs
             .iter()
             .zip(&output_types)
@@ -154,7 +141,7 @@ fuzz_target!(|data: &[u8]| {
         );
         let expected_state_bits = next_block_state
             .iter()
-            .zip(&metadata.registers)
+            .zip(&block.registers)
             .map(|(value, register)| flatten_value(value, &register.ty))
             .collect::<Vec<_>>();
         assert_eq!(

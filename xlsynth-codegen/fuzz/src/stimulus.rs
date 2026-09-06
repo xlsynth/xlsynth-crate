@@ -5,13 +5,13 @@
 use std::collections::BTreeSet;
 
 use rand::Rng;
-use xlsynth_pir::ir::{Fn, NodePayload, Type};
+use xlsynth_pir::ir::{Block, NodePayload, Type};
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 use xlsynth_pir::{IrBits, IrValue};
 
 /// Collects small discontinuities from the generated graph, including array
 /// bounds, select case counts, and shift/data widths. No circuit is injected.
-pub fn relevant_bounds(block: &Fn) -> Vec<usize> {
+pub fn relevant_bounds(block: &Block) -> Vec<usize> {
     let mut bounds = BTreeSet::from([0, 1]);
     for node in &block.nodes {
         let bound = match &node.payload {
@@ -41,14 +41,15 @@ pub fn relevant_bounds(block: &Fn) -> Vec<usize> {
 
 /// Generates a complete vector with equal same-type operands in selected
 /// samples and otherwise independent values. Four of sixteen slots are uniform.
-pub fn inputs<R: Rng>(block: &Fn, rng: &mut R, sample: usize, bounds: &[usize]) -> Vec<IrValue> {
-    let mut values: Vec<IrValue> = Vec::with_capacity(block.params.len());
-    for (index, param) in block.params.iter().enumerate() {
+pub fn inputs<R: Rng>(block: &Block, rng: &mut R, sample: usize, bounds: &[usize]) -> Vec<IrValue> {
+    let mut values: Vec<IrValue> = Vec::with_capacity(block.input_ports().count());
+    for (index, param) in block.input_ports().enumerate() {
         let equal_to = (sample % 16 == 11)
             .then(|| {
-                block.params[..index]
-                    .iter()
-                    .position(|other| other.ty == param.ty)
+                block
+                    .input_ports()
+                    .take(index)
+                    .position(|other| block.port_type(other) == block.port_type(param))
             })
             .flatten();
         let value = if let Some(previous) = equal_to {
@@ -63,7 +64,7 @@ pub fn inputs<R: Rng>(block: &Fn, rng: &mut R, sample: usize, bounds: &[usize]) 
                 10 => 6,
                 slot => slot,
             };
-            value(&param.ty, rng, pattern, bounds)
+            value(block.port_type(param), rng, pattern, bounds)
         };
         values.push(value);
     }

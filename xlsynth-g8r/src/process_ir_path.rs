@@ -486,18 +486,12 @@ fn prepared_ir_text_from_package(
             ir::PackageMember::Function(f) if f.name == top_fn_name => {
                 Some(ir::PackageMember::Function(prepared_fn.clone()))
             }
-            ir::PackageMember::Block { func, metadata } if func.name == top_fn_name => {
-                Some(ir::PackageMember::Block {
-                    func: prepared_fn.clone(),
-                    metadata: metadata.clone(),
-                })
-            }
             _ => None,
         })
         .expect("top member should exist in pir_package");
     let prepared_top = match &prepared_member {
         ir::PackageMember::Function(_) => Some((top_fn_name.to_string(), ir::MemberType::Function)),
-        ir::PackageMember::Block { .. } => Some((top_fn_name.to_string(), ir::MemberType::Block)),
+        ir::PackageMember::Block(_) => unreachable!("selected a function above"),
     };
     let prepared_pkg = ir::Package {
         name: ir_package.name.clone(),

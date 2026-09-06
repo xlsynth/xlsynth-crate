@@ -98,7 +98,7 @@ top block top(a: bits[1], y: bits[1]) {
 fn e2e_register_collapse_with_tied_input() {
     let block_ir = r#"package test
 
-top block top(a: bits[1], out: bits[1]) {
+top block top(clk: clock, a: bits[1], out: bits[1]) {
   reg r(bits[1])
   a: bits[1] = input_port(name=a, id=1)
   r_q: bits[1] = register_read(register=r, id=2)
@@ -147,9 +147,8 @@ block INV(A: bits[1], Y: bits[1]) {
   Y: () = output_port(not.22, name=Y, id=23)
 }
 
-block DFF(CLK: bits[1], D: bits[1], Q: bits[1]) {
+block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
   reg Q_reg(bits[1])
-  CLK: bits[1] = input_port(name=CLK, id=31)
   D: bits[1] = input_port(name=D, id=32)
   Q_q: bits[1] = register_read(register=Q_reg, id=33)
   Q_d: () = register_write(D, register=Q_reg, id=34)
@@ -159,14 +158,13 @@ block DFF(CLK: bits[1], D: bits[1], Q: bits[1]) {
 // Structure:
 //   q_next <= (valid & data) | (!valid & q)
 //   out = q_next
-top block top(clk: bits[1], data: bits[1], valid: bits[1], out: bits[1]) {
+top block top(clk: clock, data: bits[1], valid: bits[1], out: bits[1]) {
   instantiation u_and_data(block=AND2, kind=block)
   instantiation u_and_hold(block=AND2, kind=block)
   instantiation u_or(block=OR2, kind=block)
   instantiation u_inv(block=INV, kind=block)
   instantiation u_dff(block=DFF, kind=block)
 
-  clk: bits[1] = input_port(name=clk, id=101)
   data: bits[1] = input_port(name=data, id=102)
   valid: bits[1] = input_port(name=valid, id=103)
 
@@ -174,7 +172,6 @@ top block top(clk: bits[1], data: bits[1], valid: bits[1], out: bits[1]) {
   instantiation_input.111: () = instantiation_input(valid, instantiation=u_inv, port_name=A, id=111)
 
   q: bits[1] = instantiation_output(instantiation=u_dff, port_name=Q, id=112)
-  instantiation_input.113: () = instantiation_input(clk, instantiation=u_dff, port_name=CLK, id=113)
 
   and_data: bits[1] = instantiation_output(instantiation=u_and_data, port_name=Y, id=115)
   instantiation_input.116: () = instantiation_input(valid, instantiation=u_and_data, port_name=A, id=116)
@@ -196,9 +193,12 @@ top block top(clk: bits[1], data: bits[1], valid: bits[1], out: bits[1]) {
 #[test]
 fn e2e_netlist_load_enable_feedback_elided() {
     let f = run_block2fn(NETLIST_LOAD_ENABLE_BLOCK, &[("valid", "bits[1]:1")], &[]);
-    assert_eq!(f.params.len(), 2, "valid should be tied off");
-    assert_eq!(f.params[0].name, "clk");
-    assert_eq!(f.params[1].name, "data");
+    assert_eq!(
+        f.params.len(),
+        1,
+        "valid is tied off and the clock is not a data parameter"
+    );
+    assert_eq!(f.params[0].name, "data");
     for node in f.nodes.iter() {
         assert!(
             !matches!(

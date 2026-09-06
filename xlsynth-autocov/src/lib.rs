@@ -217,10 +217,6 @@ pub fn relevant_in_pkg(
                             *f = new_fn;
                             return Ok(());
                         }
-                        ir::PackageMember::Block { func, .. } if func.name == fn_name => {
-                            *func = new_fn;
-                            return Ok(());
-                        }
                         _ => {}
                     }
                 }

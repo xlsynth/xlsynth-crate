@@ -33,11 +33,11 @@ fuzz_target!(init: {
     let package = generate(data, &options);
     let ir = package.to_string();
     let mapped = xlsynth_codegen_fuzz::fuzz_tool!(map_sequential(&package, context));
-    let (block, metadata) = top_block(&package);
-    let output_types = block_output_types(block, metadata);
+    let block = top_block(&package);
+    let output_types = block_output_types(block);
     let design = &mapped.mapped.sequential_gate_fn;
     let mut rng = deterministic_rng(&ir);
-    let mut state = metadata
+    let mut state = block
         .registers
         .iter()
         .map(|register| generate_uniform_value_with_rng(&mut rng, &register.ty))
@@ -45,20 +45,20 @@ fuzz_target!(init: {
     let mut stimuli = Vec::with_capacity(CYCLE_COUNT);
     let mut expected_outputs = Vec::with_capacity(CYCLE_COUNT);
     for cycle in 0..CYCLE_COUNT {
-        let inputs = generate_cycle_inputs(block, metadata, &mut rng, cycle, true);
+        let inputs = generate_cycle_inputs(block, &mut rng, cycle, true);
         let bits = inputs
             .iter()
-            .zip(&block.params)
-            .map(|(value, param)| flatten_value(value, &param.ty))
+            .zip(block.input_ports())
+            .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
         stimuli.push(map_sequential_inputs(design, block, &bits));
-        let (outputs, next_state) = evaluate_block_cycle(block, metadata, &inputs, &state, &ir);
+        let (outputs, next_state) = evaluate_block_cycle(block, &inputs, &state, &ir);
         let output_bits = outputs
             .iter()
             .zip(output_types.iter())
             .map(|(value, ty)| flatten_value(value, ty))
             .collect::<Vec<_>>();
-        expected_outputs.push(map_sequential_outputs(design, metadata, &output_bits));
+        expected_outputs.push(map_sequential_outputs(design, block, &output_bits));
         state = next_state;
     }
     let trace = sequential::simulate(design, &stimuli, SequentialState::all_zeros(design))

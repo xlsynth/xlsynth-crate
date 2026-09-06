@@ -2,8 +2,8 @@
 
 //! Shared external Yosys/Liberty oracles for public block codegen targets.
 
-use xlsynth_pir::IrBits;
 use std::collections::BTreeMap;
+use xlsynth_pir::IrBits;
 
 use xlsynth::external_tool::ToolError;
 
@@ -16,7 +16,7 @@ use xlsynth_g8r::netlist::gv_eval::{
     load_labeled_netlist_aig_with_liberty, load_labeled_sequential_netlist_aig_with_liberty,
 };
 use xlsynth_g8r::netlist::yosys::{YosysInputLanguage, YosysMappingContext, YosysMappingKind};
-use xlsynth_pir::ir::{BlockMetadata, Fn, Package};
+use xlsynth_pir::ir::{Block, Package};
 
 use crate::emit;
 
@@ -130,14 +130,13 @@ fn two_valued_gatify_options() -> GatifyOptions {
 /// Reorders source port values to match mapped combinational input ordering.
 pub fn map_combinational_inputs(
     model: &LabeledNetlistAig,
-    block: &Fn,
+    block: &Block,
     values: &[IrBits],
 ) -> Vec<IrBits> {
     let by_name = block
-        .params
-        .iter()
+        .input_ports()
         .zip(values)
-        .map(|(param, value)| (param.name.as_str(), value))
+        .map(|(param, value)| (block.port_name(param), value))
         .collect::<BTreeMap<_, _>>();
     model
         .gate_fn
@@ -155,14 +154,13 @@ pub fn map_combinational_inputs(
 /// Reorders source values to match mapped sequential external-input ordering.
 pub fn map_sequential_inputs(
     design: &SequentialGateFn,
-    block: &Fn,
+    block: &Block,
     values: &[IrBits],
 ) -> Vec<IrBits> {
     let by_name = block
-        .params
-        .iter()
+        .input_ports()
         .zip(values)
-        .map(|(param, value)| (param.name.as_str(), value))
+        .map(|(param, value)| (block.port_name(param), value))
         .collect::<BTreeMap<_, _>>();
     design
         .inputs
@@ -180,14 +178,14 @@ pub fn map_sequential_inputs(
 /// Reorders source values to match mapped sequential external-output ordering.
 pub fn map_sequential_outputs(
     design: &SequentialGateFn,
-    metadata: &BlockMetadata,
+    block: &Block,
     values: &[IrBits],
 ) -> Vec<IrBits> {
-    let by_name = metadata
-        .output_names
-        .iter()
+    let by_name = block
+        .output_ports()
+        .map(|port| block.port_name(port))
         .zip(values)
-        .map(|(name, value)| (name.as_str(), value))
+        .map(|(name, value)| (name, value))
         .collect::<BTreeMap<_, _>>();
     design
         .outputs

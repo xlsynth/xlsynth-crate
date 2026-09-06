@@ -10,6 +10,40 @@ use crate::aig::gate::{AigNode, GateFn};
 use crate::aig::get_summary_stats::get_level_critical_path_ands;
 use crate::use_count::get_id_to_use_count;
 
+/// A graph to attribute, with an optional function return marker for rendering.
+#[derive(Clone, Copy)]
+pub struct IrTableSource<'a> {
+    graph: &'a ir::NodeGraph,
+    return_value: Option<ir::NodeRef>,
+}
+
+impl<'a> From<&'a ir::Fn> for IrTableSource<'a> {
+    fn from(function: &'a ir::Fn) -> Self {
+        Self {
+            graph: &function.graph,
+            return_value: function.ret_node_ref,
+        }
+    }
+}
+
+impl<'a> From<&'a ir::Block> for IrTableSource<'a> {
+    fn from(block: &'a ir::Block) -> Self {
+        Self {
+            graph: &block.graph,
+            return_value: None,
+        }
+    }
+}
+
+impl<'a> From<&'a ir::PackageMember> for IrTableSource<'a> {
+    fn from(member: &'a ir::PackageMember) -> Self {
+        match member {
+            ir::PackageMember::Function(function) => function.into(),
+            ir::PackageMember::Block(block) => block.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AreaTableRow {
     pub pir_node_id: u32,
@@ -84,7 +118,7 @@ fn as_u32_text_id(id: usize, context: &str) -> Result<u32, String> {
 }
 
 /// Formats one PIR node without `id=` or `pos=` noise, but with typed operands.
-fn render_ir_node_text(f: &ir::Fn, node: &ir::Node) -> Option<String> {
+fn render_ir_node_text(f: &ir::NodeGraph, node: &ir::Node) -> Option<String> {
     node.to_string_with_options(
         f,
         &ir::NodeRenderOptions {
@@ -96,19 +130,21 @@ fn render_ir_node_text(f: &ir::Fn, node: &ir::Node) -> Option<String> {
     )
 }
 
-fn collect_pir_info_by_id(f: &ir::Fn) -> Result<BTreeMap<u32, PirNodeInfo>, String> {
+fn collect_pir_info_by_id(source: IrTableSource<'_>) -> Result<BTreeMap<u32, PirNodeInfo>, String> {
     let mut result = BTreeMap::new();
-
-    for param in &f.params {
-        let pir_node_id = as_u32_text_id(
-            param.id.get_wrapped_id(),
-            &format!("parameter '{}'", param.name),
-        )?;
+    let f = source.graph;
+    for (index, node) in f.nodes.iter().enumerate() {
+        let ir::NodePayload::GetParam(param_id) = node.payload else {
+            continue;
+        };
+        let name = ir::node_textual_id(f, ir::NodeRef { index });
+        let pir_node_id =
+            as_u32_text_id(param_id.get_wrapped_id(), &format!("parameter '{name}'"))?;
         result.insert(
             pir_node_id,
             PirNodeInfo {
                 opcode: "param".to_string(),
-                ir_text: format!("{}: {}", param.name, param.ty),
+                ir_text: format!("{}: {}", name, node.ty),
             },
         );
     }
@@ -124,7 +160,7 @@ fn collect_pir_info_by_id(f: &ir::Fn) -> Result<BTreeMap<u32, PirNodeInfo>, Stri
         let Some(node_text) = render_ir_node_text(f, node) else {
             continue;
         };
-        let ir_text = if f.ret_node_ref == Some(ir::NodeRef { index }) {
+        let ir_text = if source.return_value == Some(ir::NodeRef { index }) {
             format!("ret {}", node_text)
         } else {
             node_text
@@ -175,22 +211,29 @@ fn select_and_nodes(gate_fn: &GateFn, selection: AigNodeSelection) -> SelectedAn
 ///
 /// The counts are over live `AigNode::And2` nodes so the totals align with the
 /// AIG area notion already used by `get_aig_stats().and_nodes`.
-pub fn build_area_table_report(gate_fn: &GateFn, f: &ir::Fn) -> Result<AreaTableReport, String> {
-    build_area_table_report_with_selection(gate_fn, f, AigNodeSelection::AllLiveAnds)
+pub fn build_area_table_report<'a>(
+    gate_fn: &GateFn,
+    f: impl Into<IrTableSource<'a>>,
+) -> Result<AreaTableReport, String> {
+    build_area_table_report_with_selection(gate_fn, f.into(), AigNodeSelection::AllLiveAnds)
 }
 
 /// Builds a per-PIR-node table for the `And2` nodes on at least one max-level
 /// input-to-output path.
-pub fn build_critical_path_area_table_report(
+pub fn build_critical_path_area_table_report<'a>(
     gate_fn: &GateFn,
-    f: &ir::Fn,
+    f: impl Into<IrTableSource<'a>>,
 ) -> Result<AreaTableReport, String> {
-    build_area_table_report_with_selection(gate_fn, f, AigNodeSelection::LevelCriticalPathAnds)
+    build_area_table_report_with_selection(
+        gate_fn,
+        f.into(),
+        AigNodeSelection::LevelCriticalPathAnds,
+    )
 }
 
 fn build_area_table_report_with_selection(
     gate_fn: &GateFn,
-    f: &ir::Fn,
+    f: IrTableSource<'_>,
     selection: AigNodeSelection,
 ) -> Result<AreaTableReport, String> {
     let pir_info_by_id = collect_pir_info_by_id(f)?;
@@ -255,7 +298,7 @@ fn build_area_table_report_with_selection(
     );
 
     Ok(AreaTableReport {
-        function_name: f.name.clone(),
+        function_name: f.graph.name.clone(),
         total_aig_node_count: selected_and_nodes.total_aig_node_count,
         selected_aig_node_count: selected_and_nodes.selected_and_nodes.len(),
         critical_path_depth_nodes: selected_and_nodes.critical_path_depth_nodes,
@@ -269,29 +312,29 @@ fn build_area_table_report_with_selection(
 ///
 /// Each live `And2` contributes at most one raw count per opcode it references,
 /// while weighted attribution preserves the per-provenance-id `1/N` split.
-pub fn build_opcode_area_table_report(
+pub fn build_opcode_area_table_report<'a>(
     gate_fn: &GateFn,
-    f: &ir::Fn,
+    f: impl Into<IrTableSource<'a>>,
 ) -> Result<OpcodeAreaTableReport, String> {
-    build_opcode_area_table_report_with_selection(gate_fn, f, AigNodeSelection::AllLiveAnds)
+    build_opcode_area_table_report_with_selection(gate_fn, f.into(), AigNodeSelection::AllLiveAnds)
 }
 
 /// Builds a per-opcode table for the `And2` nodes on at least one max-level
 /// input-to-output path.
-pub fn build_critical_path_opcode_area_table_report(
+pub fn build_critical_path_opcode_area_table_report<'a>(
     gate_fn: &GateFn,
-    f: &ir::Fn,
+    f: impl Into<IrTableSource<'a>>,
 ) -> Result<OpcodeAreaTableReport, String> {
     build_opcode_area_table_report_with_selection(
         gate_fn,
-        f,
+        f.into(),
         AigNodeSelection::LevelCriticalPathAnds,
     )
 }
 
 fn build_opcode_area_table_report_with_selection(
     gate_fn: &GateFn,
-    f: &ir::Fn,
+    f: IrTableSource<'_>,
     selection: AigNodeSelection,
 ) -> Result<OpcodeAreaTableReport, String> {
     let pir_info_by_id = collect_pir_info_by_id(f)?;
@@ -352,7 +395,7 @@ fn build_opcode_area_table_report_with_selection(
     );
 
     Ok(OpcodeAreaTableReport {
-        function_name: f.name.clone(),
+        function_name: f.graph.name.clone(),
         total_aig_node_count: selected_and_nodes.total_aig_node_count,
         selected_aig_node_count: selected_and_nodes.selected_and_nodes.len(),
         critical_path_depth_nodes: selected_and_nodes.critical_path_depth_nodes,
@@ -370,6 +413,33 @@ mod tests {
     };
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use xlsynth_pir::ir_parser;
+
+    #[test]
+    fn block_attribution_renders_real_ports_without_function_returns() {
+        let mut block = xlsynth_pir::ir::Block::new("b");
+        let input = block
+            .add_input_port("x", xlsynth_pir::ir::Type::Bits(8))
+            .unwrap();
+        block.add_output_port("y", input).unwrap();
+        let info = super::collect_pir_info_by_id((&block).into()).unwrap();
+        assert_eq!(
+            info.into_iter()
+                .map(|(id, node)| (id, node.opcode, node.ir_text))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    1,
+                    "input_port".to_string(),
+                    "x: bits[8] = input_port(name=x)".to_string()
+                ),
+                (
+                    2,
+                    "output_port".to_string(),
+                    "y: () = output_port(x: bits[8], name=y)".to_string()
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn test_build_area_table_report_counts_live_and_nodes() {

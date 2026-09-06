@@ -1,0 +1,14 @@
+package no_op_eco
+
+block single(clk: clock, x: bits[8], y: bits[8]) {
+  x: bits[8] = input_port(name=x, id=1)
+  inverted: bits[8] = not(x, id=2)
+  y: () = output_port(inverted, name=y, id=3)
+}
+
+top block multiple(x: bits[129], y: bits[129], z: bits[129]) {
+  x: bits[129] = input_port(name=x, id=11)
+  inverted: bits[129] = not(x, id=12)
+  y: () = output_port(x, name=y, id=13)
+  z: () = output_port(inverted, name=z, id=14)
+}

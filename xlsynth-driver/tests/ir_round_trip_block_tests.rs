@@ -119,7 +119,7 @@ block attr_test(a: bits[1], out: bits[1]) {
   out: () = output_port(a, name=out, id=2, pos=[(0,1,0)])
 }
 "#;
-    let want = r#"package my_test
+    let want_stripped = r#"package my_test
 
 #[signature("""""")]
 block attr_test(a: bits[1], out: bits[1]) {
@@ -134,7 +134,7 @@ block attr_test(a: bits[1], out: bits[1]) {
     std::fs::write(&path, input).unwrap();
 
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
-    // Without strip flag
+    // Positions belong to actual input/output nodes and survive by default.
     let out1 = std::process::Command::new(driver)
         .arg("ir-round-trip")
         .arg(path.to_str().unwrap())
@@ -142,9 +142,9 @@ block attr_test(a: bits[1], out: bits[1]) {
         .unwrap();
     assert!(out1.status.success());
     let s1 = String::from_utf8_lossy(&out1.stdout);
-    assert_eq!(s1, want);
+    assert_eq!(s1, input);
 
-    // With strip-pos-attrs flag (should be the same for blocks)
+    // Stripping positions applies to data-port nodes as well as computations.
     let out2 = std::process::Command::new(driver)
         .arg("ir-round-trip")
         .arg(path.to_str().unwrap())
@@ -154,7 +154,7 @@ block attr_test(a: bits[1], out: bits[1]) {
         .unwrap();
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
-    assert_eq!(s2, want);
+    assert_eq!(s2, want_stripped);
 }
 
 #[test]

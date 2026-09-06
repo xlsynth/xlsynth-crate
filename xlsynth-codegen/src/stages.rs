@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use xlsynth_pir::ir::{
-    BlockMetadata, Fn, InstantiationKind, NodePayload, NodeRef, Package, PackageMember,
+    Block, InstantiationKind, NodeGraph, NodePayload, NodeRef, Package, PackageMember,
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
 
@@ -29,32 +29,23 @@ pub(crate) struct StageLayout {
 /// Reconstructs feed-forward stages without changing the block's registers.
 pub(crate) fn reconstruct_stages(
     package: &Package,
-    func: &Fn,
-    metadata: &BlockMetadata,
+    block: &Block,
 ) -> Result<StageLayout, BlockCodegenError> {
-    if func.nodes.is_empty() {
+    if block.nodes.is_empty() {
         return Ok(StageLayout {
             stages: vec![Stage::default()],
             node_stages: Vec::new(),
         });
     }
 
-    let node_count = func.nodes.len();
-    let synthetic_output_tuple = if metadata.output_names.len() != 1 {
-        func.ret_node_ref
-    } else {
-        None
-    };
+    let node_count = block.nodes.len();
     let mut graph: Vec<Vec<(usize, isize)>> = vec![Vec::new(); node_count];
     let mut users: Vec<Vec<(usize, isize)>> = vec![Vec::new(); node_count];
     let mut register_reads: BTreeMap<&str, usize> = BTreeMap::new();
     let mut instantiation_inputs: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut instantiation_outputs: BTreeMap<&str, Vec<(usize, &str)>> = BTreeMap::new();
 
-    for (index, node) in func.nodes.iter().enumerate() {
-        if synthetic_output_tuple == Some(NodeRef { index }) {
-            continue;
-        }
+    for (index, node) in block.nodes.iter().enumerate() {
         match &node.payload {
             NodePayload::RegisterRead { register } => {
                 register_reads.insert(register.as_str(), index);
@@ -84,7 +75,7 @@ pub(crate) fn reconstruct_stages(
         }
     }
 
-    for instance in &metadata.instantiations {
+    for instance in &block.instantiations {
         let Some(inputs) = instantiation_inputs.get(instance.name.as_str()) else {
             continue;
         };
@@ -92,13 +83,11 @@ pub(crate) fn reconstruct_stages(
             continue;
         };
         let output_delays = if instance.kind == InstantiationKind::Block {
-            let (child, child_metadata) = package
+            let child = package
                 .members
                 .iter()
                 .find_map(|member| match member {
-                    PackageMember::Block { func, metadata } if func.name == instance.block => {
-                        Some((func, metadata))
-                    }
+                    PackageMember::Block(block) if block.name == instance.block => Some(block),
                     _ => None,
                 })
                 .ok_or_else(|| {
@@ -107,22 +96,15 @@ pub(crate) fn reconstruct_stages(
                         instance.block
                     ))
                 })?;
-            let child_layout = reconstruct_stages(package, child, child_metadata)?;
-            let output_nodes = if child_metadata.output_names.len() == 1 {
-                child.ret_node_ref.into_iter().collect::<Vec<_>>()
-            } else if let Some(ret) = child.ret_node_ref {
-                match &child.get_node(ret).payload {
-                    NodePayload::Tuple(nodes) => nodes.clone(),
-                    _ => Vec::new(),
-                }
-            } else {
-                Vec::new()
-            };
-            child_metadata
-                .output_names
-                .iter()
-                .zip(output_nodes)
-                .map(|(name, node)| (name.as_str(), child_layout.node_stages[node.index]))
+            let child_layout = reconstruct_stages(package, child)?;
+            child
+                .output_ports()
+                .map(|port| {
+                    (
+                        child.port_name(port),
+                        child_layout.node_stages[child.output_value(port).index],
+                    )
+                })
                 .collect::<BTreeMap<_, _>>()
         } else {
             BTreeMap::new()
@@ -136,12 +118,12 @@ pub(crate) fn reconstruct_stages(
         }
     }
 
-    for (index, node) in func.nodes.iter().enumerate() {
+    for (index, node) in block.nodes.iter().enumerate() {
         if let NodePayload::RegisterWrite { register, .. } = &node.payload {
             let Some(&read_index) = register_reads.get(register.as_str()) else {
                 return Err(BlockCodegenError::InvalidBlock(format!(
                     "register `{register}` in block `{}` has no register_read",
-                    func.name
+                    block.name
                 )));
             };
             graph[index].push((read_index, 1));
@@ -164,7 +146,7 @@ pub(crate) fn reconstruct_stages(
             return Err(BlockCodegenError::NotPipeline(format!(
                 "block `{}` cannot use layout=pipeline: register feedback or uneven \
                  register layering prevents feed-forward stage reconstruction; use layout=none",
-                func.name
+                block.name
             )));
         }
         for &(target, distance) in &graph[source] {
@@ -177,13 +159,12 @@ pub(crate) fn reconstruct_stages(
         }
     }
 
-    let topological = get_topological(func);
-    let constant_only = constant_only_nodes(func, &topological);
+    let topological = get_topological(block);
+    let constant_only = constant_only_nodes(block, &topological);
     for node_ref in topological.iter().rev().copied() {
-        if synthetic_output_tuple == Some(node_ref)
-            || users[node_ref.index].is_empty()
+        if users[node_ref.index].is_empty()
             || matches!(
-                func.get_node(node_ref).payload,
+                block.get_node(node_ref).payload,
                 NodePayload::RegisterRead { .. } | NodePayload::RegisterWrite { .. }
             )
         {
@@ -202,13 +183,10 @@ pub(crate) fn reconstruct_stages(
         .collect::<Vec<_>>();
     let mut result = vec![Stage::default(); max_stage + 1];
     for node_ref in topological {
-        if synthetic_output_tuple == Some(node_ref) {
-            continue;
-        }
         let stage_index = node_stages[node_ref.index];
         let stage = &mut result[stage_index];
-        match &func.get_node(node_ref).payload {
-            NodePayload::Nil | NodePayload::GetParam(_) => {
+        match &block.get_node(node_ref).payload {
+            NodePayload::Nil | NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
                 // Inputs are represented by module ports, outside stage
                 // sections.
             }
@@ -224,7 +202,7 @@ pub(crate) fn reconstruct_stages(
                     return Err(BlockCodegenError::NotPipeline(format!(
                         "block `{}` cannot use layout=pipeline: register `{register}` \
                          crosses incompatible pipeline stages; use layout=none",
-                        func.name
+                        block.name
                     )));
                 }
                 stage.register_writes.push(node_ref);
@@ -240,10 +218,10 @@ pub(crate) fn reconstruct_stages(
 }
 
 /// Recognizes pure constant cones without evaluating or rewriting the graph.
-fn constant_only_nodes(func: &Fn, topological: &[NodeRef]) -> Vec<bool> {
-    let mut constant_only = vec![false; func.nodes.len()];
+fn constant_only_nodes(graph: &NodeGraph, topological: &[NodeRef]) -> Vec<bool> {
+    let mut constant_only = vec![false; graph.nodes.len()];
     for &node_ref in topological {
-        let payload = &func.get_node(node_ref).payload;
+        let payload = &graph.get_node(node_ref).payload;
         constant_only[node_ref.index] = match payload {
             NodePayload::Literal(_)
             | NodePayload::Tuple(_)
@@ -277,6 +255,8 @@ fn constant_only_nodes(func: &Fn, topological: &[NodeRef]) -> Vec<bool> {
                 .all(|operand| constant_only[operand.index]),
             NodePayload::Nil
             | NodePayload::GetParam(_)
+            | NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. }
             | NodePayload::RegisterRead { .. }
             | NodePayload::RegisterWrite { .. }
             | NodePayload::InstantiationInput { .. }

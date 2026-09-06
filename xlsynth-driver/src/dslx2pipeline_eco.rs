@@ -11,9 +11,9 @@ use crate::tools::{
     run_block_to_verilog, run_codegen_pipeline, run_ir_converter_main, run_opt_main,
 };
 use regex::Regex;
+use xlsynth_pir::block2fn::{combinational_block_to_fn, replace_combinational_block_logic};
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
-use xlsynth_pir::ir::PackageMember;
-use xlsynth_pir::matching_ged::{apply_block_edits, compute_block_edit, format_ir_edits};
+use xlsynth_pir::matching_ged::{apply_fn_edits, compute_fn_edit, format_ir_edits};
 
 // Searchs the given IR file for registers and exits the process with an error
 // if found.
@@ -174,28 +174,24 @@ fn dslx2pipeline_eco(
     let new_block = new_block_ir.get_block(verilog_module_name).unwrap();
 
     // Compute the edit.
-    let (old_name, old_fn, new_fn) = match (baseline_block, new_block) {
-        (PackageMember::Block { func: o, .. }, PackageMember::Block { func: n, .. }) => {
-            (o.name.clone(), o, n)
-        }
-        _ => unreachable!("get_top_block should return a Block"),
-    };
-    let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-    let edits = compute_block_edit(baseline_block, new_block, &mut selector).unwrap();
-    let patched_block = apply_block_edits(baseline_block, &edits).unwrap();
+    let old_name = baseline_block.name.clone();
+    let old_fn =
+        combinational_block_to_fn(baseline_block).expect("ECO requires a combinational block");
+    let new_fn = combinational_block_to_fn(new_block).expect("ECO requires a combinational block");
+    let mut selector = GreedyMatchSelector::new(&old_fn, &new_fn);
+    let edits = compute_fn_edit(&old_fn, &new_fn, &mut selector).unwrap();
+    let patched_fn = apply_fn_edits(&old_fn, &edits).unwrap();
+    let patched_block = replace_combinational_block_logic(baseline_block, patched_fn).unwrap();
 
     let edits_path = temp_dir.path().join("edits.txt");
-    let edits_str = format_ir_edits(old_fn, &edits);
+    let edits_str = format_ir_edits(&old_fn, &edits);
     std::fs::write(&edits_path, edits_str.to_string()).unwrap();
     if let Some(path) = edits_debug_out {
         std::fs::write(path, edits_str.as_str()).unwrap();
     }
 
     // Set the patched block to top, and write out the patched block IR.
-    let patched_block_name = match &patched_block {
-        PackageMember::Block { func, .. } => func.name.as_str(),
-        _ => unreachable!("patched_block should be a Block"),
-    };
+    let patched_block_name = patched_block.name.as_str();
     baseline_block_ir.set_top_block(patched_block_name).unwrap();
     let patched_block_ir_path = temp_dir.path().join("patched.block.ir");
     baseline_block_ir
