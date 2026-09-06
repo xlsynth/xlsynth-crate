@@ -176,33 +176,20 @@ pub struct ReadyNode {
 /// Computes MatchNodes actions that pair parameters (Param nodes) in `old`
 /// and `new` functions by parameter name.
 pub fn compute_parameter_matches(old: &Fn, new: &Fn) -> Vec<MatchAction> {
-    let mut old_param_to_idx: HashMap<String, usize> = HashMap::new();
-    for (idx, node) in old.nodes.iter().enumerate() {
-        if let crate::ir::NodePayload::Param = node.payload {
-            old_param_to_idx.insert(node.param_name().to_string(), idx);
-        }
-    }
-    let mut new_param_to_idx: HashMap<String, usize> = HashMap::new();
-    for (idx, node) in new.nodes.iter().enumerate() {
-        if let crate::ir::NodePayload::Param = node.payload {
-            new_param_to_idx.insert(node.param_name().to_string(), idx);
-        }
-    }
+    let new_params_by_name: HashMap<&str, NodeRef> = new
+        .params
+        .iter()
+        .map(|&node| (new.get_node(node).param_name(), node))
+        .collect();
 
     let mut matches: Vec<MatchAction> = Vec::new();
-    for op in old.param_nodes() {
-        if let (Some(&oi), Some(&ni)) = (
-            old_param_to_idx.get(op.param_name()),
-            new_param_to_idx.get(op.param_name()),
-        ) {
+    for &old_ref in &old.params {
+        if let Some(&new_ref) = new_params_by_name.get(old.get_node(old_ref).param_name()) {
             matches.push(MatchAction::MatchNodes {
-                old_index: OldNodeRef(oi),
-                new_index: NewNodeRef(ni),
+                old_index: OldNodeRef(old_ref.index),
+                new_index: NewNodeRef(new_ref.index),
                 new_operands: Vec::new(),
-                is_new_return: new
-                    .ret_node_ref
-                    .map(|nr| nr.index)
-                    .map_or(false, |ri| ri == ni),
+                is_new_return: new.ret_node_ref == Some(new_ref),
             });
         }
     }

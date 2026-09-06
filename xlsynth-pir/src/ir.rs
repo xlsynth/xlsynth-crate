@@ -1315,52 +1315,7 @@ impl Fn {
     /// Node zero is the reserved Nil sentinel. Parameter order is carried by
     /// `params`, not by physical node positions or textual IDs.
     pub fn check_pir_layout_invariants(&self) -> Result<(), String> {
-        if !self
-            .nodes
-            .first()
-            .is_some_and(|node| matches!(node.payload, NodePayload::Nil))
-        {
-            return Err(format!(
-                "PIR layout invariant violated in '{}': node[0] must be Nil",
-                self.name
-            ));
-        }
-        let mut seen = std::collections::HashSet::new();
-        for &reference in &self.params {
-            let node = self.nodes.get(reference.index).ok_or_else(|| {
-                format!(
-                    "function '{}' references missing parameter node {}",
-                    self.name, reference.index
-                )
-            })?;
-            if !matches!(node.payload, NodePayload::Param) {
-                return Err(format!(
-                    "function '{}' signature references non-parameter node {}",
-                    self.name, reference.index
-                ));
-            }
-            if node.name.as_deref().is_none_or(str::is_empty) {
-                return Err(format!(
-                    "function '{}' has an unnamed parameter node {}",
-                    self.name, reference.index
-                ));
-            }
-            if !seen.insert(reference) {
-                return Err(format!(
-                    "function '{}' repeats parameter node {}",
-                    self.name, reference.index
-                ));
-            }
-        }
-        for (index, node) in self.nodes.iter().enumerate() {
-            if matches!(node.payload, NodePayload::Param) && !seen.contains(&NodeRef { index }) {
-                return Err(format!(
-                    "function '{}' has parameter node {} absent from its signature",
-                    self.name, index
-                ));
-            }
-        }
-        Ok(())
+        crate::ir_verify::verify_function_signature(self).map_err(|error| error.to_string())
     }
 
     /// Drops unused parameters by name, rejecting parameters used by the body

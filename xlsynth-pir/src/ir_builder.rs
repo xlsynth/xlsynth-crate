@@ -11,7 +11,8 @@ use crate::ir_deduce::deduce_result_type;
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
 use crate::ir_utils::operands;
 use crate::ir_verify::{
-    verify_function, verify_function_in_package, verify_node_xls_semantics, verify_package,
+    verify_function, verify_function_in_package, verify_function_signature,
+    verify_node_xls_semantics, verify_package,
 };
 
 mod function_ops;
@@ -430,6 +431,8 @@ impl FnBuilder {
     /// succeeds.
     fn check_callee(&self, callee: &ir::Fn) -> Result<(), BuilderError> {
         check_name(&callee.name)?;
+        verify_function_signature(callee)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
         if callee.name == self.function.name {
             return Err(BuilderError::InvalidOperation(format!(
                 "recursive reference to '{}' is not allowed",

@@ -285,13 +285,10 @@ fn block2sv_extension_operators_match_pir_evaluation() {
         );
         let mut connections = Vec::new();
         for parameter in func.param_nodes() {
+            let name = parameter.param_name();
             let width = parameter.ty.bit_count();
-            testbench.push_str(&format!(
-                "  logic [{}:0] stimulus_{};\n",
-                width - 1,
-                parameter.name
-            ));
-            connections.push(format!(".{}(stimulus_{})", parameter.name, parameter.name));
+            testbench.push_str(&format!("  logic [{}:0] stimulus_{name};\n", width - 1));
+            connections.push(format!(".{name}(stimulus_{name})"));
         }
         connections.push(format!(
             ".{}(actual)",
@@ -326,7 +323,7 @@ fn block2sv_extension_operators_match_pir_evaluation() {
                 };
                 testbench.push_str(&format!(
                     "    stimulus_{} = {width}'h{value:x};\n",
-                    parameter.name
+                    parameter.param_name()
                 ));
                 arguments.push(
                     xlsynth_pir::IrValue::make_ubits(width, value)

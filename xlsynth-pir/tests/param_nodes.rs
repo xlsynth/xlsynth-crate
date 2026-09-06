@@ -16,9 +16,13 @@ use xlsynth_pir::ir_utils::{
     compact_and_toposort_in_place, compact_and_toposort_with_mapping_in_place,
     compact_graph_and_toposort_with_mapping_in_place, remap_payload_with,
 };
-use xlsynth_pir::ir_verify::{VerifyError, verify_function};
+use xlsynth_pir::ir_verify::{
+    VerifyError, verify_block_in_package, verify_function, verify_function_in_package,
+    verify_function_signature, verify_package,
+};
+use xlsynth_pir::matching_ged::{MatchAction, NewNodeRef, OldNodeRef, compute_parameter_matches};
 use xlsynth_pir::node_hashing::compute_function_structural_hash;
-use xlsynth_pir::{FnBuilder, IrValue};
+use xlsynth_pir::{BuilderError, FnBuilder, IrValue};
 
 /// Interleaves a parameter with body nodes and reverses two parameter
 /// positions.
@@ -367,4 +371,224 @@ fn verifier_rejects_invalid_signature_references() {
         Err(VerifyError::DuplicateTextId { .. })
     ));
     assert!(matches!(function.get_param(0).payload, NodePayload::Param));
+}
+
+#[test]
+fn layout_and_verifier_share_signature_checks() {
+    let mutations: [fn(&mut ir::Fn); 8] = [
+        |f| f.nodes.clear(),
+        |f| f.nodes[0] = f.get_param(0).clone(),
+        |f| f.params[0] = NodeRef { index: usize::MAX },
+        |f| f.params[0] = NodeRef { index: 0 },
+        |f| f.params.push(f.params[0]),
+        |f| {
+            f.params.pop();
+        },
+        |f| {
+            let parameter = f.params[0];
+            f.get_node_mut(parameter).name = None;
+        },
+        |f| {
+            let parameter = f.params[0];
+            f.get_node_mut(parameter).name = f.get_param(1).name.clone();
+        },
+    ];
+    for mutate in mutations {
+        let mut function = interleaved_function();
+        mutate(&mut function);
+        let expected = verify_function_signature(&function).unwrap_err();
+        assert_eq!(
+            function.check_pir_layout_invariants(),
+            Err(expected.to_string())
+        );
+        assert_eq!(verify_function(&function), Err(expected));
+    }
+    // A signature can be checked independently of body topology or completion.
+    let mut unfinished = interleaved_function();
+    unfinished.ret_node_ref = None;
+    unfinished.nodes[2].payload = NodePayload::Unop(Unop::Identity, NodeRef { index: 6 });
+    verify_function_signature(&unfinished).unwrap();
+    unfinished.check_pir_layout_invariants().unwrap();
+}
+
+#[test]
+fn invalid_callee_signatures_return_errors_in_either_member_order() {
+    let package = Parser::new(
+        r#"package test
+top fn caller(x: bits[8] id=1) -> bits[8] {
+  ret call: bits[8] = invoke(x, to_apply=callee, id=2)
+}
+fn callee(y: bits[8] id=3) -> bits[8] {
+  ret y: bits[8] = param(name=y, id=3)
+}
+"#,
+    )
+    .parse_package()
+    .unwrap();
+    verify_package(&package).unwrap();
+    for index in [0, usize::MAX] {
+        let mut invalid = package.clone();
+        invalid.get_fn_mut("callee").unwrap().params[0] = NodeRef { index };
+        for _ in 0..2 {
+            let expected = VerifyError::MissingParamNode {
+                func: "callee".to_string(),
+                node_ref: NodeRef { index },
+            };
+            assert_eq!(
+                verify_function_in_package(invalid.get_fn("caller").unwrap(), &invalid)
+                    .unwrap_err(),
+                expected,
+            );
+            assert_eq!(verify_package(&invalid).unwrap_err(), expected);
+            invalid.members.reverse();
+        }
+    }
+}
+
+#[test]
+fn invalid_loop_body_signatures_return_errors_before_type_checks() {
+    let package = Parser::new(
+        r#"package test
+top fn caller(x: bits[8] id=1) -> bits[8] {
+  ret loop: bits[8] = counted_for(x, trip_count=2, stride=1, body=body, id=2)
+}
+fn body(i: bits[1] id=3, carry: bits[8] id=4) -> bits[8] {
+  ret carry: bits[8] = param(name=carry, id=4)
+}
+"#,
+    )
+    .parse_package()
+    .unwrap();
+    verify_package(&package).unwrap();
+    for parameter in 0..2 {
+        let mut invalid = package.clone();
+        let missing = NodeRef { index: usize::MAX };
+        invalid.get_fn_mut("body").unwrap().params[parameter] = missing;
+        let expected = VerifyError::MissingParamNode {
+            func: "body".to_string(),
+            node_ref: missing,
+        };
+        assert_eq!(
+            verify_function_in_package(invalid.get_fn("caller").unwrap(), &invalid).unwrap_err(),
+            expected,
+        );
+        assert_eq!(verify_package(&invalid).unwrap_err(), expected);
+    }
+}
+
+#[test]
+fn invalid_external_signatures_return_errors_before_port_mapping() {
+    let mut package = Parser::new(r#"package test
+top block wrapper(input: bits[8], result: bits[8]) {
+  instantiation external_instance(foreign_function=external_fn, kind=extern)
+  input: bits[8] = input_port(name=input, id=1)
+  instantiation_input.2: () = instantiation_input(input, instantiation=external_instance, port_name=value, id=2)
+  instantiation_output.3: bits[8] = instantiation_output(instantiation=external_instance, port_name=return, id=3)
+  result: () = output_port(instantiation_output.3, name=result, id=4)
+}
+fn external_fn(value: bits[8] id=5) -> bits[8] {
+  ret value: bits[8] = param(name=value, id=5)
+}
+"#).parse_package().unwrap();
+    verify_package(&package).unwrap();
+    let missing = NodeRef { index: usize::MAX };
+    package.get_fn_mut("external_fn").unwrap().params[0] = missing;
+    let expected = VerifyError::MissingParamNode {
+        func: "external_fn".to_string(),
+        node_ref: missing,
+    };
+    assert_eq!(
+        verify_block_in_package(package.get_block("wrapper").unwrap(), &package, 0).unwrap_err(),
+        expected,
+    );
+    assert_eq!(verify_package(&package).unwrap_err(), expected);
+}
+
+#[test]
+fn builder_rejects_invalid_callee_signatures_without_becoming_unusable() {
+    let mut callee = interleaved_function();
+    let missing = NodeRef { index: usize::MAX };
+    callee.params[0] = missing;
+    let expected = BuilderError::InvalidOperation(
+        VerifyError::MissingParamNode {
+            func: callee.name.clone(),
+            node_ref: missing,
+        }
+        .to_string(),
+    );
+    let mut builder = FnBuilder::new("caller");
+    let arg = builder.param("x", Type::Bits(8)).unwrap();
+    assert_eq!(
+        builder.invoke(&callee, &[arg, arg, arg]).unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        builder.counted_for(arg, 2, 1, &callee, &[arg]).unwrap_err(),
+        expected
+    );
+    builder.build(arg).unwrap();
+}
+
+#[test]
+fn parameter_matches_follow_names_and_signature_order() {
+    let old = interleaved_function();
+    let mut new = old.clone();
+    compact_and_toposort_in_place(&mut new).unwrap();
+    new.params.reverse();
+    new.nodes[3].name = Some("new_only".to_string());
+    new.ret_node_ref = Some(NodeRef { index: 2 });
+    verify_function(&new).unwrap();
+    assert_eq!(
+        compute_parameter_matches(&old, &new),
+        vec![
+            MatchAction::MatchNodes {
+                old_index: OldNodeRef(3),
+                new_index: NewNodeRef(1),
+                new_operands: vec![],
+                is_new_return: false,
+            },
+            MatchAction::MatchNodes {
+                old_index: OldNodeRef(1),
+                new_index: NewNodeRef(2),
+                new_operands: vec![],
+                is_new_return: true,
+            },
+        ]
+    );
+}
+
+#[test]
+fn body_param_nodes_only_resolve_matching_signature_nodes() {
+    for (body, expected) in [
+        (
+            "ret y: bits[8] = param(name=y, id=2)",
+            "unknown parameter name in param node: y",
+        ),
+        (
+            "ret x: bits[8] = param(name=x, id=2)",
+            "param name/id mismatch: name=x id=2",
+        ),
+        (
+            "ret x: bits[16] = param(name=x, id=1)",
+            "param id=1 type mismatch: header bits[8] vs node bits[16]",
+        ),
+        (
+            r#"y: bits[8] = identity(x, id=2)
+  ret y: bits[8] = param(name=y, id=2)"#,
+            "param id=2 does not reference a signature parameter",
+        ),
+    ] {
+        let text = format!("fn f(x: bits[8] id=1) -> bits[8] {{\n  {body}\n}}");
+        assert_eq!(
+            Parser::new(&text).parse_fn().unwrap_err().to_string(),
+            format!("ParseError: {expected}")
+        );
+    }
+    let text = r#"fn f(x: bits[8] id=7) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=7)
+}"#;
+    let function = Parser::new(text).parse_fn().unwrap();
+    assert_eq!(function.nodes.len(), 2);
+    assert_eq!(function.ret_node_ref, Some(function.params[0]));
+    assert_eq!(function.to_string(), text);
 }

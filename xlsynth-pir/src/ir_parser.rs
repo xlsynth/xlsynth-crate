@@ -3722,51 +3722,40 @@ impl Parser {
         while !self.try_drop("}") {
             let is_ret = self.try_drop("ret ");
             let node = self.parse_node(&mut node_env)?;
-            // Special handling: avoid duplicating Param nodes if we've
-            // already created one for this param id from the
-            // function signature. If a duplicate param(...) appears
-            // (e.g., for a return), just reference the existing
-            // node instead of adding a new one.
-            let mut node_ref = ir::NodeRef { index: nodes.len() };
-            let is_param = matches!(node.payload, ir::NodePayload::Param);
-            if is_param {
-                if let Some(existing) = node_env
+            let node_ref = if matches!(node.payload, ir::NodePayload::Param) {
+                // A body param(...) refers to an existing signature node;
+                // parse_node has already checked that its name and ID agree.
+                let existing = node_env
                     .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
                     .copied()
-                {
-                    // If a Param node with this id already exists (from the
-                    // function signature), ensure the textual node's type
-                    // matches the existing param node type.
-                    // If not, this is a parse-time
-                    // error (mirrors upstream xlsynth behavior).
-                    let existing_node = &nodes[existing.index];
-                    if !matches!(existing_node.payload, ir::NodePayload::Param) {
-                        return Err(ParseError::new(format!(
+                    .ok_or_else(|| {
+                        ParseError::new(format!(
                             "param id={} does not reference a signature parameter",
                             node.text_id
-                        )));
-                    }
-                    let existing_ty = &existing_node.ty;
-                    if existing_ty != &node.ty {
-                        return Err(ParseError::new(format!(
-                            "param id={} type mismatch: header {} vs node {}",
-                            node.text_id, existing_ty, node.ty
-                        )));
-                    }
-                    // Do not add a duplicate; use the existing node ref.
-                    node_ref = existing;
-                } else {
-                    node_env
-                        .add(node.name.clone(), node.text_id, node_ref)
-                        .map_err(ParseError::new)?;
-                    nodes.push(node);
+                        ))
+                    })?;
+                let existing_node = &nodes[existing.index];
+                if !matches!(existing_node.payload, ir::NodePayload::Param) {
+                    return Err(ParseError::new(format!(
+                        "param id={} does not reference a signature parameter",
+                        node.text_id
+                    )));
                 }
+                if existing_node.ty != node.ty {
+                    return Err(ParseError::new(format!(
+                        "param id={} type mismatch: header {} vs node {}",
+                        node.text_id, existing_node.ty, node.ty
+                    )));
+                }
+                existing
             } else {
+                let node_ref = ir::NodeRef { index: nodes.len() };
                 node_env
                     .add(node.name.clone(), node.text_id, node_ref)
                     .map_err(ParseError::new)?;
                 nodes.push(node);
-            }
+                node_ref
+            };
             if is_ret {
                 ret_node_ref = Some(node_ref);
             }

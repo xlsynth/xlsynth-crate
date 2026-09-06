@@ -799,7 +799,7 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
     validate_fn_with(
         f,
         Some(parent),
-        |name: &str| parent.get_fn_type(name).map(|ft| ft.return_type),
+        |name: &str| parent.get_fn(name).map(|callee| callee.ret_ty.clone()),
         |_register| None,
         None,
         false,
@@ -844,9 +844,8 @@ pub fn validate_block(
     let instantiation_info = build_instantiation_info(f, &prior_blocks, parent)?;
     validate_graph_with(
         f,
-        &[],
         Some(parent),
-        |name: &str| parent.get_fn_type(name).map(|ft| ft.return_type),
+        |name: &str| parent.get_fn(name).map(|callee| callee.ret_ty.clone()),
         |register| {
             f.registers
                 .iter()
@@ -1090,6 +1089,63 @@ fn validate_block_registers(f: &Block) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Checks the signature before any caller dereferences its parameter nodes.
+pub(super) fn validate_fn_signature(f: &Fn) -> Result<(), ValidationError> {
+    let invalid_param = |node_index, reason: &str| ValidationError::NodeSemanticViolation {
+        func: f.name.clone(),
+        node_index,
+        reason: reason.to_string(),
+    };
+    if !f
+        .nodes
+        .first()
+        .is_some_and(|node| matches!(node.payload, NodePayload::Nil))
+    {
+        return Err(invalid_param(
+            0,
+            "function graph must start with a Nil sentinel",
+        ));
+    }
+    let mut param_refs = HashSet::new();
+    let mut param_names = HashSet::new();
+    for &param_ref in &f.params {
+        let node = f
+            .nodes
+            .get(param_ref.index)
+            .filter(|node| matches!(node.payload, NodePayload::Param))
+            .ok_or_else(|| ValidationError::MissingParamNode {
+                func: f.name.clone(),
+                node_ref: param_ref,
+            })?;
+        if !param_refs.insert(param_ref) {
+            return Err(invalid_param(
+                param_ref.index,
+                "parameter reference occurs more than once in the signature",
+            ));
+        }
+        let name = node
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| invalid_param(param_ref.index, "parameter node must have a name"))?;
+        if !param_names.insert(name) {
+            return Err(ValidationError::DuplicateParamName {
+                func: f.name.clone(),
+                param_name: name.to_string(),
+            });
+        }
+    }
+    for (index, node) in f.nodes.iter().enumerate() {
+        if matches!(node.payload, NodePayload::Param) && !param_refs.contains(&NodeRef { index }) {
+            return Err(ValidationError::ExtraParamNode {
+                func: f.name.clone(),
+                text_id: node.text_id,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Validates a function within the context of its parent package, using a
 /// dependency-injected resolver for callee return types.
 pub(crate) fn validate_fn_with<F, R>(
@@ -1104,9 +1160,9 @@ where
     F: std::ops::Fn(&str) -> Option<Type>,
     R: std::ops::Fn(&str) -> Option<Type>,
 {
+    validate_fn_signature(f)?;
     validate_graph_with(
         f,
-        &f.params,
         parent,
         callee_ret_type_resolver,
         register_type_resolver,
@@ -1134,7 +1190,6 @@ where
 
 fn validate_graph_with<F, R>(
     f: &NodeGraph,
-    params: &[NodeRef],
     parent: Option<&Package>,
     callee_ret_type_resolver: F,
     register_type_resolver: R,
@@ -1145,8 +1200,10 @@ where
     F: std::ops::Fn(&str) -> Option<Type>,
     R: std::ops::Fn(&str) -> Option<Type>,
 {
-    // Track ids used by non-parameter nodes to ensure uniqueness.
+    // Track IDs of all non-Nil nodes, including parameters.
     let mut seen_text_ids: HashSet<usize> = HashSet::new();
+    // A callee may be referenced by many nodes; check its signature only once.
+    let mut checked_callees = HashSet::new();
     let mut used_instantiation_inputs: std::collections::HashMap<String, HashSet<String>> =
         std::collections::HashMap::new();
     let mut used_instantiation_outputs: std::collections::HashMap<String, HashSet<String>> =
@@ -1155,39 +1212,6 @@ where
         for inst_name in info.keys() {
             used_instantiation_inputs.insert(inst_name.clone(), HashSet::new());
             used_instantiation_outputs.insert(inst_name.clone(), HashSet::new());
-        }
-    }
-    let mut param_refs = HashSet::new();
-    let mut param_names = HashSet::new();
-    for &param_ref in params {
-        let invalid_param = |reason: &str| ValidationError::NodeSemanticViolation {
-            func: f.name.clone(),
-            node_index: param_ref.index,
-            reason: reason.to_string(),
-        };
-        let node = f
-            .nodes
-            .get(param_ref.index)
-            .filter(|node| matches!(node.payload, NodePayload::Param))
-            .ok_or_else(|| ValidationError::MissingParamNode {
-                func: f.name.clone(),
-                node_ref: param_ref,
-            })?;
-        if !param_refs.insert(param_ref) {
-            return Err(invalid_param(
-                "parameter reference occurs more than once in the signature",
-            ));
-        }
-        let name = node
-            .name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| invalid_param("parameter node must have a name"))?;
-        if !param_names.insert(name) {
-            return Err(ValidationError::DuplicateParamName {
-                func: f.name.clone(),
-                param_name: name.to_string(),
-            });
         }
     }
     for (i, node) in f.nodes.iter().enumerate() {
@@ -1237,16 +1261,9 @@ where
                     reason: "port nodes are only permitted in blocks".to_string(),
                 });
             }
-            NodePayload::Param => {
-                if !param_refs.contains(&NodeRef { index: i }) {
-                    return Err(ValidationError::ExtraParamNode {
-                        func: f.name.clone(),
-                        text_id: node.text_id,
-                    });
-                }
-            }
             _ => {
-                // Other payloads have no signature membership requirement.
+                // Function signatures and block interfaces are checked by the
+                // owner.
             }
         }
         // Ensure all operands refer to already defined nodes.
@@ -1300,6 +1317,9 @@ where
                         callee: to_apply.clone(),
                     });
                 };
+                if checked_callees.insert(callee.name.as_str()) {
+                    validate_fn_signature(callee)?;
+                }
                 if operands.len() != callee.params.len() {
                     return Err(ValidationError::NodeSemanticViolation {
                         func: f.name.clone(),
@@ -1347,6 +1367,9 @@ where
                         callee: body.clone(),
                     });
                 };
+                if checked_callees.insert(body_fn.name.as_str()) {
+                    validate_fn_signature(body_fn)?;
+                }
                 let expected_param_count = 2 + invariant_args.len();
                 if body_fn.params.len() != expected_param_count {
                     return Err(ValidationError::NodeSemanticViolation {
@@ -1800,9 +1823,10 @@ fn build_instantiation_info(
             let foreign_function = parent
                 .get_fn(&inst.block)
                 .expect("foreign function missing after target validation");
+            validate_fn_signature(foreign_function)?;
             let mut input_types = std::collections::HashMap::new();
             for param in foreign_function.param_nodes() {
-                collect_external_port_types(&param.param_name(), &param.ty, &mut input_types);
+                collect_external_port_types(param.param_name(), &param.ty, &mut input_types);
             }
             let mut output_types = std::collections::HashMap::new();
             collect_external_port_types("return", &foreign_function.ret_ty, &mut output_types);
@@ -2427,16 +2451,19 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
         let mut pkg = parser.parse_package().unwrap();
         {
             let f = pkg.get_top_fn_mut().unwrap();
-            // Manually insert a duplicate Param node with the same id as
-            // 'x'.
+            // Add another signature parameter sharing x's textual ID. Its
+            // name and reference are distinct so the ID check is exercised.
             let text_id = f.get_param(0).text_id;
             let dup = ir::Node {
                 text_id,
-                name: f.get_param(0).name.clone(),
+                name: Some("y".to_string()),
                 ty: f.get_param(0).ty.clone(),
                 payload: ir::NodePayload::Param,
                 pos: None,
             };
+            f.params.push(NodeRef {
+                index: f.nodes.len(),
+            });
             f.nodes.push(dup);
         }
         let f_ro = pkg.get_top_fn().unwrap();
