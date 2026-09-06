@@ -225,6 +225,8 @@ xlsynth-driver gv2ir \
 
 Converts a techmapped gate-level netlist plus Liberty proto into an XLS block IR package. Cells are defined as separate blocks instantiated in the top block. The netlist must contain exactly one module. Preserved `assign` / `tran` statements are accepted only when they are wiring artifacts such as aliases, slices, concats, or literal tieoffs; top-level combinational assign logic must be technology-mapped into cells first.
 
+Module, top-level port, and instance names are legalized to XLS identifiers, with deterministic collision handling. Reserved words receive an underscore suffix: for example, a module named `top` produces package `top_` with top block `top_`. Valid, non-colliding names are preserved. Instance input connections are checked against their cell signatures; explicitly empty input connections remain tied to zero, while missing or incorrectly sized inputs are rejected.
+
 ```shell
 xlsynth-driver gv2block \
   --netlist ~/my_netlist.v \
@@ -3501,12 +3503,12 @@ If you request this flag without `--toolchain`, the driver will print an error a
 
 ### Supported Subcommands
 
-| Subcommand       | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
+| Subcommand | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
 | ---------------- | :-----------------------------: | :------------------------------: | :-------------------------------: |
-| `dslx2pipeline`  |               Yes               |               Yes                |                Yes                |
-| `dslx2ir`        |               Yes               |               Yes                |                Yes                |
-| `dslx-g8r-stats` |               Yes               |               Yes                |                Yes                |
-| `dslx2sv-types`  |               No                |               N/A                |                Yes                |
+| `dslx2pipeline` | Yes | Yes | Yes |
+| `dslx2ir` | Yes | Yes | Yes |
+| `dslx-g8r-stats` | Yes | Yes | Yes |
+| `dslx2sv-types` | No | N/A | Yes |
 
 ### Migration and Use
 

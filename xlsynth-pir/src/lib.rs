@@ -56,7 +56,8 @@ pub mod value;
 
 pub use aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
 pub use ir_builder::{
-    BValue, BuilderError, FnBuilder, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions,
+    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, NaryAddOptions,
+    NaryAddTerm, NormalizeLeftOptions, RegisterWriteOptions, ResetBehavior,
 };
 pub use ir_inline::{IrInlineBackend, IrInlineOptions, run_ir_inline_over_ir_text};
 pub use ir_values::{

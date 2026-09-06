@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Function operations with side effects, multioperand forms, and extensions.
+//! Shared function and block operations with side effects, multioperand forms,
+//! and extensions.
 
-use super::{BValue, BuilderError, FnBuilder};
+use super::{BValue, Builder, BuilderError, sealed};
 use crate::ir::{self, Binop, NaryOp, NodePayload, Type};
 
 /// One signed or unsigned contribution to an extended modular sum.
@@ -85,7 +86,7 @@ macro_rules! bitwise_all {
     };
 }
 
-impl FnBuilder {
+impl<S: sealed::State> Builder<S> {
     bitwise_all!(and_all, And);
     bitwise_all!(nand_all, Nand);
     bitwise_all!(or_all, Or);
@@ -335,7 +336,7 @@ impl FnBuilder {
         let value = self.array_index_multi(array, indices)?;
         let NodePayload::ArrayIndex {
             assumed_in_bounds, ..
-        } = &mut self.function.get_node_mut(value.node).payload
+        } = &mut self.graph.get_node_mut(value.node).payload
         else {
             unreachable!("array_index_multi builds an ArrayIndex node");
         };
@@ -356,7 +357,7 @@ impl FnBuilder {
         let value = self.array_update(array, update, indices)?;
         let NodePayload::ArrayUpdate {
             assumed_in_bounds, ..
-        } = &mut self.function.get_node_mut(value.node).payload
+        } = &mut self.graph.get_node_mut(value.node).payload
         else {
             unreachable!("array_update builds an ArrayUpdate node");
         };
@@ -394,12 +395,12 @@ mod tests {
         builder: &mut FnBuilder,
         operation: impl FnOnce(&mut FnBuilder) -> Result<BValue, BuilderError>,
     ) {
-        let nodes = builder.function.nodes.clone();
+        let nodes = builder.graph.nodes.clone();
         let last = builder.last_value();
         assert!(operation(builder).is_err());
         assert_eq!(builder.last_value(), last);
-        assert_eq!(builder.function.nodes.len(), nodes.len());
-        for (before, after) in nodes.iter().zip(&builder.function.nodes) {
+        assert_eq!(builder.graph.nodes.len(), nodes.len());
+        for (before, after) in nodes.iter().zip(&builder.graph.nodes) {
             assert_eq!(before.text_id, after.text_id);
             assert_eq!(before.name, after.name);
             assert_eq!(before.ty, after.ty);

@@ -1,0 +1,4 @@
+package empty
+
+top block empty() {
+}

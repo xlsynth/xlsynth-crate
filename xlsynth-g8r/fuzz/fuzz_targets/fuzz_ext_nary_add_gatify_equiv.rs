@@ -12,13 +12,10 @@ use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
 use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
-use xlsynth_pir::ir::{
-    self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload,
-    Package, PackageMember, Type,
-};
+use xlsynth_pir::ir::{self, ExtNaryAddArchitecture, Package, Type};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_verify;
-use xlsynth_pir::{IrBits, IrValue};
+use xlsynth_pir::{FnBuilder, IrBits, IrValue, NaryAddOptions, NaryAddTerm};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
 #[cfg(all(not(feature = "has-bitwuzla"), feature = "has-boolector"))]
@@ -259,83 +256,52 @@ fn make_literal_operand_source<R: Rng>(rng: &mut R) -> OperandSourceSample {
 
 /// Builds a generated sample as a one-function PIR package.
 fn build_ext_nary_add_package(sample: &ExtNaryAddFnSample) -> Package {
-    let mut nodes = Vec::new();
-    nodes.push(Node {
-        text_id: 0,
-        name: None,
-        ty: Type::nil(),
-        payload: NodePayload::Nil,
-        pos: None,
-    });
-    let mut params = Vec::with_capacity(sample.params.len());
-    for (index, param) in sample.params.iter().enumerate() {
-        params.push(ir::NodeRef { index: nodes.len() });
-        nodes.push(Node {
-            text_id: index + 1,
-            name: Some(format!("p{index}")),
-            ty: Type::Bits(param.width),
-            payload: NodePayload::Param,
-            pos: None,
-        });
-    }
-
-    let mut next_text_id = params.len() + 1;
+    let mut builder = FnBuilder::new(FUNCTION_NAME);
+    let params = sample
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            builder
+                .param(&format!("p{index}"), Type::Bits(param.width))
+                .expect("generated parameter should be valid")
+        })
+        .collect::<Vec<_>>();
     let mut terms = Vec::with_capacity(sample.terms.len());
     for (term_index, term) in sample.terms.iter().enumerate() {
         let operand = match term.source {
-            OperandSourceSample::Param { param_index } => ir::NodeRef {
-                index: param_index + 1,
-            },
+            OperandSourceSample::Param { param_index } => params[param_index],
             OperandSourceSample::Literal { width, value_bits } => {
-                let literal_ref = ir::NodeRef { index: nodes.len() };
-                nodes.push(Node {
-                    text_id: next_text_id,
-                    name: Some(format!("lit_{term_index}")),
-                    ty: Type::Bits(width),
-                    payload: NodePayload::Literal(make_bits_value(width, u64::from(value_bits))),
-                    pos: None,
-                });
-                next_text_id += 1;
-                literal_ref
+                let literal = builder
+                    .literal(make_bits_value(width, u64::from(value_bits)))
+                    .expect("generated literal should be valid");
+                builder
+                    .set_name(literal, &format!("lit_{term_index}"))
+                    .expect("generated literal name should be unique");
+                literal
             }
         };
-        terms.push(ExtNaryAddTerm {
+        terms.push(NaryAddTerm {
             operand,
             signed: term.signed,
             negated: term.negated,
         });
     }
-
-    let ret_node_ref = ir::NodeRef { index: nodes.len() };
-    nodes.push(Node {
-        text_id: next_text_id,
-        name: Some("r".to_string()),
-        ty: Type::Bits(sample.result_width),
-        payload: NodePayload::ExtNaryAdd {
-            terms,
-            arch: sample.arch,
-        },
-        pos: None,
-    });
-
-    let function = ir::Fn {
-        graph: xlsynth_pir::ir::NodeGraph {
-            name: FUNCTION_NAME.to_string(),
-            nodes,
-            outer_attrs: Vec::new(),
-            inner_attrs: Vec::new(),
-        },
-        params,
-        ret_ty: Type::Bits(sample.result_width),
-        ret_node_ref: Some(ret_node_ref),
-    };
-
-    Package {
-        name: PACKAGE_NAME.to_string(),
-        file_table: FileTable::new(),
-        members: vec![PackageMember::Function(function)],
-        top: Some((FUNCTION_NAME.to_string(), MemberType::Function)),
-    }
+    let result = builder
+        .ext_nary_add(
+            &terms,
+            NaryAddOptions {
+                bit_count: sample.result_width,
+                architecture: sample.arch,
+            },
+        )
+        .expect("generated ext_nary_add should be valid");
+    builder
+        .set_name(result, "r")
+        .expect("generated result name should be unique");
+    builder
+        .build_package(result, PACKAGE_NAME)
+        .expect("generated ext_nary_add package should be valid")
 }
 
 fn make_bits_value(width: usize, raw_value: u64) -> IrValue {

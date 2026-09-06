@@ -78,6 +78,62 @@ configuration for the larger extension signatures. Desugar extensions before
 passing their IR to upstream XLS tools. Block registers, ports, instantiations,
 and proc construction are outside this function builder's scope.
 
+## Block builder
+
+`xlsynth_pir::BlockBuilder` constructs `ir::Block` directly. It shares the
+checked arithmetic, aggregate, selection, effect, extension, `invoke`, and
+`counted_for` operations of `FnBuilder`. Its `BValue` handles are scoped to the
+builder; values cannot be mixed between function and block builders.
+
+```rust
+use xlsynth_pir::{BlockBuilder, RegisterWriteOptions, ir::Type};
+
+let mut builder = BlockBuilder::new("accumulator");
+builder.clock_port("clk")?;
+let input = builder.input_port("data", Type::Bits(32))?;
+let state = builder.register("state", Type::Bits(32), None)?;
+let current = builder.register_read(state)?;
+let next = builder.add(current, input)?;
+builder.register_write(state, next, RegisterWriteOptions::default())?;
+builder.output_port("result", current)?;
+let block = builder.build()?;
+```
+
+Inputs and outputs may be interleaved with ordinary operations. Port declaration
+order is preserved; output ports return unit-valued sink handles, while clocks
+allocate no graph node. `set_name` changes a port's node alias without changing
+its external name. `set_port_sv_type` sets or clears its SystemVerilog annotation.
+Blocks may have zero outputs, multiple outputs, or aggregate-valued ports.
+
+`register` returns a builder-scoped `BRegister`; `register_read` reuses its one
+read node. A finished register needs a clock, a read, and at least one write.
+Reset values must match the register type; use `set_reset(input, ResetBehavior)`
+to declare the block reset and supply a one-bit reset in `RegisterWriteOptions`.
+Multiple writes require load enables and the same reset operand; mutually
+exclusive enables remain the caller's responsibility.
+
+`instantiate(name, &child_block)` and `instantiate_extern(name, &function)`
+return scoped `BInstantiation` handles. `instantiation_input` connects each
+named input once; `instantiation_output` caches a typed output handle. External
+tuple components use names such as `arg.0` and `return.0`; upstream XLS requires
+the referenced function's Verilog FFI template as well.
+The pinned libxls v0.54.7 parser rejects PIR's current `foreign_function=` extern
+declaration syntax, so extern builder tests use PIR verification and roundtrips,
+not upstream parsing. Other supported block forms are cross-checked with libxls.
+
+Package finalization checks combinational cycles through block instances, with
+registers as state boundaries. External bodies are opaque, so each external
+output conservatively depends on all connected inputs. A clocked child requires
+a parent clock, but their clock names need not match.
+
+`build()` verifies a standalone block. `build_package(package_name)` additionally
+marks it as top in a one-block package. Calls and instances require
+`build_in_package(&package)` or `build_into_package(&mut package)`: their supplied
+signatures must match existing package members. Finalization rebases all node
+IDs, including ports, and leaves the existing top selection unchanged. Rejected
+operations do not consume IDs or reserve names; failed package insertion leaves
+the package unchanged.
+
 ## Blocks and shared graphs
 
 `ir::Fn` and `ir::Block` are separate owners of an `ir::NodeGraph`. Functions
