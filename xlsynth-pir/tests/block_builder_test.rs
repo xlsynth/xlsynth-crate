@@ -659,6 +659,54 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
 }
 
 #[test]
+fn large_child_prefix_dependencies_finalize_without_per_node_transitive_sets() {
+    const INPUT_COUNT: usize = 4096;
+
+    let mut child = BlockBuilder::new("prefix_child");
+    let first = child.input_port("input_0", Type::Bits(1)).unwrap();
+    let mut prefix = first;
+    for index in 1..INPUT_COUNT {
+        let input = child
+            .input_port(&format!("input_{index}"), Type::Bits(1))
+            .unwrap();
+        prefix = child.xor(prefix, input).unwrap();
+    }
+    child.output_port("first", first).unwrap();
+    child.output_port("parity", prefix).unwrap();
+    let mut package = child.build_package("prefix_dependencies").unwrap();
+
+    let mut parent = BlockBuilder::new("parent");
+    let instance = parent
+        .instantiate("child", package.get_block("prefix_child").unwrap())
+        .unwrap();
+    for index in 0..INPUT_COUNT {
+        let name = format!("input_{index}");
+        let input = parent.input_port(&name, Type::Bits(1)).unwrap();
+        parent.instantiation_input(instance, &name, input).unwrap();
+    }
+    for name in ["first", "parity"] {
+        let output = parent.instantiation_output(instance, name).unwrap();
+        parent.output_port(name, output).unwrap();
+    }
+
+    // Each XOR prefix reaches one more input. Retaining a transitive input set
+    // for every node would use quadratic space despite this linear-size graph.
+    parent.build_into_package(&mut package).unwrap();
+    let parent = package.get_block("parent").unwrap();
+    assert_eq!(parent.input_ports().count(), INPUT_COUNT);
+    assert_eq!(parent.output_ports().count(), 2);
+    assert_eq!(parent.instantiations.len(), 1);
+    assert_eq!(
+        package
+            .get_block("prefix_child")
+            .unwrap()
+            .input_ports()
+            .count(),
+        INPUT_COUNT
+    );
+}
+
+#[test]
 fn clocked_instances_require_a_parent_clock_but_not_the_same_clock_name() {
     let mut child = BlockBuilder::new("registered_child");
     child.clock_port("child_clk").unwrap();

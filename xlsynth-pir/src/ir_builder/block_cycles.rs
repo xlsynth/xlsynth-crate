@@ -19,7 +19,7 @@ struct Hierarchy {
 
 /// Checks implicit instance connections as well as explicit graph edges.
 ///
-/// Each distinct child graph is visited once and summarized by the input ports
+/// Each distinct child block is checked once and summarized by the input ports
 /// reaching each output. Registers cut dependencies, so sequential feedback is
 /// permitted. Extern outputs conservatively depend on every wired input: the
 /// foreign function's IR body may be a stub, not the instantiated RTL's logic.
@@ -27,16 +27,30 @@ pub(super) fn verify_block_combinational_cycles(
     block: &Block,
     package: &Package,
 ) -> Result<(), BuilderError> {
-    Hierarchy::default().summarize(block, package)
+    // Only children need interface summaries; nobody consumes the root's.
+    Hierarchy::default()
+        .verify_graph(block, package)
+        .map(|_| ())
 }
 
 impl Hierarchy {
-    /// Memoizes each child's interface dependencies, rejecting recursive
-    /// hierarchy.
+    /// Memoizes only each child's interface dependencies, not interior nodes.
     fn summarize(&mut self, block: &Block, package: &Package) -> Result<(), BuilderError> {
         if self.summaries.contains_key(&block.name) {
             return Ok(());
         }
+        let dependencies = self.verify_graph(block, package)?;
+        let summary = graph_output_dependencies(block, &dependencies)?;
+        self.summaries.insert(block.name.clone(), summary);
+        Ok(())
+    }
+
+    /// Checks the hierarchy and returns cycle-free, instance-aware graph edges.
+    fn verify_graph(
+        &mut self,
+        block: &Block,
+        package: &Package,
+    ) -> Result<Vec<Vec<NodeRef>>, BuilderError> {
         if !self.active.insert(block.name.clone()) {
             return Err(invalid(format!(
                 "recursive block instantiation involving '{}'",
@@ -123,33 +137,15 @@ impl Hierarchy {
             }
             dependencies.push(edges);
         }
-        let reached_inputs = graph_input_dependencies(block, &dependencies)?;
-        let mut summary = BTreeMap::new();
-        for port in &block.ports {
-            if let BlockPort::Output(reference) = port {
-                let node = block
-                    .nodes
-                    .get(reference.index)
-                    .ok_or_else(|| invalid("block output references a missing node"))?;
-                let NodePayload::OutputPort { name, .. } = &node.payload else {
-                    return Err(invalid("block output does not reference an output_port"));
-                };
-                summary.insert(name.clone(), reached_inputs[reference.index].clone());
-            }
-        }
+        verify_graph_acyclic(block, &dependencies)?;
         self.active.remove(&block.name);
-        self.summaries.insert(block.name.clone(), summary);
-        Ok(())
+        Ok(dependencies)
     }
 }
 
-/// Computes reachability with iterative DFS, checking even unobserved nodes.
-fn graph_input_dependencies(
-    block: &Block,
-    dependencies: &[Vec<NodeRef>],
-) -> Result<Vec<InputDependencies>, BuilderError> {
+/// Checks even unobserved nodes in O(nodes + edges) time and O(nodes) space.
+fn verify_graph_acyclic(block: &Block, dependencies: &[Vec<NodeRef>]) -> Result<(), BuilderError> {
     let mut colors = vec![0u8; block.nodes.len()];
-    let mut reached = vec![BTreeSet::new(); block.nodes.len()];
     for root in 0..block.nodes.len() {
         if colors[root] == 2 {
             continue;
@@ -178,24 +174,59 @@ fn graph_input_dependencies(
                         pending.push((index, 0));
                     }
                     _ => {
-                        // A completed dependency already has its input summary.
+                        // This dependency's subgraph has already been checked.
                     }
                 }
             } else {
                 let (node, _) = pending.pop().expect("DFS frame exists");
-                let mut inputs = BTreeSet::new();
-                if let NodePayload::InputPort { name, .. } = &block.nodes[node].payload {
-                    inputs.insert(name.clone());
-                }
-                for dependency in &dependencies[node] {
-                    inputs.extend(reached[dependency.index].iter().cloned());
-                }
-                reached[node] = inputs;
                 colors[node] = 2;
             }
         }
     }
-    Ok(reached)
+    Ok(())
+}
+
+/// Traces each output cone in a checked graph, retaining only interface sets.
+///
+/// Each output visits a reachable node/edge at most once. The scratch storage
+/// is O(nodes), independent of transitive dependency sizes at interior nodes;
+/// only the output-to-input relation itself can require quadratic storage.
+fn graph_output_dependencies(
+    block: &Block,
+    dependencies: &[Vec<NodeRef>],
+) -> Result<OutputDependencies, BuilderError> {
+    // Tag visits by output instead of clearing O(nodes) storage for each cone.
+    let mut visited = vec![None; block.nodes.len()];
+    let mut pending = Vec::new();
+    let mut summary = BTreeMap::new();
+    for port in &block.ports {
+        let BlockPort::Output(reference) = port else {
+            continue;
+        };
+        let node = block
+            .nodes
+            .get(reference.index)
+            .ok_or_else(|| invalid("block output references a missing node"))?;
+        let NodePayload::OutputPort { name, .. } = &node.payload else {
+            return Err(invalid("block output does not reference an output_port"));
+        };
+        let mut inputs = BTreeSet::new();
+        visited[reference.index] = Some(*reference);
+        pending.push(*reference);
+        while let Some(node) = pending.pop() {
+            if let NodePayload::InputPort { name, .. } = &block.nodes[node.index].payload {
+                inputs.insert(name.clone());
+            }
+            for dependency in &dependencies[node.index] {
+                if visited[dependency.index] != Some(*reference) {
+                    visited[dependency.index] = Some(*reference);
+                    pending.push(*dependency);
+                }
+            }
+        }
+        summary.insert(name.clone(), inputs);
+    }
+    Ok(summary)
 }
 
 fn invalid(reason: impl Into<String>) -> BuilderError {
@@ -205,11 +236,69 @@ fn invalid(reason: impl Into<String>) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockBuilder;
+    use crate::ir::Type;
     use crate::ir_parser::Parser;
 
     fn check(source: &str) -> Result<(), BuilderError> {
         let package = Parser::new(source).parse_and_verify_package().unwrap();
         verify_block_combinational_cycles(package.get_top_block().unwrap(), &package)
+    }
+
+    #[test]
+    fn summaries_keep_shared_and_independent_output_cones_separate() {
+        let source = r#"package shared_cones
+top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8], direct: bits[8]) {
+  x: bits[8] = input_port(name=x, id=1)
+  y: bits[8] = input_port(name=y, id=2)
+  z: bits[8] = input_port(name=z, id=3)
+  shared: bits[8] = xor(x, y, id=4)
+  diamond: bits[8] = and(shared, x, id=5)
+  combined: bits[8] = xor(shared, z, id=6)
+  left: () = output_port(diamond, name=left, id=7)
+  right: () = output_port(combined, name=right, id=8)
+  direct: () = output_port(z, name=direct, id=9)
+}
+"#;
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        let mut hierarchy = Hierarchy::default();
+        hierarchy
+            .summarize(package.get_top_block().unwrap(), &package)
+            .unwrap();
+        let expected = BTreeMap::from([
+            ("left".into(), BTreeSet::from(["x".into(), "y".into()])),
+            (
+                "right".into(),
+                BTreeSet::from(["x".into(), "y".into(), "z".into()]),
+            ),
+            ("direct".into(), BTreeSet::from(["z".into()])),
+        ]);
+        assert_eq!(hierarchy.summaries["child"], expected);
+
+        let mut root_check = Hierarchy::default();
+        root_check
+            .verify_graph(package.get_top_block().unwrap(), &package)
+            .unwrap();
+        assert!(root_check.summaries.is_empty());
+    }
+
+    #[test]
+    fn summaries_handle_many_disjoint_output_cones() {
+        let mut builder = BlockBuilder::new("disjoint");
+        let mut expected = BTreeMap::new();
+        for index in 0..4096 {
+            let input_name = format!("input_{index}");
+            let output_name = format!("output_{index}");
+            let input = builder.input_port(&input_name, Type::Bits(1)).unwrap();
+            builder.output_port(&output_name, input).unwrap();
+            expected.insert(output_name, BTreeSet::from([input_name]));
+        }
+        let package = builder.build_package("disjoint_cones").unwrap();
+        let mut hierarchy = Hierarchy::default();
+        hierarchy
+            .summarize(package.get_top_block().unwrap(), &package)
+            .unwrap();
+        assert_eq!(hierarchy.summaries["disjoint"], expected);
     }
 
     #[test]
