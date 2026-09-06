@@ -17,7 +17,6 @@ use crate::ir::{
     Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, Node, NodeGraph, NodePayload, NodeRef,
     Package, PackageMember, Type, Unop,
 };
-use crate::ir::{Param, ParamId};
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids};
 use crate::ir_utils::compact_and_toposort_in_place;
 use crate::math::ceil_log2;
@@ -888,16 +887,17 @@ fn make_reserved_nil_node() -> Node {
     }
 }
 
-fn make_helper_with_params(name: String, params: Vec<Param>, ret_ty: Type, key: &FfiWrapKey) -> Fn {
+fn make_helper_with_params(
+    name: String,
+    parameter_nodes: Vec<Node>,
+    ret_ty: Type,
+    key: &FfiWrapKey,
+) -> Fn {
     let mut nodes = vec![make_reserved_nil_node()];
-    for param in &params {
-        nodes.push(Node {
-            text_id: param.id.get_wrapped_id(),
-            name: Some(param.name.clone()),
-            ty: param.ty.clone(),
-            payload: NodePayload::GetParam(param.id),
-            pos: None,
-        });
+    let mut params = Vec::with_capacity(parameter_nodes.len());
+    for node in parameter_nodes {
+        params.push(NodeRef { index: nodes.len() });
+        nodes.push(node);
     }
     Fn {
         graph: NodeGraph {
@@ -916,20 +916,26 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
     match key {
         FfiWrapKey::ExtCarryOut { width } => {
             let params = vec![
-                Param {
-                    name: "lhs".to_string(),
+                Node {
+                    name: Some("lhs".to_string()),
                     ty: Type::Bits(*width),
-                    id: ParamId::new(1),
+                    text_id: 1,
+                    payload: NodePayload::Param,
+                    pos: None,
                 },
-                Param {
-                    name: "rhs".to_string(),
+                Node {
+                    name: Some("rhs".to_string()),
                     ty: Type::Bits(*width),
-                    id: ParamId::new(2),
+                    text_id: 2,
+                    payload: NodePayload::Param,
+                    pos: None,
                 },
-                Param {
-                    name: "c_in".to_string(),
+                Node {
+                    name: Some("c_in".to_string()),
                     ty: Type::Bits(1),
-                    id: ParamId::new(3),
+                    text_id: 3,
+                    payload: NodePayload::Param,
+                    pos: None,
                 },
             ];
             let mut helper = make_helper_with_params(name, params, Type::Bits(1), key);
@@ -959,10 +965,12 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             let params = operand_widths
                 .iter()
                 .enumerate()
-                .map(|(i, width)| Param {
-                    name: format!("op{i}"),
+                .map(|(i, width)| Node {
+                    name: Some(format!("op{i}")),
                     ty: Type::Bits(*width),
-                    id: ParamId::new(i.saturating_add(1)),
+                    text_id: i.saturating_add(1),
+                    payload: NodePayload::Param,
+                    pos: None,
                 })
                 .collect::<Vec<_>>();
             let mut helper = make_helper_with_params(name, params, Type::Bits(*output_width), key);
@@ -998,10 +1006,12 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             output_width,
             offset,
         } => {
-            let params = vec![Param {
-                name: "arg".to_string(),
+            let params = vec![Node {
+                name: Some("arg".to_string()),
                 ty: Type::Bits(*input_width),
-                id: ParamId::new(1),
+                text_id: 1,
+                payload: NodePayload::Param,
+                pos: None,
             }];
             let shape = ExtClzShape::new(*input_width, *output_width, *offset);
             let mut helper =
@@ -1022,10 +1032,12 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             shift_offset,
             clz_bit_count,
         } => {
-            let params = vec![Param {
-                name: "arg".to_string(),
+            let params = vec![Node {
+                name: Some("arg".to_string()),
                 ty: Type::Bits(*input_width),
-                id: ParamId::new(1),
+                text_id: 1,
+                payload: NodePayload::Param,
+                pos: None,
             }];
             let shape = ExtNormalizeLeftShape {
                 input_width: *input_width,
@@ -1060,10 +1072,12 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             output_width,
             count_width,
         } => {
-            let params = vec![Param {
-                name: "count".to_string(),
+            let params = vec![Node {
+                name: Some("count".to_string()),
                 ty: Type::Bits(*count_width),
-                id: ParamId::new(1),
+                text_id: 1,
+                payload: NodePayload::Param,
+                pos: None,
             }];
             let shape = ExtMaskLowShape {
                 output_width: *output_width,
@@ -1083,10 +1097,12 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             input_width,
             lsb_prio,
         } => {
-            let params = vec![Param {
-                name: "arg".to_string(),
+            let params = vec![Node {
+                name: Some("arg".to_string()),
                 ty: Type::Bits(*input_width),
-                id: ParamId::new(1),
+                text_id: 1,
+                payload: NodePayload::Param,
+                pos: None,
             }];
             let shape = ExtPrioEncodeShape::new(*input_width, *lsb_prio);
             let mut helper =

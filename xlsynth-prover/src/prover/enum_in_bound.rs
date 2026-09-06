@@ -37,7 +37,7 @@ fn push_node_with_offset(
 }
 
 fn find_implicit_token_ref(f: &ir::Fn) -> Result<NodeRef, String> {
-    match f.params.first() {
+    match f.param_nodes().next() {
         Some(param) if matches!(param.ty, Type::Token) => {
             Ok(param_node_ref_by_index(f, 0).unwrap())
         }
@@ -49,7 +49,7 @@ fn find_implicit_token_ref(f: &ir::Fn) -> Result<NodeRef, String> {
 }
 
 fn find_implicit_activation_ref(f: &ir::Fn) -> Result<NodeRef, String> {
-    match f.params.get(1) {
+    match f.param_nodes().nth(1) {
         Some(param) if matches!(param.ty, Type::Bits(1)) => {
             Ok(param_node_ref_by_index(f, 1).unwrap())
         }
@@ -553,7 +553,7 @@ fn __itok__inner(
   ret tuple.8: (token, bits[2]) = tuple(inner_assert, sum, id=8)
 }
 
-// Collect domain entries and sort them by parameter name for determinism.    for param in &top_fn.params {
+// Collect domain entries and sort them by parameter name for determinism.    for param in top_fn.param_nodes() {
 fn __itok__top(
     __token: token id=17,
     __activation: bits[1] id=18,

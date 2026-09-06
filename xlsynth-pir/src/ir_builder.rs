@@ -6,12 +6,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::IrValue;
-use crate::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, Param, ParamId, Type, Unop};
+use crate::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
 use crate::ir_deduce::deduce_result_type;
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
 use crate::ir_utils::operands;
 use crate::ir_verify::{
-    verify_function, verify_function_in_package, verify_node_xls_semantics, verify_package,
+    verify_function, verify_function_in_package, verify_function_signature,
+    verify_node_xls_semantics, verify_package,
 };
 
 mod function_ops;
@@ -275,17 +276,12 @@ impl FnBuilder {
         let node = NodeRef {
             index: self.function.nodes.len(),
         };
-        let id = ParamId::new(node.index);
-        self.function.params.push(Param {
-            name: name.to_string(),
-            ty: ty.clone(),
-            id,
-        });
+        self.function.params.push(node);
         self.function.nodes.push(Node {
             text_id: node.index,
             name: Some(name.to_string()),
             ty,
-            payload: NodePayload::GetParam(id),
+            payload: NodePayload::Param,
             pos: None,
         });
         self.names.insert(name.to_string(), node);
@@ -316,9 +312,6 @@ impl FnBuilder {
         let data = self.function.get_node_mut(node);
         if let Some(old_name) = data.name.replace(name.to_string()) {
             self.names.remove(&old_name);
-        }
-        if let NodePayload::GetParam(id) = data.payload {
-            self.function.params[id.get_wrapped_id() - 1].name = name.to_string();
         }
         self.names.insert(name.to_string(), node);
         Ok(())
@@ -438,6 +431,8 @@ impl FnBuilder {
     /// succeeds.
     fn check_callee(&self, callee: &ir::Fn) -> Result<(), BuilderError> {
         check_name(&callee.name)?;
+        verify_function_signature(callee)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
         if callee.name == self.function.name {
             return Err(BuilderError::InvalidOperation(format!(
                 "recursive reference to '{}' is not allowed",
@@ -470,12 +465,15 @@ impl FnBuilder {
                 args.len()
             )));
         }
-        for (arg, param) in args.iter().zip(&callee.params) {
+        for (arg, param) in args.iter().zip(callee.param_nodes()) {
             let actual = self.function.get_node_ty(*arg);
             if actual != &param.ty {
                 return Err(BuilderError::InvalidOperation(format!(
                     "argument '{}' of '{}' requires {}, got {}",
-                    param.name, callee.name, param.ty, actual
+                    param.param_name(),
+                    callee.name,
+                    param.ty,
+                    actual
                 )));
             }
         }
@@ -528,22 +526,23 @@ impl FnBuilder {
         } else {
             (usize::BITS - max_index.leading_zeros()) as usize
         };
-        if !matches!(body.params[0].ty, Type::Bits(width) if width >= minimum_width) {
+        if !matches!(body.get_param(0).ty, Type::Bits(width) if width >= minimum_width) {
             return Err(BuilderError::InvalidOperation(format!(
                 "counted_for induction parameter must be bits[N] with N >= {minimum_width}"
             )));
         }
         let carry_type = self.function.get_node_ty(init);
-        if &body.params[1].ty != carry_type || &body.ret_ty != carry_type {
+        if &body.get_param(1).ty != carry_type || &body.ret_ty != carry_type {
             return Err(BuilderError::InvalidOperation(format!(
                 "counted_for carry parameter and return must have type {carry_type}"
             )));
         }
-        for (arg, param) in invariant_args.iter().zip(&body.params[2..]) {
+        for (arg, param) in invariant_args.iter().zip(body.param_nodes().skip(2)) {
             if self.function.get_node_ty(*arg) != &param.ty {
                 return Err(BuilderError::InvalidOperation(format!(
                     "counted_for invariant '{}' requires {}",
-                    param.name, param.ty
+                    param.param_name(),
+                    param.ty
                 )));
             }
         }
@@ -1479,7 +1478,7 @@ mod tests {
         );
         builder.set_name(result, "a").unwrap();
         let function = builder.build(result).unwrap();
-        assert_eq!(function.params[0].name, "renamed");
+        assert_eq!(function.get_param(0).param_name(), "renamed");
         assert_eq!(function.nodes[1].name.as_deref(), Some("renamed"));
     }
 
@@ -1531,7 +1530,7 @@ mod tests {
         second.build_into_package(inverted, &mut package).unwrap();
         assert_eq!(package.get_top_fn().unwrap().name, "first");
         let second = package.get_fn("second").unwrap();
-        assert_eq!(second.params[0].id.get_wrapped_id(), 3);
+        assert_eq!(second.get_param(0).text_id, 3);
         assert_eq!(second.nodes[1].text_id, 3);
         assert_eq!(second.nodes[2].text_id, 4);
         assert_eq!(evaluate(second, &[bits(4, 3)]), bits(4, 12));

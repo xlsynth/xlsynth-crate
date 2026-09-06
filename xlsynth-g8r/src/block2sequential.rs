@@ -341,18 +341,13 @@ fn build_transition_function(
     old_to_new[0] = Some(NodeRef { index: 0 });
     for old_ref in input_ports {
         let old_node = block.get_node(old_ref);
-        let param_id = ir::ParamId::new(old_node.text_id);
         let name = block.port_name(old_ref).to_string();
-        transition.params.push(ir::Param {
-            name: name.clone(),
-            ty: old_node.ty.clone(),
-            id: param_id,
-        });
         let new_ref = NodeRef {
             index: transition.nodes.len(),
         };
+        transition.params.push(new_ref);
         transition.nodes.push(ir::Node {
-            payload: NodePayload::GetParam(param_id),
+            payload: NodePayload::Param,
             name: Some(name),
             ..old_node.clone()
         });
@@ -366,20 +361,15 @@ fn build_transition_function(
             &canonical_register_q_name(&register.name),
             &mut used_param_names,
         );
-        let param_id = ir::ParamId::new(max_text_id);
         let q_ref = NodeRef {
             index: transition.nodes.len(),
         };
-        transition.params.push(ir::Param {
-            name: q_name.clone(),
-            ty: register.ty.clone(),
-            id: param_id,
-        });
+        transition.params.push(q_ref);
         transition.nodes.push(ir::Node {
             text_id: max_text_id,
             name: Some(q_name),
             ty: register.ty.clone(),
-            payload: NodePayload::GetParam(param_id),
+            payload: NodePayload::Param,
             pos: None,
         });
         register_q_refs.insert(

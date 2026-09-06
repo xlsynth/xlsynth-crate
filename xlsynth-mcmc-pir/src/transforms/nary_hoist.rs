@@ -290,9 +290,7 @@ mod tests {
     fn find_param_named(f: &xlsynth_pir::ir::Fn, name: &str) -> NodeRef {
         for nr in f.node_refs() {
             let node = f.get_node(nr);
-            if matches!(node.payload, NodePayload::GetParam(_))
-                && node.name.as_deref() == Some(name)
-            {
+            if matches!(node.payload, NodePayload::Param) && node.name.as_deref() == Some(name) {
                 return nr;
             }
         }

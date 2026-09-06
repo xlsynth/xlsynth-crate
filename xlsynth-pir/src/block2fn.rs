@@ -7,10 +7,7 @@ use crate::dce::remove_dead_nodes;
 use crate::ir::{self, Block, BlockPort, MemberType, NodePayload, NodeRef, PackageMember, Type};
 use crate::ir_eval::eval_pure_if_supported;
 use crate::ir_parser::Parser;
-use crate::ir_utils::{
-    compact_and_toposort_in_place, compute_users, get_topological_nodes, operands,
-    remap_payload_with, verify_no_cycle,
-};
+use crate::ir_utils::{compact_and_toposort_in_place, compute_users, operands, verify_no_cycle};
 use crate::{IrBits, IrValue};
 
 #[derive(Debug, Clone, Default)]
@@ -145,11 +142,11 @@ pub fn replace_combinational_block_logic(
     };
     if function.params.len() != template.input_ports().count()
         || function
-            .params
-            .iter()
+            .param_nodes()
             .zip(template.input_ports())
             .any(|(actual, port)| {
-                actual.name != template.port_name(port) || &actual.ty != template.port_type(port)
+                actual.param_name() != template.port_name(port)
+                    || &actual.ty != template.port_type(port)
             })
         || function.ret_ty != return_type
     {
@@ -289,7 +286,7 @@ fn rename_logic_conflicting_with_ports(
     let mut used_names = reserved_names.clone();
     used_names.extend(function.nodes.iter().filter_map(|node| node.name.clone()));
     for node in &mut function.nodes {
-        if matches!(node.payload, NodePayload::Nil | NodePayload::GetParam(_)) {
+        if matches!(node.payload, NodePayload::Nil | NodePayload::Param) {
             // Parameters retain the names required by the function signature;
             // they will become the matching ports, not competing logic nodes.
             continue;
@@ -326,14 +323,9 @@ fn project_block_interface(block: &Block) -> Result<ir::Fn, String> {
     for port in block.input_ports() {
         let node = graph.get_node_mut(port);
         let name = block.port_name(port).to_string();
-        let id = ir::ParamId::new(node.text_id);
-        params.push(ir::Param {
-            name: name.clone(),
-            ty: node.ty.clone(),
-            id,
-        });
+        params.push(port);
         node.name = Some(name);
-        node.payload = NodePayload::GetParam(id);
+        node.payload = NodePayload::Param;
     }
     for port in block.output_ports() {
         // Only materialize a sink's unit value if another node observes it;
@@ -588,73 +580,7 @@ fn collect_register_write_args(f: &ir::Fn) -> Result<HashMap<String, NodeRef>, S
 }
 
 fn reorder_params_and_compact(f: &mut ir::Fn) -> Result<(), String> {
-    let mut param_nodes: HashMap<ir::ParamId, usize> = HashMap::new();
-    for (idx, node) in f.nodes.iter().enumerate() {
-        if let NodePayload::GetParam(pid) = node.payload {
-            param_nodes.insert(pid, idx);
-        }
-    }
-
-    let mut kept_order: Vec<NodeRef> = Vec::new();
-    kept_order.push(NodeRef { index: 0 });
-    for param in f.params.iter() {
-        let idx = *param_nodes
-            .get(&param.id)
-            .ok_or_else(|| format!("block2fn: missing GetParam for '{}'", param.name))?;
-        kept_order.push(NodeRef { index: idx });
-    }
-
-    // Note: we may be calling this while PIR layout invariants are temporarily
-    // violated (e.g. after dropping/reordering params but before compaction).
-    // Use the nodes-only topo routine to avoid debug assertions on `Fn`.
-    let topo_all = get_topological_nodes(&f.nodes);
-    let mut already_kept = vec![false; f.nodes.len()];
-    for nr in kept_order.iter().copied() {
-        already_kept[nr.index] = true;
-    }
-    for nr in topo_all.into_iter() {
-        if already_kept[nr.index] {
-            continue;
-        }
-        if matches!(f.get_node(nr).payload, NodePayload::Nil) {
-            continue;
-        }
-        kept_order.push(nr);
-        already_kept[nr.index] = true;
-    }
-
-    let old_len = f.nodes.len();
-    let mut old_to_new: Vec<Option<usize>> = vec![None; old_len];
-    for (new_idx, nr) in kept_order.iter().enumerate() {
-        old_to_new[nr.index] = Some(new_idx);
-    }
-
-    let mut new_nodes: Vec<ir::Node> = Vec::with_capacity(kept_order.len());
-    for nr in kept_order.iter().copied() {
-        let src = f.get_node(nr).clone();
-        let remapped_payload = remap_payload_with(&src.payload, |(_, dep): (usize, NodeRef)| {
-            let Some(new_index) = old_to_new.get(dep.index).and_then(|x| *x) else {
-                panic!("block2fn: dependency {} removed during reorder", dep.index);
-            };
-            NodeRef { index: new_index }
-        });
-        new_nodes.push(ir::Node {
-            payload: remapped_payload,
-            ..src
-        });
-    }
-
-    if let Some(old_ret) = f.ret_node_ref {
-        let mapped = old_to_new[old_ret.index].ok_or_else(|| {
-            format!(
-                "block2fn: return node {} removed during reorder",
-                old_ret.index
-            )
-        })?;
-        f.ret_node_ref = Some(NodeRef { index: mapped });
-    }
-    f.nodes = new_nodes;
-    Ok(())
+    crate::ir_utils::compact_and_toposort_in_place(f)
 }
 
 fn parse_literal_for_type(literal: &IrBits, ty: &Type) -> Result<IrBits, String> {
@@ -1162,7 +1088,7 @@ top block top(a: bits[1], out: bits[1]) {
 "#;
         let f = run_block2fn(block_ir, &[("a", "1")], &[]);
         assert_eq!(f.params.len(), 0, "tied input should be removed");
-        assert_no_matches(&f, "get_param(name=\"a\")");
+        assert_no_matches(&f, "param(name=\"a\")");
         assert_return_matches(&f, "literal(1)");
     }
 
@@ -1187,8 +1113,8 @@ top block top(a: bits[1], b: bits[1], out: (bits[1], bits[1])) {
         };
         tie_input_ports(&mut f, &opts).expect("tie_input_ports succeeds");
         assert_eq!(f.input_ports().count(), 0, "tied inputs should be removed");
-        assert_no_matches(&f, "get_param(name=\"a\")");
-        assert_no_matches(&f, "get_param(name=\"b\")");
+        assert_no_matches(&f, "param(name=\"a\")");
+        assert_no_matches(&f, "param(name=\"b\")");
         assert_output_matches(&f, "out", "tuple(literal(0), literal(1))");
     }
 

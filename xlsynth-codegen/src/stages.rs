@@ -254,7 +254,7 @@ fn constant_only_nodes(graph: &NodeGraph, topological: &[NodeRef]) -> Vec<bool> 
                 .iter()
                 .all(|operand| constant_only[operand.index]),
             NodePayload::Nil
-            | NodePayload::GetParam(_)
+            | NodePayload::Param
             | NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
             | NodePayload::RegisterRead { .. }

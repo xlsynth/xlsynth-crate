@@ -284,14 +284,11 @@ fn block2sv_extension_operators_match_pir_evaluation() {
             output_width - 1
         );
         let mut connections = Vec::new();
-        for parameter in &func.params {
+        for parameter in func.param_nodes() {
+            let name = parameter.param_name();
             let width = parameter.ty.bit_count();
-            testbench.push_str(&format!(
-                "  logic [{}:0] stimulus_{};\n",
-                width - 1,
-                parameter.name
-            ));
-            connections.push(format!(".{}(stimulus_{})", parameter.name, parameter.name));
+            testbench.push_str(&format!("  logic [{}:0] stimulus_{name};\n", width - 1));
+            connections.push(format!(".{name}(stimulus_{name})"));
         }
         connections.push(format!(
             ".{}(actual)",
@@ -307,7 +304,7 @@ fn block2sv_extension_operators_match_pir_evaluation() {
         let mut state = 0x6d2b_79f5_u64;
         for vector in 0..vectors {
             let mut arguments = Vec::new();
-            for (index, parameter) in func.params.iter().enumerate() {
+            for (index, parameter) in func.param_nodes().enumerate() {
                 let width = parameter.ty.bit_count();
                 assert!(width < 64, "extension fixture inputs must fit in u64");
                 let mask = (1_u64 << width) - 1;
@@ -326,7 +323,7 @@ fn block2sv_extension_operators_match_pir_evaluation() {
                 };
                 testbench.push_str(&format!(
                     "    stimulus_{} = {width}'h{value:x};\n",
-                    parameter.name
+                    parameter.param_name()
                 ));
                 arguments.push(
                     xlsynth_pir::IrValue::make_ubits(width, value)

@@ -2,7 +2,7 @@
 
 //! Helpers for computing structural hashes of XLS IR nodes.
 
-use crate::ir::{self, Fn, NodePayload, NodeRef, ParamId, Type};
+use crate::ir::{self, Fn, NodePayload, NodeRef, Type};
 use crate::ir_utils::{get_topological, is_observable_effect_root, operands};
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
@@ -67,14 +67,17 @@ fn update_hash_type(hasher: &mut blake3::Hasher, ty: &Type) {
     }
 }
 
-pub(crate) fn get_param_ordinal(f: &Fn, param_id: ParamId) -> usize {
-    f.params
-        .iter()
-        .position(|p| p.id == param_id)
-        .expect("ParamId must correspond to a function parameter")
+pub(crate) fn get_param_ordinal(f: &Fn, node_ref: NodeRef) -> usize {
+    f.param_index(node_ref)
+        .expect("parameter node must appear in the signature")
 }
 
-fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::Hasher) {
+fn hash_payload_attributes(
+    f: &Fn,
+    node_ref: NodeRef,
+    payload: &NodePayload,
+    hasher: &mut blake3::Hasher,
+) {
     match payload {
         NodePayload::Nil => {}
         NodePayload::InputPort { name, sv_type }
@@ -84,10 +87,10 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
                 update_hash_string_attribute(hasher, "sv_type", sv_type);
             }
         }
-        NodePayload::GetParam(param_id) => {
+        NodePayload::Param => {
             // Use stable ordinal position within the function signature, not
             // the text id.
-            let ordinal = get_param_ordinal(f, *param_id) as u64 + 1;
+            let ordinal = get_param_ordinal(f, node_ref) as u64 + 1;
             update_hash_u64(hasher, ordinal);
         }
         NodePayload::Tuple(nodes) | NodePayload::Array(nodes) | NodePayload::ArrayConcat(nodes) => {
@@ -264,7 +267,7 @@ pub fn compute_node_structural_hash(
     let mut hasher = blake3::Hasher::new();
     update_hash_str(&mut hasher, node.payload.get_operator());
     update_hash_type(&mut hasher, &node.ty);
-    hash_payload_attributes(f, &node.payload, &mut hasher);
+    hash_payload_attributes(f, node_ref, &node.payload, &mut hasher);
     for ch in child_hashes.iter() {
         hasher.update(ch.as_bytes());
     }
@@ -277,7 +280,7 @@ pub fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> FwdHash 
     let mut hasher = blake3::Hasher::new();
     update_hash_str(&mut hasher, node.payload.get_operator());
     update_hash_type(&mut hasher, &node.ty);
-    hash_payload_attributes(f, &node.payload, &mut hasher);
+    hash_payload_attributes(f, node_ref, &node.payload, &mut hasher);
     FwdHash(hasher.finalize())
 }
 
@@ -298,8 +301,8 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
     let mut attrs: Vec<String> = Vec::new();
     match &node.payload {
         NodePayload::Nil => {}
-        NodePayload::GetParam(param_id) => {
-            let ordinal = get_param_ordinal(f, *param_id) + 1;
+        NodePayload::Param => {
+            let ordinal = get_param_ordinal(f, node_ref) + 1;
             attrs.push(format!("param_ordinal={ordinal}"));
         }
         NodePayload::Tuple(nodes) => attrs.push(format!("len={}", nodes.len())),
@@ -578,7 +581,7 @@ pub fn compute_function_structural_hash(f: &Fn) -> FwdHash {
     }
 
     update_hash_u64(&mut hasher, f.params.len() as u64);
-    for p in f.params.iter() {
+    for p in f.param_nodes() {
         update_hash_type(&mut hasher, &p.ty);
     }
     update_hash_type(&mut hasher, &f.ret_ty);

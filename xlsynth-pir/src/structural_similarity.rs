@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type, node_textual_id};
+use crate::ir::{Fn, Node, NodePayload, NodeRef, Type, node_textual_id};
 use crate::ir_utils::{
     Users, compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
     sanitize_text_id_to_identifier_name,
@@ -28,7 +28,7 @@ pub fn structurally_equivalent_ir(lhs: &Fn, rhs: &Fn) -> bool {
 fn compute_node_depth(f: &Fn, node_ref: NodeRef, child_depths: &[usize]) -> usize {
     match &f.get_node(node_ref).payload {
         NodePayload::Nil
-        | NodePayload::GetParam(_)
+        | NodePayload::Param
         | NodePayload::Literal(_)
         | NodePayload::Decode { .. }
         | NodePayload::Encode { .. }
@@ -60,7 +60,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
         let mut child_depths: Vec<usize> = Vec::new();
         match &node.payload {
             NodePayload::Nil => {}
-            NodePayload::GetParam(_) => {}
+            NodePayload::Param => {}
             NodePayload::InputPort { .. } => {}
             NodePayload::Tuple(elems)
             | NodePayload::Array(elems)
@@ -1000,9 +1000,8 @@ fn build_inner_with_union_user_slots(
 ) -> Fn {
     // 1) Create inner params: union of union_params + extra_passthrough_params,
     //    dedup’d by name, in deterministic order.
-    let mut inner_params: Vec<Param> = Vec::new();
+    let mut inner_params: Vec<NodeRef> = Vec::new();
     let mut text_to_inner_param_ref: HashMap<String, NodeRef> = HashMap::new();
-    let mut next_param_pos: usize = 1;
     let mut inner_nodes: Vec<Node> = Vec::new();
     let mut next_text_id: usize = {
         let mut max_id = 0usize;
@@ -1029,8 +1028,6 @@ fn build_inner_with_union_user_slots(
 
     let mut used_names: HashSet<String> = HashSet::new();
     for (raw_name, ty) in merged_params.iter() {
-        let pid = ParamId::new(next_param_pos);
-        next_param_pos += 1;
         let mut name = if is_valid_identifier_name(raw_name) {
             raw_name.clone()
         } else {
@@ -1048,17 +1045,15 @@ fn build_inner_with_union_user_slots(
             }
         }
         used_names.insert(name.clone());
-        inner_params.push(Param {
-            name: name.clone(),
-            ty: ty.clone(),
-            id: pid,
+        inner_params.push(NodeRef {
+            index: inner_nodes.len(),
         });
-        // Synthesize a GetParam node for this param
+        // Synthesize a Param node for this param
         inner_nodes.push(Node {
             text_id: next_text_id,
             name: Some(name.clone()),
             ty: ty.clone(),
-            payload: NodePayload::GetParam(pid),
+            payload: NodePayload::Param,
             pos: None,
         });
         let param_ref = NodeRef {

@@ -57,7 +57,6 @@ use xlsynth_pir::ir::FileTable as PirFileTable;
 use xlsynth_pir::ir::Fn as IrFn;
 use xlsynth_pir::ir::Package as PirPackage;
 use xlsynth_pir::ir::PackageMember as PirPackageMember;
-use xlsynth_pir::ir::Param as PirParam;
 use xlsynth_pir::ir::Type as PirType;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_assuming_node_index_topological};
 use xlsynth_pir::ir_parser;
@@ -79,16 +78,14 @@ const DEFAULT_ORACLE_RANDOM_SAMPLES: usize = 32;
 /// Parses positional or named `.irvals` records for a specific IR function.
 pub fn parse_irvals_file_for_fn(path: &Path, f: &IrFn) -> Result<Vec<IrValue>> {
     let argument_names = f
-        .params
-        .iter()
-        .map(|param| param.name.clone())
+        .param_nodes()
+        .map(|param| param.param_name().to_string())
         .collect::<Vec<_>>();
     let values = xlsynth_pir::parse_ir_values_file(path)?
         .into_positional_values(&argument_names)
         .map_err(anyhow::Error::new)?;
     let tuple_type = PirType::Tuple(
-        f.params
-            .iter()
+        f.param_nodes()
             .map(|param| Box::new(param.ty.clone()))
             .collect(),
     );
@@ -1377,7 +1374,7 @@ pub fn lower_toggle_stimulus_for_fn(samples: &[IrValue], f: &IrFn) -> Result<Vec
         }
 
         let mut sample_bits = Vec::with_capacity(f.params.len());
-        for (param_idx, (elem, param)) in elems.iter().zip(f.params.iter()).enumerate() {
+        for (param_idx, (elem, param)) in elems.iter().zip(f.param_nodes()).enumerate() {
             let mut flat_bits: Vec<bool> = Vec::with_capacity(param.ty.bit_count());
             flatten_ir_value_to_lsb0_bits_for_type(elem, &param.ty, &mut flat_bits).map_err(
                 |e| {
@@ -1385,7 +1382,7 @@ pub fn lower_toggle_stimulus_for_fn(samples: &[IrValue], f: &IrFn) -> Result<Vec
                         "sample {} param {} ('{}') incompatible with {}: {}",
                         sample_idx + 1,
                         param_idx,
-                        param.name,
+                        param.param_name(),
                         param.ty.to_string(),
                         e
                     )
@@ -1396,7 +1393,7 @@ pub fn lower_toggle_stimulus_for_fn(samples: &[IrValue], f: &IrFn) -> Result<Vec
                     "sample {} param {} ('{}') flattened width mismatch: expected {}, got {}",
                     sample_idx + 1,
                     param_idx,
-                    param.name,
+                    param.param_name(),
                     param.ty.bit_count(),
                     flat_bits.len()
                 ));
@@ -1443,7 +1440,7 @@ impl EvalFnBaselineResults {
             && self
                 .param_types
                 .iter()
-                .zip(baseline.params.iter())
+                .zip(baseline.param_nodes())
                 .all(|(cached_ty, param)| cached_ty == &param.ty)
     }
 
@@ -1455,23 +1452,23 @@ impl EvalFnBaselineResults {
     ) -> Result<()> {
         self.clear();
         self.random_samples = random_samples;
-        self.param_types = baseline.params.iter().map(|p| p.ty.clone()).collect();
+        self.param_types = baseline.param_nodes().map(|p| p.ty.clone()).collect();
 
         // Deterministic corner cases first: all-zeros and all-ones.
         self.samples.push(make_oracle_args(
-            &baseline.params,
+            &self.param_types,
             "all-zeros",
             make_all_zeros_value,
         )?);
         self.samples.push(make_oracle_args(
-            &baseline.params,
+            &self.param_types,
             "all-ones",
             make_all_ones_value,
         )?);
 
         for _ in 0..random_samples {
             self.samples
-                .push(make_oracle_args(&baseline.params, "random", |ty| {
+                .push(make_oracle_args(&self.param_types, "random", |ty| {
                     arbitrary_value_for_type(rng, ty)
                 })?);
         }
@@ -2385,13 +2382,13 @@ fn eval_fn_safe(f: &IrFn, args: &[IrValue]) -> Result<IrValue, ()> {
     }
 }
 
-fn make_oracle_args<F>(params: &[PirParam], label: &str, mut make_value: F) -> Result<Vec<IrValue>>
+fn make_oracle_args<F>(params: &[PirType], label: &str, mut make_value: F) -> Result<Vec<IrValue>>
 where
     F: FnMut(&PirType) -> Result<IrValue>,
 {
     params
         .iter()
-        .map(|p| make_value(&p.ty))
+        .map(|ty| make_value(ty))
         .collect::<Result<Vec<_>>>()
         .map_err(|e| anyhow::anyhow!("failed to construct {} oracle sample args: {}", label, e))
 }
@@ -2407,7 +2404,7 @@ fn pir_equiv_oracle<R: Rng>(
     if lhs.params.len() != rhs.params.len() || lhs.ret_ty != rhs.ret_ty {
         return false;
     }
-    for (lp, rp) in lhs.params.iter().zip(rhs.params.iter()) {
+    for (lp, rp) in lhs.param_nodes().zip(rhs.param_nodes()) {
         if lp.ty != rp.ty {
             return false;
         }

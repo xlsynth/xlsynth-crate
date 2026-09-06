@@ -177,10 +177,7 @@ mod tests {
             panic!("expected inner add after reassociation");
         };
         assert_eq!(f.get_node(xor_ref).text_id, 4);
-        assert!(matches!(
-            f.get_node(c_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(c_ref).payload, NodePayload::Param));
     }
 }
 

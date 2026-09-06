@@ -51,7 +51,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
     prover_fn: ProverFn<'a>,
     name_prefix: Option<&str>,
 ) -> FnInputs<'a, S::Term> {
-    let mut params_iter = prover_fn.fn_ref.params.iter();
+    let mut params_iter = prover_fn.fn_ref.param_nodes();
     let mut inputs = HashMap::new();
     let prefix_name = |name: &str| match name_prefix {
         Some(prefix) => format!("_{}__{}", prefix, name),
@@ -61,7 +61,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
         let itok = params_iter.next().unwrap();
         assert_eq!(itok.ty, ir::Type::Token);
         inputs.insert(
-            itok.name.clone(),
+            itok.param_name().to_string(),
             IrTypedBitVec {
                 ir_type: &itok.ty,
                 bitvec: solver.zero_width(),
@@ -70,7 +70,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
         let iact = params_iter.next().unwrap();
         assert_eq!(iact.ty, ir::Type::Bits(1));
         inputs.insert(
-            prefix_name(&iact.name),
+            prefix_name(iact.param_name()),
             IrTypedBitVec {
                 ir_type: &iact.ty,
                 bitvec: solver.one(1),
@@ -78,12 +78,12 @@ pub fn get_fn_inputs<'a, S: Solver>(
         );
     }
     for p in params_iter {
-        let name = prefix_name(&p.name);
+        let name = prefix_name(p.param_name());
         let bv = solver
             .declare_fresh(&name, p.ty.bit_count() as usize)
             .unwrap();
         inputs.insert(
-            p.name.clone(),
+            p.param_name().to_string(),
             IrTypedBitVec {
                 ir_type: &p.ty,
                 bitvec: bv,
@@ -125,12 +125,11 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 ir_type: &node.ty,
                 bitvec: BitVec::ZeroWidth,
             },
-            NodePayload::GetParam(pid) => {
-                let p = inputs.params().iter().find(|p| p.id == *pid).unwrap();
-                if let Some(sym) = inputs.inputs.get(&p.name) {
+            NodePayload::Param => {
+                if let Some(sym) = inputs.inputs.get(node.param_name()) {
                     sym.clone()
                 } else {
-                    panic!("Param not found: {}", p.name);
+                    panic!("Param not found: {}", node.param_name());
                 }
             }
             NodePayload::Tuple(elems) => {
@@ -180,7 +179,7 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     invariant_args.len()
                 );
 
-                let ind_ty = &callee.params[0].ty;
+                let ind_ty = &callee.get_param(0).ty;
                 let ind_width = ind_ty.bit_count();
                 // TODO: Make an independent verify_ir function that verifies a
                 // package to have all these invariants hold.
@@ -233,10 +232,10 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
 
                     // Map by param name with types from callee signature.
                     let callee_input_map =
-                        HashMap::from_iter(callee.params.iter().zip(actual_bvs.into_iter()).map(
+                        HashMap::from_iter(callee.param_nodes().zip(actual_bvs.into_iter()).map(
                             |(p, bv)| {
                                 (
-                                    p.name.clone(),
+                                    p.param_name().to_string(),
                                     IrTypedBitVec {
                                         ir_type: &p.ty,
                                         bitvec: bv,
@@ -917,12 +916,12 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
 
                 let mut callee_input_map: HashMap<String, IrTypedBitVec<'ir, S::Term>> =
                     HashMap::new();
-                for (param, arg_ref) in callee.params.iter().zip(operands.iter()) {
-                    let arg_bv = env
-                        .get(arg_ref)
-                        .unwrap_or_else(|| panic!("Invoke arg BV missing for {}", param.name));
+                for (param, arg_ref) in callee.param_nodes().zip(operands.iter()) {
+                    let arg_bv = env.get(arg_ref).unwrap_or_else(|| {
+                        panic!("Invoke arg BV missing for {}", param.param_name())
+                    });
                     callee_input_map.insert(
-                        param.name.clone(),
+                        param.param_name().to_string(),
                         IrTypedBitVec {
                             ir_type: &param.ty,
                             bitvec: arg_bv.bitvec.clone(),
@@ -936,8 +935,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 // be the only way to determine it from the IR.
                 let has_itok_in_name = callee.name.starts_with("__itok");
                 let has_itok_calling_convention_in_param = callee.params.len() >= 2
-                    && matches!(callee.params[0].ty, ir::Type::Token)
-                    && matches!(callee.params[1].ty, ir::Type::Bits(1));
+                    && matches!(callee.get_param(0).ty, ir::Type::Token)
+                    && matches!(callee.get_param(1).ty, ir::Type::Bits(1));
                 let has_itok_calling_convention_in_ret = match &callee.ret_ty {
                     ir::Type::Tuple(types) => {
                         types.len() >= 2 && matches!(*types[0], ir::Type::Token)
@@ -978,10 +977,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                             "Implicit token calling convention requires at least 2 params"
                         );
                         let args: Vec<&BitVec<S::Term>> = callee
-                            .params
-                            .iter()
+                            .param_nodes()
                             .skip(2)
-                            .map(|p| &callee_input_map.get(&p.name).unwrap().bitvec)
+                            .map(|p| &callee_input_map.get(p.param_name()).unwrap().bitvec)
                             .collect();
                         let app = solver.apply_uf(uf, &args);
                         // It is okay to use this result as token has zero width
@@ -992,9 +990,8 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     } else {
                         // Build argument vector in callee param order.
                         let args: Vec<&BitVec<S::Term>> = callee
-                            .params
-                            .iter()
-                            .map(|p| &callee_input_map.get(&p.name).unwrap().bitvec)
+                            .param_nodes()
+                            .map(|p| &callee_input_map.get(p.param_name()).unwrap().bitvec)
                             .collect();
                         let app = solver.apply_uf(uf, &args);
                         IrTypedBitVec {
@@ -1182,8 +1179,8 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
     for param in inputs.params() {
         let bv = inputs
             .inputs
-            .get(&param.name)
-            .unwrap_or_else(|| panic!("Param {} not found in inputs map", param.name));
+            .get(param.param_name())
+            .unwrap_or_else(|| panic!("Param {} not found in inputs map", param.param_name()));
         ordered_inputs.push(bv.clone());
     }
 
@@ -1216,8 +1213,8 @@ pub fn ir_to_smt_with_node_terms<'ir, 'inputs, S: Solver>(
     for param in inputs.params() {
         let bv = inputs
             .inputs
-            .get(&param.name)
-            .unwrap_or_else(|| panic!("Param {} not found in inputs map", param.name));
+            .get(param.param_name())
+            .unwrap_or_else(|| panic!("Param {} not found in inputs map", param.param_name()));
         ordered_inputs.push(bv.clone());
     }
 

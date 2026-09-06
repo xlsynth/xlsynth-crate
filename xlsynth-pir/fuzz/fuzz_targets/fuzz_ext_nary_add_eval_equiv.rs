@@ -8,7 +8,7 @@ use rand::{Rng, SeedableRng};
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_package;
 use xlsynth_pir::ir::{
     self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload,
-    Package, PackageMember, Param, ParamId, Type,
+    Package, PackageMember, Type,
 };
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_verify;
@@ -158,17 +158,6 @@ fn make_literal_operand_source<R: Rng>(rng: &mut R) -> OperandSourceSample {
 
 /// Builds a generated sample as a one-function PIR package.
 fn build_ext_nary_add_package(sample: &ExtNaryAddFnSample) -> Package {
-    let params = sample
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, param)| Param {
-            name: format!("p{i}"),
-            ty: Type::Bits(param.width),
-            id: ParamId::new(i + 1),
-        })
-        .collect::<Vec<_>>();
-
     let mut nodes = Vec::new();
     nodes.push(Node {
         text_id: 0,
@@ -177,12 +166,14 @@ fn build_ext_nary_add_package(sample: &ExtNaryAddFnSample) -> Package {
         payload: NodePayload::Nil,
         pos: None,
     });
-    for param in &params {
+    let mut params = Vec::with_capacity(sample.params.len());
+    for (index, param) in sample.params.iter().enumerate() {
+        params.push(ir::NodeRef { index: nodes.len() });
         nodes.push(Node {
-            text_id: param.id.get_wrapped_id(),
-            name: Some(param.name.clone()),
-            ty: param.ty.clone(),
-            payload: NodePayload::GetParam(param.id),
+            text_id: index + 1,
+            name: Some(format!("p{index}")),
+            ty: Type::Bits(param.width),
+            payload: NodePayload::Param,
             pos: None,
         });
     }

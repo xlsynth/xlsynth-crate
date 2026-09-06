@@ -80,7 +80,7 @@ fn should_exclude_signature_hash_root(f: &ir::Fn, node_ref: ir::NodeRef) -> bool
     let payload = &node.payload;
     match payload {
         ir::NodePayload::Nil => true,
-        ir::NodePayload::GetParam(_) => true,
+        ir::NodePayload::Param => true,
         ir::NodePayload::Literal(_) => true,
         ir::NodePayload::Tuple(_) => true,
         ir::NodePayload::Array(_) => true,

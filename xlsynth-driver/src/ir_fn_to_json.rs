@@ -63,7 +63,7 @@ fn node_to_record(f: &ir::Fn, index: usize, node: &ir::Node) -> NodeRecord {
         op: node.payload.get_operator().to_string(),
         ty: node.ty.to_string(),
         operands,
-        is_param: matches!(node.payload, ir::NodePayload::GetParam(_)),
+        is_param: matches!(node.payload, ir::NodePayload::Param),
         is_ret: f.ret_node_ref.map(|nr| nr.index == index).unwrap_or(false),
         signature: node.to_signature_string(f),
         text: node.to_string(f),

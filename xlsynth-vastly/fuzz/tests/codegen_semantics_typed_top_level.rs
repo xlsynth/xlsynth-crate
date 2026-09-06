@@ -196,8 +196,8 @@ fn pack_ir_value_matches_codegen_packed_port_order() {
     let ir_text = canonical_compound_shapes_ir();
     let top = parse_pir_top_fn(&ir_text, "compound_shapes").unwrap();
     let args = make_compound_shapes_args();
-    let lhs = pack_ir_value_to_value4(&top.params[0].ty, &args[0]).unwrap();
-    let rhs = pack_ir_value_to_value4(&top.params[1].ty, &args[1]).unwrap();
+    let lhs = pack_ir_value_to_value4(&top.get_param(0).ty, &args[0]).unwrap();
+    let rhs = pack_ir_value_to_value4(&top.get_param(1).ty, &args[1]).unwrap();
 
     assert_eq!(lhs.to_hex_string_if_known().unwrap(), "aa33441122");
     assert_eq!(rhs.to_hex_string_if_known().unwrap(), "55668877");

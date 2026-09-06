@@ -37,13 +37,13 @@ pub fn parse_pir_top_fn(ir_text: &str, top_name: &str) -> Result<xlsynth_pir::ir
 
 pub fn packed_signature(f: &xlsynth_pir::ir::Fn) -> Option<PackedSig> {
     let mut params = Vec::with_capacity(f.params.len());
-    for p in &f.params {
+    for p in f.param_nodes() {
         let width = packed_width(&p.ty)?;
         if width == 0 {
             return None;
         }
         params.push(TypedPortSig {
-            name: p.name.clone(),
+            name: p.param_name().to_string(),
             ty: p.ty.clone(),
             width,
         });

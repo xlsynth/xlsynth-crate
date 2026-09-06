@@ -422,9 +422,9 @@ fn canonicalize_wrapped_extension_helper_spec(
     match spec {
         WrappedExtensionSpec::ExtCarryOut { width } => {
             if f.params.len() != 3
-                || f.params[0].ty != ir::Type::Bits(width)
-                || f.params[1].ty != ir::Type::Bits(width)
-                || f.params[2].ty != ir::Type::Bits(1)
+                || f.get_param(0).ty != ir::Type::Bits(width)
+                || f.get_param(1).ty != ir::Type::Bits(width)
+                || f.get_param(2).ty != ir::Type::Bits(1)
                 || f.ret_ty != ir::Type::Bits(1)
             {
                 return Err(ParseError::new(format!(
@@ -441,14 +441,12 @@ fn canonicalize_wrapped_extension_helper_spec(
             operand_negated,
             arch,
         } => {
-            let helper_operand_widths = f
-                .params
-                .iter()
+            let helper_operand_widths = f.param_nodes()
                 .map(|param| match param.ty {
                     ir::Type::Bits(width) => Ok(width),
                     ref other => Err(ParseError::new(format!(
                         "ffi wrapper helper '{}' ext_nary_add operand '{}' must be bits-typed, got {}",
-                        f.name, param.name, other
+                        f.name, param.param_name(), other
                     ))),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -499,7 +497,7 @@ fn canonicalize_wrapped_extension_helper_spec(
         } => {
             let expected_ret_ty = ir::Type::Bits(output_width);
             if f.params.len() != 1
-                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.get_param(0).ty != ir::Type::Bits(input_width)
                 || f.ret_ty != expected_ret_ty
             {
                 return Err(ParseError::new(format!(
@@ -522,7 +520,7 @@ fn canonicalize_wrapped_extension_helper_spec(
             let expected_ret_ty =
                 ir::ext_normalize_left_result_type(normalized_bit_count, clz_bit_count);
             if f.params.len() != 1
-                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.get_param(0).ty != ir::Type::Bits(input_width)
                 || f.ret_ty != expected_ret_ty
             {
                 return Err(ParseError::new(format!(
@@ -542,7 +540,7 @@ fn canonicalize_wrapped_extension_helper_spec(
             count_width,
         } => {
             if f.params.len() != 1
-                || f.params[0].ty != ir::Type::Bits(count_width)
+                || f.get_param(0).ty != ir::Type::Bits(count_width)
                 || f.ret_ty != ir::Type::Bits(output_width)
             {
                 return Err(ParseError::new(format!(
@@ -561,7 +559,7 @@ fn canonicalize_wrapped_extension_helper_spec(
         } => {
             let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
             if f.params.len() != 1
-                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.get_param(0).ty != ir::Type::Bits(input_width)
                 || f.ret_ty != expected_ret_ty
             {
                 return Err(ParseError::new(format!(
@@ -1782,7 +1780,7 @@ impl Parser {
         Ok(ty)
     }
 
-    fn parse_param(&mut self, default_id: usize) -> Result<ir::Param, ParseError> {
+    fn parse_param(&mut self, default_id: usize) -> Result<ir::Node, ParseError> {
         let name = self.pop_identifier_or_error("parameter")?;
         self.drop_or_error(":")?;
         let ty = self.parse_type()?;
@@ -1798,11 +1796,16 @@ impl Parser {
                 self.rest_of_line()
             )));
         }
-        let id = ir::ParamId::new(raw_id);
-        Ok(ir::Param { name, ty, id })
+        Ok(ir::Node {
+            name: Some(name),
+            ty,
+            text_id: raw_id,
+            payload: ir::NodePayload::Param,
+            pos: None,
+        })
     }
 
-    pub fn parse_params(&mut self) -> Result<Vec<ir::Param>, ParseError> {
+    pub fn parse_params(&mut self) -> Result<Vec<ir::Node>, ParseError> {
         let mut params = Vec::new();
         self.drop_or_error("(")?;
         loop {
@@ -3492,8 +3495,7 @@ impl Parser {
                         name_attr
                     )));
                 }
-                let pid = ir::ParamId::new(raw_id);
-                (ir::NodePayload::GetParam(pid), raw_id)
+                (ir::NodePayload::Param, raw_id)
             }
             _ => {
                 return Err(ParseError::new(format!(
@@ -3556,26 +3558,19 @@ impl Parser {
         })
     }
 
-    pub fn add_param_as_node(
+    fn add_param_node(
         &mut self,
-        param: &ir::Param,
+        node: ir::Node,
         node_env: &mut IrNodeEnv,
         nodes: &mut Vec<ir::Node>,
-    ) -> Result<(), ParseError> {
+    ) -> Result<ir::NodeRef, ParseError> {
         assert!(!nodes.is_empty(), "nodes should not be empty");
-        let node = ir::Node {
-            text_id: param.id.get_wrapped_id(),
-            name: Some(param.name.clone()),
-            ty: param.ty.clone(),
-            payload: ir::NodePayload::GetParam(param.id),
-            pos: None,
-        };
         let node_ref = ir::NodeRef { index: nodes.len() };
         node_env
-            .add(Some(param.name.clone()), node.text_id, node_ref)
+            .add(node.name.clone(), node.text_id, node_ref)
             .map_err(ParseError::new)?;
         nodes.push(node);
-        Ok(())
+        Ok(node_ref)
     }
 
     /// Parses inner attributes at the current position (`#![...]`).
@@ -3698,8 +3693,7 @@ impl Parser {
         let fn_name = self.pop_identifier_or_error("fn name")?;
 
         // Parse the parameter text -- these are of the form `name: type id=n`
-        let params = self.parse_params()?;
-        log::debug!("params: {:?}", params);
+        let parameter_nodes = self.parse_params()?;
 
         self.drop_or_error("->")?;
         let ret_ty = self.parse_type()?;
@@ -3719,52 +3713,49 @@ impl Parser {
         let mut node_env = IrNodeEnv::new();
 
         // For each of the params add it as a node.
-        for param in params.iter() {
-            self.add_param_as_node(param, &mut node_env, &mut nodes)?
-        }
+        let params = parameter_nodes
+            .into_iter()
+            .map(|node| self.add_param_node(node, &mut node_env, &mut nodes))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut ret_node_ref: Option<ir::NodeRef> = None;
         while !self.try_drop("}") {
             let is_ret = self.try_drop("ret ");
             let node = self.parse_node(&mut node_env)?;
-            // Special handling: avoid duplicating GetParam nodes if we've
-            // already created one for this param id from the
-            // function signature. If a duplicate param(...) appears
-            // (e.g., for a return), just reference the existing
-            // node instead of adding a new one.
-            let mut node_ref = ir::NodeRef { index: nodes.len() };
-            let is_get_param = matches!(node.payload, ir::NodePayload::GetParam(_));
-            if is_get_param {
-                if let Some(existing) = node_env
+            let node_ref = if matches!(node.payload, ir::NodePayload::Param) {
+                // A body param(...) refers to an existing signature node;
+                // parse_node has already checked that its name and ID agree.
+                let existing = node_env
                     .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
                     .copied()
-                {
-                    // If a GetParam node with this id already exists (from the
-                    // function signature), ensure the textual node's type
-                    // matches the existing param node type.
-                    // If not, this is a parse-time
-                    // error (mirrors upstream xlsynth behavior).
-                    let existing_ty = &nodes[existing.index].ty;
-                    if existing_ty != &node.ty {
-                        return Err(ParseError::new(format!(
-                            "param id={} type mismatch: header {} vs node {}",
-                            node.text_id, existing_ty, node.ty
-                        )));
-                    }
-                    // Do not add a duplicate; use the existing node ref.
-                    node_ref = existing;
-                } else {
-                    node_env
-                        .add(node.name.clone(), node.text_id, node_ref)
-                        .map_err(ParseError::new)?;
-                    nodes.push(node);
+                    .ok_or_else(|| {
+                        ParseError::new(format!(
+                            "param id={} does not reference a signature parameter",
+                            node.text_id
+                        ))
+                    })?;
+                let existing_node = &nodes[existing.index];
+                if !matches!(existing_node.payload, ir::NodePayload::Param) {
+                    return Err(ParseError::new(format!(
+                        "param id={} does not reference a signature parameter",
+                        node.text_id
+                    )));
                 }
+                if existing_node.ty != node.ty {
+                    return Err(ParseError::new(format!(
+                        "param id={} type mismatch: header {} vs node {}",
+                        node.text_id, existing_node.ty, node.ty
+                    )));
+                }
+                existing
             } else {
+                let node_ref = ir::NodeRef { index: nodes.len() };
                 node_env
                     .add(node.name.clone(), node.text_id, node_ref)
                     .map_err(ParseError::new)?;
                 nodes.push(node);
-            }
+                node_ref
+            };
             if is_ret {
                 ret_node_ref = Some(node_ref);
             }
@@ -5222,10 +5213,10 @@ fn f(x: bits[1] id=1) -> token {
         let mut parser = Parser::new(input);
         let f = parser.parse_fn().unwrap();
         let ret_node = f.get_node(f.ret_node_ref.unwrap());
-        if let ir::NodePayload::GetParam(pid) = &ret_node.payload {
-            assert_eq!(pid.get_wrapped_id(), 29);
+        if let ir::NodePayload::Param = &ret_node.payload {
+            assert_eq!(ret_node.text_id, 29);
         } else {
-            panic!("Expected GetParam node payload");
+            panic!("Expected Param node payload");
         }
 
         // Ensure printing retains a non-empty body with the param return.
@@ -5490,7 +5481,7 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
                 !block
                     .nodes
                     .iter()
-                    .any(|node| matches!(node.payload, ir::NodePayload::GetParam(_)))
+                    .any(|node| matches!(node.payload, ir::NodePayload::Param))
             );
         }
     }

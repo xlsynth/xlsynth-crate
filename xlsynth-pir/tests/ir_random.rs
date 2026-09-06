@@ -230,8 +230,7 @@ fn assert_type_obeys_options(ty: &Type, options: &RandomFnOptions) {
 
 fn function_types(function: &xlsynth_pir::ir::Fn) -> impl Iterator<Item = &Type> {
     function
-        .params
-        .iter()
+        .param_nodes()
         .map(|param| &param.ty)
         .chain(function.nodes.iter().skip(1).map(|node| &node.ty))
 }
@@ -239,8 +238,7 @@ fn function_types(function: &xlsynth_pir::ir::Fn) -> impl Iterator<Item = &Type>
 fn assert_signature(function: &xlsynth_pir::ir::Fn, signature: &FunctionSignature) {
     assert_eq!(
         function
-            .params
-            .iter()
+            .param_nodes()
             .map(|param| param.ty.clone())
             .collect::<Vec<_>>(),
         signature.params
@@ -946,8 +944,7 @@ fn safe_array_assumptions_hold_for_arbitrary_inputs() {
         let function = package.get_top_fn().unwrap();
         for _ in 0..4 {
             let inputs = function
-                .params
-                .iter()
+                .param_nodes()
                 .map(|param| generate_uniform_value(&mut entropy, &param.ty))
                 .collect::<Vec<_>>();
             assert!(
@@ -1559,7 +1556,7 @@ fn random_package_counted_for_generation_is_bounded_and_covers_forms() {
                     matches!(function.get_node(*init).ty, Type::Array(_) | Type::Tuple(_));
 
                 let body_fn = generated.package.get_fn(body).unwrap();
-                saw_zero_width_induction |= body_fn.params[0].ty == Type::Bits(0);
+                saw_zero_width_induction |= body_fn.get_param(0).ty == Type::Bits(0);
                 saw_nested_loop |= body_fn
                     .nodes
                     .iter()
@@ -1626,7 +1623,7 @@ fn constrained_bits_result_reuses_or_materializes_values_by_width() {
                 params: vec![Type::Bits(8)],
                 return_type: Type::Bits(8),
             },
-            "get_param",
+            "param",
         ),
         (
             FunctionSignature {
@@ -2992,8 +2989,7 @@ fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
         live.extend(generated.stats.live_operations.keys().cloned());
         saw_token_param |= generated
             .function
-            .params
-            .iter()
+            .param_nodes()
             .any(|param| param.ty == Type::Token);
         for node in &generated.function.nodes {
             match &node.payload {

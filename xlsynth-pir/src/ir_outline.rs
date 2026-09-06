@@ -7,11 +7,9 @@
 //! The function signature of the inner is discovered from boundary inputs and
 //! outputs of the selected subgraph.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::ir::{
-    Fn as IrFn, Node, NodePayload, NodeRef, Package, PackageMember, Param, ParamId, Type,
-};
+use crate::ir::{Fn as IrFn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
 use crate::ir_utils::{get_topological, get_topological_nodes, operands, remap_payload_with};
 
 #[derive(Debug, Clone)]
@@ -163,72 +161,18 @@ pub fn compute_default_ordering(outer: &IrFn, to_outline: &HashSet<NodeRef>) -> 
     let to_outline_set: HashSet<usize> = to_outline.iter().map(|r| r.index).collect();
     let (inputs_ext, outputs_boundary) = compute_inputs_and_boundary(outer, &to_outline_set);
 
-    let mut used_param_ids: BTreeMap<usize, (String, Type)> = BTreeMap::new();
-    let mut outer_param_info: HashMap<usize, (String, Type)> = HashMap::new();
-    for p in outer.params.iter() {
-        outer_param_info.insert(p.id.get_wrapped_id(), (p.name.clone(), p.ty.clone()));
-    }
-    for &idx in to_outline_set.iter() {
-        if let NodePayload::GetParam(pid) = outer.nodes[idx].payload {
-            let key = pid.get_wrapped_id();
-            let (nm, ty) = outer_param_info
-                .get(&key)
-                .cloned()
-                .expect("outer params must include referenced ParamId");
-            used_param_ids.entry(key).or_insert((nm, ty));
-        }
-    }
-    for &idx in inputs_ext.iter() {
-        if let NodePayload::GetParam(pid) = outer.nodes[idx].payload {
-            let key = pid.get_wrapped_id();
-            let (nm, ty) = outer_param_info
-                .get(&key)
-                .cloned()
-                .expect("outer params must include referenced ParamId");
-            used_param_ids.entry(key).or_insert((nm, ty));
-        }
-    }
-
-    let mut params: Vec<OutlineParamSpec> = Vec::new();
-    // Prefer the GetParam node inside the selection if present for each
-    // ParamId, otherwise reference the external GetParam node driving the
-    // region.
-    let mut param_id_to_internal_node: BTreeMap<usize, usize> = BTreeMap::new();
-    for &idx in to_outline_set.iter() {
-        if let NodePayload::GetParam(pid) = outer.nodes[idx].payload {
-            param_id_to_internal_node.insert(pid.get_wrapped_id(), idx);
-        }
-    }
-    for (pid_num, _info) in used_param_ids.iter() {
-        if let Some(&internal_idx) = param_id_to_internal_node.get(pid_num) {
-            params.push(OutlineParamSpec {
-                node: NodeRef {
-                    index: internal_idx,
-                },
-                rename: None,
-            });
-        } else {
-            // Find an external GetParam node with this id among inputs_ext
-            let mut chosen: Option<usize> = None;
-            for &ext_idx in inputs_ext.iter() {
-                if let NodePayload::GetParam(pid) = outer.nodes[ext_idx].payload {
-                    if pid.get_wrapped_id() == *pid_num {
-                        chosen = Some(ext_idx);
-                        break;
-                    }
-                }
-            }
-            let idx = chosen.expect("external GetParam node must exist for used ParamId");
-            params.push(OutlineParamSpec {
-                node: NodeRef { index: idx },
-                rename: None,
-            });
-        }
-    }
+    // Preserve the outer signature order for parameter inputs.
+    let mut params: Vec<OutlineParamSpec> = outer
+        .params
+        .iter()
+        .copied()
+        .filter(|node| to_outline_set.contains(&node.index) || inputs_ext.contains(&node.index))
+        .map(|node| OutlineParamSpec { node, rename: None })
+        .collect();
     let mut ext_nonparam_inputs: Vec<usize> = inputs_ext
         .iter()
         .copied()
-        .filter(|idx| !matches!(outer.nodes[*idx].payload, NodePayload::GetParam(_)))
+        .filter(|idx| !matches!(outer.nodes[*idx].payload, NodePayload::Param))
         .collect();
     ext_nonparam_inputs.sort_unstable();
     for idx in ext_nonparam_inputs.into_iter() {
@@ -278,47 +222,17 @@ pub fn outline_with_ordering(
     let to_outline_set: HashSet<usize> = to_outline.iter().map(|r| r.index).collect();
     let (inputs_ext, outputs_boundary) = compute_inputs_and_boundary(outer, &to_outline_set);
 
-    // Collect all ParamIds used by the subgraph (whether the GetParam node is
-    // inside or outside the subgraph). We'll pull names/types from the outer
-    // signature by id.
-    let mut used_param_ids: BTreeMap<usize, (String, Type)> = BTreeMap::new();
-    // Build a quick map from ParamId -> (name, ty) from the outer signature.
-    let mut outer_param_info: HashMap<usize, (String, Type)> = HashMap::new();
-    for p in outer.params.iter() {
-        outer_param_info.insert(p.id.get_wrapped_id(), (p.name.clone(), p.ty.clone()));
-    }
-
-    // Any GetParam node inside the region contributes its ParamId.
-    for &idx in to_outline_set.iter() {
-        if let NodePayload::GetParam(pid) = outer.nodes[idx].payload {
-            let key = pid.get_wrapped_id();
-            let (nm, ty) = outer_param_info
-                .get(&key)
-                .cloned()
-                .expect("outer params must include referenced ParamId");
-            used_param_ids.entry(key).or_insert((nm, ty));
-        }
-    }
-    // Any GetParam node used as an external input contributes its ParamId as
-    // well.
-    for &idx in inputs_ext.iter() {
-        if let NodePayload::GetParam(pid) = outer.nodes[idx].payload {
-            let key = pid.get_wrapped_id();
-            let (nm, ty) = outer_param_info
-                .get(&key)
-                .cloned()
-                .expect("outer params must include referenced ParamId");
-            used_param_ids.entry(key).or_insert((nm, ty));
-        }
-    }
-
-    // Validate ordering coverage and build inner params according to ordering
-    // Compute required sets
-    let mut required_param_ids: BTreeSet<usize> = used_param_ids.keys().copied().collect();
+    // Parameter identity is the graph reference, not a second signature ID.
+    let mut required_param_nodes: BTreeSet<usize> = outer
+        .params
+        .iter()
+        .filter(|node| to_outline_set.contains(&node.index) || inputs_ext.contains(&node.index))
+        .map(|node| node.index)
+        .collect();
     let mut required_nonparam_inputs: BTreeSet<usize> = inputs_ext
         .iter()
         .copied()
-        .filter(|idx| !matches!(outer.nodes[*idx].payload, NodePayload::GetParam(_)))
+        .filter(|idx| !matches!(outer.nodes[*idx].payload, NodePayload::Param))
         .collect();
 
     // Determine which outer nodes are used as passthrough returns (outside
@@ -335,41 +249,28 @@ pub fn outline_with_ordering(
     let mut seen_ext_nodes: HashSet<usize> = HashSet::new();
 
     // Build inner params in specified order
-    let mut inner_params: Vec<Param> = Vec::new();
-    let mut param_index_to_inner_param_id: Vec<ParamId> = Vec::new();
-    let mut param_index_to_source_outer_node: Vec<Option<usize>> = Vec::new();
+    let mut inner_param_names: Vec<String> = Vec::new();
     let mut used_names: HashSet<String> = HashSet::new();
-    let mut next_param_pos: usize = 1;
     for (idx, ps) in ordering.params.iter().enumerate() {
         let node = ps.node;
         let rename = &ps.rename;
         let src_node = &outer.nodes[node.index];
         match src_node.payload {
-            NodePayload::GetParam(pid) => {
-                let id_number = pid.get_wrapped_id();
+            NodePayload::Param => {
+                let id_number = node.index;
                 if !seen_param_ids.insert(id_number) {
-                    panic!("duplicate ParamId in params ordering: {}", id_number);
+                    panic!("duplicate parameter node in params ordering: {}", id_number);
                 }
-                let (nm, ty) = outer_param_info
-                    .get(&id_number)
-                    .cloned()
-                    .expect("outer params must include referenced ParamId");
-                let name = rename.clone().unwrap_or(nm.clone());
+                let name = rename
+                    .clone()
+                    .unwrap_or_else(|| src_node.param_name().to_string());
                 if used_names.contains(&name) {
                     panic!("duplicate param name: {}", name);
                 }
                 used_names.insert(name.clone());
-                let inner_id = ParamId::new(next_param_pos);
-                next_param_pos += 1;
-                inner_params.push(Param {
-                    name,
-                    ty: ty.clone(),
-                    id: inner_id,
-                });
-                param_index_to_inner_param_id.push(inner_id);
-                param_index_to_source_outer_node.push(Some(node.index));
-                if required_param_ids.contains(&id_number) {
-                    required_param_ids.remove(&id_number);
+                inner_param_names.push(name);
+                if required_param_nodes.contains(&id_number) {
+                    required_param_nodes.remove(&id_number);
                 }
             }
             _ => {
@@ -391,15 +292,7 @@ pub fn outline_with_ordering(
                     panic!("duplicate param name: {}", name);
                 }
                 used_names.insert(name.clone());
-                let inner_id = ParamId::new(next_param_pos);
-                next_param_pos += 1;
-                inner_params.push(Param {
-                    name,
-                    ty: src_node.ty.clone(),
-                    id: inner_id,
-                });
-                param_index_to_inner_param_id.push(inner_id);
-                param_index_to_source_outer_node.push(Some(node.index));
+                inner_param_names.push(name);
                 if required_nonparam_inputs.contains(&node.index) {
                     required_nonparam_inputs.remove(&node.index);
                 }
@@ -408,9 +301,9 @@ pub fn outline_with_ordering(
     }
     // All required items must be covered
     assert!(
-        required_param_ids.is_empty(),
-        "missing required OuterParamId(s) in params ordering: {:?}",
-        required_param_ids
+        required_param_nodes.is_empty(),
+        "missing required parameter nodes in params ordering: {:?}",
+        required_param_nodes
     );
     assert!(
         required_nonparam_inputs.is_empty(),
@@ -418,7 +311,7 @@ pub fn outline_with_ordering(
         required_nonparam_inputs
     );
 
-    // Build inner nodes in PIR layout order: nil, then one GetParam for every
+    // Build inner nodes in PIR layout order: nil, then one Param for every
     // signature parameter, then outlined computation nodes.
     let mut inner_nodes: Vec<Node> = vec![Node {
         text_id: 0,
@@ -431,14 +324,15 @@ pub fn outline_with_ordering(
     let mut outlined_to_inner: HashMap<usize, NodeRef> = HashMap::new();
     let mut next_inner_text_id: usize = next_text_id(&outer.nodes);
 
-    // A selected GetParam still becomes an inner signature parameter;
+    // A selected Param still becomes an inner signature parameter;
     // preserving its source text id retains stable emitted IR while keeping
     // parameters dense.
-    for (pidx, ps) in ordering.params.iter().enumerate() {
+    let mut inner_params = Vec::with_capacity(ordering.params.len());
+    for (ps, name) in ordering.params.iter().zip(inner_param_names) {
         let node = ps.node;
         let src_node = &outer.nodes[node.index];
-        let is_selected_param = to_outline_set.contains(&node.index)
-            && matches!(src_node.payload, NodePayload::GetParam(_));
+        let is_selected_param =
+            to_outline_set.contains(&node.index) && matches!(src_node.payload, NodePayload::Param);
         let text_id = if is_selected_param {
             src_node.text_id
         } else {
@@ -448,14 +342,15 @@ pub fn outline_with_ordering(
         };
         inner_nodes.push(Node {
             text_id,
-            name: Some(inner_params[pidx].name.clone()),
+            name: Some(name),
             ty: src_node.ty.clone(),
-            payload: NodePayload::GetParam(param_index_to_inner_param_id[pidx]),
+            payload: NodePayload::Param,
             pos: src_node.pos.clone(),
         });
         let new_ref = NodeRef {
             index: inner_nodes.len() - 1,
         };
+        inner_params.push(new_ref);
         if is_selected_param {
             outlined_to_inner.insert(node.index, new_ref);
         } else {
@@ -475,7 +370,7 @@ pub fn outline_with_ordering(
         }
         let old = &outer.nodes[nr.index];
         // Map operands: internal operands map to already-cloned nodes; external
-        // operands map to synthesized GetParam nodes (must exist).
+        // operands map to synthesized Param nodes (must exist).
         let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             if to_outline_set.contains(&r.index) {
                 outlined_to_inner
@@ -607,7 +502,12 @@ pub fn outline_with_ordering(
             outer_attrs: Vec::new(),
             inner_attrs: Vec::new(),
         },
-        params: inner_params.clone(),
+        params: inner_params
+            .iter()
+            .map(|node| NodeRef {
+                index: old_to_new_inner[node.index],
+            })
+            .collect(),
         ret_ty: inner_ret_ty,
         ret_node_ref: remapped_inner_ret,
     };
@@ -617,14 +517,6 @@ pub fn outline_with_ordering(
     let mut outer_nodes = outer.nodes.clone();
 
     // Build invoke operands in the exact order of inner params.
-    // Map from outer ParamId number -> NodeRef for the corresponding GetParam
-    // node.
-    let mut paramid_to_node_ref: HashMap<usize, NodeRef> = HashMap::new();
-    for (i, n) in outer.nodes.iter().enumerate() {
-        if let NodePayload::GetParam(pid) = n.payload {
-            paramid_to_node_ref.insert(pid.get_wrapped_id(), NodeRef { index: i });
-        }
-    }
     let mut invoke_operands: Vec<NodeRef> = Vec::with_capacity(inner_params.len());
     for ps in ordering.params.iter() {
         invoke_operands.push(ps.node);
@@ -730,10 +622,10 @@ pub fn outline_with_ordering(
         node.payload = new_payload;
     }
 
-    // Clobber outlined nodes' payloads with Nil (except GetParam nodes, which
+    // Clobber outlined nodes' payloads with Nil (except Param nodes, which
     // may be used as invoke operands)
     for &idx in to_outline_set.iter() {
-        if !matches!(outer_nodes[idx].payload, NodePayload::GetParam(_)) {
+        if !matches!(outer_nodes[idx].payload, NodePayload::Param) {
             outer_nodes[idx].payload = NodePayload::Nil;
         }
     }
@@ -781,7 +673,13 @@ pub fn outline_with_ordering(
             outer_attrs: Vec::new(),
             inner_attrs: Vec::new(),
         },
-        params: outer.params.clone(),
+        params: outer
+            .params
+            .iter()
+            .map(|node| NodeRef {
+                index: old_to_new_outer[node.index],
+            })
+            .collect(),
         ret_ty: outer.ret_ty.clone(),
         ret_node_ref: outer_ret_ref,
     };
@@ -890,8 +788,8 @@ mod tests {
         let mut a_param_idx: Option<usize> = None;
         for (i, n) in f.nodes.iter().enumerate() {
             match n.payload {
-                NodePayload::GetParam(pid) => {
-                    if pid.get_wrapped_id() == 1 {
+                NodePayload::Param => {
+                    if f.params[0].index == i {
                         a_param_idx = Some(i);
                     }
                 }
@@ -911,8 +809,8 @@ mod tests {
         let res = outline(&f, &to_sel, "f_out", "f_inner", &mut pkg);
         // Inner should still have two params named 'a' and 'b'.
         assert_eq!(res.inner.params.len(), 2);
-        assert_eq!(res.inner.params[0].name, "a");
-        assert_eq!(res.inner.params[1].name, "b");
+        assert_eq!(res.inner.get_param(0).param_name(), "a");
+        assert_eq!(res.inner.get_param(1).param_name(), "b");
         // Equivalence: original vs outlined outer
         assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
     }
@@ -976,7 +874,7 @@ fn f_out(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   ret invoke.5: bits[8] = invoke(a, b, to_apply=f_inner, id=5)
 }
 
-fn f_inner(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+fn f_inner(a: bits[8] id=5, b: bits[8] id=6) -> bits[8] {
   t: bits[8] = add(a, b, id=3)
   ret identity.4: bits[8] = identity(t, id=4)
 }
@@ -1037,7 +935,7 @@ fn g_out(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   ret invoke.6: bits[8] = invoke(t, u, to_apply=g_inner, id=6)
 }
 
-fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
+fn g_inner(t: bits[8] id=6, u: bits[8] id=7) -> bits[8] {
   ret m: bits[8] = umul(t, u, id=5)
 }
 "#;
@@ -1051,7 +949,7 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
     #[test]
     fn outline_external_nonparam_inputs_unnamed_sources() {
         // External inputs to the outlined region are unnamed nodes (e.g.,
-        // add.3, not.4). This exercises GetParam synthesis and naming
+        // add.3, not.4). This exercises Param synthesis and naming
         // for non-param external inputs.
         let ir = r#"fn g2(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   add.3: bits[8] = add(a, b, id=3)
@@ -1099,7 +997,7 @@ fn g2_out(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   ret invoke.6: bits[8] = invoke(add.3, not.4, to_apply=g2_inner, id=6)
 }
 
-fn g2_inner(arg_0: bits[8] id=1, arg_1: bits[8] id=2) -> bits[8] {
+fn g2_inner(arg_0: bits[8] id=6, arg_1: bits[8] id=7) -> bits[8] {
   ret umul.5: bits[8] = umul(arg_0, arg_1, id=5)
 }
 "#;
@@ -1169,7 +1067,7 @@ fn h_out(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   ret xor.5: bits[8] = xor(tuple_index.7, tuple_index.8, id=5)
 }
 
-fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
+fn h_inner(a: bits[8] id=6, b: bits[8] id=7) -> (bits[8], bits[8]) {
   t1: bits[8] = add(a, b, id=3)
   t2: bits[8] = sub(a, b, id=4)
   ret tuple.8: (bits[8], bits[8]) = tuple(t1, t2, id=8)

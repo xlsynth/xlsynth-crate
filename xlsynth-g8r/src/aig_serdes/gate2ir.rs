@@ -111,10 +111,9 @@ impl GateFnInterfaceSchema {
     /// port.
     pub fn from_pir_fn(pir_fn: &ir::Fn) -> Result<Self, String> {
         let input_ports = pir_fn
-            .params
-            .iter()
+            .param_nodes()
             .map(|param| GateFnInterfacePort {
-                name: param.name.clone(),
+                name: param.param_name().to_string(),
                 ty: param.ty.clone(),
             })
             .collect::<Vec<GateFnInterfacePort>>();
@@ -746,7 +745,7 @@ mod tests {
         let f = package.get_top_fn().unwrap();
         assert_eq!(f.name, "_9_external_top");
         assert_eq!(
-            f.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            f.param_nodes().map(|p| p.param_name()).collect::<Vec<_>>(),
             [
                 "p_0_", "p_0___1", "p_0___2", "_fn", "_true", "name", "_9input", "p_0___3"
             ]
@@ -775,7 +774,7 @@ mod tests {
         let gates = gb.build();
         let package = gate_fn_to_pir(&gates, "sample", &gates.get_flat_type()).unwrap();
         let f = package.get_top_fn().unwrap();
-        assert_eq!(f.params[1].name, "foo_0_");
+        assert_eq!(f.get_param(1).param_name(), "foo_0_");
         let slice_names = f
             .nodes
             .iter()

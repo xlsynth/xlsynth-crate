@@ -59,17 +59,13 @@ pub fn sequential_gate_fn_to_pir_block_package(
         block.ports.push(BlockPort::Clock(clock.name.clone()));
     }
     for id in &design.inputs {
-        let param = &original_params[id.index()];
-        let index = block
-            .nodes
-            .iter()
-            .position(|node| node.payload == NodePayload::GetParam(param.id))
-            .ok_or_else(|| format!("sequential2ir: input parameter '{}' is missing", param.name))?;
-        block.nodes[index].payload = NodePayload::InputPort {
-            name: param.name.clone(),
+        let param_ref = original_params[id.index()];
+        let node = block.get_node_mut(param_ref);
+        node.payload = NodePayload::InputPort {
+            name: node.param_name().to_string(),
             sv_type: None,
         };
-        block.ports.push(BlockPort::Input(NodeRef { index }));
+        block.ports.push(BlockPort::Input(param_ref));
     }
 
     let mut next_text_id = block
@@ -168,26 +164,17 @@ fn split_transition_return_values(
 fn replace_register_q_params(
     block: &mut Block,
     design: &SequentialGateFn,
-    original_params: &[ir::Param],
+    original_params: &[NodeRef],
 ) -> Result<(), String> {
     for register in &design.registers {
-        let param = original_params.get(register.q.index()).ok_or_else(|| {
+        let &param_ref = original_params.get(register.q.index()).ok_or_else(|| {
             format!(
                 "sequential2ir: register '{}' Q references missing transition parameter {}",
                 register.name,
                 register.q.index()
             )
         })?;
-        let node = block
-            .nodes
-            .iter_mut()
-            .find(|node| node.payload == NodePayload::GetParam(param.id))
-            .ok_or_else(|| {
-                format!(
-                    "sequential2ir: register '{}' Q parameter '{}' has no corresponding node",
-                    register.name, param.name
-                )
-            })?;
+        let node = block.get_node_mut(param_ref);
         node.payload = NodePayload::RegisterRead {
             register: register.name.clone(),
         };

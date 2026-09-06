@@ -2,13 +2,13 @@
 
 #![no_main]
 
-use xlsynth_pir::IrBits;
 use libfuzzer_sys::fuzz_target;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r_fuzz::generate_full_g8r_fuzz_case;
+use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::{Fn, Package};
 use xlsynth_pir::ir_eval::{self, FnEvalResult};
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
@@ -40,7 +40,7 @@ fn check_simulation_equivalence(
 
         let gate_inputs: Vec<IrBits> = args
             .iter()
-            .zip(source_fn.params.iter())
+            .zip(source_fn.param_nodes())
             .map(|(value, param)| {
                 let mut bits = Vec::with_capacity(param.ty.bit_count());
                 flatten_ir_value_to_lsb0_bits_for_type(value, &param.ty, &mut bits)

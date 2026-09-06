@@ -58,7 +58,7 @@ fn append_operand_values<'a>(
 
     match payload {
         Nil
-        | GetParam(_)
+        | Param
         | InputPort { .. }
         | Literal(_)
         | InstantiationOutput { .. }
@@ -1158,14 +1158,14 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             }
             acc
         }
-        ir::NodePayload::GetParam(..) | _ => panic!("Cannot evaluate node as pure: {:?}", n),
+        ir::NodePayload::Param | _ => panic!("Cannot evaluate node as pure: {:?}", n),
     }
 }
 
 pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) -> Option<IrValue> {
     match n.payload {
         ir::NodePayload::Nil
-        | ir::NodePayload::GetParam(_)
+        | ir::NodePayload::Param
         | ir::NodePayload::Assert { .. }
         | ir::NodePayload::Trace { .. }
         | ir::NodePayload::InstantiationInput { .. }
@@ -1999,16 +1999,14 @@ fn eval_fn_impl<'a>(
         "argument count must match params"
     );
 
-    // Map sparse textual ParamId values to dense argument indices. ParamIds
-    // come from IR text `id=` attributes, so they are not guaranteed to be
-    // small or contiguous even though PIR parameter NodeRefs are dense.
-    let mut param_index_by_id: HashMap<ir::ParamId, usize> = HashMap::with_capacity(f.params.len());
-    for (i, p) in f.params.iter().enumerate() {
-        assert!(
-            param_index_by_id.insert(p.id, i).is_none(),
-            "duplicate ParamId in function params"
-        );
-    }
+    // Argument positions are defined by the signature, never by textual IDs.
+    let param_index_by_node: HashMap<ir::NodeRef, usize> = f
+        .params
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, node)| (node, index))
+        .collect();
 
     let mut env = DenseEvalEnv::new(f.nodes.len());
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
@@ -2023,9 +2021,9 @@ fn eval_fn_impl<'a>(
                 // Reserved zero node: produce the unit tuple value.
                 IrValue::make_tuple(&[])
             }
-            P::GetParam(param_id) => {
+            P::Param => {
                 // Must exist by construction.
-                let arg_index = *param_index_by_id.get(param_id).expect("param not found");
+                let arg_index = *param_index_by_node.get(&nr).expect("param not found");
                 args[arg_index].clone()
             }
             P::Assert {
@@ -2138,7 +2136,7 @@ fn eval_fn_impl<'a>(
                 let body_fn = pkg
                     .get_fn(body)
                     .expect("CountedFor body must exist in package");
-                let induction_width = match &body_fn.params[0].ty {
+                let induction_width = match &body_fn.get_param(0).ty {
                     ir::Type::Bits(width) => *width,
                     _ => panic!("CountedFor induction parameter must be bits[N]"),
                 };
@@ -2473,7 +2471,7 @@ fn eval_fn_impl<'a>(
         assert_value_conforms_to_type(&node.ty, &coerced, node);
         if let Some(observer) = observer {
             let observer = unsafe { &mut *observer };
-            let is_param = matches!(node.payload, ir::NodePayload::GetParam(_));
+            let is_param = matches!(node.payload, ir::NodePayload::Param);
             let is_nil = matches!(node.payload, ir::NodePayload::Nil);
             if !is_param && !is_nil {
                 observer.on_node_value(nr, node.text_id, &coerced);
@@ -2725,7 +2723,6 @@ fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
     #[test]
     fn eval_fn_falls_back_to_topological_sort_for_def_after_use_nodes() {
         let bits8 = ir::Type::Bits(8);
-        let param_id = ir::ParamId::new(1);
         let f = ir::Fn {
             graph: crate::ir::NodeGraph {
                 name: "f".to_string(),
@@ -2741,7 +2738,7 @@ fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
                         text_id: 1,
                         name: Some("x".to_string()),
                         ty: bits8.clone(),
-                        payload: ir::NodePayload::GetParam(param_id),
+                        payload: ir::NodePayload::Param,
                         pos: None,
                     },
                     ir::Node {
@@ -2766,11 +2763,7 @@ fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
                 outer_attrs: Vec::new(),
                 inner_attrs: Vec::new(),
             },
-            params: vec![ir::Param {
-                name: "x".to_string(),
-                ty: bits8.clone(),
-                id: param_id,
-            }],
+            params: vec![ir::NodeRef { index: 1 }],
             ret_ty: bits8.clone(),
             ret_node_ref: Some(ir::NodeRef { index: 2 }),
         };
@@ -4301,7 +4294,7 @@ fn f(x: bits[2] id=1, y: bits[2] id=2) -> bits[1] {
         let mut obs = RecordingBoolObserver::new();
         let _ = eval_fn_with_observer(&f, &args, Some(&mut obs));
 
-        // Only computed bits[1] nodes (excluding GetParam) should be observed,
+        // Only computed bits[1] nodes (excluding Param) should be observed,
         // in topo order: eq first, then not.
         let want = vec![(10, true), (11, false)];
         assert_eq!(obs.bool_events, want);
@@ -4325,7 +4318,7 @@ fn f(x: bits[32] id=1) -> bits[32] {
         let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
         assert!(matches!(r, FnEvalResult::Success(_)));
 
-        // Only computed nodes (excluding GetParam) should be observed, in topo
+        // Only computed nodes (excluding Param) should be observed, in topo
         // order: literal first, then add.
         let got = obs.lines.join("\n") + "\n";
         let want = "node_text_id=2 value=bits[32]:1\nnode_text_id=3 value=bits[32]:3\n";

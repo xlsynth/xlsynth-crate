@@ -14,7 +14,7 @@ use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::IrBits;
-use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
+use xlsynth_pir::ir::{self, StartAndLimit};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::ir_verify;
@@ -3057,20 +3057,16 @@ fn gatify_node(
     g8_builder: &mut GateBuilder,
     env: &mut GateEnv,
     options: &GatifyOptions,
-    param_id_to_node_ref: &HashMap<ParamId, ir::NodeRef>,
 ) -> Result<(), String> {
     let payload = &node.payload;
     match payload {
-        ir::NodePayload::GetParam(param_id) => {
-            if env.contains(node_ref) {
-                return Ok(()); // Already inserted above.
+        ir::NodePayload::Param => {
+            if !env.contains(node_ref) {
+                return Err(format!(
+                    "parameter node {} has no input binding",
+                    node_ref.index
+                ));
             }
-            // Look up the original parameter node_ref by its ParamId
-            let pr = param_id_to_node_ref
-                .get(param_id)
-                .expect("ParamId not found in mapping");
-            let entry = env.get_bit_vector(*pr).unwrap();
-            env.add(node_ref, GateOrVec::BitVector(entry));
         }
         ir::NodePayload::ArrayIndex {
             array,
@@ -4215,28 +4211,24 @@ fn gatify_internal(
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
-    // Precompute a map from parameter text_id to its NodeRef in f.nodes.
-    let mut param_id_to_node_ref: HashMap<ParamId, ir::NodeRef> = HashMap::new();
-
     // First we place all the inputs into the G8 structure and environment.
-    for (i, param) in f.params.iter().enumerate() {
-        let param_ref = ir::NodeRef { index: i + 1 };
-        assert!(f.nodes[i + 1].payload == ir::NodePayload::GetParam(param.id));
+    for &param_ref in &f.params {
+        let param = f.get_node(param_ref);
+        assert!(param.payload == ir::NodePayload::Param);
         log::debug!("Gatifying param {:?}", param);
         let provenance_id = if options.track_pir_node_ids {
             provenance_by_node.map_or_else(
-                || Some(f.nodes[i + 1].text_id as u32),
+                || Some(u32::try_from(param.text_id).expect("node id too large for u32")),
                 |by_node| by_node.get(&param_ref).copied().flatten(),
             )
         } else {
             None
         };
         g8_builder.set_current_pir_node_id(provenance_id);
-        let gate_ref_vec = g8_builder.add_input(param.name.clone(), param.ty.bit_count());
+        let gate_ref_vec =
+            g8_builder.add_input(param.param_name().to_string(), param.ty.bit_count());
         g8_builder.set_current_pir_node_id(None);
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
-        // Map ParamId to its NodeRef
-        param_id_to_node_ref.insert(param.id, param_ref);
     }
 
     for node_ref in ir_utils::get_topological(f) {
@@ -4256,15 +4248,7 @@ fn gatify_internal(
             None
         };
         g8_builder.set_current_pir_node_id(provenance_id);
-        gatify_node(
-            f,
-            node_ref,
-            node,
-            g8_builder,
-            env,
-            options,
-            &param_id_to_node_ref,
-        )?;
+        gatify_node(f, node_ref, node, g8_builder, env, options)?;
         g8_builder.set_current_pir_node_id(None);
     }
     // Resolve the outputs and place them into the builder.
@@ -4564,19 +4548,6 @@ pub fn gatify_node_as_fn(
     );
     let mut env = GateEnv::new(f);
 
-    // Precompute a map from parameter id to its NodeRef in f.nodes. This is
-    // used when lowering GetParam nodes.
-    let mut param_id_to_node_ref: HashMap<ParamId, ir::NodeRef> = HashMap::new();
-    for (i, param) in f.params.iter().enumerate() {
-        let param_ref = ir::NodeRef { index: i + 1 };
-        assert!(
-            f.nodes[i + 1].payload == ir::NodePayload::GetParam(param.id),
-            "expected param node at index {}",
-            i + 1
-        );
-        param_id_to_node_ref.insert(param.id, param_ref);
-    }
-
     // Seed the direct operands of this node as independent GateFn inputs.
     let operands: Vec<ir::NodeRef> = ir_utils::operands(&node.payload);
     for (i, operand_ref) in operands.iter().enumerate() {
@@ -4591,13 +4562,8 @@ pub fn gatify_node_as_fn(
 
     // Lower the node into env/builder and emit it as the single output.
     match &node.payload {
-        ir::NodePayload::GetParam(param_id) => {
-            let param = f
-                .params
-                .iter()
-                .find(|p| p.id == *param_id)
-                .ok_or_else(|| format!("GetParam refers to missing ParamId {:?}", param_id))?;
-            let bits = g8_builder.add_input(param.name.clone(), param.ty.bit_count());
+        ir::NodePayload::Param => {
+            let bits = g8_builder.add_input(node.param_name().to_string(), node.ty.bit_count());
             g8_builder.add_output("output_value".to_string(), bits);
             return Ok(g8_builder.build());
         }
@@ -4619,15 +4585,7 @@ pub fn gatify_node_as_fn(
         _ => {}
     }
 
-    gatify_node(
-        f,
-        node_ref,
-        node,
-        &mut g8_builder,
-        &mut env,
-        options,
-        &param_id_to_node_ref,
-    )?;
+    gatify_node(f, node_ref, node, &mut g8_builder, &mut env, options)?;
     let output_bits = env.get_bit_vector(node_ref)?;
     g8_builder.add_output("output_value".to_string(), output_bits);
     Ok(g8_builder.build())

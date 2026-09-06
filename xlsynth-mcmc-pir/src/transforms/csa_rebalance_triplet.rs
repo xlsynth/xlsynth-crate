@@ -338,17 +338,8 @@ mod tests {
         let NodePayload::Binop(Binop::Add, a_ref, b_ref) = f.get_node(inner_add).payload else {
             panic!("expected inner add after CSA expansion");
         };
-        assert!(matches!(
-            f.get_node(a_ref).payload,
-            NodePayload::GetParam(_)
-        ));
-        assert!(matches!(
-            f.get_node(b_ref).payload,
-            NodePayload::GetParam(_)
-        ));
-        assert!(matches!(
-            f.get_node(c_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(a_ref).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(b_ref).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(c_ref).payload, NodePayload::Param));
     }
 }

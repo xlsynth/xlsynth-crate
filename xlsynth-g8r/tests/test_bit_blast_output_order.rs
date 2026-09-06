@@ -30,9 +30,9 @@ fn flatten_value_for_verilog_layout(value: &IrValue, ty: &ir::Type) -> IrBits {
     IrBits::from_lsb_is_0(&flat_bits)
 }
 
-fn make_one_hot_param_samples(params: &[ir::Param]) -> Vec<Vec<IrValue>> {
-    let zero_args: Vec<IrValue> = params
-        .iter()
+fn make_one_hot_param_samples(function: &ir::Fn) -> Vec<Vec<IrValue>> {
+    let zero_args: Vec<IrValue> = function
+        .param_nodes()
         .map(|param| {
             ir_value_from_lsb0_bits_with_layout(&param.ty, &vec![false; param.ty.bit_count()])
                 .expect("zero bits should rebuild for parameter type")
@@ -40,7 +40,7 @@ fn make_one_hot_param_samples(params: &[ir::Param]) -> Vec<Vec<IrValue>> {
         .collect();
 
     let mut samples = vec![zero_args.clone()];
-    for (param_index, param) in params.iter().enumerate() {
+    for (param_index, param) in function.param_nodes().enumerate() {
         for hot_bit in 0..param.ty.bit_count() {
             let mut bits = vec![false; param.ty.bit_count()];
             bits[hot_bit] = true;
@@ -58,10 +58,10 @@ fn test_bit_blast_outputs_follow_verilog_layout_for_interesting_signatures() {
     for case in interesting_ir_output_ordering_cases() {
         let sample = load_interesting_ir_output_ordering_case(&case);
 
-        for args in make_one_hot_param_samples(&sample.g8r_fn.params) {
+        for args in make_one_hot_param_samples(&sample.g8r_fn) {
             let gate_inputs: Vec<IrBits> = args
                 .iter()
-                .zip(sample.g8r_fn.params.iter())
+                .zip(sample.g8r_fn.param_nodes())
                 .map(|(arg, param)| flatten_value_for_verilog_layout(arg, &param.ty))
                 .collect();
             let gate_result = gate_sim::eval(&sample.gate_fn, &gate_inputs, Collect::None);

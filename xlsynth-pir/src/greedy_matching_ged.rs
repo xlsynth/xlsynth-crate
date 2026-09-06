@@ -1091,7 +1091,7 @@ mod tests {
             IrEdit::SubstituteOperand { new_operand, .. } => {
                 let target_node = old_fn.get_node(new_operand);
                 assert_eq!(target_node.name.as_deref(), Some("z"));
-                assert!(matches!(target_node.payload, NodePayload::GetParam(_)));
+                assert!(matches!(target_node.payload, NodePayload::Param));
             }
             ref other => panic!(
                 "expected edit to be an operand substitution, got {:?}",

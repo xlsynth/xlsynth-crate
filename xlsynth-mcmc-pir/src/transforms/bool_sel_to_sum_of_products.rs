@@ -133,10 +133,7 @@ mod tests {
         else {
             panic!("expected sel");
         };
-        assert!(matches!(
-            f.get_node(*selector).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*selector).payload, NodePayload::Param));
         assert_eq!(cases.len(), 2);
     }
 

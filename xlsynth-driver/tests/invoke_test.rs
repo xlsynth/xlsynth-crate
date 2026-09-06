@@ -378,8 +378,7 @@ fn function_type_text_for_ir_text(ir_text: &str) -> String {
         .get_top_fn()
         .expect("roundtrip test IR should have top fn");
     let param_types = top
-        .params
-        .iter()
+        .param_nodes()
         .map(|param| param.ty.to_string())
         .collect::<Vec<String>>()
         .join(", ");
@@ -3283,7 +3282,7 @@ fn helper(x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
     let nodes = json["nodes"].as_array().expect("nodes array");
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[0]["op"], "nil");
-    assert_eq!(nodes[1]["op"], "get_param");
+    assert_eq!(nodes[1]["op"], "param");
     assert_eq!(nodes[1]["name"], "x");
     assert_eq!(nodes[1]["is_param"], true);
     assert_eq!(nodes[1]["is_ret"], true);

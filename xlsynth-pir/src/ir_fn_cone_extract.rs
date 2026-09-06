@@ -3,7 +3,7 @@
 //! Backward cone extraction for PIR functions.
 //!
 //! This module extracts the (fanin) cone feeding a selected "sink" node, down
-//! to the function's primary inputs (`get_param` nodes).
+//! to the function's primary inputs (`param` nodes).
 //!
 //! The resulting package contains a single function named `cone` whose
 //! parameters are the subset of the original function's parameters that affect
@@ -45,7 +45,8 @@ pub struct ExtractedFnCone {
     pub package: ir::Package,
     pub sink_text_id: usize,
     pub sink_node_index: usize,
-    pub used_params: Vec<ir::Param>,
+    /// Parameter references in the source function, in signature order.
+    pub used_params: Vec<ir::NodeRef>,
 }
 
 fn resolve_sink_node_index(f: &ir::Fn, sink: SinkSelector) -> Result<usize, String> {
@@ -94,26 +95,10 @@ fn resolve_sink_node_index(f: &ir::Fn, sink: SinkSelector) -> Result<usize, Stri
     }
 }
 
-fn compute_get_param_index_map(f: &ir::Fn) -> Result<HashMap<ir::ParamId, usize>, String> {
-    let mut out: HashMap<ir::ParamId, usize> = HashMap::new();
-    for (idx, node) in f.nodes.iter().enumerate() {
-        if let ir::NodePayload::GetParam(pid) = node.payload {
-            if out.insert(pid, idx).is_some() {
-                return Err(format!(
-                    "duplicate get_param node for ParamId={} in function '{}'",
-                    pid.get_wrapped_id(),
-                    f.name
-                ));
-            }
-        }
-    }
-    Ok(out)
-}
-
 fn collect_cone_nodes_and_params(
     f: &ir::Fn,
     sink_idx: usize,
-) -> Result<(BTreeSet<usize>, HashSet<ir::ParamId>), String> {
+) -> Result<(BTreeSet<usize>, HashSet<ir::NodeRef>), String> {
     if sink_idx >= f.nodes.len() {
         return Err(format!(
             "sink index {} out of bounds (len={}) in function '{}'",
@@ -125,7 +110,7 @@ fn collect_cone_nodes_and_params(
 
     let mut visited: HashSet<usize> = HashSet::new();
     let mut included_internal: BTreeSet<usize> = BTreeSet::new();
-    let mut used_param_ids: HashSet<ir::ParamId> = HashSet::new();
+    let mut used_param_refs: HashSet<ir::NodeRef> = HashSet::new();
 
     let mut stack: Vec<usize> = vec![sink_idx];
     while let Some(idx) = stack.pop() {
@@ -135,8 +120,8 @@ fn collect_cone_nodes_and_params(
         let node = &f.nodes[idx];
         match node.payload {
             ir::NodePayload::Nil => continue,
-            ir::NodePayload::GetParam(pid) => {
-                used_param_ids.insert(pid);
+            ir::NodePayload::Param => {
+                used_param_refs.insert(ir::NodeRef { index: idx });
                 continue;
             }
             _ => {
@@ -148,7 +133,7 @@ fn collect_cone_nodes_and_params(
         }
     }
 
-    Ok((included_internal, used_param_ids))
+    Ok((included_internal, used_param_refs))
 }
 
 pub fn extract_fn_cone_to_params(
@@ -160,15 +145,15 @@ pub fn extract_fn_cone_to_params(
     let sink_idx = resolve_sink_node_index(f, sink)?;
     let sink_text_id = f.nodes[sink_idx].text_id;
 
-    let get_param_idx_by_id = compute_get_param_index_map(f)?;
+    f.check_pir_layout_invariants()?;
 
-    let (included_internal, used_param_ids) = collect_cone_nodes_and_params(f, sink_idx)?;
+    let (included_internal, used_param_refs) = collect_cone_nodes_and_params(f, sink_idx)?;
 
-    let used_params: Vec<ir::Param> = f
+    let used_params: Vec<ir::NodeRef> = f
         .params
         .iter()
-        .cloned()
-        .filter(|p| used_param_ids.contains(&p.id))
+        .copied()
+        .filter(|p| used_param_refs.contains(p))
         .collect();
 
     // Build a new function named `cone` with only the used params.
@@ -185,25 +170,16 @@ pub fn extract_fn_cone_to_params(
     // referenced (used params + included internal nodes).
     let mut old_to_new: HashMap<usize, usize> = HashMap::new();
 
-    for p in used_params.iter() {
-        let old_param_idx = *get_param_idx_by_id.get(&p.id).ok_or_else(|| {
-            format!(
-                "function '{}' signature param '{}' (ParamId={}) is missing a get_param node",
-                f.name,
-                p.name,
-                p.id.get_wrapped_id()
-            )
-        })?;
-
+    let mut params = Vec::with_capacity(used_params.len());
+    for &param_ref in &used_params {
         let new_idx = nodes.len();
-        nodes.push(ir::Node {
-            text_id: p.id.get_wrapped_id(),
-            name: Some(p.name.clone()),
-            ty: p.ty.clone(),
-            payload: ir::NodePayload::GetParam(p.id),
-            pos: None,
-        });
-        old_to_new.insert(old_param_idx, new_idx);
+        let mut node = f.get_node(param_ref).clone();
+        if !emit_pos_data {
+            node.pos = None;
+        }
+        nodes.push(node);
+        params.push(ir::NodeRef { index: new_idx });
+        old_to_new.insert(param_ref.index, new_idx);
     }
 
     let internal_indices: Vec<usize> = included_internal.iter().copied().collect();
@@ -250,7 +226,7 @@ pub fn extract_fn_cone_to_params(
             outer_attrs: Vec::new(),
             inner_attrs: Vec::new(),
         },
-        params: used_params.clone(),
+        params,
         ret_ty: f.nodes[sink_idx].ty.clone(),
         ret_node_ref: Some(ir::NodeRef {
             index: new_sink_idx,
@@ -333,7 +309,10 @@ mod tests {
         };
 
         assert_eq!(
-            cone_fn.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
+            cone_fn
+                .param_nodes()
+                .map(|p| p.param_name())
+                .collect::<Vec<_>>(),
             ["a", "b"]
         );
         assert_eq!(cone_fn.ret_ty, ir::Type::Bits(8));
@@ -368,7 +347,10 @@ mod tests {
         };
 
         assert_eq!(
-            cone_fn.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
+            cone_fn
+                .param_nodes()
+                .map(|p| p.param_name())
+                .collect::<Vec<_>>(),
             ["a", "b", "c"]
         );
         assert_eq!(cone_fn.get_node(cone_fn.ret_node_ref.unwrap()).text_id, 5);
@@ -400,10 +382,13 @@ mod tests {
         };
 
         assert_eq!(
-            cone_fn.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
+            cone_fn
+                .param_nodes()
+                .map(|p| p.param_name())
+                .collect::<Vec<_>>(),
             ["a"]
         );
         let ret = cone_fn.get_node(cone_fn.ret_node_ref.unwrap());
-        assert!(matches!(ret.payload, ir::NodePayload::GetParam(_)));
+        assert!(matches!(ret.payload, ir::NodePayload::Param));
     }
 }

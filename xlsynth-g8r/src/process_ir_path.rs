@@ -106,7 +106,7 @@ fn independent_deepest_path_excluding_params(g: &gate::GateFn) -> usize {
 
 fn should_skip_independent_op_stats(payload: &ir::NodePayload) -> bool {
     match payload {
-        ir::NodePayload::GetParam(_) => true,
+        ir::NodePayload::Param => true,
         ir::NodePayload::Literal(_) => true,
         ir::NodePayload::Nil => true,
         ir::NodePayload::Unop(ir::Unop::Not, _) => true,

@@ -32,13 +32,12 @@ pub fn infer_uf_signatures(
 
         let arg_widths: Vec<usize> = if skip_implicit {
             ir_fn
-                .params
-                .iter()
+                .param_nodes()
                 .skip(2)
                 .map(|p| p.ty.bit_count())
                 .collect()
         } else {
-            ir_fn.params.iter().map(|p| p.ty.bit_count()).collect()
+            ir_fn.param_nodes().map(|p| p.ty.bit_count()).collect()
         };
         let ret_width = ir_fn.ret_ty.bit_count();
         let sig = UfSignature {

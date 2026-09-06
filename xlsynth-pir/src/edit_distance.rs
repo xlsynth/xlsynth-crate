@@ -16,7 +16,7 @@ enum NodeSignature {
 }
 
 /// Compute the edit distance between two functions based on their computational
-/// nodes. Nodes whose payload operator is "get_param" or "nil" are filtered
+/// nodes. Nodes whose payload operator is "param" or "nil" are filtered
 /// out.
 pub fn compute_edit_distance(lhs: &Fn, rhs: &Fn) -> u64 {
     let lhs_signatures: Vec<NodeSignature> = lhs
@@ -63,11 +63,11 @@ pub fn compute_edit_distance(lhs: &Fn, rhs: &Fn) -> u64 {
 }
 
 /// Returns a signature for a given node that is used for comparison in the edit
-/// distance. Returns None for nodes that are not "visible" (e.g. get_param or
+/// distance. Returns None for nodes that are not "visible" (e.g. param or
 /// nil nodes).
 fn compute_node_signature(f: &Fn, node: &Node) -> Option<NodeSignature> {
     let op = node.payload.get_operator();
-    if op == "get_param" || op == "nil" {
+    if op == "param" || op == "nil" {
         return None;
     }
     match &node.payload {
@@ -114,10 +114,10 @@ fn compute_node_signature(f: &Fn, node: &Node) -> Option<NodeSignature> {
     }
 }
 
-/// Extract a canonical "name" for an operand. For a get_param node we use its
+/// Extract a canonical "name" for an operand. For a parameter node we use its
 /// given name. For any other node we fall back to its operator.
 fn extract_operand_name(node: &Node) -> String {
-    if node.payload.get_operator() == "get_param" {
+    if node.payload.get_operator() == "param" {
         node.name.clone().unwrap_or_else(|| "<anon>".to_string())
     } else {
         node.payload.get_operator().to_string()

@@ -12,6 +12,14 @@ mod package;
 
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 
+/// Checks the sentinel and canonical parameter nodes without checking the body.
+///
+/// Allows unfinished functions with no return node and non-topological storage.
+/// Verifies reference bounds, membership, and unique, nonempty parameter names.
+pub fn verify_function_signature(f: &Fn) -> Result<(), VerifyError> {
+    package::validate_fn_signature(f)
+}
+
 /// Verifies a standalone function and all constraints that do not require
 /// package metadata or another function's signature.
 pub fn verify_function(f: &Fn) -> Result<(), VerifyError> {
@@ -66,7 +74,7 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
     for (i, node) in f.nodes.iter().enumerate() {
         match &node.payload {
             NodePayload::Nil
-            | NodePayload::GetParam(_)
+            | NodePayload::Param
             | NodePayload::Literal(_)
             | NodePayload::InputPort { .. } => {
                 // Leaf nodes do not reference operands.
@@ -393,7 +401,7 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         | NodePayload::RegisterWrite { .. }
         | NodePayload::Invoke { .. }
         | NodePayload::CountedFor { .. } => Ok(()),
-        NodePayload::GetParam(_) | NodePayload::InputPort { .. } => {
+        NodePayload::Param | NodePayload::InputPort { .. } => {
             // The owning function or block validates the input declaration.
             Ok(())
         }
@@ -828,7 +836,7 @@ pub fn verify_graph_types_agree_with_deduction_in_pkg(
             op_types.push(f.get_node(*nr).ty.clone());
         }
         let resolver =
-            |name: &str| -> Option<Type> { pkg.get_fn_type(name).map(|ft| ft.return_type) };
+            |name: &str| -> Option<Type> { pkg.get_fn(name).map(|callee| callee.ret_ty.clone()) };
         match deduce_result_type_with(&node.payload, &op_types, resolver)
             .map_err(|e| e.to_string())?
         {

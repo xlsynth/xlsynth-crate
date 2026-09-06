@@ -780,7 +780,7 @@ fn is_rewriteable_root(f: &ir::Fn, node_ref: NodeRef, ret_reachable: &[bool]) ->
     }
     !matches!(
         f.get_node(node_ref).payload,
-        NodePayload::Nil | NodePayload::GetParam(_)
+        NodePayload::Nil | NodePayload::Param
     )
 }
 
@@ -837,7 +837,7 @@ fn ensure_target_rewriteable(
 ) -> Result<(), MatchRewriteRuleApplyError> {
     if matches!(
         f.get_node(node_ref).payload,
-        NodePayload::Nil | NodePayload::GetParam(_)
+        NodePayload::Nil | NodePayload::Param
     ) {
         return Err(MatchRewriteRuleApplyError::Validation(format!(
             "target node text_id={} is not rewriteable",

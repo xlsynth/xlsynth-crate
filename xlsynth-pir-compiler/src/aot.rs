@@ -653,16 +653,16 @@ fn append_implicit_token_entrypoint_wrapper(
             callee.params.len()
         )));
     }
-    if callee.params[0].ty != Type::Token {
+    if callee.get_param(0).ty != Type::Token {
         return Err(CompilerError::InvalidFunction(format!(
             "implicit-token DSLX top `{implicit_top}` first parameter must be token, got {}",
-            callee.params[0].ty
+            callee.get_param(0).ty
         )));
     }
-    if callee.params[1].ty != Type::Bits(1) {
+    if callee.get_param(1).ty != Type::Bits(1) {
         return Err(CompilerError::InvalidFunction(format!(
             "implicit-token DSLX top `{implicit_top}` second parameter must be bits[1] activation, got {}",
-            callee.params[1].ty
+            callee.get_param(1).ty
         )));
     }
     let Type::Tuple(return_elements) = &callee.ret_ty else {
@@ -678,7 +678,7 @@ fn append_implicit_token_entrypoint_wrapper(
         )));
     }
 
-    let user_params = &callee.params[2..];
+    let user_params: Vec<_> = callee.param_nodes().skip(2).collect();
     let user_return_type = return_elements[1].as_ref();
     let first_wrapper_id = package_max_text_id(&package) + 1;
     let params = user_params
@@ -687,7 +687,7 @@ fn append_implicit_token_entrypoint_wrapper(
         .map(|(index, param)| {
             format!(
                 "{}: {} id={}",
-                param.name,
+                param.param_name(),
                 param.ty,
                 first_wrapper_id + index
             )
@@ -696,7 +696,7 @@ fn append_implicit_token_entrypoint_wrapper(
         .join(", ");
     let user_args = user_params
         .iter()
-        .map(|param| param.name.as_str())
+        .map(|param| param.param_name())
         .collect::<Vec<_>>();
     let invoke_args = std::iter::once("__xlsynth_token")
         .chain(std::iter::once("__xlsynth_activated"))
@@ -813,7 +813,7 @@ impl<'a> ValidatedPirAotPackage<'a> {
             }
         }
         for entrypoint in &metadata.entrypoints {
-            for param in &entrypoint.params {
+            for param in entrypoint.params.iter() {
                 validate_value_name(&param.name)?;
                 package.lower_type_to_layout(&param.ty, &mut Vec::new())?;
             }
@@ -1040,7 +1040,7 @@ impl GeneratedTupleTypes {
             }
         }
         for entrypoint in &package.metadata.entrypoints {
-            for param in &entrypoint.params {
+            for param in entrypoint.params.iter() {
                 registry.collect_from_type(&param.ty);
             }
             registry.collect_from_type(&entrypoint.return_type);
@@ -1326,7 +1326,7 @@ fn collect_scalar_aliases(
         }
     }
     for entrypoint in &package.metadata.entrypoints {
-        for param in &entrypoint.params {
+        for param in entrypoint.params.iter() {
             collect_scalar_aliases_from_type(&param.ty, &mut aliases);
         }
         collect_scalar_aliases_from_type(&entrypoint.return_type, &mut aliases);
@@ -1751,7 +1751,7 @@ fn render_generated_module(
     let entrypoint_artifact = AotEntrypointArtifact::from(artifact);
     let mut declarations = Vec::new();
     let mut input_type_names = Vec::new();
-    for (index, param) in function.params.iter().enumerate() {
+    for (index, param) in function.param_nodes().enumerate() {
         let name = format!("Input{index}");
         let value_type = render_value_type(&param.ty, &name, &mut declarations)?;
         input_type_names.push(value_type);
@@ -1763,9 +1763,8 @@ fn render_generated_module(
         format!("{}\n", declarations.concat())
     };
     let param_names = function
-        .params
-        .iter()
-        .map(|param| param.name.clone())
+        .param_nodes()
+        .map(|param| param.param_name().to_string())
         .collect::<Vec<_>>();
     Ok(format!(
         "// SPDX-License-Identifier: Apache-2.0\n{}",

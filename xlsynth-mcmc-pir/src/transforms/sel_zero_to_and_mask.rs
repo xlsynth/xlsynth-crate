@@ -150,7 +150,7 @@ mod tests {
         let mask = ops
             .iter()
             .copied()
-            .find(|op| !matches!(f.get_node(*op).payload, NodePayload::GetParam(_)))
+            .find(|op| !matches!(f.get_node(*op).payload, NodePayload::Param))
             .unwrap();
         let NodePayload::SignExt { arg, .. } = f.get_node(mask).payload else {
             panic!("expected sign_ext mask");

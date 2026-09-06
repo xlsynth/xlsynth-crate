@@ -604,7 +604,7 @@ fn compute_package_text_diffs(
 }
 
 fn has_token_param(f: &ir::Fn) -> bool {
-    f.params.iter().any(|p| matches!(p.ty, Type::Token))
+    f.param_nodes().any(|p| matches!(p.ty, Type::Token))
 }
 
 fn build_zero_args_value(f: &ir::Fn) -> IrValue {
@@ -633,11 +633,11 @@ fn eval_pir_for_replay(
             args.len()
         ));
     }
-    for (arg, param) in args.iter().zip(&f.params) {
+    for (arg, param) in args.iter().zip(f.param_nodes()) {
         if arg.type_() != param.ty {
             return Err(format!(
                 "argument '{}' expects {}, got {}",
-                param.name,
+                param.param_name(),
                 param.ty,
                 arg.type_()
             ));
@@ -795,7 +795,7 @@ fn try_interpret_cex(
         .ok_or_else(|| "could not extract tuple from counterexample text".to_string())?;
     let arg_tuple = IrValue::parse_typed(&tuple_text)
         .map_err(|e| format!("parse cex arg tuple failed: {}", e))?;
-    let args = counterexample_args(&arg_tuple, &new_fn.params)?;
+    let args = counterexample_args(&arg_tuple, &new_fn.get_type().param_types)?;
     let pv = match eval_pir_for_replay(&patched_pkg, patched_f, &args)? {
         FnEvalResult::Success(success) => success.value,
         failure => return Err(format!("patched interpret failed: {failure:?}")),
@@ -850,14 +850,9 @@ fn extract_tuple_text(s: &str) -> Option<String> {
 
 /// Maps a counterexample's tuple or flattened leaves to native function
 /// arguments.
-fn counterexample_args(value: &IrValue, params: &[ir::Param]) -> Result<Vec<IrValue>, String> {
-    let expected = Type::Tuple(
-        params
-            .iter()
-            .map(|param| Box::new(param.ty.clone()))
-            .collect(),
-    );
-    if params.len() == 1 && value.type_() == params[0].ty {
+fn counterexample_args(value: &IrValue, params: &[Type]) -> Result<Vec<IrValue>, String> {
+    let expected = Type::Tuple(params.iter().map(|param| Box::new(param.clone())).collect());
+    if params.len() == 1 && value.type_() == params[0] {
         return Ok(vec![value.clone()]);
     }
     let IrValue::Tuple(elements) = value else {
@@ -919,11 +914,11 @@ fn consume_value_for_type(
 }
 
 /// Reconstructs native arguments and rejects unconsumed counterexample values.
-fn reshape_args_to_params(flat: &[IrValue], params: &[ir::Param]) -> Result<Vec<IrValue>, String> {
+fn reshape_args_to_params(flat: &[IrValue], params: &[Type]) -> Result<Vec<IrValue>, String> {
     let mut idx: usize = 0;
     let mut out: Vec<IrValue> = Vec::with_capacity(params.len());
     for p in params.iter() {
-        let v = consume_value_for_type(&p.ty, flat, &mut idx)?;
+        let v = consume_value_for_type(p, flat, &mut idx)?;
         out.push(v);
     }
     if idx != flat.len() {
@@ -1049,16 +1044,8 @@ top fn main(x: bits[1] id=5) -> bits[1] {
         );
     }
 
-    fn params(types: &[Type]) -> Vec<ir::Param> {
-        types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| ir::Param {
-                name: format!("p{index}"),
-                ty: ty.clone(),
-                id: ir::ParamId::new(index + 1),
-            })
-            .collect()
+    fn params(types: &[Type]) -> Vec<Type> {
+        types.to_vec()
     }
 
     /// Flattens aggregates to typed leaves using only native value storage.
@@ -1084,14 +1071,14 @@ top fn main(x: bits[1] id=5) -> bits[1] {
                 let tuple = IrValue::make_tuple(&args);
                 let parsed = IrValue::parse_typed(&tuple.to_string()).unwrap();
                 assert_eq!(
-                    counterexample_args(&parsed, &f.params).unwrap(),
+                    counterexample_args(&parsed, &f.get_type().param_types).unwrap(),
                     args,
                     "{}",
                     case.name
                 );
                 let wrapped = IrValue::make_tuple(&[tuple.clone()]);
                 assert_eq!(
-                    counterexample_args(&wrapped, &f.params).unwrap(),
+                    counterexample_args(&wrapped, &f.get_type().param_types).unwrap(),
                     args,
                     "{}",
                     case.name
@@ -1099,7 +1086,7 @@ top fn main(x: bits[1] id=5) -> bits[1] {
                 let mut flat = Vec::new();
                 leaves(&tuple, &mut flat);
                 assert_eq!(
-                    reshape_args_to_params(&flat, &f.params).unwrap(),
+                    reshape_args_to_params(&flat, &f.get_type().param_types).unwrap(),
                     args,
                     "{}",
                     case.name

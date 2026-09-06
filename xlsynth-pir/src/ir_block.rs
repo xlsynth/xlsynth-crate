@@ -104,17 +104,11 @@ impl Block {
             registers: Vec::new(),
             instantiations: Vec::new(),
         };
-        for (index, param) in function.params.into_iter().enumerate() {
-            let node_ref = NodeRef { index: index + 1 };
+        for node_ref in function.params {
             let node = block.get_node_mut(node_ref);
-            if node.ty != param.ty || node.name.as_deref() != Some(param.name.as_str()) {
-                return Err(format!(
-                    "parameter '{}' disagrees with its graph node",
-                    param.name
-                ));
-            }
+            let name = node.param_name().to_string();
             node.payload = NodePayload::InputPort {
-                name: param.name,
+                name,
                 sv_type: None,
             };
             block.ports.push(BlockPort::Input(node_ref));
@@ -122,7 +116,7 @@ impl Block {
         if block.nodes.iter().any(|node| {
             matches!(
                 node.payload,
-                NodePayload::GetParam(_)
+                NodePayload::Param
                     | NodePayload::RegisterRead { .. }
                     | NodePayload::RegisterWrite { .. }
                     | NodePayload::InstantiationInput { .. }
@@ -507,7 +501,7 @@ mod tests {
         let function = Parser::new("fn identity(data: bits[8] id=1) -> bits[8] { ret data: bits[8] = param(name=data, id=1) }").parse_fn().unwrap();
         let input = NodeRef { index: 1 };
         for payload in [
-            NodePayload::GetParam(crate::ir::ParamId::new(2)),
+            NodePayload::Param,
             NodePayload::InputPort {
                 name: "extra".to_string(),
                 sv_type: None,

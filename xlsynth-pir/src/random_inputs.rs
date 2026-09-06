@@ -41,8 +41,7 @@ pub fn generate_uniform_value_with_rng<R: RngCore + ?Sized>(rng: &mut R, ty: &Ty
 /// Generates uniformly distributed inputs matching a function's parameters.
 pub fn generate_uniform_arguments<S: EntropySource>(source: &mut S, function: &Fn) -> Vec<IrValue> {
     function
-        .params
-        .iter()
+        .param_nodes()
         .map(|param| generate_uniform_value(source, &param.ty))
         .collect()
 }
@@ -82,8 +81,7 @@ pub fn generate_biased_value<S: EntropySource>(source: &mut S, ty: &Type) -> IrV
 /// Generates biased inputs matching a function's parameters.
 pub fn generate_biased_arguments<S: EntropySource>(source: &mut S, function: &Fn) -> Vec<IrValue> {
     function
-        .params
-        .iter()
+        .param_nodes()
         .map(|param| generate_biased_value(source, &param.ty))
         .collect()
 }
@@ -285,8 +283,7 @@ pub fn generate_pattern_value(ty: &Type, pattern: BitValuePattern) -> IrValue {
 /// Generates inputs whose leaves use the requested corner pattern.
 pub fn generate_pattern_arguments(function: &Fn, pattern: BitValuePattern) -> Vec<IrValue> {
     function
-        .params
-        .iter()
+        .param_nodes()
         .map(|param| generate_pattern_value(&param.ty, pattern))
         .collect()
 }

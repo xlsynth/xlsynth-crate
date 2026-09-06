@@ -2,7 +2,7 @@
 
 //! Dead-code elimination utilities for XLS IR functions.
 
-use crate::ir::{Fn, NodeRef};
+use crate::ir::{Fn, NodePayload, NodeRef};
 use crate::ir_utils::{compact_and_toposort_in_place, is_observable_effect_root, operands};
 
 /// Computes nodes required by the return value or an observable effect.
@@ -62,9 +62,9 @@ pub fn get_dead_nodes(f: &Fn) -> Vec<NodeRef> {
 
 /// Returns a new function with nodes irrelevant to its return value and
 /// observable effects removed, and all remaining node indices compacted.
-/// Operand references are remapped to the new indices. GetParam nodes are
+/// Operand references are remapped to the new indices. Param nodes are
 /// preserved even if they would otherwise be considered dead, to satisfy
-/// validation rules requiring a GetParam for each declared parameter.
+/// validation rules requiring a Param for each declared parameter.
 pub fn remove_dead_nodes(f: &Fn) -> Fn {
     let n = f.nodes.len();
     assert!(n > 0, "remove_dead_nodes: function has no nodes");
@@ -77,19 +77,18 @@ pub fn remove_dead_nodes(f: &Fn) -> Fn {
 
     // Always keep layout-invariant nodes:
     // - node[0] is reserved Nil
-    // - params occupy indices 1..=params.len() in signature order
+    // - all parameter references are retained regardless of storage order
     //
     // We mark dead body nodes as Nil, then use `compact_and_toposort_in_place`
     // to remove those Nil nodes and remap indices while preserving the layout
     // invariants.
     let mut g: Fn = f.clone();
-    let param_count = g.params.len();
-    for i in 0..n {
-        if i == 0 || (1..=param_count).contains(&i) {
+    for (i, node) in g.nodes.iter_mut().enumerate() {
+        if i == 0 || matches!(node.payload, NodePayload::Param) {
             continue;
         }
         if !live[i] {
-            g.nodes[i].payload = crate::ir::NodePayload::Nil;
+            node.payload = NodePayload::Nil;
         }
     }
 
@@ -145,18 +144,15 @@ mod tests {
         );
         let g = remove_dead_nodes(&f);
         g.check_pir_layout_invariants().unwrap();
-        // Validate function still has GetParam for both a and b (even if b was
+        // Validate function still has Param for both a and b (even if b was
         // dead)
         let mut seen_params = 0usize;
         for node in g.nodes.iter() {
-            if matches!(node.payload, crate::ir::NodePayload::GetParam(_)) {
+            if matches!(node.payload, crate::ir::NodePayload::Param) {
                 seen_params += 1;
             }
         }
-        assert_eq!(
-            seen_params, 2,
-            "expected both GetParam nodes to be preserved"
-        );
+        assert_eq!(seen_params, 2, "expected both Param nodes to be preserved");
         // Ensure return remains and only live path nodes are present besides
         // params.
         assert!(g.ret_node_ref.is_some());
