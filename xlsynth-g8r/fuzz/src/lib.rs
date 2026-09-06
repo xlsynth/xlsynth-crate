@@ -11,7 +11,7 @@ use xlsynth_g8r::aig::{AigBitVector, GateBuilder, GateBuilderOptions, GateFn};
 use xlsynth_g8r::process_ir_path::{
     CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts,
 };
-use xlsynth_g8r::prove_gate_fn_equiv_sat::GateFormalOptions;
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{DEFAULT_CADICAL_TERMINATE_LIMIT, GateFormalOptions};
 use xlsynth_pir::ir::Package;
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
@@ -35,6 +35,7 @@ pub fn fuzz_solver_limits() -> SolverLimits {
 pub fn fuzz_gate_formal_options() -> GateFormalOptions {
     GateFormalOptions::default()
         .with_cadical_timeout(Duration::from_millis(FUZZ_SOLVER_TIME_LIMIT_PER_MS))
+        .with_cadical_terminate_limit(DEFAULT_CADICAL_TERMINATE_LIMIT)
 }
 
 /// Returns Bitwuzla options with the fuzzing per-query time limit applied.
@@ -183,7 +184,20 @@ mod tests {
     use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
     use xlsynth_pir::IrBits;
 
-    use super::{FuzzGraph, FuzzOp, GateFn, build_graph};
+    use super::{
+        DEFAULT_CADICAL_TERMINATE_LIMIT, FuzzGraph, FuzzOp, GateFn, build_graph,
+        fuzz_gate_formal_options,
+    };
+
+    #[test]
+    fn gate_formal_fuzzing_has_deterministic_and_wall_clock_limits() {
+        let options = fuzz_gate_formal_options();
+        assert!(options.cadical_timeout.is_some());
+        assert_eq!(
+            options.cadical_terminate_limit,
+            Some(DEFAULT_CADICAL_TERMINATE_LIMIT)
+        );
+    }
 
     /// Evaluates each output for every assignment of two one-bit inputs.
     fn truth_tables(graph: &GateFn) -> Vec<Vec<bool>> {

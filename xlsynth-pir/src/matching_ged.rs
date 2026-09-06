@@ -4,7 +4,9 @@
 //! functions using an incremental node matching approach.
 
 use crate::ir::{self, Fn, Node, NodeRef};
-use crate::ir_utils::{compact_and_toposort_in_place, operands, remap_payload_with};
+use crate::ir_utils::{
+    compact_and_toposort_in_place, is_observable_effect_root, operands, remap_payload_with,
+};
 use crate::node_hashing::{FwdHash, compute_node_local_structural_hash};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -92,6 +94,7 @@ pub struct DepNode<I> {
     pub users: Vec<(I, usize)>, // (user index, operand slot)
     pub structural_hash: FwdHash,
     pub is_return: bool,
+    pub is_observable_effect_root: bool,
     pub name: String,
 }
 
@@ -144,6 +147,7 @@ where
             users: users_list[i].clone(),
             structural_hash: local_hashes[i],
             is_return: ret_index_usize == Some(i),
+            is_observable_effect_root: is_observable_effect_root(&f.nodes[i].payload),
             name: crate::ir::node_textual_id(f, NodeRef { index: i }),
         });
     }

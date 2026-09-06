@@ -4,10 +4,31 @@ use std::collections::BTreeMap;
 
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ValueError;
-use xlsynth_pir::ir::Type as PirType;
+use xlsynth_pir::ir::{Binop, Fn as PirFn, NodePayload, Type as PirType};
+use xlsynth_pir::ir_utils::operands;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
+
+pub const MAX_PIPELINE_MULTIPLY_CHAIN_DEPTH: usize = 8;
+
+/// Returns the largest number of multiplications on any node-dependency path.
+pub fn max_multiply_chain_depth(f: &PirFn) -> usize {
+    let mut depths = vec![0usize; f.nodes.len()];
+    for (index, node) in f.nodes.iter().enumerate() {
+        let operand_depth = operands(&node.payload)
+            .iter()
+            .map(|operand| depths[operand.index])
+            .max()
+            .unwrap_or(0);
+        let is_multiply = matches!(
+            node.payload,
+            NodePayload::Binop(Binop::Umul | Binop::Smul, _, _)
+        );
+        depths[index] = operand_depth + usize::from(is_multiply);
+    }
+    depths.into_iter().max().unwrap_or(0)
+}
 
 #[derive(Debug, Clone)]
 pub struct TypedPortSig {
@@ -168,5 +189,29 @@ fn append_packed_bits_lsb(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::max_multiply_chain_depth;
+    use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn multiply_depth_follows_dependencies_through_structural_nodes() {
+        let package = Parser::new(
+            r#"package test
+top fn f(x: bits[8] id=1) -> bits[8] {
+  square: bits[8] = umul(x, x, id=2)
+  slice: bits[8] = bit_slice(square, start=0, width=8, id=3)
+  fourth: bits[8] = umul(slice, slice, id=4)
+  independent: bits[8] = smul(x, x, id=5)
+  ret eighth: bits[8] = umul(fourth, independent, id=6)
+}
+"#,
+        )
+        .parse_and_validate_package()
+        .unwrap();
+        assert_eq!(max_multiply_chain_depth(package.get_top_fn().unwrap()), 3);
     }
 }

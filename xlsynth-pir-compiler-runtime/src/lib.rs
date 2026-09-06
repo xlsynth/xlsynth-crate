@@ -948,7 +948,7 @@ pub struct TraceMessage {
     pub verbosity: i64,
 }
 
-/// Accumulated execution count for a compiled `cover` site.
+/// Accumulated true-predicate count for an encountered compiled `cover` site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverCount {
     pub node_text_id: usize,
@@ -962,6 +962,8 @@ pub struct ExecutionResult {
     pub assertion_failures: Vec<AssertionFailure>,
     pub assumption_failures: Vec<AssumptionFailure>,
     pub trace_messages: Vec<TraceMessage>,
+    /// Covers encountered during execution, including zero counts for false
+    /// predicates. Sites in unexecuted callees or loop bodies are absent.
     pub cover_counts: Vec<CoverCount>,
 }
 
@@ -1033,7 +1035,8 @@ struct ContextState {
     assertion_failures: Vec<AssertionFailure>,
     assumption_failures: Vec<AssumptionFailure>,
     trace_messages: Vec<TraceMessage>,
-    event_counts: Option<Vec<u64>>,
+    // None entries distinguish unexecuted sites from encountered false covers.
+    event_counts: Option<Vec<Option<u64>>>,
 }
 
 /// Rust-owned event collector used for one or more compiled executions.
@@ -1059,7 +1062,7 @@ impl<'metadata> ExecutionContext<'metadata> {
     ) -> Self {
         let event_counts = options
             .collect_covers
-            .then(|| vec![0; metadata.event_sites.len()]);
+            .then(|| vec![None; metadata.event_sites.len()]);
         Self {
             state: Box::new(ContextState {
                 metadata,
@@ -1094,10 +1097,12 @@ impl<'metadata> ExecutionContext<'metadata> {
                     .iter()
                     .zip(event_counts)
                     .filter(|(site, _)| site.kind == EventKind::Cover)
-                    .map(|(site, count)| CoverCount {
-                        node_text_id: site.node_text_id,
-                        label: site.label.clone().unwrap_or_default(),
-                        count: *count,
+                    .filter_map(|(site, count)| {
+                        count.map(|count| CoverCount {
+                            node_text_id: site.node_text_id,
+                            label: site.label.clone().unwrap_or_default(),
+                            count,
+                        })
                     })
                     .collect()
             })
@@ -1134,10 +1139,10 @@ impl<'metadata> ExecutionContext<'metadata> {
         self.state.options = options;
         if options.collect_covers {
             match &mut self.state.event_counts {
-                Some(event_counts) => event_counts.fill(0),
+                Some(event_counts) => event_counts.fill(None),
                 None => {
                     let site_count = self.metadata().event_sites.len();
-                    self.state.event_counts = Some(vec![0; site_count]);
+                    self.state.event_counts = Some(vec![None; site_count]);
                 }
             }
         } else {
@@ -1225,7 +1230,12 @@ pub unsafe extern "C" fn xlsynth_pir_record_assumption_failure(
     });
 }
 
-/// Records one active cover occurrence from generated code.
+/// Records one known-active cover occurrence from generated code.
+///
+/// Retained for existing AOT objects. New code uses
+/// [`xlsynth_pir_record_cover_predicate`] to distinguish encountered false
+/// predicates from sites that were not executed. Objects using this entrypoint
+/// report only sites with hits and must be regenerated to report false covers.
 ///
 /// # Safety
 ///
@@ -1233,6 +1243,22 @@ pub unsafe extern "C" fn xlsynth_pir_record_assumption_failure(
 /// [`ExecutionContext::raw_context`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn xlsynth_pir_record_cover(context: *mut RawExecutionContext, site_id: u32) {
+    // SAFETY: forwarded from the caller's ABI contract.
+    unsafe { xlsynth_pir_record_cover_predicate(context, site_id, 1) };
+}
+
+/// Records one encountered cover and counts its nonzero predicate as a hit.
+///
+/// # Safety
+///
+/// `context` must point to an active raw context created by
+/// [`ExecutionContext::raw_context`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_record_cover_predicate(
+    context: *mut RawExecutionContext,
+    site_id: u32,
+    predicate: u32,
+) {
     // SAFETY: forwarded from the caller's ABI contract.
     let state = unsafe { state_from_raw(context) };
     if state.event_counts.is_none() || site(state, site_id, EventKind::Cover).is_none() {
@@ -1243,7 +1269,8 @@ pub unsafe extern "C" fn xlsynth_pir_record_cover(context: *mut RawExecutionCont
         .as_mut()
         .and_then(|event_counts| event_counts.get_mut(site_id as usize))
     {
-        *count = count.saturating_add(1);
+        let count = count.get_or_insert(0);
+        *count = count.saturating_add(u64::from(predicate != 0));
     }
 }
 
@@ -2322,7 +2349,7 @@ mod tests {
         // SAFETY: `raw` points into `context` for these immediate calls.
         unsafe {
             xlsynth_pir_record_cover(&mut raw, 0);
-            xlsynth_pir_record_cover(&mut raw, 0);
+            xlsynth_pir_record_cover_predicate(&mut raw, 0, 1);
             xlsynth_pir_record_assert(&mut raw, 1);
             xlsynth_pir_record_assumption_failure(&mut raw, 3);
         }
@@ -2435,13 +2462,53 @@ mod tests {
             ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         // SAFETY: `raw` points into `context` for this immediate call.
-        unsafe { xlsynth_pir_record_cover(&mut raw, 0) };
+        unsafe { xlsynth_pir_record_cover_predicate(&mut raw, 0, 1) };
         context.clear();
         let result = context.result();
         assert!(result.assertion_failures.is_empty());
         assert!(result.assumption_failures.is_empty());
         assert!(result.trace_messages.is_empty());
-        assert_eq!(result.cover_counts[0].count, 0);
+        assert!(result.cover_counts.is_empty());
+    }
+
+    #[test]
+    fn cover_collection_tracks_encounters_and_resets_when_options_change() {
+        let mut metadata = metadata();
+        let mut unexecuted_cover = metadata.event_sites[0].clone();
+        unexecuted_cover.node_text_id = 20;
+        unexecuted_cover.label = Some("unexecuted".into());
+        metadata.event_sites.push(unexecuted_cover);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
+        assert!(context.result().cover_counts.is_empty());
+        let mut raw = context.raw_context();
+        // SAFETY: `raw` points into the live context for each immediate call.
+        unsafe { xlsynth_pir_record_cover_predicate(&mut raw, 0, 0) };
+        assert_eq!(
+            context.result().cover_counts,
+            vec![CoverCount {
+                node_text_id: 10,
+                label: "covered".into(),
+                count: 0,
+            }]
+        );
+        // SAFETY: the raw context remains valid for these immediate calls.
+        unsafe {
+            xlsynth_pir_record_cover_predicate(&mut raw, 0, 1);
+            xlsynth_pir_record_cover_predicate(&mut raw, 0, 0);
+        }
+        assert_eq!(context.result().cover_counts[0].count, 1);
+        context.clear_with_options(ExecutionOptions::NO_EVENTS);
+        // SAFETY: clearing options does not invalidate the raw context.
+        unsafe { xlsynth_pir_record_cover_predicate(&mut raw, 0, 1) };
+        assert!(context.result().cover_counts.is_empty());
+        context.clear_with_options(ExecutionOptions::collect_all());
+        assert!(context.result().cover_counts.is_empty());
+        // SAFETY: the raw context remains valid after re-enabling collection.
+        unsafe { xlsynth_pir_record_cover_predicate(&mut raw, 0, 0) };
+        assert_eq!(context.result().cover_counts[0].count, 0);
+        context.clear();
+        assert!(context.result().cover_counts.is_empty());
     }
 
     #[test]
@@ -2457,7 +2524,7 @@ mod tests {
         ];
         // SAFETY: `raw` and operands point to valid test storage.
         unsafe {
-            xlsynth_pir_record_cover(&mut raw, 0);
+            xlsynth_pir_record_cover_predicate(&mut raw, 0, 1);
             xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr());
         }
         let result = context.result();

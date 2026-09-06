@@ -32,8 +32,8 @@ pub use xlsynth_pir_compiler_runtime::{
     TraceValueLayout, WideBinaryOp, WideUnaryOp,
 };
 use xlsynth_pir_compiler_runtime::{
-    xlsynth_pir_record_assert, xlsynth_pir_record_assumption_failure, xlsynth_pir_record_cover,
-    xlsynth_pir_record_trace, xlsynth_pir_runtime_wide_binop,
+    xlsynth_pir_record_assert, xlsynth_pir_record_assumption_failure,
+    xlsynth_pir_record_cover_predicate, xlsynth_pir_record_trace, xlsynth_pir_runtime_wide_binop,
     xlsynth_pir_runtime_wide_bit_slice_update, xlsynth_pir_runtime_wide_dynamic_bit_slice,
     xlsynth_pir_runtime_wide_mulp, xlsynth_pir_runtime_wide_unary_op,
 };
@@ -486,8 +486,8 @@ impl PirFunctionCompiler {
             xlsynth_pir_record_assumption_failure as *const u8,
         );
         builder.symbol(
-            "xlsynth_pir_record_cover",
-            xlsynth_pir_record_cover as *const u8,
+            "xlsynth_pir_record_cover_predicate",
+            xlsynth_pir_record_cover_predicate as *const u8,
         );
         builder.symbol(
             "xlsynth_pir_record_trace",
@@ -2184,6 +2184,7 @@ fn scalar_storage_view_payload(payload: &NodePayload) -> bool {
         NodePayload::Unop(Unop::Identity, _)
             | NodePayload::ArrayIndex { .. }
             | NodePayload::TupleIndex { .. }
+            | NodePayload::CountedFor { trip_count: 0, .. }
     )
 }
 
@@ -2192,7 +2193,18 @@ fn aliased_storage_operands(payload: &NodePayload) -> Vec<NodeRef> {
     match payload {
         NodePayload::Param => Vec::new(),
         NodePayload::Unop(Unop::Identity, arg) => vec![*arg],
-        NodePayload::ArrayIndex { array, .. } => vec![*array],
+        NodePayload::ArrayIndex { array, indices, .. } => {
+            // Deferred scalar indexing retains the index recipes as well as
+            // the array storage until the scalar is actually consumed.
+            let mut operands = vec![*array];
+            operands.extend(indices.iter().copied());
+            operands
+        }
+        NodePayload::CountedFor {
+            init,
+            trip_count: 0,
+            ..
+        } => vec![*init],
         NodePayload::TupleIndex { tuple, .. } => vec![*tuple],
         NodePayload::ArrayUpdate { value, indices, .. } if indices.is_empty() => vec![*value],
         NodePayload::Binop(Binop::Gate, _, gated) => vec![*gated],
@@ -2257,6 +2269,7 @@ fn needs_materialized_destination(node: &ir::Node, layout: &NativeValueLayout) -
                 | NodePayload::Binop(Binop::Gate, _, _)
                 | NodePayload::Sel { .. }
                 | NodePayload::PrioritySel { .. }
+                | NodePayload::CountedFor { trip_count: 0, .. }
         ),
         NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => match &node.payload {
             NodePayload::ArrayUpdate { indices, .. } => !indices.is_empty(),
@@ -2705,8 +2718,14 @@ fn declare_runtime_callbacks<M: Module>(
             &site_signature,
         )
         .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let mut cover_signature = site_signature.clone();
+    cover_signature.params.push(AbiParam::new(types::I32));
     let cover_id = module
-        .declare_function("xlsynth_pir_record_cover", Linkage::Import, &site_signature)
+        .declare_function(
+            "xlsynth_pir_record_cover_predicate",
+            Linkage::Import,
+            &cover_signature,
+        )
         .map_err(|error| CompilerError::Backend(error.to_string()))?;
 
     let mut trace_signature = site_signature;
@@ -2885,12 +2904,13 @@ fn lower_function(
             NodePayload::Cover { predicate, .. } => {
                 let site_id = event_site_id(event_sites, *node_ref, node)?;
                 let predicate = scalar_value_for(builder, &mut values, *predicate)?;
-                emit_conditional_site_call(
-                    builder,
-                    predicate,
+                let predicate = builder.ins().uextend(types::I32, predicate);
+                let site_id = builder.ins().iconst(types::I32, i64::from(site_id));
+                // Record false predicates too, so an encountered zero-count
+                // cover remains distinct from a site in an unexecuted body.
+                builder.ins().call(
                     runtime_callbacks.record_cover,
-                    execution_context,
-                    site_id,
+                    &[execution_context, site_id, predicate],
                 );
                 ComputedValue::ZeroSized
             }
@@ -3802,6 +3822,7 @@ fn lower_function(
                 default,
             } => lower_sel(
                 builder,
+                function,
                 scratch_pointer,
                 scratch_plan,
                 *selector,
@@ -7173,6 +7194,7 @@ fn lower_gate(
 #[allow(clippy::too_many_arguments)]
 fn lower_sel(
     builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
     scratch_pointer: Value,
     scratch_plan: &ScratchPlan,
     selector: NodeRef,
@@ -7181,15 +7203,33 @@ fn lower_sel(
     values: &mut [Option<ComputedValue>],
     layout: &NativeValueLayout,
 ) -> Result<ComputedValue, CompilerError> {
-    let selector_value = scalar_value_for(builder, values, selector)?;
     let initial = default
         .or_else(|| cases.last().copied())
         .ok_or_else(|| CompilerError::InvalidFunction("sel requires a case or default".into()))?;
     let mut result = computed_value_for(values, initial)?;
+    if cases.is_empty() || layout.byte_count() == 0 {
+        // Scalar selects own register values, not storage aliases. In
+        // particular, a default-only select must load a deferred array element
+        // before its backing scratch storage can be reused or updated.
+        return match layout {
+            NativeValueLayout::Scalar(_) => {
+                Ok(ComputedValue::Scalar(materialize_scalar(builder, result)?))
+            }
+            _ => Ok(result),
+        };
+    }
+    let selector_layout = NativeValueLayout::from_type(&function.get_node(selector).ty)?;
+    let selector_index = lower_dynamic_bit_offset(
+        builder,
+        computed_value_for(values, selector)?,
+        &selector_layout,
+        cases.len(),
+    )?;
     for (index, case) in cases.iter().enumerate().rev() {
         let selected = builder
             .ins()
-            .icmp_imm(IntCC::Equal, selector_value, index as i64);
+            .icmp_imm(IntCC::Equal, selector_index.low_bits, index as i64);
+        let selected = builder.ins().band(selector_index.in_bounds, selected);
         result = selected_value(
             builder,
             scratch_pointer,
@@ -7222,11 +7262,14 @@ fn lower_priority_sel(
             node.text_id
         )));
     };
-    let selector_value = scalar_value_for(builder, values, selector)?;
-    let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
     let mut result = computed_value_for(values, default)?;
+    if layout.byte_count() == 0 {
+        return Ok(result);
+    }
+    let selector_value = computed_value_for(values, selector)?;
+    let selector_layout = NativeValueLayout::from_type(&function.get_node(selector).ty)?;
     for (index, case) in cases.iter().enumerate().rev() {
-        let selected = bit_is_set(builder, selector_value, selector_layout, index);
+        let selected = computed_bit_is_set(builder, &selector_value, &selector_layout, index)?;
         result = selected_value(
             builder,
             scratch_pointer,
@@ -7258,16 +7301,17 @@ fn lower_one_hot_sel(
     if cases.is_empty() {
         return Err(unsupported_node(node));
     }
-    let selector_value = scalar_value_for(builder, values, selector)?;
-    let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
     if layout.byte_count() == 0 {
         return Ok(zero_sized_computed_value(layout));
     }
+    let selector_value = computed_value_for(values, selector)?;
+    let selector_layout = NativeValueLayout::from_type(&function.get_node(selector).ty)?;
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let mut result = builder.ins().iconst(scalar.clif_type(), 0);
             for (index, case) in cases.iter().enumerate() {
-                let active = bit_is_set(builder, selector_value, selector_layout, index);
+                let active =
+                    computed_bit_is_set(builder, &selector_value, &selector_layout, index)?;
                 let case = scalar_value_for(builder, values, *case)?;
                 let with_case = builder.ins().bor(result, case);
                 result = builder.ins().select(active, with_case, result);
@@ -7287,7 +7331,8 @@ fn lower_one_hot_sel(
             )?;
             write_zero_value_to_storage(builder, destination, layout)?;
             for (index, case) in cases.iter().enumerate() {
-                let active = bit_is_set(builder, selector_value, selector_layout, index);
+                let active =
+                    computed_bit_is_set(builder, &selector_value, &selector_layout, index)?;
                 write_selected_or_value_to_storage(
                     builder,
                     destination,
@@ -7375,6 +7420,21 @@ fn bit_is_set(
     }
     let masked = builder.ins().band_imm(value, (1u64 << index) as i64);
     builder.ins().icmp_imm(IntCC::NotEqual, masked, 0)
+}
+
+/// Tests a selector bit in either scalar or memory-backed bitvector storage.
+fn computed_bit_is_set(
+    builder: &mut FunctionBuilder<'_>,
+    value: &ComputedValue,
+    layout: &NativeValueLayout,
+    index: usize,
+) -> Result<Value, CompilerError> {
+    if index >= bits_bit_count(layout)? {
+        return Ok(builder.ins().iconst(types::I8, 0));
+    }
+    let limb = load_raw_bits_limb(builder, value.clone(), layout, index / 64)?;
+    let masked = builder.ins().band_imm(limb, (1u64 << (index % 64)) as i64);
+    Ok(builder.ins().icmp_imm(IntCC::NotEqual, masked, 0))
 }
 
 #[allow(clippy::too_many_arguments)]

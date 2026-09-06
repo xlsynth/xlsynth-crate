@@ -463,6 +463,9 @@ Primarily tests:
   Verilog/SystemVerilog simulation
 - Codegen/simulation consistency across combo and pipelined lowering paths
   under random typed inputs
+- Pipeline-oracle coverage up to the configured multiplication-dependency-depth
+  budget; deeper chains still exercise the combinational oracles without
+  invoking resource-pathological upstream scheduling
 
 ______________________________________________________________________
 

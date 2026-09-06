@@ -381,9 +381,7 @@ top fn f(x: bits[1] id=5) -> bits[1] {
         .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute zero-trip counted_for");
     assert_eq!(result.value, bits(1, 1));
-    assert_eq!(result.events.cover_counts.len(), 1);
-    assert_eq!(result.events.cover_counts[0].node_text_id, 3);
-    assert_eq!(result.events.cover_counts[0].count, 0);
+    assert!(result.events.cover_counts.is_empty());
 }
 
 #[test]
@@ -751,7 +749,7 @@ fn f(x: bits[1] id=1) -> bits[1] {
     }
     assert_eq!(context.result().cover_counts[0].count, 2);
     context.clear();
-    assert_eq!(context.result().cover_counts[0].count, 0);
+    assert!(context.result().cover_counts.is_empty());
 }
 
 #[test]

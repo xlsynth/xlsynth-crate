@@ -2,6 +2,9 @@
 
 //! Shared path resolution and bounded execution of external tools.
 
+use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
@@ -174,21 +177,49 @@ fn resource_diagnostic(text: &str) -> bool {
 }
 
 /// Resolves a tool name or explicit path before a caller changes directory.
+///
+/// Preserves symlinks because tool wrappers may dispatch based on the
+/// invocation path rather than the executable's canonical path.
 pub fn resolve_executable(program: &Path) -> Result<PathBuf, String> {
+    resolve_executable_with_path(program, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// Resolves against an explicit search path without changing process state.
+fn resolve_executable_with_path(program: &Path, search_path: &OsStr) -> Result<PathBuf, String> {
     let candidate = if program.components().count() > 1 || program.is_absolute() {
         program.to_owned()
     } else {
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        std::env::split_paths(search_path)
             .map(|directory| directory.join(program))
-            .find(|path| path.is_file())
+            .find(|path| is_executable_file(path))
             .ok_or_else(|| format!("executable `{}` not found on PATH", program.display()))?
     };
     if !candidate.is_file() {
         return Err(format!("executable is not a file: {}", candidate.display()));
     }
-    candidate
-        .canonicalize()
+    if !is_executable_file(&candidate) {
+        return Err(format!("file is not executable: {}", candidate.display()));
+    }
+    std::path::absolute(&candidate)
         .map_err(|error| format!("resolve executable `{}`: {error}", candidate.display()))
+}
+
+/// Checks regular-file and, on Unix, executable permission bits through
+/// symlinks.
+fn is_executable_file(path: &Path) -> bool {
+    path.metadata().is_ok_and(|metadata| {
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
 }
 
 /// Runs a tool with file-backed diagnostics and a wall-clock timeout.
@@ -303,7 +334,141 @@ pub fn kill_process_group(child: &mut Child) {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use super::*;
+
+    /// Creates a tool wrapper that dispatches only under its symlink's name.
+    fn create_dispatch_wrapper(directory: &Path) -> PathBuf {
+        let wrapper = directory.join("tool-wrapper");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+case "${0##*/}" in
+  example-tool) printf 'dispatched' ;;
+  *) exit 7 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = directory.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let tool = bin.join("example-tool");
+        symlink("../tool-wrapper", &tool).unwrap();
+        tool
+    }
+
+    #[test]
+    fn preserves_symlinked_tool_dispatch_for_explicit_and_search_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let tool = create_dispatch_wrapper(directory.path());
+        let execution_directory = tempfile::tempdir().unwrap();
+        let search_path = directory.path().join("bin");
+        for resolved in [
+            resolve_executable(&tool).unwrap(),
+            resolve_executable_with_path(Path::new("example-tool"), search_path.as_os_str())
+                .unwrap(),
+        ] {
+            assert_eq!(resolved, tool);
+            assert_eq!(
+                run_checked(
+                    Command::new(resolved).current_dir(execution_directory.path()),
+                    execution_directory.path(),
+                    "dispatch",
+                    Duration::from_secs(5),
+                )
+                .unwrap(),
+                "dispatched"
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_relative_tool_and_search_paths_before_changing_directory() {
+        let current_dir = std::env::current_dir().unwrap();
+        let directory = tempfile::tempdir_in(&current_dir).unwrap();
+        let tool = create_dispatch_wrapper(directory.path());
+        let relative_tool = tool.strip_prefix(&current_dir).unwrap();
+        let execution_directory = tempfile::tempdir().unwrap();
+        for resolved in [
+            resolve_executable(relative_tool).unwrap(),
+            resolve_executable_with_path(
+                Path::new("example-tool"),
+                relative_tool.parent().unwrap().as_os_str(),
+            )
+            .unwrap(),
+        ] {
+            assert_eq!(resolved, tool);
+            assert_eq!(
+                run_checked(
+                    Command::new(resolved).current_dir(execution_directory.path()),
+                    execution_directory.path(),
+                    "relative-dispatch",
+                    Duration::from_secs(5),
+                )
+                .unwrap(),
+                "dispatched"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_parent_components_after_symlinked_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let tool = create_dispatch_wrapper(directory.path());
+        std::fs::create_dir(directory.path().join("bin/child")).unwrap();
+        symlink("bin/child", directory.path().join("alias")).unwrap();
+        let invocation_path = directory.path().join("alias/../example-tool");
+        assert_eq!(
+            resolve_executable(&invocation_path).unwrap(),
+            invocation_path
+        );
+        assert_eq!(
+            std::fs::canonicalize(&invocation_path).unwrap(),
+            std::fs::canonicalize(tool).unwrap()
+        );
+        assert_eq!(
+            run_checked(
+                &mut Command::new(resolve_executable(&invocation_path).unwrap()),
+                directory.path(),
+                "parent-dispatch",
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+            "dispatched"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_paths_directories_and_non_executable_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        for path in [missing.as_path(), directory.path()] {
+            assert_eq!(
+                resolve_executable(path).unwrap_err(),
+                format!("executable is not a file: {}", path.display())
+            );
+        }
+        let non_executable = directory.path().join("example-tool");
+        std::fs::write(&non_executable, "not an executable").unwrap();
+        std::fs::set_permissions(&non_executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            resolve_executable(&non_executable).unwrap_err(),
+            format!("file is not executable: {}", non_executable.display())
+        );
+        assert_eq!(
+            resolve_executable_with_path(Path::new("example-tool"), directory.path().as_os_str())
+                .unwrap_err(),
+            "executable `example-tool` not found on PATH"
+        );
+        let tool = create_dispatch_wrapper(directory.path());
+        let search_path = std::env::join_paths([directory.path(), tool.parent().unwrap()]).unwrap();
+        assert_eq!(
+            resolve_executable_with_path(Path::new("example-tool"), &search_path).unwrap(),
+            tool
+        );
+    }
 
     #[test]
     fn captures_output_and_diagnostics_on_failure_and_timeout() {
