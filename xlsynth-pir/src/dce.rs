@@ -2,7 +2,7 @@
 
 //! Dead-code elimination utilities for XLS IR functions.
 
-use crate::ir::{Fn, NodeRef};
+use crate::ir::{Fn, NodePayload, NodeRef};
 use crate::ir_utils::{compact_and_toposort_in_place, is_observable_effect_root, operands};
 
 /// Computes nodes required by the return value or an observable effect.
@@ -83,12 +83,12 @@ pub fn remove_dead_nodes(f: &Fn) -> Fn {
     // to remove those Nil nodes and remap indices while preserving the layout
     // invariants.
     let mut g: Fn = f.clone();
-    for i in 0..n {
-        if i == 0 || g.params.contains(&NodeRef { index: i }) {
+    for (i, node) in g.nodes.iter_mut().enumerate() {
+        if i == 0 || matches!(node.payload, NodePayload::Param) {
             continue;
         }
         if !live[i] {
-            g.nodes[i].payload = crate::ir::NodePayload::Nil;
+            node.payload = NodePayload::Nil;
         }
     }
 

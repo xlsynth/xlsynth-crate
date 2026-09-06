@@ -498,6 +498,9 @@ pub fn verify_no_cycle(f: &NodeGraph) -> Result<(), String> {
 
     let mut state: Vec<u8> = vec![0; n]; // 0=unvisited,1=visiting,2=done
     let mut parent: Vec<Option<usize>> = vec![None; n];
+    // Build each operand list once, including for high-fan-in nodes.
+    let dependencies: Vec<Vec<NodeRef>> =
+        f.nodes.iter().map(|node| operands(&node.payload)).collect();
 
     for start in 0..n {
         if state[start] != 0 {
@@ -507,7 +510,7 @@ pub fn verify_no_cycle(f: &NodeGraph) -> Result<(), String> {
         state[start] = 1;
 
         while let Some((node_idx, next_child)) = stack.pop() {
-            let deps = operands(&f.nodes[node_idx].payload);
+            let deps = &dependencies[node_idx];
             if next_child < deps.len() {
                 let child = deps[next_child].index;
                 if child >= n {
@@ -564,16 +567,23 @@ pub fn find_node_by_name(f: &NodeGraph, name: &str) -> Option<NodeRef> {
 /// - Remapping all operands, signature parameter references, and the return
 ///   reference to the new indices.
 ///
-/// Returns `Err` if remapping encounters a reference to a removed (Nil) node.
+/// Invalid references and cycles return `Err` without modifying the function.
 pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
     compact_and_toposort_with_mapping_in_place(f).map(|_| ())
 }
 
-/// Compacts an interface-independent graph, returning a mapping for its owner's
-/// external references (such as ordered block ports and reset).
-pub fn compact_graph_and_toposort_with_mapping_in_place(
-    graph: &mut NodeGraph,
-) -> Result<Vec<Option<NodeRef>>, String> {
+/// Prepared graph storage and the mapping for owner-held references.
+struct GraphCompaction {
+    nodes: Vec<Node>,
+    mapping: Vec<Option<NodeRef>>,
+}
+
+/// Prepares compacted nodes without mutation; parameter order is validated by
+/// the function wrapper, and is empty for an interface-independent graph.
+fn prepare_graph_compaction(
+    graph: &NodeGraph,
+    parameter_order: &[NodeRef],
+) -> Result<GraphCompaction, String> {
     if graph
         .nodes
         .first()
@@ -581,127 +591,98 @@ pub fn compact_graph_and_toposort_with_mapping_in_place(
     {
         return Err("graph node zero must be the reserved Nil sentinel".to_string());
     }
+    // Validate bounds and cycles before the infallible topological traversal.
     verify_no_cycle(graph)?;
-    let mut order = get_topological(graph);
-    order.retain(|nr| nr.index == 0 || !matches!(graph.get_node(*nr).payload, NodePayload::Nil));
+    let mut order = Vec::with_capacity(graph.nodes.len());
     let mut mapping = vec![None; graph.nodes.len()];
-    for (index, nr) in order.iter().enumerate() {
-        mapping[nr.index] = Some(NodeRef { index });
+    if !graph.nodes.is_empty() {
+        order.push(NodeRef { index: 0 });
+        mapping[0] = Some(NodeRef { index: 0 });
     }
+    // Function parameters are leaves and stay first in signature order.
+    for &parameter in parameter_order {
+        mapping[parameter.index] = Some(NodeRef { index: order.len() });
+        order.push(parameter);
+    }
+    for node_ref in get_topological(graph) {
+        if mapping[node_ref.index].is_none()
+            && !matches!(graph.get_node(node_ref).payload, NodePayload::Nil)
+        {
+            mapping[node_ref.index] = Some(NodeRef { index: order.len() });
+            order.push(node_ref);
+        }
+    }
+
     let mut nodes = Vec::with_capacity(order.len());
-    for nr in order {
-        let node = graph.get_node(nr);
+    for node_ref in order {
+        let node = graph.get_node(node_ref);
         for operand in operands(&node.payload) {
             if mapping[operand.index].is_none() {
                 return Err(format!(
                     "node {} refers to removed node {}",
-                    nr.index, operand.index
+                    node_ref.index, operand.index
                 ));
             }
         }
         nodes.push(Node {
-            payload: remap_payload_with(&node.payload, |(_, dep)| {
-                mapping[dep.index].expect("operand mapping was checked")
+            text_id: node.text_id,
+            name: node.name.clone(),
+            ty: node.ty.clone(),
+            payload: remap_payload_with(&node.payload, |(_, operand)| {
+                mapping[operand.index].expect("operand mapping was checked")
             }),
-            ..node.clone()
+            pos: node.pos.clone(),
         });
     }
-    graph.nodes = nodes;
-    Ok(mapping)
+    Ok(GraphCompaction { nodes, mapping })
+}
+
+/// Compacts an interface-independent graph, returning a mapping for its owner's
+/// external references (such as ordered block ports and reset).
+///
+/// Missing/deleted operands, cycles, and a non-Nil sentinel return an error
+/// without modifying the graph. An empty graph is left empty.
+pub fn compact_graph_and_toposort_with_mapping_in_place(
+    graph: &mut NodeGraph,
+) -> Result<Vec<Option<NodeRef>>, String> {
+    let compacted = prepare_graph_compaction(graph, &[])?;
+    graph.nodes = compacted.nodes;
+    Ok(compacted.mapping)
 }
 
 /// Compacts away non-reserved `Nil` nodes, topologically reorders the body,
 /// and returns the old-to-new node mapping for callers that need to remap
 /// references after compaction.
+///
+/// Parameters remain first in signature order. Invalid signature, operand, or
+/// return references and cycles return an error without modifying the function.
 pub fn compact_and_toposort_with_mapping_in_place(
     f: &mut Fn,
 ) -> Result<Vec<Option<NodeRef>>, String> {
     f.check_pir_layout_invariants()?;
-    let n = f.nodes.len();
-
-    // Determine a topological order over the current node set.
-    let topo_all: Vec<NodeRef> = get_topological(f);
-
-    // Keep reserved nil node at index 0.
-    let mut kept_order: Vec<NodeRef> = Vec::with_capacity(topo_all.len());
-    kept_order.push(NodeRef { index: 0 });
-
-    // Preserve signature order while canonicalizing node storage. References
-    // remain the source of truth even when input storage was noncanonical.
-    kept_order.extend(f.params.iter().copied());
-
-    // Add remaining topo-sorted body nodes, excluding:
-    // - the reserved nil node (already added)
-    // - parameter nodes (already added)
-    // - any other Nil nodes (removed)
-    let mut already_kept: Vec<bool> = vec![false; n];
-    for nr in kept_order.iter().copied() {
-        already_kept[nr.index] = true;
-    }
-    for nr in topo_all.into_iter() {
-        if already_kept[nr.index] {
-            continue;
+    if let Some(return_ref) = f.ret_node_ref {
+        if f.nodes
+            .get(return_ref.index)
+            .is_none_or(|node| matches!(node.payload, NodePayload::Nil))
+        {
+            return Err(format!(
+                "function '{}' return node {} is missing or deleted",
+                f.name, return_ref.index
+            ));
         }
-        if matches!(f.get_node(nr).payload, NodePayload::Nil) {
-            continue;
-        }
-        kept_order.push(nr);
-        already_kept[nr.index] = true;
     }
-
-    // Build old->new index mapping for remapping payloads.
-    let old_len = f.nodes.len();
-    let mut old_to_new: Vec<Option<usize>> = vec![None; old_len];
-    for (new_idx, nr) in kept_order.iter().enumerate() {
-        old_to_new[nr.index] = Some(new_idx);
-    }
-
-    // Construct new node vector with remapped payloads.
-    let mut new_nodes: Vec<Node> = Vec::with_capacity(kept_order.len());
-    for nr in kept_order.iter().copied() {
-        let src = f.get_node(nr).clone();
-        let remapped_payload = remap_payload_with(&src.payload, |(_, dep): (usize, NodeRef)| {
-            match old_to_new.get(dep.index).and_then(|x| *x) {
-                Some(new_index) => NodeRef { index: new_index },
-                None => {
-                    // Encountered a dependency that was removed (Nil). This
-                    // indicates the function still
-                    // references a deleted node; surface an error.
-                    panic!(
-                        "compact_and_toposort_in_place: dependency {} was removed (Nil)",
-                        dep.index
-                    );
-                }
-            }
-        });
-        new_nodes.push(Node {
-            payload: remapped_payload,
-            ..src
-        });
-    }
-
-    let old_to_new_refs: Vec<Option<NodeRef>> = old_to_new
-        .into_iter()
-        .map(|mapped| mapped.map(|index| NodeRef { index }))
-        .collect();
-
-    // Remap return node ref, if present.
-    if let Some(old_ret) = f.ret_node_ref {
-        let mapped = old_to_new_refs[old_ret.index].ok_or_else(|| {
-            format!(
-                "compact_and_toposort_in_place: return node {} was removed (Nil)",
-                old_ret.index
-            )
-        })?;
-        f.ret_node_ref = Some(mapped);
-    }
-
+    let compacted = prepare_graph_compaction(&f.graph, &f.params)?;
+    // The signature and return were validated above, and all non-Nil nodes
+    // are retained, so interface remapping cannot fail after graph preparation.
+    let return_ref = f
+        .ret_node_ref
+        .map(|node| compacted.mapping[node.index].expect("return node is retained"));
     for parameter in &mut f.params {
-        *parameter = old_to_new_refs[parameter.index].expect("parameter nodes are retained");
+        *parameter = compacted.mapping[parameter.index].expect("parameter node is retained");
     }
-    // Install new nodes.
-    f.nodes = new_nodes;
-    Ok(old_to_new_refs)
+    f.ret_node_ref = return_ref;
+    f.nodes = compacted.nodes;
+    Ok(compacted.mapping)
 }
 
 pub type UserList = SmallVec<[NodeRef; 2]>;
@@ -1343,6 +1324,38 @@ mod tests {
             "node 1 references missing node 2"
         );
         assert_eq!(format!("{graph:?}"), before);
+    }
+
+    #[test]
+    fn block_compaction_graph_errors_leave_the_interface_unchanged() {
+        for (index, expected) in [
+            (3, "node 2 refers to removed node 3"),
+            (99, "node 2 references missing node 99"),
+            (2, "cycle detected: y -> y"),
+        ] {
+            let mut block = ir::Block::new("b");
+            let input = block.add_input_port("x", Type::Bits(1)).unwrap();
+            let output = block.add_output_port("y", input).unwrap();
+            block.add_clock_port("clk").unwrap();
+            block.reset = Some(ir::BlockReset {
+                port: input,
+                asynchronous: false,
+                active_low: true,
+            });
+            let deleted = Node {
+                text_id: 3,
+                ..block.nodes[0].clone()
+            };
+            block.nodes.push(deleted);
+            let NodePayload::OutputPort { arg, .. } = &mut block.get_node_mut(output).payload
+            else {
+                unreachable!("add_output_port constructs an output port");
+            };
+            *arg = NodeRef { index };
+            let before = format!("{block:?}");
+            assert_eq!(block.compact_and_toposort().unwrap_err(), expected);
+            assert_eq!(format!("{block:?}"), before);
+        }
     }
 
     fn parse_fn(ir: &str) -> Fn {

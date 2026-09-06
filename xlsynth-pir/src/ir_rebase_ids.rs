@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir::{Fn as IrFn, NodePayload, Package};
+use crate::ir::{Fn as IrFn, NodeGraph, NodePayload, Package};
 
 /// A checked ID allocation or rebasing operation exceeded the ID space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,23 +20,7 @@ impl std::error::Error for IdRebaseError {}
 /// node's ID are unchanged. Each non-Nil node owns the only textual ID to
 /// rebase.
 pub fn rebase_fn_ids_in_place(f: &mut IrFn, base: usize) -> Result<(), IdRebaseError> {
-    for node in &f.nodes {
-        let id = match node.payload {
-            NodePayload::Nil => continue,
-            _ => node.text_id,
-        };
-        id.checked_add(base).ok_or(IdRebaseError)?;
-    }
-    for node in &mut f.nodes {
-        match &mut node.payload {
-            NodePayload::Nil => {
-                // The synthetic sentinel is not emitted and never needs
-                // rebasing.
-            }
-            _ => node.text_id += base,
-        }
-    }
-    Ok(())
+    rebase_graph_ids_in_place(&mut f.graph, base)
 }
 
 /// Finds the highest allocated ID across all function and block nodes.
@@ -55,12 +39,20 @@ pub fn rebase_block_ids_in_place(
     block: &mut crate::ir::Block,
     base: usize,
 ) -> Result<(), IdRebaseError> {
-    for node in &block.nodes {
+    rebase_graph_ids_in_place(&mut block.graph, base)
+}
+
+/// Rebases non-Nil node IDs without reallocating nodes or changing references.
+///
+/// Checks every addition before mutation, leaving the graph unchanged on
+/// overflow. A zero base is allowed; sentinel and deleted node IDs stay intact.
+pub fn rebase_graph_ids_in_place(graph: &mut NodeGraph, base: usize) -> Result<(), IdRebaseError> {
+    for node in &graph.nodes {
         if !matches!(node.payload, NodePayload::Nil) {
             node.text_id.checked_add(base).ok_or(IdRebaseError)?;
         }
     }
-    for node in &mut block.nodes {
+    for node in &mut graph.nodes {
         if !matches!(node.payload, NodePayload::Nil) {
             node.text_id += base;
         }
@@ -88,7 +80,9 @@ pub fn rebase_fn_ids(f: &IrFn, base: usize) -> IrFn {
 
 #[cfg(test)]
 mod tests {
-    use super::{rebase_block_ids_in_place, rebase_fn_ids, rebase_fn_ids_in_place};
+    use super::{
+        rebase_block_ids_in_place, rebase_fn_ids, rebase_fn_ids_in_place, rebase_graph_ids_in_place,
+    };
     use crate::ir::{self, NodePayload};
     use crate::ir_parser::Parser;
     use crate::ir_verify::verify_function_in_package;
@@ -202,6 +196,38 @@ fn no_params() -> bits[32] {
         assert_eq!(function.nodes.as_ptr(), nodes);
         assert_eq!(function.get_param(0).text_id, 8);
         assert_eq!(function.nodes.last().unwrap().text_id, 47);
+    }
+
+    #[test]
+    fn graph_rebase_is_atomic_on_late_overflow_and_preserves_deleted_ids() {
+        let mut graph = sparse_param_function().graph;
+        graph.nodes.last_mut().unwrap().text_id = usize::MAX - 1;
+        graph.nodes.push(ir::Node {
+            text_id: usize::MAX,
+            ..graph.nodes[0].clone()
+        });
+        let before = graph.clone();
+        let nodes_ptr = graph.nodes.as_ptr();
+        // Earlier nodes fit; a single-pass mutating implementation would have
+        // already changed their IDs before encountering the overflow.
+        assert!(rebase_graph_ids_in_place(&mut graph, 2).is_err());
+        assert_eq!(format!("{graph:?}"), format!("{before:?}"));
+        rebase_graph_ids_in_place(&mut graph, 0).unwrap();
+        assert_eq!(format!("{graph:?}"), format!("{before:?}"));
+        rebase_graph_ids_in_place(&mut graph, 1).unwrap();
+        assert_eq!(graph.nodes.as_ptr(), nodes_ptr);
+        for (node, original) in graph.nodes.iter().zip(&before.nodes) {
+            let expected_id = if matches!(original.payload, NodePayload::Nil) {
+                original.text_id
+            } else {
+                original.text_id + 1
+            };
+            assert_eq!(node.text_id, expected_id);
+            assert_eq!(node.name, original.name);
+            assert_eq!(node.ty, original.ty);
+            assert_eq!(node.payload, original.payload);
+            assert_eq!(node.pos, original.pos);
+        }
     }
 
     fn assert_structure_preserved_except_ids(original: &ir::Fn, rebased: &ir::Fn, base: usize) {

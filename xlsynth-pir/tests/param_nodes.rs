@@ -6,13 +6,16 @@ use std::collections::HashSet;
 
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::dce::remove_dead_nodes;
-use xlsynth_pir::ir::{self, Block, NodePayload, NodeRef, Type};
+use xlsynth_pir::ir::{self, Block, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
 use xlsynth_pir::ir_fn_cone_extract::{SinkSelector, extract_fn_cone_to_params};
 use xlsynth_pir::ir_outline::outline;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_rebase_ids::rebase_fn_ids;
-use xlsynth_pir::ir_utils::{compact_and_toposort_in_place, remap_payload_with};
+use xlsynth_pir::ir_utils::{
+    compact_and_toposort_in_place, compact_and_toposort_with_mapping_in_place,
+    compact_graph_and_toposort_with_mapping_in_place, remap_payload_with,
+};
 use xlsynth_pir::ir_verify::{VerifyError, verify_function};
 use xlsynth_pir::node_hashing::compute_function_structural_hash;
 use xlsynth_pir::{FnBuilder, IrValue};
@@ -109,6 +112,127 @@ fn signature_order_survives_storage_reordering_and_compaction() {
         result_value(eval_fn(&swapped, &args())),
         IrValue::make_ubits(8, 243).unwrap()
     );
+}
+
+#[test]
+fn graph_and_function_compaction_reject_invalid_operands_without_mutation() {
+    let cases = [
+        (
+            6,
+            NodePayload::Unop(Unop::Identity, NodeRef { index: 99 }),
+            "node 6 references missing node 99",
+        ),
+        (2, NodePayload::Nil, "node 6 refers to removed node 2"),
+        (
+            2,
+            NodePayload::Unop(Unop::Identity, NodeRef { index: 6 }),
+            "cycle detected: one -> result -> one",
+        ),
+    ];
+    for (index, payload, expected) in cases {
+        let mut function = interleaved_function();
+        function.nodes[index].payload = payload;
+        let mut graph = function.graph.clone();
+        let function_before = format!("{function:?}");
+        let graph_before = format!("{graph:?}");
+        assert_eq!(
+            compact_and_toposort_with_mapping_in_place(&mut function).unwrap_err(),
+            expected
+        );
+        assert_eq!(format!("{function:?}"), function_before);
+        assert_eq!(
+            compact_graph_and_toposort_with_mapping_in_place(&mut graph).unwrap_err(),
+            expected
+        );
+        assert_eq!(format!("{graph:?}"), graph_before);
+    }
+}
+
+#[test]
+fn compaction_rejects_invalid_return_references_without_mutation() {
+    for index in [0, 2, usize::MAX] {
+        let mut function = interleaved_function();
+        function.ret_node_ref = Some(NodeRef { index });
+        if index == 2 {
+            function.nodes[index].payload = NodePayload::Nil;
+        }
+        let before = format!("{function:?}");
+        assert_eq!(
+            compact_and_toposort_in_place(&mut function).unwrap_err(),
+            format!("function 'arithmetic' return node {index} is missing or deleted")
+        );
+        assert_eq!(format!("{function:?}"), before);
+    }
+}
+
+#[test]
+fn compaction_rejects_invalid_signature_references_without_mutation() {
+    for index in [0, 1, 2, usize::MAX] {
+        let mut function = interleaved_function();
+        // Index 1 repeats an existing signature reference; other choices are
+        // the sentinel, a computation node, or an out-of-bounds reference.
+        function.params[0] = NodeRef { index };
+        let before = format!("{function:?}");
+        assert!(compact_and_toposort_in_place(&mut function).is_err());
+        assert_eq!(format!("{function:?}"), before);
+    }
+}
+
+#[test]
+fn compaction_preserves_metadata_and_reports_every_node_mapping() {
+    let mut function = interleaved_function();
+    function
+        .outer_attrs
+        .push("#[ffi_proto(\"opaque\")]".to_string());
+    function.inner_attrs.push("#![opaque]".to_string());
+    for (index, node) in function.nodes.iter_mut().enumerate() {
+        node.pos = Some(vec![ir::Pos {
+            fileno: 1,
+            lineno: index,
+            colno: 2,
+        }]);
+    }
+    let mut removed = function.nodes[0].clone();
+    removed.text_id = 100;
+    function.nodes.push(removed);
+    let before = function.clone();
+    let mapping = compact_and_toposort_with_mapping_in_place(&mut function).unwrap();
+    assert_eq!(
+        mapping,
+        [
+            Some(0),
+            Some(2),
+            Some(4),
+            Some(1),
+            Some(5),
+            Some(3),
+            Some(6),
+            None
+        ]
+        .map(|index| index.map(|index| NodeRef { index }))
+    );
+    assert_eq!(function.name, before.name);
+    assert_eq!(function.outer_attrs, before.outer_attrs);
+    assert_eq!(function.inner_attrs, before.inner_attrs);
+    for (index, mapped) in mapping.iter().enumerate() {
+        if let Some(mapped) = mapped {
+            let original = &before.nodes[index];
+            let node = function.get_node(*mapped);
+            assert_eq!(node.text_id, original.text_id);
+            assert_eq!(node.name, original.name);
+            assert_eq!(node.ty, original.ty);
+            assert_eq!(node.pos, original.pos);
+            assert_eq!(
+                node.payload,
+                remap_payload_with(&original.payload, |(_, operand)| mapping[operand.index]
+                    .unwrap())
+            );
+        }
+    }
+    // Function construction may compact an unfinished graph without a return.
+    function.ret_node_ref = None;
+    compact_and_toposort_in_place(&mut function).unwrap();
+    assert_eq!(function.ret_node_ref, None);
 }
 
 #[test]
