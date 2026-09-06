@@ -46,15 +46,8 @@ pub enum ValidationError {
         expected: Type,
         actual: Type,
     },
-    /// A node's text id is not unique among non-parameter nodes.
+    /// A non-Nil node's textual ID is not unique within its graph.
     DuplicateTextId { func: String, text_id: usize },
-    /// A parameter node's text id does not match its declared parameter id.
-    ParamIdMismatch {
-        func: String,
-        param_name: String,
-        expected: usize,
-        actual: usize,
-    },
     /// The function refers to another function that does not exist in the
     /// package.
     UnknownCallee { func: String, callee: String },
@@ -206,14 +199,9 @@ pub enum ValidationError {
     },
     /// Two parameters share the same name within a function.
     DuplicateParamName { func: String, param_name: String },
-    /// A parameter declared in the function signature has no corresponding
-    /// GetParam node in the node list.
-    MissingParamNode {
-        func: String,
-        param_name: String,
-        expected_id: usize,
-    },
-    /// A GetParam node exists in the node list that does not correspond to any
+    /// A signature reference does not point to a parameter node.
+    MissingParamNode { func: String, node_ref: NodeRef },
+    /// A Param node exists in the node list that does not correspond to any
     /// declared parameter in the function signature.
     ExtraParamNode { func: String, text_id: usize },
     /// A node name looks like a default textual id (e.g. op.id) but the
@@ -317,18 +305,6 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::DuplicateTextId { func, text_id } => {
                 write!(f, "function '{}' has duplicate text id {}", func, text_id)
-            }
-            ValidationError::ParamIdMismatch {
-                func,
-                param_name,
-                expected,
-                actual,
-            } => {
-                write!(
-                    f,
-                    "function '{}' param '{}' id mismatch: expected {}, got {}",
-                    func, param_name, expected, actual
-                )
             }
             ValidationError::UnknownCallee { func, callee } => {
                 write!(
@@ -615,21 +591,17 @@ impl std::fmt::Display for ValidationError {
                     func, param_name
                 )
             }
-            ValidationError::MissingParamNode {
-                func,
-                param_name,
-                expected_id,
-            } => {
+            ValidationError::MissingParamNode { func, node_ref } => {
                 write!(
                     f,
-                    "function '{}' missing GetParam node for param '{}' (expected id={})",
-                    func, param_name, expected_id
+                    "function '{}' signature references missing parameter node {}",
+                    func, node_ref.index
                 )
             }
             ValidationError::ExtraParamNode { func, text_id } => {
                 write!(
                     f,
-                    "function '{}' has GetParam node with id {} not declared in signature",
+                    "function '{}' has Param node with id {} not declared in signature",
                     func, text_id
                 )
             }
@@ -1005,7 +977,7 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                     ));
                 }
             }
-            NodePayload::GetParam(_) => {
+            NodePayload::Param => {
                 return Err(violation(
                     index,
                     "blocks must use input ports, not function parameters".to_string(),
@@ -1162,7 +1134,7 @@ where
 
 fn validate_graph_with<F, R>(
     f: &NodeGraph,
-    params: &[crate::ir::Param],
+    params: &[NodeRef],
     parent: Option<&Package>,
     callee_ret_type_resolver: F,
     register_type_resolver: R,
@@ -1174,7 +1146,7 @@ where
     R: std::ops::Fn(&str) -> Option<Type>,
 {
     // Track ids used by non-parameter nodes to ensure uniqueness.
-    let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
+    let mut seen_text_ids: HashSet<usize> = HashSet::new();
     let mut used_instantiation_inputs: std::collections::HashMap<String, HashSet<String>> =
         std::collections::HashMap::new();
     let mut used_instantiation_outputs: std::collections::HashMap<String, HashSet<String>> =
@@ -1185,23 +1157,46 @@ where
             used_instantiation_outputs.insert(inst_name.clone(), HashSet::new());
         }
     }
-    // Track GetParam node ids to verify 1:1 mapping with signature params.
-    let mut seen_param_ids: HashSet<usize> = HashSet::new();
-    // Map parameter names to their declared ids from the function signature,
-    // and check name uniqueness.
-    let mut param_name_to_id: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
-    for p in params {
-        let name = p.name.as_str();
-        if param_name_to_id.contains_key(name) {
+    let mut param_refs = HashSet::new();
+    let mut param_names = HashSet::new();
+    for &param_ref in params {
+        let invalid_param = |reason: &str| ValidationError::NodeSemanticViolation {
+            func: f.name.clone(),
+            node_index: param_ref.index,
+            reason: reason.to_string(),
+        };
+        let node = f
+            .nodes
+            .get(param_ref.index)
+            .filter(|node| matches!(node.payload, NodePayload::Param))
+            .ok_or_else(|| ValidationError::MissingParamNode {
+                func: f.name.clone(),
+                node_ref: param_ref,
+            })?;
+        if !param_refs.insert(param_ref) {
+            return Err(invalid_param(
+                "parameter reference occurs more than once in the signature",
+            ));
+        }
+        let name = node
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| invalid_param("parameter node must have a name"))?;
+        if !param_names.insert(name) {
             return Err(ValidationError::DuplicateParamName {
                 func: f.name.clone(),
-                param_name: p.name.clone(),
+                param_name: name.to_string(),
             });
         }
-        param_name_to_id.insert(name, p.id.get_wrapped_id());
     }
     for (i, node) in f.nodes.iter().enumerate() {
+        if !matches!(node.payload, NodePayload::Nil) && !seen_text_ids.insert(node.text_id) {
+            return Err(ValidationError::DuplicateTextId {
+                func: f.name.clone(),
+                text_id: node.text_id,
+            });
+        }
         // Enforce: if a node has a name that looks like a default textual id
         // pattern '<prefix>.<digits>', then '<prefix>' must match the operator
         // and the numeric suffix must match the node's text id. This aligns
@@ -1242,61 +1237,16 @@ where
                     reason: "port nodes are only permitted in blocks".to_string(),
                 });
             }
-            NodePayload::GetParam(pid) => {
-                if let Some(param) = params.iter().find(|param| param.id == *pid) {
-                    if node.ty != param.ty {
-                        return Err(ValidationError::NodeTypeMismatch {
-                            func: f.name.clone(),
-                            node_index: i,
-                            deduced: param.ty.clone(),
-                            actual: node.ty.clone(),
-                        });
-                    }
-                }
-                let declared = node
-                    .name
-                    .as_ref()
-                    .and_then(|n| param_name_to_id.get(n.as_str()))
-                    .copied()
-                    .unwrap_or(pid.get_wrapped_id());
-                let actual_pid = pid.get_wrapped_id();
-                // First: mismatch between declared and actual ->
-                // ParamIdMismatch.
-                if actual_pid != declared || node.text_id != declared {
-                    let param_name = node
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| "<unnamed-param>".to_string());
-                    return Err(ValidationError::ParamIdMismatch {
-                        func: f.name.clone(),
-                        param_name,
-                        expected: declared,
-                        actual: node.text_id,
-                    });
-                }
-                // Ensure this GetParam refers to a declared param id.
-                if !param_name_to_id.values().any(|&v| v == actual_pid) {
+            NodePayload::Param => {
+                if !param_refs.contains(&NodeRef { index: i }) {
                     return Err(ValidationError::ExtraParamNode {
                         func: f.name.clone(),
                         text_id: node.text_id,
                     });
                 }
-                // Ensure each GetParam id appears exactly once in the node
-                // list.
-                if !seen_param_ids.insert(actual_pid) {
-                    return Err(ValidationError::DuplicateTextId {
-                        func: f.name.clone(),
-                        text_id: actual_pid,
-                    });
-                }
             }
             _ => {
-                if !seen_nonparam_ids.insert(node.text_id) {
-                    return Err(ValidationError::DuplicateTextId {
-                        func: f.name.clone(),
-                        text_id: node.text_id,
-                    });
-                }
+                // Other payloads have no signature membership requirement.
             }
         }
         // Ensure all operands refer to already defined nodes.
@@ -1362,14 +1312,14 @@ where
                         ),
                     });
                 }
-                for (operand, parameter) in operands.iter().zip(callee.params.iter()) {
+                for (operand, parameter) in operands.iter().zip(callee.param_nodes()) {
                     if f.get_node(*operand).ty != parameter.ty {
                         return Err(ValidationError::NodeSemanticViolation {
                             func: f.name.clone(),
                             node_index: i,
                             reason: format!(
                                 "invoke operand for parameter '{}' must have type {}, got {}",
-                                parameter.name,
+                                parameter.param_name(),
                                 parameter.ty,
                                 f.get_node(*operand).ty
                             ),
@@ -1424,7 +1374,7 @@ where
                 } else {
                     (usize::BITS - max_i.leading_zeros()) as usize
                 };
-                match &body_fn.params[0].ty {
+                match &body_fn.get_param(0).ty {
                     Type::Bits(width) if *width >= minimum_i_width => {}
                     actual => {
                         return Err(ValidationError::NodeSemanticViolation {
@@ -1438,7 +1388,7 @@ where
                     }
                 }
                 let init_ty = &f.get_node(*init).ty;
-                if body_fn.params[1].ty != *init_ty || body_fn.ret_ty != *init_ty {
+                if body_fn.get_param(1).ty != *init_ty || body_fn.ret_ty != *init_ty {
                     return Err(ValidationError::NodeSemanticViolation {
                         func: f.name.clone(),
                         node_index: i,
@@ -1448,14 +1398,16 @@ where
                         ),
                     });
                 }
-                for (argument, parameter) in invariant_args.iter().zip(body_fn.params[2..].iter()) {
+                for (argument, parameter) in
+                    invariant_args.iter().zip(body_fn.param_nodes().skip(2))
+                {
                     if f.get_node(*argument).ty != parameter.ty {
                         return Err(ValidationError::NodeSemanticViolation {
                             func: f.name.clone(),
                             node_index: i,
                             reason: format!(
                                 "counted_for invariant parameter '{}' must have type {}, got {}",
-                                parameter.name,
+                                parameter.param_name(),
                                 parameter.ty,
                                 f.get_node(*argument).ty
                             ),
@@ -1821,18 +1773,6 @@ where
             }
         }
     }
-    // Ensure every declared parameter has a corresponding GetParam node.
-    for p in params {
-        let pid = p.id.get_wrapped_id();
-        if !seen_param_ids.contains(&pid) {
-            return Err(ValidationError::MissingParamNode {
-                func: f.name.clone(),
-                param_name: p.name.clone(),
-                expected_id: pid,
-            });
-        }
-    }
-
     Ok(())
 }
 
@@ -1861,8 +1801,8 @@ fn build_instantiation_info(
                 .get_fn(&inst.block)
                 .expect("foreign function missing after target validation");
             let mut input_types = std::collections::HashMap::new();
-            for param in &foreign_function.params {
-                collect_external_port_types(&param.name, &param.ty, &mut input_types);
+            for param in foreign_function.param_nodes() {
+                collect_external_port_types(&param.param_name(), &param.ty, &mut input_types);
             }
             let mut output_types = std::collections::HashMap::new();
             collect_external_port_types("return", &foreign_function.ret_ty, &mut output_types);
@@ -2475,7 +2415,7 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
     }
 
     #[test]
-    fn duplicate_getparam_node_id_fails() {
+    fn duplicate_param_node_id_fails() {
         let ir = r#"
         package test
 
@@ -2487,14 +2427,14 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
         let mut pkg = parser.parse_package().unwrap();
         {
             let f = pkg.get_top_fn_mut().unwrap();
-            // Manually insert a duplicate GetParam node with the same id as
+            // Manually insert a duplicate Param node with the same id as
             // 'x'.
-            let pid = f.params[0].id;
+            let text_id = f.get_param(0).text_id;
             let dup = ir::Node {
-                text_id: pid.get_wrapped_id(),
-                name: Some(f.params[0].name.clone()),
-                ty: f.params[0].ty.clone(),
-                payload: ir::NodePayload::GetParam(pid),
+                text_id,
+                name: f.get_param(0).name.clone(),
+                ty: f.get_param(0).ty.clone(),
+                payload: ir::NodePayload::Param,
                 pos: None,
             };
             f.nodes.push(dup);
@@ -2507,7 +2447,7 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
     }
 
     #[test]
-    fn missing_getparam_node_fails() {
+    fn missing_param_node_fails() {
         let ir = r#"
         package test
 
@@ -2519,11 +2459,11 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
         let mut pkg = parser.parse_package().unwrap();
         {
             let f = pkg.get_top_fn_mut().unwrap();
-            // Remove the GetParam node for 'x'. It should be at index 1.
+            // Remove the Param node for 'x'. It should be at index 1.
             let idx = f
                 .nodes
                 .iter()
-                .position(|n| matches!(n.payload, NodePayload::GetParam(_)))
+                .position(|n| matches!(n.payload, NodePayload::Param))
                 .unwrap();
             f.nodes.remove(idx);
         }

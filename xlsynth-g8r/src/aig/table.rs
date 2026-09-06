@@ -134,12 +134,11 @@ fn collect_pir_info_by_id(source: IrTableSource<'_>) -> Result<BTreeMap<u32, Pir
     let mut result = BTreeMap::new();
     let f = source.graph;
     for (index, node) in f.nodes.iter().enumerate() {
-        let ir::NodePayload::GetParam(param_id) = node.payload else {
+        let ir::NodePayload::Param = node.payload else {
             continue;
         };
         let name = ir::node_textual_id(f, ir::NodeRef { index });
-        let pir_node_id =
-            as_u32_text_id(param_id.get_wrapped_id(), &format!("parameter '{name}'"))?;
+        let pir_node_id = as_u32_text_id(node.text_id, &format!("parameter '{name}'"))?;
         result.insert(
             pir_node_id,
             PirNodeInfo {
@@ -150,10 +149,7 @@ fn collect_pir_info_by_id(source: IrTableSource<'_>) -> Result<BTreeMap<u32, Pir
     }
 
     for (index, node) in f.nodes.iter().enumerate() {
-        if matches!(
-            node.payload,
-            ir::NodePayload::Nil | ir::NodePayload::GetParam(_)
-        ) {
+        if matches!(node.payload, ir::NodePayload::Nil | ir::NodePayload::Param) {
             continue;
         }
         let pir_node_id = as_u32_text_id(node.text_id, "node")?;

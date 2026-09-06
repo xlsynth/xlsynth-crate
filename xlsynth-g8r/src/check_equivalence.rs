@@ -72,8 +72,8 @@ fn get_fn_signature(f: &ir::Fn) -> String {
     signature.push_str("fn ");
     signature.push_str(&f.name);
     signature.push_str("(");
-    for (i, param) in f.params.iter().enumerate() {
-        signature.push_str(&format!("{}: {}", param.name, param.ty));
+    for (i, param) in f.param_nodes().enumerate() {
+        signature.push_str(&format!("{}: {}", param.param_name(), param.ty));
         if i + 1 != f.params.len() {
             signature.push_str(", ");
         }

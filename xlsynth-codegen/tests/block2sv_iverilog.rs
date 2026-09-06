@@ -284,7 +284,7 @@ fn block2sv_extension_operators_match_pir_evaluation() {
             output_width - 1
         );
         let mut connections = Vec::new();
-        for parameter in &func.params {
+        for parameter in func.param_nodes() {
             let width = parameter.ty.bit_count();
             testbench.push_str(&format!(
                 "  logic [{}:0] stimulus_{};\n",
@@ -307,7 +307,7 @@ fn block2sv_extension_operators_match_pir_evaluation() {
         let mut state = 0x6d2b_79f5_u64;
         for vector in 0..vectors {
             let mut arguments = Vec::new();
-            for (index, parameter) in func.params.iter().enumerate() {
+            for (index, parameter) in func.param_nodes().enumerate() {
                 let width = parameter.ty.bit_count();
                 assert!(width < 64, "extension fixture inputs must fit in u64");
                 let mask = (1_u64 << width) - 1;

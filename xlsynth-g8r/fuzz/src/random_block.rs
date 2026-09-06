@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use xlsynth_pir::IrBits;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
-use xlsynth_pir::ir::{Block, Fn, Node, NodeGraph, NodePayload, NodeRef, Param, ParamId, Type};
+use xlsynth_pir::ir::{Block, Fn, Node, NodeGraph, NodePayload, NodeRef, Type};
 use xlsynth_pir::ir_eval::{self, EvalObserver, FnEvalResult, SelectEvent};
 use xlsynth_pir::ir_utils::remap_payload_with;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
@@ -57,12 +57,8 @@ pub fn evaluate_block_cycle_observed(
     // EvalObserver reports computed values, not parameter and unit nodes.
     for (index, node) in cycle_fn.nodes.iter().enumerate() {
         match &node.payload {
-            NodePayload::GetParam(id) => {
-                let position = cycle_fn
-                    .params
-                    .iter()
-                    .position(|param| param.id == *id)
-                    .unwrap();
+            NodePayload::Param => {
+                let position = cycle_fn.param_index(NodeRef { index }).unwrap();
                 observer.0[index] = Some(inputs[position].clone());
             }
             NodePayload::Nil => observer.0[index] = Some(IrValue::make_tuple(&[])),
@@ -306,21 +302,15 @@ fn cycle_eval_fn(block: &Block, state: &[IrValue]) -> CycleEvalFn {
     };
     let mut result = Fn {
         graph,
-        params: block
-            .input_ports()
-            .map(|port| Param {
-                name: block.port_name(port).to_string(),
-                ty: block.port_type(port).clone(),
-                id: ParamId::new(block.get_node(port).text_id),
-            })
-            .collect(),
+        params: block.input_ports().collect(),
         ret_ty: Type::nil(),
         ret_node_ref: None,
     };
     for node in &mut result.nodes {
         match &node.payload {
-            NodePayload::InputPort { .. } => {
-                node.payload = NodePayload::GetParam(ParamId::new(node.text_id));
+            NodePayload::InputPort { name, .. } => {
+                node.name = Some(name.clone());
+                node.payload = NodePayload::Param;
             }
             NodePayload::OutputPort { .. } => {
                 node.payload = NodePayload::Tuple(Vec::new());

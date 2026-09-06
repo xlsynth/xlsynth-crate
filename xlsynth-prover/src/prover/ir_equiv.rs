@@ -49,15 +49,15 @@ pub fn align_fn_inputs<'a, S: Solver>(
             rhs_inputs.free_params_len(),
             "LHS and RHS must have the same number of inputs"
         );
-        for (l, r) in lhs_inputs
-            .free_params()
-            .iter()
-            .zip(rhs_inputs.free_params().iter())
-        {
+        for (l, r) in lhs_inputs.free_params().zip(rhs_inputs.free_params()) {
             assert_eq!(
-                l.ty, r.ty,
+                l.ty,
+                r.ty,
                 "Input type mismatch for {} vs {}: {:?} vs {:?}",
-                l.name, r.name, l.ty, r.ty
+                l.param_name(),
+                r.param_name(),
+                l.ty,
+                r.ty
             );
         }
     }
@@ -80,13 +80,13 @@ pub fn align_fn_inputs<'a, S: Solver>(
     let mut split_map =
         |inputs: &FnInputs<'a, S::Term>| -> HashMap<String, IrTypedBitVec<'a, S::Term>> {
             let mut m = HashMap::new();
-            let mut params_iter = inputs.params().iter();
+            let mut params_iter = inputs.params();
 
             if inputs.fixed_implicit_activation() {
                 let itok = params_iter.next().unwrap();
                 assert_eq!(itok.ty, ir::Type::Token);
                 m.insert(
-                    itok.name.clone(),
+                    itok.param_name().to_string(),
                     IrTypedBitVec {
                         ir_type: &itok.ty,
                         bitvec: solver.zero_width(),
@@ -95,7 +95,7 @@ pub fn align_fn_inputs<'a, S: Solver>(
                 let iact = params_iter.next().unwrap();
                 assert_eq!(iact.ty, ir::Type::Bits(1));
                 m.insert(
-                    iact.name.clone(),
+                    iact.param_name().to_string(),
                     IrTypedBitVec {
                         ir_type: &iact.ty,
                         bitvec: solver.one(1),
@@ -105,7 +105,7 @@ pub fn align_fn_inputs<'a, S: Solver>(
 
             let mut offset = 0;
             for n in params_iter {
-                let existing_bitvec = inputs.inputs.get(&n.name).unwrap();
+                let existing_bitvec = inputs.inputs.get(n.param_name()).unwrap();
                 let new_bitvec = {
                     let w = existing_bitvec.bitvec.get_width();
                     let h = offset as i32 + (w as i32) - 1;
@@ -117,7 +117,7 @@ pub fn align_fn_inputs<'a, S: Solver>(
                     extracted
                 };
                 m.insert(
-                    n.name.clone(),
+                    n.param_name().to_string(),
                     IrTypedBitVec {
                         ir_type: &n.ty,
                         bitvec: new_bitvec,
@@ -260,11 +260,10 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
             let build_inputs = |solver: &mut S, smt_fn: &SmtFn<'a, S::Term>| {
                 smt_fn
                     .fn_ref
-                    .params
-                    .iter()
+                    .param_nodes()
                     .zip(smt_fn.inputs.iter())
                     .map(|(p, i)| FnInput {
-                        name: p.name.clone(),
+                        name: p.param_name().to_string(),
                         value: get_value(solver, i),
                     })
                     .collect()
@@ -329,9 +328,9 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
 
     let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: &Option<ParamDomains>| {
         if let Some(dom) = domains {
-            for p in inputs.params().iter() {
-                if let Some(allowed) = dom.get(&p.name) {
-                    if let Some(sym) = inputs.inputs.get(&p.name) {
+            for p in inputs.params() {
+                if let Some(allowed) = dom.get(p.param_name()) {
+                    if let Some(sym) = inputs.inputs.get(p.param_name()) {
                         let mut or_chain: Option<BitVec<S::Term>> = None;
                         for v in allowed {
                             let bv = ir_value_to_bv(&mut solver, v, &p.ty).bitvec;
@@ -530,7 +529,7 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         "split_input_index out of bounds"
     );
     assert!(
-        split_input_bit_index < lhs.fn_ref.params[split_input_index].ty.bit_count(),
+        split_input_bit_index < lhs.fn_ref.get_param(split_input_index).ty.bit_count(),
         "split_input_bit_index out of bounds"
     );
 
@@ -549,7 +548,7 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &empty_map, &empty_registry);
 
         // Locate the chosen parameter on the LHS side.
-        let param_name = &lhs.fn_ref.params[split_input_index].name;
+        let param_name = lhs.fn_ref.get_param(split_input_index).param_name();
 
         let param_bv = aligned
             .lhs
@@ -626,6 +625,40 @@ pub mod test_utils {
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    /// Invokes bind arguments using the callee's signature reference order.
+    pub fn test_invoke_reordered_parameter_references<S: Solver>(solver_config: &S::Config) {
+        let mut package = ir_parser::Parser::new(
+            r#"package reordered
+
+fn difference(x: bits[8] id=90, y: bits[8] id=4) -> bits[8] {
+  ret result: bits[8] = sub(x, y, id=91)
+}
+fn caller(a: bits[8] id=101, b: bits[8] id=102) -> bits[8] {
+  ret call: bits[8] = invoke(a, b, to_apply=difference, id=103)
+}
+fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
+  ret result: bits[8] = sub(b, a, id=203)
+}
+"#,
+        )
+        .parse_package()
+        .unwrap();
+        package.get_fn_mut("difference").unwrap().params.swap(0, 1);
+        let caller = ProverFn::new(package.get_fn("caller").unwrap(), Some(&package));
+        let expected = ProverFn::new(package.get_fn("expected").unwrap(), Some(&package));
+        assert!(matches!(
+            super::prove_ir_fn_equiv::<S>(
+                solver_config,
+                &caller,
+                &expected,
+                AssertionSemantics::Same,
+                None,
+                false
+            ),
+            super::EquivResult::Proved
+        ));
     }
 
     /// Uninterpreted-function (UF) handling tests
@@ -2631,8 +2664,8 @@ pub mod test_utils {
             } => {
                 // Verify LHS input ordering & naming.
                 assert_eq!(lhs_inputs.len(), lhs_fn_ir.params.len());
-                for (idx, param) in lhs_fn_ir.params.iter().enumerate() {
-                    assert_eq!(lhs_inputs[idx].name, param.name);
+                for (idx, param) in lhs_fn_ir.param_nodes().enumerate() {
+                    assert_eq!(lhs_inputs[idx].name, param.param_name());
                     assert_eq!(
                         lhs_inputs[idx].value.bit_count().unwrap(),
                         param.ty.bit_count()
@@ -2640,8 +2673,8 @@ pub mod test_utils {
                 }
                 // Verify RHS input ordering & naming.
                 assert_eq!(rhs_inputs.len(), rhs_fn_ir.params.len());
-                for (idx, param) in rhs_fn_ir.params.iter().enumerate() {
-                    assert_eq!(rhs_inputs[idx].name, param.name);
+                for (idx, param) in rhs_fn_ir.param_nodes().enumerate() {
+                    assert_eq!(rhs_inputs[idx].name, param.param_name());
                     assert_eq!(
                         rhs_inputs[idx].value.bit_count().unwrap(),
                         param.ty.bit_count()
@@ -3146,6 +3179,12 @@ macro_rules! test_with_solver {
             #[test]
             fn test_prove_fn_equiv() {
                 test_utils::test_prove_fn_equiv::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_invoke_reordered_parameter_references() {
+                test_utils::test_invoke_reordered_parameter_references::<$solver_type>(
+                    $solver_config,
+                );
             }
             #[test]
             fn test_prove_fn_inequiv() {

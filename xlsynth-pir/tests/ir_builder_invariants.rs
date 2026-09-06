@@ -89,8 +89,9 @@ fn rejected_requests_leave_the_complete_function_unchanged() {
         assert_eq!(actual.payload, expected.payload);
     }
     assert_eq!(recovered.params.len(), baseline.params.len());
-    for (actual, expected) in recovered.params.iter().zip(&baseline.params) {
-        assert_eq!(actual.id, expected.id);
+    assert_eq!(recovered.params, baseline.params);
+    for (actual, expected) in recovered.param_nodes().zip(baseline.param_nodes()) {
+        assert_eq!(actual.text_id, expected.text_id);
         assert_eq!(actual.name, expected.name);
         assert_eq!(actual.ty, expected.ty);
     }

@@ -213,10 +213,11 @@ fn reconstruct_shared_signature_corpus_with_builder() {
         let original = original_package.get_top_fn().unwrap();
         let mut b = FnBuilder::new(&original.name);
         let mut parameters = BTreeMap::new();
-        for param in &original.params {
+        for param_ref in &original.params {
+            let param = original.get_node(*param_ref);
             parameters.insert(
-                param.id.get_wrapped_id(),
-                b.param(&param.name, param.ty.clone()).unwrap(),
+                param_ref.index,
+                b.param(param.param_name(), param.ty.clone()).unwrap(),
             );
         }
         let mut nodes = BTreeMap::new();
@@ -226,7 +227,7 @@ fn reconstruct_shared_signature_corpus_with_builder() {
                     // PIR's sentinel is not an executable node.
                     continue;
                 }
-                NodePayload::GetParam(id) => parameters[&id.get_wrapped_id()],
+                NodePayload::Param => parameters[&index],
                 NodePayload::Literal(value) => b.literal(value.clone()).unwrap(),
                 NodePayload::Unop(Unop::Identity, operand) => {
                     b.identity(nodes[&operand.index]).unwrap()

@@ -10,27 +10,6 @@ use crate::{ir, ir_parser, ir_utils::operands};
 
 pub use crate::ir_block::{Block, BlockPort, BlockReset};
 
-/// Strongly-typed wrapper for parameter IDs.
-///
-/// Note: This is *not* a general node id. This is an ordinal referring to the
-/// dense parameter space for a function signature (i.e., the Nth parameter),
-/// not a node id in the IR graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ParamId(usize);
-
-impl ParamId {
-    /// Constructs a new ParamId, asserting that the id is greater than zero.
-    pub fn new(id: usize) -> Self {
-        assert!(id > 0, "ParamId must be greater than zero, got {}", id);
-        ParamId(id)
-    }
-
-    /// Returns the wrapped id value.
-    pub fn get_wrapped_id(&self) -> usize {
-        self.0
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct ArrayTypeData {
     pub element_type: Box<Type>,
@@ -398,7 +377,8 @@ pub struct ExtNaryAddTerm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodePayload {
     Nil,
-    GetParam(ParamId),
+    /// A function parameter; its name, type, and textual ID belong to the node.
+    Param,
     /// A block input; unlike a function parameter it has no signature ordinal.
     InputPort {
         name: String,
@@ -629,7 +609,7 @@ impl NodePayload {
     pub fn get_operator(&self) -> &str {
         match self {
             NodePayload::Nil => "nil",
-            NodePayload::GetParam(_) => "get_param",
+            NodePayload::Param => "param",
             NodePayload::InputPort { .. } => "input_port",
             NodePayload::OutputPort { .. } => "output_port",
             NodePayload::Tuple(_) => "tuple",
@@ -676,7 +656,7 @@ impl NodePayload {
     pub fn validate(&self, f: &NodeGraph) -> Result<(), String> {
         match self {
             NodePayload::Nil => Ok(()),
-            NodePayload::GetParam(_) => Ok(()),
+            NodePayload::Param => Ok(()),
             NodePayload::Tuple(_) => Ok(()),
             NodePayload::Array(_) => Ok(()),
             NodePayload::ArrayConcat(_) => Ok(()),
@@ -1053,7 +1033,7 @@ impl NodePayload {
                 }
                 parts
             }
-            NodePayload::GetParam(_) | NodePayload::Nil => return None,
+            NodePayload::Param | NodePayload::Nil => return None,
         };
         Some(result)
     }
@@ -1061,13 +1041,13 @@ impl NodePayload {
 
 /// Returns a human-oriented textual identifier for a node reference.
 ///
-/// - For `get_param` nodes, returns the parameter's name.
+/// - For `param` nodes, returns the parameter's name.
 /// - For other nodes, returns the node's `name` if present, otherwise
 ///   `"<operator>.<text_id>"`.
 pub fn node_textual_id(f: &NodeGraph, nr: NodeRef) -> String {
     let node = f.get_node(nr);
     match node.payload {
-        NodePayload::GetParam(_) => node.name.clone().expect("GetParam node should have a name"),
+        NodePayload::Param => node.name.clone().expect("Param node should have a name"),
         _ => match &node.name {
             Some(n) => n.clone(),
             None => format!("{}.{}", node.payload.get_operator(), node.text_id),
@@ -1132,6 +1112,17 @@ pub struct Node {
 }
 
 impl Node {
+    /// Returns a parameter's required name from its canonical graph node.
+    pub fn param_name(&self) -> &str {
+        assert!(
+            matches!(self.payload, NodePayload::Param),
+            "expected parameter node"
+        );
+        self.name
+            .as_deref()
+            .expect("parameter node must have a name")
+    }
+
     pub fn to_string(&self, f: &NodeGraph) -> Option<String> {
         self.to_string_with_options(f, &NodeRenderOptions::default())
     }
@@ -1220,13 +1211,6 @@ impl Node {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Param {
-    pub name: String,
-    pub ty: Type,
-    pub id: ParamId,
-}
-
 #[derive(Debug, PartialEq)]
 pub struct FunctionType {
     pub param_types: Vec<Type>,
@@ -1282,7 +1266,8 @@ impl NodeGraph {
 #[derive(Debug, Clone)]
 pub struct Fn {
     pub graph: NodeGraph,
-    pub params: Vec<Param>,
+    /// Parameter nodes in signature order, independent of node storage order.
+    pub params: Vec<NodeRef>,
     pub ret_ty: Type,
     pub ret_node_ref: Option<NodeRef>,
 }
@@ -1302,177 +1287,111 @@ impl std::ops::DerefMut for Fn {
 }
 
 impl Fn {
+    /// Borrows the canonical parameter nodes in signature order.
+    pub fn param_nodes(&self) -> impl ExactSizeIterator<Item = &Node> + DoubleEndedIterator {
+        self.params.iter().map(|node| self.get_node(*node))
+    }
+
+    /// Resolves a parameter's signature position without consulting textual
+    /// IDs.
+    pub fn param_index(&self, node: NodeRef) -> Option<usize> {
+        self.params.iter().position(|param| *param == node)
+    }
+
+    /// Borrows a parameter by its position in the function signature.
+    pub fn get_param(&self, index: usize) -> &Node {
+        self.get_node(self.params[index])
+    }
+
     pub fn get_type(&self) -> FunctionType {
         FunctionType {
-            param_types: self.params.iter().map(|p| p.ty.clone()).collect(),
+            param_types: self.param_nodes().map(|p| p.ty.clone()).collect(),
             return_type: self.ret_ty.clone(),
         }
     }
 
-    /// Checks PIR layout invariants:
-    /// - node index 0 is a reserved `Nil` node
-    /// - parameter nodes are at indices `1..=params.len()` in signature order,
-    ///   and the `GetParam` id matches the signature `ParamId`.
+    /// Checks that the signature refers exactly once to each parameter node.
+    ///
+    /// Node zero is the reserved Nil sentinel. Parameter order is carried by
+    /// `params`, not by physical node positions or textual IDs.
     pub fn check_pir_layout_invariants(&self) -> Result<(), String> {
-        if self.nodes.is_empty() {
-            return Ok(());
-        }
-        if !matches!(self.nodes[0].payload, ir::NodePayload::Nil) {
+        if !self
+            .nodes
+            .first()
+            .is_some_and(|node| matches!(node.payload, NodePayload::Nil))
+        {
             return Err(format!(
                 "PIR layout invariant violated in '{}': node[0] must be Nil",
                 self.name
             ));
         }
-        let param_count = self.params.len();
-        if self.nodes.len() < 1 + param_count {
-            return Err(format!(
-                "PIR layout invariant violated in '{}': nodes.len()={} < 1+params.len()={}",
-                self.name,
-                self.nodes.len(),
-                1 + param_count
-            ));
+        let mut seen = std::collections::HashSet::new();
+        for &reference in &self.params {
+            let node = self.nodes.get(reference.index).ok_or_else(|| {
+                format!(
+                    "function '{}' references missing parameter node {}",
+                    self.name, reference.index
+                )
+            })?;
+            if !matches!(node.payload, NodePayload::Param) {
+                return Err(format!(
+                    "function '{}' signature references non-parameter node {}",
+                    self.name, reference.index
+                ));
+            }
+            if node.name.as_deref().is_none_or(str::is_empty) {
+                return Err(format!(
+                    "function '{}' has an unnamed parameter node {}",
+                    self.name, reference.index
+                ));
+            }
+            if !seen.insert(reference) {
+                return Err(format!(
+                    "function '{}' repeats parameter node {}",
+                    self.name, reference.index
+                ));
+            }
         }
-        for (i, p) in self.params.iter().enumerate() {
-            let node_idx = i + 1;
-            match self.nodes[node_idx].payload {
-                ir::NodePayload::GetParam(pid) => {
-                    if pid != p.id {
-                        return Err(format!(
-                            "PIR layout invariant violated in '{}': param node[{}] has id={} but signature param '{}' has id={}",
-                            self.name,
-                            node_idx,
-                            pid.get_wrapped_id(),
-                            p.name,
-                            p.id.get_wrapped_id()
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(format!(
-                        "PIR layout invariant violated in '{}': node[{}] must be GetParam for signature param '{}'",
-                        self.name, node_idx, p.name
-                    ));
-                }
+        for (index, node) in self.nodes.iter().enumerate() {
+            if matches!(node.payload, NodePayload::Param) && !seen.contains(&NodeRef { index }) {
+                return Err(format!(
+                    "function '{}' has parameter node {} absent from its signature",
+                    self.name, index
+                ));
             }
         }
         Ok(())
     }
 
-    /// Returns a new Fn with the given parameter names dropped.
-    /// Returns Err if any dropped parameter is used in the function body.
+    /// Drops unused parameters by name, rejecting parameters used by the body
+    /// or returned directly.
     pub fn drop_params(mut self, params: &[String]) -> Result<Self, String> {
-        let dropped: Vec<_> = self
+        let dropped = self
             .params
             .iter()
-            .filter(|p| params.contains(&p.name))
-            .map(|p| p.id)
-            .collect();
-        self.params.retain(|p| !params.contains(&p.name));
-        // Find all GetParam nodes for dropped params
-        let mut offending = Vec::new();
-        for (i, node) in self.nodes.iter().enumerate() {
-            if let ir::NodePayload::GetParam(param_id) = &node.payload {
-                if dropped.contains(param_id) {
-                    offending.push((i, *param_id));
-                }
-            }
-        }
-        // For each offending node, check if it is referenced by any other node
-        let mut to_nil = Vec::new();
-        for (idx, param_id) in offending {
-            let node_ref = ir::NodeRef { index: idx };
-            let is_used = self.nodes.iter().any(|n| {
-                use ir::NodePayload::*;
-                match &n.payload {
-                    Tuple(nodes) | Array(nodes) | ArrayConcat(nodes) => nodes.contains(&node_ref),
-                    ArraySlice { array, start, .. } => array == &node_ref || start == &node_ref,
-                    TupleIndex { tuple, .. } => tuple == &node_ref,
-                    Binop(_, a, b) => a == &node_ref || b == &node_ref,
-                    Unop(_, a) => a == &node_ref,
-                    SignExt { arg, .. } | ZeroExt { arg, .. } => arg == &node_ref,
-                    ArrayUpdate {
-                        array,
-                        value,
-                        indices,
-                        assumed_in_bounds: _,
-                    } => array == &node_ref || value == &node_ref || indices.contains(&node_ref),
-                    ArrayIndex { array, indices, .. } => {
-                        array == &node_ref || indices.contains(&node_ref)
-                    }
-                    DynamicBitSlice { arg, start, .. } => arg == &node_ref || start == &node_ref,
-                    BitSlice { arg, .. } => arg == &node_ref,
-                    BitSliceUpdate {
-                        arg,
-                        start,
-                        update_value,
-                    } => arg == &node_ref || start == &node_ref || update_value == &node_ref,
-                    Assert {
-                        token, activate, ..
-                    } => token == &node_ref || activate == &node_ref,
-                    Trace {
-                        token,
-                        activated,
-                        operands,
-                        ..
-                    } => {
-                        token == &node_ref || activated == &node_ref || operands.contains(&node_ref)
-                    }
-                    InstantiationInput { arg, .. } => arg == &node_ref,
-                    InstantiationOutput { .. } => false,
-                    RegisterRead { .. } => false,
-                    RegisterWrite {
-                        arg,
-                        load_enable,
-                        reset,
-                        ..
-                    } => {
-                        arg == &node_ref
-                            || load_enable.map_or(false, |le| le == node_ref)
-                            || reset.map_or(false, |rst| rst == node_ref)
-                    }
-                    AfterAll(nodes) => nodes.contains(&node_ref),
-                    Nary(_, nodes) => nodes.contains(&node_ref),
-                    Invoke { operands, .. } => operands.contains(&node_ref),
-                    PrioritySel {
-                        selector,
-                        cases,
-                        default,
-                    } => {
-                        selector == &node_ref
-                            || cases.contains(&node_ref)
-                            || default.map_or(false, |d| d == node_ref)
-                    }
-                    OneHotSel { selector, cases } => {
-                        selector == &node_ref || cases.contains(&node_ref)
-                    }
-                    OneHot { arg, .. } => arg == &node_ref,
-                    Sel {
-                        selector,
-                        cases,
-                        default,
-                    } => {
-                        selector == &node_ref
-                            || cases.contains(&node_ref)
-                            || default.map_or(false, |d| d == node_ref)
-                    }
-                    Cover { predicate, .. } => predicate == &node_ref,
-                    Decode { arg, .. } => arg == &node_ref,
-                    Encode { arg } => arg == &node_ref,
-                    _ => false,
-                }
-            });
-            if is_used {
+            .copied()
+            .filter(|reference| {
+                params
+                    .iter()
+                    .any(|name| name == self.get_node(*reference).param_name())
+            })
+            .collect::<Vec<_>>();
+        for &reference in &dropped {
+            if self.ret_node_ref == Some(reference)
+                || self
+                    .nodes
+                    .iter()
+                    .any(|node| operands(&node.payload).contains(&reference))
+            {
                 return Err(format!(
-                    "Dropped parameter with id {:?} is used in the function body (node {})!",
-                    param_id, idx
+                    "Dropped parameter '{}' is still used by the function",
+                    self.get_node(reference).param_name()
                 ));
-            } else {
-                to_nil.push(idx);
             }
         }
-        // Clobber unused GetParam nodes with Nil
-        for idx in to_nil {
-            self.nodes[idx].payload = ir::NodePayload::Nil;
+        self.params.retain(|reference| !dropped.contains(reference));
+        for reference in dropped {
+            self.nodes[reference.index].payload = NodePayload::Nil;
         }
         Ok(self)
     }
@@ -1498,7 +1417,7 @@ fn append_emitted_node_line(
     };
 
     match &node.payload {
-        NodePayload::GetParam(pid) if is_ret => {
+        NodePayload::Param if is_ret => {
             let name = node
                 .name
                 .as_ref()
@@ -1508,10 +1427,7 @@ fn append_emitted_node_line(
             line.push_str("  ret ");
             line.push_str(&format!(
                 "{}: {} = param(name={}, id={})",
-                name,
-                node.ty,
-                name,
-                pid.get_wrapped_id()
+                name, node.ty, name, node.text_id
             ));
             if let Some(comment) = comment {
                 line.push_str("  // ");
@@ -1551,9 +1467,8 @@ pub fn emit_fn(func: &Fn, is_top: bool) -> String {
 
     // Signature line
     let params_str = func
-        .params
-        .iter()
-        .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
+        .param_nodes()
+        .map(|p| format!("{}: {} id={}", p.param_name(), p.ty, p.text_id))
         .collect::<Vec<String>>()
         .join(", ");
     let return_type_str = func.ret_ty.to_string();
@@ -1599,9 +1514,8 @@ where
 
     // Signature line.
     let params_str = func
-        .params
-        .iter()
-        .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
+        .param_nodes()
+        .map(|p| format!("{}: {} id={}", p.param_name(), p.ty, p.text_id))
         .collect::<Vec<String>>()
         .join(", ");
     let return_type_str = func.ret_ty.to_string();
@@ -1714,9 +1628,8 @@ where
     F: FnMut(&Fn, NodeRef) -> Option<String>,
 {
     let params_str = func
-        .params
-        .iter()
-        .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
+        .param_nodes()
+        .map(|p| format!("{}: {} id={}", p.param_name(), p.ty, p.text_id))
         .collect::<Vec<String>>()
         .join(", ");
     let return_type_str = func.ret_ty.to_string();
@@ -2140,16 +2053,13 @@ mod tests {
             NodePayload::Nil
         ));
 
-        for (ordinal, param) in ir_fn.params.iter().enumerate() {
+        for (ordinal, param) in ir_fn.param_nodes().enumerate() {
             let node_ref = NodeRef { index: ordinal + 1 };
             let node = ir_fn.get_node(node_ref);
-            assert_eq!(node.name.as_deref(), Some(param.name.as_str()));
+            assert_eq!(node.name.as_deref(), Some(param.param_name()));
             assert_eq!(node.ty, param.ty);
-            assert_eq!(node.payload, NodePayload::GetParam(param.id));
-            assert!(
-                operands(&node.payload).is_empty(),
-                "GetParam nodes are leaves"
-            );
+            assert_eq!(node.payload, NodePayload::Param);
+            assert!(operands(&node.payload).is_empty(), "Param nodes are leaves");
         }
 
         let add_node_ref = NodeRef {
@@ -2165,30 +2075,24 @@ mod tests {
     }
 
     #[test]
-    fn returning_parameter_uses_explicit_get_param_node() {
+    fn returning_parameter_uses_explicit_param_node() {
         let ir_text = r#"fn passthrough(x: bits[16] id=7) -> bits[16] {
   ret x: bits[16] = param(name=x, id=7)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_fn = parser.parse_fn().unwrap();
 
-        // With de-duplication of GetParam nodes, only the reserved zero node
-        // and a single GetParam remain; the return refers to that same
+        // With de-duplication of Param nodes, only the reserved zero node
+        // and a single Param remain; the return refers to that same
         // node.
         assert_eq!(ir_fn.nodes.len(), 2);
         assert_eq!(ir_fn.ret_node_ref, Some(NodeRef { index: 1 }));
 
         let param_node = ir_fn.get_node(NodeRef { index: 1 });
-        assert!(matches!(
-            param_node.payload,
-            NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
-        ));
+        assert!(matches!(param_node.payload, NodePayload::Param));
 
         let ret_node = ir_fn.get_node(ir_fn.ret_node_ref.unwrap());
-        assert!(matches!(
-            ret_node.payload,
-            NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
-        ));
+        assert!(matches!(ret_node.payload, NodePayload::Param));
 
         assert_eq!(ir_fn.to_string(), ir_text);
     }

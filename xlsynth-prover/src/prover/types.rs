@@ -81,8 +81,8 @@ impl<'a> ProverFn<'a> {
         &self.fn_ref.name
     }
 
-    pub fn params(&self) -> &'a [ir::Param] {
-        &self.fn_ref.params
+    pub fn params(&self) -> impl ExactSizeIterator<Item = &'a ir::Node> + DoubleEndedIterator {
+        self.fn_ref.param_nodes()
     }
 
     pub fn with_fixed_implicit_activation(mut self, fixed: bool) -> Self {
@@ -131,7 +131,7 @@ impl<'a, R> FnInputs<'a, R> {
         self.prover_fn.fixed_implicit_activation
     }
 
-    pub fn params(&self) -> &'a [ir::Param] {
+    pub fn params(&self) -> impl ExactSizeIterator<Item = &'a ir::Node> + DoubleEndedIterator {
         self.prover_fn.params()
     }
 
@@ -147,12 +147,13 @@ impl<'a, R> FnInputs<'a, R> {
         }
     }
 
-    pub fn free_params(&self) -> &'a [ir::Param] {
-        if self.fixed_implicit_activation() {
-            &self.params()[2..]
+    pub fn free_params(&self) -> impl ExactSizeIterator<Item = &'a ir::Node> + DoubleEndedIterator {
+        let skip = if self.fixed_implicit_activation() {
+            2
         } else {
-            self.params()
-        }
+            0
+        };
+        self.params().skip(skip)
     }
 
     pub fn name(&self) -> &str {

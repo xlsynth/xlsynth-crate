@@ -31,7 +31,7 @@ pub enum TrivialFnBody {
 pub fn is_structural_payload(payload: &NodePayload) -> bool {
     match payload {
         NodePayload::Nil => true,
-        NodePayload::GetParam(_) => true,
+        NodePayload::Param => true,
         NodePayload::Literal(_) => true,
         NodePayload::Tuple(_) => true,
         NodePayload::Array(_) => true,
@@ -91,7 +91,7 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
         } else if !is_structural_payload(&node.payload) {
             return None;
         }
-        if matches!(node.payload, NodePayload::GetParam(_)) {
+        if matches!(node.payload, NodePayload::Param) {
             used_param_node_refs.insert(nr);
         }
         for dep in operands(&node.payload) {
@@ -169,7 +169,7 @@ pub fn has_external_function_references(f: &Fn) -> bool {
 
 /// Returns a deterministic histogram mapping operator name to count.
 ///
-/// Excludes bookkeeping-only nodes (`nil` and `get_param`) so the histogram
+/// Excludes bookkeeping-only nodes (`nil` and `param`) so the histogram
 /// reflects explicit operation nodes present in the function body.
 pub fn op_histogram(f: &Fn) -> BTreeMap<String, usize> {
     op_histogram_impl(f, false)
@@ -180,7 +180,7 @@ pub fn op_histogram(f: &Fn) -> BTreeMap<String, usize> {
 /// Signatures include the operator, operand types, and result type, e.g.
 /// `and(bits[1], bits[1]) -> bits[1]`.
 ///
-/// Excludes bookkeeping-only nodes (`nil` and `get_param`).
+/// Excludes bookkeeping-only nodes (`nil` and `param`).
 pub fn op_histogram_with_types(f: &Fn) -> BTreeMap<String, usize> {
     op_histogram_impl(f, true)
 }
@@ -189,7 +189,7 @@ fn op_histogram_impl(f: &Fn, include_types: bool) -> BTreeMap<String, usize> {
     let mut hist = BTreeMap::new();
     for node in f.nodes.iter() {
         match &node.payload {
-            NodePayload::Nil | NodePayload::GetParam(_) => continue,
+            NodePayload::Nil | NodePayload::Param => continue,
             _ => {
                 let key = if include_types {
                     node.to_signature_string(f)
@@ -209,7 +209,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
 
     match payload {
         Nil => vec![],
-        GetParam(_) => vec![],
+        Param => vec![],
         InputPort { .. } => vec![],
         OutputPort { arg, .. } => vec![*arg],
         Tuple(elems) => elems.clone(),
@@ -462,37 +462,30 @@ pub fn next_text_id(pkg: &Package) -> usize {
 /// Returns the `NodeRef` corresponding to the `index`-th parameter of `f`, if
 /// it exists.
 pub fn param_node_ref_by_index(f: &Fn, param_index: usize) -> Option<NodeRef> {
-    let param = f.params.get(param_index)?;
-    f.nodes
-        .iter()
-        .enumerate()
-        .find_map(|(idx, node)| match node.payload {
-            NodePayload::GetParam(pid) if pid == param.id => Some(NodeRef { index: idx }),
-            _ => None,
-        })
+    f.params.get(param_index).copied()
 }
 
 /// Returns the `NodeRef` corresponding to the parameter named `param_name` in
 /// `f`, if any.
 pub fn param_node_ref_by_name(f: &Fn, param_name: &str) -> Option<NodeRef> {
     let (index, _) = f
-        .params
-        .iter()
+        .param_nodes()
         .enumerate()
-        .find(|(_, param)| param.name == param_name)?;
+        .find(|(_, param)| param.param_name() == param_name)?;
     param_node_ref_by_index(f, index)
 }
 
 /// Returns the `Type` of the `index`-th parameter of `f`, if it exists.
 pub fn param_type_by_index(f: &Fn, param_index: usize) -> Option<Type> {
-    f.params.get(param_index).map(|param| param.ty.clone())
+    f.params
+        .get(param_index)
+        .map(|param| f.get_node_ty(*param).clone())
 }
 
 /// Returns the `Type` of the parameter named `param_name` in `f`, if any.
 pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
-    f.params
-        .iter()
-        .find(|param| param.name == param_name)
+    f.param_nodes()
+        .find(|param| param.param_name() == param_name)
         .map(|param| param.ty.clone())
 }
 
@@ -563,16 +556,13 @@ pub fn find_node_by_name(f: &NodeGraph, name: &str) -> Option<NodeRef> {
 
 /// Compacts and reorders the nodes of a function in place.
 ///
-/// PIR layout invariants:
-/// - Node index 0 is reserved for a `Nil` node.
-/// - Parameter nodes occupy indices `1..=f.params.len()` in parameter order.
-///
-/// This routine preserves those invariants while:
+/// Keeps the reserved `Nil` sentinel at index zero and places parameters next,
+/// in signature order (their original storage positions may differ), while:
 /// - Removing any other nodes whose payload is `Nil`.
 /// - Reordering non-parameter body nodes into a topological order (dependencies
 ///   before users).
-/// - Remaps all operand indices and the function's `ret_node_ref` to the new
-///   indices.
+/// - Remapping all operands, signature parameter references, and the return
+///   reference to the new indices.
 ///
 /// Returns `Err` if remapping encounters a reference to a removed (Nil) node.
 pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
@@ -626,21 +616,8 @@ pub fn compact_graph_and_toposort_with_mapping_in_place(
 pub fn compact_and_toposort_with_mapping_in_place(
     f: &mut Fn,
 ) -> Result<Vec<Option<NodeRef>>, String> {
+    f.check_pir_layout_invariants()?;
     let n = f.nodes.len();
-    if n == 0 {
-        return Ok(vec![]);
-    }
-
-    let param_count = f.params.len();
-    if n < 1 + param_count {
-        return Err(format!(
-            "compact_and_toposort_in_place: function '{}' has {} nodes but {} params (need at least {})",
-            f.name,
-            n,
-            param_count,
-            1 + param_count
-        ));
-    }
 
     // Determine a topological order over the current node set.
     let topo_all: Vec<NodeRef> = get_topological(f);
@@ -649,31 +626,9 @@ pub fn compact_and_toposort_with_mapping_in_place(
     let mut kept_order: Vec<NodeRef> = Vec::with_capacity(topo_all.len());
     kept_order.push(NodeRef { index: 0 });
 
-    // Keep params at indices 1..=param_count in signature order.
-    for i in 0..param_count {
-        let nr = NodeRef { index: i + 1 };
-        match f.get_node(nr).payload {
-            NodePayload::GetParam(pid) => {
-                if pid != f.params[i].id {
-                    return Err(format!(
-                        "compact_and_toposort_in_place: param node at index {} has id={} but signature param '{}' has id={}",
-                        i + 1,
-                        pid.get_wrapped_id(),
-                        f.params[i].name,
-                        f.params[i].id.get_wrapped_id()
-                    ));
-                }
-            }
-            _ => {
-                return Err(format!(
-                    "compact_and_toposort_in_place: expected GetParam at index {} for param '{}'",
-                    i + 1,
-                    f.params[i].name
-                ));
-            }
-        }
-        kept_order.push(nr);
-    }
+    // Preserve signature order while canonicalizing node storage. References
+    // remain the source of truth even when input storage was noncanonical.
+    kept_order.extend(f.params.iter().copied());
 
     // Add remaining topo-sorted body nodes, excluding:
     // - the reserved nil node (already added)
@@ -741,6 +696,9 @@ pub fn compact_and_toposort_with_mapping_in_place(
         f.ret_node_ref = Some(mapped);
     }
 
+    for parameter in &mut f.params {
+        *parameter = old_to_new_refs[parameter.index].expect("parameter nodes are retained");
+    }
     // Install new nodes.
     f.nodes = new_nodes;
     Ok(old_to_new_refs)
@@ -975,7 +933,7 @@ where
 {
     match payload {
         NodePayload::Nil => NodePayload::Nil,
-        NodePayload::GetParam(p) => NodePayload::GetParam(*p),
+        NodePayload::Param => NodePayload::Param,
         NodePayload::InputPort { name, sv_type } => NodePayload::InputPort {
             name: name.clone(),
             sv_type: sv_type.clone(),
@@ -1485,7 +1443,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
     }
 
     #[test]
-    fn op_histogram_excludes_nil_and_get_param() {
+    fn op_histogram_excludes_nil_and_param() {
         let f = parse_fn(
             r#"fn f(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
   both: bits[1] = and(x, y, id=3)
@@ -1647,14 +1605,14 @@ fn main(x: bits[8] id=1) -> bits[8] {
 
         let a_ref = param_node_ref_by_index(&f, 0).expect("param 0 node");
         match &f.nodes[a_ref.index].payload {
-            NodePayload::GetParam(pid) => assert_eq!(*pid, f.params[0].id),
-            other => panic!("expected get_param, found {other:?}"),
+            NodePayload::Param => assert_eq!(a_ref, f.params[0]),
+            other => panic!("expected param, found {other:?}"),
         }
 
         let b_ref = param_node_ref_by_name(&f, "b").expect("param b node");
         match &f.nodes[b_ref.index].payload {
-            NodePayload::GetParam(pid) => assert_eq!(*pid, f.params[1].id),
-            other => panic!("expected get_param, found {other:?}"),
+            NodePayload::Param => assert_eq!(b_ref, f.params[1]),
+            other => panic!("expected param, found {other:?}"),
         }
 
         assert!(matches!(param_type_by_index(&f, 0), Some(Type::Bits(8))));
@@ -1820,7 +1778,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
 }"#,
         );
         let dead_ref = find_node_by_name(&f, "dead").unwrap();
-        let new_payload = NodePayload::GetParam(f.params[0].id);
+        let new_payload = NodePayload::Param;
         replace_node_payload(&mut f, dead_ref, new_payload.clone(), Some(Type::Bits(2)))
             .expect("payload replacement should succeed");
 
@@ -2123,7 +2081,7 @@ mod users_tests {
         let mut add_ref: Option<NodeRef> = None;
         for (i, node) in f.nodes.iter().enumerate() {
             match &node.payload {
-                NodePayload::GetParam(_) => x_ref = Some(NodeRef { index: i }),
+                NodePayload::Param => x_ref = Some(NodeRef { index: i }),
                 NodePayload::Binop(_, lhs, rhs) if lhs == rhs => {
                     add_ref = Some(NodeRef { index: i })
                 }

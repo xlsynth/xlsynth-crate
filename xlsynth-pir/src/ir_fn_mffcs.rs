@@ -6,9 +6,7 @@
 //! This module is intentionally library-oriented: it performs no stdout/stderr
 //! output and returns structured results to callers (e.g. `xlsynth-driver`).
 
-use crate::ir::{
-    self, MemberType, Node, NodePayload, NodeRef, Package, PackageMember, Param, ParamId,
-};
+use crate::ir::{self, MemberType, Node, NodePayload, NodeRef, Package, PackageMember};
 use crate::ir_utils::{operands, remap_payload_with};
 use sha2::Digest;
 use std::cmp::Ordering;
@@ -129,7 +127,7 @@ fn is_literal_node(f: &ir::Fn, idx: usize) -> bool {
 fn is_root_eligible(node: &Node) -> bool {
     !matches!(
         node.payload,
-        NodePayload::Nil | NodePayload::GetParam(_) | NodePayload::Literal(_)
+        NodePayload::Nil | NodePayload::Param | NodePayload::Literal(_)
     )
 }
 
@@ -206,7 +204,7 @@ fn compute_single_mffc_spec(f: &ir::Fn, users: &[Vec<usize>], root_idx: usize) -
                     frontier.remove(&pred_idx);
                     worklist.push(pred_idx);
                 }
-                NodePayload::GetParam(_) => {
+                NodePayload::Param => {
                     frontier.insert(pred_idx);
                 }
                 _ => {
@@ -227,11 +225,7 @@ fn compute_single_mffc_spec(f: &ir::Fn, users: &[Vec<usize>], root_idx: usize) -
 
     let internal_node_indices: Vec<usize> = (1..f.nodes.len())
         .filter(|&idx| {
-            in_mffc[idx]
-                && !matches!(
-                    f.nodes[idx].payload,
-                    NodePayload::Nil | NodePayload::GetParam(_)
-                )
+            in_mffc[idx] && !matches!(f.nodes[idx].payload, NodePayload::Nil | NodePayload::Param)
         })
         .collect();
 
@@ -374,8 +368,8 @@ pub fn extract_mffc(
         }
     }
 
-    // Build new params and their corresponding get_param nodes.
-    let mut params: Vec<Param> = Vec::with_capacity(param_leaf_indices.len());
+    // Build new params and their corresponding parameter nodes.
+    let mut params: Vec<NodeRef> = Vec::with_capacity(param_leaf_indices.len());
     let mut nodes: Vec<Node> = Vec::new();
     nodes.push(Node {
         text_id: 0,
@@ -388,19 +382,15 @@ pub fn extract_mffc(
     let mut old_to_new: HashMap<usize, usize> = HashMap::new();
 
     for (ordinal, old_idx) in param_leaf_indices.iter().copied().enumerate() {
-        let param_id = ParamId::new(ordinal + 1);
+        let text_id = ordinal + 1;
         let param_name = format!("leaf_{}", old_idx);
         let param_ty = f.nodes[old_idx].ty.clone();
-        params.push(Param {
-            name: param_name.clone(),
-            ty: param_ty.clone(),
-            id: param_id,
-        });
+        params.push(NodeRef { index: nodes.len() });
         nodes.push(Node {
-            text_id: param_id.get_wrapped_id(),
+            text_id,
             name: Some(param_name),
             ty: param_ty,
-            payload: NodePayload::GetParam(param_id),
+            payload: NodePayload::Param,
             pos: None,
         });
         old_to_new.insert(old_idx, nodes.len() - 1);

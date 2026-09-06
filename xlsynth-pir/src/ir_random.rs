@@ -11,8 +11,7 @@ use rand::RngCore;
 
 use crate::ir::{
     Binop, Block, BlockPort, BlockReset, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, Fn,
-    MemberType, NaryOp, Node, NodePayload, NodeRef, Package, PackageMember, Param, ParamId,
-    Register, Type, Unop,
+    MemberType, NaryOp, Node, NodePayload, NodeRef, Package, PackageMember, Register, Type, Unop,
 };
 use crate::ir_rebase_ids::rebase_fn_ids;
 use crate::ir_utils::{is_observable_effect_root, operands};
@@ -845,8 +844,7 @@ impl FunctionSignature {
     pub fn from_fn(function: &Fn) -> Self {
         Self {
             params: function
-                .params
-                .iter()
+                .param_nodes()
                 .map(|param| param.ty.clone())
                 .collect(),
             return_type: function.ret_ty.clone(),
@@ -1136,11 +1134,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         );
         // The construction pool retains input signature facts for budgeting
         // and stage-local type selection, without constructing a function.
-        generator.params.push(Param {
-            name,
-            ty,
-            id: ParamId::new(generator.nodes[node_ref.index].text_id),
-        });
+        generator.params.push(node_ref);
         block.ports.push(BlockPort::Input(node_ref));
         node_ref
     }
@@ -1205,7 +1199,7 @@ impl<'a, S: EntropySource> BlockGenerator<'a, S> {
         for index in 0..register_count {
             let name = format!("r{index}");
             let ty = if self.options.topology == BlockTopology::FeedForwardPipeline {
-                generator.params[0].ty.clone()
+                generator.nodes[generator.params[0].index].ty.clone()
             } else {
                 self.choose_interface_type(generator)
             };
@@ -2015,8 +2009,7 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
                 completed.max_nested_counted_for_iterations <= nested_iteration_budget
                     && completed
                         .function
-                        .params
-                        .iter()
+                        .param_nodes()
                         .all(|param| generator.nodes_by_type.contains_key(&param.ty))
             })
             .map(CallableFunction::from_completed)
@@ -2031,11 +2024,10 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
             .iter()
             .filter(|completed| {
                 let function = &completed.function;
-                matches!(function.params.first(), Some(Param { ty: Type::Bits(width), .. }) if *width > 0)
+                matches!(function.param_nodes().next(), Some(Node { ty: Type::Bits(width), .. }) if *width > 0)
                     && function.params.len() >= 2
-                    && function.ret_ty == function.params[1].ty
-                    && function.params[1..]
-                        .iter()
+                    && function.ret_ty == function.get_param(1).ty
+                    && function.param_nodes().skip(1)
                         .all(|param| generator.nodes_by_type.contains_key(&param.ty))
             })
             .map(CallableFunction::from_completed)
@@ -2566,7 +2558,7 @@ fn required_materialization_nodes(
 
 struct FunctionGenerator<'a> {
     options: &'a RandomFnOptions,
-    params: Vec<Param>,
+    params: Vec<NodeRef>,
     nodes: Vec<Node>,
     nodes_by_type: BTreeMap<Type, Vec<NodeRef>>,
     preparation_remaining: usize,
@@ -2601,13 +2593,8 @@ impl<'a> FunctionGenerator<'a> {
     }
 
     fn add_named_param(&mut self, name: String, ty: Type) -> NodeRef {
-        let id = ParamId::new(self.params.len() + 1);
-        let node_ref = self.add_node(
-            ty.clone(),
-            NodePayload::GetParam(id.clone()),
-            Some(name.clone()),
-        );
-        self.params.push(Param { name, ty, id });
+        let node_ref = self.add_node(ty.clone(), NodePayload::Param, Some(name.clone()));
+        self.params.push(node_ref);
         debug_assert_eq!(node_ref.index, self.params.len());
         node_ref
     }
@@ -4229,7 +4216,7 @@ fn gather_stats_with_roots(
         }
         if matches!(
             node.payload,
-            NodePayload::GetParam(_) | NodePayload::InputPort { .. }
+            NodePayload::Param | NodePayload::InputPort { .. }
         ) {
             continue;
         }

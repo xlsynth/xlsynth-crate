@@ -5,6 +5,7 @@
 
 use xlsynth_pir::ir::{self, ExtNaryAddArchitecture, MemberType, Type};
 use xlsynth_pir::ir_eval::{self, FnEvalResult, eval_fn, eval_fn_in_package};
+use xlsynth_pir::ir_utils::remap_payload_with;
 use xlsynth_pir::{FnBuilder, IrValue, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
 use xlsynth_pir_compiler::{ExecutionOptions, IrExecutionResult, PirFunctionCompiler};
 
@@ -99,6 +100,42 @@ fn assert_package_execution(
         ObservedExecution::from_pir(expected),
         "arguments: {args:?}"
     );
+}
+
+#[test]
+fn jit_binds_interleaved_aggregate_parameters_by_signature_order() {
+    for width in [1, 4, 64, 65, 129] {
+        let scalar = IrValue::all_ones_bits(width);
+        let array = IrValue::make_array(&[scalar.clone(), scalar.clone()]).unwrap();
+        let aggregate = IrValue::make_tuple(&[scalar.clone(), array]);
+        let mut builder = FnBuilder::new("interleaved");
+        let p = builder.param("p", aggregate.type_()).unwrap();
+        let q = builder.param("q", scalar.type_()).unwrap();
+        let one = IrValue::make_ubits(8, 1).unwrap();
+        let literal = builder.literal(one.clone()).unwrap();
+        let result = builder.tuple(&[p, q, literal]).unwrap();
+        let mut function = builder.build(result).unwrap();
+        let old_to_new = [0, 3, 1, 2, 4];
+        let remap = |node: ir::NodeRef| ir::NodeRef {
+            index: old_to_new[node.index],
+        };
+        function.nodes = [0, 2, 3, 1, 4]
+            .into_iter()
+            .map(|index| {
+                let mut node = function.nodes[index].clone();
+                node.payload = remap_payload_with(&node.payload, |(_, operand)| remap(operand));
+                node
+            })
+            .collect();
+        function.params = function.params.iter().copied().map(remap).collect();
+        function.ret_node_ref = function.ret_node_ref.map(remap);
+        let compiled = PirFunctionCompiler::compile(&function).unwrap();
+        let expected = IrValue::make_tuple(&[aggregate.clone(), scalar.clone(), one]);
+        assert_eq!(
+            compiled.run_ir_values(&[aggregate, scalar]).unwrap(),
+            expected
+        );
+    }
 }
 
 #[test]

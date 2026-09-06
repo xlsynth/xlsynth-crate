@@ -973,7 +973,7 @@ mod tests {
 
         match &f.get_node(ret_ref).payload {
             NodePayload::Unop(Unop::AndReduce, arg) => {
-                assert!(matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)));
+                assert!(matches!(f.get_node(*arg).payload, NodePayload::Param));
             }
             other => panic!("expected and_reduce after rewrite, got {other:?}"),
         }
@@ -1011,10 +1011,7 @@ mod tests {
         let NodePayload::Unop(Unop::Not, x_ref) = &f.get_node(*not_ref).payload else {
             panic!("expected not(x) after rewrite");
         };
-        assert!(matches!(
-            f.get_node(*x_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*x_ref).payload, NodePayload::Param));
     }
 
     #[test]
@@ -1042,10 +1039,7 @@ mod tests {
         let NodePayload::Binop(Binop::Shll, x_ref, k_ref) = &f.get_node(ret_ref).payload else {
             panic!("expected shll after rewrite");
         };
-        assert!(matches!(
-            f.get_node(*x_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*x_ref).payload, NodePayload::Param));
         let NodePayload::Literal(v) = &f.get_node(*k_ref).payload else {
             panic!("expected literal shift amount");
         };
@@ -1085,7 +1079,7 @@ mod tests {
         let NodePayload::BitSlice { arg, start, width } = &f.get_node(ops[0]).payload else {
             panic!("expected bit_slice in concat");
         };
-        assert!(matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)));
+        assert!(matches!(f.get_node(*arg).payload, NodePayload::Param));
         assert_eq!(*start, 0);
         assert_eq!(*width, 5);
         let NodePayload::Literal(v) = &f.get_node(ops[1]).payload else {
@@ -1119,17 +1113,11 @@ mod tests {
         let NodePayload::Binop(Binop::Add, x_ref, neg_ref) = &f.get_node(sub_ref).payload else {
             panic!("expected add after rewrite");
         };
-        assert!(matches!(
-            f.get_node(*x_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*x_ref).payload, NodePayload::Param));
         let NodePayload::Unop(Unop::Neg, y_ref) = &f.get_node(*neg_ref).payload else {
             panic!("expected neg(y) after rewrite");
         };
-        assert!(matches!(
-            f.get_node(*y_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*y_ref).payload, NodePayload::Param));
     }
 
     #[test]
@@ -1156,14 +1144,8 @@ mod tests {
         let NodePayload::Binop(Binop::Sub, x_ref, y_ref) = &f.get_node(add_ref).payload else {
             panic!("expected sub after rewrite");
         };
-        assert!(matches!(
-            f.get_node(*x_ref).payload,
-            NodePayload::GetParam(_)
-        ));
-        assert!(matches!(
-            f.get_node(*y_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*x_ref).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(*y_ref).payload, NodePayload::Param));
     }
 
     #[test]
@@ -1190,14 +1172,8 @@ mod tests {
         let NodePayload::Binop(Binop::Sub, y_ref, x_ref) = &f.get_node(neg_ref).payload else {
             panic!("expected swapped sub after rewrite");
         };
-        assert!(matches!(
-            f.get_node(*x_ref).payload,
-            NodePayload::GetParam(_)
-        ));
-        assert!(matches!(
-            f.get_node(*y_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*x_ref).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(*y_ref).payload, NodePayload::Param));
     }
 
     #[test]
@@ -1227,14 +1203,8 @@ mod tests {
         else {
             panic!("expected inner sub after rewrite");
         };
-        assert!(matches!(
-            f.get_node(*x_ref).payload,
-            NodePayload::GetParam(_)
-        ));
-        assert!(matches!(
-            f.get_node(*y_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*x_ref).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(*y_ref).payload, NodePayload::Param));
     }
 
     #[test]
@@ -1254,7 +1224,7 @@ mod tests {
             if matches!(
                 f.get_node(lhs).payload,
                 NodePayload::Binop(Binop::Add, _, _)
-            ) && matches!(f.get_node(rhs).payload, NodePayload::GetParam(_))
+            ) && matches!(f.get_node(rhs).payload, NodePayload::Param)
             {
                 add_ref = Some(nr);
             }
@@ -1268,12 +1238,12 @@ mod tests {
         let NodePayload::Binop(Binop::Add, lhs, rhs) = &f.get_node(add_ref).payload else {
             panic!("expected add after rewrite");
         };
-        assert!(matches!(f.get_node(*lhs).payload, NodePayload::GetParam(_)));
+        assert!(matches!(f.get_node(*lhs).payload, NodePayload::Param));
         let NodePayload::Binop(Binop::Add, rb, rc) = &f.get_node(*rhs).payload else {
             panic!("expected nested add on rhs after rewrite");
         };
-        assert!(matches!(f.get_node(*rb).payload, NodePayload::GetParam(_)));
-        assert!(matches!(f.get_node(*rc).payload, NodePayload::GetParam(_)));
+        assert!(matches!(f.get_node(*rb).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(*rc).payload, NodePayload::Param));
     }
 
     #[test]
@@ -1307,14 +1277,8 @@ mod tests {
         let NodePayload::Binop(Binop::Add, x_ref, y_ref) = &f.get_node(add_ref).payload else {
             panic!("expected add after fold");
         };
-        assert!(matches!(
-            f.get_node(*x_ref).payload,
-            NodePayload::GetParam(_)
-        ));
-        assert!(matches!(
-            f.get_node(*y_ref).payload,
-            NodePayload::GetParam(_)
-        ));
+        assert!(matches!(f.get_node(*x_ref).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(*y_ref).payload, NodePayload::Param));
     }
 
     #[test]
@@ -1858,10 +1822,7 @@ mod tests {
         assert_eq!(cases.len(), 2);
         assert!(default.is_none());
         for case in cases {
-            assert!(matches!(
-                f.get_node(*case).payload,
-                NodePayload::GetParam(_)
-            ));
+            assert!(matches!(f.get_node(*case).payload, NodePayload::Param));
         }
     }
 
@@ -2413,10 +2374,7 @@ mod tests {
             } => {
                 assert_eq!(cases.len(), 2);
                 // selector should now be `p`, not a `not(...)` node.
-                assert!(matches!(
-                    f.get_node(*selector).payload,
-                    NodePayload::GetParam(_)
-                ));
+                assert!(matches!(f.get_node(*selector).payload, NodePayload::Param));
             }
             other => panic!("expected sel after rewrite, got {other:?}"),
         }

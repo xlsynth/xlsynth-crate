@@ -7,8 +7,7 @@
 //! output and returns structured results to callers (e.g. `xlsynth-driver`).
 
 use crate::ir::{
-    self, ArrayTypeData, MemberType, Node, NodePayload, NodeRef, Package, PackageMember, Param,
-    ParamId, Type,
+    self, ArrayTypeData, MemberType, Node, NodePayload, NodeRef, Package, PackageMember, Type,
 };
 use crate::ir_utils::{operands, remap_payload_with};
 use sha2::Digest;
@@ -102,17 +101,14 @@ pub fn is_trivial_param_return_cone(cone: &ExtractedCone) -> bool {
         return false;
     }
     if f.nodes.len() != 2 {
-        // Nil + GetParam
+        // Nil + Param
         return false;
     }
     if f.ret_node_ref != Some(NodeRef { index: 1 }) {
         return false;
     }
-    let p = &f.params[0];
-    match &f.nodes[1].payload {
-        NodePayload::GetParam(pid) => pid.get_wrapped_id() == p.id.get_wrapped_id(),
-        _ => false,
-    }
+    f.ret_node_ref == Some(f.params[0])
+        && matches!(f.get_node(f.params[0]).payload, NodePayload::Param)
 }
 
 /// Returns true if the extracted cone is a trivial constant function with no
@@ -349,8 +345,8 @@ pub fn extract_bool_cone(
 
     let frontier_non_literal_count = param_leaf_indices.len();
 
-    // Build new params and their corresponding GetParam nodes.
-    let mut params: Vec<Param> = Vec::with_capacity(param_leaf_indices.len());
+    // Build new params and their corresponding Param nodes.
+    let mut params: Vec<NodeRef> = Vec::with_capacity(param_leaf_indices.len());
     let mut nodes: Vec<Node> = Vec::new();
 
     // Reserved Nil node at index 0.
@@ -366,19 +362,15 @@ pub fn extract_bool_cone(
     let mut old_to_new: HashMap<usize, usize> = HashMap::new();
 
     for (ordinal, old_idx) in param_leaf_indices.iter().copied().enumerate() {
-        let param_id = ParamId::new(ordinal + 1);
+        let text_id = ordinal + 1;
         let param_name = format!("leaf_{}", old_idx);
         let param_ty = f.nodes[old_idx].ty.clone();
-        params.push(Param {
-            name: param_name.clone(),
-            ty: param_ty.clone(),
-            id: param_id,
-        });
+        params.push(NodeRef { index: nodes.len() });
         nodes.push(Node {
-            text_id: param_id.get_wrapped_id(),
+            text_id,
             name: Some(param_name),
             ty: param_ty,
-            payload: NodePayload::GetParam(param_id),
+            payload: NodePayload::Param,
             pos: None,
         });
         old_to_new.insert(old_idx, nodes.len() - 1);

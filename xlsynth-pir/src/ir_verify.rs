@@ -66,7 +66,7 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
     for (i, node) in f.nodes.iter().enumerate() {
         match &node.payload {
             NodePayload::Nil
-            | NodePayload::GetParam(_)
+            | NodePayload::Param
             | NodePayload::Literal(_)
             | NodePayload::InputPort { .. } => {
                 // Leaf nodes do not reference operands.
@@ -393,7 +393,7 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         | NodePayload::RegisterWrite { .. }
         | NodePayload::Invoke { .. }
         | NodePayload::CountedFor { .. } => Ok(()),
-        NodePayload::GetParam(_) | NodePayload::InputPort { .. } => {
+        NodePayload::Param | NodePayload::InputPort { .. } => {
             // The owning function or block validates the input declaration.
             Ok(())
         }

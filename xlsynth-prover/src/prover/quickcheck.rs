@@ -82,9 +82,9 @@ where
     let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
 
     if let Some(domains) = &prover_fn.domains {
-        for param in fn_inputs.params().iter() {
-            if let Some(allowed) = domains.get(&param.name) {
-                if let Some(sym) = fn_inputs.inputs.get(&param.name) {
+        for param in fn_inputs.params() {
+            if let Some(allowed) = domains.get(param.param_name()) {
+                if let Some(sym) = fn_inputs.inputs.get(param.param_name()) {
                     let mut domain_constraint: Option<BitVec<S::Term>> = None;
                     for value in allowed {
                         let value_bv = ir_value_to_bv(&mut solver, value, &param.ty).bitvec;
@@ -175,11 +175,10 @@ where
             // Extract counter-example values.
             let inputs: Vec<FnInput> = smt_fn
                 .fn_ref
-                .params
-                .iter()
+                .param_nodes()
                 .zip(smt_fn.inputs.iter())
                 .map(|(p, i)| FnInput {
-                    name: p.name.clone(),
+                    name: p.param_name().to_string(),
                     value: solver.get_value(&i.bitvec, &i.ir_type).unwrap(),
                 })
                 .collect();
@@ -792,9 +791,10 @@ mod test_utils {
         match res {
             BoolPropertyResult::Disproved { inputs, .. } => {
                 assert_eq!(inputs.len(), f.params.len());
-                for (idx, param) in f.params.iter().enumerate() {
+                for (idx, param) in f.param_nodes().enumerate() {
                     assert_eq!(
-                        inputs[idx].name, param.name,
+                        inputs[idx].name,
+                        param.param_name(),
                         "param name mismatch at index {idx}"
                     );
                     assert_eq!(

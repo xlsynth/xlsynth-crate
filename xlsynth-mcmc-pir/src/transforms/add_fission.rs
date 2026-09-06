@@ -291,7 +291,7 @@ mod tests {
         let NodePayload::Binop(Binop::Add, lhs, rhs) = f.get_node(add_ref).payload else {
             panic!("expected add payload after fold");
         };
-        assert!(matches!(f.get_node(lhs).payload, NodePayload::GetParam(_)));
-        assert!(matches!(f.get_node(rhs).payload, NodePayload::GetParam(_)));
+        assert!(matches!(f.get_node(lhs).payload, NodePayload::Param));
+        assert!(matches!(f.get_node(rhs).payload, NodePayload::Param));
     }
 }

@@ -19,9 +19,8 @@ pub(crate) fn add_assertion_dependency_property(
 
     let mut builder = FnBuilder::new(&property_name);
     let args = top
-        .params
-        .iter()
-        .map(|param| builder.param(&param.name, param.ty.clone()))
+        .param_nodes()
+        .map(|param| builder.param(param.param_name(), param.ty.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let invoked = builder
@@ -88,8 +87,7 @@ top fn target(tok: token id=11, enabled: bits[1] id=19, payload: (bits[65], bits
             let property = package.get_fn(&property_name).expect("property");
             let signature = |function: &ir::Fn| {
                 function
-                    .params
-                    .iter()
+                    .param_nodes()
                     .map(|param| (param.name.clone(), param.ty.clone()))
                     .collect::<Vec<_>>()
             };
@@ -108,10 +106,8 @@ top fn target(tok: token id=11, enabled: bits[1] id=19, payload: (bits[65], bits
             assert_eq!(to_apply, "target");
             assert_eq!(operands.len(), property.params.len());
             for (operand, param) in operands.iter().zip(&property.params) {
-                assert_eq!(
-                    property.get_node(*operand).payload,
-                    NodePayload::GetParam(param.id)
-                );
+                assert_eq!(operand, param);
+                assert_eq!(property.get_node(*operand).payload, NodePayload::Param);
             }
             assert_eq!(package.top, original_top);
             verify_package(&package).expect("valid property calls and package-unique IDs");

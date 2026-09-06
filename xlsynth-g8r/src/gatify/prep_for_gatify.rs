@@ -1723,16 +1723,12 @@ fn mark_dead_nodes_as_nil(f: &mut ir::Fn) {
         }
     }
 
-    // Preserve reserved nil and param nodes (PIR layout invariants).
-    let param_count = f.params.len();
+    // Preserve the sentinel and signature, regardless of node storage order.
     if !f.nodes.is_empty() {
         live[0] = true;
     }
-    for i in 0..param_count {
-        let idx = i + 1;
-        if idx < live.len() {
-            live[idx] = true;
-        }
+    for param in &f.params {
+        live[param.index] = true;
     }
 
     for i in 0..f.nodes.len() {

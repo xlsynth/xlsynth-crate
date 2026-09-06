@@ -133,7 +133,7 @@ where
 {
     match payload {
         NodePayload::Nil => Ok(Some(Type::nil())),
-        NodePayload::GetParam(_) | NodePayload::InputPort { .. } => Ok(None),
+        NodePayload::Param | NodePayload::InputPort { .. } => Ok(None),
         NodePayload::OutputPort { .. } => Ok(Some(Type::nil())),
 
         NodePayload::Tuple(_) => {

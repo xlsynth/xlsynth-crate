@@ -1024,11 +1024,7 @@ mod tests {
     }
 
     fn param_ref(f: &IrFn, param_index: usize) -> NodeRef {
-        let param_id = f.params[param_index].id;
-        find_node_ref(
-            f,
-            |payload| matches!(payload, NodePayload::GetParam(index) if *index == param_id),
-        )
+        f.params[param_index]
     }
 
     #[test]

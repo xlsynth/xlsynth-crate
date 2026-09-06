@@ -936,8 +936,7 @@ fn plan_reachable_functions<'a>(
         .map(|function_name| {
             let function = resolve_function(package, top, function_name)?;
             let param_layouts = function
-                .params
-                .iter()
+                .param_nodes()
                 .map(|param| NativeValueLayout::from_type(&param.ty))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok((function_name.clone(), param_layouts))
@@ -2191,7 +2190,7 @@ fn scalar_storage_view_payload(payload: &NodePayload) -> bool {
 /// Returns operands whose backing storage is preserved by a memory-backed view.
 fn aliased_storage_operands(payload: &NodePayload) -> Vec<NodeRef> {
     match payload {
-        NodePayload::GetParam(_) => Vec::new(),
+        NodePayload::Param => Vec::new(),
         NodePayload::Unop(Unop::Identity, arg) => vec![*arg],
         NodePayload::ArrayIndex { array, .. } => vec![*array],
         NodePayload::TupleIndex { tuple, .. } => vec![*tuple],
@@ -2251,7 +2250,7 @@ fn needs_materialized_destination(node: &ir::Node, layout: &NativeValueLayout) -
     match layout {
         NativeValueLayout::WideBits(_) => !matches!(
             &node.payload,
-            NodePayload::GetParam(_)
+            NodePayload::Param
                 | NodePayload::Unop(Unop::Identity, _)
                 | NodePayload::ArrayIndex { .. }
                 | NodePayload::TupleIndex { .. }
@@ -2832,8 +2831,9 @@ fn lower_function(
     let parameter_indices = function
         .params
         .iter()
+        .copied()
         .enumerate()
-        .map(|(index, parameter)| (parameter.id, index))
+        .map(|(index, parameter)| (parameter, index))
         .collect::<HashMap<_, _>>();
     let mut values = vec![None; function.nodes.len()];
 
@@ -2841,10 +2841,10 @@ fn lower_function(
         let node = function.get_node(*node_ref);
         let layout = NativeValueLayout::from_type(&node.ty)?;
         let value = match &node.payload {
-            NodePayload::GetParam(param_id) => {
-                let param_index = parameter_indices.get(param_id).copied().ok_or_else(|| {
+            NodePayload::Param => {
+                let param_index = parameter_indices.get(node_ref).copied().ok_or_else(|| {
                     CompilerError::InvalidFunction(format!(
-                        "unknown parameter id in {}",
+                        "parameter node {} is absent from the signature",
                         node.text_id
                     ))
                 })?;

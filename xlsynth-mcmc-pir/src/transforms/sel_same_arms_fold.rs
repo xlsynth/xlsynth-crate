@@ -90,9 +90,9 @@ impl PirTransform for SelSameArmsFoldTransform {
 
                 // Expand: a -> sel(p, [a,a]) for some safe predicate p (bits[1]).
                 //
-                // We avoid GetParam/Nil targets (they have structural invariants) and
+                // We avoid Param/Nil targets (they have structural invariants) and
                 // avoid choosing a selector that depends on the target (cycle risk).
-                NodePayload::GetParam(_) | NodePayload::Nil => {}
+                NodePayload::Param | NodePayload::Nil => {}
                 _ => {
                     let Some(w) = Self::bits_width(f, nr) else {
                         continue;
@@ -171,8 +171,8 @@ impl PirTransform for SelSameArmsFoldTransform {
 
             // Expand: a -> sel(p, [a,a]) by cloning the current node into a new node,
             // then selecting between that new node twice.
-            NodePayload::GetParam(_) | NodePayload::Nil => {
-                Err("SelSameArmsFoldTransform: refusing to wrap GetParam/Nil nodes".to_string())
+            NodePayload::Param | NodePayload::Nil => {
+                Err("SelSameArmsFoldTransform: refusing to wrap Param/Nil nodes".to_string())
             }
             _ => {
                 let Some(w) = Self::bits_width(f, target_ref) else {

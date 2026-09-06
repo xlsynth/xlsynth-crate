@@ -194,7 +194,12 @@ pub fn rebase_onto(
             outer_attrs: Vec::new(),
             inner_attrs: Vec::new(),
         },
-        params: result_params,
+        params: result_params
+            .iter()
+            .map(|node| NodeRef {
+                index: old_to_new[node.index],
+            })
+            .collect(),
         ret_ty: result_ret_ty,
         ret_node_ref: remapped_ret,
     }

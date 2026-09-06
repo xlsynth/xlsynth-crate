@@ -2054,7 +2054,7 @@ When `--include-types=true`, keys are operation signatures, e.g.
 Notes:
 
 - Histogram keys are printed in sorted order.
-- Histograms exclude bookkeeping-only nodes (`nil` and `get_param`), matching
+- Histograms exclude bookkeeping-only nodes (`nil` and `param`), matching
   `ir-op-histo-corpus`.
 
 Example:
@@ -2088,7 +2088,7 @@ Notes:
 
 - Histograms are deterministic: files are visited in sorted path order and
   operator keys are printed in sorted order.
-- Histograms exclude bookkeeping-only nodes (`nil` and `get_param`).
+- Histograms exclude bookkeeping-only nodes (`nil` and `param`).
 
 Example:
 
@@ -2209,7 +2209,7 @@ Supported flags include the common gate-optimization controls:
   inputs) and emitting `independent_op_stats` in the JSON output (and a
   corresponding text section when not quiet). This can be expensive on large IRs.
   The independent-op model skips IR node kinds that are typically zero-cost
-  reshapes: `GetParam`, `Literal`, `Nil`, `Unop(Not)`, `Unop(Identity)`, `Tuple`,
+  reshapes: `Param`, `Literal`, `Nil`, `Unop(Not)`, `Unop(Identity)`, `Tuple`,
   `TupleIndex`, `Array`, `Concat`, `Invoke`, `Cover`, `CountedFor`, `BitSlice`,
   `ZeroExt`, and `SignExt`.
 - `--max-fraig-sim-samples=<N>` – maximum number of random simulation samples

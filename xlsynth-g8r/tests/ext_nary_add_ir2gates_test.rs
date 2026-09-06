@@ -8,7 +8,7 @@ use xlsynth_g8r::prove_gate_fn_equiv_sat::{
 };
 use xlsynth_pir::ir::{
     ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
-    PackageMember, Param, ParamId, Type,
+    PackageMember, Type,
 };
 use xlsynth_pir::ir_verify;
 use xlsynth_pir::{IrBits, IrValue};
@@ -62,18 +62,13 @@ fn build_single_stage_ext_nary_add_ir_text(result_width: usize, terms: &[Operand
         let operand = match term.kind {
             OperandKind::Param => {
                 let name = format!("p{next_param_index}");
-                let param_id = ParamId::new(next_param_index + 1);
-                params.push(Param {
-                    name: name.clone(),
-                    ty: Type::Bits(term.width),
-                    id: param_id,
-                });
                 let node_ref = xlsynth_pir::ir::NodeRef { index: nodes.len() };
+                params.push(node_ref);
                 nodes.push(Node {
                     text_id: next_text_id,
                     name: Some(name),
                     ty: Type::Bits(term.width),
-                    payload: NodePayload::GetParam(param_id),
+                    payload: NodePayload::Param,
                     pos: None,
                 });
                 next_param_index += 1;

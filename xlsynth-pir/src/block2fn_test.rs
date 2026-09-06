@@ -53,8 +53,8 @@ top block top(a: bits[8], out: bits[8]) {
 "#;
     let f = run_block2fn(block_ir, &[], &[]);
     assert_eq!(f.params.len(), 1, "expected a single input param");
-    assert_eq!(f.params[0].name, "a");
-    assert_return_matches(&f, "get_param(name=\"a\")");
+    assert_eq!(f.get_param(0).param_name(), "a");
+    assert_return_matches(&f, "param(name=\"a\")");
 }
 
 #[test]
@@ -91,7 +91,7 @@ top block top(a: bits[1], y: bits[1]) {
 }
 "#;
     let f = run_block2fn(block_ir, &[], &[]);
-    assert_return_matches(&f, "not(get_param(name=\"a\"))");
+    assert_return_matches(&f, "not(param(name=\"a\"))");
 }
 
 #[test]
@@ -122,7 +122,7 @@ top block top(a: bits[1], b: bits[1], out0: bits[1], out1: bits[1]) {
 }
 "#;
     let f = run_block2fn(block_ir, &[], &["out1"]);
-    assert_return_matches(&f, "get_param(name=\"a\")");
+    assert_return_matches(&f, "param(name=\"a\")");
 }
 
 const NETLIST_LOAD_ENABLE_BLOCK: &str = r#"package test
@@ -198,7 +198,7 @@ fn e2e_netlist_load_enable_feedback_elided() {
         1,
         "valid is tied off and the clock is not a data parameter"
     );
-    assert_eq!(f.params[0].name, "data");
+    assert_eq!(f.get_param(0).param_name(), "data");
     for node in f.nodes.iter() {
         assert!(
             !matches!(
@@ -224,8 +224,8 @@ top block top(clk: clock, data: bits[1], out: bits[1]) {
 "#;
     let f = run_block2fn(block_ir, &[], &[]);
     assert_eq!(f.params.len(), 1, "clock should not appear as data param");
-    assert_eq!(f.params[0].name, "data");
-    assert_return_matches(&f, "get_param(name=\"data\")");
+    assert_eq!(f.get_param(0).param_name(), "data");
+    assert_return_matches(&f, "param(name=\"data\")");
 }
 
 #[test]

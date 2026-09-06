@@ -312,7 +312,7 @@ impl BlockEmitter<'_, '_> {
             }
             NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
-            | NodePayload::GetParam(_)
+            | NodePayload::Param
             | NodePayload::RegisterRead { .. } => {
                 return Err(BlockCodegenError::InvalidBlock(format!(
                     "node `{}` should have been represented by an existing signal",

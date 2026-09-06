@@ -126,10 +126,9 @@ pub fn generate_ir_fn_inputs_from_ir_text(
     let mut tuples = Vec::with_capacity(config.count);
     for _ in 0..config.count {
         let args = function
-            .params
-            .iter()
+            .param_nodes()
             .map(|param| {
-                if let Some(spec) = float_params.get(&param.name) {
+                if let Some(spec) = float_params.get(param.param_name()) {
                     random_float_value(spec, &mut rng)
                 } else {
                     Ok(generate_uniform_value_with_rng(&mut rng, &param.ty))
@@ -179,9 +178,8 @@ fn validate_float_params(
     let mut specs = BTreeMap::new();
     for spec in float_params {
         let param = function
-            .params
-            .iter()
-            .find(|param| param.name == spec.param_name)
+            .param_nodes()
+            .find(|param| param.param_name() == spec.param_name)
             .ok_or_else(|| {
                 format!(
                     "float param '{}' is not a parameter of function '{}'",

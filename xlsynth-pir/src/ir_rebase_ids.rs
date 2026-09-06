@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir::{Fn as IrFn, NodePayload, Package, ParamId};
+use crate::ir::{Fn as IrFn, NodePayload, Package};
 
 /// A checked ID allocation or rebasing operation exceeded the ID space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,33 +17,18 @@ impl std::error::Error for IdRebaseError {}
 /// Rebases IDs without cloning the function, leaving it unchanged on overflow.
 ///
 /// A zero base is allowed. Node indices, parameter order, and the reserved Nil
-/// node's ID are unchanged; parameter IDs and their GetParam nodes move
-/// together.
+/// node's ID are unchanged. Each non-Nil node owns the only textual ID to
+/// rebase.
 pub fn rebase_fn_ids_in_place(f: &mut IrFn, base: usize) -> Result<(), IdRebaseError> {
-    for param in &f.params {
-        param
-            .id
-            .get_wrapped_id()
-            .checked_add(base)
-            .ok_or(IdRebaseError)?;
-    }
     for node in &f.nodes {
         let id = match node.payload {
             NodePayload::Nil => continue,
-            NodePayload::GetParam(id) => id.get_wrapped_id(),
             _ => node.text_id,
         };
         id.checked_add(base).ok_or(IdRebaseError)?;
     }
-    for param in &mut f.params {
-        param.id = ParamId::new(param.id.get_wrapped_id() + base);
-    }
     for node in &mut f.nodes {
         match &mut node.payload {
-            NodePayload::GetParam(id) => {
-                *id = ParamId::new(id.get_wrapped_id() + base);
-                node.text_id = id.get_wrapped_id();
-            }
             NodePayload::Nil => {
                 // The synthetic sentinel is not emitted and never needs
                 // rebasing.
@@ -83,11 +68,11 @@ pub fn rebase_block_ids_in_place(
     Ok(())
 }
 
-/// Returns a clone of `f` with all ParamIds and node text ids rebased by
+/// Returns a clone of `f` with all node text IDs rebased by
 /// `base`.
 ///
-/// The function topology and payloads are preserved (except for the adjusted
-/// `GetParam` payload ids). All node references remain intact because the node
+/// The function topology and payloads are preserved. All node references,
+/// including signature references, remain intact because the node
 /// list ordering is unchanged. The reserved Nil node keeps its original
 /// `text_id`.
 ///
@@ -215,7 +200,7 @@ fn no_params() -> bits[32] {
         assert_eq!(function.to_string(), before);
         rebase_fn_ids_in_place(&mut function, 7).unwrap();
         assert_eq!(function.nodes.as_ptr(), nodes);
-        assert_eq!(function.params[0].id.get_wrapped_id(), 8);
+        assert_eq!(function.get_param(0).text_id, 8);
         assert_eq!(function.nodes.last().unwrap().text_id, 47);
     }
 
@@ -225,11 +210,11 @@ fn no_params() -> bits[32] {
         assert_eq!(original.ret_node_ref, rebased.ret_node_ref);
 
         assert_eq!(original.params.len(), rebased.params.len());
-        for (orig, rebased_param) in original.params.iter().zip(&rebased.params) {
+        for (orig, rebased_param) in original.param_nodes().zip(rebased.param_nodes()) {
             assert_eq!(orig.name, rebased_param.name);
             assert_eq!(orig.ty, rebased_param.ty);
-            let expected_id = orig.id.get_wrapped_id() + base;
-            assert_eq!(rebased_param.id.get_wrapped_id(), expected_id);
+            let expected_id = orig.text_id + base;
+            assert_eq!(rebased_param.text_id, expected_id);
         }
 
         assert_eq!(original.nodes.len(), rebased.nodes.len());
@@ -238,12 +223,9 @@ fn no_params() -> bits[32] {
             assert_eq!(orig_node.ty, rebased_node.ty);
             assert_eq!(orig_node.pos, rebased_node.pos);
             match (&orig_node.payload, &rebased_node.payload) {
-                (NodePayload::GetParam(orig_pid), NodePayload::GetParam(rebased_pid)) => {
-                    assert_eq!(
-                        rebased_pid.get_wrapped_id(),
-                        orig_pid.get_wrapped_id() + base
-                    );
-                    assert_eq!(rebased_node.text_id, rebased_pid.get_wrapped_id());
+                (NodePayload::Param, NodePayload::Param) => {
+                    assert_eq!(rebased_node.text_id, orig_node.text_id + base);
+                    assert_eq!(original.params, rebased.params);
                 }
                 (NodePayload::Nil, NodePayload::Nil) => {
                     assert_eq!(rebased_node.text_id, orig_node.text_id);
@@ -257,37 +239,31 @@ fn no_params() -> bits[32] {
     }
 
     #[test]
-    fn rebase_updates_param_ids_and_getparam_nodes() {
+    fn rebase_updates_param_ids_and_param_nodes() {
         let original = sample_two_param_function();
         let base = 10;
         let rebased = rebase_fn_ids(&original, base);
 
-        for (orig, rebased_param) in original.params.iter().zip(&rebased.params) {
+        for (orig, rebased_param) in original.param_nodes().zip(rebased.param_nodes()) {
             assert_eq!(orig.name, rebased_param.name);
             assert_eq!(orig.ty, rebased_param.ty);
-            assert_eq!(
-                rebased_param.id.get_wrapped_id(),
-                orig.id.get_wrapped_id() + base
-            );
+            assert_eq!(rebased_param.text_id, orig.text_id + base);
         }
 
-        let mut seen_getparam = 0;
+        let mut seen_param = 0;
         for (orig_node, rebased_node) in original.nodes.iter().zip(&rebased.nodes) {
-            if let (NodePayload::GetParam(orig_pid), NodePayload::GetParam(rebased_pid)) =
+            if let (NodePayload::Param, NodePayload::Param) =
                 (&orig_node.payload, &rebased_node.payload)
             {
-                seen_getparam += 1;
-                assert_eq!(
-                    rebased_pid.get_wrapped_id(),
-                    orig_pid.get_wrapped_id() + base
-                );
-                assert_eq!(rebased_node.text_id, rebased_pid.get_wrapped_id());
+                seen_param += 1;
+                assert_eq!(rebased_node.text_id, orig_node.text_id + base);
+                assert_eq!(original.params, rebased.params);
             }
         }
-        assert!(seen_getparam > 0, "expected GetParam nodes in fixture");
+        assert!(seen_param > 0, "expected Param nodes in fixture");
 
         // Ensure the original function is unchanged.
-        assert_eq!(original.params[0].id.get_wrapped_id(), 1);
+        assert_eq!(original.get_param(0).text_id, 1);
     }
 
     #[test]
@@ -301,7 +277,7 @@ fn no_params() -> bits[32] {
                 NodePayload::Nil => {
                     assert_eq!(rebased_node.text_id, orig_node.text_id);
                 }
-                NodePayload::GetParam(_) => {
+                NodePayload::Param => {
                     // Checked by other test; ensure invariant holds here.
                     assert_eq!(rebased_node.text_id >= base, true);
                 }
@@ -342,10 +318,8 @@ fn no_params() -> bits[32] {
         let rebased = rebase_fn_ids(&original, base);
 
         assert_eq!(rebased.params.len(), 2);
-        let original_gap =
-            original.params[1].id.get_wrapped_id() - original.params[0].id.get_wrapped_id();
-        let rebased_gap =
-            rebased.params[1].id.get_wrapped_id() - rebased.params[0].id.get_wrapped_id();
+        let original_gap = original.get_param(1).text_id - original.get_param(0).text_id;
+        let rebased_gap = rebased.get_param(1).text_id - rebased.get_param(0).text_id;
         assert_eq!(rebased_gap, original_gap);
 
         let package = package_with_function(&rebased);

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::IrFormatPreference;
 
-use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, ParamId, Type, Unop};
+use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
 use crate::ir_utils::get_topological;
 
@@ -85,7 +85,8 @@ pub fn convert_ir_package_fn_to_dslx(
 
 /// Converts an in-memory IR function into DSLX function text.
 pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDslxError> {
-    for p in &func.params {
+    for &param_ref in &func.params {
+        let p = func.get_node(param_ref);
         let _ = type_to_dslx(&p.ty)?;
     }
     let ret_ty_str = type_to_dslx(&func.ret_ty)?;
@@ -95,11 +96,12 @@ pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDs
 
     let mut used_names: HashSet<String> = HashSet::new();
     let mut param_names: Vec<String> = Vec::with_capacity(func.params.len());
-    let mut param_name_by_id: HashMap<ParamId, String> = HashMap::with_capacity(func.params.len());
-    for p in &func.params {
-        let base = sanitize_identifier(&p.name);
+    let mut param_name_by_ref: HashMap<NodeRef, String> = HashMap::with_capacity(func.params.len());
+    for &param_ref in &func.params {
+        let p = func.get_node(param_ref);
+        let base = sanitize_identifier(p.param_name());
         let chosen = make_unique_identifier(&base, &mut used_names);
-        param_name_by_id.insert(p.id, chosen.clone());
+        param_name_by_ref.insert(param_ref, chosen.clone());
         param_names.push(chosen);
     }
 
@@ -108,11 +110,11 @@ pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDs
         let node = func.get_node(nr);
         match node.payload {
             NodePayload::Nil => {}
-            NodePayload::GetParam(pid) => {
-                let pname = param_name_by_id.get(&pid).ok_or_else(|| {
+            NodePayload::Param => {
+                let pname = param_name_by_ref.get(&nr).ok_or_else(|| {
                     IrFnToDslxError::Internal(format!(
-                        "GetParam id {} not found in signature",
-                        pid.get_wrapped_id()
+                        "Parameter node {} not found in signature",
+                        nr.index
                     ))
                 })?;
                 node_names[nr.index] = Some(pname.clone());
@@ -137,7 +139,7 @@ pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDs
     for nr in get_topological(func) {
         let node = func.get_node(nr);
         match node.payload {
-            NodePayload::Nil | NodePayload::GetParam(_) => continue,
+            NodePayload::Nil | NodePayload::Param => continue,
             _ => {}
         }
         let lhs_name = node_names[nr.index]
@@ -155,8 +157,7 @@ pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDs
 
     let fn_name = sanitize_identifier(&func.name);
     let params_str = func
-        .params
-        .iter()
+        .param_nodes()
         .zip(param_names.iter())
         .map(|(p, name)| {
             let ty = type_to_dslx(&p.ty)?;

@@ -190,13 +190,16 @@ pub fn get_equivalences(
             gate_fn.inputs.len()
         ));
     }
-    for (i, (p, g_in)) in pir_fn.params.iter().zip(gate_fn.inputs.iter()).enumerate() {
+    for (i, (p, g_in)) in pir_fn.param_nodes().zip(gate_fn.inputs.iter()).enumerate() {
         let pir_w = p.ty.bit_count();
         let gate_w = g_in.get_bit_count();
         if pir_w != gate_w {
             return Err(format!(
                 "input width mismatch at index {} ('{}'): PIR bits[{}] vs GateFn bits[{}]",
-                i, p.name, pir_w, gate_w
+                i,
+                p.param_name(),
+                pir_w,
+                gate_w
             ));
         }
     }
@@ -887,7 +890,7 @@ fn make_random_args_for_both(
     let mut pir_args: Vec<IrValue> = Vec::with_capacity(pir_fn.params.len());
     let mut gate_inputs: Vec<IrBits> = Vec::with_capacity(gate_fn.inputs.len());
 
-    for (param, gate_input) in pir_fn.params.iter().zip(gate_fn.inputs.iter()) {
+    for (param, gate_input) in pir_fn.param_nodes().zip(gate_fn.inputs.iter()) {
         // Generate the *flat* bitvector first, then unflatten into an IrValue.
         // This ensures the PIR evaluator and the GateFn see identical bit
         // patterns in the same flattened order for tuple/array
@@ -900,7 +903,7 @@ fn make_random_args_for_both(
         if flat_bits.len() != gate_input.get_bit_count() {
             return Err(format!(
                 "flattened arg width mismatch for param '{}': got {} expected {}",
-                param.name,
+                param.param_name(),
                 flat_bits.len(),
                 gate_input.get_bit_count()
             ));

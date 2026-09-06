@@ -26,7 +26,7 @@ impl PirTransform for CloneMultiUserNodeTransform {
                 // pretty-printing and other utilities.
                 let node = f.get_node(nr);
                 match &node.payload {
-                    NodePayload::GetParam(_) => None,
+                    NodePayload::Param => None,
                     NodePayload::Nil => None,
                     _ if users.len() > 1 => Some(TransformCandidate {
                         location: TransformLocation::Node(nr),

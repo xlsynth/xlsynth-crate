@@ -19,7 +19,10 @@ fn native_irvals_feed_scalar_and_simd_gate_simulators() {
             .map(|args| IrValue::make_tuple(args))
             .collect();
         let text = IrValuesFile::ValueSequence(values).to_string();
-        let names = f.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        let names = f
+            .param_nodes()
+            .map(|p| p.param_name().to_string())
+            .collect::<Vec<_>>();
         let samples = parse_ir_values(&text)
             .unwrap()
             .into_positional_values(&names)
@@ -30,7 +33,7 @@ fn native_irvals_feed_scalar_and_simd_gate_simulators() {
             let args = sample.get_elements().unwrap();
             let inputs = args
                 .iter()
-                .zip(&f.params)
+                .zip(f.param_nodes())
                 .map(|(value, param)| {
                     let mut flat = Vec::new();
                     flatten_ir_value_to_lsb0_bits_for_type(value, &param.ty, &mut flat).unwrap();
@@ -62,7 +65,10 @@ fn native_irvals_roundtrip_and_match_libxls_for_shared_signatures() {
             .parse_and_validate_package()
             .unwrap();
         let f = pkg.get_top_fn().unwrap();
-        let names = f.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        let names = f
+            .param_nodes()
+            .map(|p| p.param_name().to_string())
+            .collect::<Vec<_>>();
         let samples = generate_argument_sets_from_seed(&f, 42, 8)
             .iter()
             .map(|args| IrValue::make_tuple(args))

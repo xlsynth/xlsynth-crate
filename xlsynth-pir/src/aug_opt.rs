@@ -1762,8 +1762,8 @@ fn literal_low_bits_are_zero(f: &ir::Fn, lit_nr: NodeRef, low_bits: usize) -> bo
     true
 }
 
-fn is_get_param_node(f: &ir::Fn, nr: NodeRef) -> bool {
-    matches!(f.get_node(nr).payload, NodePayload::GetParam(_))
+fn is_param_node(f: &ir::Fn, nr: NodeRef) -> bool {
+    matches!(f.get_node(nr).payload, NodePayload::Param)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2536,7 +2536,7 @@ fn rewrite_eq_add_zero_to_eq_rhs_sub(f: &mut ir::Fn) -> usize {
 
         // Choose which operand to "solve for" deterministically: prefer a param
         // node when available.
-        let (solve_for, other) = match (is_get_param_node(f, x), is_get_param_node(f, y)) {
+        let (solve_for, other) = match (is_param_node(f, x), is_param_node(f, y)) {
             (true, false) => (x, y),
             (false, true) => (y, x),
             _ => (y, x),
@@ -3186,21 +3186,21 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
                         text_id: 1,
                         name: Some("p".to_string()),
                         ty: Type::Bits(1),
-                        payload: NodePayload::GetParam(ir::ParamId::new(1)),
+                        payload: NodePayload::Param,
                         pos: None,
                     },
                     ir::Node {
                         text_id: 2,
                         name: Some("a".to_string()),
                         ty: Type::Bits(8),
-                        payload: NodePayload::GetParam(ir::ParamId::new(2)),
+                        payload: NodePayload::Param,
                         pos: None,
                     },
                     ir::Node {
                         text_id: 3,
                         name: Some("b".to_string()),
                         ty: Type::Bits(8),
-                        payload: NodePayload::GetParam(ir::ParamId::new(3)),
+                        payload: NodePayload::Param,
                         pos: None,
                     },
                     ir::Node {
@@ -3241,21 +3241,9 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
                 inner_attrs: Vec::new(),
             },
             params: vec![
-                ir::Param {
-                    name: "p".to_string(),
-                    ty: Type::Bits(1),
-                    id: ir::ParamId::new(1),
-                },
-                ir::Param {
-                    name: "a".to_string(),
-                    ty: Type::Bits(8),
-                    id: ir::ParamId::new(2),
-                },
-                ir::Param {
-                    name: "b".to_string(),
-                    ty: Type::Bits(8),
-                    id: ir::ParamId::new(3),
-                },
+                NodeRef { index: 1 },
+                NodeRef { index: 2 },
+                NodeRef { index: 3 },
             ],
             ret_ty: Type::Bits(8),
             ret_node_ref: Some(NodeRef { index: 6 }),

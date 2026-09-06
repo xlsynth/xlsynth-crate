@@ -173,31 +173,27 @@ pub struct ReadyNode {
     pub index: usize,
 }
 
-/// Computes MatchNodes actions that pair parameters (GetParam nodes) in `old`
+/// Computes MatchNodes actions that pair parameters (Param nodes) in `old`
 /// and `new` functions by parameter name.
 pub fn compute_parameter_matches(old: &Fn, new: &Fn) -> Vec<MatchAction> {
     let mut old_param_to_idx: HashMap<String, usize> = HashMap::new();
     for (idx, node) in old.nodes.iter().enumerate() {
-        if let crate::ir::NodePayload::GetParam(pid) = node.payload {
-            if let Some(p) = old.params.iter().find(|p| p.id == pid) {
-                old_param_to_idx.insert(p.name.clone(), idx);
-            }
+        if let crate::ir::NodePayload::Param = node.payload {
+            old_param_to_idx.insert(node.param_name().to_string(), idx);
         }
     }
     let mut new_param_to_idx: HashMap<String, usize> = HashMap::new();
     for (idx, node) in new.nodes.iter().enumerate() {
-        if let crate::ir::NodePayload::GetParam(pid) = node.payload {
-            if let Some(p) = new.params.iter().find(|p| p.id == pid) {
-                new_param_to_idx.insert(p.name.clone(), idx);
-            }
+        if let crate::ir::NodePayload::Param = node.payload {
+            new_param_to_idx.insert(node.param_name().to_string(), idx);
         }
     }
 
     let mut matches: Vec<MatchAction> = Vec::new();
-    for op in old.params.iter() {
+    for op in old.param_nodes() {
         if let (Some(&oi), Some(&ni)) = (
-            old_param_to_idx.get(&op.name),
-            new_param_to_idx.get(&op.name),
+            old_param_to_idx.get(op.param_name()),
+            new_param_to_idx.get(op.param_name()),
         ) {
             matches.push(MatchAction::MatchNodes {
                 old_index: OldNodeRef(oi),
@@ -291,7 +287,7 @@ impl<'a> MatchSelector for NaiveMatchSelector<'a> {
             NodeSide::Old => {
                 if matches!(
                     self.old.nodes[node.index].payload,
-                    crate::ir::NodePayload::GetParam(_)
+                    crate::ir::NodePayload::Param
                 ) {
                     return;
                 }
@@ -302,7 +298,7 @@ impl<'a> MatchSelector for NaiveMatchSelector<'a> {
             NodeSide::New => {
                 if matches!(
                     self.new.nodes[node.index].payload,
-                    crate::ir::NodePayload::GetParam(_)
+                    crate::ir::NodePayload::Param
                 ) {
                     return;
                 }
@@ -352,8 +348,8 @@ pub fn compute_fn_match<S: MatchSelector>(
 
     // Verify parameter names match (order-sensitive) to avoid ambiguous operand
     // mapping.
-    let old_param_names: Vec<&str> = old.params.iter().map(|p| p.name.as_str()).collect();
-    let new_param_names: Vec<&str> = new.params.iter().map(|p| p.name.as_str()).collect();
+    let old_param_names: Vec<&str> = old.param_nodes().map(|p| p.param_name()).collect();
+    let new_param_names: Vec<&str> = new.param_nodes().map(|p| p.param_name()).collect();
     if old_param_names != new_param_names {
         return Err(format!(
             "Parameter names mismatch: old [{:?}] vs new [{:?}]",
@@ -789,8 +785,7 @@ pub fn format_match_actions(old: &Fn, new: &Fn, actions: &[MatchAction]) -> Stri
 
 fn format_function_type(f: &Fn) -> String {
     let params = f
-        .params
-        .iter()
+        .param_nodes()
         .map(|p| format!("{}", p.ty))
         .collect::<Vec<String>>()
         .join(", ");

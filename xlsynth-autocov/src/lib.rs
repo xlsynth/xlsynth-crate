@@ -264,11 +264,12 @@ pub fn relevant_in_pkg(
         RelevanceCheckMethod::ExhaustiveBitsParams { max_total_arg_bits } => {
             let mut total_bits: usize = 0;
             let mut widths: Vec<usize> = Vec::with_capacity(f.params.len());
-            for p in f.params.iter() {
+            for p in f.param_nodes() {
                 let ir::Type::Bits(w) = p.ty else {
                     return Err(format!(
                         "exhaustive relevance requires bits[N] params only; saw param {}: {:?}",
-                        p.name, p.ty
+                        p.param_name(),
+                        p.ty
                     ));
                 };
                 total_bits = total_bits.saturating_add(w);
@@ -1015,9 +1016,8 @@ impl AutocovEngine {
     /// Returns function parameter names in argument order.
     pub fn argument_names(&self) -> Vec<String> {
         self.f
-            .params
-            .iter()
-            .map(|param| param.name.clone())
+            .param_nodes()
+            .map(|param| param.param_name().to_string())
             .collect()
     }
 
@@ -1193,7 +1193,7 @@ impl AutocovEngine {
         for nr in self.f.node_refs() {
             let n = self.f.get_node(nr);
             let is_bool_node = matches!(n.ty, ir::Type::Bits(1));
-            let is_param = matches!(n.payload, ir::NodePayload::GetParam(_));
+            let is_param = matches!(n.payload, ir::NodePayload::Param);
             if !is_bool_node || is_param {
                 continue;
             }
@@ -1463,8 +1463,7 @@ impl AutocovEngine {
             .clone();
 
         let args_tuple_type = ir::Type::Tuple(
-            f.params
-                .iter()
+            f.param_nodes()
                 .map(|p| Box::new(p.ty.clone()))
                 .collect::<Vec<_>>(),
         );
