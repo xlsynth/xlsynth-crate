@@ -1,0 +1,15 @@
+package register_feedback
+
+top block feedback(clk: clock, rst: bits[1], enable: bits[1], data: bits[8], value: bits[8]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  reg state(bits[8], reset_value=7)
+  rst: bits[1] = input_port(name=rst, id=1)
+  enable: bits[1] = input_port(name=enable, id=2)
+  data: bits[8] = input_port(name=data, id=3)
+  register_read.4: bits[8] = register_read(register=state, id=4)
+  add.5: bits[8] = add(register_read.4, data, id=5)
+  register_write.6: () = register_write(add.5, register=state, load_enable=enable, reset=rst, id=6)
+  not.7: bits[1] = not(enable, id=7)
+  register_write.8: () = register_write(data, register=state, load_enable=not.7, reset=rst, id=8)
+  value: () = output_port(register_read.4, name=value, id=9)
+}

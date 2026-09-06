@@ -17,8 +17,11 @@ use crate::ir::{
     Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, Node, NodeGraph, NodePayload, NodeRef,
     Package, PackageMember, Type, Unop,
 };
-use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids};
-use crate::ir_utils::compact_and_toposort_in_place;
+use crate::ir_builder::{
+    BuilderError, FnBuilder, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions,
+};
+use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
+use crate::ir_utils::{compact_and_toposort_in_place, remap_payload_with};
 use crate::math::ceil_log2;
 use crate::{IrBits, IrValue};
 
@@ -40,6 +43,12 @@ impl std::fmt::Display for DesugarError {
 }
 
 impl std::error::Error for DesugarError {}
+
+impl From<BuilderError> for DesugarError {
+    fn from(error: BuilderError) -> Self {
+        Self::new(format!("constructing extension helper: {error}"))
+    }
+}
 
 /// Controls how PIR extension ops are emitted as text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,154 +886,53 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
     }
 }
 
-fn make_reserved_nil_node() -> Node {
-    Node {
-        text_id: 0,
-        name: Some("reserved_zero_node".to_string()),
-        ty: Type::nil(),
-        payload: NodePayload::Nil,
-        pos: None,
-    }
-}
-
-fn make_helper_with_params(
-    name: String,
-    parameter_nodes: Vec<Node>,
-    ret_ty: Type,
-    key: &FfiWrapKey,
-) -> Fn {
-    let mut nodes = vec![make_reserved_nil_node()];
-    let mut params = Vec::with_capacity(parameter_nodes.len());
-    for node in parameter_nodes {
-        params.push(NodeRef { index: nodes.len() });
-        nodes.push(node);
-    }
-    Fn {
-        graph: NodeGraph {
-            name,
-            nodes,
-            outer_attrs: vec![format_ffi_proto_outer_attr(&helper_code_template(key))],
-            inner_attrs: Vec::new(),
-        },
-        params,
-        ret_ty,
-        ret_node_ref: None,
-    }
-}
-
-fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
-    match key {
+/// Constructs a checked extension helper and reuses the inline lowering path.
+fn make_helper_fn(name: String, key: &FfiWrapKey) -> Result<Fn, DesugarError> {
+    let mut builder = FnBuilder::new(&name);
+    let result = match key {
         FfiWrapKey::ExtCarryOut { width } => {
-            let params = vec![
-                Node {
-                    name: Some("lhs".to_string()),
-                    ty: Type::Bits(*width),
-                    text_id: 1,
-                    payload: NodePayload::Param,
-                    pos: None,
-                },
-                Node {
-                    name: Some("rhs".to_string()),
-                    ty: Type::Bits(*width),
-                    text_id: 2,
-                    payload: NodePayload::Param,
-                    pos: None,
-                },
-                Node {
-                    name: Some("c_in".to_string()),
-                    ty: Type::Bits(1),
-                    text_id: 3,
-                    payload: NodePayload::Param,
-                    pos: None,
-                },
-            ];
-            let mut helper = make_helper_with_params(name, params, Type::Bits(1), key);
-            let shape = ExtCarryOutShape { width: *width };
-            let lowered = append_lowered_ext_carry_out(
-                &mut helper,
-                NodeRef { index: 1 },
-                NodeRef { index: 2 },
-                NodeRef { index: 3 },
-                shape,
-            );
-            let ret_node_ref = push_node(
-                &mut helper,
-                Type::Bits(1),
-                NodePayload::Unop(Unop::Identity, lowered),
-            );
-            helper.ret_node_ref = Some(ret_node_ref);
-            helper
+            let lhs = builder.param("lhs", Type::Bits(*width))?;
+            let rhs = builder.param("rhs", Type::Bits(*width))?;
+            let carry_in = builder.param("c_in", Type::Bits(1))?;
+            builder.ext_carry_out(lhs, rhs, carry_in)?
         }
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
             operand_signed,
             operand_negated,
-            arch: _,
+            arch,
         } => {
-            let params = operand_widths
+            let operands = operand_widths
                 .iter()
                 .enumerate()
-                .map(|(i, width)| Node {
-                    name: Some(format!("op{i}")),
-                    ty: Type::Bits(*width),
-                    text_id: i.saturating_add(1),
-                    payload: NodePayload::Param,
-                    pos: None,
-                })
-                .collect::<Vec<_>>();
-            let mut helper = make_helper_with_params(name, params, Type::Bits(*output_width), key);
-            let operand_refs = operand_widths
-                .iter()
-                .enumerate()
-                .map(|(i, _)| NodeRef {
-                    index: i.saturating_add(1),
-                })
-                .collect::<Vec<_>>();
-            let terms = operand_refs
-                .iter()
-                .zip(operand_signed.iter())
-                .zip(operand_negated.iter())
-                .map(|((operand, signed), negated)| ExtNaryAddTerm {
-                    operand: *operand,
+                .map(|(index, width)| builder.param(&format!("op{index}"), Type::Bits(*width)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let terms = operands
+                .into_iter()
+                .zip(operand_signed)
+                .zip(operand_negated)
+                .map(|((operand, signed), negated)| NaryAddTerm {
+                    operand,
                     signed: *signed,
                     negated: *negated,
                 })
                 .collect::<Vec<_>>();
-            let lowered = append_lowered_ext_nary_add(&mut helper, &terms, *output_width)
-                .expect("helper ext_nary_add lowering must be well-typed");
-            let ret_node_ref = push_node(
-                &mut helper,
-                Type::Bits(*output_width),
-                NodePayload::Unop(Unop::Identity, lowered),
-            );
-            helper.ret_node_ref = Some(ret_node_ref);
-            helper
+            builder.ext_nary_add(
+                &terms,
+                NaryAddOptions {
+                    bit_count: *output_width,
+                    architecture: *arch,
+                },
+            )?
         }
         FfiWrapKey::ExtClz {
             input_width,
             output_width,
             offset,
         } => {
-            let params = vec![Node {
-                name: Some("arg".to_string()),
-                ty: Type::Bits(*input_width),
-                text_id: 1,
-                payload: NodePayload::Param,
-                pos: None,
-            }];
-            let shape = ExtClzShape::new(*input_width, *output_width, *offset);
-            let mut helper =
-                make_helper_with_params(name, params, Type::Bits(shape.output_width), key);
-            let lowered = append_lowered_ext_clz(&mut helper, NodeRef { index: 1 }, shape)
-                .expect("helper ext_clz lowering must be well-typed");
-            let ret_node_ref = push_node(
-                &mut helper,
-                Type::Bits(shape.output_width),
-                NodePayload::Unop(Unop::Identity, lowered),
-            );
-            helper.ret_node_ref = Some(ret_node_ref);
-            helper
+            let arg = builder.param("arg", Type::Bits(*input_width))?;
+            builder.ext_clz(arg, *offset, *output_width)?
         }
         FfiWrapKey::ExtNormalizeLeft {
             input_width,
@@ -1032,91 +940,68 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             shift_offset,
             clz_bit_count,
         } => {
-            let params = vec![Node {
-                name: Some("arg".to_string()),
-                ty: Type::Bits(*input_width),
-                text_id: 1,
-                payload: NodePayload::Param,
-                pos: None,
-            }];
-            let shape = ExtNormalizeLeftShape {
-                input_width: *input_width,
-                normalized_bit_count: *normalized_bit_count,
-                shift_offset: *shift_offset,
-                clz_bit_count: *clz_bit_count,
-            };
-            let mut helper = make_helper_with_params(
-                name,
-                params,
-                crate::ir::ext_normalize_left_result_type(
-                    shape.normalized_bit_count,
-                    shape.clz_bit_count,
-                ),
-                key,
-            );
-            let lowered =
-                append_lowered_ext_normalize_left(&mut helper, NodeRef { index: 1 }, shape)
-                    .expect("helper ext_normalize_left lowering must be well-typed");
-            let ret_node_ref = push_node(
-                &mut helper,
-                crate::ir::ext_normalize_left_result_type(
-                    shape.normalized_bit_count,
-                    shape.clz_bit_count,
-                ),
-                NodePayload::Unop(Unop::Identity, lowered),
-            );
-            helper.ret_node_ref = Some(ret_node_ref);
-            helper
+            let arg = builder.param("arg", Type::Bits(*input_width))?;
+            builder.ext_normalize_left(
+                arg,
+                NormalizeLeftOptions {
+                    normalized_bit_count: *normalized_bit_count,
+                    shift_offset: *shift_offset,
+                    clz_bit_count: *clz_bit_count,
+                },
+            )?
         }
         FfiWrapKey::ExtMaskLow {
             output_width,
             count_width,
         } => {
-            let params = vec![Node {
-                name: Some("count".to_string()),
-                ty: Type::Bits(*count_width),
-                text_id: 1,
-                payload: NodePayload::Param,
-                pos: None,
-            }];
-            let shape = ExtMaskLowShape {
-                output_width: *output_width,
-                count_width: *count_width,
-            };
-            let mut helper = make_helper_with_params(name, params, Type::Bits(*output_width), key);
-            let lowered = append_lowered_ext_mask_low(&mut helper, NodeRef { index: 1 }, shape);
-            let ret_node_ref = push_node(
-                &mut helper,
-                Type::Bits(*output_width),
-                NodePayload::Unop(Unop::Identity, lowered),
-            );
-            helper.ret_node_ref = Some(ret_node_ref);
-            helper
+            let count = builder.param("count", Type::Bits(*count_width))?;
+            builder.ext_mask_low(count, *output_width)?
         }
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
         } => {
-            let params = vec![Node {
-                name: Some("arg".to_string()),
-                ty: Type::Bits(*input_width),
-                text_id: 1,
-                payload: NodePayload::Param,
-                pos: None,
-            }];
-            let shape = ExtPrioEncodeShape::new(*input_width, *lsb_prio);
-            let mut helper =
-                make_helper_with_params(name, params, Type::Bits(shape.output_width), key);
-            let lowered = append_lowered_ext_prio_encode(&mut helper, NodeRef { index: 1 }, shape);
-            let ret_node_ref = push_node(
-                &mut helper,
-                Type::Bits(shape.output_width),
-                NodePayload::Unop(Unop::Identity, lowered),
-            );
-            helper.ret_node_ref = Some(ret_node_ref);
-            helper
+            let arg = builder.param("arg", Type::Bits(*input_width))?;
+            builder.ext_prio_encode(arg, *lsb_prio)?
         }
+    };
+    let mut helper = builder.build(result)?;
+    desugar_extensions_in_fn(&mut helper)?;
+    canonicalize_helper_node_order(&mut helper);
+    helper
+        .outer_attrs
+        .push(format_ffi_proto_outer_attr(&helper_code_template(key)));
+    Ok(helper)
+}
+
+/// Preserves canonical FFI helper IDs and allocation order after lowering.
+fn canonicalize_helper_node_order(helper: &mut Fn) {
+    // The builder allocated one extension node after the parameters. Lowering
+    // replaces it with the return identity and appends its dependencies. Give
+    // those dependencies consecutive IDs first, followed by the identity, to
+    // retain the established FFI text representation.
+    let mut order = (0..helper.nodes.len()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|&index| {
+        (
+            helper.ret_node_ref == Some(NodeRef { index }),
+            helper.nodes[index].text_id,
+        )
+    });
+    let mut mapping = vec![NodeRef { index: 0 }; helper.nodes.len()];
+    for (index, old_index) in order.into_iter().enumerate() {
+        helper.nodes[old_index].text_id = index;
+        mapping[old_index] = NodeRef { index };
     }
+    // Compaction may have interleaved independent dependencies. Restore their
+    // allocation order and remap references without changing annotations.
+    helper.nodes.sort_by_key(|node| node.text_id);
+    for node in &mut helper.nodes {
+        node.payload = remap_payload_with(&node.payload, |(_, operand)| mapping[operand.index]);
+    }
+    for parameter in &mut helper.params {
+        *parameter = mapping[parameter.index];
+    }
+    helper.ret_node_ref = helper.ret_node_ref.map(|node| mapping[node.index]);
 }
 
 fn max_text_id_in_graph(f: &NodeGraph) -> usize {
@@ -1129,21 +1014,18 @@ fn get_or_create_helper_name(
     helper_fns: &mut Vec<Fn>,
     existing_names: &mut BTreeSet<String>,
     current_max_text_id: &mut usize,
-) -> String {
+) -> Result<String, DesugarError> {
     if let Some(existing) = helper_names.get(key) {
-        return existing.clone();
+        return Ok(existing.clone());
     }
     let name = make_unique_helper_name(&helper_base_name(key), existing_names);
-    let helper = make_helper_fn(name.clone(), key);
-    let rebased_helper = if *current_max_text_id == 0 {
-        helper
-    } else {
-        rebase_fn_ids(&helper, *current_max_text_id)
-    };
-    *current_max_text_id = max_text_id_in_graph(&rebased_helper);
+    let mut helper = make_helper_fn(name.clone(), key)?;
+    rebase_fn_ids_in_place(&mut helper, *current_max_text_id)
+        .map_err(|error| DesugarError::new(error.to_string()))?;
+    *current_max_text_id = max_text_id_in_graph(&helper);
     helper_names.insert(key.clone(), name.clone());
-    helper_fns.push(rebased_helper);
-    name
+    helper_fns.push(helper);
+    Ok(name)
 }
 
 fn wrap_extensions_in_graph(
@@ -1168,7 +1050,7 @@ fn wrap_extensions_in_graph(
                     helper_fns,
                     existing_names,
                     current_max_text_id,
-                );
+                )?;
                 let node = f.get_node_mut(nr);
                 node.ty = Type::Bits(1);
                 node.payload = NodePayload::Invoke {
@@ -1194,7 +1076,7 @@ fn wrap_extensions_in_graph(
                     helper_fns,
                     existing_names,
                     current_max_text_id,
-                );
+                )?;
                 let node = f.get_node_mut(nr);
                 node.ty = Type::Bits(shape.output_width);
                 node.payload = NodePayload::Invoke {
@@ -1229,7 +1111,7 @@ fn wrap_extensions_in_graph(
                     helper_fns,
                     existing_names,
                     current_max_text_id,
-                );
+                )?;
                 let node = f.get_node_mut(nr);
                 node.ty = crate::ir::ext_normalize_left_result_type(
                     shape.normalized_bit_count,
@@ -1253,7 +1135,7 @@ fn wrap_extensions_in_graph(
                     helper_fns,
                     existing_names,
                     current_max_text_id,
-                );
+                )?;
                 let node = f.get_node_mut(nr);
                 node.ty = Type::Bits(shape.output_width);
                 node.payload = NodePayload::Invoke {
@@ -1277,7 +1159,7 @@ fn wrap_extensions_in_graph(
                     helper_fns,
                     existing_names,
                     current_max_text_id,
-                );
+                )?;
                 let node = f.get_node_mut(nr);
                 node.ty = Type::Bits(shape.output_width);
                 node.payload = NodePayload::Invoke {
@@ -1298,7 +1180,7 @@ fn wrap_extensions_in_graph(
                     helper_fns,
                     existing_names,
                     current_max_text_id,
-                );
+                )?;
                 let node = f.get_node_mut(nr);
                 node.ty = Type::Bits(shape.output_width);
                 node.payload = NodePayload::Invoke {
@@ -1542,4 +1424,188 @@ pub fn emit_package_with_extension_mode(
 /// first.
 pub fn emit_package_as_xls_ir_text(pkg: &Package) -> Result<String, DesugarError> {
     emit_package_with_extension_mode(pkg, ExtensionEmitMode::Desugared)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FfiWrapKey, canonicalize_helper_node_order, get_or_create_helper_name, helper_base_name,
+        make_helper_fn,
+    };
+    use crate::ir::ExtNaryAddArchitecture;
+    use crate::ir_eval::{FnEvalResult, eval_fn};
+    use crate::ir_verify::verify_function;
+    use crate::{IrBits, IrValue};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn ffi_helpers_preserve_canonical_text() {
+        let cases = [
+            FfiWrapKey::ExtCarryOut { width: 8 },
+            FfiWrapKey::ExtNaryAdd {
+                output_width: 6,
+                operand_widths: vec![3, 5, 9],
+                operand_signed: vec![false, true, false],
+                operand_negated: vec![false, true, false],
+                arch: Some(ExtNaryAddArchitecture::BrentKung),
+            },
+            FfiWrapKey::ExtClz {
+                input_width: 4,
+                output_width: 3,
+                offset: 1,
+            },
+            FfiWrapKey::ExtNormalizeLeft {
+                input_width: 4,
+                normalized_bit_count: 8,
+                shift_offset: 1,
+                clz_bit_count: Some(3),
+            },
+            FfiWrapKey::ExtMaskLow {
+                output_width: 8,
+                count_width: 4,
+            },
+            FfiWrapKey::ExtPrioEncode {
+                input_width: 5,
+                lsb_prio: true,
+            },
+        ];
+        let text = cases
+            .iter()
+            .map(|key| {
+                let mut helper = make_helper_fn(helper_base_name(key), key).unwrap();
+                verify_function(&helper).unwrap();
+                let text = helper.to_string();
+                for node in &mut helper.nodes {
+                    node.text_id *= 3;
+                }
+                canonicalize_helper_node_order(&mut helper);
+                assert_eq!(helper.to_string(), text);
+                text
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            format!("{text}\n"),
+            include_str!("../tests/goldens/extension_helpers.ir")
+        );
+    }
+
+    #[test]
+    fn ffi_helpers_support_zero_single_bit_and_wide_operands() {
+        for width in [0, 1, 129] {
+            let zero = IrValue::from_bits(&IrBits::zero(width));
+            let cases = [
+                (FfiWrapKey::ExtCarryOut { width }, IrValue::bool(false)),
+                (
+                    FfiWrapKey::ExtNaryAdd {
+                        output_width: width,
+                        operand_widths: vec![width, width + 1],
+                        operand_signed: vec![true, false],
+                        operand_negated: vec![false, true],
+                        arch: None,
+                    },
+                    zero.clone(),
+                ),
+                (
+                    FfiWrapKey::ExtNaryAdd {
+                        output_width: width,
+                        operand_widths: Vec::new(),
+                        operand_signed: Vec::new(),
+                        operand_negated: Vec::new(),
+                        arch: None,
+                    },
+                    zero.clone(),
+                ),
+                (
+                    FfiWrapKey::ExtClz {
+                        input_width: width,
+                        output_width: 8,
+                        offset: 2,
+                    },
+                    IrValue::make_ubits(8, (width + 2) as u64).unwrap(),
+                ),
+                (
+                    FfiWrapKey::ExtNormalizeLeft {
+                        input_width: width,
+                        normalized_bit_count: width + 2,
+                        shift_offset: 1,
+                        clz_bit_count: Some(8),
+                    },
+                    IrValue::make_tuple(&[
+                        IrValue::from_bits(&IrBits::zero(width + 2)),
+                        IrValue::make_ubits(8, width as u64).unwrap(),
+                    ]),
+                ),
+                (
+                    FfiWrapKey::ExtMaskLow {
+                        output_width: width,
+                        count_width: 8,
+                    },
+                    zero,
+                ),
+                (
+                    FfiWrapKey::ExtPrioEncode {
+                        input_width: width,
+                        lsb_prio: false,
+                    },
+                    IrValue::make_ubits(crate::math::ceil_log2(width + 1), width as u64).unwrap(),
+                ),
+            ];
+            for (key, expected) in cases {
+                let helper = make_helper_fn(helper_base_name(&key), &key).unwrap();
+                verify_function(&helper).unwrap();
+                for (index, node) in helper.nodes.iter().enumerate() {
+                    assert_eq!(node.text_id, index, "{key:?}");
+                    assert!(!node.payload.is_extension_op());
+                }
+                let args = helper
+                    .param_nodes()
+                    .map(|node| IrValue::from_bits(&IrBits::zero(node.ty.bit_count())))
+                    .collect::<Vec<_>>();
+                let FnEvalResult::Success(result) = eval_fn(&helper, &args) else {
+                    panic!("helper evaluation failed: {key:?}");
+                };
+                assert_eq!(result.value, expected, "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ffi_helper_construction_propagates_invalid_name_and_width_errors() {
+        let error = make_helper_fn(
+            "bad name".to_string(),
+            &FfiWrapKey::ExtCarryOut { width: 1 },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "DesugarError: constructing extension helper: invalid IR identifier: \"bad name\""
+        );
+        let error = make_helper_fn(
+            "overflow".to_string(),
+            &FfiWrapKey::ExtCarryOut { width: usize::MAX },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "DesugarError: constructing extension helper: IR width or element count overflows usize"
+        );
+    }
+
+    #[test]
+    fn ffi_helper_package_id_overflow_is_reported() {
+        let mut max_text_id = usize::MAX;
+        let error = get_or_create_helper_name(
+            &FfiWrapKey::ExtCarryOut { width: 1 },
+            &mut BTreeMap::new(),
+            &mut Vec::new(),
+            &mut BTreeSet::new(),
+            &mut max_text_id,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "DesugarError: node ID allocation or rebasing overflows usize"
+        );
+    }
 }

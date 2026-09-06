@@ -1,8 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::Write;
+use std::path::Path;
 use tempfile::NamedTempFile;
-use xlsynth_g8r::netlist::gv2block::convert_gv2block_paths_to_string;
+use xlsynth_g8r::netlist::gv2block::convert_gv2block_paths;
+
+/// Requires every successful fixture to produce both PIR-valid and XLS-valid
+/// IR.
+fn convert_gv2block_paths_to_string(netlist: &Path, liberty: &Path) -> anyhow::Result<String> {
+    let package = convert_gv2block_paths(netlist, liberty)?;
+    xlsynth_pir::ir_verify::verify_package(&package).expect("generated package must verify");
+    let text = package.to_string();
+    xlsynth::IrPackage::parse_ir(&text, None)
+        .unwrap_or_else(|error| panic!("generated package must parse in XLS: {error}\n{text}"));
+    Ok(text)
+}
+
+/// Converts an inline netlist with the common test library and checks its
+/// package.
+fn convert_netlist(netlist: &str) -> anyhow::Result<String> {
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{netlist}").unwrap();
+    convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
+}
 
 const LIBERTY_TEXTPROTO: &str = r#"
 format_magic: 5496997758177923663
@@ -141,7 +163,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block INV(A: bits[1], Y: bits[1]) {
   A: bits[1] = input_port(name=A, id=1)
@@ -149,7 +171,7 @@ block INV(A: bits[1], Y: bits[1]) {
   Y: () = output_port(not.2, name=Y, id=3)
 }
 
-top block top(a: bits[1], y: bits[1]) {
+top block top_(a: bits[1], y: bits[1]) {
   instantiation u1(block=INV, kind=block)
   a: bits[1] = input_port(name=a, id=4)
   u1_Y: bits[1] = instantiation_output(instantiation=u1, port_name=Y, id=5)
@@ -180,7 +202,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
   reg Q_reg(bits[1])
@@ -190,7 +212,7 @@ block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
   Q: () = output_port(Q_q, name=Q, id=4)
 }
 
-top block top(clk: clock, d: bits[1], q: bits[1]) {
+top block top_(clk: clock, d: bits[1], q: bits[1]) {
   instantiation u1(block=DFF, kind=block)
   d: bits[1] = input_port(name=d, id=5)
   u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=6)
@@ -249,7 +271,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block DFFQN(CLK: clock, D: bits[1], Q: bits[1], QN: bits[1]) {
   reg IQ_reg(bits[1])
@@ -261,7 +283,7 @@ block DFFQN(CLK: clock, D: bits[1], Q: bits[1], QN: bits[1]) {
   QN: () = output_port(IQN_q, name=QN, id=6)
 }
 
-top block top(clk: clock, d: bits[1], q: bits[1], qn: bits[1]) {
+top block top_(clk: clock, d: bits[1], q: bits[1], qn: bits[1]) {
   instantiation u1(block=DFFQN, kind=block)
   d: bits[1] = input_port(name=d, id=7)
   u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=8)
@@ -296,7 +318,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block DFFNAND(CLK: clock, D: bits[1], EN: bits[1], Q: bits[1]) {
   reg Q_reg(bits[1])
@@ -309,7 +331,7 @@ block DFFNAND(CLK: clock, D: bits[1], EN: bits[1], Q: bits[1]) {
   Q: () = output_port(Q_q, name=Q, id=7)
 }
 
-top block top(clk: clock, d: bits[1], en: bits[1], q: bits[1]) {
+top block top_(clk: clock, d: bits[1], en: bits[1], q: bits[1]) {
   instantiation u1(block=DFFNAND, kind=block)
   d: bits[1] = input_port(name=d, id=8)
   en: bits[1] = input_port(name=en, id=9)
@@ -344,7 +366,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block DFFCLR(CLK: clock, D: bits[1], RST: bits[1], Q: bits[1]) {
   #![reset(port="RST", asynchronous=true, active_low=false)]
@@ -356,7 +378,7 @@ block DFFCLR(CLK: clock, D: bits[1], RST: bits[1], Q: bits[1]) {
   Q: () = output_port(Q_q, name=Q, id=5)
 }
 
-top block top(clk: clock, d: bits[1], rst: bits[1], q: bits[1]) {
+top block top_(clk: clock, d: bits[1], rst: bits[1], q: bits[1]) {
   instantiation u1(block=DFFCLR, kind=block)
   d: bits[1] = input_port(name=d, id=6)
   rst: bits[1] = input_port(name=rst, id=7)
@@ -391,7 +413,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block DFFPRE(CLK: clock, D: bits[1], RSTN: bits[1], Q: bits[1]) {
   #![reset(port="RSTN", asynchronous=true, active_low=true)]
@@ -403,7 +425,7 @@ block DFFPRE(CLK: clock, D: bits[1], RSTN: bits[1], Q: bits[1]) {
   Q: () = output_port(Q_q, name=Q, id=5)
 }
 
-top block top(clk: clock, d: bits[1], rstn: bits[1], q: bits[1]) {
+top block top_(clk: clock, d: bits[1], rstn: bits[1], q: bits[1]) {
   instantiation u1(block=DFFPRE, kind=block)
   d: bits[1] = input_port(name=d, id=6)
   rstn: bits[1] = input_port(name=rstn, id=7)
@@ -436,7 +458,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block BUF(A: bits[1], Y: bits[1]) {
   A: bits[1] = input_port(name=A, id=1)
@@ -449,7 +471,7 @@ block INV(A: bits[1], Y: bits[1]) {
   Y: () = output_port(not.4, name=Y, id=5)
 }
 
-top block top(a: bits[3], y: bits[3]) {
+top block top_(a: bits[3], y: bits[3]) {
   instantiation u0(block=INV, kind=block)
   instantiation u1(block=BUF, kind=block)
   instantiation u2(block=INV, kind=block)
@@ -488,7 +510,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block INV(A: bits[1], Y: bits[1]) {
   A: bits[1] = input_port(name=A, id=1)
@@ -496,7 +518,7 @@ block INV(A: bits[1], Y: bits[1]) {
   Y: () = output_port(not.2, name=Y, id=3)
 }
 
-top block top(a: bits[1], y: bits[2]) {
+top block top_(a: bits[1], y: bits[2]) {
   instantiation u0(block=INV, kind=block)
   a: bits[1] = input_port(name=a, id=4)
   u0_Y: bits[1] = instantiation_output(instantiation=u0, port_name=Y, id=5)
@@ -531,7 +553,7 @@ endmodule
 
     let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
 
-    let want = r#"package top
+    let want = r#"package top_
 
 block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
   reg Q_reg(bits[1])
@@ -541,7 +563,7 @@ block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
   Q: () = output_port(Q_q, name=Q, id=4)
 }
 
-top block top(clk: clock, d: bits[1], q: bits[1]) {
+top block top_(clk: clock, d: bits[1], q: bits[1]) {
   instantiation u1(block=DFF, kind=block)
   d: bits[1] = input_port(name=d, id=5)
   u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=6)
@@ -743,4 +765,204 @@ endmodule
     let err_text = err.to_string();
     assert!(err_text.contains("gv2block only supports techmapped netlists"));
     assert!(err_text.contains("run technology mapping first"));
+}
+
+#[test]
+fn test_gv2block_legalizes_reserved_names_before_resolving_collisions() {
+    let netlist = r#"
+module top (stage, stage_, clock);
+  input stage;
+  input stage_;
+  output clock;
+  AND2 ret (.A(stage), .B(stage_), .Y(clock));
+endmodule
+"#;
+    let got = convert_netlist(netlist).unwrap();
+    let want = r#"package top_
+
+block AND2(A: bits[1], B: bits[1], Y: bits[1]) {
+  A: bits[1] = input_port(name=A, id=1)
+  B: bits[1] = input_port(name=B, id=2)
+  and.3: bits[1] = and(A, B, id=3)
+  Y: () = output_port(and.3, name=Y, id=4)
+}
+
+top block top_(stage_: bits[1], stage__1: bits[1], clock_: bits[1]) {
+  instantiation ret_(block=AND2, kind=block)
+  stage_: bits[1] = input_port(name=stage_, id=5)
+  stage__1: bits[1] = input_port(name=stage__1, id=6)
+  ret__Y: bits[1] = instantiation_output(instantiation=ret_, port_name=Y, id=7)
+  ret__A: () = instantiation_input(stage_, instantiation=ret_, port_name=A, id=8)
+  ret__B: () = instantiation_input(stage__1, instantiation=ret_, port_name=B, id=9)
+  clock_: () = output_port(ret__Y, name=clock_, id=10)
+}
+"#;
+    assert_eq!(got, want);
+}
+
+#[test]
+fn test_gv2block_reserves_clock_and_late_output_names_before_internal_aliases() {
+    let netlist = r#"
+module aliases (u_D, u_Q, u_Q_1);
+  input u_D;
+  input u_Q;
+  output u_Q_1;
+  DFF u (.CLK(u_D), .D(u_Q), .Q(u_Q_1));
+endmodule
+"#;
+    let got = convert_netlist(netlist).unwrap();
+    let want = r#"package aliases
+
+block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
+  reg Q_reg(bits[1])
+  D: bits[1] = input_port(name=D, id=1)
+  Q_q: bits[1] = register_read(register=Q_reg, id=2)
+  Q_d: () = register_write(D, register=Q_reg, id=3)
+  Q: () = output_port(Q_q, name=Q, id=4)
+}
+
+top block aliases(u_D: clock, u_Q: bits[1], u_Q_1: bits[1]) {
+  instantiation u(block=DFF, kind=block)
+  u_Q: bits[1] = input_port(name=u_Q, id=5)
+  u_Q_2: bits[1] = instantiation_output(instantiation=u, port_name=Q, id=6)
+  u_D_1: () = instantiation_input(u_Q, instantiation=u, port_name=D, id=7)
+  u_Q_1: () = output_port(u_Q_2, name=u_Q_1, id=8)
+}
+"#;
+    assert_eq!(got, want);
+}
+
+#[test]
+fn test_gv2block_uniquifies_aliases_from_ambiguous_instance_pin_boundaries() {
+    let liberty = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "X"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
+}
+cells: {
+  name: "Y"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 1 }
+}
+interned_strings: ["A", "B_C", "C"]
+"#;
+    let netlist = r#"
+module aliases (a, y0, y1);
+  input a;
+  output y0;
+  output y1;
+  X u (.A(a), .B_C(y0));
+  Y u_B (.A(a), .C(y1));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{liberty}").unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{netlist}").unwrap();
+    let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
+    let want = r#"package aliases
+
+block X(A: bits[1], B_C: bits[1]) {
+  A: bits[1] = input_port(name=A, id=1)
+  B_C: () = output_port(A, name=B_C, id=2)
+}
+
+block Y(A: bits[1], C: bits[1]) {
+  A: bits[1] = input_port(name=A, id=3)
+  C: () = output_port(A, name=C, id=4)
+}
+
+top block aliases(a: bits[1], y0: bits[1], y1: bits[1]) {
+  instantiation u(block=X, kind=block)
+  instantiation u_B(block=Y, kind=block)
+  a: bits[1] = input_port(name=a, id=5)
+  u_B_C: bits[1] = instantiation_output(instantiation=u, port_name=B_C, id=6)
+  u_B_C_1: bits[1] = instantiation_output(instantiation=u_B, port_name=C, id=7)
+  u_A: () = instantiation_input(a, instantiation=u, port_name=A, id=8)
+  u_B_A: () = instantiation_input(a, instantiation=u_B, port_name=A, id=9)
+  y0: () = output_port(u_B_C, name=y0, id=10)
+  y1: () = output_port(u_B_C_1, name=y1, id=11)
+}
+"#;
+    assert_eq!(got, want);
+}
+
+#[test]
+fn test_gv2block_preserves_clock_legalization_after_data_ports() {
+    let netlist = r#"
+module clock_collision (\clk[0] , clk_0_, q);
+  input \clk[0] ;
+  input clk_0_;
+  output q;
+  DFF u (.CLK(\clk[0] ), .D(clk_0_), .Q(q));
+endmodule
+"#;
+    let text = convert_netlist(netlist).unwrap();
+    let package = xlsynth_pir::ir_parser::Parser::new(&text)
+        .parse_and_verify_package()
+        .unwrap();
+    let block = package.get_top_block().unwrap();
+    assert_eq!(block.clock_port_name(), Some("clk_0__1"));
+    assert_eq!(
+        block
+            .input_ports()
+            .map(|port| block.port_name(port))
+            .collect::<Vec<_>>(),
+        vec!["clk_0_"]
+    );
+}
+
+#[test]
+fn test_gv2block_rejects_missing_or_incorrectly_sized_instance_inputs() {
+    let missing = r#"
+module missing (y);
+  output y;
+  INV u (.Y(y));
+endmodule
+"#;
+    assert_eq!(
+        convert_netlist(missing).unwrap_err().to_string(),
+        "function 'missing' instantiation 'u' missing input ports: [\"A\"]"
+    );
+    let wide = r#"
+module wide (a, y);
+  input [1:0] a;
+  output y;
+  INV u (.A(a), .Y(y));
+endmodule
+"#;
+    assert_eq!(
+        convert_netlist(wide).unwrap_err().to_string(),
+        "instance input 'A' requires bits[1], got bits[2]"
+    );
+}
+
+#[test]
+fn test_gv2block_empty_instance_input_remains_tied_to_zero() {
+    let netlist = r#"
+module tied (y);
+  output y;
+  INV u (.A(), .Y(y));
+endmodule
+"#;
+    let got = convert_netlist(netlist).unwrap();
+    let want = r#"package tied
+
+block INV(A: bits[1], Y: bits[1]) {
+  A: bits[1] = input_port(name=A, id=1)
+  not.2: bits[1] = not(A, id=2)
+  Y: () = output_port(not.2, name=Y, id=3)
+}
+
+top block tied(y: bits[1]) {
+  instantiation u(block=INV, kind=block)
+  u_Y: bits[1] = instantiation_output(instantiation=u, port_name=Y, id=4)
+  literal.5: bits[1] = literal(value=0, id=5)
+  u_A: () = instantiation_input(literal.5, instantiation=u, port_name=A, id=6)
+  y: () = output_port(u_Y, name=y, id=7)
+}
+"#;
+    assert_eq!(got, want);
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Checked construction of PIR functions and explicit extension operations.
+//! Checked construction of PIR function and block graphs.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,13 +15,18 @@ use crate::ir_verify::{
     verify_node_xls_semantics, verify_package,
 };
 
-mod function_ops;
+mod block;
+mod block_cycles;
+mod ops;
 
-pub use function_ops::{NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
+pub use block::{
+    BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions, ResetBehavior,
+};
+pub use ops::{NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
 
 static NEXT_BUILDER_ID: AtomicUsize = AtomicUsize::new(1);
 
-/// An opaque, cheap-to-copy reference to a value in one function builder.
+/// An opaque, cheap-to-copy reference to a value in one builder.
 ///
 /// Handles cannot be constructed externally or used with another builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +39,8 @@ pub struct BValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuilderError {
     ForeignValue,
+    ForeignRegister,
+    ForeignInstantiation,
     ParameterAfterBody,
     InvalidName(String),
     DuplicateName(String),
@@ -44,7 +51,9 @@ pub enum BuilderError {
 impl std::fmt::Display for BuilderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ForeignValue => write!(f, "value belongs to a different function builder"),
+            Self::ForeignValue => write!(f, "value belongs to a different builder"),
+            Self::ForeignRegister => write!(f, "register belongs to a different builder"),
+            Self::ForeignInstantiation => write!(f, "instantiation belongs to a different builder"),
             Self::ParameterAfterBody => write!(f, "parameters must precede body nodes"),
             Self::InvalidName(name) => write!(f, "invalid IR identifier: {name:?}"),
             Self::DuplicateName(name) => write!(f, "duplicate IR identifier: {name:?}"),
@@ -55,6 +64,30 @@ impl std::fmt::Display for BuilderError {
 }
 
 impl std::error::Error for BuilderError {}
+
+mod sealed {
+    use super::{BuilderError, NodeRef};
+
+    /// Interface-specific restrictions applied by the shared graph builder.
+    pub trait State {
+        fn check_name_available(
+            &self,
+            _name: &str,
+            _node: Option<NodeRef>,
+        ) -> Result<(), BuilderError> {
+            Ok(())
+        }
+    }
+}
+
+/// The function interface carried by a checked builder.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct FunctionState {
+    params: Vec<NodeRef>,
+}
+
+impl sealed::State for FunctionState {}
 
 /// Builds a function using PIR types, values, and deterministic node IDs.
 ///
@@ -74,11 +107,18 @@ impl std::error::Error for BuilderError {}
 /// assert_eq!(function.ret_ty, Type::Bits(32));
 /// # Ok::<(), xlsynth_pir::BuilderError>(())
 /// ```
-pub struct FnBuilder {
+pub type FnBuilder = Builder<FunctionState>;
+
+/// Shared checked graph operations, specialized by function or block interface.
+///
+/// Construct this through [`FnBuilder`] or [`BlockBuilder`]. Its graph and
+/// interface stay together; neither is exposed for unchecked mutation.
+pub struct Builder<S: sealed::State> {
     id: usize,
-    function: ir::Fn,
+    graph: ir::NodeGraph,
     names: HashMap<String, NodeRef>,
     callees: BTreeMap<String, ir::FunctionType>,
+    state: S,
 }
 
 macro_rules! binary_op {
@@ -141,6 +181,7 @@ pub fn is_valid_identifier(name: &str) -> bool {
             | "top"
             | "file_number"
             | "proc_instantiation"
+            | "stage"
             | "true"
             | "false"
     );
@@ -161,33 +202,18 @@ fn checked_flat_width(ty: &Type) -> Result<usize, BuilderError> {
     ty.checked_bit_count().ok_or(BuilderError::WidthOverflow)
 }
 
-impl FnBuilder {
-    /// Creates an empty builder; the function name is checked when building.
-    pub fn new(name: &str) -> Self {
+impl<S: sealed::State> Builder<S> {
+    /// Creates shared state without exposing a separately mutable graph.
+    fn from_state(name: &str, state: S) -> Self {
         let id = NEXT_BUILDER_ID
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .expect("function builder identity space exhausted");
+            .expect("builder identity space exhausted");
         Self {
             id,
-            function: ir::Fn {
-                graph: crate::ir::NodeGraph {
-                    name: name.to_string(),
-                    nodes: vec![Node {
-                        text_id: 0,
-                        name: None,
-                        ty: Type::nil(),
-                        payload: NodePayload::Nil,
-                        pos: None,
-                    }],
-                    outer_attrs: Vec::new(),
-                    inner_attrs: Vec::new(),
-                },
-                params: Vec::new(),
-                ret_ty: Type::nil(),
-                ret_node_ref: None,
-            },
+            graph: ir::NodeGraph::new(name),
             names: HashMap::new(),
             callees: BTreeMap::new(),
+            state,
         }
     }
 
@@ -219,7 +245,7 @@ impl FnBuilder {
     ) -> Result<BValue, BuilderError> {
         let operand_types: Vec<Type> = operands(&payload)
             .iter()
-            .map(|node| self.function.get_node_ty(*node).clone())
+            .map(|node| self.graph.get_node_ty(*node).clone())
             .collect();
         let deduced = deduce_result_type(&payload, &operand_types)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
@@ -239,52 +265,21 @@ impl FnBuilder {
         };
         checked_flat_width(&ty)?;
         let node = NodeRef {
-            index: self.function.nodes.len(),
+            index: self.graph.nodes.len(),
         };
-        self.function.nodes.push(Node {
+        self.graph.nodes.push(Node {
             text_id: node.index,
             name: None,
             ty,
             payload,
             pos: None,
         });
-        let validation = verify_node_xls_semantics(&self.function, node.index).and_then(|()| {
-            self.function.nodes[node.index]
-                .payload
-                .validate(&self.function)
-        });
+        let validation = verify_node_xls_semantics(&self.graph, node.index)
+            .and_then(|()| self.graph.nodes[node.index].payload.validate(&self.graph));
         if let Err(reason) = validation {
-            self.function.nodes.pop();
+            self.graph.nodes.pop();
             return Err(BuilderError::InvalidOperation(reason));
         }
-        Ok(BValue {
-            builder_id: self.id,
-            node,
-        })
-    }
-
-    /// Adds a uniquely named parameter before any body nodes.
-    pub fn param(&mut self, name: &str, ty: Type) -> Result<BValue, BuilderError> {
-        if self.function.nodes.len() != self.function.params.len() + 1 {
-            return Err(BuilderError::ParameterAfterBody);
-        }
-        check_name(name)?;
-        checked_flat_width(&ty)?;
-        if self.names.contains_key(name) {
-            return Err(BuilderError::DuplicateName(name.to_string()));
-        }
-        let node = NodeRef {
-            index: self.function.nodes.len(),
-        };
-        self.function.params.push(node);
-        self.function.nodes.push(Node {
-            text_id: node.index,
-            name: Some(name.to_string()),
-            ty,
-            payload: NodePayload::Param,
-            pos: None,
-        });
-        self.names.insert(name.to_string(), node);
         Ok(BValue {
             builder_id: self.id,
             node,
@@ -298,18 +293,11 @@ impl FnBuilder {
         self.add_node(NodePayload::Literal(value), Some(ty))
     }
 
-    /// Assigns a unique name, updating the signature when naming a parameter.
+    /// Assigns a unique node name while respecting interface reservations.
     pub fn set_name(&mut self, value: BValue, name: &str) -> Result<(), BuilderError> {
         let node = self.node(value)?;
-        check_name(name)?;
-        if self
-            .names
-            .get(name)
-            .is_some_and(|existing| *existing != node)
-        {
-            return Err(BuilderError::DuplicateName(name.to_string()));
-        }
-        let data = self.function.get_node_mut(node);
+        self.check_node_name(name, Some(node))?;
+        let data = self.graph.get_node_mut(node);
         if let Some(old_name) = data.name.replace(name.to_string()) {
             self.names.remove(&old_name);
         }
@@ -319,82 +307,35 @@ impl FnBuilder {
 
     /// Borrows the type of a value belonging to this builder.
     pub fn get_type(&self, value: BValue) -> Result<&Type, BuilderError> {
-        Ok(self.function.get_node_ty(self.node(value)?))
+        Ok(self.graph.get_node_ty(self.node(value)?))
     }
 
-    /// Returns the latest successful parameter or body node, if there is one.
+    /// Returns the latest successfully constructed node, if there is one.
     pub fn last_value(&self) -> Option<BValue> {
-        (self.function.nodes.len() > 1).then(|| BValue {
+        (self.graph.nodes.len() > 1).then(|| BValue {
             builder_id: self.id,
             node: NodeRef {
-                index: self.function.nodes.len() - 1,
+                index: self.graph.nodes.len() - 1,
             },
         })
     }
 
-    /// Sets the return node without choosing standalone or package
-    /// verification.
-    fn set_return(&mut self, return_value: BValue) -> Result<(), BuilderError> {
-        check_name(&self.function.name)?;
-        let node = self.node(return_value)?;
-        self.function.ret_ty = self.function.get_node_ty(node).clone();
-        self.function.ret_node_ref = Some(node);
-        Ok(())
-    }
-
-    /// Consumes and verifies a standalone function with no package
-    /// dependencies.
-    ///
-    /// Functions containing `invoke` or `counted_for` require
-    /// `build_in_package` or `build_into_package`, even if the call's
-    /// result is unused.
-    pub fn build(mut self, return_value: BValue) -> Result<ir::Fn, BuilderError> {
-        self.set_return(return_value)?;
-        verify_function(&self.function)
-            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        Ok(self.function)
-    }
-
-    /// Builds a one-function package with that function marked as top.
-    pub fn build_package(
-        self,
-        return_value: BValue,
-        package_name: &str,
-    ) -> Result<ir::Package, BuilderError> {
-        check_name(package_name)?;
-        let function = self.build(return_value)?;
-        let top = Some((function.name.clone(), ir::MemberType::Function));
-        Ok(ir::Package {
-            name: package_name.to_string(),
-            file_table: ir::FileTable::new(),
-            members: vec![ir::PackageMember::Function(function)],
-            top,
-        })
-    }
-
-    /// Builds an insertion-ready function in the context of an existing
-    /// package.
-    ///
-    /// Callees must already exist in a valid package and match the signatures
-    /// supplied during construction. Rejects duplicate names and recursion;
-    /// rebases IDs above all existing nodes and emitted block ports. No package
-    /// or function clone is needed, and the package is never modified.
-    pub fn build_in_package(
-        mut self,
-        return_value: BValue,
-        package: &ir::Package,
-    ) -> Result<ir::Fn, BuilderError> {
-        check_name(&package.name)?;
-        if package
-            .members
-            .iter()
-            .any(|member| member.graph().name == self.function.name)
+    /// Checks node names against both graph names and interface reservations.
+    fn check_node_name(&self, name: &str, node: Option<NodeRef>) -> Result<(), BuilderError> {
+        check_name(name)?;
+        if self
+            .names
+            .get(name)
+            .is_some_and(|existing| Some(*existing) != node)
         {
-            return Err(BuilderError::DuplicateName(self.function.name.clone()));
+            return Err(BuilderError::DuplicateName(name.to_string()));
         }
-        self.set_return(return_value)?;
-        verify_package(package)
-            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
+        self.state.check_name_available(name, node)
+    }
+
+    /// Resolves every signature supplied to a call against its destination
+    /// package.
+    fn check_callees(&self, package: &ir::Package) -> Result<(), BuilderError> {
         for (name, expected) in &self.callees {
             let actual = package.get_fn(name).ok_or_else(|| {
                 BuilderError::InvalidOperation(format!("callee '{name}' is missing from package"))
@@ -405,25 +346,6 @@ impl FnBuilder {
                 )));
             }
         }
-        verify_function_in_package(&self.function, package)
-            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        let base = package_max_emitted_node_id(package);
-        rebase_fn_ids_in_place(&mut self.function, base)
-            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        Ok(self.function)
-    }
-
-    /// Appends a context-verified function with unique IDs, preserving the top.
-    ///
-    /// All checks occur before insertion. A failure leaves the package
-    /// unchanged.
-    pub fn build_into_package(
-        self,
-        return_value: BValue,
-        package: &mut ir::Package,
-    ) -> Result<(), BuilderError> {
-        let function = self.build_in_package(return_value, package)?;
-        package.members.push(ir::PackageMember::Function(function));
         Ok(())
     }
 
@@ -433,7 +355,7 @@ impl FnBuilder {
         check_name(&callee.name)?;
         verify_function_signature(callee)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        if callee.name == self.function.name {
+        if callee.name == self.graph.name {
             return Err(BuilderError::InvalidOperation(format!(
                 "recursive reference to '{}' is not allowed",
                 callee.name
@@ -466,7 +388,7 @@ impl FnBuilder {
             )));
         }
         for (arg, param) in args.iter().zip(callee.param_nodes()) {
-            let actual = self.function.get_node_ty(*arg);
+            let actual = self.graph.get_node_ty(*arg);
             if actual != &param.ty {
                 return Err(BuilderError::InvalidOperation(format!(
                     "argument '{}' of '{}' requires {}, got {}",
@@ -531,14 +453,14 @@ impl FnBuilder {
                 "counted_for induction parameter must be bits[N] with N >= {minimum_width}"
             )));
         }
-        let carry_type = self.function.get_node_ty(init);
+        let carry_type = self.graph.get_node_ty(init);
         if &body.get_param(1).ty != carry_type || &body.ret_ty != carry_type {
             return Err(BuilderError::InvalidOperation(format!(
                 "counted_for carry parameter and return must have type {carry_type}"
             )));
         }
         for (arg, param) in invariant_args.iter().zip(body.param_nodes().skip(2)) {
-            if self.function.get_node_ty(*arg) != &param.ty {
+            if self.graph.get_node_ty(*arg) != &param.ty {
                 return Err(BuilderError::InvalidOperation(format!(
                     "counted_for invariant '{}' requires {}",
                     param.param_name(),
@@ -973,6 +895,127 @@ impl FnBuilder {
         let one_hot = self.one_hot(arg, true)?;
         let encoded = self.encode(one_hot)?;
         self.zero_extend(encoded, width)
+    }
+}
+
+impl Builder<FunctionState> {
+    /// Creates an empty builder; the function name is checked when building.
+    pub fn new(name: &str) -> Self {
+        Self::from_state(name, FunctionState::default())
+    }
+
+    /// Adds a uniquely named parameter before any body nodes.
+    pub fn param(&mut self, name: &str, ty: Type) -> Result<BValue, BuilderError> {
+        if self.graph.nodes.len() != self.state.params.len() + 1 {
+            return Err(BuilderError::ParameterAfterBody);
+        }
+        self.check_node_name(name, None)?;
+        checked_flat_width(&ty)?;
+        let node = NodeRef {
+            index: self.graph.nodes.len(),
+        };
+        self.state.params.push(node);
+        self.graph.nodes.push(Node {
+            text_id: node.index,
+            name: Some(name.to_string()),
+            ty,
+            payload: NodePayload::Param,
+            pos: None,
+        });
+        self.names.insert(name.to_string(), node);
+        Ok(BValue {
+            builder_id: self.id,
+            node,
+        })
+    }
+
+    /// Moves the graph and ordered parameter interface into a function.
+    fn into_function(self, return_value: BValue) -> Result<ir::Fn, BuilderError> {
+        check_name(&self.graph.name)?;
+        let node = self.node(return_value)?;
+        let ret_ty = self.graph.get_node_ty(node).clone();
+        Ok(ir::Fn {
+            graph: self.graph,
+            params: self.state.params,
+            ret_ty,
+            ret_node_ref: Some(node),
+        })
+    }
+
+    /// Consumes and verifies a standalone function with no package
+    /// dependencies.
+    ///
+    /// Functions containing `invoke` or `counted_for` require
+    /// `build_in_package` or `build_into_package`, even if the call's
+    /// result is unused.
+    pub fn build(self, return_value: BValue) -> Result<ir::Fn, BuilderError> {
+        let function = self.into_function(return_value)?;
+        verify_function(&function)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
+        Ok(function)
+    }
+
+    /// Builds a one-function package with that function marked as top.
+    pub fn build_package(
+        self,
+        return_value: BValue,
+        package_name: &str,
+    ) -> Result<ir::Package, BuilderError> {
+        check_name(package_name)?;
+        let function = self.build(return_value)?;
+        let top = Some((function.name.clone(), ir::MemberType::Function));
+        Ok(ir::Package {
+            name: package_name.to_string(),
+            file_table: ir::FileTable::new(),
+            members: vec![ir::PackageMember::Function(function)],
+            top,
+        })
+    }
+
+    /// Builds an insertion-ready function in the context of an existing
+    /// package.
+    ///
+    /// Callees must already exist in a valid package and match the signatures
+    /// supplied during construction. Rejects duplicate names and recursion;
+    /// rebases IDs above all existing graph nodes. No package or function clone
+    /// is needed, and the package is never modified.
+    pub fn build_in_package(
+        self,
+        return_value: BValue,
+        package: &ir::Package,
+    ) -> Result<ir::Fn, BuilderError> {
+        check_name(&package.name)?;
+        if package
+            .members
+            .iter()
+            .any(|member| member.graph().name == self.graph.name)
+        {
+            return Err(BuilderError::DuplicateName(self.graph.name.clone()));
+        }
+        verify_package(package)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
+        self.check_callees(package)?;
+        let mut function = self.into_function(return_value)?;
+        verify_function_in_package(&function, package)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
+        let base = package_max_emitted_node_id(package);
+        rebase_fn_ids_in_place(&mut function, base)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
+        Ok(function)
+    }
+
+    /// Appends a context-verified function with unique IDs, preserving the top.
+    ///
+    /// All checks occur before insertion. A failure leaves the package
+    /// unchanged.
+    pub fn build_into_package(
+        self,
+        return_value: BValue,
+        package: &mut ir::Package,
+    ) -> Result<(), BuilderError> {
+        let function = self.build_in_package(return_value, package)?;
+        package.members.push(ir::PackageMember::Function(function));
+        Ok(())
     }
 }
 

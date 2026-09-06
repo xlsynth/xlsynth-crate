@@ -1,0 +1,13 @@
+package aggregate_ports
+
+top block aggregate(x: bits[129], elements: bits[3][2], pair: (bits[8], bits[3]), unit: (())) {
+  x: bits[129] = input_port(name=x, id=1)
+  bit_slice.2: bits[8] = bit_slice(x, start=64, width=8, id=2)
+  elements: bits[3][2] = input_port(name=elements, id=3)
+  literal.4: bits[1] = literal(value=0, id=4)
+  array_index.5: bits[3] = array_index(elements, indices=[literal.4], id=5)
+  tuple.6: (bits[8], bits[3]) = tuple(bit_slice.2, array_index.5, id=6)
+  pair_sink: () = output_port(tuple.6, name=pair, id=7)
+  tuple.8: (()) = tuple(pair_sink, id=8)
+  unit: () = output_port(tuple.8, name=unit, id=9)
+}
