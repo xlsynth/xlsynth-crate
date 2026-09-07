@@ -32,7 +32,7 @@ use xlsynth_pir::IrBits;
 use crate::{
     aig::aig_simplify,
     aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds},
-    aig::structural_hash_cons::StructuralHashCons,
+    aig::structural_hash_cons::{ExistingAndPair, StructuralHashCons},
 };
 
 mod full_adder;
@@ -281,9 +281,14 @@ impl GateBuilder {
             .map(|hash_cons| hash_cons.depth(operand))
     }
 
-    /// Returns an existing structurally equivalent AND, if hashing found one.
-    pub(crate) fn find_existing_and(&self, lhs: AigOperand, rhs: AigOperand) -> Option<AigOperand> {
-        self.hash_cons.as_ref()?.find_and(lhs, rhs).map(Into::into)
+    /// Returns existing ANDs whose operands both occur in `operands`.
+    pub(crate) fn find_existing_and_pairs(
+        &mut self,
+        operands: &[AigOperand],
+    ) -> Vec<ExistingAndPair> {
+        self.hash_cons.as_mut().map_or_else(Vec::new, |hash_cons| {
+            hash_cons.find_and_pairs(&self.gates, operands)
+        })
     }
 
     pub fn get_false(&self) -> AigOperand {
@@ -1624,7 +1629,10 @@ mod tests {
         let suffix_checkpoint = builder.begin_append_checkpoint();
         let trial_ac = builder.add_and_binary(a, c);
         assert_eq!(trial_ac.node.id, prefix_gate_count);
+        assert_eq!(builder.find_existing_and_pairs(&[a, c]).len(), 1);
         builder.rollback_append_checkpoint(suffix_checkpoint);
+
+        assert!(builder.find_existing_and_pairs(&[a, c]).is_empty());
 
         // Rebuilding the discarded expression must not find a stale hash
         // entry referring to the rolled-back suffix.

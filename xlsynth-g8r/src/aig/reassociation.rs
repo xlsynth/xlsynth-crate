@@ -374,9 +374,9 @@ struct AndPairSelection {
     used_alternate_reuse_pair: bool,
 }
 
-// Bounds the quadratic search for an existing AND among arrival-equivalent
+// Bounds the indexed search for an existing AND among arrival-equivalent
 // choices. Large buckets retain deterministic behavior by considering their
-// earliest operands only.
+// earliest operands in (depth, node ID, polarity) order.
 const MAX_REUSE_PAIR_SEARCH_OPERANDS: usize = 64;
 
 fn pop_earliest_arrival_pair(
@@ -393,7 +393,7 @@ fn pop_earliest_arrival_pair(
 
 /// Removes an earliest-arrival pair, preferring an existing AND when tied.
 fn pop_earliest_arrival_pair_prefer_reuse(
-    builder: &GateBuilder,
+    builder: &mut GateBuilder,
     heap: &mut BinaryHeap<Reverse<(usize, AigOperand)>>,
 ) -> AndPairSelection {
     let Reverse(first) = heap.pop().expect("AND tree should have a first operand");
@@ -412,31 +412,27 @@ fn pop_earliest_arrival_pair_prefer_reuse(
         eligible.push(heap.pop().unwrap().0);
     }
 
+    let eligible_operands = eligible
+        .iter()
+        .map(|(_, operand)| *operand)
+        .collect::<Vec<_>>();
     let mut selected = None;
-    for lhs_index in 0..eligible.len() {
-        for rhs_index in lhs_index + 1..eligible.len() {
-            // If the smallest arrival is unique, consuming it is part of the
-            // earliest-arrival schedule. Otherwise any two operands in the
-            // minimum-depth bucket are equivalent for depth.
-            if first_depth < second_depth && lhs_index != 0 {
-                continue;
-            }
-            let lhs = eligible[lhs_index];
-            let rhs = eligible[rhs_index];
-            let Some(existing) = builder.find_existing_and(lhs.1, rhs.1) else {
-                continue;
-            };
-            let existing_depth = builder
-                .aig_depth(existing)
-                .expect("reassociation builder should cache AIG depths");
-            let newly_built_depth = lhs.0.max(rhs.0) + 1;
-            if existing_depth > newly_built_depth {
-                continue;
-            }
-            let rank = (existing_depth, lhs_index, rhs_index);
-            if selected.is_none_or(|(best_rank, _, _)| rank < best_rank) {
-                selected = Some((rank, lhs_index, rhs_index));
-            }
+    for candidate in builder.find_existing_and_pairs(&eligible_operands) {
+        // If the smallest arrival is unique, consuming it is part of the
+        // earliest-arrival schedule. Otherwise any two operands in the
+        // minimum-depth bucket are equivalent for depth.
+        if first_depth < second_depth && candidate.lhs_index != 0 {
+            continue;
+        }
+        let lhs = eligible[candidate.lhs_index];
+        let rhs = eligible[candidate.rhs_index];
+        let newly_built_depth = lhs.0.max(rhs.0) + 1;
+        if candidate.depth > newly_built_depth {
+            continue;
+        }
+        let rank = (candidate.depth, candidate.lhs_index, candidate.rhs_index);
+        if selected.is_none_or(|(best_rank, _, _)| rank < best_rank) {
+            selected = Some((rank, candidate.lhs_index, candidate.rhs_index));
         }
     }
 
@@ -618,8 +614,63 @@ mod tests {
             )));
         }
 
-        let selection = pop_earliest_arrival_pair_prefer_reuse(&builder, &mut heap);
+        let selection = pop_earliest_arrival_pair_prefer_reuse(&mut builder, &mut heap);
         assert!(selection.lhs == a || selection.rhs == a);
+    }
+
+    #[test]
+    fn reuse_search_window_is_bounded_and_deterministic() {
+        let mut builder = GateBuilder::new(
+            "bounded_reuse_window".to_string(),
+            GateBuilderOptions::opt(),
+        );
+        let operands = (0..MAX_REUSE_PAIR_SEARCH_OPERANDS + 2)
+            .map(|index| *builder.add_input(format!("x{index}"), 1).get_lsb(0))
+            .collect::<Vec<_>>();
+
+        // A reusable pair beyond the window must not displace the ordinary
+        // first pair.
+        builder.add_and_binary(
+            operands[MAX_REUSE_PAIR_SEARCH_OPERANDS],
+            operands[MAX_REUSE_PAIR_SEARCH_OPERANDS + 1],
+        );
+        let make_heap = |reversed: bool| {
+            let mut heap = BinaryHeap::new();
+            let ordered = if reversed {
+                operands.iter().copied().rev().collect::<Vec<_>>()
+            } else {
+                operands.clone()
+            };
+            for operand in ordered {
+                heap.push(Reverse((0, operand)));
+            }
+            heap
+        };
+        let mut outside_only_heap = make_heap(false);
+        let outside_only =
+            pop_earliest_arrival_pair_prefer_reuse(&mut builder, &mut outside_only_heap);
+        assert_eq!(
+            (outside_only.lhs, outside_only.rhs),
+            (operands[0], operands[1])
+        );
+        assert!(!outside_only.used_alternate_reuse_pair);
+
+        // Once pairs exist inside the window, neither heap insertion order nor
+        // adjacency registration order may affect which ranked pair wins.
+        builder.add_and_binary(
+            operands[MAX_REUSE_PAIR_SEARCH_OPERANDS - 2],
+            operands[MAX_REUSE_PAIR_SEARCH_OPERANDS - 1],
+        );
+        builder.add_and_binary(operands[2], operands[3]);
+        let mut forward_heap = make_heap(false);
+        let mut reverse_heap = make_heap(true);
+        let forward = pop_earliest_arrival_pair_prefer_reuse(&mut builder, &mut forward_heap);
+        let reverse = pop_earliest_arrival_pair_prefer_reuse(&mut builder, &mut reverse_heap);
+        let expected = (operands[2], operands[3]);
+        assert_eq!((forward.lhs, forward.rhs), expected);
+        assert_eq!((reverse.lhs, reverse.rhs), expected);
+        assert!(forward.used_alternate_reuse_pair);
+        assert!(reverse.used_alternate_reuse_pair);
     }
 
     #[test]
