@@ -120,20 +120,25 @@ impl IrBits {
 
     /// Constructs a bitvector from booleans whose index zero is the LSB.
     pub fn from_lsb_is_0(bits: &[bool]) -> Self {
-        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
-        for (index, bit) in bits.iter().copied().enumerate() {
-            if bit {
-                bytes[index / 8] |= 1u8 << (index % 8);
-            }
-        }
-        Self::from_le_bytes(bits.len(), &bytes).expect("boolean bits are canonical")
+        Self::from_lsb_fn(bits.len(), |index| bits[index])
     }
 
     /// Constructs a bitvector from booleans whose index zero is the MSB.
     pub fn from_msb_is_0(bits: &[bool]) -> Self {
-        let mut reversed = bits.to_vec();
-        reversed.reverse();
-        Self::from_lsb_is_0(&reversed)
+        Self::from_lsb_fn(bits.len(), |index| bits[bits.len() - 1 - index])
+    }
+
+    /// Packs bits directly into limbs without intermediate Boolean or byte
+    /// buffers, visiting each index once in LSB-first order.
+    pub(crate) fn from_lsb_fn(bit_count: usize, mut bit_at: impl FnMut(usize) -> bool) -> Self {
+        let mut result = Self::zero(bit_count);
+        for (limb_index, limb) in result.limbs.iter_mut().enumerate() {
+            let start = limb_index * 64;
+            for offset in 0..(bit_count - start).min(64) {
+                *limb |= u64::from(bit_at(start + offset)) << offset;
+            }
+        }
+        result
     }
 
     /// Returns the all-zero value at this width.
@@ -1092,6 +1097,36 @@ impl<'a> TypedValueParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_bit_packing_matches_bytes_across_limb_boundaries() {
+        for width in [0usize, 1, 7, 8, 63, 64, 65, 127, 128, 129, 257] {
+            for seed in 0..7 {
+                let bits = (0..width).map(|i| (i + seed) % 7 < 3).collect::<Vec<_>>();
+                let mut bytes = vec![0u8; width.div_ceil(8)];
+                for (index, bit) in bits.iter().copied().enumerate() {
+                    if bit {
+                        bytes[index / 8] |= 1u8 << (index % 8);
+                    }
+                }
+                let expected = IrBits::from_le_bytes(width, &bytes).unwrap();
+                assert_eq!(IrBits::from_lsb_is_0(&bits), expected);
+                let mut next_index = 0;
+                assert_eq!(
+                    IrBits::from_lsb_fn(width, |index| {
+                        assert_eq!(index, next_index);
+                        next_index += 1;
+                        bits[index]
+                    }),
+                    expected,
+                );
+                assert_eq!(next_index, width);
+                let mut reversed = bits;
+                reversed.reverse();
+                assert_eq!(IrBits::from_msb_is_0(&reversed), expected);
+            }
+        }
+    }
 
     #[test]
     fn bits_roundtrip_le_bytes_and_format() {
