@@ -216,9 +216,14 @@ fn input_kinds<R: RngCore + ?Sized>(rng: &mut R, count: usize) -> Vec<InputKind>
         return Vec::new();
     }
     if rng.gen_ratio(1, 10) {
-        let pattern = rng.gen_range(0..4);
+        let pattern = rng.gen_range(0..6);
         return (0..count)
             .map(|index| {
+                if pattern >= 4 {
+                    return InputKind::Pattern(BitValuePattern::Alternating {
+                        lsb_is_one: pattern == 5,
+                    });
+                }
                 let one = match pattern {
                     0 => false,
                     1 => true,
@@ -555,8 +560,8 @@ mod tests {
     use super::{
         BitValuePattern, InputKind, generate_corner_irbits, generate_mixed_argument_sets_with_rng,
         generate_mixed_arguments_with_rng, generate_mixed_irbits_with_rng,
-        generate_mixed_values_with_rng, input_kinds, perturb_irbits, perturb_specials,
-        perturb_value, special_positions,
+        generate_mixed_values_with_rng, generate_pattern_irbits, input_kinds, perturb_irbits,
+        perturb_specials, perturb_value, special_positions,
     };
     use crate::ir::Type;
     use crate::{FnBuilder, IrBits, IrValue};
@@ -607,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_vectors_alternate_by_argument_not_by_bit() {
+    fn structured_vectors_cover_cross_argument_and_bitwise_patterns() {
         let mut observed = BTreeSet::new();
         let mut mixed_seen = false;
         let mut structured_count = 0;
@@ -622,9 +627,10 @@ mod tests {
                     kinds
                         .iter()
                         .map(|kind| match kind {
-                            InputKind::Pattern(BitValuePattern::Zero) => false,
-                            InputKind::Pattern(BitValuePattern::AllOnes) => true,
-                            _ => panic!("whole-vector patterns must fill entire arguments"),
+                            InputKind::Pattern(pattern) => {
+                                generate_pattern_irbits(8, *pattern).to_u64().unwrap()
+                            }
+                            _ => panic!("structured vectors must use patterns at every position"),
                         })
                         .collect::<Vec<_>>(),
                 );
@@ -635,10 +641,12 @@ mod tests {
         assert_eq!(
             observed,
             BTreeSet::from([
-                vec![false, false, false],
-                vec![true, true, true],
-                vec![true, false, true],
-                vec![false, true, false],
+                vec![0x00, 0x00, 0x00],
+                vec![0xff, 0xff, 0xff],
+                vec![0xff, 0x00, 0xff],
+                vec![0x00, 0xff, 0x00],
+                vec![0xaa, 0xaa, 0xaa],
+                vec![0x55, 0x55, 0x55],
             ])
         );
         assert!(mixed_seen);
@@ -653,8 +661,19 @@ mod tests {
             InputKind::Special,
             InputKind::Uniform,
             InputKind::Pattern(BitValuePattern::Zero),
+            InputKind::Pattern(BitValuePattern::Alternating { lsb_is_one: false }),
+            InputKind::Pattern(BitValuePattern::Alternating { lsb_is_one: true }),
         ];
-        let original = vec![IrBits::zero(129); 3];
+        let alternating_zero =
+            generate_pattern_irbits(129, BitValuePattern::Alternating { lsb_is_one: false });
+        let alternating_one = alternating_zero.not();
+        let original = vec![
+            IrBits::zero(129),
+            IrBits::zero(129),
+            IrBits::zero(129),
+            alternating_zero.clone(),
+            alternating_one.clone(),
+        ];
         let mut unchanged = original.clone();
         perturb_specials(
             &mut StepRng::new(u64::MAX, 0),
@@ -675,7 +694,9 @@ mod tests {
             vec![
                 IrBits::all_ones(129),
                 IrBits::zero(129),
-                IrBits::all_ones(129)
+                IrBits::all_ones(129),
+                alternating_one,
+                alternating_zero,
             ]
         );
         // The gate succeeds, but every later draw is above the bit threshold.

@@ -8,9 +8,13 @@ Random graph-evaluation tests use the typed or flat-vector adapters in
 `xlsynth_pir::random_inputs`. Each evaluation independently draws one complete
 vector of N function arguments or block input ports:
 
-- With 10% probability, choose equally between all-zero, all-one, alternating
-  all-one/all-zero, and alternating all-zero/all-one arguments. Alternation is
-  across argument positions, not bits within an argument.
+- With 10% probability, choose equally among six whole-vector patterns:
+  all-zero arguments, all-one arguments, alternating all-one/all-zero arguments,
+  alternating all-zero/all-one arguments, all arguments with alternating bits
+  ending in zero (`...1010`), or all arguments with alternating bits ending in
+  one (`...0101`). The middle two alternate across argument positions; the last
+  two alternate within every argument, using the same least-significant-bit
+  phase for all inputs and restarting that phase in each aggregate bits leaf.
 - Otherwise, choose K uniformly from 0 through N and select K distinct positions
   uniformly. Those arguments use special values; the other N - K use uniform
   random bits. Aggregates count as one argument and special patterns recurse
