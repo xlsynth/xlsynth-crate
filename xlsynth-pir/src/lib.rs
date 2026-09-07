@@ -43,6 +43,7 @@ pub mod ir_value_utils;
 pub mod ir_values;
 pub mod ir_verify;
 pub mod ir_verify_parity;
+pub mod known_bits;
 pub mod libxls_bridge;
 pub mod localized_eco2;
 pub mod matching_ged;

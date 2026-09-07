@@ -4,7 +4,7 @@
 //! checks.
 
 use crate::{IrBits, IrValue};
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, RngCore, SeedableRng, seq::SliceRandom};
 use rand_pcg::Pcg64Mcg;
 
 use crate::ir::{Fn, Type};
@@ -141,6 +141,36 @@ pub fn generate_argument_sets_with_rng<R: RngCore + ?Sized>(
         sets.push(generate_biased_arguments(&mut source, function));
     }
     sets
+}
+
+/// Generates a shuffled, randomly proportioned mix of uniform and corner-biased
+/// argument sets. Budgets of at least two use both sampling strategies; a
+/// one-set budget randomly chooses one. Each biased leaf independently chooses
+/// a corner pattern or uniform value, allowing mixed cases within one vector.
+pub fn generate_mixed_argument_sets_with_rng<R: RngCore + ?Sized>(
+    function: &Fn,
+    rng: &mut R,
+    count: usize,
+) -> Vec<Vec<IrValue>> {
+    let biased_count = mixed_biased_count(rng, count);
+    let mut sets = Vec::with_capacity(count);
+    for _ in 0..biased_count {
+        sets.push(generate_biased_arguments_with_rng(rng, function));
+    }
+    for _ in biased_count..count {
+        sets.push(generate_uniform_arguments_with_rng(rng, function));
+    }
+    sets.shuffle(rng);
+    sets
+}
+
+/// Allocates a bounded sample budget between the two generation strategies.
+fn mixed_biased_count<R: RngCore + ?Sized>(rng: &mut R, count: usize) -> usize {
+    match count {
+        0 => 0,
+        1 => usize::from(rng.gen_bool(0.5)),
+        _ => rng.gen_range(1..count),
+    }
 }
 
 /// Generates flat bitvector argument sets from an RNG, starting with
@@ -354,4 +384,118 @@ fn choose_count<S: EntropySource>(source: &mut S, exclusive_limit: usize) -> usi
 fn choose_between<S: EntropySource>(source: &mut S, minimum: usize, maximum: usize) -> usize {
     debug_assert!(minimum <= maximum);
     minimum + choose_count(source, maximum - minimum + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use rand::{RngCore, SeedableRng};
+    use rand_pcg::Pcg64Mcg;
+
+    use super::{
+        generate_corner_irbits, generate_mixed_argument_sets_with_rng, mixed_biased_count,
+    };
+    use crate::FnBuilder;
+    use crate::ir::Type;
+
+    #[test]
+    fn mixed_sample_budget_uses_both_strategies_and_varies_the_ratio() {
+        let mut singleton_counts = BTreeSet::new();
+        let mut mixed_counts = BTreeSet::new();
+        for seed in 0..128 {
+            let mut rng = Pcg64Mcg::seed_from_u64(seed);
+            assert_eq!(mixed_biased_count(&mut rng, 0), 0);
+            assert_eq!(mixed_biased_count(&mut rng, 2), 1);
+            singleton_counts.insert(mixed_biased_count(&mut rng, 1));
+            mixed_counts.insert(mixed_biased_count(&mut rng, 8));
+        }
+        assert_eq!(singleton_counts, BTreeSet::from([0, 1]));
+        assert_eq!(mixed_counts, (1..8).collect());
+    }
+
+    #[test]
+    fn mixed_arguments_replay_and_preserve_wide_aggregate_types() {
+        let types = [
+            Type::Bits(129),
+            Type::Tuple(vec![
+                Box::new(Type::Bits(0)),
+                Box::new(Type::new_array(Type::Bits(65), 2)),
+                Box::new(Type::Token),
+            ]),
+            Type::new_array(Type::Bits(257), 0),
+        ];
+        let mut builder = FnBuilder::new("mixed_input_shapes");
+        let params = types
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| builder.param(&format!("p{i}"), ty.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let result = builder.tuple(&params).unwrap();
+        let function = builder.build(result).unwrap();
+        for seed in 0..16 {
+            for count in [0, 1, 2, 8] {
+                let mut rng = Pcg64Mcg::seed_from_u64(seed);
+                let mut replay = rng.clone();
+                let sets = generate_mixed_argument_sets_with_rng(&function, &mut rng, count);
+                assert_eq!(
+                    sets,
+                    generate_mixed_argument_sets_with_rng(&function, &mut replay, count),
+                );
+                assert_eq!(sets.len(), count);
+                for args in sets {
+                    assert_eq!(args.len(), types.len());
+                    for (arg, ty) in args.iter().zip(&types) {
+                        assert_eq!(&arg.type_(), ty);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_arguments_handle_empty_budgets_and_nullary_functions() {
+        let mut builder = FnBuilder::new("no_inputs");
+        let result = builder.tuple(&[]).unwrap();
+        let function = builder.build(result).unwrap();
+        let mut rng = Pcg64Mcg::seed_from_u64(42);
+        let mut untouched = rng.clone();
+        assert!(generate_mixed_argument_sets_with_rng(&function, &mut rng, 0).is_empty());
+        assert_eq!(rng.next_u64(), untouched.next_u64());
+        for count in [1, 2, 8] {
+            assert_eq!(
+                generate_mixed_argument_sets_with_rng(&function, &mut rng, count),
+                vec![vec![]; count],
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_arguments_exercise_corners_and_mixed_parameter_values() {
+        let mut builder = FnBuilder::new("mixed_input_values");
+        let lhs = builder.param("lhs", Type::Bits(129)).unwrap();
+        let rhs = builder.param("rhs", Type::Bits(129)).unwrap();
+        let result = builder.tuple(&[lhs, rhs]).unwrap();
+        let function = builder.build(result).unwrap();
+        let corners = generate_corner_irbits(129);
+        let mut seen_zero = false;
+        let mut seen_all_ones = false;
+        let mut seen_non_corner = false;
+        let mut seen_mixed_parameters = false;
+        for seed in 0..64 {
+            let mut rng = Pcg64Mcg::seed_from_u64(seed);
+            for args in generate_mixed_argument_sets_with_rng(&function, &mut rng, 8) {
+                let lhs = args[0].as_bits().unwrap();
+                let rhs = args[1].as_bits().unwrap();
+                for bits in [lhs, rhs] {
+                    seen_zero |= bits.is_zero();
+                    seen_all_ones |= bits.not().is_zero();
+                    seen_non_corner |= !corners.contains(bits);
+                }
+                seen_mixed_parameters |= (lhs.is_zero() && !corners.contains(rhs))
+                    || (rhs.is_zero() && !corners.contains(lhs));
+            }
+        }
+        assert!(seen_zero && seen_all_ones && seen_non_corner && seen_mixed_parameters);
+    }
 }

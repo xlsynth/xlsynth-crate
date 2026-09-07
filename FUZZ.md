@@ -59,6 +59,34 @@ Primarily tests:
 - Function/package pretty-printer roundtrip soundness
 - Structural equivalence stability across roundtrip, including event metadata
 
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_known_bits_soundness.rs
+
+Generates pure typed PIR graphs directly from libFuzzer bytes, including all six
+extension operations, aggregates, zero-width bits, and widths through 257.
+The first eight bytes independently seed concrete-input generation; the
+remaining bytes drive graph construction. Each graph is analyzed once and
+evaluated on eight input sets (once for nullary functions). The shared
+`generate_mixed_argument_sets_with_rng` helper randomly allocates that budget
+between uniform and corner-biased sampling, uses both strategies when the budget
+is at least two, and shuffles the sets. Biased leaves independently choose
+patterns such as zero, all-ones, signed limits, one-hot values and runs of ones,
+or uniform values, exercising mixed cases within a vector too.
+Every node and aggregate leaf must satisfy its known-bit claims, including
+parameters and dead nodes. The target also requires identical facts when the
+function is represented as a combinational block. It flags unsound facts,
+missing value callbacks, unexpected generation/analysis/interpreter failures,
+and function/block disagreements. No XLS oracle or solver is invoked.
+
+Run a bounded campaign from the repository root with:
+
+```bash
+cd xlsynth-pir
+cargo fuzz run --sanitizer none fuzz_known_bits_soundness -- -max_total_time=60 -timeout=15 -max_len=4096
+```
+
+For new concrete-value fuzz targets, prefer this shared mixed-input policy over
+uniform-only sampling so wide corner values receive meaningful coverage.
+
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_opt_equiv.rs
 
 Builds an XLS IR package from an upstream-standard random sample, including
