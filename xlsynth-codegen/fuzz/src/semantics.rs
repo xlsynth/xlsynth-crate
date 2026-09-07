@@ -2,12 +2,13 @@
 
 //! Shared stimuli and independent PIR expectations for external RTL oracles.
 
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{SeedableRng, rngs::StdRng};
 use std::collections::BTreeMap;
 use xlsynth_g8r_fuzz::random_block::{
     block_output_types, evaluate_block_cycle_observed, flatten_value,
 };
 use xlsynth_pir::ir::Package;
+use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 use xlsynth_test_helpers::rtl_sim::{Bindings, LogicValue};
 
 use crate::{CYCLE_COUNT, INPUT_SAMPLE_COUNT, top_block};
@@ -39,15 +40,8 @@ impl Trace {
         let block = top_block(package);
         let output_types = block_output_types(block);
         let mut rng = StdRng::from_seed(seed);
-        let bounds = crate::stimulus::relevant_bounds(block);
-        let mut state = block
-            .registers
-            .iter()
-            .map(|r| {
-                let pattern = rng.gen_range(0..16);
-                crate::stimulus::value(&r.ty, &mut rng, pattern, &bounds)
-            })
-            .collect::<Vec<_>>();
+        let mut state =
+            generate_mixed_values_with_rng(&mut rng, block.registers.iter().map(|r| &r.ty));
         let initial_state = block
             .registers
             .iter()
@@ -69,7 +63,7 @@ impl Trace {
         } else {
             INPUT_SAMPLE_COUNT
         } {
-            let mut inputs = crate::stimulus::inputs(block, &mut rng, sample, &bounds);
+            let mut inputs = crate::generate_inputs(block, &mut rng);
             if let Some(reset) = &block.reset {
                 assert!(
                     !reset.asynchronous,

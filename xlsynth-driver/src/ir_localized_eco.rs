@@ -18,7 +18,7 @@ use xlsynth_pir::ir::{self as ir_mod, Block};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::{self, emit_block};
 use xlsynth_pir::random_inputs::{
-    BitValuePattern, generate_biased_arguments_with_rng, generate_pattern_arguments,
+    BitValuePattern, generate_mixed_arguments_with_rng, generate_pattern_arguments,
 };
 use xlsynth_prover::prover::SolverChoice;
 
@@ -616,7 +616,7 @@ fn build_ones_args_value(f: &ir::Fn) -> IrValue {
 }
 
 fn build_random_args_value(f: &ir::Fn, rng: &mut rand::rngs::StdRng) -> IrValue {
-    IrValue::make_tuple(&generate_biased_arguments_with_rng(rng, f))
+    IrValue::make_tuple(&generate_mixed_arguments_with_rng(rng, f))
 }
 
 /// Checks replay arguments before invoking the native evaluator on verified IR.

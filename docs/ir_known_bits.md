@@ -139,9 +139,10 @@ cargo test -p xlsynth-pir --doc
 The in-tree [libFuzzer target](../xlsynth-pir/fuzz/fuzz_targets/fuzz_known_bits_soundness.rs)
 extends these checks with coverage-guided graph generation and independently
 mutable concrete-input seeds. It checks every node, enables all six extensions,
-and compares function facts with the equivalent combinational block. A shared
-input helper randomly divides the bounded input budget between uniform and
-corner-biased sampling, then shuffles the resulting vectors. See
+and compares function facts with the equivalent combinational block. It uses the
+[shared mixed-vector input policy](../FUZZ.md#shared-concrete-input-sampling),
+choosing structured patterns or a fresh subset of special-valued arguments for
+each evaluation, with optional sparse perturbation of special values. See
 [FUZZ.md](../FUZZ.md) for its invocation. Generation, analysis and interpreter
 failures are sample failures, not silently discarded inputs.
 

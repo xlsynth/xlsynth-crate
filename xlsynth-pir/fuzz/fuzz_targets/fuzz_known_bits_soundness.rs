@@ -62,8 +62,8 @@ fn check_function(function: &ir::Fn, input_seed: u64) {
 
     let mut rng = StdRng::seed_from_u64(input_seed);
     // Nullary functions still get checked; repeating identical executions adds
-    // no coverage. Other functions receive eight concrete input sets with a
-    // randomly chosen mix of uniform and corner-biased sampling.
+    // no coverage. Other functions receive eight independently mixed input
+    // vectors from the shared structured/special/uniform sampler.
     let trials = if function.params.is_empty() { 1 } else { 8 };
     let argument_sets = generate_mixed_argument_sets_with_rng(function, &mut rng, trials);
     for (trial, arguments) in argument_sets.into_iter().enumerate() {

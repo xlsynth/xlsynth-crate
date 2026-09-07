@@ -108,8 +108,7 @@ pub fn generate_biased_arguments_from_seed(function: &Fn, seed: u64) -> Vec<IrVa
     generate_biased_arguments_with_rng(&mut rng, function)
 }
 
-/// Generates reproducible argument sets, starting with whole-input corner
-/// cases.
+/// Generates reproducible argument sets using per-vector mixed sampling.
 pub fn generate_argument_sets_from_seed(
     function: &Fn,
     seed: u64,
@@ -119,94 +118,254 @@ pub fn generate_argument_sets_from_seed(
     generate_argument_sets_with_rng(function, &mut rng, count)
 }
 
-/// Generates argument sets from an RNG, starting with whole-input corner
-/// cases.
+/// Generates argument sets using per-vector mixed sampling.
 pub fn generate_argument_sets_with_rng<R: RngCore + ?Sized>(
     function: &Fn,
     rng: &mut R,
     count: usize,
 ) -> Vec<Vec<IrValue>> {
-    let mut sets = Vec::with_capacity(count);
-    if count > 0 {
-        sets.push(generate_pattern_arguments(function, BitValuePattern::Zero));
-    }
-    if count > 1 {
-        sets.push(generate_pattern_arguments(
-            function,
-            BitValuePattern::AllOnes,
-        ));
-    }
-    let mut source = RngEntropy::new(rng);
-    while sets.len() < count {
-        sets.push(generate_biased_arguments(&mut source, function));
-    }
-    sets
+    generate_mixed_argument_sets_with_rng(function, rng, count)
 }
 
-/// Generates a shuffled, randomly proportioned mix of uniform and corner-biased
-/// argument sets. Budgets of at least two use both sampling strategies; a
-/// one-set budget randomly chooses one. Each biased leaf independently chooses
-/// a corner pattern or uniform value, allowing mixed cases within one vector.
+/// Generates independent mixed vectors, choosing a fresh special-value subset
+/// for each evaluation. Arguments remain in signature order.
 pub fn generate_mixed_argument_sets_with_rng<R: RngCore + ?Sized>(
     function: &Fn,
     rng: &mut R,
     count: usize,
 ) -> Vec<Vec<IrValue>> {
-    let biased_count = mixed_biased_count(rng, count);
-    let mut sets = Vec::with_capacity(count);
-    for _ in 0..biased_count {
-        sets.push(generate_biased_arguments_with_rng(rng, function));
-    }
-    for _ in biased_count..count {
-        sets.push(generate_uniform_arguments_with_rng(rng, function));
-    }
-    sets.shuffle(rng);
-    sets
+    (0..count)
+        .map(|_| generate_mixed_arguments_with_rng(rng, function))
+        .collect()
 }
 
-/// Allocates a bounded sample budget between the two generation strategies.
-fn mixed_biased_count<R: RngCore + ?Sized>(rng: &mut R, count: usize) -> usize {
-    match count {
-        0 => 0,
-        1 => usize::from(rng.gen_bool(0.5)),
-        _ => rng.gen_range(1..count),
+/// Generates one mixed input vector matching a function's parameter types.
+pub fn generate_mixed_arguments_with_rng<R: RngCore + ?Sized>(
+    rng: &mut R,
+    function: &Fn,
+) -> Vec<IrValue> {
+    generate_mixed_values_with_rng(rng, function.param_nodes().map(|param| &param.ty))
+}
+
+/// Generates one mixed input vector from a stable seed.
+pub fn generate_mixed_arguments_from_seed(function: &Fn, seed: u64) -> Vec<IrValue> {
+    let mut rng = Pcg64Mcg::seed_from_u64(seed);
+    generate_mixed_arguments_with_rng(&mut rng, function)
+}
+
+/// Generates one vector in type order: 10% use a whole-vector pattern,
+/// otherwise K uniformly chosen positions (K in 0..=N) use special values and
+/// the rest are uniform. A vector-wide 50% gate enables independent
+/// 1/64-probability bit flips in special-derived values only. Aggregates count
+/// as single input positions.
+pub fn generate_mixed_values_with_rng<'a, R, I>(rng: &mut R, types: I) -> Vec<IrValue>
+where
+    R: RngCore + ?Sized,
+    I: IntoIterator<Item = &'a Type>,
+{
+    let types = types.into_iter().collect::<Vec<_>>();
+    let kinds = input_kinds(rng, types.len());
+    let mut values = {
+        let mut source = RngEntropy::new(&mut *rng);
+        types
+            .into_iter()
+            .zip(&kinds)
+            .map(|(ty, kind)| match kind {
+                InputKind::Uniform => generate_uniform_value(&mut source, ty),
+                InputKind::Special => generate_special_value(&mut source, ty),
+                InputKind::Pattern(pattern) => generate_pattern_value(ty, *pattern),
+            })
+            .collect::<Vec<_>>()
+    };
+    perturb_specials(rng, &kinds, &mut values, perturb_value);
+    values
+}
+
+/// Generates one flat vector with the same per-position policy as typed values.
+pub fn generate_mixed_irbits_with_rng<R: RngCore + ?Sized>(
+    rng: &mut R,
+    widths: &[usize],
+) -> Vec<IrBits> {
+    let kinds = input_kinds(rng, widths.len());
+    let mut values = {
+        let mut source = RngEntropy::new(&mut *rng);
+        widths
+            .iter()
+            .zip(&kinds)
+            .map(|(&width, kind)| match kind {
+                InputKind::Uniform => generate_uniform_irbits(&mut source, width),
+                InputKind::Special => generate_special_irbits(&mut source, width),
+                InputKind::Pattern(pattern) => generate_pattern_irbits(width, *pattern),
+            })
+            .collect::<Vec<_>>()
+    };
+    perturb_specials(rng, &kinds, &mut values, perturb_irbits);
+    values
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputKind {
+    Uniform,
+    Special,
+    Pattern(BitValuePattern),
+}
+
+/// Chooses base-value strategies without changing argument/port order.
+fn input_kinds<R: RngCore + ?Sized>(rng: &mut R, count: usize) -> Vec<InputKind> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if rng.gen_ratio(1, 10) {
+        let pattern = rng.gen_range(0..4);
+        return (0..count)
+            .map(|index| {
+                let one = match pattern {
+                    0 => false,
+                    1 => true,
+                    2 => index % 2 == 0,
+                    _ => index % 2 != 0,
+                };
+                InputKind::Pattern(if one {
+                    BitValuePattern::AllOnes
+                } else {
+                    BitValuePattern::Zero
+                })
+            })
+            .collect();
+    }
+    special_positions(rng, count)
+        .into_iter()
+        .map(|special| {
+            if special {
+                InputKind::Special
+            } else {
+                InputKind::Uniform
+            }
+        })
+        .collect()
+}
+
+/// Applies one vector-wide gate, never perturbing uniform-derived positions.
+fn perturb_specials<R: RngCore + ?Sized, T>(
+    rng: &mut R,
+    kinds: &[InputKind],
+    values: &mut [T],
+    mut perturb: impl FnMut(&mut R, &T) -> T,
+) {
+    assert_eq!(kinds.len(), values.len());
+    if values.is_empty() || !rng.gen_bool(0.5) {
+        return;
+    }
+    for (kind, value) in kinds.iter().zip(values) {
+        if *kind != InputKind::Uniform {
+            *value = perturb(rng, value);
+        }
     }
 }
 
-/// Generates flat bitvector argument sets from an RNG, starting with
-/// whole-input corner cases.
+/// Toggles each valid bit independently; enabling perturbation may flip none.
+fn perturb_irbits<R: RngCore + ?Sized>(rng: &mut R, bits: &IrBits) -> IrBits {
+    let mut bytes = bits.to_le_bytes();
+    for index in 0..bits.get_bit_count() {
+        if rng.gen_ratio(1, 64) {
+            bytes[index / 8] ^= 1 << (index % 8);
+        }
+    }
+    IrBits::from_le_bytes(bits.get_bit_count(), &bytes).expect("valid bits remain in width")
+}
+
+/// Perturbs every leaf while preserving token and empty-aggregate shapes.
+fn perturb_value<R: RngCore + ?Sized>(rng: &mut R, value: &IrValue) -> IrValue {
+    match value {
+        IrValue::Bits(bits) => IrValue::from_bits(&perturb_irbits(rng, bits)),
+        IrValue::Token => IrValue::make_token(),
+        IrValue::Tuple(fields) => IrValue::make_tuple(
+            &fields
+                .iter()
+                .map(|value| perturb_value(rng, value))
+                .collect::<Vec<_>>(),
+        ),
+        IrValue::Array(array) => IrValue::make_array_typed(
+            array.element_type().clone(),
+            &array
+                .elements()
+                .iter()
+                .map(|value| perturb_value(rng, value))
+                .collect::<Vec<_>>(),
+        )
+        .expect("perturbation preserves array element types"),
+    }
+}
+
+/// Chooses a uniform subset conditional on a uniformly selected cardinality.
+fn special_positions<R: RngCore + ?Sized>(rng: &mut R, count: usize) -> Vec<bool> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let special_count = rng.gen_range(0..=count);
+    let mut positions = vec![false; count];
+    positions[..special_count].fill(true);
+    positions.shuffle(rng);
+    positions
+}
+
+/// Generates a type-shaped special value without a uniform-sampling fallback.
+fn generate_special_value<S: EntropySource>(source: &mut S, ty: &Type) -> IrValue {
+    match ty {
+        Type::Bits(width) => IrValue::from_bits(&generate_special_irbits(source, *width)),
+        Type::Token => IrValue::make_token(),
+        Type::Tuple(fields) => IrValue::make_tuple(
+            &fields
+                .iter()
+                .map(|ty| generate_special_value(source, ty))
+                .collect::<Vec<_>>(),
+        ),
+        Type::Array(array) => IrValue::make_array_typed(
+            (*array.element_type).clone(),
+            &(0..array.element_count)
+                .map(|_| generate_special_value(source, &array.element_type))
+                .collect::<Vec<_>>(),
+        )
+        .expect("special array values preserve their element type"),
+    }
+}
+
+/// Chooses generic boundary patterns, including arbitrary-width extrema.
+fn generate_special_irbits<S: EntropySource>(source: &mut S, width: usize) -> IrBits {
+    let choice = source.take_u64() % 11;
+    if choice == 9 {
+        return generate_pattern_irbits(width, BitValuePattern::OneHot(0));
+    }
+    if choice == 10 {
+        return generate_pattern_irbits(
+            width,
+            BitValuePattern::OneHot(choose_count(source, width)),
+        )
+        .not();
+    }
+    let pattern = match choice {
+        0 => BitValuePattern::Zero,
+        1 => BitValuePattern::AllOnes,
+        2 => BitValuePattern::SignedMin,
+        3 => BitValuePattern::SignedMax,
+        4 => BitValuePattern::OneHot(choose_count(source, width)),
+        5 => BitValuePattern::LowOnes(choose_between(source, 0, width)),
+        6 => BitValuePattern::HighOnes(choose_between(source, 0, width)),
+        7 => BitValuePattern::Alternating { lsb_is_one: true },
+        _ => BitValuePattern::Alternating { lsb_is_one: false },
+    };
+    generate_pattern_irbits(width, pattern)
+}
+
+/// Generates flat bitvector argument sets using per-vector mixed sampling.
 pub fn generate_flat_bitvector_argument_sets_with_rng<R: RngCore + ?Sized>(
     rng: &mut R,
     input_widths: &[usize],
     count: usize,
 ) -> Vec<Vec<IrBits>> {
-    let mut sets = Vec::with_capacity(count);
-    if count > 0 {
-        sets.push(
-            input_widths
-                .iter()
-                .map(|width| generate_pattern_irbits(*width, BitValuePattern::Zero))
-                .collect(),
-        );
-    }
-    if count > 1 {
-        sets.push(
-            input_widths
-                .iter()
-                .map(|width| generate_pattern_irbits(*width, BitValuePattern::AllOnes))
-                .collect(),
-        );
-    }
-    let mut source = RngEntropy::new(rng);
-    while sets.len() < count {
-        sets.push(
-            input_widths
-                .iter()
-                .map(|width| generate_biased_irbits(&mut source, *width))
-                .collect(),
-        );
-    }
-    sets
+    (0..count)
+        .map(|_| generate_mixed_irbits_with_rng(rng, input_widths))
+        .collect()
 }
 
 /// Generates reproducible flat bitvector argument sets.
@@ -390,28 +549,183 @@ fn choose_between<S: EntropySource>(source: &mut S, minimum: usize, maximum: usi
 mod tests {
     use std::collections::BTreeSet;
 
-    use rand::{RngCore, SeedableRng};
+    use rand::{RngCore, SeedableRng, rngs::mock::StepRng};
     use rand_pcg::Pcg64Mcg;
 
     use super::{
-        generate_corner_irbits, generate_mixed_argument_sets_with_rng, mixed_biased_count,
+        BitValuePattern, InputKind, generate_corner_irbits, generate_mixed_argument_sets_with_rng,
+        generate_mixed_arguments_with_rng, generate_mixed_irbits_with_rng,
+        generate_mixed_values_with_rng, input_kinds, perturb_irbits, perturb_specials,
+        perturb_value, special_positions,
     };
-    use crate::FnBuilder;
     use crate::ir::Type;
+    use crate::{FnBuilder, IrBits, IrValue};
 
     #[test]
-    fn mixed_sample_budget_uses_both_strategies_and_varies_the_ratio() {
-        let mut singleton_counts = BTreeSet::new();
-        let mut mixed_counts = BTreeSet::new();
+    fn special_positions_cover_zero_through_all_without_reordering_arguments() {
+        for count in 0..=8 {
+            let mut cardinalities = BTreeSet::new();
+            let mut frequencies = vec![0; count + 1];
+            let mut subsets = BTreeSet::new();
+            for seed in 0..1024 {
+                let mut rng = Pcg64Mcg::seed_from_u64(seed);
+                let positions = special_positions(&mut rng, count);
+                assert_eq!(positions.len(), count);
+                let special_count = positions.iter().filter(|&&special| special).count();
+                cardinalities.insert(special_count);
+                frequencies[special_count] += 1;
+                subsets.insert(positions);
+            }
+            assert_eq!(cardinalities, (0..=count).collect());
+            // A deterministic broad check distinguishes uniform K from
+            // independently marking each argument special (binomial K).
+            let expected = 1024 / (count + 1);
+            for frequency in frequencies {
+                assert!((expected / 2..=expected * 2).contains(&frequency));
+            }
+            if count <= 3 {
+                assert_eq!(subsets.len(), 1 << count);
+            }
+        }
+    }
+
+    #[test]
+    fn typed_and_flat_vectors_share_policy_and_rng_draws() {
+        let widths = [129, 65, 257, 0];
+        let types = widths.map(Type::Bits);
         for seed in 0..128 {
             let mut rng = Pcg64Mcg::seed_from_u64(seed);
-            assert_eq!(mixed_biased_count(&mut rng, 0), 0);
-            assert_eq!(mixed_biased_count(&mut rng, 2), 1);
-            singleton_counts.insert(mixed_biased_count(&mut rng, 1));
-            mixed_counts.insert(mixed_biased_count(&mut rng, 8));
+            let mut flat_rng = rng.clone();
+            let values = generate_mixed_values_with_rng(&mut rng, &types);
+            let flat = generate_mixed_irbits_with_rng(&mut flat_rng, &widths);
+            assert_eq!(rng.next_u64(), flat_rng.next_u64());
+            for (index, (value, bits)) in values.iter().zip(&flat).enumerate() {
+                assert_eq!(value.as_bits().unwrap(), bits);
+                assert_eq!(bits.get_bit_count(), widths[index]);
+            }
         }
-        assert_eq!(singleton_counts, BTreeSet::from([0, 1]));
-        assert_eq!(mixed_counts, (1..8).collect());
+    }
+
+    #[test]
+    fn structured_vectors_alternate_by_argument_not_by_bit() {
+        let mut observed = BTreeSet::new();
+        let mut mixed_seen = false;
+        let mut structured_count = 0;
+        for seed in 0..4096 {
+            let kinds = input_kinds(&mut Pcg64Mcg::seed_from_u64(seed), 3);
+            if kinds
+                .iter()
+                .all(|kind| matches!(kind, InputKind::Pattern(_)))
+            {
+                structured_count += 1;
+                observed.insert(
+                    kinds
+                        .iter()
+                        .map(|kind| match kind {
+                            InputKind::Pattern(BitValuePattern::Zero) => false,
+                            InputKind::Pattern(BitValuePattern::AllOnes) => true,
+                            _ => panic!("whole-vector patterns must fill entire arguments"),
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            } else {
+                mixed_seen = true;
+            }
+        }
+        assert_eq!(
+            observed,
+            BTreeSet::from([
+                vec![false, false, false],
+                vec![true, true, true],
+                vec![true, false, true],
+                vec![false, true, false],
+            ])
+        );
+        assert!(mixed_seen);
+        // Fixed seeds keep this non-flaky; the broad interval catches a
+        // policy regression without depending on an exact RNG histogram.
+        assert!((328..=492).contains(&structured_count));
+    }
+
+    #[test]
+    fn one_gate_controls_all_special_positions_and_never_uniform_ones() {
+        let kinds = [
+            InputKind::Special,
+            InputKind::Uniform,
+            InputKind::Pattern(BitValuePattern::Zero),
+        ];
+        let original = vec![IrBits::zero(129); 3];
+        let mut unchanged = original.clone();
+        perturb_specials(
+            &mut StepRng::new(u64::MAX, 0),
+            &kinds,
+            &mut unchanged,
+            perturb_irbits,
+        );
+        assert_eq!(unchanged, original);
+        let mut changed = original.clone();
+        perturb_specials(
+            &mut StepRng::new(0, 0),
+            &kinds,
+            &mut changed,
+            perturb_irbits,
+        );
+        assert_eq!(
+            changed,
+            vec![
+                IrBits::all_ones(129),
+                IrBits::zero(129),
+                IrBits::all_ones(129)
+            ]
+        );
+        // The gate succeeds, but every later draw is above the bit threshold.
+        // Enabling perturbation must not force a flip.
+        perturb_specials(
+            &mut StepRng::new(0, u64::MAX),
+            &kinds,
+            &mut unchanged,
+            perturb_irbits,
+        );
+        assert_eq!(unchanged, original);
+    }
+
+    #[test]
+    fn per_bit_probability_and_aggregate_perturbation_preserve_widths() {
+        let changed = perturb_irbits(&mut StepRng::new(0, 1u64 << 58), &IrBits::zero(129));
+        for bit in 0..129 {
+            assert_eq!(changed.get_bit(bit).unwrap(), bit % 64 == 0);
+        }
+        let aggregate = IrValue::make_tuple(&[
+            IrValue::make_token(),
+            IrValue::from_bits(&IrBits::zero(0)),
+            IrValue::make_array_typed(Type::Bits(257), &[]).unwrap(),
+            IrValue::make_array(&[IrValue::from_bits(&IrBits::zero(65))]).unwrap(),
+        ]);
+        let result = perturb_value(&mut StepRng::new(0, 0), &aggregate);
+        assert_eq!(result.type_(), aggregate.type_());
+        assert_eq!(
+            result.as_elements().unwrap()[3].as_elements().unwrap()[0]
+                .as_bits()
+                .unwrap(),
+            &IrBits::all_ones(65),
+        );
+    }
+
+    #[test]
+    fn batches_choose_a_fresh_subset_per_evaluation() {
+        let mut builder = FnBuilder::new("per_vector_selection");
+        let lhs = builder.param("lhs", Type::Bits(129)).unwrap();
+        let rhs = builder.param("rhs", Type::Bits(65)).unwrap();
+        let result = builder.tuple(&[lhs, rhs]).unwrap();
+        let function = builder.build(result).unwrap();
+        let mut rng = Pcg64Mcg::seed_from_u64(42);
+        let mut replay = rng.clone();
+        assert_eq!(
+            generate_mixed_argument_sets_with_rng(&function, &mut rng, 16),
+            (0..16)
+                .map(|_| generate_mixed_arguments_with_rng(&mut replay, &function))
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]

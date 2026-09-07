@@ -13,7 +13,7 @@ use xlsynth_codegen_fuzz::{
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r_fuzz::external_yosys::required_external_yosys_context;
 use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
-use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
 fuzz_target!(init: {
     if let Err(error) = validate(Oracles::YosysSequential) {
@@ -37,11 +37,7 @@ fuzz_target!(init: {
     let output_types = block_output_types(block);
     let design = &mapped.mapped.sequential_gate_fn;
     let mut rng = deterministic_rng(&ir);
-    let mut state = block
-        .registers
-        .iter()
-        .map(|register| generate_uniform_value_with_rng(&mut rng, &register.ty))
-        .collect::<Vec<_>>();
+    let mut state = generate_mixed_values_with_rng(&mut rng, block.registers.iter().map(|r| &r.ty));
     let mut stimuli = Vec::with_capacity(CYCLE_COUNT);
     let mut expected_outputs = Vec::with_capacity(CYCLE_COUNT);
     for cycle in 0..CYCLE_COUNT {

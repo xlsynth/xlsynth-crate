@@ -11,7 +11,7 @@ use xlsynth_pir::ir::{self, NodePayload, Type, Unop};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::libxls_bridge::{value_from_libxls, value_to_libxls};
-use xlsynth_pir::random_inputs::generate_uniform_arguments_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_arguments_with_rng;
 use xlsynth_pir::{FnBuilder, IrBits, IrValue, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
 
 /// Checks the emitted package, roundtrip stability, and independent execution.
@@ -66,7 +66,7 @@ fn bit_samples(width: usize, count: usize) -> Vec<Vec<IrValue>> {
     let function = builder.build(lhs).unwrap();
     let mut rng = StdRng::seed_from_u64(0x6275_696c_6465_7200 + width as u64);
     for _ in 0..count {
-        result.push(generate_uniform_arguments_with_rng(&mut rng, &function));
+        result.push(generate_mixed_arguments_with_rng(&mut rng, &function));
     }
     result
 }
@@ -239,7 +239,7 @@ fn reconstruct_shared_signature_corpus_with_builder() {
         let result = nodes[&original.ret_node_ref.unwrap().index];
         let package = b.build_package(result, "corpus").unwrap();
         let samples = (0..16)
-            .map(|_| generate_uniform_arguments_with_rng(&mut rng, original))
+            .map(|_| generate_mixed_arguments_with_rng(&mut rng, original))
             .collect::<Vec<_>>();
         check_with_xls(&package, &samples);
         for args in samples {

@@ -19,7 +19,7 @@ use xlsynth_pir::ir_random::{
 use xlsynth_pir::ir_utils::operands;
 use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::random_inputs::{
-    generate_argument_sets_from_seed, generate_biased_arguments, generate_biased_value,
+    generate_argument_sets_from_seed, generate_biased_value, generate_mixed_arguments_with_rng,
     generate_uniform_value,
 };
 
@@ -919,6 +919,7 @@ fn safe_array_assumptions_hold_for_arbitrary_inputs() {
         ..RandomFnOptions::default()
     };
     let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xb0a0_d5));
+    let mut input_rng = Pcg64Mcg::new(0xb0a0_d6);
     let mut assumed_count = 0;
     for _ in 0..120 {
         let generated =
@@ -943,10 +944,7 @@ fn safe_array_assumptions_hold_for_arbitrary_inputs() {
         let package = generated.into_top_package("safe");
         let function = package.get_top_fn().unwrap();
         for _ in 0..4 {
-            let inputs = function
-                .param_nodes()
-                .map(|param| generate_uniform_value(&mut entropy, &param.ty))
-                .collect::<Vec<_>>();
+            let inputs = generate_mixed_arguments_with_rng(&mut input_rng, function);
             assert!(
                 matches!(
                     eval_fn_in_package(&package, function, &inputs),
@@ -1766,7 +1764,7 @@ fn biased_generated_bits_include_corner_patterns() {
 }
 
 #[test]
-fn argument_sets_start_with_whole_input_corner_patterns() {
+fn argument_sets_replay_without_a_mandatory_corner_prefix() {
     let signature = FunctionSignature {
         params: vec![Type::Bits(8), Type::Bits(3)],
         return_type: Type::Bits(8),
@@ -1789,13 +1787,15 @@ fn argument_sets_start_with_whole_input_corner_patterns() {
     let sets = generate_argument_sets_from_seed(&generated.function, 0x1234, 3);
     assert_eq!(sets.len(), 3);
     assert_eq!(
-        sets[0].iter().map(ToString::to_string).collect::<Vec<_>>(),
-        ["bits[8]:0", "bits[3]:0"]
+        sets,
+        generate_argument_sets_from_seed(&generated.function, 0x1234, 3)
     );
-    assert_eq!(
-        sets[1].iter().map(ToString::to_string).collect::<Vec<_>>(),
-        ["bits[8]:255", "bits[3]:7"]
-    );
+    for args in &sets {
+        assert_eq!(
+            args.iter().map(|value| value.type_()).collect::<Vec<_>>(),
+            signature.params
+        );
+    }
     assert!(generate_argument_sets_from_seed(&generated.function, 0x1234, 0).is_empty());
 }
 
@@ -2740,13 +2740,13 @@ fn probabilistic_expanded_standard_generation_matches_libxls_interpreter() {
         ..RandomFnOptions::default()
     };
     let mut graph_entropy = RngEntropy::new(Pcg64Mcg::new(0xb042_0ca9));
-    let mut value_entropy = RngEntropy::new(Pcg64Mcg::new(0x16e4_d4f1));
+    let mut value_rng = Pcg64Mcg::new(0x16e4_d4f1);
     for sample in 0..300 {
         let generated =
             generate_fn(&mut graph_entropy, &options, StopPolicy::ExactBodyNodes(40)).unwrap();
         let package = generated.into_top_package(format!("expanded_eval_{sample}"));
         let function = package.get_top_fn().unwrap();
-        let args = generate_biased_arguments(&mut value_entropy, function);
+        let args = generate_mixed_arguments_with_rng(&mut value_rng, function);
         let ir_text = package.to_string();
         let xls_package = xlsynth::IrPackage::parse_ir(&ir_text, None)
             .unwrap_or_else(|error| panic!("libxls rejected generated PIR:\n{ir_text}\n{error}"));

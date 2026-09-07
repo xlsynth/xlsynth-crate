@@ -15,9 +15,10 @@ current native-value execution boundary. Generated packages may include
 `xlsynth_pir::ir_eval` and through `xlsynth-pir-compiler`, then requires
 identical returned values. Each compiled graph is exercised with
 32 reproducible argument sets rather than decoding arguments directly from the
-coverage-guided graph byte stream. These begin with whole-input zero and
-all-ones cases, then use pseudorandom leaves biased toward useful bitvector
-corner patterns.
+coverage-guided graph byte stream. These use the
+[shared mixed-vector sampler](../../FUZZ.md#shared-concrete-input-sampling):
+10% structured vectors, otherwise a fresh uniformly selected number of special
+arguments per evaluation, with optional sparse perturbation of special values.
 
 Essential property under test:
 
@@ -51,8 +52,8 @@ Generated array operations also exercise `assumed_in_bounds=true` and compare
 reported out-of-bounds assumption violations.
 Observable event results are compared as unordered multisets because independent
 event nodes are not semantically ordered unless their token dependencies require it.
-Each compiled graph is exercised with the same 32 reproducible, corner-biased
-argument sets.
+Each compiled graph is exercised with 32 reproducible argument sets from the
+[shared mixed-vector sampler](../../FUZZ.md#shared-concrete-input-sampling).
 
 Main additional failure modes surfaced:
 
@@ -79,8 +80,8 @@ runtime results. It also generates `assumed_in_bounds=true` array operations
 and compares reported out-of-bounds violations. The target enables every
 operation provided by the random PIR function generator, including
 `counted_for`.
-Each compiled graph is exercised with the same 32 reproducible, corner-biased
-argument sets.
+Each compiled graph is exercised with 32 reproducible argument sets from the
+[shared mixed-vector sampler](../../FUZZ.md#shared-concrete-input-sampling).
 
 Main additional failure modes surfaced:
 

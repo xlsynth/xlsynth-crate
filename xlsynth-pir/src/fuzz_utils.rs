@@ -6,8 +6,8 @@ use crate::random_inputs::generate_uniform_irbits_with_rng;
 
 /// Generates uniformly distributed bits using the provided RNG.
 ///
-/// Prefer `random_inputs::generate_biased_irbits_with_rng` for semantic
-/// checking.
+/// Prefer `random_inputs::generate_mixed_irbits_with_rng` for semantic
+/// checking of a complete input vector.
 /// Uniform samples remain useful for workload-oriented measurements such as
 /// toggle estimation.
 pub fn arbitrary_irbits<R: rand::Rng>(rng: &mut R, width: usize) -> IrBits {

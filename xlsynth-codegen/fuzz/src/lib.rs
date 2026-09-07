@@ -8,7 +8,6 @@ pub mod iverilog;
 pub mod preflight;
 pub mod references;
 pub mod semantics;
-pub mod stimulus;
 pub mod tool_failure;
 #[cfg(feature = "external-yosys")]
 pub mod yosys;
@@ -24,7 +23,7 @@ use xlsynth_pir::ir_random::{
     ArrayAssumptionMode, BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions,
     RandomBlockResetTiming, RandomFnOptions, RandomOperation, StopPolicy, generate_block_package,
 };
-use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
 /// Number of independent value samples used for each generated graph.
 pub const INPUT_SAMPLE_COUNT: usize = 16;
@@ -175,10 +174,7 @@ pub fn deterministic_rng(ir: &str) -> StdRng {
 
 /// Draws one correctly typed value for each visible generated input port.
 pub fn generate_inputs(block: &Block, rng: &mut StdRng) -> Vec<IrValue> {
-    block
-        .input_ports()
-        .map(|param| generate_uniform_value_with_rng(rng, block.port_type(param)))
-        .collect()
+    generate_mixed_values_with_rng(rng, block.input_ports().map(|param| block.port_type(param)))
 }
 
 /// Draws a reset-aware deterministic input vector for one clock cycle.
@@ -188,30 +184,28 @@ pub fn generate_cycle_inputs(
     cycle: usize,
     require_initial_reset: bool,
 ) -> Vec<IrValue> {
-    block
-        .input_ports()
-        .map(|param| {
-            if let Some(reset) = &block.reset
-                && param == reset.port
-            {
-                let asserted = if require_initial_reset {
-                    cycle == 0
-                } else if cycle == 0 {
-                    rng.gen_bool(0.5)
-                } else {
-                    rng.gen_ratio(1, 8)
-                };
-                let high = if reset.active_low {
-                    !asserted
-                } else {
-                    asserted
-                };
-                return IrValue::make_ubits(1, u64::from(high))
-                    .expect("reset signal should fit in bits[1]");
-            }
-            generate_uniform_value_with_rng(rng, block.port_type(param))
-        })
-        .collect()
+    let mut inputs = generate_inputs(block, rng);
+    for (index, param) in block.input_ports().enumerate() {
+        if let Some(reset) = &block.reset
+            && param == reset.port
+        {
+            let asserted = if require_initial_reset {
+                cycle == 0
+            } else if cycle == 0 {
+                rng.gen_bool(0.5)
+            } else {
+                rng.gen_ratio(1, 8)
+            };
+            let high = if reset.active_low {
+                !asserted
+            } else {
+                asserted
+            };
+            inputs[index] = IrValue::make_ubits(1, u64::from(high))
+                .expect("reset signal should fit in bits[1]");
+        }
+    }
+    inputs
 }
 
 /// Compares emitted outputs with PIR using Icarus.
@@ -239,11 +233,12 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::{RngCore, SeedableRng};
     use xlsynth_codegen::BlockCodegenOptions;
+    use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_random::RandomOperation;
 
     use super::{
         assert_combinational_semantics, assert_sequential_semantics, block_options, emit, generate,
-        parse_reference, references,
+        generate_cycle_inputs, generate_inputs, parse_reference, references, top_block,
     };
 
     #[test]
@@ -361,6 +356,33 @@ top block zero(clk: clock, x: bits[0], enable: bits[1], out: bits[0]) {
         for signed in [false, true] {
             let source = references::partial_product(signed, 5, 7, 11);
             assert!(parse_reference(&source).get_top_block().is_some());
+        }
+    }
+
+    #[test]
+    fn mixed_cycle_inputs_preserve_reset_protocol_and_other_ports() {
+        let package = parse_reference(references::SEQUENTIAL);
+        for active_low in [false, true] {
+            let mut block = top_block(&package).clone();
+            block.reset.as_mut().unwrap().active_low = active_low;
+            let reset = block.reset.as_ref().unwrap();
+            let reset_index = block
+                .input_ports()
+                .position(|port| port == reset.port)
+                .unwrap();
+            let mut rng = StdRng::seed_from_u64(42);
+            for cycle in 0..32 {
+                let mut replay = rng.clone();
+                let mut expected = generate_inputs(&block, &mut replay);
+                expected[reset_index] =
+                    IrValue::make_ubits(1, u64::from((cycle == 0) ^ active_low)).unwrap();
+                let actual = generate_cycle_inputs(&block, &mut rng, cycle, true);
+                assert_eq!(actual, expected);
+                assert_eq!(rng.next_u64(), replay.next_u64());
+                for (port, value) in block.input_ports().zip(&actual) {
+                    assert_eq!(block.port_type(port), &value.type_());
+                }
+            }
         }
     }
 

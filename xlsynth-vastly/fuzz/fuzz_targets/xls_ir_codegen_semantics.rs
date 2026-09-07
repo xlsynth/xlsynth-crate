@@ -22,7 +22,7 @@ use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
 };
-use xlsynth_pir::random_inputs::generate_biased_arguments_from_seed;
+use xlsynth_pir::random_inputs::generate_mixed_arguments_from_seed;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
@@ -58,7 +58,7 @@ fuzz_target!(|data: &[u8]| {
         // Non-packable signatures are outside this target's current simulation harness.
         None => return,
     };
-    let base_args = generate_biased_arguments_from_seed(pir_top, stable_hash_bytes(data));
+    let base_args = generate_mixed_arguments_from_seed(pir_top, stable_hash_bytes(data));
     let stimuli = match generate_stimuli(base_args, pir_top, &ir_text, data) {
         Ok(v) => v,
         Err(e) => {
