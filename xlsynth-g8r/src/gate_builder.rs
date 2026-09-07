@@ -1592,6 +1592,31 @@ mod tests {
     }
 
     #[test]
+    fn test_find_existing_and_pairs_is_exact_for_dense_adjacency() {
+        let mut builder =
+            GateBuilder::new("dense_adjacency".to_string(), GateBuilderOptions::opt());
+        let common = *builder.add_input("common".to_string(), 1).get_lsb(0);
+        let matching_leaf = *builder.add_input("matching_leaf".to_string(), 1).get_lsb(0);
+        let expected = builder.add_and_binary(common, matching_leaf);
+        for index in 0..8 {
+            let leaf = *builder
+                .add_input(format!("other_leaf_{index}"), 1)
+                .get_lsb(0);
+            builder.add_and_binary(common, leaf);
+        }
+
+        assert_eq!(
+            builder.find_existing_and_pairs(&[common, matching_leaf]),
+            vec![ExistingAndPair {
+                lhs_index: 0,
+                rhs_index: 1,
+                depth: 1,
+            }]
+        );
+        assert_eq!(builder.add_and_binary(matching_leaf, common), expected);
+    }
+
+    #[test]
     fn test_append_checkpoint_rollback_restores_builder_prefix() {
         let mut builder = GateBuilder::new("checkpoint".to_string(), GateBuilderOptions::opt());
         let a = *builder.add_input("a".to_string(), 1).get_lsb(0);

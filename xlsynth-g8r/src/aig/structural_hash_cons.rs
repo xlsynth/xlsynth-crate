@@ -48,6 +48,12 @@ pub(crate) struct ExistingAndPair {
     pub(crate) depth: usize,
 }
 
+/// Caps dense adjacency work at the number of candidate operand pairs.
+fn should_probe_candidate_pairs(adjacency_edge_count: usize, operand_count: usize) -> bool {
+    let candidate_pair_count = operand_count.saturating_mul(operand_count.saturating_sub(1)) / 2;
+    adjacency_edge_count > candidate_pair_count
+}
+
 /// Incrementally interns structural AIG expressions as a builder appends nodes.
 #[derive(Clone)]
 pub(crate) struct StructuralHashCons {
@@ -151,8 +157,9 @@ impl StructuralHashCons {
 
     /// Returns existing ANDs whose two operands both occur in `operands`.
     ///
-    /// Hash maps are used only for keyed lookup. Candidate order comes from
-    /// `operands` and each adjacency vector's stable registration order.
+    /// Hash maps are used only for keyed lookup. Candidate traversal follows
+    /// operand index order; sparse adjacency vectors retain registration order,
+    /// and the dense fallback probes right-hand indices in ascending order.
     pub(crate) fn find_and_pairs(
         &mut self,
         nodes: &[AigNode],
@@ -163,6 +170,42 @@ impl StructuralHashCons {
             .iter()
             .map(|operand| self.structural_operand(*operand))
             .collect::<Vec<_>>();
+        let adjacency_edge_count = {
+            let and_neighbors = self
+                .and_neighbors
+                .as_ref()
+                .expect("AND adjacency should be initialized");
+            structural_operands.iter().fold(0usize, |count, operand| {
+                count.saturating_add(and_neighbors.get(operand).map_or(0, Vec::len))
+            })
+        };
+
+        // Sparse adjacency avoids blind candidate-pair probes. For dense or
+        // high-fanout operands, pairwise lookup provides a hard work bound.
+        if should_probe_candidate_pairs(adjacency_edge_count, structural_operands.len()) {
+            let mut result = Vec::new();
+            for lhs_index in 0..structural_operands.len() {
+                for rhs_index in lhs_index + 1..structural_operands.len() {
+                    let mut lhs = structural_operands[lhs_index];
+                    let mut rhs = structural_operands[rhs_index];
+                    if rhs < lhs {
+                        std::mem::swap(&mut lhs, &mut rhs);
+                    }
+                    let Some(expression_id) = self
+                        .key_to_expression_id
+                        .get(&StructuralKey::And2 { lhs, rhs })
+                    else {
+                        continue;
+                    };
+                    result.push(ExistingAndPair {
+                        lhs_index,
+                        rhs_index,
+                        depth: self.expression_data[*expression_id].min_depth,
+                    });
+                }
+            }
+            return result;
+        }
         let mut indices_by_operand: HashMap<StructuralOperand, Vec<usize>> = HashMap::new();
         for (index, operand) in structural_operands.iter().copied().enumerate() {
             indices_by_operand.entry(operand).or_default().push(index);
@@ -326,5 +369,18 @@ impl StructuralHashCons {
         // `ref_data` can already be shorter than `gate_count` when the graph
         // prefix ends in folded-away, deliberately unregistered nodes.
         self.ref_data.truncate(gate_count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pair_search_work_is_bounded_by_candidate_pair_count() {
+        assert!(!should_probe_candidate_pairs(1, 2));
+        assert!(should_probe_candidate_pairs(2, 2));
+        assert!(!should_probe_candidate_pairs(2_016, 64));
+        assert!(should_probe_candidate_pairs(2_017, 64));
     }
 }
