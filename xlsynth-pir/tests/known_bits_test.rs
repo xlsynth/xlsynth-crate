@@ -429,6 +429,27 @@ fn empty_blocks_and_output_sink_users_have_real_unit_facts() {
 }
 
 #[test]
+fn block_analysis_rejects_an_empty_node_graph() {
+    let mut block = BlockBuilder::new("missing_sentinel").build().unwrap();
+    block.nodes.clear();
+    assert_eq!(
+        analyze_block(&block).unwrap_err().to_string(),
+        "block graph must start with a Nil sentinel"
+    );
+}
+
+#[test]
+fn block_analysis_rejects_a_value_in_the_sentinel_slot() {
+    let mut block = BlockBuilder::new("replaced_sentinel").build().unwrap();
+    block.nodes[0].ty = Type::Bits(8);
+    block.nodes[0].payload = NodePayload::Literal(bits(8, 42));
+    assert_eq!(
+        analyze_block(&block).unwrap_err().to_string(),
+        "block graph must start with a Nil sentinel"
+    );
+}
+
+#[test]
 fn malformed_local_graphs_return_errors_instead_of_knowledge() {
     let mut builder = FnBuilder::new("valid");
     let x = builder.param("x", Type::Bits(8)).unwrap();

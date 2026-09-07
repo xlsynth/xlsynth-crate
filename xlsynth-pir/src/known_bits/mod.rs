@@ -246,6 +246,15 @@ pub fn analyze_fn(function: &ir::Fn) -> Result<KnownBitsAnalysis<'_>, AnalysisEr
 /// Instance outputs are opaque unknown sources. Package-level hierarchy and
 /// resource validity remain the responsibility of the package verifier.
 pub fn analyze_block(block: &ir::Block) -> Result<KnownBitsAnalysis<'_>, AnalysisError> {
+    if !block
+        .nodes
+        .first()
+        .is_some_and(|node| matches!(node.payload, NodePayload::Nil))
+    {
+        return Err(AnalysisError::new(
+            "block graph must start with a Nil sentinel",
+        ));
+    }
     analyze_graph(&block.graph)
 }
 
