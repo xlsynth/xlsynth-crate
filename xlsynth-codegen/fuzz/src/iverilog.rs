@@ -4,10 +4,10 @@
 
 use std::time::Duration;
 
-use rand::Rng;
 use xlsynth::external_tool::ToolError;
 use xlsynth_g8r_fuzz::random_block::block_output_types;
 use xlsynth_pir::ir::Package;
+use xlsynth_pir::random_inputs::generate_mixed_irbits_with_rng;
 use xlsynth_test_helpers::iverilog::required_iverilog_toolchain;
 use xlsynth_test_helpers::rtl_sim::{Icarus, Interface, Port, StateSignal, identifier};
 
@@ -108,8 +108,9 @@ pub fn assert_hierarchy_semantics(ir: &str, rtl: &str, width: usize) -> Result<(
     let mask = (1_u64 << width) - 1;
     let mut rng = deterministic_rng(ir);
     for sample in 0..INPUT_SAMPLE_COUNT {
-        let left = rng.gen_range(0..=mask);
-        let right = rng.gen_range(0..=mask);
+        let inputs = generate_mixed_irbits_with_rng(&mut rng, &[width, width]);
+        let left = inputs[0].to_u64().unwrap();
+        let right = inputs[1].to_u64().unwrap();
         let expected = ((left.wrapping_add(1) & mask) ^ (right.wrapping_add(1) & mask)) & mask;
         testbench.push_str(&format!(
             "    left = {width}'h{left:x}; right = {width}'h{right:x}; #1;\n    if (result !== {width}'h{expected:x}) $fatal(1, \"hierarchy sample {sample} mismatch: actual=%h expected={expected:x}\", result);\n"
@@ -135,10 +136,11 @@ pub fn assert_extern_semantics(
         "`timescale 1ns/1ps\nmodule public_fuzz_testbench;\n  reg [{last}:0] x;\n  wire [{last}:0] result;\n  wrapper dut (.x(x), .result(result));\n  initial begin\n",
         last = width - 1
     );
-    let mask = (1_u64 << width) - 1;
     let mut rng = deterministic_rng(ir);
     for sample in 0..INPUT_SAMPLE_COUNT {
-        let input = rng.gen_range(0..=mask);
+        let input = generate_mixed_irbits_with_rng(&mut rng, &[width])[0]
+            .to_u64()
+            .unwrap();
         testbench.push_str(&format!(
             "    x = {width}'h{input:x}; #1;\n    if (result !== {width}'h{input:x}) $fatal(1, \"external instance sample {sample} mismatch: actual=%h expected={input:x}\", result);\n"
         ));

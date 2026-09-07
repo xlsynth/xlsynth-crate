@@ -25,7 +25,7 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval;
 use xlsynth_pir::ir_utils::is_structural_payload;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
-use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_irbits_with_rng;
 
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output, PirNodeIds};
 use crate::aig::topo::topo_sort_refs;
@@ -890,12 +890,20 @@ fn make_random_args_for_both(
     let mut pir_args: Vec<IrValue> = Vec::with_capacity(pir_fn.params.len());
     let mut gate_inputs: Vec<IrBits> = Vec::with_capacity(gate_fn.inputs.len());
 
-    for (param, gate_input) in pir_fn.param_nodes().zip(gate_fn.inputs.iter()) {
+    let widths = pir_fn
+        .param_nodes()
+        .map(|param| param.ty.bit_count())
+        .collect::<Vec<_>>();
+    let random_values = generate_mixed_irbits_with_rng(rng, &widths);
+    for ((param, gate_input), random_bits) in pir_fn
+        .param_nodes()
+        .zip(gate_fn.inputs.iter())
+        .zip(random_values)
+    {
         // Generate the *flat* bitvector first, then unflatten into an IrValue.
         // This ensures the PIR evaluator and the GateFn see identical bit
         // patterns in the same flattened order for tuple/array
         // parameters.
-        let random_bits = generate_biased_irbits_with_rng(rng, param.ty.bit_count());
         let flat_bits: Vec<bool> = (0..random_bits.get_bit_count())
             .map(|bit_index| random_bits.get_bit(bit_index).unwrap())
             .collect();

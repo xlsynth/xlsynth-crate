@@ -29,7 +29,7 @@ use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
     RandomOperation, StopPolicy, generate_block_package,
 };
-use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
 const CYCLE_COUNT: usize = 32;
 
@@ -56,32 +56,27 @@ fn fuzz_block_options() -> RandomBlockOptions {
 }
 
 fn generate_initial_state(block: &Block, rng: &mut StdRng) -> Vec<IrValue> {
-    block
-        .registers
-        .iter()
-        .map(|register| generate_uniform_value_with_rng(rng, &register.ty))
-        .collect()
+    generate_mixed_values_with_rng(rng, block.registers.iter().map(|r| &r.ty))
 }
 
 fn generate_cycle_inputs(block: &Block, rng: &mut StdRng, cycle: usize) -> Vec<IrValue> {
-    block
-        .input_ports()
-        .map(|param| {
-            if let Some(reset) = block.reset.as_ref()
-                && param == reset.port
-            {
-                let asserted = cycle == 0;
-                let signal_high = if reset.active_low {
-                    !asserted
-                } else {
-                    asserted
-                };
-                return IrValue::make_ubits(1, u64::from(signal_high))
-                    .expect("bits[1] reset input should construct");
-            }
-            generate_uniform_value_with_rng(rng, block.port_type(param))
-        })
-        .collect()
+    let mut inputs =
+        generate_mixed_values_with_rng(rng, block.input_ports().map(|p| block.port_type(p)));
+    for (index, param) in block.input_ports().enumerate() {
+        if let Some(reset) = block.reset.as_ref()
+            && param == reset.port
+        {
+            let asserted = cycle == 0;
+            let signal_high = if reset.active_low {
+                !asserted
+            } else {
+                asserted
+            };
+            inputs[index] = IrValue::make_ubits(1, u64::from(signal_high))
+                .expect("bits[1] reset input should construct");
+        }
+    }
+    inputs
 }
 
 fn external_input_shapes(design: &SequentialGateFn) -> BTreeMap<String, usize> {

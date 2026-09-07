@@ -13,7 +13,7 @@ use xlsynth_g8r::aig::dce::dce;
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateBuilder, GateBuilderOptions, GateFn};
 use xlsynth_g8r::aig_sim::gate_sim::{Collect, eval};
 
-use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_irbits_with_rng;
 
 static LOGGER_INIT: Once = Once::new();
 
@@ -540,8 +540,8 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
 
     // 2. No-op rebuild: the original substitution map is expressed in terms of
     //    `gate_fn` node IDs, but `bulk_replace` runs DCE and renumbers nodes in
-    //    `new_fn`. Reapplying that stale map would be invalid, so rebuild `new_fn`
-    //    with an empty map instead and check output shape stability.
+    //    `new_fn`. Reapplying that stale map would be invalid, so rebuild
+    //    `new_fn` with an empty map instead and check output shape stability.
     let no_op_substitutions = SubstitutionMap::new();
     let new_fn2 = bulk_replace(&new_fn, &no_op_substitutions, opts);
     assert_eq!(
@@ -572,16 +572,12 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         );
     }
     // Optionally, check simulation outputs for a random input vector
-    let mut input_vecs = Vec::new();
-    for input in &gate_fn.inputs {
-        let width = input.get_bit_count();
-        if width == 0 || width >= 64 {
-            // zero-width or too big to fit in u64, skip this fuzz case
-            return;
-        }
-        let bits = generate_biased_irbits_with_rng(&mut rng, width);
-        input_vecs.push(bits);
-    }
+    let widths = gate_fn
+        .inputs
+        .iter()
+        .map(|input| input.get_bit_count())
+        .collect::<Vec<_>>();
+    let input_vecs = generate_mixed_irbits_with_rng(&mut rng, &widths);
     let orig_sim = eval(&gate_fn, &input_vecs, Collect::None);
     let dce_sim = eval(&dce_fn, &input_vecs, Collect::None);
     assert_eq!(

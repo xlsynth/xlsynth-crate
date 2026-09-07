@@ -366,8 +366,12 @@ impl CoverageReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoverageReport, Outcome};
-    use crate::parse_reference;
+    use std::collections::BTreeMap;
+    use xlsynth_g8r_fuzz::random_block::evaluate_block_cycle_observed;
+    use xlsynth_pir::{IrBits, IrValue};
+
+    use super::{CoverageReport, Outcome, live_nodes, record_behaviors};
+    use crate::{parse_reference, top_block};
 
     #[test]
     fn data_widths_distinguish_operand_roles_even_when_nodes_are_shared() {
@@ -443,6 +447,21 @@ top block behaviors(values: bits[8][3], index: bits[128], data: bits[65], read: 
 "#,
         );
         let trace = crate::semantics::Trace::for_package(&package);
+        // Coverage accounting needs explicit boundary stimuli, not a guarantee
+        // that a small random sample will contain every event.
+        let block = top_block(&package);
+        let live = live_nodes(block);
+        let mut observed = BTreeMap::new();
+        let array = IrValue::make_array(&vec![IrValue::from_bits(&IrBits::zero(8)); 3]).unwrap();
+        for (index, data) in [(0, IrBits::zero(65)), (3, IrBits::all_ones(65))] {
+            let inputs = [
+                array.clone(),
+                IrValue::make_ubits(128, index).unwrap(),
+                IrValue::from_bits(&data),
+            ];
+            let evaluated = evaluate_block_cycle_observed(block, &inputs, &[]);
+            record_behaviors(block, &evaluated.node_values, &live, &mut observed);
+        }
         for event in [
             "array_index:in-bounds",
             "array_index:out-of-bounds",
@@ -453,13 +472,9 @@ top block behaviors(values: bits[8][3], index: bits[128], data: bits[65], read: 
             "one_hot:zero-input",
             "one_hot:nonzero-input",
         ] {
-            assert!(trace.observed_live_behaviors[event] > 0, "{event}");
+            assert_eq!(observed.get(event), Some(&1), "{event}");
         }
-        assert!(
-            !trace
-                .observed_live_behaviors
-                .contains_key("udiv:zero-divisor")
-        );
+        assert!(!observed.contains_key("udiv:zero-divisor"));
         let mut report = CoverageReport::default();
         report.record(&package, Outcome::GeneratedOnly);
         assert_eq!(

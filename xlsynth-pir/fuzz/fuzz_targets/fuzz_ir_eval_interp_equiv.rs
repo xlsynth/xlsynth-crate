@@ -4,11 +4,14 @@
 use libfuzzer_sys::fuzz_target;
 
 use xlsynth_autocov::{IrFnAutocovGenerateConfig, generate_ir_fn_corpus_from_ir_text};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::libxls_bridge::{value_from_libxls, value_to_libxls};
+use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
 use xlsynth_pir_fuzz::generate_upstream_eval_random_pir_package;
 
 const AUTOCOV_MAX_ITERS: u64 = 256;
+const RANDOM_INPUT_COUNT: usize = 32;
 const AUTOCOV_MAX_CORPUS_LEN: usize = 64;
 const AUTOCOV_TWO_HOT_MAX_BITS: usize = 64;
 
@@ -44,36 +47,47 @@ fuzz_target!(|data: &[u8]| {
         None => panic!("missing function {fn_name} in parsed package"),
     };
 
-    // Nullary functions do not benefit from autocov-driven input exploration and
-    // are covered by simpler direct tests elsewhere.
-    if parsed_fn.params.is_empty() {
-        return;
-    }
-
-    let corpus_result = generate_ir_fn_corpus_from_ir_text(
-        &pkg_text,
-        fn_name.as_str(),
-        IrFnAutocovGenerateConfig {
-            seed: stable_hash_u64(&pkg_text),
-            max_iters: Some(AUTOCOV_MAX_ITERS),
-            max_corpus_len: Some(AUTOCOV_MAX_CORPUS_LEN),
-            progress_every: None,
-            threads: Some(1),
-            seed_structured: true,
-            seed_two_hot_max_bits: AUTOCOV_TWO_HOT_MAX_BITS,
+    let mut corpus = generate_argument_sets_from_seed(
+        parsed_fn,
+        stable_hash_u64(&pkg_text),
+        if parsed_fn.params.is_empty() {
+            1
+        } else {
+            RANDOM_INPUT_COUNT
         },
     )
-    .expect("autocov corpus generation should succeed for generated IR");
+    .into_iter()
+    .map(|args| IrValue::make_tuple(&args))
+    .collect::<Vec<_>>();
+    // Adaptive coverage adds directed inputs; nullary functions have just one
+    // assignment and are already included in the shared sample set.
+    if !parsed_fn.params.is_empty() {
+        let corpus_result = generate_ir_fn_corpus_from_ir_text(
+            &pkg_text,
+            fn_name.as_str(),
+            IrFnAutocovGenerateConfig {
+                seed: stable_hash_u64(&pkg_text),
+                max_iters: Some(AUTOCOV_MAX_ITERS),
+                max_corpus_len: Some(AUTOCOV_MAX_CORPUS_LEN),
+                progress_every: None,
+                threads: Some(1),
+                seed_structured: true,
+                seed_two_hot_max_bits: AUTOCOV_TWO_HOT_MAX_BITS,
+            },
+        )
+        .expect("autocov corpus generation should succeed for generated IR");
 
-    assert!(
-        !corpus_result.corpus.is_empty(),
-        "autocov should produce at least one corpus sample"
-    );
+        assert!(
+            !corpus_result.corpus.is_empty(),
+            "autocov should produce at least one corpus sample"
+        );
+        corpus.extend(corpus_result.corpus);
+    }
 
-    for tuple_value in &corpus_result.corpus {
+    for tuple_value in &corpus {
         let args = tuple_value
             .get_elements()
-            .expect("autocov corpus samples should be tuples");
+            .expect("evaluation corpus samples should be tuples");
         let ours = match eval_fn_in_package(&parsed_pkg, parsed_fn, &args) {
             FnEvalResult::Success(success) => success.value,
             other => panic!("expected PIR evaluator success, got {:?}", other),
@@ -85,7 +99,7 @@ fuzz_target!(|data: &[u8]| {
             .expect("generated corpus values should convert to libxls");
         let theirs = xls_fn
             .interpret(&xls_args)
-            .expect("xlsynth interpreter should succeed on autocov corpus values");
+            .expect("xlsynth interpreter should succeed on evaluation corpus values");
         let theirs = value_from_libxls(&theirs, &parsed_fn.ret_ty)
             .expect("libxls result should match the function return type");
         assert_eq!(

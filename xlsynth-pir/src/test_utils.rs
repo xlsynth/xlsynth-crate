@@ -11,7 +11,7 @@ use crate::ir;
 use crate::ir_eval::{FnEvalResult, eval_fn};
 use crate::ir_parser;
 use crate::random_inputs::{
-    BitValuePattern, generate_biased_irbits_with_rng, generate_pattern_irbits,
+    BitValuePattern, generate_mixed_irbits_with_rng, generate_pattern_irbits,
 };
 use crate::{IrBits, IrValue};
 
@@ -67,12 +67,9 @@ fn quickcheck_fn_equivalence_ubits_le64(
         run_case(&case);
     }
 
-    // Deterministic corner-biased pseudo-random sampling.
+    // Shared per-vector mixed sampling supplements the directed cases above.
     for _ in 0..random_samples {
-        let case: Vec<IrBits> = param_widths
-            .iter()
-            .map(|width| generate_biased_irbits_with_rng(&mut rng, *width))
-            .collect();
+        let case = generate_mixed_irbits_with_rng(&mut rng, param_widths);
         run_case(&case);
     }
 

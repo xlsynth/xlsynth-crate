@@ -2,6 +2,40 @@
 
 This document lists the fuzz targets in the repository and summarizes what each one exercises at a high level. Each entry describes the essential property under test and the major failure modes it is intended to surface. Per-target early-return rationales are documented inline in the target source above the relevant condition, not here.
 
+### Shared concrete input sampling
+
+Random graph-evaluation tests use the typed or flat-vector adapters in
+`xlsynth_pir::random_inputs`. Each evaluation independently draws one complete
+vector of N function arguments or block input ports:
+
+- With 10% probability, choose equally among six whole-vector patterns:
+  all-zero arguments, all-one arguments, alternating all-one/all-zero arguments,
+  alternating all-zero/all-one arguments, all arguments with alternating bits
+  ending in zero (`...1010`), or all arguments with alternating bits ending in
+  one (`...0101`). The middle two alternate across argument positions; the last
+  two alternate within every argument, using the same least-significant-bit
+  phase for all inputs and restarting that phase in each aggregate bits leaf.
+- Otherwise, choose K uniformly from 0 through N and select K distinct positions
+  uniformly. Those arguments use special values; the other N - K use uniform
+  random bits. Aggregates count as one argument and special patterns recurse
+  through their leaves.
+- After constructing the vector, one 50% gate enables perturbation of all
+  special-derived arguments, including whole-vector patterns. Each eligible
+  bit then flips independently with probability 1/64. Uniform-derived arguments
+  are never perturbed. No flip is forced, and there is no flip-count cap.
+
+Special values include zero, numeric one, all ones, signed extrema, one-hot and
+one-cold values, alternating bit patterns, and low/high runs of ones. Arbitrary
+widths, tokens, and empty aggregate shapes are preserved. Existing seed/entropy
+sources make replay deterministic; graph generation remains separate from input
+sampling. Block reset protocols can override the sampled reset port afterward.
+Initial register-state vectors use the same sampler where arbitrary state is
+permitted.
+
+Explicit directed/exhaustive cases and adaptive/autocov inputs remain additional
+coverage, not replacements for this policy. Uniform-only statistical workloads
+and graph-literal generation keep their existing distributions.
+
 ### Running the smoke suite
 
 With Python 3.11+ and cargo-fuzz installed, run the smoke suite with:
@@ -66,11 +100,10 @@ extension operations, aggregates, zero-width bits, and widths through 257.
 The first eight bytes independently seed concrete-input generation; the
 remaining bytes drive graph construction. Each graph is analyzed once and
 evaluated on eight input sets (once for nullary functions). The shared
-`generate_mixed_argument_sets_with_rng` helper randomly allocates that budget
-between uniform and corner-biased sampling, uses both strategies when the budget
-is at least two, and shuffles the sets. Biased leaves independently choose
-patterns such as zero, all-ones, signed limits, one-hot values and runs of ones,
-or uniform values, exercising mixed cases within a vector too.
+`generate_mixed_argument_sets_with_rng` helper uses the
+[shared mixed-vector policy](#shared-concrete-input-sampling), independently
+selecting structured vectors or a fresh subset of special-valued arguments for
+each evaluation, with optional sparse perturbation of special values.
 Every node and aggregate leaf must satisfy its known-bit claims, including
 parameters and dead nodes. The target also requires identical facts when the
 function is represented as a combinational block. It flags unsound facts,
@@ -154,8 +187,8 @@ Generates random gatify-supported PIR functions with up to 64 generated nodes
 and runs them through the canonical production g8r pipeline with all default
 optimization stages enabled. It then
 differentially evaluates the source PIR and optimized `GateFn` over 1,024
-deterministic, corner-biased input samples. Input generation is seeded from the
-generated IR text so coverage-guided entropy is dedicated to exploring program
+deterministic input samples using the shared mixed-vector policy. Input generation
+is seeded from the generated IR text so coverage-guided entropy is dedicated to exploring program
 structure instead of stimulus values.
 
 Primarily tests:
@@ -222,10 +255,10 @@ Primarily tests:
 
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
 
-Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same directly generated acyclic PIR package, but instead of checking a single arbitrary argument tuple it uses autocov to grow a bounded corpus of interesting typed inputs.
+Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same directly generated acyclic PIR package, using the shared mixed-vector sampler plus a bounded autocov corpus of interesting typed inputs.
 
 - Generates an upstream-standard random PIR package, including helper functions, `invoke`, `counted_for`, `gate`, and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
-- Runs autocov on the generated IR text to synthesize a small corpus of semantically interesting input tuples.
+- Draws 32 shared mixed input vectors, seeded from the generated IR, then runs autocov to add semantically interesting tuples. Nullary functions are evaluated on their single empty argument vector without autocov.
 - Evaluates every corpus sample with both engines and asserts the results are equal, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
 
 See inline comments in the target source for early-return rationales.
@@ -234,7 +267,7 @@ Primarily tests:
 
 - Autocov-selected boundary-ish inputs expose the same interpreter semantics as direct xlsynth interpretation
 - Generated IR text remains parseable and executable across the C++ and PIR interpreters
-- Arbitrary generated ops and value shapes behave identically in both interpreters across autocov-selected inputs
+- Arbitrary generated ops and value shapes behave identically in both interpreters across mixed random and autocov-selected inputs
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ext_nary_add_gatify_equiv.rs
 

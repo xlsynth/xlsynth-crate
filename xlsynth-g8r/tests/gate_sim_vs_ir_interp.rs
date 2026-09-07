@@ -8,7 +8,8 @@
 use std::collections::HashMap;
 
 use half::bf16;
-use rand::Rng;
+use rand::SeedableRng;
+use rand_pcg::Pcg64Mcg;
 use xlsynth_g8r::aig::AigRef;
 use xlsynth_g8r::aig::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
@@ -20,6 +21,7 @@ use xlsynth_g8r::test_utils::{
 };
 use xlsynth_g8r::use_count::get_id_to_use_count;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::random_inputs::generate_mixed_irbits_with_rng;
 
 #[test]
 fn test_bf16_mul_zero_zero() {
@@ -65,11 +67,12 @@ fn test_bf16_mul_random() {
         .unwrap();
     let gate_fn = loaded_sample.gate_fn;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = Pcg64Mcg::seed_from_u64(0xbf16);
 
     for i in 0..256 {
-        let f0_bits: u16 = rng.r#gen();
-        let f1_bits: u16 = rng.r#gen();
+        let inputs = generate_mixed_irbits_with_rng(&mut rng, &[16, 16]);
+        let f0_bits = inputs[0].to_u64().unwrap() as u16;
+        let f1_bits = inputs[1].to_u64().unwrap() as u16;
 
         let f0_bf16 = bf16::from_bits(f0_bits);
         let f1_bf16 = bf16::from_bits(f1_bits);

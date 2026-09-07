@@ -62,7 +62,7 @@ use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_assuming_node_index_topological
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
-use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 use xlsynth_pir::structural_similarity::collect_structural_entries;
 use xlsynth_pir::{IrBits, IrValue};
 
@@ -1468,9 +1468,7 @@ impl EvalFnBaselineResults {
 
         for _ in 0..random_samples {
             self.samples
-                .push(make_oracle_args(&self.param_types, "random", |ty| {
-                    arbitrary_value_for_type(rng, ty)
-                })?);
+                .push(generate_mixed_values_with_rng(rng, &self.param_types));
         }
 
         self.expected_values = self
@@ -2326,38 +2324,6 @@ fn make_all_ones_value(ty: &PirType) -> Result<IrValue> {
             }
             IrValue::make_array(&elems).map_err(|e| {
                 anyhow::anyhow!("failed to construct all-ones array oracle sample: {}", e)
-            })
-        }
-    }
-}
-
-fn arbitrary_value_for_type<R: Rng>(rng: &mut R, ty: &PirType) -> Result<IrValue> {
-    match ty {
-        PirType::Token => Ok(IrValue::make_token()),
-        PirType::Bits(width) => {
-            let bits = generate_biased_irbits_with_rng(rng, *width);
-            Ok(IrValue::from_bits(&bits))
-        }
-        PirType::Tuple(elem_types) => {
-            let elems: Result<Vec<IrValue>> = elem_types
-                .iter()
-                .map(|t| arbitrary_value_for_type(rng, t))
-                .collect();
-            Ok(IrValue::make_tuple(&elems?))
-        }
-        PirType::Array(arr) => {
-            if arr.element_count == 0 {
-                return Err(anyhow::anyhow!(
-                    "cannot construct random oracle sample for zero-length array type {}",
-                    ty
-                ));
-            }
-            let mut elems: Vec<IrValue> = Vec::with_capacity(arr.element_count);
-            for _ in 0..arr.element_count {
-                elems.push(arbitrary_value_for_type(rng, &arr.element_type)?);
-            }
-            IrValue::make_array(&elems).map_err(|e| {
-                anyhow::anyhow!("failed to construct random array oracle sample: {}", e)
             })
         }
     }

@@ -78,12 +78,13 @@ nodes are allowed and nothing forces operations to become observable.
 Corpus bytes are reproducible with the same generator version/options; the
 header format changes how older corpora decode.
 
-The stimulus region can mutate independently of graph and wiring. Sixteen
-stimulus slots mix zeros, ones, isolated/cleared bits, alternating bits, signed
-extrema, small values near graph-derived widths/bounds, correlated equal
-operands, extrema versus -1, and ones versus 1. Four slots use uniform values.
-Patterns recurse through aggregate leaves and support widths above 64. Initial
-state is independently patterned/random. Synchronous reset sequences include
+The stimulus region can mutate independently of graph and wiring. Each input
+vector and initial-state vector uses the shared mixed sampler described in
+[the repository fuzz overview](../../FUZZ.md#shared-concrete-input-sampling):
+10% structured whole-vector patterns, otherwise a uniformly chosen count of
+special arguments with the rest uniform, followed by an optional sparse bit
+perturbation of special arguments. Patterns recurse through aggregate leaves
+and support widths above 64. Synchronous reset sequences include
 deasserted startup, consecutive asserted cycles, and later pulses; asynchronous
 reset events are not tested by these targets.
 

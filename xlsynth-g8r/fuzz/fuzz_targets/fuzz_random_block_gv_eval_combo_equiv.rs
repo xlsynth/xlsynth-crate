@@ -22,7 +22,7 @@ use xlsynth_pir::ir_random::{
     BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions,
     RandomOperation, StopPolicy, generate_block_package,
 };
-use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
+use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
 const INPUT_SAMPLE_COUNT: usize = 16;
 
@@ -50,10 +50,7 @@ fn fuzz_block_options() -> RandomBlockOptions {
 }
 
 fn generate_inputs(block: &Block, rng: &mut StdRng) -> Vec<IrValue> {
-    block
-        .input_ports()
-        .map(|param| generate_uniform_value_with_rng(rng, block.port_type(param)))
-        .collect()
+    generate_mixed_values_with_rng(rng, block.input_ports().map(|p| block.port_type(p)))
 }
 
 fuzz_target!(init: {

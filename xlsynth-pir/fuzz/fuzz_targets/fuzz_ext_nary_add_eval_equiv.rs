@@ -247,12 +247,9 @@ fn build_ext_nary_add_eval_corpus(sample: &ExtNaryAddFnSample, ir_text: &str) ->
     }
 
     let mut rng = StdRng::seed_from_u64(sample.value_seed ^ stable_hash_u64(ir_text));
-    let random_sets = generate_flat_bitvector_argument_sets_with_rng(
-        &mut rng,
-        &input_widths,
-        RANDOM_TUPLE_COUNT + 2,
-    );
-    for tuple in random_sets.into_iter().skip(2) {
+    let random_sets =
+        generate_flat_bitvector_argument_sets_with_rng(&mut rng, &input_widths, RANDOM_TUPLE_COUNT);
+    for tuple in random_sets {
         push_unique_tuple(
             &mut corpus,
             tuple
