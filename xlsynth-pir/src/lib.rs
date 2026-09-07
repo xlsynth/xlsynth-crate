@@ -5,6 +5,7 @@
 //! Functionality that is purely related to the XLS IR, i.e. parsing,
 //! representing, querying/manipulating, etc.
 
+mod analysis_utils;
 pub mod array_alias_rewrite;
 pub mod aug_opt;
 pub mod block2fn;
@@ -51,6 +52,7 @@ pub mod math;
 pub mod node_hashing;
 pub mod prove_equiv_via_toolchain;
 pub mod random_inputs;
+pub mod range_analysis;
 pub mod simple_rebase;
 pub mod structural_similarity;
 pub mod value;

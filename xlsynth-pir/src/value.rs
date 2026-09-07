@@ -7,6 +7,7 @@
 //! DSO. This module provides the same value-shaped operations needed by PIR
 //! while keeping a canonical Rust-owned representation.
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
@@ -424,42 +425,58 @@ impl IrBits {
 
     pub fn ult(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_biguint() < rhs.to_biguint()
+        self.cmp_unsigned(rhs).is_lt()
     }
 
     pub fn ule(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_biguint() <= rhs.to_biguint()
+        self.cmp_unsigned(rhs).is_le()
     }
 
     pub fn ugt(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_biguint() > rhs.to_biguint()
+        self.cmp_unsigned(rhs).is_gt()
     }
 
     pub fn uge(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_biguint() >= rhs.to_biguint()
+        self.cmp_unsigned(rhs).is_ge()
     }
 
     pub fn slt(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_bigint_signed() < rhs.to_bigint_signed()
+        self.cmp_signed(rhs).is_lt()
     }
 
     pub fn sle(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_bigint_signed() <= rhs.to_bigint_signed()
+        self.cmp_signed(rhs).is_le()
     }
 
     pub fn sgt(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_bigint_signed() > rhs.to_bigint_signed()
+        self.cmp_signed(rhs).is_gt()
     }
 
     pub fn sge(&self, rhs: &Self) -> bool {
         self.assert_matching_bit_count(rhs);
-        self.to_bigint_signed() >= rhs.to_bigint_signed()
+        self.cmp_signed(rhs).is_ge()
+    }
+
+    /// Compares equal-width canonical limbs without allocating temporary
+    /// values.
+    fn cmp_unsigned(&self, rhs: &Self) -> Ordering {
+        self.limbs.iter().rev().cmp(rhs.limbs.iter().rev())
+    }
+
+    /// Compares equal-width two's-complement values; equal signs retain
+    /// unsigned ordering, including two negative values and the empty
+    /// bitvector.
+    fn cmp_signed(&self, rhs: &Self) -> Ordering {
+        match self.is_negative().cmp(&rhs.is_negative()) {
+            Ordering::Equal => self.cmp_unsigned(rhs),
+            differing_signs => differing_signs.reverse(),
+        }
     }
 
     pub fn is_negative(&self) -> bool {

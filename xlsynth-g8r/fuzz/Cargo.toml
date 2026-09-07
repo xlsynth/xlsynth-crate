@@ -48,6 +48,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_range_analysis_block_soundness"
+path = "fuzz_targets/fuzz_range_analysis_block_soundness.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_random_block_gv_eval_combo_equiv"
 path = "fuzz_targets/fuzz_random_block_gv_eval_combo_equiv.rs"
 test = false

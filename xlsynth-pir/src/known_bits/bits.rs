@@ -595,7 +595,7 @@ pub(super) fn dynamic_slice(a: &KnownBits, start: &KnownBits, width: usize) -> K
 }
 
 /// Joins feasible in-bounds updates and the out-of-bounds no-op case.
-pub(super) fn slice_update(a: &KnownBits, start: &KnownBits, update: &KnownBits) -> KnownBits {
+pub(crate) fn slice_update(a: &KnownBits, start: &KnownBits, update: &KnownBits) -> KnownBits {
     let mut a = a.lsb_bits();
     let start = start.lsb_bits();
     let update = update.lsb_bits();
@@ -663,7 +663,7 @@ pub(super) fn decode(a: &KnownBits, width: usize) -> KnownBits {
 }
 
 /// ORs the indices of every potentially selected input bit.
-pub(super) fn encode(a: &KnownBits) -> KnownBits {
+pub(crate) fn encode(a: &KnownBits) -> KnownBits {
     let input = a.lsb_bits();
     let width = if input.len() <= 1 {
         0
@@ -682,7 +682,7 @@ pub(super) fn encode(a: &KnownBits) -> KnownBits {
 }
 
 /// Evaluates a scalar unary operation over three-valued input bits.
-pub(super) fn unop(op: Unop, a: &KnownBits) -> KnownBits {
+pub(crate) fn unop(op: Unop, a: &KnownBits) -> KnownBits {
     match op {
         Unop::Identity => a.clone(),
         Unop::Not => KnownBits {
@@ -730,7 +730,7 @@ pub(super) fn unop(op: Unop, a: &KnownBits) -> KnownBits {
 }
 
 /// Evaluates bitwise operations or concatenates operands in IR order.
-pub(super) fn nary(op: NaryOp, args: &[&KnownBits], width: usize) -> KnownBits {
+pub(crate) fn nary(op: NaryOp, args: &[&KnownBits], width: usize) -> KnownBits {
     if op == NaryOp::Concat {
         let width = args.iter().fold(0usize, |width, arg| {
             width

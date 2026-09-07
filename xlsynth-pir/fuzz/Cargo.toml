@@ -87,6 +87,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_range_analysis_soundness"
+path = "fuzz_targets/fuzz_range_analysis_soundness.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_ir_same_sig_pair"
 path = "fuzz_targets/fuzz_ir_same_sig_pair.rs"
 test = false
