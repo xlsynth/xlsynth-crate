@@ -3,6 +3,7 @@
 //! Verification routines for PIR graphs, functions, blocks, and packages.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use crate::ir::{self, Block, Fn, NodeGraph, NodePayload, Package, PackageMember, Type};
 use crate::ir_deduce::{deduce_result_type, deduce_result_type_with};
@@ -62,7 +63,7 @@ pub fn verify_graph_unique_node_ids(f: &NodeGraph) -> Result<(), String> {
 /// Verifies that all NodeRef indices referenced by payloads are within bounds.
 pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), String> {
     let n = f.nodes.len();
-    let check = |nr: ir::NodeRef, ctx: &str| -> Result<(), String> {
+    let check = |nr: ir::NodeRef, ctx: fmt::Arguments<'_>| -> Result<(), String> {
         if nr.index >= n {
             return Err(format!(
                 "operand index {} out of bounds in {}; graph '{}' has {} nodes",
@@ -80,7 +81,7 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                 // Leaf nodes do not reference operands.
             }
             NodePayload::OutputPort { arg, .. } => {
-                check(*arg, &format!("node {} output_port.arg", i))?;
+                check(*arg, format_args!("node {} output_port.arg", i))?;
             }
             NodePayload::Tuple(nodes)
             | NodePayload::Array(nodes)
@@ -88,7 +89,7 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
             | NodePayload::AfterAll(nodes)
             | NodePayload::Nary(_, nodes) => {
                 for r in nodes.iter() {
-                    check(*r, &format!("node {} payload list", i))?;
+                    check(*r, format_args!("node {} payload list", i))?;
                 }
             }
             NodePayload::TupleIndex { tuple, .. }
@@ -97,40 +98,43 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
             | NodePayload::Encode { arg: tuple }
             | NodePayload::OneHot { arg: tuple, .. }
             | NodePayload::BitSlice { arg: tuple, .. } => {
-                check(*tuple, &format!("node {} single", i))?;
+                check(*tuple, format_args!("node {} single", i))?;
             }
             NodePayload::ArraySlice { array, start, .. } => {
-                check(*array, &format!("node {} array_slice.array", i))?;
-                check(*start, &format!("node {} array_slice.start", i))?;
+                check(*array, format_args!("node {} array_slice.array", i))?;
+                check(*start, format_args!("node {} array_slice.start", i))?;
             }
             NodePayload::Binop(_, a, b) => {
-                check(*a, &format!("node {} binop.lhs", i))?;
-                check(*b, &format!("node {} binop.rhs", i))?;
+                check(*a, format_args!("node {} binop.lhs", i))?;
+                check(*b, format_args!("node {} binop.rhs", i))?;
             }
             NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
-                check(*lhs, &format!("node {} ext_carry_out.lhs", i))?;
-                check(*rhs, &format!("node {} ext_carry_out.rhs", i))?;
-                check(*c_in, &format!("node {} ext_carry_out.c_in", i))?;
+                check(*lhs, format_args!("node {} ext_carry_out.lhs", i))?;
+                check(*rhs, format_args!("node {} ext_carry_out.rhs", i))?;
+                check(*c_in, format_args!("node {} ext_carry_out.c_in", i))?;
             }
             NodePayload::ExtPrioEncode { arg, lsb_prio: _ } => {
-                check(*arg, &format!("node {} ext_prio_encode.arg", i))?;
+                check(*arg, format_args!("node {} ext_prio_encode.arg", i))?;
             }
             NodePayload::ExtClz { arg, .. } => {
-                check(*arg, &format!("node {} ext_clz.arg", i))?;
+                check(*arg, format_args!("node {} ext_clz.arg", i))?;
             }
             NodePayload::ExtNormalizeLeft { arg, .. } => {
-                check(*arg, &format!("node {} ext_normalize_left.arg", i))?;
+                check(*arg, format_args!("node {} ext_normalize_left.arg", i))?;
             }
             NodePayload::ExtMaskLow { count } => {
-                check(*count, &format!("node {} ext_mask_low.count", i))?;
+                check(*count, format_args!("node {} ext_mask_low.count", i))?;
             }
             NodePayload::ExtNaryAdd { terms, arch: _ } => {
                 for term in terms.iter() {
-                    check(term.operand, &format!("node {} ext_nary_add.operand", i))?;
+                    check(
+                        term.operand,
+                        format_args!("node {} ext_nary_add.operand", i),
+                    )?;
                 }
             }
             NodePayload::SignExt { arg, .. } | NodePayload::ZeroExt { arg, .. } => {
-                check(*arg, &format!("node {} ext.arg", i))?;
+                check(*arg, format_args!("node {} ext.arg", i))?;
             }
             NodePayload::ArrayUpdate {
                 array,
@@ -138,36 +142,36 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                 indices,
                 ..
             } => {
-                check(*array, &format!("node {} array_update.array", i))?;
-                check(*value, &format!("node {} array_update.value", i))?;
+                check(*array, format_args!("node {} array_update.array", i))?;
+                check(*value, format_args!("node {} array_update.value", i))?;
                 for r in indices.iter() {
-                    check(*r, &format!("node {} array_update.index", i))?;
+                    check(*r, format_args!("node {} array_update.index", i))?;
                 }
             }
             NodePayload::ArrayIndex { array, indices, .. } => {
-                check(*array, &format!("node {} array_index.array", i))?;
+                check(*array, format_args!("node {} array_index.array", i))?;
                 for r in indices.iter() {
-                    check(*r, &format!("node {} array_index.index", i))?;
+                    check(*r, format_args!("node {} array_index.index", i))?;
                 }
             }
             NodePayload::DynamicBitSlice { arg, start, .. } => {
-                check(*arg, &format!("node {} dbs.arg", i))?;
-                check(*start, &format!("node {} dbs.start", i))?;
+                check(*arg, format_args!("node {} dbs.arg", i))?;
+                check(*start, format_args!("node {} dbs.start", i))?;
             }
             NodePayload::BitSliceUpdate {
                 arg,
                 start,
                 update_value,
             } => {
-                check(*arg, &format!("node {} bsu.arg", i))?;
-                check(*start, &format!("node {} bsu.start", i))?;
-                check(*update_value, &format!("node {} bsu.update_value", i))?;
+                check(*arg, format_args!("node {} bsu.arg", i))?;
+                check(*start, format_args!("node {} bsu.start", i))?;
+                check(*update_value, format_args!("node {} bsu.update_value", i))?;
             }
             NodePayload::Assert {
                 token, activate, ..
             } => {
-                check(*token, &format!("node {} assert.token", i))?;
-                check(*activate, &format!("node {} assert.activate", i))?;
+                check(*token, format_args!("node {} assert.token", i))?;
+                check(*activate, format_args!("node {} assert.activate", i))?;
             }
             NodePayload::Trace {
                 token,
@@ -175,14 +179,14 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                 operands,
                 ..
             } => {
-                check(*token, &format!("node {} trace.token", i))?;
-                check(*activated, &format!("node {} trace.activated", i))?;
+                check(*token, format_args!("node {} trace.token", i))?;
+                check(*activated, format_args!("node {} trace.activated", i))?;
                 for r in operands.iter() {
-                    check(*r, &format!("node {} trace.operand", i))?;
+                    check(*r, format_args!("node {} trace.operand", i))?;
                 }
             }
             NodePayload::InstantiationInput { arg, .. } => {
-                check(*arg, &format!("node {} instantiation_input.arg", i))?;
+                check(*arg, format_args!("node {} instantiation_input.arg", i))?;
             }
             NodePayload::InstantiationOutput { .. } => {}
             NodePayload::RegisterRead { .. } => {}
@@ -192,17 +196,17 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                 reset,
                 ..
             } => {
-                check(*arg, &format!("node {} register_write.arg", i))?;
+                check(*arg, format_args!("node {} register_write.arg", i))?;
                 if let Some(le) = load_enable {
-                    check(*le, &format!("node {} register_write.load_enable", i))?;
+                    check(*le, format_args!("node {} register_write.load_enable", i))?;
                 }
                 if let Some(rst) = reset {
-                    check(*rst, &format!("node {} register_write.reset", i))?;
+                    check(*rst, format_args!("node {} register_write.reset", i))?;
                 }
             }
             NodePayload::Invoke { operands, .. } => {
                 for r in operands.iter() {
-                    check(*r, &format!("node {} invoke.operand", i))?;
+                    check(*r, format_args!("node {} invoke.operand", i))?;
                 }
             }
             NodePayload::PrioritySel {
@@ -215,18 +219,18 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                 cases,
                 default,
             } => {
-                check(*selector, &format!("node {} sel.selector", i))?;
+                check(*selector, format_args!("node {} sel.selector", i))?;
                 for r in cases.iter() {
-                    check(*r, &format!("node {} sel.case", i))?;
+                    check(*r, format_args!("node {} sel.case", i))?;
                 }
                 if let Some(d) = default {
-                    check(*d, &format!("node {} sel.default", i))?;
+                    check(*d, format_args!("node {} sel.default", i))?;
                 }
             }
             NodePayload::OneHotSel { selector, cases } => {
-                check(*selector, &format!("node {} one_hot_sel.selector", i))?;
+                check(*selector, format_args!("node {} one_hot_sel.selector", i))?;
                 for r in cases.iter() {
-                    check(*r, &format!("node {} one_hot_sel.case", i))?;
+                    check(*r, format_args!("node {} one_hot_sel.case", i))?;
                 }
             }
             NodePayload::CountedFor {
@@ -234,13 +238,13 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                 invariant_args,
                 ..
             } => {
-                check(*init, &format!("node {} counted_for.init", i))?;
+                check(*init, format_args!("node {} counted_for.init", i))?;
                 for r in invariant_args.iter() {
-                    check(*r, &format!("node {} counted_for.invariant", i))?;
+                    check(*r, format_args!("node {} counted_for.invariant", i))?;
                 }
             }
             NodePayload::Cover { predicate, .. } => {
-                check(*predicate, &format!("node {} cover.predicate", i))?;
+                check(*predicate, format_args!("node {} cover.predicate", i))?;
             }
         }
     }
@@ -370,6 +374,17 @@ fn trace_operand_count(format: &str) -> Result<usize, String> {
 /// standalone function compiler.
 pub fn verify_graph_xls_node_semantics(f: &NodeGraph) -> Result<(), String> {
     verify_graph_operand_indices_in_bounds(f)?;
+    verify_graph_xls_node_semantics_after_bounds_check(f)
+}
+
+/// Checks local semantics after every operand index has been bounds-checked.
+///
+/// Callers must first successfully call
+/// `verify_graph_operand_indices_in_bounds` on this same graph, with no
+/// intervening mutation of its nodes or operands.
+pub(crate) fn verify_graph_xls_node_semantics_after_bounds_check(
+    f: &NodeGraph,
+) -> Result<(), String> {
     for (node_index, node) in f.nodes.iter().enumerate() {
         verify_node_xls_semantics(f, node_index).map_err(|reason| {
             format!(
@@ -861,6 +876,180 @@ pub fn verify_graph_types_agree_with_deduction_in_pkg(
 mod tests {
     use super::*;
     use crate::ir_parser::Parser;
+
+    /// Builds a bounds-only fixture; slot zero is a valid storage index.
+    fn bounds_graph(payload: NodePayload) -> NodeGraph {
+        let mut graph = NodeGraph::new("bounds");
+        graph.nodes.push(ir::Node {
+            text_id: 1,
+            name: None,
+            ty: Type::Bits(1),
+            payload,
+            pos: None,
+        });
+        graph
+    }
+
+    #[test]
+    fn operand_bounds_accepts_in_bounds_references_and_empty_lists() {
+        let valid = ir::NodeRef { index: 0 };
+        let payloads = [
+            NodePayload::Tuple(vec![]),
+            NodePayload::Tuple(vec![valid, valid]),
+            NodePayload::Binop(ir::Binop::Add, valid, valid),
+            NodePayload::Sel {
+                selector: valid,
+                cases: vec![valid],
+                default: Some(valid),
+            },
+            NodePayload::RegisterWrite {
+                arg: valid,
+                register: "state".to_string(),
+                load_enable: Some(valid),
+                reset: Some(valid),
+            },
+            NodePayload::CountedFor {
+                init: valid,
+                trip_count: 1,
+                stride: 1,
+                body: "body".to_string(),
+                invariant_args: vec![valid, valid],
+            },
+        ];
+        for payload in payloads {
+            verify_graph_operand_indices_in_bounds(&bounds_graph(payload)).unwrap();
+        }
+    }
+
+    #[test]
+    fn operand_bounds_preserves_error_context_and_operand_order() {
+        let valid = ir::NodeRef { index: 0 };
+        let invalid = ir::NodeRef { index: 2 };
+        let later_invalid = ir::NodeRef { index: 3 };
+        let cases = [
+            (
+                NodePayload::Binop(ir::Binop::Add, invalid, later_invalid),
+                "binop.lhs",
+            ),
+            (
+                NodePayload::Binop(ir::Binop::Add, valid, invalid),
+                "binop.rhs",
+            ),
+            (
+                NodePayload::Tuple(vec![valid, invalid, later_invalid]),
+                "payload list",
+            ),
+            (
+                NodePayload::RegisterWrite {
+                    arg: valid,
+                    register: "state".to_string(),
+                    load_enable: Some(invalid),
+                    reset: Some(later_invalid),
+                },
+                "register_write.load_enable",
+            ),
+            (
+                NodePayload::Sel {
+                    selector: valid,
+                    cases: vec![valid, invalid],
+                    default: Some(later_invalid),
+                },
+                "sel.case",
+            ),
+            (
+                NodePayload::CountedFor {
+                    init: valid,
+                    trip_count: 1,
+                    stride: 1,
+                    body: "body".to_string(),
+                    invariant_args: vec![valid, invalid, later_invalid],
+                },
+                "counted_for.invariant",
+            ),
+            (
+                NodePayload::Trace {
+                    token: valid,
+                    activated: valid,
+                    operands: vec![valid, invalid, later_invalid],
+                    format: "{} {} {}".to_string(),
+                    verbosity: 0,
+                },
+                "trace.operand",
+            ),
+            (
+                NodePayload::ExtCarryOut {
+                    lhs: valid,
+                    rhs: valid,
+                    c_in: invalid,
+                },
+                "ext_carry_out.c_in",
+            ),
+        ];
+        for (payload, context) in cases {
+            let graph = bounds_graph(payload);
+            let expected = format!(
+                "operand index 2 out of bounds in node 1 {context}; graph 'bounds' has 2 nodes"
+            );
+            assert_eq!(
+                verify_graph_operand_indices_in_bounds(&graph),
+                Err(expected.clone())
+            );
+            // The public semantic verifier must reject bounds before any
+            // payload-specific type lookup, even on otherwise invalid nodes.
+            assert_eq!(verify_graph_xls_node_semantics(&graph), Err(expected));
+        }
+    }
+
+    #[test]
+    fn prechecked_semantics_matches_public_verification() {
+        let ir = r#"fn checked(x: bits[8] id=1) -> bits[8] {
+  ret sum: bits[8] = add(x, x, id=2)
+}
+"#;
+        let mut function = Parser::new(ir).parse_fn().unwrap();
+        verify_graph_operand_indices_in_bounds(&function).unwrap();
+        assert_eq!(verify_graph_xls_node_semantics(&function), Ok(()));
+        assert_eq!(
+            verify_graph_xls_node_semantics_after_bounds_check(&function),
+            Ok(())
+        );
+
+        function.nodes[2].ty = Type::Bits(16);
+        verify_graph_operand_indices_in_bounds(&function).unwrap();
+        let expected = Err(
+            "invalid node 2 (add) in graph 'checked': left operand must have type bits[16], got bits[8]"
+                .to_string(),
+        );
+        assert_eq!(verify_graph_xls_node_semantics(&function), expected);
+        assert_eq!(
+            verify_graph_xls_node_semantics_after_bounds_check(&function),
+            expected
+        );
+    }
+
+    #[test]
+    fn public_semantics_checks_all_bounds_before_earlier_type_errors() {
+        let ir = r#"fn checked(x: bits[8] id=1) -> bits[8] {
+  ret sum: bits[8] = add(x, x, id=2)
+}
+"#;
+        let mut function = Parser::new(ir).parse_fn().unwrap();
+        function.nodes[2].ty = Type::Bits(16);
+        function.nodes.push(ir::Node {
+            text_id: 3,
+            name: None,
+            ty: Type::Bits(8),
+            payload: NodePayload::Unop(ir::Unop::Identity, ir::NodeRef { index: usize::MAX }),
+            pos: None,
+        });
+        assert_eq!(
+            verify_graph_xls_node_semantics(&function),
+            Err(format!(
+                "operand index {} out of bounds in node 3 single; graph 'checked' has 4 nodes",
+                usize::MAX
+            ))
+        );
+    }
 
     #[test]
     fn type_mismatch_on_add_is_flagged() {

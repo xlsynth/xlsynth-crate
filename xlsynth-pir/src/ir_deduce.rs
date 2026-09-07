@@ -36,6 +36,7 @@ pub enum DeduceError {
     ArrayConcatElementTypeMismatch,
     ArrayIndexNonArray,
     ConcatRequiresBits,
+    SizeOverflow(&'static str),
     SelectRequiresCaseOrDefault,
     SelectOperandListTooShort,
     SelectCasesNotSameType,
@@ -80,6 +81,7 @@ impl std::fmt::Display for DeduceError {
                 write!(f, "array_index indexing into non-array type")
             }
             DeduceError::ConcatRequiresBits => write!(f, "concat requires bits operands"),
+            DeduceError::SizeOverflow(ctx) => write!(f, "result size overflows usize for {ctx}"),
             DeduceError::SelectRequiresCaseOrDefault => {
                 write!(f, "select requires at least one case or default")
             }
@@ -191,7 +193,9 @@ where
                 if array.element_type != first.element_type {
                     return Err(DeduceError::ArrayConcatElementTypeMismatch);
                 }
-                element_count += array.element_count;
+                element_count = element_count
+                    .checked_add(array.element_count)
+                    .ok_or(DeduceError::SizeOverflow("array_concat"))?;
             }
             Ok(Some(Type::Array(ArrayTypeData {
                 element_type: first.element_type.clone(),
@@ -465,7 +469,11 @@ where
                 let mut total: usize = 0;
                 for t in operand_types.iter() {
                     match t {
-                        Type::Bits(w) => total += *w,
+                        Type::Bits(w) => {
+                            total = total
+                                .checked_add(*w)
+                                .ok_or(DeduceError::SizeOverflow("concat"))?;
+                        }
                         _ => return Err(DeduceError::ConcatRequiresBits),
                     }
                 }
@@ -478,7 +486,10 @@ where
                 .get(0)
                 .ok_or(DeduceError::MissingOperand("one_hot.arg"))?;
             match arg_ty {
-                Type::Bits(w) => Ok(Some(Type::Bits(*w + 1))),
+                Type::Bits(w) => Ok(Some(Type::Bits(
+                    w.checked_add(1)
+                        .ok_or(DeduceError::SizeOverflow("one_hot"))?,
+                ))),
                 _ => Err(DeduceError::ExpectedBits("one_hot")),
             }
         }
