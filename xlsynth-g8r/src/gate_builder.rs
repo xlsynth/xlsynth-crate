@@ -281,6 +281,11 @@ impl GateBuilder {
             .map(|hash_cons| hash_cons.depth(operand))
     }
 
+    /// Returns an existing structurally equivalent AND, if hashing found one.
+    pub(crate) fn find_existing_and(&self, lhs: AigOperand, rhs: AigOperand) -> Option<AigOperand> {
+        self.hash_cons.as_ref()?.find_and(lhs, rhs).map(Into::into)
+    }
+
     pub fn get_false(&self) -> AigOperand {
         AigOperand {
             node: AigRef { id: 0 },
