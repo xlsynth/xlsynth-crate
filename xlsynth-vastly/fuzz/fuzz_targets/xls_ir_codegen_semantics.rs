@@ -540,6 +540,8 @@ fn codegen_pipeline(
 ) -> Result<String, XlsynthError> {
     let package = xlsynth::IrPackage::parse_ir(ir_text, None)?;
     let sched_proto = format!("delay_model: \"unit\"\npipeline_stages: {pipeline_stages}");
+    // Codegen v1 can apply non-equivalent upstream arithmetic rewrites before
+    // pipeline emission; keep this oracle on the modern pipeline path.
     let codegen_proto = format!(
         "register_merge_strategy: STRATEGY_IDENTITY_ONLY\n\
 generator: GENERATOR_KIND_PIPELINE\n\
@@ -555,7 +557,7 @@ reset_active_low: false\n\
 reset_asynchronous: false\n\
 reset_data_path: true\n\
 add_invariant_assertions: false\n\
-codegen_version: 1"
+codegen_version: CODEGEN_VERSION_TWO_DOT_ZERO"
     );
     let result = xlsynth::schedule_and_codegen(&package, &sched_proto, &codegen_proto)?;
     result.get_verilog_text()
