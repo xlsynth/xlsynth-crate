@@ -345,6 +345,47 @@ top fn f(init: bits[8][2][2] id=8) -> bits[8][2][2] {
 }
 
 #[test]
+fn package_compiler_keeps_counted_for_init_disjoint_from_aggregate_invariant() {
+    let ir = r#"package test
+
+fn body(i: bits[1] id=1, carry: bits[9][4][1][3] id=2, invariant: bits[9][4] id=3) -> bits[9][4][1][3] {
+  ret result: bits[9][4][1][3] = identity(carry, id=4)
+}
+
+top fn f(init: bits[9][4][1][3] id=5) -> bits[9][4][1][3] {
+  zero: bits[1] = literal(value=0, id=6)
+  wide_zero: bits[255] = zero_ext(zero, new_bit_count=255, id=7)
+  zero_value: bits[9] = literal(value=0, id=8)
+  first: bits[9][4] = array_index(init, indices=[wide_zero, zero], id=9)
+  invariant: bits[9][4] = array_update(first, zero_value, indices=[zero], id=10)
+  ret result: bits[9][4][1][3] = counted_for(init, trip_count=1, stride=2, body=body, invariant_args=[invariant], id=11)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let function = package.get_top_fn().expect("top function should exist");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let args = [IrValue::make_array(&[
+        IrValue::make_array(&[array(9, &[245, 114, 425, 213])])
+            .expect("first nested array should construct"),
+        IrValue::make_array(&[array(9, &[305, 160, 491, 17])])
+            .expect("second nested array should construct"),
+        IrValue::make_array(&[array(9, &[19, 22, 354, 21])])
+            .expect("third nested array should construct"),
+    ])
+    .expect("outer array should construct")];
+    let expected = match eval_fn_in_package(&package, function, &args) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        compiler.run_ir_values(&args).expect("execute counted_for"),
+        expected
+    );
+}
+
+#[test]
 fn package_compiler_lowers_wide_induction_counted_for() {
     let compiler = compile_package(
         r#"package test
@@ -1751,6 +1792,38 @@ fn f(pred: bits[1] id=1, values: bits[8][4] id=2, index: bits[2] id=3) -> bits[8
             .run_ir_values(&[bits(1, 0), array(8, &[3, 5, 7, 11]), bits(2, 2)])
             .expect("disabled aggregate gate execution"),
         bits(8, 0)
+    );
+}
+
+#[test]
+fn aggregate_gate_zero_storage_is_not_mutated_by_in_place_update() {
+    let compiler = compile(
+        r#"package test
+
+fn f(values: bits[39][4] id=2) -> bits[39][4] {
+  after_all.3: token = after_all(id=3)
+  array.4: bits[39][4][4] = array(values, values, values, values, id=4)
+  after_all.5: token = after_all(after_all.3, id=5)
+  concat.6: bits[0] = concat(id=6)
+  zero_ext.7: bits[36] = zero_ext(concat.6, new_bit_count=36, id=7)
+  array.8: bits[0][3] = array(concat.6, concat.6, concat.6, id=8)
+  ne.9: bits[1] = ne(zero_ext.7, zero_ext.7, id=9)
+  bit_slice.10: bits[17] = bit_slice(zero_ext.7, start=6, width=17, id=10)
+  umul.11: bits[32] = umul(bit_slice.10, bit_slice.10, id=11)
+  or_reduce.12: bits[1] = or_reduce(umul.11, id=12)
+  gate.13: bits[39][4][4] = gate(or_reduce.12, array.4, id=13)
+  array_update.14: bits[39][4][4] = array_update(gate.13, values, indices=[zero_ext.7], assumed_in_bounds=true, id=14)
+  gate.15: bits[39][4] = gate(or_reduce.12, values, id=15)
+  gate.16: bits[39][4] = gate(or_reduce.12, values, id=16)
+  ret gate.17: bits[39][4] = gate(or_reduce.12, gate.15, id=17)
+}
+"#,
+    );
+    assert_eq!(
+        compiler
+            .run_ir_values(&[array(39, &[7, 11, 13, 17])])
+            .expect("disabled aggregate gate execution"),
+        array(39, &[0, 0, 0, 0])
     );
 }
 

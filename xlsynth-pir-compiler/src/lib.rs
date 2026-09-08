@@ -1646,6 +1646,13 @@ struct ActiveScratchSlot {
     last_use: usize,
 }
 
+#[derive(Debug, Default, Clone)]
+struct BackingStorageOwners {
+    scratch: Vec<NodeRef>,
+    may_alias_external: bool,
+    may_alias_shared_zero: bool,
+}
+
 impl ScratchPlan {
     /// Assigns reusable native scratch slots for materialized intermediates.
     fn for_function(
@@ -2122,15 +2129,18 @@ fn plan_scratch_storage_owners(
     let mut materialized = HashSet::new();
     let mut in_place_array_updates = HashSet::new();
     let mut owners = HashMap::<NodeRef, Vec<NodeRef>>::new();
+    let mut storage_owners = HashMap::<NodeRef, BackingStorageOwners>::new();
     for (position, node_ref) in order.iter().enumerate() {
         let node = function.get_node(*node_ref);
         let layout = NativeValueLayout::from_type(&node.ty)?;
         let can_update_in_place = match &node.payload {
             NodePayload::ArrayUpdate { array, indices, .. } if !indices.is_empty() => {
-                let source_owners = owners.get(array).cloned().unwrap_or_default();
-                source_owners.len() == 1
+                let source_owners = storage_owners.get(array).cloned().unwrap_or_default();
+                !source_owners.may_alias_external
+                    && !source_owners.may_alias_shared_zero
+                    && source_owners.scratch.len() == 1
                     && scratch_owner_is_dead_after_position(
-                        source_owners[0],
+                        source_owners.scratch[0],
                         position,
                         &owners,
                         direct_last_uses,
@@ -2161,6 +2171,42 @@ fn plan_scratch_storage_owners(
         node_owners.sort_by_key(|owner| owner.index);
         node_owners.dedup();
         owners.insert(*node_ref, node_owners);
+
+        let mut node_storage_owners = if materialized.contains(node_ref) {
+            BackingStorageOwners {
+                scratch: vec![*node_ref],
+                may_alias_external: false,
+                may_alias_shared_zero: false,
+            }
+        } else if can_update_in_place {
+            let NodePayload::ArrayUpdate { array, .. } = &node.payload else {
+                unreachable!("in-place update decision requires array_update")
+            };
+            storage_owners.get(array).cloned().unwrap_or_default()
+        } else if layout.is_memory_backed() || scalar_storage_view_payload(&node.payload) {
+            let mut result = BackingStorageOwners {
+                scratch: Vec::new(),
+                may_alias_external: matches!(node.payload, NodePayload::Param),
+                // A false memory-backed gate returns the one zero buffer
+                // shared by every gate in the compiled function.
+                may_alias_shared_zero: matches!(
+                    node.payload,
+                    NodePayload::Binop(Binop::Gate, _, _)
+                ),
+            };
+            for operand in aliased_backing_storage_operands(&node.payload) {
+                let operand_owners = storage_owners.get(&operand).cloned().unwrap_or_default();
+                result.scratch.extend(operand_owners.scratch);
+                result.may_alias_external |= operand_owners.may_alias_external;
+                result.may_alias_shared_zero |= operand_owners.may_alias_shared_zero;
+            }
+            result
+        } else {
+            BackingStorageOwners::default()
+        };
+        node_storage_owners.scratch.sort_by_key(|owner| owner.index);
+        node_storage_owners.scratch.dedup();
+        storage_owners.insert(*node_ref, node_storage_owners);
     }
     Ok((materialized, in_place_array_updates, owners))
 }
@@ -2215,6 +2261,15 @@ fn aliased_storage_operands(payload: &NodePayload) -> Vec<NodeRef> {
             operands
         }
         _ => Vec::new(),
+    }
+}
+
+/// Returns only operands whose backing storage is preserved by a memory-backed
+/// view.
+fn aliased_backing_storage_operands(payload: &NodePayload) -> Vec<NodeRef> {
+    match payload {
+        NodePayload::ArrayIndex { array, .. } => vec![*array],
+        _ => aliased_storage_operands(payload),
     }
 }
 
