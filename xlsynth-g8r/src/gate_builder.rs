@@ -32,7 +32,7 @@ use xlsynth_pir::IrBits;
 use crate::{
     aig::aig_simplify,
     aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds},
-    aig::structural_hash_cons::StructuralHashCons,
+    aig::structural_hash_cons::{ExistingAndPair, StructuralHashCons},
 };
 
 mod full_adder;
@@ -279,6 +279,16 @@ impl GateBuilder {
         self.hash_cons
             .as_ref()
             .map(|hash_cons| hash_cons.depth(operand))
+    }
+
+    /// Returns existing ANDs whose operands both occur in `operands`.
+    pub(crate) fn find_existing_and_pairs(
+        &mut self,
+        operands: &[AigOperand],
+    ) -> Vec<ExistingAndPair> {
+        self.hash_cons.as_mut().map_or_else(Vec::new, |hash_cons| {
+            hash_cons.find_and_pairs(&self.gates, operands)
+        })
     }
 
     pub fn get_false(&self) -> AigOperand {
@@ -1582,6 +1592,31 @@ mod tests {
     }
 
     #[test]
+    fn test_find_existing_and_pairs_is_exact_for_dense_adjacency() {
+        let mut builder =
+            GateBuilder::new("dense_adjacency".to_string(), GateBuilderOptions::opt());
+        let common = *builder.add_input("common".to_string(), 1).get_lsb(0);
+        let matching_leaf = *builder.add_input("matching_leaf".to_string(), 1).get_lsb(0);
+        let expected = builder.add_and_binary(common, matching_leaf);
+        for index in 0..8 {
+            let leaf = *builder
+                .add_input(format!("other_leaf_{index}"), 1)
+                .get_lsb(0);
+            builder.add_and_binary(common, leaf);
+        }
+
+        assert_eq!(
+            builder.find_existing_and_pairs(&[common, matching_leaf]),
+            vec![ExistingAndPair {
+                lhs_index: 0,
+                rhs_index: 1,
+                depth: 1,
+            }]
+        );
+        assert_eq!(builder.add_and_binary(matching_leaf, common), expected);
+    }
+
+    #[test]
     fn test_append_checkpoint_rollback_restores_builder_prefix() {
         let mut builder = GateBuilder::new("checkpoint".to_string(), GateBuilderOptions::opt());
         let a = *builder.add_input("a".to_string(), 1).get_lsb(0);
@@ -1619,7 +1654,10 @@ mod tests {
         let suffix_checkpoint = builder.begin_append_checkpoint();
         let trial_ac = builder.add_and_binary(a, c);
         assert_eq!(trial_ac.node.id, prefix_gate_count);
+        assert_eq!(builder.find_existing_and_pairs(&[a, c]).len(), 1);
         builder.rollback_append_checkpoint(suffix_checkpoint);
+
+        assert!(builder.find_existing_and_pairs(&[a, c]).is_empty());
 
         // Rebuilding the discarded expression must not find a stale hash
         // entry referring to the rolled-back suffix.

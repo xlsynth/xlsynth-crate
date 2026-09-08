@@ -121,8 +121,8 @@ pub fn optimize_gate_fn(
         fraig_pass_stat = Some(result.stat);
     }
 
-    if options.reassociation {
-        log::info!("reassociation enabled");
+    if options.reassociation && options.cut_db.is_some() {
+        log::info!("pre-cut-db ordinary reassociation enabled");
         gate_fn = reassociation::reassociate_gatefn(&gate_fn);
     }
 
@@ -141,9 +141,12 @@ pub fn optimize_gate_fn(
             },
         );
         if options.reassociation {
-            log::info!("post-cut-db reassociation enabled");
-            gate_fn = reassociation::reassociate_gatefn(&gate_fn);
+            log::info!("post-cut-db guarded reuse reassociation enabled");
+            gate_fn = reassociation::reassociate_gatefn_selecting_reuse(&gate_fn);
         }
+    } else if options.reassociation {
+        log::info!("guarded reuse reassociation enabled");
+        gate_fn = reassociation::reassociate_gatefn_selecting_reuse(&gate_fn);
     }
 
     Ok(GateFnOptimizeOutcome {
