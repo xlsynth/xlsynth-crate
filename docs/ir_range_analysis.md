@@ -172,18 +172,7 @@ output. They reject missing records, mismatched identities, malformed output,
 timeouts, and subprocess failures. Extension comparisons use standard-op
 lowerings rather than passing unsupported extension syntax to XLS.
 
-These development helpers are not shipped in the repository. An opt-in ignored
-scalar differential test accepts a locally built interval-operations oracle via
-`XLS_RANGE_TRANSFER_ORACLE`. The protocol and pinned version header are described
-in `xlsynth-pir/src/range_analysis/ops_xls_test.rs`. This exercises
-generated abstract input sets directly without exposing conditional facts as
-unconditional public analysis results.
-
-```bash
-XLS_RANGE_TRANSFER_ORACLE=/path/to/range_transfer_oracle \
-XLS_RANGE_TRANSFER_SAMPLES=100000 XLS_RANGE_TRANSFER_SEED=0 \
-cargo test -p xlsynth-pir --lib generated_interval_givens_are_at_least_as_precise_as_xls -- --ignored --nocapture
-```
+These development helpers are not shipped in the repository.
 
 Fuzzing is evidence of soundness and precision parity, not a universal proof.
 Matching this standalone engine does not establish parity with libxls's

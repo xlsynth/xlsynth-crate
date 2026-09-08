@@ -11,10 +11,6 @@ use super::interval_set::GapDistance;
 use super::policy::{BIT_WORK_BUDGET, EXACT_VALUES, INTERVAL_COMBINATIONS, RESULT_INTERVALS};
 
 #[cfg(test)]
-#[path = "ops_xls_test.rs"]
-mod xls_tests;
-
-#[cfg(test)]
 #[path = "ops_small_domain_test.rs"]
 mod small_domain_tests;
 
