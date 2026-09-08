@@ -258,7 +258,7 @@ fn normalize_left(
 }
 
 /// Evaluates a validated extension using operands in ir_utils::operands order.
-pub(super) fn evaluate(node: &ir::Node, operands: &[&KnownBits]) -> KnownValue {
+pub(crate) fn evaluate(node: &ir::Node, operands: &[&KnownBits]) -> KnownValue {
     let width = || match node.ty {
         Type::Bits(width) => width,
         _ => unreachable!("extension has a validated bits result"),

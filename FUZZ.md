@@ -120,6 +120,34 @@ cargo fuzz run --sanitizer none fuzz_known_bits_soundness -- -max_total_time=60 
 For new concrete-value fuzz targets, prefer this shared mixed-input policy over
 uniform-only sampling so wide corner values receive meaningful coverage.
 
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_range_analysis_soundness.rs
+
+Generates pure typed function graphs, including all six extension operations,
+aggregates, zero-width bits, and widths through 257, and checks every node's
+range against concrete interpretation. The first eight bytes seed the shared
+mixed-input sampler independently of graph construction. Eight evaluations
+(one for nullary functions) cover parameters and dead nodes as well as the
+return value. It also requires identical facts after conversion to a
+combinational block. Unexpected generation, analysis, or evaluation failures,
+missing callbacks, unsound intervals, and function/block disagreements fail
+the sample. This target invokes neither XLS nor a solver.
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_range_analysis_block_soundness.rs
+
+Generates general sequential blocks with registers, optional resets/enables,
+aggregate ports, and extension operations. Independent input entropy drives
+eight mixed-sampler arbitrary-Q initial states, each followed for two cycles
+with new port inputs; Q is not restricted to reset values or reset-reachable
+states. The observed cycle interpreter checks every node's value, including
+register reads, dead nodes, and unit sinks, against the block's unconditional
+intervals. Missing values, unexpected generation/analysis/evaluation errors,
+and excluded concrete values are failures. The existing block observer lives
+in the g8r fuzz crate, avoiding
+a new dependency cycle. No external tool or solver is invoked.
+
+Run either target from its crate directory with
+`cargo fuzz run --sanitizer none <target> -- -max_total_time=60 -timeout=15 -max_len=4096`.
+
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_opt_equiv.rs
 
 Builds an XLS IR package from an upstream-standard random sample, including
