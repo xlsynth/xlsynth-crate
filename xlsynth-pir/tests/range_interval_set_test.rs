@@ -222,6 +222,50 @@ fn ternary_relaxation_preserves_xls_extrema_and_contiguous_unknown_policy() {
 }
 
 #[test]
+fn known_bit_overlap_respects_population_bounds_without_enumerating_wide_domains() {
+    for width in 0..=3 {
+        let size = 1usize << width;
+        for pattern in 0..3usize.pow(width as u32) {
+            let base = known_pattern(width, pattern);
+            for min in 0..=width {
+                for max in min..=width {
+                    let Ok(known) = base.clone().with_popcount_bounds(min, max) else {
+                        // A contradictory mask/count intersection represents no
+                        // valid KnownBits value and is rejected by
+                        // construction.
+                        continue;
+                    };
+                    for lower in 0..size {
+                        for upper in 0..size {
+                            let candidate = set(width, &[(lower, upper)]);
+                            let expected = (0..size).any(|value| {
+                                candidate.contains_usize(value)
+                                    && known.contains(&bits(width, value))
+                            });
+                            assert_eq!(candidate.intersects_known_bits(&known), expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for width in [65, 129, 257, 4097] {
+        let one_hot = KnownBits::unknown(width)
+            .with_popcount_bounds(1, 1)
+            .unwrap();
+        assert!(!IntervalSet::singleton(IrBits::zero(width)).intersects_known_bits(&one_hot));
+        assert!(!IntervalSet::singleton(IrBits::all_ones(width)).intersects_known_bits(&one_hot));
+        assert!(IntervalSet::full(width).intersects_known_bits(&one_hot));
+        let no_powers =
+            IntervalSet::from_intervals(width, [(bits(width, 5), bits(width, 7))]).unwrap();
+        assert!(!no_powers.intersects_known_bits(&one_hot));
+        let with_power =
+            IntervalSet::from_intervals(width, [(bits(width, 5), bits(width, 9))]).unwrap();
+        assert!(with_power.intersects_known_bits(&one_hot));
+    }
+}
+
+#[test]
 fn zero_width_bottom_and_mismatched_queries_are_distinct() {
     let zero = IrBits::zero(0);
     let empty = IntervalSet::empty(0);

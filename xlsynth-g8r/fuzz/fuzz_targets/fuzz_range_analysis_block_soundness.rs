@@ -9,6 +9,7 @@ use xlsynth_pir::ir_random::{
     BlockTopology, DepletableBytes, EntropySource, RandomBlockOptions, RandomFnOptions, StopPolicy,
     generate_block_package,
 };
+use xlsynth_pir::known_bits;
 use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 use xlsynth_pir::range_analysis::analyze_block;
 
@@ -49,6 +50,9 @@ fuzz_target!(|data: &[u8]| {
     let block = generated.package.get_top_block().unwrap();
     let facts = analyze_block(block)
         .unwrap_or_else(|error| panic!("generated block must analyze: {error}\n{block}"));
+    let known_bits = known_bits::analyze_block(block).unwrap_or_else(|error| {
+        panic!("generated block must have known-bit facts: {error}\n{block}")
+    });
     let mut rng = StdRng::seed_from_u64(input_seed);
     for trial in 0..8 {
         // Q values are arbitrary each trial, not reset values or only states
@@ -70,6 +74,14 @@ fuzz_target!(|data: &[u8]| {
                 assert!(
                     range.contains(value),
                     "trial={trial} cycle={cycle} node id={}: {range:?} excludes {value}; inputs={inputs:?}; state={state:?}\n{block}",
+                    block.get_node(node).text_id,
+                );
+                let known = known_bits
+                    .get(node)
+                    .expect("both analyses cover every data node");
+                assert!(
+                    known.contains(value),
+                    "trial={trial} cycle={cycle} node id={}: {known:?} excludes {value}; inputs={inputs:?}; state={state:?}\n{block}",
                     block.get_node(node).text_id,
                 );
             }

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Forward three-state value analysis for functions and blocks.
+//! Forward known-bit and population-count analysis for functions and blocks.
 //!
-//! Every reported bit holds for all input values and all current register
+//! Every reported fact holds for all input values and all current register
 //! values. Register resets and program assertions are not assumptions. The
 //! result borrows its graph so it cannot be reused across graph mutations.
 //! This analysis does not invoke XLS, a solver, or any external executable.
@@ -96,7 +96,8 @@ impl KnownValue {
         }
     }
 
-    /// Checks whether a concrete value satisfies every reported known bit.
+    /// Checks whether a concrete value satisfies every mask and population
+    /// bound.
     pub fn contains(&self, value: &IrValue) -> bool {
         match (self, value) {
             (Self::Bits(known), IrValue::Bits(bits)) => known.contains(bits),
@@ -237,7 +238,7 @@ fn analyze_graph(graph: &NodeGraph) -> Result<KnownBitsAnalysis<'_>, AnalysisErr
             // Transforms leave typed holes; these are not operations or values.
             continue;
         }
-        let value = eval::evaluate(node, &values, graph).map_err(|e| {
+        let value = eval::evaluate(node, &values).map_err(|e| {
             AnalysisError::new(format!(
                 "known bits for {} node id={} ({}): {e}",
                 graph.name,

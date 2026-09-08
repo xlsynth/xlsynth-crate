@@ -557,7 +557,7 @@ impl IntervalSet {
         Self::from_intervals(width, intervals).unwrap()
     }
 
-    /// Tests whether any represented value satisfies the supplied bit pattern.
+    /// Tests exact overlap with the supplied masks and population-count bounds.
     pub fn intersects_known_bits(&self, known: &KnownBits) -> bool {
         if self.width != known.bit_count() {
             return false;
@@ -565,23 +565,36 @@ impl IntervalSet {
         if known.is_fully_known() {
             return self.contains(known.value());
         }
-        if known.mask().is_zero() {
+        if known.mask().is_zero() && known.min_ones() == 0 && known.max_ones() == self.width {
             return !self.is_empty();
         }
+        let known_ones: usize = known
+            .value()
+            .limbs()
+            .iter()
+            .map(|limb| limb.count_ones() as usize)
+            .sum();
+        let unknown = self.width - known.known_bit_count();
         self.intervals.iter().any(|interval| {
-            // A four-state digit DP tracks whether the prefix equals each
-            // endpoint. Strictly interior prefixes can accept either next bit.
-            let mut states = [false, false, false, true];
+            // Each endpoint-tight prefix has a unique bit pattern and hence
+            // one population count. Once neither endpoint is tight, the mask's
+            // remaining free bits realize every count between their extrema.
+            // This keeps the query linear in width, without a count-sized DP.
+            let mut states = [None, None, None, Some(0usize)];
+            let mut remaining_ones = known_ones;
+            let mut remaining_unknown = unknown;
             for bit in (0..self.width).rev() {
                 let lower = interval.lower.get_bit(bit).unwrap();
                 let upper = interval.upper.get_bit(bit).unwrap();
                 let fixed = known.mask().get_bit(bit).unwrap();
                 let value = known.value().get_bit(bit).unwrap();
-                let mut next = [false; 4];
-                for (state, &possible) in states.iter().enumerate() {
-                    if !possible {
+                remaining_ones -= usize::from(fixed && value);
+                remaining_unknown -= usize::from(!fixed);
+                let mut next = [None; 4];
+                for (state, &prefix_ones) in states.iter().enumerate() {
+                    let Some(prefix_ones) = prefix_ones else {
                         continue;
-                    }
+                    };
                     let equal_lower = state & 1 != 0;
                     let equal_upper = state & 2 != 0;
                     for choice in [false, true] {
@@ -593,20 +606,25 @@ impl IntervalSet {
                         }
                         let next_state = usize::from(equal_lower && choice == lower)
                             | (usize::from(equal_upper && choice == upper) << 1);
-                        next[next_state] = true;
+                        let ones = prefix_ones + usize::from(choice);
+                        let suffix_min = ones + remaining_ones;
+                        let suffix_max = suffix_min + remaining_unknown;
+                        if suffix_min > known.max_ones() || suffix_max < known.min_ones() {
+                            continue;
+                        }
+                        if next_state == 0 {
+                            return true;
+                        }
+                        debug_assert!(next[next_state].is_none_or(|previous| previous == ones));
+                        next[next_state] = Some(ones);
                     }
                 }
                 states = next;
-                if states[0] {
-                    // A prefix strictly between both bounds admits every
-                    // suffix, including one satisfying the remaining pattern.
-                    return true;
-                }
-                if !states.iter().any(|&state| state) {
+                if states.iter().all(Option::is_none) {
                     return false;
                 }
             }
-            states.iter().any(|&state| state)
+            states.iter().any(Option::is_some)
         })
     }
 }

@@ -31,24 +31,46 @@ fn from_bit_fn(width: usize, bit: impl Fn(usize) -> Option<bool>) -> KnownBits {
 /// Visits feasible first-set indices in priority order, including the all-zero
 /// sentinel when possible. No assignments to unrelated input bits are expanded.
 fn visit_first_set(arg: &KnownBits, lsb_prio: bool, mut visit: impl FnMut(usize)) {
+    let mut remaining_ones: usize = arg
+        .value()
+        .limbs()
+        .iter()
+        .map(|limb| limb.count_ones() as usize)
+        .sum();
+    let mut remaining_unknown = arg.bit_count() - arg.known_bit_count();
     for step in 0..arg.bit_count() {
         let index = if lsb_prio {
             step
         } else {
             arg.bit_count() - 1 - step
         };
-        match bit_at(arg, index) {
+        let bit = bit_at(arg, index);
+        remaining_ones -= usize::from(bit == Some(true));
+        remaining_unknown -= usize::from(bit.is_none());
+        // Earlier positions in priority order are zero in this candidate.
+        // The suffix's independent unknowns realize every count in this range.
+        let feasible = remaining_ones + 1 <= arg.max_ones()
+            && remaining_ones + 1 + remaining_unknown >= arg.min_ones();
+        match bit {
             Some(false) => {
                 // A known-zero bit cannot be the first set bit.
             }
-            None => visit(index),
+            None => {
+                if feasible {
+                    visit(index);
+                }
+            }
             Some(true) => {
-                visit(index);
+                if feasible {
+                    visit(index);
+                }
                 return;
             }
         }
     }
-    visit(arg.bit_count());
+    if arg.min_ones() == 0 {
+        visit(arg.bit_count());
+    }
 }
 
 /// Visits exactly the feasible leading-zero counts, including zero-input N.
@@ -70,6 +92,8 @@ struct CountFacts {
     zeros: usize,
     carry_one: bool,
     carry_zero: bool,
+    min_ones: usize,
+    max_ones: usize,
 }
 
 impl CountFacts {
@@ -79,15 +103,26 @@ impl CountFacts {
             zeros: usize::MAX,
             carry_one: true,
             carry_zero: true,
+            min_ones: usize::MAX,
+            max_ones: 0,
         }
     }
 
-    fn observe(&mut self, count: usize, offset: usize) {
+    fn observe(&mut self, count: usize, offset: usize, width: usize) {
         let (low, carry) = count.overflowing_add(offset);
         self.ones &= low;
         self.zeros &= !low;
         self.carry_one &= carry;
         self.carry_zero &= !carry;
+        let truncated = if width < usize::BITS as usize {
+            low & ((1usize << width) - 1)
+        } else {
+            low
+        };
+        let ones =
+            truncated.count_ones() as usize + usize::from(width > usize::BITS as usize && carry);
+        self.min_ones = self.min_ones.min(ones);
+        self.max_ones = self.max_ones.max(ones);
     }
 
     fn finish(self, width: usize) -> KnownBits {
@@ -100,18 +135,20 @@ impl CountFacts {
                 Some(false)
             }
         })
+        .with_popcount_bounds(self.min_ones, self.max_ones)
+        .expect("observed count values agree with their joined masks")
     }
 }
 
 fn clz(arg: &KnownBits, offset: usize, width: usize) -> KnownBits {
     let mut result = CountFacts::new();
-    visit_clz(arg, |count| result.observe(count, offset));
+    visit_clz(arg, |count| result.observe(count, offset, width));
     result.finish(width)
 }
 
 fn priority_encode(arg: &KnownBits, lsb_prio: bool, width: usize) -> KnownBits {
     let mut result = CountFacts::new();
-    visit_first_set(arg, lsb_prio, |index| result.observe(index, 0));
+    visit_first_set(arg, lsb_prio, |index| result.observe(index, 0, width));
     result.finish(width)
 }
 
@@ -139,6 +176,9 @@ fn mask_low(count: &KnownBits, width: usize) -> KnownBits {
             .saturating_mul(2)
             .saturating_add(usize::from(bit != Some(false)))
             .min(width);
+    }
+    if count.min_ones() > 0 {
+        minimum = minimum.max(1).min(width);
     }
     from_bit_fn(width, |i| {
         if i < minimum {
@@ -175,7 +215,9 @@ fn normalize_given_clz(
         } else {
             bit_at(arg, i)
         }
-    });
+    })
+    .with_popcount_bounds(arg.min_ones(), arg.max_ones())
+    .expect("visited first-set position is feasible under the input counts");
     bits::shift_fixed(&conditional, shift, width, false, false)
 }
 
@@ -208,6 +250,15 @@ fn normalize_large_domain(
             None
         }
     })
+    .with_popcount_bounds(
+        if leading_one.is_some_and(|position| position < width) {
+            arg.min_ones()
+        } else {
+            0
+        },
+        arg.max_ones().min(width),
+    )
+    .expect("normalization only removes or moves set bits")
 }
 
 /// Keeps CLZ precise even when a large conditional normalized-value join is
@@ -225,7 +276,7 @@ fn normalize_left(
     let mut min_count = usize::MAX;
     let mut zero_input_possible = false;
     visit_clz(arg, |count| {
-        count_facts.observe(count, 0);
+        count_facts.observe(count, 0, clz_width.unwrap_or(0));
         min_count = min_count.min(count);
         zero_input_possible |= count == arg.bit_count();
         if candidates.len() < candidate_limit {
@@ -478,6 +529,64 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn refined_population_facts_are_sound_for_count_and_normalization_extensions() {
+        for input_width in 0..=3 {
+            for base in domain(input_width) {
+                for min in 0..=input_width {
+                    for max in min..=input_width {
+                        let Ok(arg) = base.clone().with_popcount_bounds(min, max) else {
+                            // Contradictory mask/count domains are rejected by
+                            // construction, not valid abstract input samples.
+                            continue;
+                        };
+                        for width in 0..=input_width + 2 {
+                            let leading = clz(&arg, 0, width);
+                            let priority = priority_encode(&arg, true, width);
+                            let mask = mask_low(&arg, width);
+                            let normalized = normalize_left(&arg, 0, width, Some(width));
+                            for value in concrete(&arg) {
+                                let count = concrete_clz(value, input_width);
+                                let first = if value == 0 {
+                                    input_width
+                                } else {
+                                    value.trailing_zeros() as usize
+                                };
+                                assert!(leading.contains(&constant_usize(count, width)));
+                                assert!(priority.contains(&constant_usize(first, width)));
+                                let low_mask = IrBits::from_lsb_fn(width, |bit| bit < value);
+                                assert!(mask.contains(&low_mask));
+                                let shifted = if count >= width { 0 } else { value << count };
+                                assert!(
+                                    normalized
+                                        .leaf(&[0])
+                                        .unwrap()
+                                        .contains(&constant_usize(shifted, width))
+                                );
+                                assert!(
+                                    normalized
+                                        .leaf(&[1])
+                                        .unwrap()
+                                        .contains(&constant_usize(count, width))
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The large-domain fallback also retains the global one-count bound;
+        // a surviving normalized leading one forces every other bit to zero.
+        for width in [257, 513] {
+            let one_hot = KnownBits::unknown(width)
+                .with_popcount_bounds(1, 1)
+                .unwrap();
+            let result = normalize_left(&one_hot, 1, width + 1, Some(16));
+            let expected = IrBits::from_lsb_fn(width + 1, |bit| bit == width);
+            assert_eq!(result.leaf(&[0]), Some(&KnownBits::constant(&expected)));
         }
     }
 

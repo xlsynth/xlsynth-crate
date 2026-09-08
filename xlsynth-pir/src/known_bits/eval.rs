@@ -112,11 +112,9 @@ fn contains_index(index: &KnownBits, candidate: usize) -> bool {
     if index.bit_count() < usize::BITS as usize && candidate >> index.bit_count() != 0 {
         return false;
     }
-    (0..index.bit_count()).all(|position| {
-        !index.mask().get_bit(position).unwrap()
-            || index.value().get_bit(position).unwrap()
-                == (position < usize::BITS as usize && ((candidate >> position) & 1) != 0)
-    })
+    index.contains(&IrBits::from_lsb_fn(index.bit_count(), |position| {
+        position < usize::BITS as usize && ((candidate >> position) & 1) != 0
+    }))
 }
 
 /// Saturation retains all comparisons against structural array/case counts.
@@ -152,8 +150,18 @@ fn possible_indices(index: &KnownBits) -> Vec<usize> {
         }
     }
     debug_assert!(unknown.len() < 10);
+    let known_ones: usize = index
+        .value()
+        .limbs()
+        .iter()
+        .map(|limb| limb.count_ones() as usize)
+        .sum();
     let mut result = Vec::with_capacity(1usize << unknown.len());
     for assignment in 0..(1usize << unknown.len()) {
+        let ones = known_ones + assignment.count_ones() as usize;
+        if ones < index.min_ones() || ones > index.max_ones() {
+            continue;
+        }
         let mut value = base;
         for (variable, position) in unknown.iter().enumerate() {
             if assignment & (1usize << variable) != 0 {
@@ -262,7 +270,6 @@ fn array_update(
 pub(super) fn evaluate(
     node: &ir::Node,
     values: &[Option<KnownValue>],
-    graph: &ir::NodeGraph,
 ) -> Result<KnownValue, AnalysisError> {
     let output_width = node
         .ty
@@ -525,11 +532,9 @@ pub(super) fn evaluate(
             cases,
             default,
         } => {
-            let known_nonzero = matches!(
-                graph.get_node(*selector).payload,
-                NodePayload::OneHot { .. }
-            );
-            let selector = bits_at(values, *selector)?.lsb_bits();
+            let selector = bits_at(values, *selector)?;
+            let known_nonzero = selector.min_ones() > 0;
+            let selector = selector.lsb_bits();
             let mut result = None;
             let mut can_reach_default = true;
             for (index, case) in cases.iter().enumerate() {
@@ -549,11 +554,31 @@ pub(super) fn evaluate(
             result.unwrap_or_else(|| KnownValue::unknown(&node.ty))
         }
         NodePayload::OneHotSel { selector, cases } => {
-            let known_nonzero = matches!(
-                graph.get_node(*selector).payload,
-                NodePayload::OneHot { .. }
-            );
-            let selector = bits_at(values, *selector)?.lsb_bits();
+            let selector = bits_at(values, *selector)?;
+            let known_nonzero = selector.min_ones() > 0;
+            if selector.max_ones() <= 1 {
+                let mut result = (!known_nonzero).then(|| {
+                    map_bits(&KnownValue::unknown(&node.ty), &|leaf| {
+                        KnownBits::constant(&IrBits::zero(leaf.bit_count()))
+                    })
+                });
+                let has_known_one = !selector.value().is_zero();
+                for (index, case) in cases.iter().enumerate() {
+                    // At most one set bit is possible. A known one excludes
+                    // every other case; otherwise each unknown bit is feasible.
+                    let possible = selector.max_ones() == 1
+                        && if has_known_one {
+                            selector.value().get_bit(index).unwrap()
+                        } else {
+                            !selector.mask().get_bit(index).unwrap()
+                        };
+                    if possible {
+                        join_into(&mut result, value_at(values, *case)?)?;
+                    }
+                }
+                return Ok(result.unwrap_or_else(|| KnownValue::unknown(&node.ty)));
+            }
+            let selector = selector.lsb_bits();
             let mut result = map_bits(&KnownValue::unknown(&node.ty), &|leaf| {
                 KnownBits::constant(&IrBits::zero(leaf.bit_count()))
             });
@@ -668,6 +693,31 @@ mod tests {
             &KnownBits::unknown(6),
             &KnownBits::unknown(4)
         ]));
+    }
+
+    #[test]
+    fn index_membership_and_enumeration_respect_popcount_constraints() {
+        let index = KnownBits::from_lsb_bits(&[Some(true), None, None, None])
+            .with_popcount_bounds(2, 2)
+            .unwrap();
+        assert_eq!(possible_indices(&index), vec![3, 5, 9]);
+        for candidate in 0..32 {
+            assert_eq!(
+                contains_index(&index, candidate),
+                [3, 5, 9].contains(&candidate)
+            );
+        }
+
+        let mut pattern = vec![Some(false); 129];
+        pattern[0] = None;
+        pattern[128] = None;
+        let wide = KnownBits::from_lsb_bits(&pattern)
+            .with_popcount_bounds(1, 1)
+            .unwrap();
+        assert_eq!(possible_indices(&wide), vec![1, usize::MAX]);
+        assert!(contains_index(&wide, 1));
+        assert!(!contains_index(&wide, 0));
+        assert!(!contains_index(&wide, usize::MAX));
     }
 
     #[test]

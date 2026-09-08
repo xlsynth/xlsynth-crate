@@ -146,23 +146,58 @@ pub fn required_iverilog_toolchain() -> Result<&'static IcarusToolchain, &'stati
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::fs::File;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::Barrier;
+    use std::thread;
     use std::time::Duration;
     use xlsynth::external_tool::ToolFailureKind;
 
     use super::IcarusToolchain;
 
+    /// Waits for any fork-inherited writers before exposing an executable.
+    fn write_executable(path: &Path, script: &str) {
+        let mut file = File::create(path).unwrap();
+        file.lock().unwrap();
+        file.write_all(script.as_bytes()).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        // A concurrent fork can retain this writable descriptor until exec,
+        // even after our close. Keep its flock attached to the open file
+        // description, then wait from a read-only descriptor for all writers
+        // to close. Explicitly unlocking would reintroduce the ETXTBSY race.
+        // https://github.com/rust-lang/rust/issues/114554
+        drop(file);
+        File::open(path).unwrap().lock_shared().unwrap();
+    }
+
     /// Provides a successful version probe and a caller-selected tool body.
     fn fake_tool(directory: &Path, name: &str, body: &str) -> PathBuf {
         let path = directory.join(name);
-        std::fs::write(
+        write_executable(
             &path,
-            format!("#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then exit 0; fi\n{body}\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then exit 0; fi\n{body}\n"),
+        );
         path
+    }
+
+    #[test]
+    fn fake_tools_can_be_created_during_concurrent_process_spawns() {
+        let start = Barrier::new(4);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let directory = tempfile::tempdir().unwrap();
+                    start.wait();
+                    for _ in 0..32 {
+                        let tool = fake_tool(directory.path(), "tool", "exit 0");
+                        IcarusToolchain::new(&tool, &tool).unwrap();
+                    }
+                });
+            }
+        });
     }
 
     #[test]
@@ -263,8 +298,7 @@ mod tests {
             (&working, "#!/bin/sh\nexit 0\n"),
             (&broken, "#!/bin/sh\necho broken >&2\nexit 1\n"),
         ] {
-            std::fs::write(path, script).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            write_executable(path, script);
         }
         IcarusToolchain::new(&working, &working).unwrap();
         for (compiler, runtime, name) in

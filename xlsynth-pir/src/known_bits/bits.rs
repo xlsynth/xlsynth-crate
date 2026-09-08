@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Width-checked known bits and scalar three-valued transfer functions.
+//! Width-checked known bits, population bounds, and scalar transfer functions.
+//!
+//! Each fact represents the conjunction of fixed bit positions and an inclusive
+//! interval for the number of ones. Zero counts follow from the bit width.
+//! Local transfers may conservatively forget population information, but never
+//! assume a relationship between independently supplied operand facts.
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -10,11 +15,19 @@ use crate::{IrBits, ValueError};
 
 type Bit = Option<bool>;
 
-/// Unconditional bit facts; unknown positions are zero in the value mask.
+/// Unconditional bit facts and population bounds; unknown positions are zero
+/// in the value mask.
+///
+/// Bounds satisfy `0 <= min_ones <= max_ones <= bit_count` and are consistent
+/// with the known mask. Saturating a population bound fills all forced unknown
+/// bits. Every instance represents at least one value; there is no empty/bottom
+/// element. For `bits[0]`, the sole value has zero ones and zero zeros.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KnownBits {
     mask: IrBits,
     value: IrBits,
+    min_ones: usize,
+    max_ones: usize,
 }
 
 impl KnownBits {
@@ -23,14 +36,19 @@ impl KnownBits {
         Self {
             mask: IrBits::zero(width),
             value: IrBits::zero(width),
+            min_ones: 0,
+            max_ones: width,
         }
     }
 
     /// Creates a fully known value.
     pub fn constant(value: &IrBits) -> Self {
+        let count = popcount(value);
         Self {
             mask: IrBits::all_ones(value.get_bit_count()),
             value: value.clone(),
+            min_ones: count,
+            max_ones: count,
         }
     }
 
@@ -44,7 +62,74 @@ impl KnownBits {
             )));
         }
         let value = value.and(&mask);
-        Ok(Self { mask, value })
+        Ok(Self::from_canonical_mask_value(mask, value))
+    }
+
+    /// Constructs mask-derived bounds for already width-checked, masked bits.
+    fn from_canonical_mask_value(mask: IrBits, value: IrBits) -> Self {
+        debug_assert_eq!(mask.get_bit_count(), value.get_bit_count());
+        let min_ones = popcount(&value);
+        let max_ones = min_ones + (mask.get_bit_count() - popcount(&mask));
+        Self {
+            mask,
+            value,
+            min_ones,
+            max_ones,
+        }
+    }
+
+    /// Intersects these facts with population bounds, rejecting empty or
+    /// out-of-width bounds and filling unknown bits when the count is forced.
+    pub fn with_popcount_bounds(mut self, min: usize, max: usize) -> Result<Self, ValueError> {
+        let width = self.bit_count();
+        if min > max || max > width {
+            return Err(ValueError(format!(
+                "invalid population bounds [{min}, {max}] for bits[{width}]"
+            )));
+        }
+        let known_ones = popcount(&self.value);
+        let possible_ones = known_ones + (width - self.known_bit_count());
+        self.min_ones = self.min_ones.max(min).max(known_ones);
+        self.max_ones = self.max_ones.min(max).min(possible_ones);
+        if self.min_ones > self.max_ones {
+            return Err(ValueError(
+                "population bounds contradict known bits or existing bounds".into(),
+            ));
+        }
+        if self.max_ones == known_ones {
+            self.mask = IrBits::all_ones(width);
+        } else if self.min_ones == possible_ones {
+            self.value = self.value.or(&self.mask.not());
+            self.mask = IrBits::all_ones(width);
+        }
+        Ok(self)
+    }
+
+    /// Applies bounds proved by a scalar transfer to its independently computed
+    /// bit mask.
+    fn with_derived_popcount(self, min: usize, max: usize) -> Self {
+        self.with_popcount_bounds(min, max)
+            .expect("transfer population bounds must agree with its known bits")
+    }
+
+    /// Minimum number of set bits in every represented value.
+    pub fn min_ones(&self) -> usize {
+        self.min_ones
+    }
+
+    /// Maximum number of set bits in every represented value.
+    pub fn max_ones(&self) -> usize {
+        self.max_ones
+    }
+
+    /// Minimum number of zero bits in every represented value.
+    pub fn min_zeros(&self) -> usize {
+        self.bit_count() - self.max_ones
+    }
+
+    /// Maximum number of zero bits in every represented value.
+    pub fn max_zeros(&self) -> usize {
+        self.bit_count() - self.min_ones
     }
 
     pub fn bit_count(&self) -> usize {
@@ -60,11 +145,7 @@ impl KnownBits {
     }
 
     pub fn known_bit_count(&self) -> usize {
-        self.mask
-            .limbs()
-            .iter()
-            .map(|x| x.count_ones() as usize)
-            .sum()
+        popcount(&self.mask)
     }
 
     pub fn is_fully_known(&self) -> bool {
@@ -73,7 +154,11 @@ impl KnownBits {
 
     /// Returns whether a concrete value satisfies these facts.
     pub fn contains(&self, value: &IrBits) -> bool {
-        value.get_bit_count() == self.bit_count() && value.and(&self.mask) == self.value
+        if value.get_bit_count() != self.bit_count() || value.and(&self.mask) != self.value {
+            return false;
+        }
+        let count = popcount(value);
+        self.min_ones <= count && count <= self.max_ones
     }
 
     /// Formats the most-significant bit first, using `X` for unknown bits.
@@ -90,10 +175,10 @@ impl KnownBits {
     }
 
     pub(crate) fn from_lsb_bits(bits: &[Bit]) -> Self {
-        Self {
-            mask: IrBits::from_lsb_fn(bits.len(), |i| bits[i].is_some()),
-            value: IrBits::from_lsb_fn(bits.len(), |i| bits[i].unwrap_or(false)),
-        }
+        Self::from_canonical_mask_value(
+            IrBits::from_lsb_fn(bits.len(), |i| bits[i].is_some()),
+            IrBits::from_lsb_fn(bits.len(), |i| bits[i].unwrap_or(false)),
+        )
     }
 
     pub(crate) fn lsb_bits(&self) -> Vec<Bit> {
@@ -115,8 +200,55 @@ impl KnownBits {
             .and(&other.mask)
             .and(&self.value.xor(&other.value).not());
         let value = self.value.and(&mask);
-        Self { mask, value }
+        Self::from_canonical_mask_value(mask, value).with_derived_popcount(
+            self.min_ones.min(other.min_ones),
+            self.max_ones.max(other.max_ones),
+        )
     }
+}
+
+fn popcount(bits: &IrBits) -> usize {
+    bits.limbs()
+        .iter()
+        .map(|limb| limb.count_ones() as usize)
+        .sum()
+}
+
+/// Bounds retained positions after accounting for known bits in the removed
+/// region, so slicing away zero padding does not discard population facts.
+fn retained_popcount(
+    a: &KnownBits,
+    retained: usize,
+    retained_known_ones: usize,
+    retained_known_zeros: usize,
+) -> (usize, usize) {
+    debug_assert!(retained <= a.bit_count());
+    let known_ones = popcount(&a.value);
+    let known_zeros = a.known_bit_count() - known_ones;
+    let removed_known_ones = known_ones - retained_known_ones;
+    let removed_known_zeros = known_zeros - retained_known_zeros;
+    let removed = a.bit_count() - retained;
+    (
+        a.min_ones.saturating_sub(removed - removed_known_zeros),
+        (a.max_ones - removed_known_ones).min(retained),
+    )
+}
+
+/// Counts fixed bit facts in a known in-bounds slice without allocating.
+fn slice_mask_counts(a: &KnownBits, start: usize, width: usize) -> (usize, usize) {
+    debug_assert!(start <= a.bit_count() && width <= a.bit_count() - start);
+    let mut ones = 0;
+    let mut zeros = 0;
+    for bit in start..start + width {
+        if a.mask.get_bit(bit).unwrap() {
+            if a.value.get_bit(bit).unwrap() {
+                ones += 1;
+            } else {
+                zeros += 1;
+            }
+        }
+    }
+    (ones, zeros)
 }
 
 fn not(a: Bit) -> Bit {
@@ -444,14 +576,30 @@ pub(super) fn shift_fixed(
     };
     let fill_known = !arithmetic || a.bit_count() == 0 || a.mask.msb();
     let fill_value = arithmetic && a.value.msb();
-    KnownBits {
-        mask: IrBits::from_lsb_fn(width, |i| {
+    let result = KnownBits::from_canonical_mask_value(
+        IrBits::from_lsb_fn(width, |i| {
             source(i).map_or(fill_known, |i| a.mask.get_bit(i).unwrap())
         }),
-        value: IrBits::from_lsb_fn(width, |i| {
+        IrBits::from_lsb_fn(width, |i| {
             source(i).map_or(fill_value, |i| a.value.get_bit(i).unwrap())
         }),
+    );
+    let retained = if right {
+        width.min(a.bit_count().saturating_sub(amount))
+    } else {
+        a.bit_count().min(width.saturating_sub(amount))
+    };
+    let fill = width - retained;
+    let retained_ones = result.min_ones - if fill_known && fill_value { fill } else { 0 };
+    let retained_zeros = result.min_zeros() - if fill_known && !fill_value { fill } else { 0 };
+    let (mut min, mut max) = retained_popcount(a, retained, retained_ones, retained_zeros);
+    if fill_value {
+        min += fill;
+        max += fill;
+    } else if !fill_known {
+        max += fill;
     }
+    result.with_derived_popcount(min, max)
 }
 
 fn shift_by(a: &[Bit], amount: usize, width: usize, right: bool, fill: Bit) -> Vec<Bit> {
@@ -533,58 +681,89 @@ pub(super) fn try_slice_update_fixed(
     }
     let count = update.bit_count().min(a.bit_count() - offset);
     let update_index = |i: usize| i.checked_sub(offset).filter(|&i| i < count);
-    Some(KnownBits {
-        mask: IrBits::from_lsb_fn(a.bit_count(), |i| {
+    let result = KnownBits::from_canonical_mask_value(
+        IrBits::from_lsb_fn(a.bit_count(), |i| {
             update_index(i).map_or_else(
                 || a.mask.get_bit(i).unwrap(),
                 |i| update.mask.get_bit(i).unwrap(),
             )
         }),
-        value: IrBits::from_lsb_fn(a.bit_count(), |i| {
+        IrBits::from_lsb_fn(a.bit_count(), |i| {
             update_index(i).map_or_else(
                 || a.value.get_bit(i).unwrap(),
                 |i| update.value.get_bit(i).unwrap(),
             )
         }),
-    })
+    );
+    let (removed_ones, removed_zeros) = slice_mask_counts(a, offset, count);
+    let base_known_ones = popcount(&a.value) - removed_ones;
+    let base_known_zeros = a.known_bit_count() - popcount(&a.value) - removed_zeros;
+    let (base_min, base_max) =
+        retained_popcount(a, a.bit_count() - count, base_known_ones, base_known_zeros);
+    let (update_ones, update_zeros) = slice_mask_counts(update, 0, count);
+    let (update_min, update_max) = retained_popcount(update, count, update_ones, update_zeros);
+    Some(result.with_derived_popcount(base_min + update_min, base_max + update_max))
 }
 
 pub(super) fn slice(a: &KnownBits, start: usize, width: usize) -> KnownBits {
     let input_index = |i| start.checked_add(i).filter(|&i| i < a.bit_count());
-    KnownBits {
+    let result = KnownBits::from_canonical_mask_value(
         // Bits beyond the input, including overflowing indices, are known
         // zeros rather than unknown bits.
-        mask: IrBits::from_lsb_fn(width, |i| {
+        IrBits::from_lsb_fn(width, |i| {
             input_index(i).is_none_or(|i| a.mask.get_bit(i).unwrap())
         }),
-        value: IrBits::from_lsb_fn(width, |i| {
+        IrBits::from_lsb_fn(width, |i| {
             input_index(i).is_some_and(|i| a.value.get_bit(i).unwrap())
         }),
-    }
+    );
+    let retained = width.min(a.bit_count().saturating_sub(start));
+    let (min, max) = retained_popcount(
+        a,
+        retained,
+        result.min_ones,
+        result.min_zeros() - (width - retained),
+    );
+    result.with_derived_popcount(min, max)
 }
 
 pub(super) fn resize(a: &KnownBits, width: usize, signed: bool) -> KnownBits {
     let sign_known = !signed || a.bit_count() == 0 || a.mask.msb();
     let sign_value = signed && a.value.msb();
-    KnownBits {
-        mask: IrBits::from_lsb_fn(width, |i| {
+    let result = KnownBits::from_canonical_mask_value(
+        IrBits::from_lsb_fn(width, |i| {
             if i < a.bit_count() {
                 a.mask.get_bit(i).unwrap()
             } else {
                 sign_known
             }
         }),
-        value: IrBits::from_lsb_fn(width, |i| {
+        IrBits::from_lsb_fn(width, |i| {
             if i < a.bit_count() {
                 a.value.get_bit(i).unwrap()
             } else {
                 sign_value
             }
         }),
+    );
+    let retained = width.min(a.bit_count());
+    let fill = width - retained;
+    let retained_ones = result.min_ones - if sign_known && sign_value { fill } else { 0 };
+    let retained_zeros = result.min_zeros() - if sign_known && !sign_value { fill } else { 0 };
+    let (mut min, mut max) = retained_popcount(a, retained, retained_ones, retained_zeros);
+    if sign_value {
+        min += fill;
+        max += fill;
+    } else if !sign_known {
+        max += fill;
     }
+    result.with_derived_popcount(min, max)
 }
 
 pub(super) fn dynamic_slice(a: &KnownBits, start: &KnownBits, width: usize) -> KnownBits {
+    if let Some(amount) = fixed_or_saturated_amount(&start.lsb_bits(), a.bit_count()) {
+        return shift_fixed(a, amount, width, true, false);
+    }
     KnownBits::from_lsb_bits(&shifted(
         &a.lsb_bits(),
         &start.lsb_bits(),
@@ -596,17 +775,12 @@ pub(super) fn dynamic_slice(a: &KnownBits, start: &KnownBits, width: usize) -> K
 
 /// Joins feasible in-bounds updates and the out-of-bounds no-op case.
 pub(crate) fn slice_update(a: &KnownBits, start: &KnownBits, update: &KnownBits) -> KnownBits {
-    let mut a = a.lsb_bits();
+    if let Some(result) = try_slice_update_fixed(a, start, update) {
+        return result;
+    }
+    let a = a.lsb_bits();
     let start = start.lsb_bits();
     let update = update.lsb_bits();
-    if update.is_empty() {
-        return KnownBits::from_lsb_bits(&a);
-    }
-    if let Some(offset) = fixed_or_saturated_amount(&start, a.len()) {
-        let count = update.len().min(a.len() - offset);
-        a[offset..offset + count].copy_from_slice(&update[..count]);
-        return KnownBits::from_lsb_bits(&a);
-    }
     let mut result = None;
     for offset in 0..a.len() {
         if !can_equal_index(&start, offset) {
@@ -631,6 +805,7 @@ pub(crate) fn slice_update(a: &KnownBits, start: &KnownBits, update: &KnownBits)
 
 /// Tracks the first set bit and the extra all-zero indicator.
 pub(super) fn one_hot(a: &KnownBits, lsb_prio: bool) -> KnownBits {
+    let nonzero = a.min_ones > 0;
     let a = a.lsb_bits();
     let mut result = vec![Some(false); a.len() + 1];
     let mut all_zero = Some(true);
@@ -639,18 +814,22 @@ pub(super) fn one_hot(a: &KnownBits, lsb_prio: bool) -> KnownBits {
         result[i] = and(all_zero, a[i]);
         all_zero = and(all_zero, not(a[i]));
     }
-    result[a.len()] = all_zero;
-    KnownBits::from_lsb_bits(&result)
+    result[a.len()] = if nonzero { Some(false) } else { all_zero };
+    KnownBits::from_lsb_bits(&result).with_derived_popcount(1, 1)
 }
 
 /// Determines each decoded bit by matching its index against the input facts.
 pub(super) fn decode(a: &KnownBits, width: usize) -> KnownBits {
+    if width == 0 {
+        return KnownBits::constant(&IrBits::zero(0));
+    }
     let bits = a.lsb_bits();
     let fully_known = a.is_fully_known();
-    KnownBits::from_lsb_bits(
+    let result = KnownBits::from_lsb_bits(
         &(0..width)
             .map(|index| {
-                if !can_equal_index(&bits, index) {
+                let count = index.count_ones() as usize;
+                if !can_equal_index(&bits, index) || count < a.min_ones || count > a.max_ones {
                     Some(false)
                 } else if fully_known {
                     Some(true)
@@ -659,7 +838,9 @@ pub(super) fn decode(a: &KnownBits, width: usize) -> KnownBits {
                 }
             })
             .collect::<Vec<_>>(),
-    )
+    );
+    let min = usize::from(!can_be_at_least(&bits, width));
+    result.with_derived_popcount(min, 1)
 }
 
 /// ORs the indices of every potentially selected input bit.
@@ -688,6 +869,8 @@ pub(crate) fn unop(op: Unop, a: &KnownBits) -> KnownBits {
         Unop::Not => KnownBits {
             mask: a.mask.clone(),
             value: a.mask.xor(&a.value),
+            min_ones: a.min_zeros(),
+            max_ones: a.max_zeros(),
         },
         Unop::Neg => KnownBits::from_lsb_bits(&negate_bits(&a.lsb_bits())),
         Unop::Reverse => KnownBits {
@@ -697,34 +880,31 @@ pub(crate) fn unop(op: Unop, a: &KnownBits) -> KnownBits {
             value: IrBits::from_lsb_fn(a.bit_count(), |i| {
                 a.value.get_bit(a.bit_count() - 1 - i).unwrap()
             }),
+            min_ones: a.min_ones,
+            max_ones: a.max_ones,
         },
         Unop::OrReduce => {
-            let has_one = !a.value.is_zero();
-            KnownBits {
-                mask: IrBits::bool(has_one || a.is_fully_known()),
-                value: IrBits::bool(has_one),
-            }
+            let bit = if a.min_ones > 0 {
+                Some(true)
+            } else if a.max_ones == 0 {
+                Some(false)
+            } else {
+                None
+            };
+            KnownBits::from_lsb_bits(&[bit])
         }
         Unop::AndReduce => {
-            let has_zero = a.mask != a.value;
-            let known = has_zero || a.is_fully_known();
-            KnownBits {
-                mask: IrBits::bool(known),
-                value: IrBits::bool(known && !has_zero),
-            }
+            let bit = if a.min_zeros() > 0 {
+                Some(false)
+            } else if a.max_zeros() == 0 {
+                Some(true)
+            } else {
+                None
+            };
+            KnownBits::from_lsb_bits(&[bit])
         }
         Unop::XorReduce => {
-            let known = a.is_fully_known();
-            let parity = known
-                && a.value
-                    .limbs()
-                    .iter()
-                    .fold(0, |parity, limb| parity ^ (limb.count_ones() & 1))
-                    != 0;
-            KnownBits {
-                mask: IrBits::bool(known),
-                value: IrBits::bool(parity),
-            }
+            KnownBits::from_lsb_bits(&[(a.min_ones == a.max_ones).then_some(a.min_ones % 2 != 0)])
         }
     }
 }
@@ -748,6 +928,8 @@ pub(crate) fn nary(op: NaryOp, args: &[&KnownBits], width: usize) -> KnownBits {
         return KnownBits {
             mask: IrBits::from_lsb_fn(width, |_| masks.next().unwrap()),
             value: IrBits::from_lsb_fn(width, |_| values.next().unwrap()),
+            min_ones: args.iter().map(|arg| arg.min_ones).sum(),
+            max_ones: args.iter().map(|arg| arg.max_ones).sum(),
         };
     }
     let identity = matches!(op, NaryOp::And | NaryOp::Nand);
@@ -769,37 +951,59 @@ pub(crate) fn nary(op: NaryOp, args: &[&KnownBits], width: usize) -> KnownBits {
             NaryOp::And | NaryOp::Nand => {
                 let value = result.value.and(&a.value);
                 let zeros = result.mask.xor(&result.value).or(&a.mask.xor(&a.value));
-                KnownBits {
-                    mask: zeros.or(&value),
-                    value,
-                }
+                KnownBits::from_canonical_mask_value(zeros.or(&value), value).with_derived_popcount(
+                    result.min_ones.saturating_sub(width - a.min_ones),
+                    result.max_ones.min(a.max_ones),
+                )
             }
             NaryOp::Or | NaryOp::Nor => {
                 let value = result.value.or(&a.value);
                 let zeros = result.mask.xor(&result.value).and(&a.mask.xor(&a.value));
-                KnownBits {
-                    mask: zeros.or(&value),
-                    value,
-                }
+                KnownBits::from_canonical_mask_value(zeros.or(&value), value).with_derived_popcount(
+                    result.min_ones.max(a.min_ones),
+                    result.max_ones + a.max_ones.min(width - result.max_ones),
+                )
             }
             NaryOp::Xor => {
                 let mask = result.mask.and(&a.mask);
-                KnownBits {
-                    value: result.value.xor(&a.value).and(&mask),
-                    mask,
-                }
+                let value = result.value.xor(&a.value).and(&mask);
+                KnownBits::from_canonical_mask_value(mask, value).with_derived_popcount(
+                    result
+                        .min_ones
+                        .saturating_sub(a.max_ones)
+                        .max(a.min_ones.saturating_sub(result.max_ones)),
+                    width
+                        .min(result.max_ones.saturating_add(a.max_ones))
+                        .min((width - result.min_ones).saturating_add(width - a.min_ones)),
+                )
             }
             NaryOp::Concat => unreachable!("concat handled above"),
         };
     }
     if matches!(op, NaryOp::Nand | NaryOp::Nor) {
-        result.value = result.mask.xor(&result.value);
+        return unop(Unop::Not, &result);
     }
     result
 }
 
 /// Evaluates arithmetic, comparisons, shifts, and gating without assumptions.
 pub(super) fn binop(op: Binop, a: &KnownBits, b: &KnownBits, out_width: usize) -> KnownBits {
+    if matches!(op, Binop::Shll | Binop::Shrl | Binop::Shra) {
+        if let Some(result) = try_shift_fixed(op, a, b, out_width) {
+            return result;
+        }
+    }
+    if op == Binop::Gate {
+        assert_eq!(a.bit_count(), 1);
+        assert_eq!(b.bit_count(), out_width);
+        return if a.min_ones > 0 {
+            b.clone()
+        } else if a.max_ones == 0 {
+            KnownBits::constant(&IrBits::zero(out_width))
+        } else {
+            b.join(&KnownBits::constant(&IrBits::zero(out_width)))
+        };
+    }
     if a.is_fully_known() && b.is_fully_known() {
         let result = match op {
             Binop::Udiv => Some(a.value.udiv(&b.value)),
@@ -1419,7 +1623,13 @@ mod tests {
                                         }));
                                 }
                             }
-                            assert_eq!(result, exact.unwrap(), "{op:?} {a:?} {b:?}");
+                            // This test characterizes exact per-bit joins;
+                            // uncertain shifts may conservatively drop counts.
+                            let exact = exact.unwrap();
+                            assert_eq!(result.mask(), exact.mask(), "{op:?} {a:?} {b:?}");
+                            assert_eq!(result.value(), exact.value(), "{op:?} {a:?} {b:?}");
+                            assert!(result.min_ones() <= exact.min_ones());
+                            assert!(result.max_ones() >= exact.max_ones());
                         }
                     }
                 }
@@ -1520,3 +1730,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "bits_popcount_test.rs"]
+mod popcount_tests;
