@@ -153,6 +153,55 @@ top fn f(use_global: bits[1] id=3) -> bits[14] {
 }
 
 #[test]
+fn package_compiler_preserves_call_outputs_when_updating_selected_view() {
+    let cases = [
+        r#"package test
+
+fn copy(value: bits[8][2][2] id=1) -> bits[8][2][2] {
+  ret result: bits[8][2][2] = identity(value, id=2)
+}
+
+top fn f(selector: bits[1] id=3, values: bits[8][2][2] id=4, replacement: bits[8] id=5) -> (bits[8][2], bits[8][2][2]) {
+  produced: bits[8][2][2] = invoke(values, to_apply=copy, id=6)
+  row: bits[8][2] = array(replacement, replacement, id=7)
+  scratch: bits[8][2][2] = array(row, row, id=8)
+  selected: bits[8][2][2] = sel(selector, cases=[produced, scratch], id=9)
+  zero: bits[1] = literal(value=0, id=10)
+  selected_row: bits[8][2] = array_index(selected, indices=[zero], id=11)
+  updated: bits[8][2] = array_update(selected_row, replacement, indices=[zero], id=12)
+  ret result: (bits[8][2], bits[8][2][2]) = tuple(updated, produced, id=13)
+}
+"#,
+        r#"package test
+
+fn body(i: bits[32] id=1, carry: bits[8][2][2] id=2) -> bits[8][2][2] {
+  ret result: bits[8][2][2] = identity(carry, id=3)
+}
+
+top fn f(selector: bits[1] id=4, values: bits[8][2][2] id=5, replacement: bits[8] id=6) -> (bits[8][2], bits[8][2][2]) {
+  produced: bits[8][2][2] = counted_for(values, trip_count=1, stride=1, body=body, invariant_args=[], id=7)
+  row: bits[8][2] = array(replacement, replacement, id=8)
+  scratch: bits[8][2][2] = array(row, row, id=9)
+  selected: bits[8][2][2] = sel(selector, cases=[produced, scratch], id=10)
+  zero: bits[1] = literal(value=0, id=11)
+  selected_row: bits[8][2] = array_index(selected, indices=[zero], id=12)
+  updated: bits[8][2] = array_update(selected_row, replacement, indices=[zero], id=13)
+  ret result: (bits[8][2], bits[8][2][2]) = tuple(updated, produced, id=14)
+}
+"#,
+    ];
+    for ir in cases {
+        let compiler = compile_package(ir);
+        let original = IrValue::make_array(&[array(8, &[3, 5]), array(8, &[7, 11])])
+            .expect("nested input array should construct");
+        let actual = compiler
+            .run_ir_values(&[bits(1, 0), original.clone(), bits(8, 42)])
+            .expect("compiled call should execute");
+        assert_eq!(actual, tuple(&[array(8, &[42, 5]), original]));
+    }
+}
+
+#[test]
 fn package_compiler_counted_for_updates_array_of_tuples() {
     let ir = r#"package test
 

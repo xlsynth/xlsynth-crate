@@ -1646,11 +1646,12 @@ struct ActiveScratchSlot {
     last_use: usize,
 }
 
-#[derive(Debug, Default, Clone)]
-struct BackingStorageOwners {
-    scratch: Vec<NodeRef>,
-    may_alias_external: bool,
-    may_alias_shared_zero: bool,
+/// Identifies the storage an address-valued node can return at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackingStorageOrigin {
+    MaterializedScratch(NodeRef),
+    NonReusable(NodeRef),
+    SharedGateZero,
 }
 
 impl ScratchPlan {
@@ -2129,22 +2130,26 @@ fn plan_scratch_storage_owners(
     let mut materialized = HashSet::new();
     let mut in_place_array_updates = HashSet::new();
     let mut owners = HashMap::<NodeRef, Vec<NodeRef>>::new();
-    let mut storage_owners = HashMap::<NodeRef, BackingStorageOwners>::new();
+    let mut storage_origins = HashMap::<NodeRef, Vec<BackingStorageOrigin>>::new();
     for (position, node_ref) in order.iter().enumerate() {
         let node = function.get_node(*node_ref);
         let layout = NativeValueLayout::from_type(&node.ty)?;
         let can_update_in_place = match &node.payload {
-            NodePayload::ArrayUpdate { array, indices, .. } if !indices.is_empty() => {
-                let source_owners = storage_owners.get(array).cloned().unwrap_or_default();
-                !source_owners.may_alias_external
-                    && !source_owners.may_alias_shared_zero
-                    && source_owners.scratch.len() == 1
-                    && scratch_owner_is_dead_after_position(
-                        source_owners.scratch[0],
+            NodePayload::ArrayUpdate { array, indices, .. }
+                if !indices.is_empty() && layout.byte_count() != 0 =>
+            {
+                if let Some([BackingStorageOrigin::MaterializedScratch(owner)]) =
+                    storage_origins.get(array).map(Vec::as_slice)
+                {
+                    scratch_owner_is_dead_after_position(
+                        *owner,
                         position,
                         &owners,
                         direct_last_uses,
                     )
+                } else {
+                    false
+                }
             }
             _ => false,
         };
@@ -2172,41 +2177,40 @@ fn plan_scratch_storage_owners(
         node_owners.dedup();
         owners.insert(*node_ref, node_owners);
 
-        let mut node_storage_owners = if materialized.contains(node_ref) {
-            BackingStorageOwners {
-                scratch: vec![*node_ref],
-                may_alias_external: false,
-                may_alias_shared_zero: false,
-            }
+        let mut node_storage_origins = if materialized.contains(node_ref) {
+            vec![BackingStorageOrigin::MaterializedScratch(*node_ref)]
         } else if can_update_in_place {
             let NodePayload::ArrayUpdate { array, .. } = &node.payload else {
                 unreachable!("in-place update decision requires array_update")
             };
-            storage_owners.get(array).cloned().unwrap_or_default()
+            storage_origins.get(array).cloned().unwrap_or_default()
         } else if layout.is_memory_backed() || scalar_storage_view_payload(&node.payload) {
-            let mut result = BackingStorageOwners {
-                scratch: Vec::new(),
-                may_alias_external: matches!(node.payload, NodePayload::Param),
-                // A false memory-backed gate returns the one zero buffer
-                // shared by every gate in the compiled function.
-                may_alias_shared_zero: matches!(
-                    node.payload,
-                    NodePayload::Binop(Binop::Gate, _, _)
-                ),
-            };
-            for operand in aliased_backing_storage_operands(&node.payload) {
-                let operand_owners = storage_owners.get(&operand).cloned().unwrap_or_default();
-                result.scratch.extend(operand_owners.scratch);
-                result.may_alias_external |= operand_owners.may_alias_external;
-                result.may_alias_shared_zero |= operand_owners.may_alias_shared_zero;
+            let mut origins = aliased_backing_storage_operands(&node.payload)
+                .into_iter()
+                .flat_map(|operand| storage_origins.get(&operand).into_iter().flatten().copied())
+                .collect::<Vec<_>>();
+            if layout.is_memory_backed()
+                && matches!(node.payload, NodePayload::Binop(Binop::Gate, _, _))
+            {
+                // A false gate can return the buffer shared by every gate.
+                origins.push(BackingStorageOrigin::SharedGateZero);
             }
-            result
+            if origins.is_empty() && layout.is_memory_backed() {
+                // Inputs, call results, and return destinations are real
+                // buffers even though none uses a reusable scratch slot.
+                origins.push(BackingStorageOrigin::NonReusable(*node_ref));
+            }
+            origins
         } else {
-            BackingStorageOwners::default()
+            Vec::new()
         };
-        node_storage_owners.scratch.sort_by_key(|owner| owner.index);
-        node_storage_owners.scratch.dedup();
-        storage_owners.insert(*node_ref, node_storage_owners);
+        node_storage_origins.sort_by_key(|origin| match origin {
+            BackingStorageOrigin::MaterializedScratch(owner) => (0, owner.index),
+            BackingStorageOrigin::NonReusable(owner) => (1, owner.index),
+            BackingStorageOrigin::SharedGateZero => (2, 0),
+        });
+        node_storage_origins.dedup();
+        storage_origins.insert(*node_ref, node_storage_origins);
     }
     Ok((materialized, in_place_array_updates, owners))
 }
@@ -2313,19 +2317,22 @@ fn align_up(value: usize, alignment: usize) -> Result<usize, CompilerError> {
         .ok_or_else(|| CompilerError::UnsupportedType("native layout size overflow".into()))
 }
 
+/// Reports whether lowering writes an intermediate to a reusable scratch slot.
 fn needs_materialized_destination(node: &ir::Node, layout: &NativeValueLayout) -> bool {
     match layout {
-        NativeValueLayout::WideBits(_) => !matches!(
-            &node.payload,
+        NativeValueLayout::WideBits(_) => match &node.payload {
             NodePayload::Param
-                | NodePayload::Unop(Unop::Identity, _)
-                | NodePayload::ArrayIndex { .. }
-                | NodePayload::TupleIndex { .. }
-                | NodePayload::Binop(Binop::Gate, _, _)
-                | NodePayload::Sel { .. }
-                | NodePayload::PrioritySel { .. }
-                | NodePayload::CountedFor { trip_count: 0, .. }
-        ),
+            | NodePayload::Unop(Unop::Identity, _)
+            | NodePayload::ArrayIndex { .. }
+            | NodePayload::TupleIndex { .. }
+            | NodePayload::Binop(Binop::Gate, _, _)
+            | NodePayload::Sel { .. }
+            | NodePayload::PrioritySel { .. }
+            | NodePayload::Invoke { .. }
+            | NodePayload::CountedFor { .. } => false,
+            NodePayload::ArrayUpdate { indices, .. } => !indices.is_empty(),
+            _ => true,
+        },
         NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => match &node.payload {
             NodePayload::ArrayUpdate { indices, .. } => !indices.is_empty(),
             NodePayload::Literal(_)
