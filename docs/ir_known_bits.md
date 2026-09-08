@@ -4,7 +4,8 @@
 
 The `xlsynth_pir::known_bits` module provides standalone, forward three-state
 analysis for PIR functions and blocks. It computes bits that are always zero or
-always one, without invoking XLS, a solver, or an external executable. It does
+always one, together with bounds on the number of set bits, without invoking
+XLS, a solver, or an external executable. It does
 not rewrite the graph or change the source of facts used by existing production
 consumers.
 
@@ -26,18 +27,31 @@ references and reserved/deleted `Nil` slots return `None`; valid bits nodes
 with no known bits still return `Some`. Facts must not be detached and applied
 to a mutated graph merely because text IDs still match.
 
-`KnownBits` stores private, equal-width `IrBits` mask/value fields. A set mask
-bit means that the corresponding value bit is known. Unknown positions are
-normalized to zero in the value field. Every compatible concrete value `v`
-satisfies:
+`KnownBits` stores private, equal-width `IrBits` mask/value fields and inclusive
+`min_ones`/`max_ones` population bounds. A set mask bit means that the corresponding
+value bit is known. Unknown positions are normalized to zero in the value field.
+Every compatible concrete value `v` satisfies both conditions:
 
 ```text
 (v & mask) == value
+min_ones <= popcount(v) <= max_ones
 ```
 
 Constructors support unknown values, constants, and checked mask/value pairs.
-Accessors expose the masks, bit counts, fully-known status, concrete-value
-containment, and MSB-first ternary formatting with `X` for unknown bits.
+Unknown values start with population bounds `[0,width]`; constants have their
+exact population. Mask/value construction derives the bounds already implied
+by the known bits. `with_popcount_bounds(min, max)` intersects additional bounds
+with the existing facts, rejects reversed, out-of-width, or contradictory bounds,
+and fills remaining unknown bits when their population is forced to zero or all
+ones. It does not represent an impossible value as an ordinary fact.
+
+Accessors expose the masks, bit counts, `min_ones()`, `max_ones()`, fully-known
+status, and concrete-value containment. Zero counts are derived rather than
+stored separately: `min_zeros() = width - max_ones()` and
+`max_zeros() = width - min_ones()`. Zero-width bits have population `[0,0]`.
+`contains` checks both masks and population bounds. MSB-first ternary formatting
+still displays only the per-bit mask, using `X` for unknown positions; it does
+not display the additional population information.
 
 `KnownValue` preserves tuple and array structure rather than flattening
 aggregates. Tokens and empty aggregates have no bits; zero-width bits are
@@ -53,8 +67,18 @@ checks the signature and return. Package-level callee, register and instance
 validity remain the package verifier's responsibility.
 
 Each transfer conservatively includes every concrete result compatible with
-its input facts. Joins keep only known bits shared by every feasible
-alternative.
+its input facts. Joins keep only known bits shared by every feasible alternative
+and widen population bounds to include every alternative.
+
+Population facts are node-local: transfers depend on the operation and its
+immediate operand facts, not a recognized graph neighborhood or a contextual
+guard. For example, a one-hot result can have no known bit positions but still
+have population `[1,1]`; its OR and XOR reductions are therefore known one.
+NOT swaps the one/zero bounds, concatenation adds bounds, and static routing
+retains bounds for the surviving bits. Bitwise operations and feasible-arm joins
+also propagate conservative bounds. Other transfers may retain only the bounds
+implied by their output masks. No new analysis configuration or backward pass is
+required.
 
 | Operations | Forward transfer |
 | --- | --- |
@@ -119,8 +143,9 @@ In-tree tests cover:
 
 - Exhaustive small ternary domains, soundness and precision regressions.
 - Arbitrary widths, word boundaries, zero-width bits and aggregate shapes.
-- Generic random graphs evaluated on random concrete inputs, checking every
-  node and aggregate leaf, including parameters and dead nodes.
+- Generic random graphs evaluated on random concrete inputs, checking masks
+  and population bounds at every node and aggregate leaf, including parameters
+  and dead nodes.
 - All six extensions, including signed/negated sums and CLZ/normalization
   offsets.
 - Agreement between function analysis and the same graph represented as a block,
@@ -139,33 +164,40 @@ cargo test -p xlsynth-pir --doc
 The in-tree [libFuzzer target](../xlsynth-pir/fuzz/fuzz_targets/fuzz_known_bits_soundness.rs)
 extends these checks with coverage-guided graph generation and independently
 mutable concrete-input seeds. It checks every node, enables all six extensions,
-and compares function facts with the equivalent combinational block. It uses the
+and compares function facts with the equivalent combinational block. Concrete
+membership checks cover population bounds as well as per-bit masks. It uses the
 [shared mixed-vector input policy](../FUZZ.md#shared-concrete-input-sampling),
 choosing structured patterns or a fresh subset of special-valued arguments for
 each evaluation, with optional sparse perturbation of special values. See
 [FUZZ.md](../FUZZ.md) for its invocation. Generation, analysis and interpreter
 failures are sample failures, not silently discarded inputs.
 
+Optional formal checks use the existing Bitwuzla configuration:
+
+```bash
+cargo test -p xlsynth-prover --features with-bitwuzla-system --test known_bits_test
+```
+
+The checker asks whether any node or aggregate leaf can violate either its mask
+or population bounds. Population counters use enough bits to represent the full
+value width, including widths above one machine word. Each of 256 deterministic
+small generated graphs receives a 250 ms bounded query. A satisfiable result must
+replay through concrete PIR evaluation; timeout or unknown is inconclusive.
+Directed negative controls exercise false mask/count claims, dead nodes, aggregate
+layout, and counts above 64. General zero-width arithmetic and partial-product
+pairs remain in concrete tests because the SMT translator does not support them;
+directed formal cases still cover zero-width values. No solver is used at runtime.
+
 A local, unpublished differential harness uses the generic typed graph generator
 and a separate C++ executable running only the eager `TernaryQueryEngine`,
 pinned to XLS `v0.54.7`, revision
 `78446462c07943896edd7d18720b205e3c0e0601`. It compares every node ID and typed
 aggregate leaf, requiring every XLS-known bit to be present with the same value.
+This comparison measures ternary-mask precision; the additional population
+claims are checked by concrete and formal soundness tests.
 Failures preserve the input bytes, IR and oracle output for replay.
 Extension-enabled graphs use concrete PIR interpretation because upstream XLS
 cannot parse those operations.
 
-Validation on 2026-09-07 included 6,000 strict differential samples: 2,000 each
-for small functions, wide functions and sequential blocks, with seeds 12,000
-through 13,999. The small profile also passed 8,000 concrete all-node
-evaluations. A separate extension-enabled sweep passed 2,000 graphs and 16,000
-concrete evaluations at widths through 257, with function/block fact agreement.
-The in-tree mixed-input libFuzzer target additionally passed 124,884 executions
-in a 61-second sanitizer-free campaign (including corpus initialization and
-replays, not distinct graph counts). The workspace run with
-`--features with-bitwuzla-system` passed 4,409 tests, with 12 skipped; nextest
-marked one passing test as leaky. All four PIR doctests passed separately. The
-solver feature is needed by existing workspace tests, not by this analysis.
-
-These checks do not constitute a formal soundness proof or a claim of universal
-XLS precision parity. No formal known-bit claim checker is implemented.
+Finite formal checks and fuzzing do not establish universal soundness or XLS
+precision parity.

@@ -264,6 +264,38 @@ fn partial_extension_facts_hold_for_every_small_input() {
 }
 
 #[test]
+fn extension_mask_precision_and_population_soundness_are_separate_properties() {
+    let mut builder = FnBuilder::new("extension_population");
+    let input = builder.param("input", Type::Bits(4)).unwrap();
+    let clz = builder.ext_clz(input, 0, 3).unwrap();
+    let priority = builder.ext_prio_encode(input, true).unwrap();
+    let result = builder.tuple(&[clz, priority]).unwrap();
+    let function = builder.build(result).unwrap();
+    let arguments = (0..16)
+        .map(|value| vec![bits(4, value)])
+        .collect::<Vec<_>>();
+    let outputs = check_claims(&function, &arguments, false);
+    let expected = outputs
+        .iter()
+        .map(KnownValue::constant)
+        .reduce(|a, b| a.join(&b).unwrap())
+        .unwrap();
+    let analysis = analyze_fn(&function).unwrap();
+    for path in [[0], [1]] {
+        let actual = analysis
+            .leaf(function.ret_node_ref.unwrap(), &path)
+            .unwrap();
+        let expected = expected.leaf(&path).unwrap();
+        assert_eq!(actual.mask(), expected.mask());
+        assert_eq!(actual.value(), expected.value());
+        // These transfers promise exact ternary masks for this domain, not
+        // necessarily the strongest possible population interval as well.
+        assert!(actual.min_ones() <= expected.min_ones());
+        assert!(actual.max_ones() >= expected.max_ones());
+    }
+}
+
+#[test]
 fn priority_direction_zero_sentinel_and_clz_offset_wrapping_match_interpreter() {
     let mut builder = FnBuilder::new("priority_and_clz");
     let x = builder.param("x", Type::Bits(4)).unwrap();

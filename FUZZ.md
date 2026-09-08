@@ -104,8 +104,10 @@ evaluated on eight input sets (once for nullary functions). The shared
 [shared mixed-vector policy](#shared-concrete-input-sampling), independently
 selecting structured vectors or a fresh subset of special-valued arguments for
 each evaluation, with optional sparse perturbation of special values.
-Every node and aggregate leaf must satisfy its known-bit claims, including
-parameters and dead nodes. The target also requires identical facts when the
+Every node and aggregate leaf must satisfy both its known-bit masks and its
+minimum/maximum population bounds, including parameters and dead nodes. These
+are node-local facts; the target checks their concrete membership without
+recognizing graph neighborhoods. It also requires identical facts when the
 function is represented as a combinational block. It flags unsound facts,
 missing value callbacks, unexpected generation/analysis/interpreter failures,
 and function/block disagreements. No XLS oracle or solver is invoked.
@@ -144,6 +146,8 @@ intervals. Missing values, unexpected generation/analysis/evaluation errors,
 and excluded concrete values are failures. The existing block observer lives
 in the g8r fuzz crate, avoiding
 a new dependency cycle. No external tool or solver is invoked.
+The same observed values also validate known-bit masks and population bounds,
+including arbitrary current register values and next-state transitions.
 
 Run either target from its crate directory with
 `cargo fuzz run --sanitizer none <target> -- -max_total_time=60 -timeout=15 -max_len=4096`.

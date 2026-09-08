@@ -5,12 +5,112 @@ use xlsynth_pir::ir::{self, Block, NodeGraph, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_eval::{EvalObserver, FnEvalResult, SelectEvent, eval_fn_with_observer};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_random::{RandomFnOptions, RngEntropy, StopPolicy, generate_fn};
-use xlsynth_pir::known_bits::{KnownBitsAnalysis, KnownValue, analyze_block, analyze_fn};
+use xlsynth_pir::known_bits::{
+    KnownBits, KnownBitsAnalysis, KnownValue, analyze_block, analyze_fn,
+};
 use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
 use xlsynth_pir::{BlockBuilder, FnBuilder, IrBits, IrValue, RegisterWriteOptions, ResetBehavior};
 
 fn bits(width: usize, value: u64) -> IrValue {
     IrValue::make_ubits(width, value).unwrap()
+}
+
+#[test]
+fn population_bounds_are_checked_and_concrete_membership_uses_them() {
+    for width in [0, 1, 64, 65, 129, 257] {
+        let unknown = KnownBits::unknown(width);
+        assert_eq!((unknown.min_ones(), unknown.max_ones()), (0, width));
+        assert_eq!((unknown.min_zeros(), unknown.max_zeros()), (0, width));
+        let value = IrBits::from_lsb_is_0(&(0..width).map(|bit| bit % 3 == 0).collect::<Vec<_>>());
+        let ones = (0..width).filter(|bit| bit % 3 == 0).count();
+        let constant = KnownBits::constant(&value);
+        assert_eq!((constant.min_ones(), constant.max_ones()), (ones, ones));
+        assert_eq!(
+            (constant.min_zeros(), constant.max_zeros()),
+            (width - ones, width - ones)
+        );
+        assert!(constant.contains(&value));
+        assert_eq!(
+            unknown.clone().with_popcount_bounds(0, 0).unwrap(),
+            KnownBits::constant(&IrBits::zero(width))
+        );
+        assert_eq!(
+            unknown.with_popcount_bounds(width, width).unwrap(),
+            KnownBits::constant(&IrBits::all_ones(width))
+        );
+    }
+
+    let sparse = KnownBits::unknown(4).with_popcount_bounds(1, 2).unwrap();
+    assert_eq!(sparse.to_ternary_string(), "XXXX");
+    assert_eq!((sparse.min_ones(), sparse.max_ones()), (1, 2));
+    assert_eq!((sparse.min_zeros(), sparse.max_zeros()), (2, 3));
+    for value in 0..16u64 {
+        assert_eq!(
+            sparse.contains(&IrBits::make_ubits(4, value).unwrap()),
+            (1..=2).contains(&value.count_ones())
+        );
+    }
+    assert!(!sparse.contains(&IrBits::make_ubits(5, 1).unwrap()));
+    assert!(KnownBits::unknown(4).with_popcount_bounds(3, 2).is_err());
+    assert!(KnownBits::unknown(4).with_popcount_bounds(0, 5).is_err());
+    assert!(sparse.clone().with_popcount_bounds(0, 0).is_err());
+    assert_eq!(sparse.clone().with_popcount_bounds(0, 4).unwrap(), sparse);
+
+    let masked = KnownBits::from_mask_value(
+        IrBits::make_ubits(4, 3).unwrap(),
+        IrBits::make_ubits(4, 13).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(masked.to_ternary_string(), "XX01");
+    assert_eq!((masked.min_ones(), masked.max_ones()), (1, 3));
+    assert!(masked.clone().with_popcount_bounds(0, 0).is_err());
+    assert!(masked.clone().with_popcount_bounds(4, 4).is_err());
+    assert_eq!(
+        masked.clone().with_popcount_bounds(0, 1).unwrap(),
+        KnownBits::constant(&IrBits::make_ubits(4, 1).unwrap())
+    );
+    assert_eq!(
+        masked.with_popcount_bounds(3, 4).unwrap(),
+        KnownBits::constant(&IrBits::make_ubits(4, 13).unwrap())
+    );
+}
+
+#[test]
+fn one_hot_population_facts_propagate_without_a_known_bit_position() {
+    let mut builder = FnBuilder::new("population_flow");
+    let input = builder.param("input", Type::Bits(3)).unwrap();
+    let decoded = builder.decode(input, Some(8)).unwrap();
+    let one_hot = builder.one_hot(input, true).unwrap();
+    let any = builder.or_reduce(decoded).unwrap();
+    let parity = builder.xor_reduce(decoded).unwrap();
+    let complemented = builder.not(decoded).unwrap();
+    let result = builder
+        .tuple(&[decoded, one_hot, any, parity, complemented])
+        .unwrap();
+    let function = builder.build(result).unwrap();
+    let analysis = analyze_fn(&function).unwrap();
+    let result = function.ret_node_ref.unwrap();
+    for path in [[0], [1]] {
+        let facts = analysis.leaf(result, &path).unwrap();
+        assert_eq!((facts.min_ones(), facts.max_ones()), (1, 1));
+        assert!(facts.mask().is_zero());
+    }
+    for path in [[2], [3]] {
+        assert_eq!(
+            analysis.leaf(result, &path).unwrap(),
+            &KnownBits::constant(&IrBits::bool(true))
+        );
+    }
+    let complemented = analysis.leaf(result, &[4]).unwrap();
+    assert_eq!((complemented.min_ones(), complemented.max_ones()), (7, 7));
+    assert_eq!((complemented.min_zeros(), complemented.max_zeros()), (1, 1));
+    let arguments = (0..8).map(|value| vec![bits(3, value)]).collect::<Vec<_>>();
+    check_concrete_inputs(&function, &arguments, 0);
+    let block = Block::from_function(function.clone(), None).unwrap();
+    let block_analysis = analyze_block(&block).unwrap();
+    for (node, facts) in analysis.iter() {
+        assert_eq!(block_analysis.get(node), Some(facts));
+    }
 }
 
 fn named(graph: &NodeGraph, name: &str) -> NodeRef {
