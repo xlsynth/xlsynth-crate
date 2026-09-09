@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.69.0"
+version = "0.70.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -18,8 +18,8 @@ workspace = true
 default = []
 
 [dependencies]
-xlsynth-sys = {path = "../xlsynth-sys", version = "0.69.0"}
-xlsynth-vast = {path = "../xlsynth-vast", version = "0.69.0"}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.70.0"}
+xlsynth-vast = {path = "../xlsynth-vast", version = "0.70.0"}
 thiserror.workspace = true
 log = "0.4"
 regex = "1.11.1"
