@@ -5,6 +5,8 @@
 
 import io
 import hashlib
+from email.message import Message
+from email.utils import formatdate
 from pathlib import Path
 import re
 import struct
@@ -354,3 +356,347 @@ def test_github_asset_requests_accept_binary_redirects(monkeypatch):
 
     assert request.get_header("Accept") == "application/octet-stream"
     assert request.get_header("Authorization") is None
+
+
+@pytest.fixture(params=["download_with_retry", "download_and_verify_with_retry"])
+def artifact_download(request):
+    """Exercises the same retry contract through either public download API."""
+    download = getattr(download_and_verify, request.param)
+
+    def run(destination, attempts, **kwargs):
+        args = ["https://example.invalid/slang", destination]
+        if request.param == "download_and_verify_with_retry":
+            args.insert(0, "elf")
+        return download(*args, attempts=attempts, timeout_seconds=1, **kwargs)
+
+    return run
+
+
+@pytest.fixture
+def retry_clock(monkeypatch):
+    clock = {"now": 1700000000.0, "sleeps": [], "jitter_bounds": []}
+
+    def sleep(delay):
+        clock["sleeps"].append(delay)
+        clock["now"] += delay
+
+    def uniform(lower, upper):
+        clock["jitter_bounds"].append((lower, upper))
+        return upper
+
+    monkeypatch.setattr(download_and_verify.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(download_and_verify.time, "sleep", sleep)
+    monkeypatch.setattr(download_and_verify.random, "uniform", uniform)
+    return clock
+
+
+def http_error(code, headers=None, reason="rate limited", url=None):
+    message = Message()
+    for name, value in (headers or {}).items():
+        message[name] = value
+    return urllib.error.HTTPError(
+        url or "https://example.invalid/slang", code, reason, message, None
+    )
+
+
+def mock_http_outcomes(monkeypatch, outcomes):
+    pending = iter(outcomes)
+    requests = []
+
+    def urlopen(request, timeout):
+        del timeout
+        requests.append(request.full_url)
+        outcome = next(pending)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return FakeResponse(outcome)
+
+    monkeypatch.setattr(download_and_verify.urllib.request, "urlopen", urlopen)
+    return requests
+
+
+@pytest.mark.parametrize(
+    "code,headers,expected_wait",
+    [
+        pytest.param(429, {"Retry-After": "7"}, 7.0, id="retry-after-seconds"),
+        pytest.param(
+            429,
+            {"Retry-After": formatdate(1700000010, usegmt=True)},
+            10.0,
+            id="retry-after-http-date",
+        ),
+        pytest.param(
+            403,
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1700000012"},
+            12.0,
+            id="github-primary-rate-limit",
+        ),
+        pytest.param(
+            429,
+            {
+                "Retry-After": "7",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1700000012",
+            },
+            12.0,
+            id="reset-later-than-retry-after",
+        ),
+        pytest.param(
+            429,
+            {
+                "Retry-After": "15",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1700000012",
+            },
+            15.0,
+            id="retry-after-later-than-reset",
+        ),
+        pytest.param(429, {"Retry-After": "1"}, 2.5, id="jittered-backoff-is-longer"),
+        pytest.param(429, {"Retry-After": "0"}, 2.5, id="zero-retry-after"),
+        pytest.param(
+            429,
+            {"Retry-After": formatdate(1699999990, usegmt=True)},
+            2.5,
+            id="past-http-date",
+        ),
+        pytest.param(
+            403,
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1699999990"},
+            2.5,
+            id="past-reset",
+        ),
+        pytest.param(
+            429, {"Retry-After": "not a date"}, 75.0, id="malformed-retry-after"
+        ),
+        pytest.param(429, {"Retry-After": "NaN"}, 75.0, id="nan-retry-after"),
+        pytest.param(429, {"Retry-After": "inf"}, 75.0, id="infinite-retry-after"),
+        pytest.param(429, {"Retry-After": "-1"}, 75.0, id="negative-retry-after"),
+        pytest.param(
+            403,
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "invalid"},
+            75.0,
+            id="malformed-reset",
+        ),
+    ],
+)
+def test_http_retry_respects_server_deadlines_and_jitter(
+    artifact_download, tmp_path, monkeypatch, retry_clock, code, headers, expected_wait
+):
+    artifact = tmp_path / "slang"
+    payload = download_and_verify.ELF_MAGIC + b"rate-limited-slang"
+    requests = mock_http_outcomes(monkeypatch, [http_error(code, headers), payload])
+
+    artifact_download(artifact, attempts=2)
+
+    assert retry_clock["sleeps"] == [expected_wait]
+    assert len(requests) == 2
+    assert artifact.read_bytes() == payload
+    assert not list(tmp_path.glob("slang.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "code,headers,reason,expected_waits",
+    [
+        (429, {}, "Too Many Requests", [75.0, 150.0]),
+        (403, {"X-RateLimit-Remaining": "0"}, "Forbidden", [75.0, 150.0]),
+        (403, {}, "API rate limit exceeded", [75.0, 150.0]),
+        (403, {}, "Forbidden", [2.5, 5.0]),
+    ],
+)
+def test_http_retry_without_deadline_distinguishes_rate_limits(
+    artifact_download,
+    tmp_path,
+    monkeypatch,
+    retry_clock,
+    code,
+    headers,
+    reason,
+    expected_waits,
+):
+    payload = download_and_verify.ELF_MAGIC + b"slang"
+    requests = mock_http_outcomes(
+        monkeypatch,
+        [http_error(code, headers, reason), http_error(code, headers, reason), payload],
+    )
+
+    artifact_download(tmp_path / "slang", attempts=3)
+
+    assert retry_clock["sleeps"] == expected_waits
+    assert len(requests) == 3
+
+
+def test_network_retry_doubles_and_caps_base_before_adding_jitter(
+    artifact_download, tmp_path, monkeypatch, retry_clock
+):
+    failures = [urllib.error.URLError("connection reset") for _ in range(8)]
+    payload = download_and_verify.ELF_MAGIC + b"slang"
+    requests = mock_http_outcomes(monkeypatch, failures + [payload])
+
+    artifact_download(tmp_path / "slang", attempts=9, max_retry_wait_seconds=400)
+
+    assert retry_clock["sleeps"] == [2.5, 5.0, 10.0, 20.0, 40.0, 75.0, 75.0, 75.0]
+    assert retry_clock["jitter_bounds"] == [
+        (0.0, upper) for upper in [0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 15.0, 15.0]
+    ]
+    assert len(requests) == 9
+
+
+def test_default_retry_wait_budget_is_cumulative_and_stops_at_300_seconds(
+    artifact_download, tmp_path, monkeypatch, retry_clock
+):
+    artifact = tmp_path / "slang"
+    final_error = http_error(429, {"Retry-After": "1"})
+    requests = mock_http_outcomes(
+        monkeypatch,
+        [
+            http_error(429, {"Retry-After": "100"}),
+            http_error(429, {"Retry-After": "200"}),
+            final_error,
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="retry wait budget") as exc_info:
+        artifact_download(artifact, attempts=4)
+
+    assert exc_info.value.__cause__ is final_error
+    assert retry_clock["sleeps"] == [100.0, 200.0]
+    assert len(requests) == 3
+    assert not artifact.exists()
+    assert not list(tmp_path.glob("slang.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "retry_after_values,budget,expected_waits",
+    [
+        (["6"], 5.0, []),
+        (["3", "4"], 5.0, [3.0]),
+        (["0"], 0.0, []),
+    ],
+)
+def test_custom_retry_wait_budget_never_retries_early(
+    artifact_download,
+    tmp_path,
+    monkeypatch,
+    retry_clock,
+    retry_after_values,
+    budget,
+    expected_waits,
+):
+    artifact = tmp_path / "slang"
+    failures = [http_error(429, {"Retry-After": value}) for value in retry_after_values]
+    requests = mock_http_outcomes(monkeypatch, failures)
+
+    with pytest.raises(RuntimeError, match="retry wait budget") as exc_info:
+        artifact_download(artifact, attempts=5, max_retry_wait_seconds=budget)
+
+    assert exc_info.value.__cause__ is failures[-1]
+    assert retry_clock["sleeps"] == expected_waits
+    assert len(requests) == len(expected_waits) + 1
+    assert not artifact.exists()
+    assert not list(tmp_path.glob("slang.*.tmp"))
+
+
+@pytest.mark.parametrize("budget", [-1, float("nan"), float("inf")])
+def test_invalid_retry_wait_budget_fails_before_destination_mutation(
+    artifact_download, tmp_path, monkeypatch, budget
+):
+    artifact = tmp_path / "missing-parent" / "slang"
+    requests = mock_http_outcomes(monkeypatch, [])
+
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        artifact_download(artifact, attempts=2, max_retry_wait_seconds=budget)
+
+    assert requests == []
+    assert not artifact.parent.exists()
+
+
+def test_final_attempt_propagates_http_error_without_another_sleep(
+    artifact_download, tmp_path, monkeypatch, retry_clock
+):
+    final_error = http_error(429, {"Retry-After": "10000"})
+    requests = mock_http_outcomes(
+        monkeypatch, [http_error(429, {"Retry-After": "7"}), final_error]
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        artifact_download(tmp_path / "slang", attempts=2)
+
+    assert exc_info.value is final_error
+    assert retry_clock["sleeps"] == [7.0]
+    assert len(requests) == 2
+    assert not list(tmp_path.iterdir())
+
+
+def test_checksum_http_error_respects_retry_after_and_removes_unverified_artifact(
+    tmp_path, monkeypatch, retry_clock
+):
+    artifact = tmp_path / "slang"
+    url = "https://example.invalid/slang"
+    sha256_url = url + ".sha256"
+    payload = download_and_verify.ELF_MAGIC + b"checksum-rate-limited-slang"
+    digest = hashlib.sha256(payload).hexdigest().encode("ascii")
+    requests = []
+
+    def urlopen(request, timeout):
+        del timeout
+        requests.append(request.full_url)
+        if request.full_url == url:
+            assert not artifact.exists()
+            return FakeResponse(payload)
+        assert request.full_url == sha256_url
+        assert artifact.read_bytes() == payload
+        if len(requests) == 2:
+            raise http_error(429, {"Retry-After": "9"}, url=sha256_url)
+        return FakeResponse(digest)
+
+    def sleep(delay):
+        assert not artifact.exists()
+        retry_clock["sleeps"].append(delay)
+        retry_clock["now"] += delay
+
+    monkeypatch.setattr(download_and_verify.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(download_and_verify.time, "sleep", sleep)
+
+    download_and_verify.download_and_verify_with_retry(
+        "elf", url, artifact, attempts=2, timeout_seconds=1, sha256_url=sha256_url
+    )
+
+    assert requests == [url, sha256_url, url, sha256_url]
+    assert retry_clock["sleeps"] == [9.0]
+    assert artifact.read_bytes() == payload
+    assert not list(tmp_path.glob("slang.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "attempts,expected_exception", [(1, urllib.error.HTTPError), (2, RuntimeError)]
+)
+def test_checksum_http_failure_cleans_output_and_preserves_error_headers(
+    tmp_path, monkeypatch, retry_clock, attempts, expected_exception
+):
+    artifact = tmp_path / "slang"
+    url = "https://example.invalid/slang"
+    sha256_url = url + ".sha256"
+    failure = http_error(429, {"Retry-After": "301"}, url=sha256_url)
+    requests = mock_http_outcomes(
+        monkeypatch, [download_and_verify.ELF_MAGIC + b"unverified-slang", failure]
+    )
+
+    with pytest.raises(expected_exception) as exc_info:
+        download_and_verify.download_and_verify_with_retry(
+            "elf",
+            url,
+            artifact,
+            attempts=attempts,
+            timeout_seconds=1,
+            sha256_url=sha256_url,
+        )
+
+    if attempts == 1:
+        assert exc_info.value is failure
+    else:
+        assert exc_info.value.__cause__ is failure
+    assert failure.headers["Retry-After"] == "301"
+    assert requests == [url, sha256_url]
+    assert retry_clock["sleeps"] == []
+    assert not artifact.exists()
+    assert not list(tmp_path.glob("slang.*.tmp"))

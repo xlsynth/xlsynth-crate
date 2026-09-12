@@ -107,6 +107,16 @@ bootstrapped on 2026-08-27 by matching an unauthenticated asset download against
 freezes an existing trusted input; it is not independent source/build provenance,
 and deleting the upstream asset can still make the pin unavailable.
 
+Artifact downloads honor `Retry-After` (seconds or an HTTP date) and
+`X-RateLimit-Reset` when the API quota is exhausted. Other failures use
+exponential backoff with jitter; recognized rate limits without usable retry
+headers start with a one-minute delay. The shared downloader limits total retry
+sleep to 300 seconds by default, configurable with `--max-retry-wait-seconds`.
+This budget excludes request timeouts. If a server requires more time than the
+remaining budget allows, the download fails with the required wait in its error
+instead of retrying before the server permits it. `--attempts` still bounds the
+number of attempts, and the final failure does not sleep.
+
 `.dockerignore` excludes host Git metadata, build outputs, Cargo lockfiles, and
 downloaded artifacts. The image creates a local Git index solely for pre-commit,
 so linked worktrees work too and host Git credentials are not copied.

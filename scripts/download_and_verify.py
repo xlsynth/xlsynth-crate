@@ -11,8 +11,12 @@ such as `--retry-all-errors`, which are missing on older images like Rocky 8.
 """
 
 import argparse
+import datetime
+import email.utils
 import hashlib
+import math
 import os
+import random
 import shutil
 import sys
 import tarfile
@@ -25,6 +29,7 @@ import zlib
 from pathlib import Path
 from typing import Optional
 
+DEFAULT_MAX_RETRY_WAIT_SECONDS = 300
 ELF_MAGIC = b"\x7fELF"
 MACH_O_MAGICS = {
     b"\xfe\xed\xfa\xce",
@@ -61,6 +66,12 @@ def parse_args() -> argparse.Namespace:
     checksum_group.add_argument("--sha256-url")
     parser.add_argument("--attempts", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=int, default=60)
+    parser.add_argument(
+        "--max-retry-wait-seconds",
+        type=float,
+        default=DEFAULT_MAX_RETRY_WAIT_SECONDS,
+        help="Total retry sleep budget (default: 300s), excluding request timeouts",
+    )
     return parser.parse_args()
 
 
@@ -75,9 +86,112 @@ def build_request(url: str) -> urllib.request.Request:
     return urllib.request.Request(url, headers=headers)
 
 
+def nonnegative_finite_number(value: Optional[str]) -> Optional[float]:
+    """Parses a server delay or timestamp without accepting invalid durations."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def server_retry_delay_seconds(error: Exception) -> Optional[float]:
+    """Finds the latest usable server retry deadline in an HTTP failure."""
+    if not isinstance(error, urllib.error.HTTPError):
+        return None
+    headers = error.headers or {}
+    now = time.time()
+    delays = []
+    retry_after = headers.get("Retry-After")
+    if retry_after is not None:
+        delay = nonnegative_finite_number(retry_after)
+        if delay is None:
+            try:
+                deadline = email.utils.parsedate_to_datetime(retry_after)
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=datetime.timezone.utc)
+                delay = max(0.0, deadline.timestamp() - now)
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
+        if delay is not None:
+            delays.append(delay)
+    if headers.get("X-RateLimit-Remaining", "").strip() == "0":
+        reset = nonnegative_finite_number(headers.get("X-RateLimit-Reset"))
+        if reset is not None:
+            delays.append(max(0.0, reset - now))
+    return max(delays) if delays else None
+
+
+def is_rate_limit_error(error: Exception) -> bool:
+    """Identifies throttling without treating every forbidden request as a quota."""
+    if not isinstance(error, urllib.error.HTTPError):
+        return False
+    return error.code == 429 or (
+        error.code == 403
+        and (
+            (error.headers or {}).get("X-RateLimit-Remaining", "").strip() == "0"
+            or "rate limit" in str(error.reason).lower()
+        )
+    )
+
+
+class RetryWait:
+    """Bounds total sleeps while respecting server deadlines and adding jitter."""
+
+    def __init__(self, max_retry_wait_seconds: float):
+        if not math.isfinite(max_retry_wait_seconds) or max_retry_wait_seconds < 0:
+            raise ValueError("--max-retry-wait-seconds must be finite and nonnegative")
+        self.remaining_seconds = max_retry_wait_seconds
+        self.backoff_seconds = 2.0
+        self.rate_limit_backoff_seconds = 60.0
+
+    def wait(self, error: Exception, attempt: int, url: str) -> None:
+        """Sleeps until a safe retry, or fails before exceeding the sleep budget."""
+        server_delay = server_retry_delay_seconds(error)
+        backoff = self.backoff_seconds
+        if server_delay is None and is_rate_limit_error(error):
+            # GitHub requests at least one minute for throttling without headers.
+            backoff = self.rate_limit_backoff_seconds
+            self.rate_limit_backoff_seconds *= 2
+        delay = max(
+            server_delay or 0.0,
+            backoff + random.uniform(0.0, backoff * 0.25),
+        )
+        if delay > self.remaining_seconds:
+            raise RuntimeError(
+                "Retry for {} requires {:.2f}s, exceeding the remaining {:.2f}s "
+                "retry wait budget (--max-retry-wait-seconds); refusing to retry "
+                "early. Last failure: {}".format(
+                    url, delay, self.remaining_seconds, error
+                )
+            ) from error
+        print(
+            "Attempt {} failed for {}: {}. Retrying in {:.2f} seconds{}...".format(
+                attempt,
+                url,
+                error,
+                delay,
+                " (respecting server retry headers)"
+                if server_delay is not None
+                else "",
+            ),
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        self.remaining_seconds -= delay
+        self.backoff_seconds = min(60.0, self.backoff_seconds * 2)
+
+
 def download_with_retry(
-    url: str, destination: Path, attempts: int, timeout_seconds: int
+    url: str,
+    destination: Path,
+    attempts: int,
+    timeout_seconds: int,
+    max_retry_wait_seconds: float = DEFAULT_MAX_RETRY_WAIT_SECONDS,
 ) -> None:
+    retry_wait = RetryWait(max_retry_wait_seconds)
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_path_str = tempfile.mkstemp(
         prefix=f"{destination.name}.",
@@ -86,7 +200,6 @@ def download_with_retry(
     )
     os.close(fd)
     temp_path = Path(temp_path_str)
-    delay_seconds = 2
     last_error = None  # type: Optional[Exception]
     try:
         for attempt in range(1, attempts + 1):
@@ -102,13 +215,7 @@ def download_with_retry(
                 last_error = exc
                 if attempt == attempts:
                     break
-                print(
-                    f"Attempt {attempt} failed for {url}: {exc}. "
-                    f"Retrying in {delay_seconds} seconds...",
-                    file=sys.stderr,
-                )
-                time.sleep(delay_seconds)
-                delay_seconds *= 2
+                retry_wait.wait(exc, attempt, url)
         assert last_error is not None
         raise last_error
     finally:
@@ -124,19 +231,22 @@ def download_and_verify_with_retry(
     timeout_seconds: int,
     sha256: Optional[str] = None,
     sha256_url: Optional[str] = None,
+    max_retry_wait_seconds: float = DEFAULT_MAX_RETRY_WAIT_SECONDS,
 ) -> None:
     if sha256 is not None and sha256_url is not None:
         raise ValueError("--sha256 and --sha256-url are mutually exclusive")
     expected_sha256 = normalize_sha256(sha256) if sha256 is not None else None
+    retry_wait = RetryWait(max_retry_wait_seconds)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    delay_seconds = 2
     last_error = None
     for attempt in range(1, attempts + 1):
+        downloaded = False
         try:
             download_with_retry(
                 url, destination, attempts=1, timeout_seconds=timeout_seconds
             )
+            downloaded = True
             validation_error = validate_artifact(destination, kind)
             if validation_error is None:
                 if expected_sha256 is not None:
@@ -151,17 +261,14 @@ def download_and_verify_with_retry(
                 destination.unlink()
             last_error = RuntimeError(validation_error)
         except (urllib.error.URLError, OSError, RuntimeError) as exc:
+            if downloaded and sha256_url is not None and destination.exists():
+                # A checksum fetch failure must not leave an unverified artifact.
+                destination.unlink()
             last_error = exc
 
         if attempt == attempts:
             break
-        print(
-            f"Attempt {attempt} produced an invalid artifact for {url}: {last_error}. "
-            f"Retrying in {delay_seconds} seconds...",
-            file=sys.stderr,
-        )
-        time.sleep(delay_seconds)
-        delay_seconds *= 2
+        retry_wait.wait(last_error, attempt, url)
 
     assert last_error is not None
     raise last_error
@@ -287,6 +394,9 @@ def validate_sha256_url(path: Path, sha256_url: Optional[str], timeout_seconds: 
         ) as response:
             checksum_text = response.read().decode("utf-8", errors="replace")
         expected = parse_sha256_text(checksum_text)
+    except urllib.error.HTTPError:
+        # Preserve retry headers for the outer artifact/checksum retry budget.
+        raise
     except (urllib.error.URLError, OSError, UnicodeError, ValueError) as exc:
         return f"could not fetch or parse checksum {sha256_url}: {exc}"
 
@@ -305,6 +415,7 @@ def main() -> int:
             args.timeout_seconds,
             sha256=args.sha256,
             sha256_url=args.sha256_url,
+            max_retry_wait_seconds=args.max_retry_wait_seconds,
         )
     except (urllib.error.URLError, OSError, RuntimeError, ValueError) as exc:
         print(
