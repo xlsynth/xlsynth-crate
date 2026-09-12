@@ -22,10 +22,10 @@ module __my_module__main(
   end
 
   // ===== Pipe stage 1:
-  wire [31:0] p1_literal_27_comb;
-  wire [31:0] p1_add_33_comb;
-  assign p1_literal_27_comb = 32'h0000_0001;
-  assign p1_add_33_comb = x__input_flop + p1_literal_27_comb;
+  wire [31:0] p1_literal_28_comb;
+  wire [31:0] p1_add_34_comb;
+  assign p1_literal_28_comb = 32'h0000_0001;
+  assign p1_add_34_comb = x__input_flop + p1_literal_28_comb;
 
   // Registers for pipe stage 1:
   reg output_valid__output_flop;
@@ -36,7 +36,7 @@ module __my_module__main(
       out__output_flop <= 32'h0000_0000;
     end else begin
       output_valid__output_flop <= input_valid__input_flop;
-      out__output_flop <= input_valid__input_flop ? p1_add_33_comb : out__output_flop;
+      out__output_flop <= input_valid__input_flop ? p1_add_34_comb : out__output_flop;
     end
   end
   assign output_valid = output_valid__output_flop;

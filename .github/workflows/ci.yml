@@ -1058,6 +1058,9 @@ jobs:
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
 
+      - name: Test Valgrind runner
+        run: python3 -m unittest discover -s scripts -p run_valgrind_on_tests_test.py
+
       - name: Build crate
         run: cargo build --features with-z3-system,with-bitwuzla-system,with-boolector-system,with-z3-binary-test --workspace --exclude sample-usage -vv
 

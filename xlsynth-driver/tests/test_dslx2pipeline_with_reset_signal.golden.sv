@@ -27,18 +27,18 @@ module __my_module__main(
   end
 
   // ===== Pipe stage 1:
-  wire [31:0] p1_literal_34_comb;
-  wire [31:0] p1_add_40_comb;
+  wire [31:0] p1_literal_35_comb;
+  wire [31:0] p1_add_41_comb;
   wire p1_output_flop_load_enable_comb;
-  assign p1_literal_34_comb = 32'h0000_0001;
-  assign p1_add_40_comb = x__input_flop + p1_literal_34_comb;
+  assign p1_literal_35_comb = 32'h0000_0001;
+  assign p1_add_41_comb = x__input_flop + p1_literal_35_comb;
   assign p1_output_flop_load_enable_comb = input_valid__input_flop | p0_reset_active_comb;
 
   // Registers for pipe stage 1:
   reg output_valid__output_flop;
   reg [31:0] out__output_flop;
   always @ (posedge clk) begin
-    out__output_flop <= p1_output_flop_load_enable_comb ? p1_add_40_comb : out__output_flop;
+    out__output_flop <= p1_output_flop_load_enable_comb ? p1_add_41_comb : out__output_flop;
   end
   always @ (posedge clk) begin
     if (!rst_n) begin

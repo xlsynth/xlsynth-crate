@@ -2,9 +2,9 @@ package simple_pkg
 
 #[signature("""module_name: "my_main" data_ports { direction: PORT_DIRECTION_INPUT name: "x" width: 8 type { type_enum: BITS bit_count: 8 } } data_ports { direction: PORT_DIRECTION_OUTPUT name: "out" width: 8 type { type_enum: BITS bit_count: 8 } } combinational { } """)]
 top block my_main(x: bits[8], out: bits[8]) {
-  x: bits[8] = input_port(name=x, id=11)
-  one: bits[8] = literal(value=1, id=12)
-  add.15: bits[8] = add(x, one, id=15)
-  out: () = output_port(add.15, name=out, id=18)
+  x: bits[8] = input_port(name=x, id=12)
+  one: bits[8] = literal(value=1, id=13)
+  add.16: bits[8] = add(x, one, id=16)
+  out: () = output_port(add.16, name=out, id=20)
 }
 

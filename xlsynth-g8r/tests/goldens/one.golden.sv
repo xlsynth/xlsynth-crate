@@ -3,9 +3,9 @@ module one_cycle0(
   input wire [31:0] y,
   output wire [31:0] out
 );
-  wire [31:0] add_15;
-  assign add_15 = x + y;
-  assign out = add_15;
+  wire [31:0] add_16;
+  assign add_16 = x + y;
+  assign out = add_16;
 endmodule
 module one(
   input wire clk,
