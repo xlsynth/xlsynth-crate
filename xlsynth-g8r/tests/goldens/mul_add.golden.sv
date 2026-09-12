@@ -11,11 +11,11 @@ module mul_add_cycle0(
     end
   endfunction
   // lint_on MULTIPLY
-  wire [31:0] umul_16;
-  wire [63:0] tuple_20;
-  assign umul_16 = umul32b_32b_x_32b(x, y);
-  assign tuple_20 = {umul_16, z};
-  assign out = tuple_20;
+  wire [31:0] umul_17;
+  wire [63:0] tuple_21;
+  assign umul_17 = umul32b_32b_x_32b(x, y);
+  assign tuple_21 = {umul_17, z};
+  assign out = tuple_21;
 endmodule
 
 module mul_add_cycle1(
@@ -23,9 +23,9 @@ module mul_add_cycle1(
   input wire [31:0] z,
   output wire [31:0] out
 );
-  wire [31:0] add_20;
-  assign add_20 = partial + z;
-  assign out = add_20;
+  wire [31:0] add_21;
+  assign add_21 = partial + z;
+  assign out = add_21;
 endmodule
 module mul_add(
   input wire clk,

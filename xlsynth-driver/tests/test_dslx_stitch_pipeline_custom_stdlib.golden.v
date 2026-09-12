@@ -1,9 +1,9 @@
 module foo_cycle0(
   output wire [31:0] out
 );
-  wire [31:0] literal_14;
-  assign literal_14 = 32'h0000_0007;
-  assign out = literal_14;
+  wire [31:0] literal_15;
+  assign literal_15 = 32'h0000_0007;
+  assign out = literal_15;
 endmodule
 
 module foo_cycle1(

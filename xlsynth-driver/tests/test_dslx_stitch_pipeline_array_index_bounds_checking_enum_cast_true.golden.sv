@@ -8,17 +8,17 @@ module foo_cycle0(
   assign arr_unflattened[1] = arr[63:32];
   assign arr_unflattened[2] = arr[95:64];
   assign arr_unflattened[3] = arr[127:96];
-  wire literal_20;
-  wire [2:0] concat_22;
-  wire [2:0] literal_23;
-  wire [2:0] add_25;
-  wire [31:0] array_index_28;
-  assign literal_20 = 1'h0;
-  assign concat_22 = {literal_20, sel};
-  assign literal_23 = 3'h1;
-  assign add_25 = concat_22 + literal_23;
-  assign array_index_28 = arr_unflattened[add_25 > 3'h3 ? 2'h3 : add_25[1:0]];
-  assign out = array_index_28;
+  wire literal_21;
+  wire [2:0] concat_23;
+  wire [2:0] literal_24;
+  wire [2:0] add_26;
+  wire [31:0] array_index_29;
+  assign literal_21 = 1'h0;
+  assign concat_23 = {literal_21, sel};
+  assign literal_24 = 3'h1;
+  assign add_26 = concat_23 + literal_24;
+  assign array_index_29 = arr_unflattened[add_26 > 3'h3 ? 2'h3 : add_26[1:0]];
+  assign out = array_index_29;
 endmodule
 
 module foo_cycle1(
