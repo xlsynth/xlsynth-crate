@@ -2,12 +2,13 @@
 
 //! Example of multi-threaded invocation of XLS functions.
 
-use lazy_static::lazy_static;
 use rayon::prelude::*;
 use xlsynth::DslxConvertOptions;
+use xlsynth::IrFunction;
 use xlsynth::IrPackage;
 use xlsynth::XlsIrValue;
 
+/// Loads a DSLX source file into an owned IR package.
 fn load_package(cargo_relpath: &str) -> IrPackage {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
     let dslx = std::fs::read_to_string(&path).unwrap();
@@ -19,32 +20,36 @@ fn load_package(cargo_relpath: &str) -> IrPackage {
     result.ir
 }
 
-// Do a lazy_static initialization of the function.
-lazy_static! {
-    // Load sample.x and expose the "add1" function so that threads can invoke it via the XLS
-    // interpreter.
-    static ref ADD1_FUNCTION: xlsynth::IrFunction = {
-        let package = load_package("src/sample.x");
-        let mangled = xlsynth::mangle_dslx_name("sample", "add1").unwrap();
-        let function = package.get_function(&mangled).unwrap();
-        assert_eq!(function.get_name(), mangled);
-        function
-    };
-}
-
-fn run_dslx_add1(x: u32) -> u32 {
+/// Interprets the shared add1 function for one input.
+fn run_dslx_add1(function: &IrFunction, x: u32) -> u32 {
     let x_ir = XlsIrValue::u32(x);
-    let result = ADD1_FUNCTION.interpret(&[x_ir]).unwrap();
+    let result = function.interpret(&[x_ir]).unwrap();
     result.to_u32().unwrap()
 }
 
+/// Checks parallel interpreter calls and releases their package and worker
+/// threads.
 pub fn validate_all_threads_compute_add1() {
-    // Use rayon to compute the "add1" function in parallel on every available
-    // core.
-    let results: Vec<u32> = (0..num_cpus::get() as u32)
-        .into_par_iter()
-        .map(run_dslx_add1)
-        .collect();
+    let package = load_package("src/sample.x");
+    let mangled = xlsynth::mangle_dslx_name("sample", "add1").unwrap();
+    let function = package.get_function(&mangled).unwrap();
+    assert_eq!(function.get_name(), mangled);
+
+    // Share one function across the workers. The scoped pool joins every worker
+    // before returning, so thread-local resources and the package can be freed.
+    let results: Vec<u32> = rayon::ThreadPoolBuilder::new()
+        .build_scoped(
+            |thread| thread.run(),
+            |pool| {
+                pool.install(|| {
+                    (0..num_cpus::get() as u32)
+                        .into_par_iter()
+                        .map(|x| run_dslx_add1(&function, x))
+                        .collect()
+                })
+            },
+        )
+        .expect("scoped interpreter worker pool should build");
 
     // Check that all the results are index+1.
     for (i, result) in results.iter().enumerate() {

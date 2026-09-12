@@ -29,19 +29,6 @@
    ...
 }
 {
-   xls_v0547_z3_solver_static_registration
-   Memcheck:Leak
-   match-leak-kinds: possible
-   fun:malloc
-   obj:*/libxls-v0.54.7-ubuntu2004.so
-   fun:*PrepareInsertSmallNonSoo*
-   fun:*SolverFactoryRegistry*Register*
-   fun:_GLOBAL__sub_I_z3_ir_translator.cc
-   ...
-   fun:_dl_init
-   ...
-}
-{
    ortools_init
    Memcheck:Leak
    match-leak-kinds: possible
@@ -233,5 +220,19 @@
    fun:mi_process_init
    fun:_mi_auto_process_init
    fun:mi_process_attach
+   ...
+}
+
+# The bundled mimalloc transparent-huge-page probe searches beyond read()'s
+# returned bytes in an unterminated stack buffer. This is the same known
+# dependency startup bug as above; optimization inlines intermediate frames.
+{
+   mimalloc_transparent_huge_page_probe_optimized
+   Memcheck:Cond
+   fun:_mi_strnlen
+   fun:_mi_strnstr
+   fun:_mi_prim_mem_init
+   fun:mi_process_init
+   fun:_mi_auto_process_init
    ...
 }

@@ -9,7 +9,16 @@ import json
 import time
 from collections import defaultdict
 import concurrent.futures
-from typing import List, Dict, Optional, DefaultDict, Union, Any, Tuple, TypedDict
+from typing import (
+    List,
+    Dict,
+    Optional,
+    DefaultDict,
+    Union,
+    Tuple,
+    TypedDict,
+    NamedTuple,
+)
 
 import termcolor
 
@@ -172,27 +181,120 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
 }
 
 
-def get_target_to_cwd_mapping() -> Dict[str, str]:
-    """
-    Returns a dict mapping a test target name to its package root directory.
-    We use 'cargo metadata' to get information on each package.
-    """
-    p: subprocess.CompletedProcess[bytes] = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-        capture_output=True,
-        check=True,
+class TestExecutable(NamedTuple):
+    """A Cargo test artifact and the package directory it must run from."""
+
+    path: str
+    target_name: str
+    cwd: str
+
+
+def parse_cargo_test_executables(output: str, build_cwd: str) -> List[TestExecutable]:
+    """Reads Cargo artifacts without assuming a target directory or filename layout."""
+    executables: Dict[str, TestExecutable] = {}
+    for line in output.splitlines():
+        if not line.lstrip().startswith("{"):
+            # Procedural macros and other tools can emit non-JSON output.
+            continue
+        message = json.loads(line)
+        if message.get("reason") == "compiler-message":
+            rendered = message.get("message", {}).get("rendered")
+            if rendered:
+                print(rendered, file=sys.stderr, end="")
+        if message.get("reason") != "compiler-artifact":
+            continue
+        if message.get("profile", {}).get("test") is not True:
+            continue
+        executable = message.get("executable")
+        if not executable:
+            continue
+        target_name = message.get("target", {}).get("name")
+        manifest_path = message.get("manifest_path")
+        if not all(
+            isinstance(value, str) and value
+            for value in (executable, target_name, manifest_path)
+        ):
+            raise ValueError(
+                "Cargo test artifact is missing executable, target name, or manifest path"
+            )
+        path = os.path.abspath(os.path.join(build_cwd, executable))
+        cwd = os.path.realpath(os.path.dirname(os.path.join(build_cwd, manifest_path)))
+        artifact = TestExecutable(path, target_name.replace("-", "_"), cwd)
+        if path in executables and executables[path] != artifact:
+            raise ValueError(
+                "Conflicting Cargo metadata for executable: {}".format(path)
+            )
+        # Cargo reports fresh artifacts too; they are just as important to run.
+        executables[path] = artifact
+    return list(executables.values())
+
+
+def compile_test_executables(release: bool, build_cwd: str) -> List[TestExecutable]:
+    """Builds test harnesses and obtains their paths from Cargo's JSON interface."""
+    command = ["cargo", "test", "--no-run", "--workspace", "--message-format=json"]
+    if release:
+        command.append("--release")
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+        cwd=build_cwd,
         env=os.environ,
     )
-    metadata: Dict[str, Any] = json.loads(p.stdout.decode("utf-8"))
-    mapping: Dict[str, str] = {}
-    for package in metadata["packages"]:
-        # The package root is the directory containing Cargo.toml.
-        package_root = os.path.dirname(package["manifest_path"])
-        for target in package["targets"]:
-            # We assume test targets have kind "test" or "integration-test".
-            if any(kind in target["kind"] for kind in ("test", "integration-test")):
-                mapping[target["name"]] = package_root
-    return mapping
+    # Parse before checking the exit code so rustc diagnostics remain visible.
+    executables = parse_cargo_test_executables(result.stdout, build_cwd)
+    result.check_returncode()
+    return executables
+
+
+def select_test_executables(
+    executables: List[TestExecutable], filter_substrings: List[str]
+) -> List[TestExecutable]:
+    """Applies executable filters and rejects empty or partially unmatched requests."""
+    selected = []
+    matched_filters = set()
+    for executable in executables:
+        if any(
+            name in executable.target_name
+            for name in ("spdx", "readme_test", "version_test")
+        ):
+            continue
+        matches = [
+            substring
+            for substring in filter_substrings
+            if substring in executable.path
+            or substring.replace("-", "_") in executable.target_name
+        ]
+        if filter_substrings and not matches:
+            continue
+        matched_filters.update(matches)
+        selected.append(executable)
+    unmatched = sorted(set(filter_substrings) - matched_filters)
+    if not selected or unmatched:
+        available = (
+            ", ".join(sorted(set(exe.target_name for exe in executables))) or "<none>"
+        )
+        detail = (
+            "Unmatched executable filters: {}. ".format(", ".join(unmatched))
+            if unmatched
+            else ""
+        )
+        raise ValueError(
+            "{}Selected {} test executables. Available Cargo test targets: {}".format(
+                detail, len(selected), available
+            )
+        )
+    return selected
+
+
+def parse_test_case_names(output: str) -> List[str]:
+    """Reads libtest's list output, including headerless lists and trailing summaries."""
+    names = []
+    for line in output.splitlines():
+        match = re.fullmatch(r"(.+): test", line.strip())
+        if match:
+            names.append(match.group(1))
+    return names
 
 
 def _sanity_check_test_executable(exe: str) -> None:
@@ -225,32 +327,6 @@ def _sanity_check_test_executable(exe: str) -> None:
         raise PermissionError(f"Executable not runnable: {exe}")
 
 
-def _insert_test_filter(command: List[str], test_filters: List[str]) -> None:
-    """Inserts the test filter strings into the command list immediately after the executable path.
-
-    Raises ValueError if the executable path cannot be determined (heuristically).
-    """
-    exe_index = -1
-    for i, arg in enumerate(command):
-        # Heuristic: Find the first arg that is likely the executable path
-        if (
-            i > 0
-            and not arg.startswith("-")
-            and os.path.isabs(arg)
-            and os.path.isfile(arg)
-        ):
-            exe_index = i
-            break
-
-    if exe_index == -1:
-        raise ValueError(
-            f"Could not reliably determine executable path index in command to insert test filter: {command}"
-        )
-
-    # Insert each test filter string individually after the executable path
-    command[exe_index + 1 : exe_index + 1] = test_filters  # Splice the list in
-
-
 def run_subset_of_tests(
     exe: str,
     cwd: str,
@@ -268,21 +344,13 @@ def run_subset_of_tests(
     output: str = subprocess.check_output([exe, "--test", "--list"], cwd=cwd).decode(
         "utf-8"
     )
-    lines: List[str] = output.splitlines()
     to_run: List[str] = []
     to_skip: List[str] = []
-    # Skip the header line.
-    for line in lines[1:]:
-        if not line.strip():
-            continue
-        if "benchmark" in line:
-            continue
-        lhs, rhs = line.rsplit(": ", 1)
-        assert rhs == "test", line
-        if any(f in lhs for f in filter_out):
-            to_skip.append(lhs)
+    for test_name in parse_test_case_names(output):
+        if any(f in test_name for f in filter_out):
+            to_skip.append(test_name)
         else:
-            to_run.append(lhs)
+            to_run.append(test_name)
 
     termcolor.cprint(f"Discovered {len(to_run)} tests to run:", "green")
     for test in to_run:
@@ -354,8 +422,9 @@ def run_valgrind(
         valgrind_command.insert(-1, "--demangle=no")  # Insert before exe path
 
     if test_filters:
-        # Insert test filter strings right after the executable
-        _insert_test_filter(valgrind_command, test_filters)
+        # These names came from libtest's list, so match complete names only.
+        valgrind_command.extend(test_filters)
+        valgrind_command.append("--exact")
 
     # Append test harness options AFTER the filter strings (if present)
     valgrind_command.extend(
@@ -363,6 +432,8 @@ def run_valgrind(
             "-Z",
             "unstable-options",
             "--report-time",
+            # Parallelism is managed by the outer runner; libtest runs serially.
+            "--test-threads=1",
             "--format",
             "json",
         ]
@@ -497,6 +568,11 @@ def run_valgrind(
                 "magenta",
                 file=sys.stderr,
             )
+            raise ValueError(
+                "No successful test events were recorded for {} although tests were expected".format(
+                    exe
+                )
+            )
 
     return test_durations, parsed_specific_test_count
 
@@ -553,45 +629,27 @@ def run_single_test_case(
 
 
 def run_single_test_binary(
-    exe: str,
-    target_to_cwd: Dict[str, str],
+    executable: TestExecutable,
     script_cwd: str,
     demangle: bool = True,
 ) -> WorkerResult:
     """Determines how to run valgrind for a single binary and executes it."""
+    exe, target_name, cwd = executable
     basename: str = os.path.basename(exe)
-    m: Optional[re.Match[str]] = re.match(r"^(?P<target>.+?)-[0-9a-f]+$", basename)
-    target_name: str = m.group("target") if m else basename
 
     # Determine CWD and suppression path
-    cwd: str = os.path.realpath(target_to_cwd.get(target_name, script_cwd))
     suppression_path: str = os.path.join(script_cwd, "valgrind.supp")
 
     termcolor.cprint(f"Starting: {basename}", "blue")
 
-    test_binary_name_match: Optional[re.Match[str]] = re.match(
-        r".*/(.*)-[0-9a-f]{16}$", exe
-    )
-    test_binary_name: Optional[str] = None
-    if test_binary_name_match:
-        test_binary_name = test_binary_name_match.group(1)
-    else:
-        termcolor.cprint(
-            f"Warning: Could not extract test binary name from {exe}",
-            "yellow",
-            file=sys.stderr,
-        )
-
     result: WorkerResult
     try:
         # Look up configuration for this binary
-        config = TEST_BINARY_CONFIGS.get(test_binary_name) if test_binary_name else None
+        config = TEST_BINARY_CONFIGS.get(target_name)
 
         if config:
             # Found specific config, use run_subset_of_tests
-            termcolor.cprint(
-                f"Applying special config for {test_binary_name}", "magenta"
-            )
+            termcolor.cprint(f"Applying special config for {target_name}", "magenta")
             result = run_subset_of_tests(
                 exe,
                 cwd,
@@ -603,23 +661,10 @@ def run_single_test_binary(
         else:
             # No specific config found, run valgrind directly
             # Check if binary has tests before running valgrind and count them
-            expected_count = 0
-            try:
-                list_output = subprocess.check_output(
-                    [exe, "--test", "--list"], cwd=cwd, stderr=subprocess.PIPE
-                ).decode("utf-8")
-                for list_line in list_output.splitlines():
-                    if list_line.strip().endswith(": test"):
-                        expected_count += 1
-            except (subprocess.CalledProcessError, FileNotFoundError) as list_err:
-                termcolor.cprint(
-                    f"Warning: Failed to list tests for {basename}: {list_err}",
-                    "yellow",
-                    file=sys.stderr,
-                )
-                # We failed to list, assume tests are expected, but expected count is unknown (use -1?)
-                # Let's stick with 0 for now, run_valgrind's warning will trigger if needed.
-                expected_count = 0
+            list_output = subprocess.check_output(
+                [exe, "--test", "--list"], cwd=cwd, stderr=subprocess.PIPE
+            ).decode("utf-8")
+            expected_count = len(parse_test_case_names(list_output))
 
             # Pass expect_tests flag to run_valgrind
             try:
@@ -664,23 +709,20 @@ def run_single_test_binary(
 
 def submit_valgrind_tasks(
     executor: concurrent.futures.ProcessPoolExecutor,
-    exe_path: str,
-    target_to_cwd: Dict[str, str],
+    executable: TestExecutable,
     script_cwd: str,
     demangle: bool = True,
 ) -> Dict[concurrent.futures.Future[WorkerResult], str]:
     """Lists tests, applies filters, and submits tasks for a single binary.
 
     Returns a dictionary mapping submitted Future objects to their task names.
-    Task names are either the binary basename or 'binary::test_case'.
+    Full executable paths keep task identities distinct across packages.
     """
     tasks: Dict[concurrent.futures.Future[WorkerResult], str] = {}
+    exe_path, target_name, cwd = executable
     basename = os.path.basename(exe_path)
-    m = re.match(r"^(?P<target>.+?)-[0-9a-f]+$", basename)
-    target_name = m.group("target") if m else basename
 
     # Determine CWD and suppression path for this binary
-    cwd = os.path.realpath(target_to_cwd.get(target_name, script_cwd))
     suppression_path = os.path.join(script_cwd, "valgrind.supp")
 
     # Check configuration for sharding
@@ -690,74 +732,54 @@ def submit_valgrind_tasks(
 
     if shard_this_binary:
         termcolor.cprint(f"Sharding tests for {basename}...", "magenta")
-        try:
-            list_output = subprocess.check_output(
-                [exe_path, "--test", "--list"], cwd=cwd, stderr=subprocess.PIPE
-            ).decode("utf-8")
+        list_output = subprocess.check_output(
+            [exe_path, "--test", "--list"], cwd=cwd, stderr=subprocess.PIPE
+        ).decode("utf-8")
 
-            individual_tests_to_run: List[str] = []
-            tests_skipped: List[str] = []
-            for list_line in list_output.splitlines():
-                if list_line.strip().endswith(": test"):
-                    test_case_name = list_line.split(": test")[0].strip()
-                    if any(f in test_case_name for f in filter_out):
-                        tests_skipped.append(test_case_name)
-                    else:
-                        individual_tests_to_run.append(test_case_name)
+        individual_tests_to_run: List[str] = []
+        tests_skipped: List[str] = []
+        for test_case_name in parse_test_case_names(list_output):
+            if any(f in test_case_name for f in filter_out):
+                tests_skipped.append(test_case_name)
+            else:
+                individual_tests_to_run.append(test_case_name)
 
-            if tests_skipped:
-                termcolor.cprint(
-                    f"  Skipping {len(tests_skipped)} tests from {basename} due to config.",
-                    "red",
-                )
-
-            if not individual_tests_to_run:
-                termcolor.cprint(
-                    f"  No tests left to run in {basename} after filtering.", "blue"
-                )
-                return tasks  # Return empty dict if no tests to run
-
+        if tests_skipped:
             termcolor.cprint(
-                f"  Submitting {len(individual_tests_to_run)} individual test tasks for {basename}.",
-                "magenta",
-            )
-            for test_case in individual_tests_to_run:
-                future = executor.submit(
-                    run_single_test_case,
-                    exe_path,
-                    test_case,
-                    cwd,
-                    suppression_path,
-                    demangle=demangle,
-                )
-                task_name = f"{basename}::{test_case}"
-                tasks[future] = task_name
-
-        except (subprocess.CalledProcessError, FileNotFoundError) as list_err:
-            termcolor.cprint(
-                f"Error listing tests for sharding {basename}: {list_err}. Running binary as whole.",
+                f"  Skipping {len(tests_skipped)} tests from {basename} due to config.",
                 "red",
-                file=sys.stderr,
             )
-            # Fallback: submit the whole binary
+
+        if not individual_tests_to_run:
+            if config and config.get("all_filtered_ok", False):
+                return tasks
+            raise ValueError(
+                "No tests left to run in {} after filtering".format(exe_path)
+            )
+
+        termcolor.cprint(
+            f"  Submitting {len(individual_tests_to_run)} individual test tasks for {basename}.",
+            "magenta",
+        )
+        for test_case in individual_tests_to_run:
             future = executor.submit(
-                run_single_test_binary,
+                run_single_test_case,
                 exe_path,
-                target_to_cwd,
-                script_cwd,
+                test_case,
+                cwd,
+                suppression_path,
                 demangle=demangle,
             )
-            tasks[future] = basename
+            tasks[future] = f"{exe_path}::{test_case}"
     else:
         # No sharding: submit task for the whole binary
         future = executor.submit(
             run_single_test_binary,
-            exe_path,
-            target_to_cwd,
+            executable,
             script_cwd,
             demangle=demangle,
         )
-        tasks[future] = basename
+        tasks[future] = exe_path
 
     return tasks
 
@@ -811,7 +833,7 @@ def main() -> None:
         "--filter-to-run",
         type="string",
         default="",
-        help="Comma-separated substrings; only executables whose path contains any of them will be run",
+        help="Comma-separated substrings matching executable paths or Cargo target names; every filter must match",
     )
     parser.add_option(
         "--release",
@@ -849,70 +871,27 @@ def main() -> None:
 
     # Determine build mode
     build_mode = "release" if opts.release else "debug (fast build)"
-    termcolor.cprint(
-        f"Compiling tests in {build_mode} mode with unstable options...", "yellow"
-    )
-    cargo_command = [
-        "cargo",
-        "test",
-        "--no-run",
-        "--workspace",
-        "--exclude",
-        "sample-usage",
-    ]
-    if opts.release:
-        cargo_command.append("--release")
-
-    # Add unstable options flag (passed to test binary compiler)
-    cargo_command.extend(["--", "-Z", "unstable-options"])
-    # Note: passing flags after '--' to cargo test passes them to the test binary compiler *invocation*
-    # We might just need the -Z flag when RUNNING the binary. Let's keep this for now.
-
-    p: subprocess.CompletedProcess[bytes] = subprocess.run(
-        cargo_command, check=True, stderr=subprocess.PIPE, env=os.environ
-    )
-    output: str = p.stderr.decode("utf-8")
-
-    test_binaries: List[str] = []
-
-    # Adjust executable path based on build mode
-    target_dir = "target/release/deps" if opts.release else "target/debug/deps"
-
-    for line in output.splitlines():
-        # Check for the correct target directory
-        if "Executable" in line and "(" in line and target_dir in line:
-            # Apply executable filtering if requested.
-            if filter_substrings and not any(sub in line for sub in filter_substrings):
-                continue
-            if "spdx" in line or any(
-                x in line for x in ["readme_test", "version_test"]
-            ):
-                continue
-
-            # Extract the path within the parentheses
-            path_match = re.search(r"\(([^)]+)\)", line)
-            if path_match:
-                relative_path: str = path_match.group(1)  # It's typically relative
-                absolute_path: str = os.path.abspath(relative_path)
-                test_binaries.append(absolute_path)
-            else:
-                termcolor.cprint(
-                    f"Warning: Could not parse executable path from line: {line}",
-                    "yellow",
-                    file=sys.stderr,
-                )
-
-    if not test_binaries:
-        print("No test executables found in release build matching filter.")
-        sys.exit(0)
+    termcolor.cprint(f"Compiling tests in {build_mode} mode...", "yellow")
+    script_cwd = os.path.realpath(os.getcwd())
+    try:
+        test_binaries = select_test_executables(
+            compile_test_executables(opts.release, script_cwd), filter_substrings
+        )
+    except (subprocess.CalledProcessError, ValueError, OSError) as error:
+        termcolor.cprint(
+            "Error discovering test executables: {}".format(error),
+            "red",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     print(f"Found {len(test_binaries)} test binaries:")
-
-    target_to_cwd: Dict[str, str] = {
-        name: os.path.realpath(path)
-        for name, path in get_target_to_cwd_mapping().items()
-    }
-    script_cwd: str = os.getcwd()
+    for executable in test_binaries:
+        print(
+            "  {}: {} (cwd: {})".format(
+                executable.target_name, executable.path, executable.cwd
+            )
+        )
 
     num_workers: Optional[int] = os.cpu_count()
     if num_workers is None:
@@ -930,15 +909,17 @@ def main() -> None:
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
         all_futures_map: Dict[concurrent.futures.Future[WorkerResult], str] = {}
-        for exe_path in test_binaries:
-            submitted_tasks = submit_valgrind_tasks(
-                executor,
-                exe_path,
-                target_to_cwd,
-                script_cwd,
-                demangle=(not opts.no_demangle),
-            )
-            all_futures_map.update(submitted_tasks)
+        for executable in test_binaries:
+            try:
+                submitted_tasks = submit_valgrind_tasks(
+                    executor,
+                    executable,
+                    script_cwd,
+                    demangle=(not opts.no_demangle),
+                )
+                all_futures_map.update(submitted_tasks)
+            except (subprocess.CalledProcessError, ValueError, OSError) as error:
+                task_results[executable.path] = error
 
         # Process results as they complete
         for future in concurrent.futures.as_completed(all_futures_map):
@@ -1040,6 +1021,16 @@ def main() -> None:
     )
 
     exit_code = 0
+    executed_tests = sum(parsed_counts.values())
+    if executed_tests == 0:
+        termcolor.cprint(
+            "\nError: No test cases completed under Valgrind.", "red", file=sys.stderr
+        )
+        exit_code = 1
+    else:
+        termcolor.cprint(
+            "\nCompleted {} test cases under Valgrind.".format(executed_tests), "green"
+        )
     if failed_binaries:
         termcolor.cprint(
             f"\nSummary: Valgrind runs failed for {len(failed_binaries)} binaries:",
