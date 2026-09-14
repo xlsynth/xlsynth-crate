@@ -47,8 +47,8 @@ fn assert_compatibility_warning(output: &Output, expected: bool) {
 #[test_case("dslx2pipeline", true, false; "external_pipeline")]
 #[test_case("dslx-g8r-stats", false, false; "linked_g8r")]
 #[test_case("dslx-g8r-stats", true, false; "external_g8r")]
-#[test_case("dslx-equiv", false, false; "linked_equiv")]
-#[test_case("dslx-equiv", true, false; "external_equiv")]
+#[cfg_attr(feature = "has-bitwuzla", test_case("dslx-equiv", false, false; "linked_equiv"))]
+#[cfg_attr(feature = "has-bitwuzla", test_case("dslx-equiv", true, false; "external_equiv"))]
 #[test_case("dslx2pipeline-eco", true, false; "external_eco")]
 fn type_inference_v2_conversion_ignores_legacy_input(command: &str, external: bool, in_toml: bool) {
     let dir = tempfile::tempdir().unwrap();
@@ -93,6 +93,10 @@ fn type_inference_v2_conversion_ignores_legacy_input(command: &str, external: bo
         }
         if command == "dslx2pipeline" || command == "dslx2pipeline-eco" {
             cmd.args(["--delay_model", "unit", "--pipeline_stages", "1"]);
+        }
+        if command == "dslx-g8r-stats" {
+            // Input compatibility does not need optional solver analysis.
+            cmd.arg("--enable-formal-array-alias-analysis=false");
         }
         if command == "dslx2pipeline-eco" {
             cmd.arg("--baseline_unopt_ir")
@@ -206,6 +210,7 @@ fn type_inference_v2_does_not_hide_other_config_errors() {
 
 // Verifies: real plan loading warns on old keys and still runs the proof.
 // Catches: silent handling or child failures caused by obsolete options.
+#[cfg(feature = "has-bitwuzla")]
 #[test]
 fn type_inference_v2_json_warns_in_the_prover_process() {
     let dir = tempfile::tempdir().unwrap();
