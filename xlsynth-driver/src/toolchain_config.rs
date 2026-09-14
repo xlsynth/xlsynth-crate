@@ -13,11 +13,11 @@ pub struct ToolchainConfig {
 
 #[derive(Deserialize, Debug)]
 pub struct DslxConfig {
-    /// Accepted only so existing toolchain files keep working.
+    /// Accept deprecated true values; reject V1 requests before CLI dispatch.
     #[serde(
         default,
         rename = "type_inference_v2",
-        deserialize_with = "crate::obsolete_options::ignore_type_inference_v2"
+        deserialize_with = "crate::obsolete_options::deserialize_type_inference_v2"
     )]
     pub _ignored_type_inference_v2: (),
     pub dslx_stdlib_path: Option<String>,

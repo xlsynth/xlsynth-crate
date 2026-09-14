@@ -1,20 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compatibility for obsolete inputs, discarded before conversion or proving.
+//! Validate deprecated inputs without restoring typechecker selection.
 
-use serde::{Deserialize, Deserializer, de::IgnoredAny};
+use anyhow::Result;
+use serde::{Deserialize, Deserializer};
 
+/// Keep deprecation diagnostics enabled by default without other library logs.
 pub const LOG_TARGET: &str = "xlsynth_driver::obsolete_options";
 
-pub fn warn_type_inference_v2() {
-    log::warn!(target: LOG_TARGET, "type_inference_v2 is obsolete and ignored");
+/// Warn for V2 requests and reject V1 requests without retaining a selector.
+pub fn accept_type_inference_v2(value: bool) -> Result<()> {
+    if value {
+        log::warn!(target: LOG_TARGET, "The type_inference_v2 option is deprecated; V2 is always used.");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "type_inference_v2=false requests V1, which is no longer supported; remove the option or set it to true"
+        )
+    }
 }
 
-/// Consume any legacy value without retaining or validating a removed option.
-pub fn ignore_type_inference_v2<'de, D: Deserializer<'de>>(
+/// Validate each supplied config value even when a CLI value is also present.
+pub fn deserialize_type_inference_v2<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<(), D::Error> {
-    IgnoredAny::deserialize(deserializer)?;
-    warn_type_inference_v2();
-    Ok(())
+    let value = bool::deserialize(deserializer)?;
+    accept_type_inference_v2(value).map_err(serde::de::Error::custom)
 }

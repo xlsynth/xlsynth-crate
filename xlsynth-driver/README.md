@@ -3478,22 +3478,26 @@ use_system_verilog = true
 
 ## Obsolete `type_inference_v2` inputs
 
-Type inference is determined by the selected XLS compiler. The driver no longer
-selects an algorithm or forwards `type_inference_v2` to external tools.
+V2 type inference is always used. The driver no longer selects an algorithm or
+forwards `type_inference_v2` to external tools.
 
 For existing scripts, `dslx2ir`, `dslx2pipeline`, `dslx-g8r-stats`,
-`dslx2pipeline-eco`, and `dslx-equiv` still accept `--type_inference_v2 <VALUE>`
-(or `--type_inference_v2=<VALUE>`). The value is ignored and a warning is logged
-on stderr. The option is hidden from help. Supplying it adds no external-tools
+`dslx2pipeline-eco`, and `dslx-equiv` still accept `--type_inference_v2 true`
+(or `--type_inference_v2=true`) with a deprecation warning on stderr. Explicit
+`false` is rejected because it requests unsupported V1 behavior; malformed values
+are also rejected. The option is hidden from help. Supplying it adds no external-tools
 requirement. `dslx2pipeline-eco` still requires external tools for its normal operation.
 
 Existing `[toolchain.dslx]` TOML and `dslx-equiv` prover JSON may also contain
-`type_inference_v2`. These readers warn and discard its value. New serialized
-prover plans and child commands omit the key. Remove the old input to silence
-the warning. An explicit `RUST_LOG` setting controls warning visibility.
+`type_inference_v2`. These readers accept boolean `true` with a warning, and reject
+`false` or non-boolean values. Every supplied value is validated: CLI `true` cannot
+override an invalid or `false` config value. New serialized prover plans and child
+commands omit the key. Remove the old input to silence the warning. An explicit
+`RUST_LOG` setting controls warning visibility.
 
-For example, adding `--type_inference_v2=false` to this command produces the same
-IR, with an additional warning:
+For example, adding `--type_inference_v2=true` to this command produces the same
+IR with a deprecation warning. Adding `--type_inference_v2=false` instead fails
+before conversion and explains that V1 is no longer supported:
 
 ```shell
 xlsynth-driver dslx2ir --dslx_input_file my_module.x --dslx_top main
