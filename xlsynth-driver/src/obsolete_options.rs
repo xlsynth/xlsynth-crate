@@ -15,7 +15,7 @@ pub fn accept_type_inference_v2(value: bool) -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!(
-            "type_inference_v2=false requests V1, which is no longer supported; remove the option or set it to true"
+            "type_inference_v2=false requests V1, which is no longer supported; remove the option entirely"
         )
     }
 }

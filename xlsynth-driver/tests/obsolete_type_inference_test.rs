@@ -8,7 +8,8 @@ use test_case::test_case;
 use xlsynth_driver::prover_config::{ProverPlan, ToDriverCommand};
 
 const WARNING: &str = "The type_inference_v2 option is deprecated; V2 is always used.";
-const V1_ERROR: &str = "type_inference_v2=false requests V1, which is no longer supported";
+const V1_ERROR: &str =
+    "type_inference_v2=false requests V1, which is no longer supported; remove the option entirely";
 
 fn assert_success(output: &Output) {
     assert!(
