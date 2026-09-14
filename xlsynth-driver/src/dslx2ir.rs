@@ -5,7 +5,7 @@ use xlsynth::{DslxConvertOptions, IrPackage};
 use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
 
 use crate::{
-    common::{parse_bool_flag_or, resolve_type_inference_v2},
+    common::parse_bool_flag_or,
     toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path},
     tools::{run_ir_converter_main, run_opt_main},
 };
@@ -18,7 +18,6 @@ fn dslx2ir(
     tool_path: Option<&str>,
     enable_warnings: Option<&[String]>,
     disable_warnings: Option<&[String]>,
-    type_inference_v2: Option<bool>,
     opt: bool,
     aug_opt: bool,
     convert_tests: bool,
@@ -36,7 +35,6 @@ fn dslx2ir(
             tool_path,
             enable_warnings,
             disable_warnings,
-            type_inference_v2,
             convert_tests,
         );
         if aug_opt && !opt {
@@ -66,12 +64,6 @@ fn dslx2ir(
         }
         println!("{}", output);
     } else {
-        if type_inference_v2 == Some(true) {
-            eprintln!(
-                "error: --type_inference_v2 is only supported when using --toolchain (external tool path)"
-            );
-            std::process::exit(1);
-        }
         if aug_opt && !opt {
             eprintln!("error: dslx2ir: --aug-opt=true requires --opt=true");
             std::process::exit(2);
@@ -173,8 +165,6 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         );
     }
 
-    let type_inference_v2 = resolve_type_inference_v2(matches, config);
-
     dslx2ir(
         input_path,
         top,
@@ -183,7 +173,6 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         tool_path,
         enable_warnings,
         disable_warnings,
-        type_inference_v2,
         opt,
         aug_opt,
         convert_tests,

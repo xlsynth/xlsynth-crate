@@ -73,20 +73,6 @@ pub fn enforce_extern_verilog_codegen_policy(
     }
 }
 
-/// Determines the effective value of the experimental `type_inference_v2`
-/// option. The command-line flag takes precedence, and we fall back to the
-/// toolchain configuration when the flag is absent.
-pub fn resolve_type_inference_v2(
-    matches: &ArgMatches,
-    config: &Option<crate::toolchain_config::ToolchainConfig>,
-) -> Option<bool> {
-    parse_bool_flag(matches, "type_inference_v2").or_else(|| {
-        config
-            .as_ref()
-            .and_then(|c| c.dslx.as_ref()?.type_inference_v2)
-    })
-}
-
 pub fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
     if let Some(pipeline_stages) = matches.get_one::<String>("pipeline_stages") {
         PipelineSpec::Stages(pipeline_stages.parse().unwrap())

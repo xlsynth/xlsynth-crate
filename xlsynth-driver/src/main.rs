@@ -125,6 +125,7 @@ mod ir_structural_similarity;
 mod lib2proto;
 mod lib_query;
 mod liberty_proto_info;
+mod obsolete_options;
 mod proofs;
 mod prove_enum_in_bound;
 mod prove_quickcheck;
@@ -149,6 +150,15 @@ use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
+
+/// Accept legacy explicit values without advertising a typechecker choice.
+fn obsolete_type_inference_arg() -> Arg {
+    Arg::new("type_inference_v2")
+        .long("type_inference_v2")
+        .action(ArgAction::Set)
+        .num_args(1)
+        .hide(true)
+}
 
 /// Builds the shared solver-selection argument used by formal subcommands.
 fn solver_arg(help: &'static str) -> Arg {
@@ -515,7 +525,13 @@ impl AppExt for clap::Command {
 }
 
 fn main() {
-    let _ = env_logger::try_init();
+    // Keep other targets at their usual error-only default. An explicit
+    // RUST_LOG still controls all logging, including compatibility warnings.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or(format!("error,{}=warn", obsolete_options::LOG_TARGET)),
+    )
+    .try_init();
 
     log::info!(
         "xlsynth-driver starting; version: {}",
@@ -598,10 +614,7 @@ fn main() {
                     "Allow codegen IR containing Verilog FFI declarations emitted from DSLX extern_verilog",
                 )
                 .add_bool_arg("keep_temps", "Keep temporary files")
-                .add_bool_arg(
-                    "type_inference_v2",
-                    "Enable the experimental type-inference v2 algorithm",
-                ),
+                .arg(obsolete_type_inference_arg()),
         )
         .subcommand(
             clap::Command::new("dslx-stitch-pipeline")
@@ -882,10 +895,7 @@ fn main() {
                         .num_args(1)
                         .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
                 )
-                .add_bool_arg(
-                    "type_inference_v2",
-                    "Enable the experimental type-inference v2 algorithm",
-                )
+                .arg(obsolete_type_inference_arg())
                 .add_bool_arg(
                     "convert_tests",
                     "Convert test procs/functions to IR",
@@ -999,10 +1009,7 @@ fn main() {
                 .about("Emit gate-level summary stats for a DSLX entry point")
                 .add_dslx_input_args(true)
                 .add_g8r_lowering_flags()
-                .add_bool_arg(
-                    "type_inference_v2",
-                    "Enable the experimental type-inference v2 algorithm",
-                ),
+                .arg(obsolete_type_inference_arg()),
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(
@@ -1839,10 +1846,7 @@ fn main() {
                 .add_pipeline_args()
                 .add_codegen_args()
                 .add_bool_arg("keep_temps", "Keep temporary files")
-                .add_bool_arg(
-                    "type_inference_v2",
-                    "Enable the experimental type-inference v2 algorithm",
-                )
+                .arg(obsolete_type_inference_arg())
                 .arg(
                     clap::Arg::new("edits_debug_out")
                         .long("edits_debug_out")
@@ -3768,10 +3772,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("DSLX_STDLIB_PATH")
                         .help("Path to the DSLX standard library"),
                 )
-                .add_bool_arg(
-                    "type_inference_v2",
-                    "Enable the experimental type-inference v2 algorithm (external toolchain only)",
-                )
+                .arg(obsolete_type_inference_arg())
                 .arg(solver_arg(
                     "Use the specified solver for equivalence checking",
                 ))
@@ -3878,6 +3879,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
     }
 
     let matches = cmd.get_matches();
+
+    if let Some((_, subcommand)) = matches.subcommand()
+        && let Ok(Some(_)) = subcommand.try_get_one::<String>("type_inference_v2")
+    {
+        obsolete_options::warn_type_inference_v2();
+    }
 
     let mut toml_path: Option<String> = matches
         .get_one::<String>("toolchain")

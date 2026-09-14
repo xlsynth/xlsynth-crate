@@ -7706,12 +7706,12 @@ fn test_aig_eval_reports_fn_type_mismatch() {
     );
 }
 
-/// TODO(cdleary): 2025-06-10 This only works when there is a tool path
-/// available because the runtime APIs don't support specifying TIv2.
+// Negative test: out-of-bounds slices retain each route's diagnostic handling.
 #[test_case(true; "with_tool_path")]
-fn test_tiv2_slice_oob_is_error(use_tool_path: bool) {
+#[test_case(false; "without_tool_path")]
+fn test_slice_oob_diagnostic(use_tool_path: bool) {
     let _ = env_logger::builder().is_test(true).try_init();
-    // Same DSLX code as above.
+    // External tools treat this warning as an error; the linked API returns it.
     let dslx = "fn f(x: u32) -> u32 { x[32 +: u32] }";
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("f.x");
@@ -7729,8 +7729,8 @@ fn test_tiv2_slice_oob_is_error(use_tool_path: bool) {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
 
-    // Pass --type_inference_v2=true
     let output = std::process::Command::new(command_path)
+        .env("RUST_LOG", "warn")
         .arg("--toolchain")
         .arg(toolchain_path.to_str().unwrap())
         .arg("dslx2ir")
@@ -7738,13 +7738,13 @@ fn test_tiv2_slice_oob_is_error(use_tool_path: bool) {
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
         .arg("f")
-        .arg("--type_inference_v2=true")
         .output()
         .unwrap();
 
-    assert!(
-        !output.status.success(),
-        "tiv2 compile should fail; stdout: {}\nstderr: {}",
+    assert_eq!(
+        output.status.success(),
+        !use_tool_path,
+        "unexpected slice diagnostic outcome; stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

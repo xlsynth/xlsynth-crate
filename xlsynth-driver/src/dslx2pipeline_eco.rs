@@ -4,7 +4,6 @@ use clap::ArgMatches;
 
 use crate::common::{
     CodegenFlags, PipelineSpec, extract_codegen_flags, extract_pipeline_spec, parse_bool_flag,
-    resolve_type_inference_v2,
 };
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{
@@ -36,7 +35,6 @@ fn dslx2pipeline_eco(
     codegen_flags: &CodegenFlags,
     delay_model: &str,
     keep_temps: &Option<bool>,
-    type_inference_v2: Option<bool>,
     output_unopt_ir: &Option<&std::path::Path>,
     output_opt_ir: &Option<&std::path::Path>,
     config: &Option<ToolchainConfig>,
@@ -91,7 +89,6 @@ fn dslx2pipeline_eco(
         tool_path,
         enable_warnings,
         disable_warnings,
-        type_inference_v2,
         /* convert_tests= */ false,
     );
     let unopt_ir_path = temp_dir.path().join("unopt.ir");
@@ -251,8 +248,6 @@ pub fn handle_dslx2pipeline_eco(matches: &ArgMatches, config: &Option<ToolchainC
         .get_one::<String>("output_baseline_verilog_path")
         .map(|s| std::path::PathBuf::from(s));
 
-    let type_inference_v2 = resolve_type_inference_v2(matches, config);
-
     dslx2pipeline_eco(
         input_path,
         dslx_top,
@@ -260,7 +255,6 @@ pub fn handle_dslx2pipeline_eco(matches: &ArgMatches, config: &Option<ToolchainC
         &codegen_flags,
         delay_model,
         &keep_temps,
-        type_inference_v2,
         &output_unopt_ir.as_deref(),
         &output_opt_ir.as_deref(),
         config,

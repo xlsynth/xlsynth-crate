@@ -2,6 +2,7 @@
 
 // Expose the modules needed by the fuzzer and external users.
 // Keep this facade minimal to avoid pulling in the whole CLI surface.
+mod obsolete_options;
 pub mod proofs;
 pub mod prover;
 pub mod prover_config;

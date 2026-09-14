@@ -103,7 +103,14 @@ pub struct DslxEquivConfig {
     pub lhs_fixed_implicit_activation: Option<bool>,
     pub rhs_fixed_implicit_activation: Option<bool>,
     pub assume_enum_in_bound: Option<bool>,
-    pub type_inference_v2: Option<bool>, // external toolchain only
+    /// Consume legacy plans without copying the obsolete key to new plans.
+    #[serde(
+        default,
+        rename = "type_inference_v2",
+        deserialize_with = "crate::obsolete_options::ignore_type_inference_v2",
+        skip_serializing
+    )]
+    pub _ignored_type_inference_v2: (),
     /// Include only assertions whose label matches this regex.
     pub assert_label_filter: Option<String>,
 
@@ -259,7 +266,6 @@ impl ToDriverCommand for DslxEquivConfig {
             self.rhs_fixed_implicit_activation,
         );
         add_bool(&mut cmd, "assume-enum-in-bound", self.assume_enum_in_bound);
-        add_bool(&mut cmd, "type_inference_v2", self.type_inference_v2);
 
         if let Some(list) = &self.lhs_uf {
             for entry in list {

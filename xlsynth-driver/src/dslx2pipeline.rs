@@ -7,7 +7,7 @@ use clap::ArgMatches;
 use crate::common::{
     CodegenFlags, DEFAULT_WARNINGS_AS_ERRORS, PipelineSpec, enforce_extern_verilog_codegen_policy,
     extract_codegen_flags, extract_pipeline_spec, parse_bool_flag, parse_bool_flag_or,
-    pipeline_codegen_flags_proto, resolve_type_inference_v2, scheduling_options_proto,
+    pipeline_codegen_flags_proto, scheduling_options_proto,
 };
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
@@ -22,7 +22,6 @@ fn dslx2pipeline(
     codegen_flags: &CodegenFlags,
     delay_model: &str,
     keep_temps: &Option<bool>,
-    type_inference_v2: Option<bool>,
     allow_extern_verilog: bool,
     output_unopt_ir: &Option<&std::path::Path>,
     output_opt_ir: &Option<&std::path::Path>,
@@ -63,7 +62,6 @@ fn dslx2pipeline(
             tool_path,
             enable_warnings,
             disable_warnings,
-            type_inference_v2,
             /* convert_tests= */ false,
         );
         let unopt_ir_path = temp_dir.path().join("unopt.ir");
@@ -104,12 +102,6 @@ fn dslx2pipeline(
         }
         println!("{}", sv);
     } else {
-        if type_inference_v2 == Some(true) {
-            eprintln!(
-                "error: --type_inference_v2 is only supported when using --toolchain (external tool path)"
-            );
-            std::process::exit(1);
-        }
         log::info!("dslx2pipeline using runtime APIs");
         let dslx = std::fs::read_to_string(input_file).unwrap();
 
@@ -211,8 +203,6 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
         .get_one::<String>("output_opt_ir")
         .map(|s| std::path::PathBuf::from(s));
 
-    let type_inference_v2 = resolve_type_inference_v2(matches, config);
-
     dslx2pipeline(
         input_path,
         top,
@@ -220,7 +210,6 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
         &codegen_flags,
         delay_model,
         &keep_temps,
-        type_inference_v2,
         allow_extern_verilog,
         &output_unopt_ir.as_deref(),
         &output_opt_ir.as_deref(),
