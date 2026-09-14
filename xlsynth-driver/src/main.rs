@@ -531,6 +531,7 @@ fn main() {
         env_logger::Env::default()
             .default_filter_or(format!("error,{}=warn", obsolete_options::LOG_TARGET)),
     )
+    .format_timestamp(None)
     .try_init();
 
     log::info!(

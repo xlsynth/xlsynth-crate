@@ -18,8 +18,27 @@ fn assert_success(output: &Output) {
     );
 }
 
+/// Checks the default warning text, including its deterministic prefix.
+fn assert_compatibility_warning(output: &Output, expected: bool) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let warnings: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.contains(WARNING))
+        .collect();
+    if expected {
+        assert_eq!(
+            warnings,
+            [format!(
+                "[WARN  xlsynth_driver::obsolete_options] {WARNING}"
+            )]
+        );
+    } else {
+        assert!(warnings.is_empty());
+    }
+}
+
 // Verifies: old CLI/TOML values warn and preserve each command's output.
-// Catches: obsolete guards, hidden warnings, and effective selector forwarding.
+// Catches: obsolete guards, hidden or timestamped warnings, and forwarding.
 #[test_case("dslx2ir", false, false; "linked_cli")]
 #[test_case("dslx2ir", true, false; "external_cli")]
 #[test_case("dslx2ir", false, true; "linked_toml")]
@@ -99,10 +118,7 @@ fn type_inference_v2_conversion_ignores_legacy_input(command: &str, external: bo
         std::fs::write(&config, contents).unwrap();
         let output = cmd.output().unwrap();
         assert_success(&output);
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr).contains(WARNING),
-            value.is_some()
-        );
+        assert_compatibility_warning(&output, value.is_some());
         // Equivalence reports include elapsed time; compare the result lines.
         let stdout: Vec<_> = String::from_utf8(output.stdout)
             .unwrap()
@@ -212,9 +228,6 @@ fn type_inference_v2_json_warns_in_the_prover_process() {
             .output()
             .unwrap();
         assert_success(&output);
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr).contains(WARNING),
-            value.is_some()
-        );
+        assert_compatibility_warning(&output, value.is_some());
     }
 }
