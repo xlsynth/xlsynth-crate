@@ -70,7 +70,6 @@ pub struct DslxOptions<'a> {
     pub additional_search_paths: Vec<PathBuf>,
     pub enable_warnings: Option<&'a [String]>,
     pub disable_warnings: Option<&'a [String]>,
-    pub type_inference_v2: Option<bool>,
     pub optimize: bool,
 }
 
@@ -82,7 +81,6 @@ impl<'a> Default for DslxOptions<'a> {
             additional_search_paths: Vec::new(),
             enable_warnings: None,
             disable_warnings: None,
-            type_inference_v2: None,
             optimize: false,
         }
     }
@@ -119,11 +117,6 @@ impl<'a> DslxOptions<'a> {
 
     pub fn with_disable_warnings(mut self, warnings: Option<&'a [String]>) -> Self {
         self.disable_warnings = warnings;
-        self
-    }
-
-    pub fn with_type_inference_v2(mut self, flag: Option<bool>) -> Self {
-        self.type_inference_v2 = flag;
         self
     }
 
@@ -231,17 +224,10 @@ impl<'a> DslxEquivRequest<'a> {
         self.options.disable_warnings = warnings;
         self
     }
-
-    pub fn with_type_inference_v2(mut self, flag: Option<bool>) -> Self {
-        self.options.type_inference_v2 = flag;
-        self
-    }
 }
 
 /// Proves equivalence between two DSLX modules described by `request`.
 pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, String> {
-    validate_tool_options(request)?;
-
     let start = Instant::now();
 
     let lhs_ir = prepare_side(request, &request.lhs)?;
@@ -326,7 +312,6 @@ fn prepare_side(
             &additional_path_refs,
             options.enable_warnings,
             options.disable_warnings,
-            options.type_inference_v2,
         )
         .map_err(|e| e)?;
         if options.optimize {
@@ -336,9 +321,6 @@ fn prepare_side(
         }
         ir_text
     } else {
-        if options.type_inference_v2 == Some(true) {
-            return Err("--type_inference_v2 requires external toolchain support".to_string());
-        }
         let origin_path = module.path.unwrap_or_else(|| Path::new("<inline.dslx>"));
         let result = xlsynth::convert_dslx_to_ir_text(
             module.source,
@@ -381,13 +363,6 @@ fn prepare_side(
         mangled_top,
         param_domains,
     })
-}
-
-fn validate_tool_options(request: &DslxEquivRequest<'_>) -> Result<(), String> {
-    if request.options.type_inference_v2.is_some() && request.options.tool_path.is_none() {
-        return Err("--type_inference_v2 requires --tool_path to be set".to_string());
-    }
-    Ok(())
 }
 
 fn module_name<'a>(module: &'a DslxModule<'a>) -> Result<&'a str, String> {

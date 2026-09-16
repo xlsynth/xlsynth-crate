@@ -25,7 +25,6 @@ pub fn run_ir_converter_main(
     additional_search_paths: &[&Path],
     enable_warnings: Option<&[String]>,
     disable_warnings: Option<&[String]>,
-    type_inference_v2: Option<bool>,
 ) -> Result<String, String> {
     let mut command = Command::new(tool_path.join("ir_converter_main"));
     command.arg(input_file);
@@ -49,12 +48,6 @@ pub fn run_ir_converter_main(
         }
     }
     command.arg("--convert_tests=false");
-    if let Some(value) = type_inference_v2 {
-        command.arg(format!(
-            "--type_inference_v2={}",
-            if value { "true" } else { "false" }
-        ));
-    }
 
     let output = run_command(&mut command, "ir_converter_main")?;
     if !output.status.success() {

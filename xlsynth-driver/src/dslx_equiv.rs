@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::{parse_uf_spec, resolve_type_inference_v2};
+use crate::common::parse_uf_spec;
 use crate::ir_equiv::outcome_from_report;
 use crate::proofs::obligations::{LecObligation, LecSide, ObligationPayload, ProverObligation};
 use crate::proofs::script::{
@@ -84,8 +84,6 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let disable_warnings = config
         .as_ref()
         .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
-
-    let type_inference_v2 = resolve_type_inference_v2(matches, config);
 
     let assertion_semantics = matches
         .get_one::<String>("assertion_semantics")
@@ -318,8 +316,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             .with_dslx_stdlib_path(dslx_stdlib_path_ref)
             .with_additional_search_paths(additional_search_paths)
             .with_enable_warnings(enable_warnings)
-            .with_disable_warnings(disable_warnings)
-            .with_type_inference_v2(type_inference_v2);
+            .with_disable_warnings(disable_warnings);
 
         let report = match run_dslx_equiv(&request) {
             Ok(r) => r,

@@ -86,7 +86,6 @@ pub fn run_ir_converter_main(
     tool_path: &str,
     enable_warnings: Option<&[String]>,
     disable_warnings: Option<&[String]>,
-    type_inference_v2: Option<bool>,
     convert_tests: bool,
 ) -> String {
     log::info!(
@@ -126,14 +125,6 @@ pub fn run_ir_converter_main(
         command.arg("--convert_tests=true");
     } else {
         command.arg("--convert_tests=false");
-    }
-
-    // Pass through the experimental type inference flag if requested.
-    if let Some(value) = type_inference_v2 {
-        command.arg(format!(
-            "--type_inference_v2={}",
-            if value { "true" } else { "false" }
-        ));
     }
 
     log::info!("command: {:?}", command);

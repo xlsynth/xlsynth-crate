@@ -103,7 +103,14 @@ pub struct DslxEquivConfig {
     pub lhs_fixed_implicit_activation: Option<bool>,
     pub rhs_fixed_implicit_activation: Option<bool>,
     pub assume_enum_in_bound: Option<bool>,
-    pub type_inference_v2: Option<bool>, // external toolchain only
+    /// Accept deprecated true values without retaining or forwarding the key.
+    #[serde(
+        default,
+        rename = "type_inference_v2",
+        deserialize_with = "crate::obsolete_options::deserialize_type_inference_v2",
+        skip_serializing
+    )]
+    pub _ignored_type_inference_v2: (),
     /// Include only assertions whose label matches this regex.
     pub assert_label_filter: Option<String>,
 
@@ -259,7 +266,6 @@ impl ToDriverCommand for DslxEquivConfig {
             self.rhs_fixed_implicit_activation,
         );
         add_bool(&mut cmd, "assume-enum-in-bound", self.assume_enum_in_bound);
-        add_bool(&mut cmd, "type_inference_v2", self.type_inference_v2);
 
         if let Some(list) = &self.lhs_uf {
             for entry in list {
@@ -492,7 +498,11 @@ pub enum GroupKind {
     First,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A prover task or recursive group, selected by its `kind` field in JSON.
+///
+/// Deserialization selects the schema before parsing fields so invalid tasks
+/// retain their specific error instead of an untagged-enum fallback error.
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum ProverPlan {
     Task {
@@ -514,6 +524,56 @@ pub enum ProverPlan {
         #[serde(default)]
         keep_running_till_finish: bool,
     },
+}
+
+impl<'de> Deserialize<'de> for ProverPlan {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Kind {
+            kind: String,
+        }
+
+        #[derive(Deserialize)]
+        struct Task {
+            #[serde(flatten)]
+            task: ProverTask,
+            timeout_ms: Option<u64>,
+            task_id: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct Group {
+            kind: GroupKind,
+            tasks: Vec<ProverPlan>,
+            #[serde(default)]
+            keep_running_till_finish: bool,
+        }
+
+        // Keep duplicate keys visible; a Value map would overwrite earlier
+        // values.
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        let kind: Kind = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+        match kind.kind.as_str() {
+            "all" | "any" | "first" => {
+                let group: Group =
+                    serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+                Ok(Self::Group {
+                    kind: group.kind,
+                    tasks: group.tasks,
+                    keep_running_till_finish: group.keep_running_till_finish,
+                })
+            }
+            _ => {
+                let task: Task =
+                    serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+                Ok(Self::Task {
+                    task: task.task,
+                    timeout_ms: task.timeout_ms,
+                    task_id: task.task_id,
+                })
+            }
+        }
+    }
 }
 
 #[cfg(test)]

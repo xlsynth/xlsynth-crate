@@ -1224,9 +1224,6 @@ The resulting Verilog is printed on **stdout**.
 Diagnostic messages and the path to temporary files (when
 `--keep_temps=true`) are written to **stderr**.
 
-- The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
-  **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
-
 Additional outputs:
 
 - `--output_unopt_ir <PATH>` – write the unoptimized IR package to a file.
@@ -1243,9 +1240,6 @@ Extern-Verilog policy:
 
 Converts DSLX source code to the XLS IR. The IR text is emitted on **stdout**.
 DSLX warnings and errors appear on **stderr**.
-
-- The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
-  **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
 
 Optional optimization:
 
@@ -1422,8 +1416,6 @@ Converts a DSLX entry point all the way to a gate-level representation and
 prints a JSON summary of structural statistics. It performs IR conversion,
 optimization, and gatification using either the toolchain or the runtime APIs.
 
-- The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
-  **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
 - Gate-lowering flags are shared with `ir2g8r` / `ir2gates` (e.g. `--fold`, `--hash`, `--track-pir-node-ids`, `--fraig`, `--adder-mapping`, and `--enable-rewrite-*`).
 
 ### `ir2opt`: optimize IR
@@ -2704,7 +2696,6 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels)
   - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
   - `--assume-enum-in-bound=<BOOL>`
-  - `--type_inference_v2=<BOOL>` (requires `--toolchain`)
   - `--lhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--rhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). When present, the driver builds a tactic obligation tree and executes it instead of direct equivalence.
@@ -3170,7 +3161,6 @@ Schema details
     - `lhs_fixed_implicit_activation`: bool
     - `rhs_fixed_implicit_activation`: bool
     - `assume_enum_in_bound`: bool
-    - `type_inference_v2`: bool (requires external toolchain)
     - `lhs_uf`: array of strings, each "`<func_name>:<uf_name>`" (repeats map to repeated CLI flags). Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
     - `rhs_uf`: array of strings, each "`<func_name>:<uf_name>`". Same semantics as above.
     - `json`: bool
@@ -3220,7 +3210,6 @@ xlsynth-driver ir-equiv lhs.ir rhs.ir \
 Notes
 
 - Enum values are case-insensitive on the CLI but serialized in lowercase/kebab-case in JSON.
-- `type_inference_v2` is only honored when using the external toolchain (`--toolchain`).
 - `dslx_path` is joined with `;` regardless of platform to match upstream tools.
 
 ### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
@@ -3456,8 +3445,7 @@ Several subcommands accept a `--toolchain` option that points at a
 code-generation-specific settings:
 
 - `[toolchain]` | `tool_path` | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
-- `[toolchain.dslx]` | `type_inference_v2` | Enables the experimental type-inference-v2 algorithm globally unless overridden by a CLI flag. |
-  | | `dslx_stdlib_path` | Path to the DSLX standard library. |
+- `[toolchain.dslx]` | `dslx_stdlib_path` | Path to the DSLX standard library. |
   | | `dslx_path` | *Array* of additional DSLX search paths. |
   | | `warnings_as_errors` | Treat DSLX warnings as hard errors. |
   | | `enable_warnings` / `disable_warnings`| Lists of DSLX warning names to enable / suppress. |
@@ -3476,7 +3464,6 @@ Example:
 tool_path = "/path/to/xls/tools"
 
 [toolchain.dslx]
-type_inference_v2 = true
 dslx_stdlib_path = "/path/to/dslx/stdlib"
 dslx_path         = ["/path/to/extra1", "/path/to/extra2"]
 warnings_as_errors = true
@@ -3489,40 +3476,29 @@ assert_format      = "`BR_ASSERT({label}, {condition})"
 use_system_verilog = true
 ```
 
-## Experimental `--type_inference_v2` Flag
+## Obsolete `type_inference_v2` inputs
 
-Some subcommands support an experimental flag:
+V2 type inference is always used. The driver no longer selects an algorithm or
+forwards `type_inference_v2` to external tools.
 
-```
---type_inference_v2
-```
+For existing scripts, `dslx2ir`, `dslx2pipeline`, `dslx-g8r-stats`,
+`dslx2pipeline-eco`, and `dslx-equiv` still accept `--type_inference_v2 true`
+(or `--type_inference_v2=true`) with a deprecation warning on stderr. Explicit
+`false` is rejected because it requests unsupported V1 behavior; malformed values
+are also rejected. The option is hidden from help. Supplying it adds no external-tools
+requirement. `dslx2pipeline-eco` still requires external tools for its normal operation.
 
-This flag enables the experimental type inference v2 algorithm for DSLX-to-IR and related conversions.
-**It is only supported when using the external toolchain (`--toolchain`).**
-If you request this flag without `--toolchain`, the driver will print an error and exit.
+Existing `[toolchain.dslx]` TOML and `dslx-equiv` prover JSON may also contain
+`type_inference_v2`. These readers accept boolean `true` with a warning, and reject
+`false` or non-boolean values. Every supplied value is validated: CLI `true` cannot
+override an invalid or `false` config value. New serialized prover plans and child
+commands omit the key. Remove the old input to silence the warning. An explicit
+`RUST_LOG` setting controls warning visibility.
 
-### Supported Subcommands
-
-| Subcommand | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
-| ---------------- | :-----------------------------: | :------------------------------: | :-------------------------------: |
-| `dslx2pipeline` | Yes | Yes | Yes |
-| `dslx2ir` | Yes | Yes | Yes |
-| `dslx-g8r-stats` | Yes | Yes | Yes |
-| `dslx2sv-types` | No | N/A | Yes |
-
-### Migration and Use
-
-The main benefit of this flag is that it enables an attempt at migrating `.x` files with **no associated source text changes** (e.g., that would change the position metadata in the resulting IR file).
-
-> **Note:**
-> This flag may be short-lived, as it will likely become the default mode when TIv1 is deleted.
-> However, it may assist with migration testing and validation during the transition period.
-
-**How to use:**
+For example, adding `--type_inference_v2=true` to this command produces the same
+IR with a deprecation warning. Adding `--type_inference_v2=false` instead fails
+before conversion and explains that V1 is no longer supported:
 
 ```shell
-xlsynth-driver --toolchain=path/to/xlsynth-toolchain.toml dslx2ir \
-  --dslx_input_file my_module.x \
-  --dslx_top main \
-  --type_inference_v2=true
+xlsynth-driver dslx2ir --dslx_input_file my_module.x --dslx_top main
 ```
