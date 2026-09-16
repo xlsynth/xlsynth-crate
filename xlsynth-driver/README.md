@@ -742,6 +742,90 @@ available as explicit experimental options. Explicit endpoint constraints use
 the separate Liberty-timed mapping path. Constant outputs are emitted as
 zero-area Verilog tie-offs.
 
+`--nf-cover-search=single` (default) maps exactly one fastest-child NF-Liberty
+cover, for both combinational and registered designs. It does not enter the
+implicit large-design portfolio. `--nf-cover-search=automatic` explicitly
+preserves the previous mapping policy:
+one registered cover, with bounded alternative-cover search for unusually large
+unconstrained combinational covers. `--nf-cover-search=fast-and-area` requires
+`nf-liberty` and explicitly evaluates both area-child and fastest-child policies.
+Both receive the same endpoint constraints, register restoration, and requested
+buffering/resizing. Selection uses final Liberty area and timing, including
+clock-to-Q and setup for registered paths. The fastest-child result is retained
+unless the area-child result is no larger and no worse in worst delay or any
+present input-to-register, register-to-register, or register-to-output timing
+class, with at least one strict improvement. Missing timing classes must match;
+exact ties retain the fastest-child result. If only one policy succeeds, it is
+used; failure of both policies is an error. The command emits a deterministic
+`nf-cover-search:` JSON record on stderr containing each policy's final metrics
+or failure, the selected policy, and the selection reason. This opt-in search
+can approximately double physical-optimization runtime.
+
+`--nf-cover-search=guarded-area` additionally evaluates an area-priority cut
+frontier without the three protected shallow-cut slots. This remains an
+`nf-liberty` mapper: representative Liberty pin delays and fastest-child
+scoring are unchanged for this additional cover. All alternatives receive the
+same complete registered timing and post-mapping optimization treatment. The
+smallest candidate that preserves every baseline area/timing bound wins;
+equal-area alternatives are ordered by worst delay and stable policy order.
+The fastest-child baseline wins exact ties. This opt-in three-cover search can
+approximately triple physical-optimization runtime; each attempted policy and
+its outcome is included in the JSON audit.
+
+`--nf-cover-search=calibrated-timing` measures the selected preliminary cover's
+median internal slew and load, then tries a second cover characterized at that
+operating point. `--nf-cover-search=load-slew` also propagates rise/fall arrival
+and slew through each candidate's Liberty arcs and refreshes per-node/polarity
+loads from the live cover between the four flow rounds. Load estimates are
+damped halfway toward the new cover; unused choice alternatives contribute no
+load. Cached arc queries round slew/load coordinates upward in sixteenths of
+the calibrated point, without clipping high fanout. These estimates guide
+mapping only; final evaluation still uses exact Liberty STA.
+
+Both modes are opt-in and require `nf-liberty`. Neither changes external input
+transition, output load, arrival/required constraints, or physical optimization
+settings. Registered calibration uses physical Q timing and D-pin capacitance.
+The original fastest-child cover is optimized first and retained unless the
+alternative preserves every final area/timing bound above. A raw-cover area
+screen skips physical optimization of larger alternatives, so there are at
+most two full physical-optimization runs. The audit includes the measured
+operating point, candidate failures, and any screen decision. Calibration or
+alternative failure does not discard a successfully optimized incumbent.
+
+For timing-constrained area recovery, add
+`--nf-cover-max-delay-regression-percent=2`. This permits an alternative that
+strictly reduces area to be at most 2% slower than the fastest-child incumbent
+in each final timing class, including register-to-register delay. Explicit
+clock periods and endpoint deadlines remain hard constraints: the allowance
+does not extend them. The smallest acceptable cover wins. The default is `0`
+(strict Pareto selection), the accepted range is 0 through 100, and a nonzero
+allowance requires an explicit `--nf-cover-search` policy. The audit records the
+allowance and whether selection used the delay budget. For the library API,
+`TechMapOptions::nf_cover_max_delay_regression` is a fraction (`0.02` means 2%).
+
+For `calibrated-timing` and `load-slew`, optionally set
+`--nf-cover-timeout-seconds=60` to bound speculative work after the standard
+cover has finished mapping, buffering, and resizing. The default `0` is
+unlimited and preserves deterministic selection. A nonzero budget is a
+cooperative wall-time limit checked between mapping/optimization operations;
+an in-progress operation can overrun it until the next check. If the alternative times out,
+the complete incumbent is emitted and the policy audit records the failure
+and budget. The incumbent itself is not subject to this budget. Budgeted
+selection may differ with machine speed or contention. The library equivalent
+is `TechMapOptions::nf_cover_timeout: Option<Duration>`.
+
+Identical reconstructed covers skip duplicate physical optimization. Timing
+preparation and exact trial caching do not quantize timing or relax the final
+acceptance constraints.
+
+Final sizing area recovery preserves its established result, then adds a bounded
+round-robin candidate worklist so a rejected high-savings prefix does not hide
+later cells. Each phase uses the configured area-iteration and evaluation
+budgets; accepted-batch revalidation is additional. Electrical effort ranks
+final recovery candidates rather than discarding them; exact timing and actual
+electrical limits still determine acceptance. Earlier delay-optimization rounds
+retain their conservative area-recovery policy.
+
 ```shell
 xlsynth-driver choice-aig-tech-map final_choices.aig \
   --liberty_proto /path/to/timing-enabled.liberty.proto \
@@ -870,17 +954,38 @@ Key flags:
   register restoration and optional buffer insertion; independently preserve
   setup requirements and external timing constraints while tracking clock-pin
   load.
-- `--resize-rounds <N>`: maximum alternating timing-optimization and
-  area-recovery rounds (default: `3`); stop early at a local fixed point.
-- `--resize-iterations <N>`: maximum adaptive, batched critical-path sizing
-  iterations per optimization round; one iteration can accept several
-  independent resizing or pin-swapping moves
-  (default: `16`).
-- `--resize-area-iterations <N>`: maximum accepted timing-protected downsizing
-  moves (default: `32`).
-- `--resize-max-evaluations <N>`: maximum exact drive-strength timing trials
-  per sizing iteration (default: `64`); pin swaps receive an additional
-  bounded, quarter-sized trial budget.
+- `--optimization-effort <bounded|exhaustive>`: default `bounded` uses at most
+  eight buffer timing snapshots, does not split rejected optional batches,
+  and runs individual-cell sizing/pin swaps followed by one downsizing queue.
+  It skips coordinated multi-cell search and repeated buffering/consolidation.
+  `exhaustive` retains those exploratory algorithms and 64 buffer snapshots;
+  search iteration flags still apply.
+- `--resize-rounds <N>`: outer timing/area rounds for exhaustive effort
+  (default: `1`); bounded effort always uses one pass.
+- `--resize-iterations <N>`: maximum timing-improvement rounds (default: `4`).
+- `--resize-area-iterations <N>`: area trial batches (default: `4`). Bounded
+  effort visits one queue with at most N times `--resize-max-evaluations`
+  candidate trials, without restarting it. Zero disables downsizing.
+- `--resize-max-evaluations <N>`: maximum candidate trials per timing round
+  (default: `32`), shared by sizes and pin swaps in bounded effort.
+- `--resize-max-propagated-instances <N>`: deterministic bounded-resizer work
+  limit (default: `2000000`), counting instance, primary-input-driver, and
+  capture recomputations in successful, failed, rolled-back, and commit trials.
+  Initial STA and independent final verification are always performed. Zero
+  leaves sizing unchanged. Exhaustion rolls back the unfinished trial and
+  returns the last completed netlist, with `resize_budget_exhausted` in the
+  `optimization-work:` JSON audit on stderr. It does not imply that timing or
+  electrical constraints were met; unresolved buffering violations are also
+  reported. Exhaustive effort does not use this work limit.
+- `--resize-refinement-batches <N>`: final coordinated sizing batches
+  in bounded effort (default: `2`, maximum: `4`; `0` disables). A complete batch
+  must improve
+  register-to-register delay (or worst delay without a registered path), preserve
+  all boundary timing and electrical constraints, and keep total refinement
+  area growth within 2% of the completed greedy result. It shares the existing
+  propagation allowance; rejected batches are not split.
+- `--resize-refinement-batch-size <N>`: maximum independent substitutions per
+  batch (default: `8`, range: `1..=64`).
 - `--primary-input-arrival <NAME=TIME>`: optional scalar primary-input arrival
   time; may be repeated.
 - `--primary-output-required <NAME=TIME>`: optional scalar primary-output
@@ -937,14 +1042,22 @@ Key flags:
 - `--resize <true|false>`: enable exact-Liberty critical-path sizing,
   Boolean-safe combinational input-pin swapping, and timing-protected area
   recovery (default: `true`).
-- `--resize-rounds <N>`: maximum alternating timing-optimization and
-  area-recovery rounds (default: `3`).
-- `--resize-iterations <N>`: maximum adaptive, batched critical-path sizing
-  iterations per optimization round (default: `16`).
-- `--resize-area-iterations <N>`: maximum area-recovery moves (default: `32`).
-- `--resize-max-evaluations <N>`: maximum exact drive-strength timing trials
-  per iteration (default: `64`); pin swaps receive an additional bounded,
-  quarter-sized trial budget.
+- `--optimization-effort <bounded|exhaustive>`: the same single-pass bounded
+  default and opt-in exploratory algorithms as `choice-aig-tech-map`.
+- `--resize-rounds <N>`: exhaustive outer rounds (default: `1`); bounded effort
+  always uses one pass.
+- `--resize-iterations <N>`: timing-improvement rounds (default: `4`).
+- `--resize-area-iterations <N>`: area trial batches (default: `4`); bounded
+  effort processes one queue of at most N times the per-iteration trial cap.
+- `--resize-max-evaluations <N>`: candidate trials per timing round (default:
+  `32`); bounded effort shares this cap with pin swaps.
+- `--resize-max-propagated-instances <N>`: bounded trial/commit propagation
+  budget (default: `2000000`). Exhaustion returns the last completed netlist;
+  JSON statistics report actual work and budget exhaustion. Initial and final
+  STA are not subject to this budget. Exhaustive effort ignores it.
+- `--resize-refinement-batches <N>` and `--resize-refinement-batch-size <N>`:
+  optional final coordinated sizing, with the same guards and defaults as
+  `choice-aig-tech-map` above.
 - `--json-out <PATH>`: write complete before/after area, delay, buffering, and
   resizing statistics.
 

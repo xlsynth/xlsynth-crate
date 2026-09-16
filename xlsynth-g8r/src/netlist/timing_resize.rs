@@ -13,6 +13,7 @@ use crate::netlist::resize::{
     PinSwapStep, ResizeOptions, ResizeStats, ResizeStep, validate_options,
 };
 use crate::netlist::sequential_liberty::get_gv_eval_sequential_cell_spec;
+use crate::netlist::sta::prepared::PreparedTimingLibrary;
 use crate::netlist::sta::{
     CombinationalOutputLoad, EdgeTiming, ScopedTimingTableEnvelopeCache, SignalTiming, StaOptions,
     TimingEdge, TimingPredecessor, TimingQueryDiagnosticCounts, TracedCombinationalTiming,
@@ -365,6 +366,34 @@ struct CriticalInstance {
     slack: f64,
 }
 
+/// Dense per-edge visitation, independently reset by each endpoint's index.
+struct CriticalWindowVisits {
+    paths: Vec<[usize; 2]>,
+    slacks: Vec<[f64; 2]>,
+}
+
+impl CriticalWindowVisits {
+    fn new(bit_count: usize) -> Self {
+        Self {
+            paths: vec![[usize::MAX; 2]; bit_count],
+            slacks: vec![[0.0; 2]; bit_count],
+        }
+    }
+
+    /// Retains the original slack tolerance without per-path map allocation.
+    fn expand(&mut self, transition: BitEdge, path: usize, slack: f64) -> bool {
+        let edge = usize::from(transition.edge == TimingEdge::Fall);
+        if self.paths[transition.bit][edge] == path
+            && self.slacks[transition.bit][edge] + TIMING_VERIFICATION_EPSILON >= slack
+        {
+            return false;
+        }
+        self.paths[transition.bit][edge] = path;
+        self.slacks[transition.bit][edge] = slack;
+        true
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SizingInput {
     name: String,
@@ -465,7 +494,7 @@ struct SizingTrial {
 }
 
 /// One function-preserving incremental cell-assignment change.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum SizingMoveKind {
     Resize {
         cell_index: usize,
@@ -575,6 +604,7 @@ struct BestSizingState {
 enum AreaRecoveryStrategy {
     PreserveNearCriticalArrivals,
     PreserveEndpointMaxima,
+    ExtendEndpointRecovery,
 }
 
 impl BestSizingState {
@@ -682,7 +712,7 @@ pub(crate) fn recover_final_timing_protected_area(
         library,
         &recovery_options,
         constraints,
-        AreaRecoveryStrategy::PreserveEndpointMaxima,
+        AreaRecoveryStrategy::ExtendEndpointRecovery,
     )
 }
 
@@ -737,6 +767,43 @@ fn resize_timing_aware_netlist_with_area_strategy(
     };
 
     let mut pin_history = PinAssignmentHistory::default();
+    if options.effort == crate::netlist::OptimizationEffort::Bounded {
+        timing.propagation_budget.limit = Some(options.max_propagated_instances);
+        resize_bounded(
+            module,
+            interner,
+            library,
+            &catalog,
+            &registers,
+            options,
+            &mut timing,
+            &mut pin_history,
+            &mut score,
+            &mut area,
+            &mut stats,
+        )?;
+        let final_report = build_netlist_report_with_primary_input_arrivals(
+            module,
+            nets,
+            interner,
+            library,
+            options.sta_options,
+            &constraints.primary_input_arrivals,
+        )?;
+        verify_exact_score(score, &final_report, options.improvement_epsilon)?;
+        if !BoundaryTimingScore::from_report(&final_report).no_worse_than(
+            BoundaryTimingScore::from_report(&original_report),
+            options.improvement_epsilon,
+        ) {
+            bail!("bounded resizing increased an exact boundary delay");
+        }
+        stats.final_delay = score.worst_delay();
+        stats.final_area = final_report.cell_area;
+        stats.final_clock_load = has_registers.then_some(timing.clock_load);
+        stats.propagated_instances = timing.propagation_budget.used;
+        stats.work_budget_exhausted = timing.propagation_budget.exhausted;
+        return Ok(stats);
+    }
     if options.max_iterations > 0 {
         apply_electrical_sizing(
             module,
@@ -757,6 +824,7 @@ fn resize_timing_aware_netlist_with_area_strategy(
         BestSizingState::capture(module, &timing, score, area, &stats, &pin_history);
     let mut achieved = score;
     for _ in 0..options.max_outer_iterations {
+        crate::optimization_budget::check()?;
         stats.outer_iterations += 1;
         let round_start_score = score;
         let round_start_area = area;
@@ -765,13 +833,11 @@ fn resize_timing_aware_netlist_with_area_strategy(
         if options.max_iterations > 0 {
             apply_coordinated_timing_waves(
                 module,
-                nets,
                 interner,
                 library,
                 &catalog,
                 &registers,
                 options,
-                constraints,
                 &mut timing,
                 &mut pin_history,
                 &mut score,
@@ -912,6 +978,385 @@ fn resize_timing_aware_netlist_with_area_strategy(
     stats.final_area = final_report.cell_area;
     stats.final_clock_load = has_registers.then_some(timing.clock_load);
     Ok(stats)
+}
+
+/// Runs a fixed number of greedy single-cell rounds, then one downsizing queue.
+#[allow(clippy::too_many_arguments)]
+fn resize_bounded(
+    module: &mut NetlistModule,
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    catalog: &CellCatalog,
+    registers: &RegisterCellCatalog,
+    options: &ResizeOptions,
+    timing: &mut IncrementalRegisteredSta<'_>,
+    pin_history: &mut PinAssignmentHistory,
+    score: &mut BoundaryTimingScore,
+    area: &mut f64,
+    stats: &mut ResizeStats,
+) -> Result<()> {
+    stats.outer_iterations = 1;
+    for _ in 0..options.max_iterations {
+        if timing.propagation_budget.exhausted {
+            break;
+        }
+        let critical = timing
+            .critical_window_instances(options.max_candidate_paths, INITIAL_CRITICAL_WINDOW)?;
+        let mut queues = VecDeque::from(timing_move_queues(
+            timing,
+            &critical,
+            library,
+            catalog,
+            registers,
+            options,
+            pin_history,
+            false,
+        ));
+        // Give zero-area pin changes the same opportunity as substitutions
+        // under the shared trial cap, rather than hiding them after all sizes.
+        for queue in &mut queues {
+            let mut sizes = VecDeque::new();
+            let mut swaps = VecDeque::new();
+            for kind in queue.moves.drain(..) {
+                match kind {
+                    SizingMoveKind::Resize { .. } => sizes.push_back(kind),
+                    SizingMoveKind::SwapPins { .. } => swaps.push_back(kind),
+                }
+            }
+            while !sizes.is_empty() || !swaps.is_empty() {
+                queue.moves.extend(swaps.pop_front());
+                queue.moves.extend(sizes.pop_front());
+            }
+        }
+        let accepted = run_bounded_move_queue(
+            module,
+            interner,
+            library,
+            catalog,
+            options,
+            timing,
+            pin_history,
+            score,
+            area,
+            stats,
+            queues,
+            options.max_evaluations_per_iteration,
+            false,
+        )?;
+        if accepted == 0 {
+            break;
+        }
+    }
+    if options.max_area_iterations > 0 && !timing.propagation_budget.exhausted {
+        let limit = options
+            .max_area_iterations
+            .saturating_mul(options.max_evaluations_per_iteration);
+        let recoverable = area_recovery_instances(timing, library, catalog, registers, options)
+            .into_iter()
+            .take(limit)
+            .collect();
+        let queues = area_recovery_worklist(
+            recoverable,
+            timing,
+            library,
+            catalog,
+            registers,
+            options,
+            true,
+        );
+        run_bounded_move_queue(
+            module,
+            interner,
+            library,
+            catalog,
+            options,
+            timing,
+            pin_history,
+            score,
+            area,
+            stats,
+            queues,
+            limit,
+            true,
+        )?;
+    }
+    if options.max_iterations > 0 {
+        refine_bounded_solution(
+            module, interner, library, catalog, registers, options, timing, score, area, stats,
+        )?;
+    }
+    Ok(())
+}
+
+/// Improves the completed greedy solution with strict endpoint and area guards.
+#[allow(clippy::too_many_arguments)]
+fn refine_bounded_solution(
+    module: &mut NetlistModule,
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    catalog: &CellCatalog,
+    registers: &RegisterCellCatalog,
+    options: &ResizeOptions,
+    timing: &mut IncrementalRegisteredSta<'_>,
+    score: &mut BoundaryTimingScore,
+    area: &mut f64,
+    stats: &mut ResizeStats,
+) -> Result<()> {
+    // Do not compound the two-percent area allowance across batches.
+    let area_limit = *area * 1.02;
+    for _ in 0..options.max_refinement_batches {
+        crate::optimization_budget::check()?;
+        if timing.propagation_budget.exhausted {
+            break;
+        }
+        let critical = timing
+            .critical_window_instances(options.max_candidate_paths, INITIAL_CRITICAL_WINDOW)?;
+        let mut indices = critical
+            .iter()
+            .map(|c| c.instance_index)
+            .collect::<Vec<_>>();
+        let tied = timing.tied_boundary_instances(options.improvement_epsilon);
+        if timing.are_independent_leaf_boundaries(&tied) {
+            // Cover tied endpoints even when they exceed the traced-path cap.
+            indices.splice(0..0, tied);
+        }
+        let mut seen = BTreeSet::new();
+        indices.retain(|index| seen.insert(*index));
+        let mut proposals = Vec::new();
+        for index in indices.into_iter().take(128) {
+            let current_index = timing.instances[index].cell_index;
+            let current = &library.cells[current_index];
+            let Ok(arrival) = timing.estimate_replacement_arrival(index, current_index) else {
+                continue;
+            };
+            let input_load = average_functional_input_capacitance(library, current)?;
+            let best = ordered_size_alternatives(timing, index, library, catalog, registers)
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.cell_index != current_index
+                        && library.cells[candidate.cell_index].area >= current.area
+                        && *area + library.cells[candidate.cell_index].area - current.area
+                            <= area_limit + options.area_epsilon
+                        && candidate.arrival + options.improvement_epsilon < arrival
+                        && candidate.input_load <= input_load * 2.0 + TIMING_VERIFICATION_EPSILON
+                })
+                .min_by(|a, b| {
+                    a.arrival
+                        .total_cmp(&b.arrival)
+                        .then_with(|| a.input_load.total_cmp(&b.input_load))
+                        .then_with(|| a.cell_index.cmp(&b.cell_index))
+                });
+            if let Some(best) = best {
+                proposals.push(SizingMove {
+                    instance_index: index,
+                    kind: SizingMoveKind::Resize {
+                        cell_index: best.cell_index,
+                    },
+                    score: *score,
+                    ranking: arrival - best.arrival,
+                    area: *area - current.area + library.cells[best.cell_index].area,
+                });
+            }
+        }
+        proposals.sort_by(|a, b| {
+            b.ranking
+                .total_cmp(&a.ranking)
+                .then_with(|| a.instance_index.cmp(&b.instance_index))
+        });
+        let selected = timing.independent_move_batch(proposals, options.max_refinement_batch_size);
+        let mut next_area = *area;
+        let mut replacements = Vec::new();
+        for candidate in selected {
+            let SizingMoveKind::Resize { cell_index } = candidate.kind else {
+                unreachable!()
+            };
+            let cost = candidate.area - *area;
+            if next_area + cost <= area_limit + options.area_epsilon {
+                next_area += cost;
+                replacements.push((candidate.instance_index, cell_index));
+            }
+        }
+        if replacements.is_empty() {
+            break;
+        }
+        let before_electrical = timing.electrical_violations();
+        let before_score = *score;
+        let objective = before_score
+            .register_to_register
+            .unwrap_or(before_score.worst_delay());
+        let old_cells = replacements
+            .iter()
+            .map(|(i, _)| timing.instances[*i].cell_index)
+            .collect::<Vec<_>>();
+        stats.evaluations += 1;
+        stats.refinement_evaluations += 1;
+        let trial = timing.try_resize_batch(&replacements, |candidate| {
+            let after = candidate.score();
+            after.no_worse_than(before_score, options.improvement_epsilon)
+                && after.register_to_register.unwrap_or(after.worst_delay())
+                    + options.improvement_epsilon
+                    < objective
+                && candidate.satisfies_constraints(after)
+                && candidate
+                    .electrical_violations()
+                    .iter()
+                    .zip(&before_electrical)
+                    .all(|(a, b)| {
+                        a.iter()
+                            .zip(b)
+                            .all(|(a, b)| *a <= *b + TIMING_VERIFICATION_EPSILON)
+                    })
+        });
+        let recomputed = match trial {
+            Ok(Some(recomputed)) => recomputed,
+            Ok(None) => break, // Do not recursively subdivide rejected batches.
+            Err(_) if timing.propagation_budget.exhausted => break,
+            Err(error) => {
+                stats.failed_evaluations += 1;
+                log::debug!("rejected bounded coordinated batch: {error:#}");
+                break;
+            }
+        };
+        *score = timing.score();
+        stats.recomputed_instances += recomputed;
+        stats.refinement_batches_accepted += 1;
+        for ((index, cell_index), old_index) in replacements.into_iter().zip(old_cells) {
+            let old = &library.cells[old_index];
+            let new = &library.cells[cell_index];
+            let previous_area = *area;
+            *area += new.area - old.area;
+            module.instances[index].type_name = interner.get_or_intern(&new.name);
+            stats.replacements.push(ResizeStep {
+                instance: interner
+                    .resolve(module.instances[index].instance_name)
+                    .unwrap()
+                    .to_string(),
+                old_cell: old.name.clone(),
+                new_cell: new.name.clone(),
+                delay_before: before_score.worst_delay(),
+                delay_after: score.worst_delay(),
+                area_before: previous_area,
+                area_after: *area,
+            });
+            if new.area > old.area {
+                stats.upsizes += 1;
+                stats.register_upsizes += usize::from(timing.instances[index].sequential);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Evaluates and commits individual moves without ever accepting worse timing.
+#[allow(clippy::too_many_arguments)]
+fn run_bounded_move_queue(
+    module: &mut NetlistModule,
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    catalog: &CellCatalog,
+    options: &ResizeOptions,
+    timing: &mut IncrementalRegisteredSta<'_>,
+    pin_history: &mut PinAssignmentHistory,
+    score: &mut BoundaryTimingScore,
+    area: &mut f64,
+    stats: &mut ResizeStats,
+    mut queues: VecDeque<TimingMoveQueue>,
+    limit: usize,
+    recover_area: bool,
+) -> Result<usize> {
+    let mut evaluations = 0;
+    let mut accepted = 0;
+    while evaluations < limit && !timing.propagation_budget.exhausted {
+        crate::optimization_budget::check()?;
+        let Some(mut queue) = queues.pop_front() else {
+            break;
+        };
+        let index = queue.instance_index;
+        let kind = queue
+            .moves
+            .pop_front()
+            .expect("nonempty bounded move queue");
+        if !queue.moves.is_empty() {
+            queues.push_back(queue);
+        }
+        let current_area = library.cells[timing.instances[index].cell_index].area;
+        let new_area = match kind {
+            SizingMoveKind::Resize { cell_index } => {
+                if cell_index == timing.instances[index].cell_index {
+                    continue;
+                }
+                *area - current_area + library.cells[cell_index].area
+            }
+            SizingMoveKind::SwapPins {
+                first_input,
+                second_input,
+            } => {
+                if pin_history
+                    .visited_assignments
+                    .contains(&PinAssignmentKey::swapped(
+                        timing,
+                        index,
+                        first_input,
+                        second_input,
+                    ))
+                {
+                    continue;
+                }
+                *area
+            }
+        };
+        if recover_area && new_area + options.area_epsilon >= *area {
+            continue;
+        }
+        evaluations += 1;
+        record_optimization_evaluation(stats, kind);
+        let trial = match timing.evaluate_optimization_move(index, kind, catalog, false) {
+            Ok(trial) => trial,
+            Err(error) => {
+                if !timing.propagation_budget.exhausted {
+                    stats.failed_evaluations += 1;
+                    log::debug!("rejecting bounded sizing trial: {error:#}");
+                }
+                continue;
+            }
+        };
+        stats.recomputed_instances += trial.recomputed_instances;
+        if !trial.constraints_satisfied
+            || !trial
+                .score
+                .no_worse_than(*score, options.improvement_epsilon)
+            || (!recover_area
+                && !timing_trial_is_acceptable(&trial, *score, *score, options, false))
+        {
+            continue;
+        }
+        let selected = SizingMove {
+            instance_index: index,
+            kind,
+            score: trial.score,
+            ranking: trial.local_improvement,
+            area: new_area,
+        };
+        // Commits repropagate against the current solution and consume the
+        // same deterministic work allowance as speculative evaluations.
+        match commit_registered_move(
+            module,
+            interner,
+            library,
+            catalog,
+            timing,
+            pin_history,
+            stats,
+            score,
+            area,
+            selected,
+        ) {
+            Ok(()) => accepted += 1,
+            Err(_) if timing.propagation_budget.exhausted => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(accepted)
 }
 
 /// Checks the incremental endpoint score against a complete Liberty STA.
@@ -1559,13 +2004,11 @@ fn retain_timing_candidate(
 #[allow(clippy::too_many_arguments)]
 fn apply_coordinated_timing_waves<'a>(
     module: &mut NetlistModule,
-    nets: &[Net],
     interner: &mut StringInterner<StringBackend<SymbolU32>>,
     library: &'a Library,
     catalog: &CellCatalog,
     registers: &RegisterCellCatalog,
     options: &ResizeOptions,
-    constraints: &BufferTimingConstraints,
     timing: &mut IncrementalRegisteredSta<'a>,
     pin_history: &mut PinAssignmentHistory,
     score: &mut BoundaryTimingScore,
@@ -1725,20 +2168,14 @@ fn apply_coordinated_timing_waves<'a>(
                     continue;
                 };
                 let old_cell_index = timing.instances[candidate.instance_index].cell_index;
-                module.instances[candidate.instance_index].type_name =
-                    interner.get_or_intern(library.cells[cell_index].name.as_str());
                 changes.push((candidate.instance_index, old_cell_index, cell_index));
             }
             stats.evaluations += 1;
-            let trial = IncrementalRegisteredSta::new(
-                module,
-                nets,
-                interner,
-                library,
-                options.sta_options,
-                constraints,
-            );
-            let accepted_trial = trial.ok().filter(|candidate| {
+            let replacements = changes
+                .iter()
+                .map(|&(index, _, cell)| (index, cell))
+                .collect::<Vec<_>>();
+            let trial = timing.try_resize_batch(&replacements, |candidate| {
                 let candidate_score = candidate.score();
                 candidate.satisfies_constraints(candidate_score)
                     && candidate_score.no_worse_than(
@@ -1748,22 +2185,19 @@ fn apply_coordinated_timing_waves<'a>(
                         ),
                     )
             });
-            let Some(candidate_timing) = accepted_trial else {
+            let Some(recomputed) = trial.ok().flatten() else {
                 stats.failed_evaluations += 1;
-                for (instance_index, old_cell_index, _) in &changes {
-                    module.instances[*instance_index].type_name =
-                        interner.get_or_intern(library.cells[*old_cell_index].name.as_str());
-                }
                 selected.truncate(selected.len() / 2);
                 continue;
             };
-            let candidate_score = candidate_timing.score();
-            stats.recomputed_instances += candidate_timing.instances.len();
-            *timing = candidate_timing;
+            let candidate_score = timing.score();
+            stats.recomputed_instances += recomputed;
             *score = candidate_score;
             for (instance_index, old_cell_index, new_cell_index) in changes {
                 let old_cell = &library.cells[old_cell_index];
                 let new_cell = &library.cells[new_cell_index];
+                module.instances[instance_index].type_name =
+                    interner.get_or_intern(new_cell.name.as_str());
                 *area += new_cell.area - old_cell.area;
                 let instance = interner
                     .resolve(module.instances[instance_index].instance_name)
@@ -1847,6 +2281,7 @@ fn optimize_timing_moves(
         .map(|(index, instance)| (index, instance.cell_index))
         .collect::<BTreeSet<_>>();
     while sizing_rounds < max_rounds {
+        crate::optimization_budget::check()?;
         let critical =
             timing.critical_window_instances(options.max_candidate_paths, critical_window)?;
         let queues = timing_move_queues(
@@ -2106,63 +2541,86 @@ fn recover_timing_protected_area(
     area_strategy: AreaRecoveryStrategy,
 ) -> Result<usize> {
     let mut total_committed = 0usize;
+    let final_area = area_strategy == AreaRecoveryStrategy::ExtendEndpointRecovery;
+    let achieved = if final_area {
+        // Preserve the established recovery result before broadening coverage.
+        // Otherwise a different bounded visitation order could miss a downsize
+        // that the old search found, regressing either area or final timing.
+        total_committed += recover_timing_protected_area(
+            module,
+            interner,
+            library,
+            catalog,
+            registers,
+            options,
+            timing,
+            pin_history,
+            score,
+            area,
+            stats,
+            achieved,
+            AreaRecoveryStrategy::PreserveEndpointMaxima,
+        )?;
+        *score
+    } else {
+        achieved
+    };
     let achieved_secondary = timing.secondary_delay();
+    // A final-recovery epoch visits all retained moves before rebuilding from
+    // the changed netlist. The normal per-round/iteration budgets still bound
+    // work, including on designs whose candidate list exceeds that budget.
+    let mut pending = VecDeque::<TimingMoveQueue>::new();
+    let mut epoch_changed = true;
     for _ in 0..options.max_area_iterations {
-        let recoverable = area_recovery_instances(timing, library, catalog, registers, options);
-        let batch_limit = recoverable.len().div_ceil(SIZING_BATCH_DIVISOR).max(1);
-        let mut queues = recoverable
-            .into_iter()
-            .take(options.max_evaluations_per_iteration)
-            .filter_map(|instance_index| {
-                let current = &library.cells[timing.instances[instance_index].cell_index];
-                let current_area = current.area;
-                let current_input = average_functional_input_capacitance(library, current).ok()?;
-                let required_input = timing.instances[instance_index]
-                    .outputs
-                    .iter()
-                    .map(|output| max_load(timing.loads[output.bit]))
-                    .fold(0.0_f64, f64::max)
-                    / MAX_ELECTRICAL_EFFORT;
-                let moves =
-                    ordered_size_alternatives(timing, instance_index, library, catalog, registers)
-                        .into_iter()
-                        .filter(|candidate| {
-                            library.cells[candidate.cell_index].area + options.area_epsilon
-                                < current_area
-                                && candidate.input_load + TIMING_VERIFICATION_EPSILON
-                                    >= current_input.min(required_input)
-                        })
-                        .take(options.max_cell_candidates_per_instance)
-                        .map(|candidate| SizingMoveKind::Resize {
-                            cell_index: candidate.cell_index,
-                        })
-                        .collect::<VecDeque<_>>();
-                (!moves.is_empty()).then_some(TimingMoveQueue {
-                    instance_index,
-                    moves,
-                })
-            })
-            .collect::<Vec<_>>();
+        crate::optimization_budget::check()?;
+        let batch_limit;
+        if !final_area || pending.is_empty() {
+            if final_area && !epoch_changed {
+                break;
+            }
+            let recoverable = area_recovery_instances(timing, library, catalog, registers, options);
+            batch_limit = recoverable.len().div_ceil(SIZING_BATCH_DIVISOR).max(1);
+            pending = area_recovery_worklist(
+                recoverable,
+                timing,
+                library,
+                catalog,
+                registers,
+                options,
+                final_area,
+            );
+            epoch_changed = false;
+        } else {
+            batch_limit = pending.len().div_ceil(SIZING_BATCH_DIVISOR).max(1);
+        }
         let mut best_moves = BTreeMap::<usize, SizingMove>::new();
         let mut evaluations = 0usize;
         while evaluations < options.max_evaluations_per_iteration {
-            let mut attempted = false;
-            for queue in &mut queues {
-                if evaluations == options.max_evaluations_per_iteration {
-                    break;
-                }
-                let Some(kind) = queue.moves.pop_front() else {
-                    continue;
-                };
-                attempted = true;
-                evaluations += 1;
-                record_optimization_evaluation(stats, kind);
-                let trial = match timing.evaluate_optimization_move(
-                    queue.instance_index,
-                    kind,
-                    catalog,
-                    false,
-                ) {
+            let Some(mut queue) = pending.pop_front() else {
+                break;
+            };
+            let instance_index = queue.instance_index;
+            let kind = queue
+                .moves
+                .pop_front()
+                .expect("area queue has a pending move");
+            if !queue.moves.is_empty() {
+                pending.push_back(queue);
+            }
+            let SizingMoveKind::Resize { cell_index } = kind else {
+                unreachable!("area recovery queues contain only cell substitutions");
+            };
+            // A previous batch may already have selected this size or a smaller
+            // one. Revalidate live area before spending a timing evaluation.
+            if library.cells[cell_index].area + options.area_epsilon
+                >= library.cells[timing.instances[instance_index].cell_index].area
+            {
+                continue;
+            }
+            evaluations += 1;
+            record_optimization_evaluation(stats, kind);
+            let trial =
+                match timing.evaluate_optimization_move(instance_index, kind, catalog, false) {
                     Ok(trial) => trial,
                     Err(error) => {
                         stats.failed_evaluations += 1;
@@ -2170,44 +2628,39 @@ fn recover_timing_protected_area(
                         continue;
                     }
                 };
-                stats.recomputed_instances += trial.recomputed_instances;
-                if !trial
-                    .score
-                    .no_worse_than(achieved, options.improvement_epsilon)
-                    || (area_strategy == AreaRecoveryStrategy::PreserveNearCriticalArrivals
-                        && trial.secondary_delay > achieved_secondary + options.improvement_epsilon)
-                    || !trial.constraints_satisfied
-                {
-                    continue;
-                }
-                let SizingMoveKind::Resize { cell_index } = kind else {
-                    // Area recovery only enumerates smaller cell substitutions.
-                    continue;
-                };
-                let current = &library.cells[timing.instances[queue.instance_index].cell_index];
-                let candidate = &library.cells[cell_index];
-                let proposed = SizingMove {
-                    instance_index: queue.instance_index,
-                    kind,
-                    score: trial.score,
-                    ranking: current.area - candidate.area,
-                    area: *area - current.area + candidate.area,
-                };
-                let preferred = best_moves
-                    .get(&queue.instance_index)
-                    .is_none_or(|existing| {
-                        compare_area_moves(&proposed, existing, library) == std::cmp::Ordering::Less
-                    });
-                if preferred {
-                    best_moves.insert(queue.instance_index, proposed);
-                }
+            stats.recomputed_instances += trial.recomputed_instances;
+            if !trial
+                .score
+                .no_worse_than(achieved, options.improvement_epsilon)
+                || (area_strategy == AreaRecoveryStrategy::PreserveNearCriticalArrivals
+                    && trial.secondary_delay > achieved_secondary + options.improvement_epsilon)
+                || !trial.constraints_satisfied
+            {
+                continue;
             }
-            if !attempted {
-                break;
+            let current = &library.cells[timing.instances[instance_index].cell_index];
+            let candidate = &library.cells[cell_index];
+            let proposed = SizingMove {
+                instance_index,
+                kind,
+                score: trial.score,
+                ranking: current.area - candidate.area,
+                area: *area - current.area + candidate.area,
+            };
+            let preferred = best_moves.get(&instance_index).is_none_or(|existing| {
+                compare_area_moves(&proposed, existing, library) == std::cmp::Ordering::Less
+            });
+            if preferred {
+                best_moves.insert(instance_index, proposed);
             }
         }
         let mut candidates = best_moves.into_values().collect::<Vec<_>>();
         if candidates.is_empty() {
+            if final_area {
+                // Finish the worklist before revisiting rejected high-priority
+                // cells. Only an accepted change can justify another epoch.
+                continue;
+            }
             break;
         }
         candidates.sort_by(|lhs, rhs| compare_area_moves(lhs, rhs, library));
@@ -2260,14 +2713,76 @@ fn recover_timing_protected_area(
             committed += 1;
             total_committed += 1;
         }
-        if committed == 0 {
+        epoch_changed |= committed > 0;
+        if committed == 0 && !final_area {
             break;
         }
     }
     Ok(total_committed)
 }
 
-/// Prioritizes high-savings, noncritical cells during timing-safe downsizing.
+/// Builds deterministic per-cell queues, prioritizing effort-safe alternatives.
+fn area_recovery_worklist(
+    recoverable: Vec<usize>,
+    timing: &mut IncrementalRegisteredSta<'_>,
+    library: &Library,
+    catalog: &CellCatalog,
+    registers: &RegisterCellCatalog,
+    options: &ResizeOptions,
+    final_area: bool,
+) -> VecDeque<TimingMoveQueue> {
+    let limit = if final_area {
+        usize::MAX
+    } else {
+        options.max_evaluations_per_iteration
+    };
+    recoverable
+        .into_iter()
+        .take(limit)
+        .filter_map(|instance_index| {
+            let current = &library.cells[timing.instances[instance_index].cell_index];
+            let current_input = average_functional_input_capacitance(library, current).ok()?;
+            let required_input = timing.instances[instance_index]
+                .outputs
+                .iter()
+                .map(|output| max_load(timing.loads[output.bit]))
+                .fold(0.0_f64, f64::max)
+                / MAX_ELECTRICAL_EFFORT;
+            let respects_effort = |candidate: &EstimatedCellAlternative| {
+                candidate.input_load + TIMING_VERIFICATION_EPSILON
+                    >= current_input.min(required_input)
+            };
+            let mut alternatives =
+                ordered_size_alternatives(timing, instance_index, library, catalog, registers)
+                    .into_iter()
+                    .filter(|candidate| {
+                        library.cells[candidate.cell_index].area + options.area_epsilon
+                            < current.area
+                    })
+                    .filter(|candidate| final_area || respects_effort(candidate))
+                    .collect::<Vec<_>>();
+            if final_area {
+                // Effort is a search heuristic, not a substitute for the real
+                // slew, load, fanout, and registered timing
+                // checks made for every trial.
+                alternatives.sort_by_key(|candidate| !respects_effort(candidate));
+            }
+            let moves = alternatives
+                .into_iter()
+                .take(options.max_cell_candidates_per_instance)
+                .map(|candidate| SizingMoveKind::Resize {
+                    cell_index: candidate.cell_index,
+                })
+                .collect::<VecDeque<_>>();
+            (!moves.is_empty()).then_some(TimingMoveQueue {
+                instance_index,
+                moves,
+            })
+        })
+        .collect()
+}
+
+/// Prioritizes potential physical area savings before exact timing validation.
 fn area_recovery_instances(
     timing: &IncrementalRegisteredSta<'_>,
     library: &Library,
@@ -2615,13 +3130,53 @@ fn average_functional_input_capacitance(library: &Library, cell: &Cell) -> Resul
     })
 }
 
+/// Mutable state restored when a coordinated resizing batch is rejected.
+struct SizingBatchUndo {
+    instances: Vec<(usize, SizingInstance)>,
+    loads: Vec<CombinationalOutputLoad>,
+    fanout_loads: Vec<f64>,
+    bit_timing: Vec<BoundarySignalTiming>,
+    bit_predecessors: Vec<BoundaryPredecessors>,
+    captures: Vec<RegisterCaptureScore>,
+    capture_predecessors: Vec<CapturePredecessors>,
+    data_transition_limits: Vec<Option<f64>>,
+    clock_load: f64,
+}
+
 /// Incremental per-bit STA for both sides of synchronous register boundaries.
+/// Counts actual propagation, including work subsequently rolled back.
+#[derive(Default)]
+struct PropagationBudget {
+    limit: Option<usize>,
+    used: usize,
+    exhausted: bool,
+}
+
+impl PropagationBudget {
+    /// Charges before a mutation so exhaustion follows the normal rollback
+    /// path.
+    fn charge(&mut self) -> Result<()> {
+        if self.limit.is_some_and(|limit| self.used >= limit) {
+            self.exhausted = true;
+            bail!("bounded resizing propagation budget exhausted");
+        }
+        self.used = self.used.saturating_add(1);
+        Ok(())
+    }
+}
+
 struct IncrementalRegisteredSta<'a> {
+    propagation_budget: PropagationBudget,
     library: &'a Library,
+    prepared_timing: PreparedTimingLibrary<'a>,
+    /// Exact trials are reusable only until the next committed assignment.
+    trial_cache: HashMap<(usize, SizingMoveKind), SizingTrial>,
     representative_driver: Option<RepresentativeDriver<'a>>,
     primary_input_options: StaOptions,
     primary_input_arrivals_by_bit: Vec<Option<f64>>,
     instances: Vec<SizingInstance>,
+    /// Original connection order preserves exact full-STA load summation.
+    input_load_order: Vec<Vec<usize>>,
     drivers: Vec<Option<usize>>,
     loads: Vec<CombinationalOutputLoad>,
     fanout_loads: Vec<f64>,
@@ -2669,6 +3224,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
         let mut loads = vec![CombinationalOutputLoad::default(); normalized.bit_count()];
         let mut fanout_loads = vec![0.0; normalized.bit_count()];
         let mut instances = Vec::with_capacity(normalized.instances.len());
+        let mut input_load_order = Vec::with_capacity(normalized.instances.len());
         let mut registers = Vec::new();
         let mut clock_load = 0.0;
 
@@ -2748,7 +3304,22 @@ impl<'a> IncrementalRegisteredSta<'a> {
                     }
                 }
             }
+            let original_names = inputs
+                .iter()
+                .map(|input| input.name.clone())
+                .collect::<Vec<_>>();
             inputs.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+            input_load_order.push(
+                original_names
+                    .iter()
+                    .map(|name| {
+                        inputs
+                            .iter()
+                            .position(|input| &input.name == name)
+                            .expect("sorted input must remain present")
+                    })
+                    .collect(),
+            );
             outputs.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
             instances.push(SizingInstance {
                 cell_index,
@@ -2964,10 +3535,14 @@ impl<'a> IncrementalRegisteredSta<'a> {
         let has_registers = !registers.is_empty();
         let mut state = Self {
             library,
+            propagation_budget: PropagationBudget::default(),
+            prepared_timing: PreparedTimingLibrary::new(library),
+            trial_cache: HashMap::new(),
             representative_driver,
             primary_input_options: options,
             primary_input_arrivals_by_bit,
             instances,
+            input_load_order,
             drivers,
             loads,
             fanout_loads,
@@ -3013,6 +3588,215 @@ impl<'a> IncrementalRegisteredSta<'a> {
     /// Returns whether this timing graph contains physical register endpoints.
     fn has_registers(&self) -> bool {
         self.has_registers
+    }
+
+    /// Evaluates a coordinated assignment on the existing graph, atomically.
+    fn try_resize_batch(
+        &mut self,
+        replacements: &[(usize, usize)],
+        accept: impl FnOnce(&Self) -> bool,
+    ) -> Result<Option<usize>> {
+        crate::optimization_budget::check()?;
+        let mut seen = BTreeSet::new();
+        let mut prepared = Vec::with_capacity(replacements.len());
+        for &(index, cell_index) in replacements {
+            if !seen.insert(index) {
+                bail!("coordinated sizing repeats an instance");
+            }
+            let mut instance = self
+                .instances
+                .get(index)
+                .cloned()
+                .ok_or_else(|| anyhow!("coordinated sizing instance is out of bounds"))?;
+            let cell = self
+                .library
+                .cells
+                .get(cell_index)
+                .ok_or_else(|| anyhow!("coordinated sizing cell is out of bounds"))?;
+            if instance.sequential != is_sequential_boundary_cell(cell) {
+                bail!("coordinated sizing changes the sequential cell interface");
+            }
+            for input in &instance.inputs {
+                let pin = cell
+                    .pins
+                    .iter()
+                    .find(|pin| self.library.resolve_string(&pin.name) == input.name)
+                    .ok_or_else(|| anyhow!("coordinated sizing loses input '{}'", input.name))?;
+                if pin.direction != PinDirection::Input as i32 || pin.is_clocking_pin != input.clock
+                {
+                    bail!("coordinated sizing changes an input's direction or clock role");
+                }
+            }
+            for output in &mut instance.outputs {
+                output.pin_index = cell
+                    .pins
+                    .iter()
+                    .position(|pin| {
+                        pin.direction == PinDirection::Output as i32
+                            && self.library.resolve_string(&pin.name) == output.name
+                    })
+                    .ok_or_else(|| anyhow!("coordinated sizing loses output '{}'", output.name))?;
+            }
+            instance.cell_index = cell_index;
+            prepared.push((index, instance));
+        }
+        let mut undo = SizingBatchUndo {
+            instances: Vec::with_capacity(prepared.len()),
+            loads: self.loads.clone(),
+            fanout_loads: self.fanout_loads.clone(),
+            bit_timing: self.bit_timing.clone(),
+            bit_predecessors: self.bit_predecessors.clone(),
+            captures: self.captures.clone(),
+            capture_predecessors: self.capture_predecessors.clone(),
+            data_transition_limits: self.data_transition_limits.clone(),
+            clock_load: self.clock_load,
+        };
+        for (index, instance) in prepared {
+            undo.instances.push((
+                index,
+                std::mem::replace(&mut self.instances[index], instance),
+            ));
+        }
+        let result = (|| {
+            // Re-sum in the same order as a fresh graph, including clock and
+            // output loads. This also removes roundoff from previous trials.
+            self.loads.fill(CombinationalOutputLoad::default());
+            self.fanout_loads.fill(0.0);
+            self.clock_load = 0.0;
+            for (index, instance) in self.instances.iter().enumerate() {
+                let cell = &self.library.cells[instance.cell_index];
+                for &input_index in &self.input_load_order[index] {
+                    let input = &instance.inputs[input_index];
+                    let Some(bit) = input.bit else {
+                        continue;
+                    };
+                    let pin = cell
+                        .pins
+                        .iter()
+                        .find(|pin| self.library.resolve_string(&pin.name) == input.name)
+                        .ok_or_else(|| anyhow!("coordinated sizing lost input '{}'", input.name))?;
+                    let capacitance = effective_input_capacitance_for_mapping(pin, &cell.name)?;
+                    self.loads[bit].rise += capacitance.rise;
+                    self.loads[bit].fall += capacitance.fall;
+                    self.fanout_loads[bit] += pin.fanout_load.unwrap_or(0.0);
+                    if input.clock {
+                        self.clock_load += max_load(capacitance);
+                    }
+                }
+            }
+            let output_load =
+                resolved_module_output_load(self.library, self.primary_input_options)?;
+            for output in &self.outputs {
+                self.loads[output.bit].rise += output_load.rise;
+                self.loads[output.bit].fall += output_load.fall;
+            }
+            let mut dirty = BTreeSet::new();
+            let mut captures = BTreeSet::new();
+            for &(index, _) in replacements {
+                dirty.insert((self.topological_positions[index], index));
+                if self.instances[index].sequential {
+                    captures.insert(index);
+                }
+            }
+            let mut recomputed = 0;
+            for bit in 0..self.loads.len() {
+                if self.loads[bit] == undo.loads[bit] {
+                    continue;
+                }
+                if let Some(driver) = self.drivers[bit] {
+                    dirty.insert((self.topological_positions[driver], driver));
+                } else if self.representative_driver.is_some()
+                    && self.primary_input_arrivals_by_bit[bit].is_some()
+                    && !self.clock_bits[bit]
+                {
+                    let previous = self.bit_timing[bit];
+                    self.propagation_budget.charge()?;
+                    self.recompute_primary_input(bit)?;
+                    recomputed += 1;
+                    if previous != self.bit_timing[bit] {
+                        for &consumer in &self.data_consumers[bit] {
+                            if self.instances[consumer].sequential {
+                                captures.insert(consumer);
+                            } else {
+                                dirty.insert((self.topological_positions[consumer], consumer));
+                            }
+                        }
+                    }
+                }
+            }
+            while let Some((_, index)) = dirty.pop_first() {
+                let old_outputs = self.instances[index]
+                    .outputs
+                    .iter()
+                    .map(|output| (output.bit, self.bit_timing[output.bit]))
+                    .collect::<smallvec::SmallVec<[_; 2]>>();
+                self.propagation_budget.charge()?;
+                self.recompute_instance(index)?;
+                recomputed += 1;
+                for (bit, previous) in old_outputs {
+                    if self.bit_timing[bit] != previous {
+                        for &successor in &self.successors[index] {
+                            dirty.insert((self.topological_positions[successor], successor));
+                        }
+                        captures.extend(self.capture_consumers[bit].iter().copied());
+                    }
+                }
+            }
+            for capture in captures {
+                self.propagation_budget.charge()?;
+                self.recompute_capture(capture)?;
+                recomputed += 1;
+            }
+            if self.has_transition_limits {
+                for bit in 0..self.loads.len() {
+                    self.data_transition_limits[bit] = self.data_transition_limit(bit);
+                }
+            }
+            Ok(accept(self).then_some(recomputed))
+        })();
+        if matches!(result, Ok(Some(_))) {
+            self.trial_cache.clear();
+        } else {
+            // A failed table query or rejected whole batch restores exactly the
+            // incumbent. Immutable prepared tables may safely remain cached.
+            for (index, instance) in undo.instances {
+                self.instances[index] = instance;
+            }
+            self.loads = undo.loads;
+            self.fanout_loads = undo.fanout_loads;
+            self.bit_timing = undo.bit_timing;
+            self.bit_predecessors = undo.bit_predecessors;
+            self.captures = undo.captures;
+            self.capture_predecessors = undo.capture_predecessors;
+            self.data_transition_limits = undo.data_transition_limits;
+            self.clock_load = undo.clock_load;
+        }
+        result
+    }
+
+    /// Captures per-net capacitance, fanout, and slew violations for a batch.
+    fn electrical_violations(&self) -> Vec<[f64; 3]> {
+        (0..self.loads.len())
+            .map(|bit| {
+                let pin = self.drivers[bit].and_then(|index| {
+                    let instance = &self.instances[index];
+                    instance
+                        .outputs
+                        .iter()
+                        .find(|output| output.bit == bit)
+                        .map(|output| {
+                            &self.library.cells[instance.cell_index].pins[output.pin_index]
+                        })
+                });
+                [
+                    pin.and_then(|pin| pin.max_capacitance)
+                        .map_or(0.0, |limit| (max_load(self.loads[bit]) - limit).max(0.0)),
+                    pin.and_then(|pin| pin.max_fanout)
+                        .map_or(0.0, |limit| (self.fanout_loads[bit] - limit).max(0.0)),
+                    self.data_transition_violation(bit, self.bit_timing[bit]),
+                ]
+            })
+            .collect()
     }
 
     /// Returns the strictest actual driver or nonclock sink slew constraint.
@@ -3388,21 +4172,19 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 .then_with(|| lhs.transition.cmp(&rhs.transition))
         });
 
-        let mut ranks = BTreeMap::<usize, CriticalInstance>::new();
-        let mut arc_cache = HashMap::<(BitIndex, bool), Vec<WindowArc>>::new();
+        let mut ranks = vec![None; self.instances.len()];
+        let mut arc_cache = vec![[None, None]; self.bit_timing.len()];
+        let mut visited = CriticalWindowVisits::new(self.bit_timing.len());
+        let mut queue = VecDeque::new();
         for (path_index, endpoint) in endpoints.into_iter().take(max_paths).enumerate() {
             if let Some(capture) = endpoint.capture {
                 record_critical_instance(&mut ranks, capture, path_index, endpoint.available_slack);
             }
-            let mut queue = VecDeque::from([(endpoint.transition, endpoint.available_slack)]);
-            let mut visited = BTreeMap::<BitEdge, f64>::new();
+            queue.push_back((endpoint.transition, endpoint.available_slack));
             while let Some((transition, available_slack)) = queue.pop_front() {
-                if visited.get(&transition).is_some_and(|previous| {
-                    *previous + TIMING_VERIFICATION_EPSILON >= available_slack
-                }) {
+                if !visited.expand(transition, path_index, available_slack) {
                     continue;
                 }
-                visited.insert(transition, available_slack);
                 let Some(driver) = self.drivers[transition.bit] else {
                     continue;
                 };
@@ -3416,16 +4198,15 @@ impl<'a> IncrementalRegisteredSta<'a> {
                     continue;
                 };
                 let output_arrival = timing_edge_arrival(signal, transition.edge);
-                let key = (transition.bit, endpoint.register_launch);
-                let arcs = if let Some(cached) = arc_cache.get(&key) {
-                    cached.clone()
-                } else {
-                    let computed =
-                        self.input_window_arcs(driver, transition.bit, endpoint.register_launch)?;
-                    arc_cache.insert(key, computed.clone());
-                    computed
-                };
-                for arc in arcs {
+                let slot = &mut arc_cache[transition.bit][usize::from(endpoint.register_launch)];
+                if slot.is_none() {
+                    *slot = Some(self.input_window_arcs(
+                        driver,
+                        transition.bit,
+                        endpoint.register_launch,
+                    )?);
+                }
+                for arc in slot.as_ref().unwrap() {
                     let Some((input_arrival, input_transition)) = arc.for_edge(transition.edge)
                     else {
                         continue;
@@ -3445,7 +4226,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
             }
         }
 
-        let mut result = ranks.into_values().collect::<Vec<_>>();
+        let mut result = ranks.into_iter().flatten().collect::<Vec<_>>();
         result.sort_by(|lhs, rhs| {
             rhs.path_count
                 .cmp(&lhs.path_count)
@@ -3573,7 +4354,14 @@ impl<'a> IncrementalRegisteredSta<'a> {
         catalog: &CellCatalog,
         commit: bool,
     ) -> Result<SizingTrial> {
-        match kind {
+        crate::optimization_budget::check()?;
+        let key = (instance_index, kind);
+        if !commit && let Some(cached) = self.trial_cache.get(&key) {
+            let mut trial = cached.clone();
+            trial.recomputed_instances = 0;
+            return Ok(trial);
+        }
+        let result = match kind {
             SizingMoveKind::Resize { cell_index } => {
                 self.evaluate_cell_substitution(instance_index, cell_index, commit)
             }
@@ -3581,7 +4369,14 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 first_input,
                 second_input,
             } => self.evaluate_pin_swap(instance_index, first_input, second_input, catalog, commit),
+        };
+        if !commit
+            && self.trial_cache.len() < 4096
+            && let Ok(trial) = &result
+        {
+            self.trial_cache.insert(key, trial.clone());
         }
+        result
     }
 
     /// Evaluates a reversible same-pin cell substitution.
@@ -3677,6 +4472,12 @@ impl<'a> IncrementalRegisteredSta<'a> {
         mut replacement: SizingInstance,
         commit: bool,
     ) -> Result<SizingTrial> {
+        crate::optimization_budget::check()?;
+        if commit {
+            // Even commits outside evaluate_optimization_move invalidate all
+            // cached endpoint scores, including moves in disconnected cones.
+            self.trial_cache.clear();
+        }
         let original = self
             .instances
             .get(instance_index)
@@ -3940,6 +4741,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 saved_timings
                     .entry(*bit)
                     .or_insert((previous, self.bit_predecessors[*bit]));
+                self.propagation_budget.charge()?;
                 self.recompute_primary_input(*bit)?;
                 recomputed += 1;
                 if self.bit_timing[*bit] != previous {
@@ -3963,12 +4765,13 @@ impl<'a> IncrementalRegisteredSta<'a> {
                             self.bit_predecessors[output.bit],
                         )
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<smallvec::SmallVec<[_; 2]>>();
                 for (bit, timing, predecessors) in &old_outputs {
                     saved_timings
                         .entry(*bit)
                         .or_insert((*timing, *predecessors));
                 }
+                self.propagation_budget.charge()?;
                 self.recompute_instance(index)?;
                 recomputed += 1;
                 for (bit, previous, _) in old_outputs {
@@ -3986,6 +4789,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 saved_captures
                     .entry(capture)
                     .or_insert((self.captures[capture], self.capture_predecessors[capture]));
+                self.propagation_budget.charge()?;
                 self.recompute_capture(capture)?;
                 recomputed += 1;
             }
@@ -4135,10 +4939,13 @@ impl<'a> IncrementalRegisteredSta<'a> {
                 self.bit_predecessors[output.bit] = BoundaryPredecessors::default();
                 continue;
             }
-            let mut primary = Vec::new();
-            let mut primary_bits = Vec::new();
-            let mut register = Vec::new();
-            let mut register_bits = Vec::new();
+            let prepared = self
+                .prepared_timing
+                .output(instance.cell_index, output.pin_index)?;
+            let mut primary = smallvec::SmallVec::<[(&str, SignalTiming); 6]>::new();
+            let mut primary_bits = smallvec::SmallVec::<[Option<BitIndex>; 6]>::new();
+            let mut register = smallvec::SmallVec::<[(&str, SignalTiming); 6]>::new();
+            let mut register_bits = smallvec::SmallVec::<[Option<BitIndex>; 6]>::new();
             for input in instance.inputs.iter().filter(|input| !input.clock) {
                 if let Some(bit) = input.bit {
                     let timing = self.bit_timing[bit];
@@ -4159,10 +4966,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
             let primary = if primary.is_empty() {
                 None
             } else {
-                Some(evaluate_combinational_cell_output_timing_with_predecessors(
-                    self.library,
-                    cell.name.as_str(),
-                    pin,
+                Some(prepared.evaluate(
                     primary.as_slice(),
                     self.loads[output.bit],
                     &instance.known_pin_values,
@@ -4172,10 +4976,7 @@ impl<'a> IncrementalRegisteredSta<'a> {
             let register = if register.is_empty() {
                 None
             } else {
-                Some(evaluate_combinational_cell_output_timing_with_predecessors(
-                    self.library,
-                    cell.name.as_str(),
-                    pin,
+                Some(prepared.evaluate(
                     register.as_slice(),
                     self.loads[output.bit],
                     &instance.known_pin_values,
@@ -4252,23 +5053,22 @@ impl<'a> IncrementalRegisteredSta<'a> {
 
 /// Updates deterministic endpoint/path/slack priorities for a critical cell.
 fn record_critical_instance(
-    ranks: &mut BTreeMap<usize, CriticalInstance>,
+    ranks: &mut [Option<CriticalInstance>],
     instance_index: usize,
     path_index: usize,
     slack: f64,
 ) {
-    ranks
-        .entry(instance_index)
-        .and_modify(|current| {
-            current.path_count += 1;
-            current.slack = current.slack.min(slack);
-        })
-        .or_insert(CriticalInstance {
+    if let Some(current) = &mut ranks[instance_index] {
+        current.path_count += 1;
+        current.slack = current.slack.min(slack);
+    } else {
+        ranks[instance_index] = Some(CriticalInstance {
             instance_index,
             path_count: 1,
             first_path: path_index,
             slack,
         });
+    }
 }
 
 /// Converts exact Liberty predecessor indices to stable normalized net bits.
@@ -4366,9 +5166,9 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundaryTimingScore, IncrementalRegisteredSta, RegisterCellCatalog, SizingMove,
-        SizingMoveKind, SizingTrial, compare_area_moves, compare_delay_moves,
-        prioritized_timing_instances, recover_final_timing_protected_area,
+        BitEdge, BoundaryTimingScore, CriticalWindowVisits, IncrementalRegisteredSta,
+        RegisterCellCatalog, SizingMove, SizingMoveKind, SizingTrial, compare_area_moves,
+        compare_delay_moves, prioritized_timing_instances, recover_final_timing_protected_area,
         resize_timing_aware_netlist, timing_trial_is_acceptable,
     };
     use crate::liberty_model::{Cell, Library, LibraryBuilder, LuTableTemplate, PinDirection};
@@ -4380,12 +5180,506 @@ mod tests {
         build_netlist_report, build_netlist_report_with_primary_input_arrivals,
     };
     use crate::netlist::resize::ResizeOptions;
-    use crate::netlist::sta::{StaOptions, analyze_register_boundary_max_arrival};
+    use crate::netlist::sta::{StaOptions, TimingEdge, analyze_register_boundary_max_arrival};
     use crate::netlist::timing_buffer::BufferTimingConstraints;
     use crate::netlist::timing_buffer::tests::{
         high_fanout_register_source, registered_timing_library,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn bounded_refinement_requires_endpoint_progress_and_caps_area() {
+        for (extra_area, batch_size, expected_batches) in [(0.01, 2, 1), (0.01, 1, 0), (0.10, 2, 0)]
+        {
+            let mut builder = LibraryBuilder::new();
+            for (name, area, delay) in [("BUF", 1.0, 2.0), ("BUF_FAST", 1.0 + extra_area, 1.0)] {
+                let cell = timed_cell(&mut builder, name, &["A"], "A", area, delay, 0.1, 10.0);
+                builder.cells.push(cell);
+            }
+            let library = builder.finish();
+            let (mut module, nets, mut interner) = parse_module(
+                r#"
+module top(a, y, z);
+input a; output y, z;
+BUF first (.A(a), .Y(y));
+BUF second (.A(a), .Y(z));
+endmodule
+"#,
+            );
+            let options = ResizeOptions {
+                max_refinement_batches: 2,
+                max_refinement_batch_size: batch_size,
+                ..Default::default()
+            };
+            let mut timing = IncrementalRegisteredSta::new(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                options.sta_options,
+                &BufferTimingConstraints::default(),
+            )
+            .unwrap();
+            timing.propagation_budget.limit = Some(1000);
+            let mut score = timing.score();
+            let mut area = 2.0;
+            let mut stats = crate::netlist::resize::ResizeStats::default();
+            super::refine_bounded_solution(
+                &mut module,
+                &mut interner,
+                &library,
+                &CellCatalog::new(&library).unwrap(),
+                &RegisterCellCatalog::new(&library).unwrap(),
+                &options,
+                &mut timing,
+                &mut score,
+                &mut area,
+                &mut stats,
+            )
+            .unwrap();
+            assert_eq!(stats.refinement_batches_accepted, expected_batches);
+            assert!(area <= 2.0 * 1.02 + 1e-12);
+            assert_eq!(
+                score.worst_delay(),
+                if expected_batches == 0 { 2.0 } else { 1.0 }
+            );
+            let report =
+                build_netlist_report(&module, &nets, &interner, &library, options.sta_options)
+                    .unwrap();
+            super::verify_exact_score(score, &report, 1e-9).unwrap();
+        }
+    }
+
+    #[test]
+    fn refinement_area_allowance_is_not_compounded() {
+        let mut builder = LibraryBuilder::new();
+        for (name, area, delay) in [
+            ("BUF", 1.0, 3.0),
+            ("BUF_FAST", 1.015, 2.0),
+            ("BUF_FASTEST", 1.025, 1.0),
+        ] {
+            let cell = timed_cell(&mut builder, name, &["A"], "A", area, delay, 0.1, 10.0);
+            builder.cells.push(cell);
+        }
+        let library = builder.finish();
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, y);
+input a; output y;
+BUF first (.A(a), .Y(y));
+endmodule
+"#,
+        );
+        let options = ResizeOptions::default();
+        let mut timing = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            options.sta_options,
+            &BufferTimingConstraints::default(),
+        )
+        .unwrap();
+        let mut score = timing.score();
+        let mut area = 1.0;
+        let mut stats = crate::netlist::resize::ResizeStats::default();
+        super::refine_bounded_solution(
+            &mut module,
+            &mut interner,
+            &library,
+            &CellCatalog::new(&library).unwrap(),
+            &RegisterCellCatalog::new(&library).unwrap(),
+            &options,
+            &mut timing,
+            &mut score,
+            &mut area,
+            &mut stats,
+        )
+        .unwrap();
+        assert_eq!(stats.refinement_batches_accepted, 1);
+        assert!((area - 1.015).abs() < 1e-12);
+        assert_eq!(score.worst_delay(), 2.0);
+        assert_eq!(stats.replacements.len(), 1);
+        assert!(
+            stats
+                .replacements
+                .iter()
+                .all(|step| step.new_cell == "BUF_FAST")
+        );
+    }
+
+    #[test]
+    fn propagation_budget_rolls_back_partial_trials_and_commits() {
+        for (library, source, replacement_name) in [
+            (
+                sizing_library(),
+                r#"module top(a, b, y);
+input a, b; output y; wire n;
+AND2 producer (.A(a), .B(b), .Y(n));
+BUF consumer (.A(n), .Y(y));
+endmodule"#,
+                "AND2_FAST",
+            ),
+            (
+                registered_sizing_library(),
+                high_fanout_register_source(),
+                "DFF_FAST",
+            ),
+        ] {
+            let (module, nets, interner) = parse_module(source);
+            let catalog = CellCatalog::new(&library).unwrap();
+            let cell_index = library
+                .cells
+                .iter()
+                .position(|cell| cell.name == replacement_name)
+                .unwrap();
+            let mut timing = IncrementalRegisteredSta::new(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                StaOptions::default(),
+                &BufferTimingConstraints::default(),
+            )
+            .unwrap();
+            let original_cell = timing.instances[0].cell_index;
+            let loads = timing.loads.clone();
+            let fanout_loads = timing.fanout_loads.clone();
+            let bits = timing.bit_timing.clone();
+            let predecessors = timing.bit_predecessors.clone();
+            let captures = timing.captures.clone();
+            let capture_predecessors = timing.capture_predecessors.clone();
+            let limits = timing.data_transition_limits.clone();
+            let clock = timing.clock_load;
+            let kind = SizingMoveKind::Resize { cell_index };
+            let work = timing
+                .evaluate_optimization_move(0, kind, &catalog, false)
+                .unwrap()
+                .recomputed_instances;
+            assert!(work > 1);
+            for commit in [false, true] {
+                for limit in [0, 1, work - 1] {
+                    timing.trial_cache.clear();
+                    timing.propagation_budget = super::PropagationBudget {
+                        limit: Some(limit),
+                        ..Default::default()
+                    };
+                    assert!(
+                        timing
+                            .evaluate_optimization_move(0, kind, &catalog, commit)
+                            .is_err()
+                    );
+                    assert!(timing.propagation_budget.exhausted);
+                    assert_eq!(timing.propagation_budget.used, limit);
+                    assert_eq!(timing.instances[0].cell_index, original_cell);
+                    assert_eq!(timing.loads, loads);
+                    assert_eq!(timing.fanout_loads, fanout_loads);
+                    assert_eq!(timing.bit_timing, bits);
+                    assert_eq!(timing.bit_predecessors, predecessors);
+                    assert_eq!(timing.captures, captures);
+                    assert_eq!(timing.capture_predecessors, capture_predecessors);
+                    assert_eq!(timing.data_transition_limits, limits);
+                    assert_eq!(timing.clock_load, clock);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_zero_work_returns_the_original_verified_netlist() {
+        let library = registered_sizing_library();
+        let (mut module, nets, mut interner) = parse_module(high_fanout_register_source());
+        let before = emit_module_as_netlist_text(&module, &nets, &interner).unwrap();
+        let stats = resize_timing_aware_netlist(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                max_propagated_instances: 0,
+                ..Default::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .unwrap();
+        assert_eq!(stats.propagated_instances, 0);
+        assert!(stats.work_budget_exhausted);
+        assert_eq!(stats.failed_evaluations, 0);
+        assert_eq!(stats.final_delay, stats.initial_delay);
+        assert_eq!(
+            emit_module_as_netlist_text(&module, &nets, &interner).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn dense_critical_visits_match_tree_indexed_slack_and_endpoint_resets() {
+        let mut dense = CriticalWindowVisits::new(17);
+        for path in 0..7 {
+            let mut tree = BTreeMap::<BitEdge, f64>::new();
+            for step in 0..1000 {
+                let transition = BitEdge {
+                    bit: step % 17,
+                    edge: if step % 3 == 0 {
+                        TimingEdge::Fall
+                    } else {
+                        TimingEdge::Rise
+                    },
+                };
+                let slack = (step % 31) as f64 + (step % 5) as f64 * 1e-10;
+                let expected = !tree.get(&transition).is_some_and(|previous| {
+                    *previous + super::TIMING_VERIFICATION_EPSILON >= slack
+                });
+                if expected {
+                    tree.insert(transition, slack);
+                }
+                assert_eq!(dense.expand(transition, path, slack), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn coordinated_batches_match_fresh_timing_and_rollback_register_state() {
+        for (library, source, replacements) in [
+            (
+                sizing_library(),
+                r#"
+module top(a, b, y);
+  input a, b;
+  output y;
+  wire n;
+  AND2 producer (.B(b), .A(a), .Y(n));
+  BUF consumer (.A(n), .Y(y));
+endmodule
+"#,
+                vec![(0, "AND2_FAST"), (1, "BUF_FAST")],
+            ),
+            (
+                registered_sizing_library(),
+                high_fanout_register_source(),
+                vec![(0, "DFF_FAST"), (1, "DFF_FAST")],
+            ),
+            (
+                representative_sizing_library(),
+                r#"
+module top(a, y);
+  input a;
+  output y;
+  wire n;
+  WEAK producer (.A(a), .Y(n));
+  WEAK consumer (.A(n), .Y(y));
+endmodule
+"#,
+                vec![(0, "OVERSIZED"), (1, "OVERSIZED")],
+            ),
+        ] {
+            let (mut module, nets, mut interner) = parse_module(source);
+            let replacements = replacements
+                .into_iter()
+                .map(|(instance, name)| {
+                    (
+                        instance,
+                        library
+                            .cells
+                            .iter()
+                            .position(|cell| cell.name == name)
+                            .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let constraints = BufferTimingConstraints {
+                primary_input_arrivals: BTreeMap::from([("a".to_string(), 3.0)]),
+                ..Default::default()
+            };
+            let options = StaOptions {
+                primary_input_transition: 0.13,
+                module_output_load: 0.2,
+            };
+            let mut timing = IncrementalRegisteredSta::new(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                options,
+                &constraints,
+            )
+            .unwrap();
+            let original_loads = timing.loads.clone();
+            let original_bits = timing.bit_timing.clone();
+            let original_predecessors = timing.bit_predecessors.clone();
+            let original_captures = timing.captures.clone();
+            let original_capture_predecessors = timing.capture_predecessors.clone();
+            let original_limits = timing.data_transition_limits.clone();
+            let original_clock = timing.clock_load;
+            let catalog = CellCatalog::new(&library).unwrap();
+            let (index, cell_index) = replacements[0];
+            timing
+                .evaluate_optimization_move(
+                    index,
+                    SizingMoveKind::Resize { cell_index },
+                    &catalog,
+                    false,
+                )
+                .unwrap();
+            let original_cache_len = timing.trial_cache.len();
+            timing.propagation_budget = super::PropagationBudget {
+                limit: Some(0),
+                ..Default::default()
+            };
+            assert!(timing.try_resize_batch(&replacements, |_| true).is_err());
+            assert!(timing.propagation_budget.exhausted);
+            assert_eq!(timing.loads, original_loads);
+            assert_eq!(timing.bit_timing, original_bits);
+            assert_eq!(timing.bit_predecessors, original_predecessors);
+            assert_eq!(timing.captures, original_captures);
+            assert_eq!(timing.capture_predecessors, original_capture_predecessors);
+            assert_eq!(timing.data_transition_limits, original_limits);
+            assert_eq!(timing.clock_load, original_clock);
+            timing.propagation_budget = super::PropagationBudget::default();
+            assert_eq!(
+                timing.try_resize_batch(&replacements, |_| false).unwrap(),
+                None
+            );
+            assert_eq!(timing.loads, original_loads);
+            assert_eq!(timing.bit_timing, original_bits);
+            assert_eq!(timing.bit_predecessors, original_predecessors);
+            assert_eq!(timing.captures, original_captures);
+            assert_eq!(timing.capture_predecessors, original_capture_predecessors);
+            assert_eq!(timing.data_transition_limits, original_limits);
+            assert_eq!(timing.clock_load, original_clock);
+            assert_eq!(timing.trial_cache.len(), original_cache_len);
+            assert!(
+                timing
+                    .try_resize_batch(&replacements, |_| true)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(timing.trial_cache.is_empty());
+            for &(index, cell) in &replacements {
+                module.instances[index].type_name =
+                    interner.get_or_intern(library.cells[cell].name.as_str());
+            }
+            let fresh = IncrementalRegisteredSta::new(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                options,
+                &constraints,
+            )
+            .unwrap();
+            assert_eq!(timing.loads, fresh.loads);
+            assert_eq!(timing.fanout_loads, fresh.fanout_loads);
+            assert_eq!(timing.bit_timing, fresh.bit_timing);
+            assert_eq!(timing.bit_predecessors, fresh.bit_predecessors);
+            assert_eq!(timing.captures, fresh.captures);
+            assert_eq!(timing.capture_predecessors, fresh.capture_predecessors);
+            assert_eq!(timing.data_transition_limits, fresh.data_transition_limits);
+            assert_eq!(timing.clock_load, fresh.clock_load);
+            assert_eq!(timing.score(), fresh.score());
+        }
+    }
+
+    #[test]
+    fn failed_coordinated_batch_restores_all_preceding_changes() {
+        let mut library = sizing_library();
+        let bad_cell = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == "AND2_FAST")
+            .unwrap();
+        for pin in &mut library.cells[bad_cell].pins {
+            if pin.direction == PinDirection::Output as i32 {
+                pin.timing_arcs.clear();
+            }
+        }
+        let (module, nets, interner) = parse_module(
+            r#"
+module top(a, b, y);
+  input a, b;
+  output y;
+  wire n;
+  BUF producer (.A(a), .Y(n));
+  AND2 consumer (.A(n), .B(b), .Y(y));
+endmodule
+"#,
+        );
+        let mut timing = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .unwrap();
+        let before_loads = timing.loads.clone();
+        let before_bits = timing.bit_timing.clone();
+        let before_cells = timing
+            .instances
+            .iter()
+            .map(|instance| instance.cell_index)
+            .collect::<Vec<_>>();
+        assert!(
+            timing
+                .try_resize_batch(&[(0, 1), (1, bad_cell)], |_| true)
+                .is_err()
+        );
+        assert_eq!(timing.loads, before_loads);
+        assert_eq!(timing.bit_timing, before_bits);
+        assert_eq!(
+            timing
+                .instances
+                .iter()
+                .map(|instance| instance.cell_index)
+                .collect::<Vec<_>>(),
+            before_cells
+        );
+    }
+
+    #[test]
+    fn exact_trial_cache_hits_and_invalidates_on_direct_commits() {
+        let library = sizing_library();
+        let catalog = CellCatalog::new(&library).unwrap();
+        let (module, nets, interner) = parse_module(
+            r#"
+module top(a, b, y);
+  input a, b;
+  output y;
+  wire n;
+  AND2 producer (.A(a), .B(b), .Y(n));
+  BUF consumer (.A(n), .Y(y));
+endmodule
+"#,
+        );
+        let mut timing = IncrementalRegisteredSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+            &BufferTimingConstraints::default(),
+        )
+        .unwrap();
+        let kind = SizingMoveKind::Resize { cell_index: 1 };
+        let first = timing
+            .evaluate_optimization_move(1, kind, &catalog, false)
+            .unwrap();
+        assert!(first.recomputed_instances > 0);
+        let second = timing
+            .evaluate_optimization_move(1, kind, &catalog, false)
+            .unwrap();
+        assert_eq!(second.recomputed_instances, 0);
+        assert_eq!(first.score.values(), second.score.values());
+        assert_eq!(first.local_improvement, second.local_improvement);
+        assert_eq!(timing.trial_cache.len(), 1);
+        timing.evaluate_cell_substitution(0, 3, true).unwrap();
+        assert!(timing.trial_cache.is_empty());
+        let third = timing
+            .evaluate_optimization_move(1, kind, &catalog, false)
+            .unwrap();
+        assert!(third.recomputed_instances > 0);
+    }
 
     /// Adds an exact-state, same-pin FF with stronger clock-to-Q drive.
     fn registered_sizing_library() -> Library {
@@ -4936,6 +6230,8 @@ endmodule
             &mut interner,
             &library,
             &ResizeOptions {
+                // Characterize the opt-in coordinated/multi-pass search.
+                effort: crate::netlist::OptimizationEffort::Exhaustive,
                 sta_options: StaOptions {
                     module_output_load: 0.2,
                     ..StaOptions::default()
@@ -5040,7 +6336,7 @@ endmodule
 
         assert_eq!(stats.pin_swaps, 1);
         assert_eq!(stats.pin_swap_steps.len(), 1);
-        assert!(stats.pin_swap_evaluations >= 2);
+        assert!(stats.pin_swap_evaluations >= 1);
         assert!((stats.initial_area - stats.final_area).abs() < 1e-9);
         assert!(stats.final_delay < stats.initial_delay);
         assert_eq!(stats.pin_swap_steps[0].first_pin, "A");
@@ -5431,6 +6727,8 @@ endmodule
             &mut interner,
             &library,
             &ResizeOptions {
+                // Characterize the opt-in coordinated/multi-pass search.
+                effort: crate::netlist::OptimizationEffort::Exhaustive,
                 sta_options: StaOptions {
                     module_output_load: 1.0,
                     ..StaOptions::default()
@@ -5524,6 +6822,113 @@ endmodule
         assert_eq!(stats.final_area, 2.0);
         assert_eq!(stats.final_delay, stats.initial_delay);
         assert_eq!(exact_report.max_delay, Some(stats.initial_delay));
+    }
+
+    #[test]
+    fn final_area_recovery_visits_cells_beyond_a_rejected_priority_prefix() {
+        let mut builder = LibraryBuilder::new();
+        let critical = timed_cell(
+            &mut builder,
+            "AND2",
+            &["A", "B"],
+            "A * B",
+            1.0,
+            100.0,
+            0.1,
+            0.8,
+        );
+        let fast = timed_cell(&mut builder, "BUF_FAST", &["A"], "A", 2.0, 1.0, 0.2, 0.8);
+        let small = timed_cell(&mut builder, "BUF", &["A"], "A", 1.0, 2.0, 0.1, 0.8);
+        builder.cells = vec![critical, fast, small];
+        let library = builder.finish();
+        for (rounds, expected_downsizes) in [(1, 0), (4, 1)] {
+            let (mut module, nets, mut interner) = parse_module(
+                r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  wire delayed;
+  BUF_FAST critical (.A(delayed), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(near));
+  AND2 source (.A(a), .B(b), .Y(delayed));
+endmodule
+"#,
+            );
+            let stats = recover_final_timing_protected_area(
+                &mut module,
+                &nets,
+                &mut interner,
+                &library,
+                &ResizeOptions {
+                    max_area_iterations: rounds,
+                    max_evaluations_per_iteration: 1,
+                    ..ResizeOptions::default()
+                },
+                &BufferTimingConstraints::default(),
+            )
+            .expect("scan past the rejected critical cell within the configured budget");
+            assert_eq!(stats.downsizes, expected_downsizes);
+            assert_eq!(stats.final_delay, stats.initial_delay);
+            assert!(stats.evaluations <= 2 * rounds);
+            assert_eq!(
+                interner.resolve(module.instances[0].type_name),
+                Some("BUF_FAST")
+            );
+            assert_eq!(
+                interner.resolve(module.instances[1].type_name),
+                Some(if expected_downsizes == 0 {
+                    "BUF_FAST"
+                } else {
+                    "BUF"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn final_area_recovery_uses_actual_timing_instead_of_an_effort_veto() {
+        let mut builder = LibraryBuilder::new();
+        let critical = timed_cell(
+            &mut builder,
+            "AND2",
+            &["A", "B"],
+            "A * B",
+            1.0,
+            100.0,
+            0.1,
+            0.8,
+        );
+        let fast = timed_cell(&mut builder, "BUF_FAST", &["A"], "A", 2.0, 1.0, 0.2, 0.8);
+        let small = timed_cell(&mut builder, "BUF", &["A"], "A", 1.0, 2.0, 0.001, 0.8);
+        builder.cells = vec![critical, fast, small];
+        let library = builder.finish();
+        let (mut module, nets, mut interner) = parse_module(
+            r#"
+module top(a, b, c, worst, near);
+  input a, b, c;
+  output worst, near;
+  AND2 critical (.A(a), .B(b), .Y(worst));
+  BUF_FAST noncritical (.A(c), .Y(near));
+endmodule
+"#,
+        );
+        let stats = recover_final_timing_protected_area(
+            &mut module,
+            &nets,
+            &mut interner,
+            &library,
+            &ResizeOptions {
+                sta_options: StaOptions {
+                    module_output_load: 0.1,
+                    ..StaOptions::default()
+                },
+                ..ResizeOptions::default()
+            },
+            &BufferTimingConstraints::default(),
+        )
+        .expect("accept a timing-safe small driver despite conservative electrical effort");
+        assert_eq!(stats.downsizes, 1);
+        assert_eq!(stats.final_delay, stats.initial_delay);
     }
 
     #[test]
@@ -6040,6 +7445,8 @@ endmodule
             &mut interner,
             &library,
             &ResizeOptions {
+                // Characterize the opt-in coordinated/multi-pass search.
+                effort: crate::netlist::OptimizationEffort::Exhaustive,
                 sta_options: StaOptions {
                     module_output_load: 1.2,
                     ..StaOptions::default()
@@ -6082,6 +7489,8 @@ endmodule
             &mut interner,
             &library,
             &ResizeOptions {
+                // Characterize the opt-in coordinated/multi-pass search.
+                effort: crate::netlist::OptimizationEffort::Exhaustive,
                 max_iterations: 1,
                 max_area_iterations: 0,
                 ..ResizeOptions::default()

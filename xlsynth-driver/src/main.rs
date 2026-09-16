@@ -171,6 +171,32 @@ fn obsolete_type_inference_arg() -> Arg {
         .hide(true)
 }
 
+/// Shared controls for deterministic post-mapping optimization work.
+fn post_mapping_effort_args() -> [Arg; 4] {
+    [
+        Arg::new("optimization_effort")
+            .long("optimization-effort")
+            .default_value("bounded")
+            .value_parser(["bounded", "exhaustive"])
+            .help("Bounded single-pass buffering/resizing, or the exploratory multi-pass optimizer"),
+        Arg::new("resize_max_propagated_instances")
+            .long("resize-max-propagated-instances")
+            .default_value("2000000")
+            .value_parser(clap::value_parser!(usize))
+            .help("Total instance/PI/capture recomputations allowed in bounded resizing, including rollback trials and commits; 0 disables optimization work"),
+        Arg::new("resize_refinement_batches")
+            .long("resize-refinement-batches")
+            .default_value("2")
+            .value_parser(clap::value_parser!(usize))
+            .help("At most four area-capped coordinated batches after bounded greedy sizing"),
+        Arg::new("resize_refinement_batch_size")
+            .long("resize-refinement-batch-size")
+            .default_value("8")
+            .value_parser(clap::value_parser!(usize))
+            .help("Maximum independent cell substitutions in each refinement batch (1..=64)"),
+    ]
+}
+
 /// Builds the shared solver-selection argument used by formal subcommands.
 fn solver_arg(help: &'static str) -> Arg {
     Arg::new("solver")
@@ -2635,6 +2661,33 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("nf_cover_search")
+                        .long("nf-cover-search")
+                        .value_name("SEARCH")
+                        .default_value("single")
+                        .value_parser(["single", "automatic", "fast-and-area", "guarded-area", "calibrated-timing", "load-slew"])
+                        .help("Single fastest-child NF cover by default; other modes explicitly enable alternative-cover searches and emit a JSON policy audit")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("nf_cover_max_delay_regression_percent")
+                        .long("nf-cover-max-delay-regression-percent")
+                        .value_name("PERCENT")
+                        .default_value("0")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Allow strictly smaller NF covers up to this percent slower in every final timing class; requires explicit NF cover search and never relaxes clock/endpoint constraints")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("nf_cover_timeout_seconds")
+                        .long("nf-cover-timeout-seconds")
+                        .value_name("SECONDS")
+                        .default_value("0")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("Cooperative time budget for a calibrated/load-slew alternative after completing its incumbent; 0 is unlimited. Budgeted selection depends on runtime; expiry returns the incumbent")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("buffer")
                         .long("buffer")
                         .value_name("BOOL")
@@ -2675,40 +2728,41 @@ fn main() {
                         .help("Run exact-Liberty sizing, safe input-pin swapping, and area recovery")
                         .action(ArgAction::Set),
                 )
+                .args(post_mapping_effort_args())
                 .arg(
                     Arg::new("resize_rounds")
                         .long("resize-rounds")
                         .value_name("N")
-                        .default_value("3")
+                        .default_value("1")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum alternating timing-optimization and area-recovery rounds")
+                        .help("Maximum outer rounds in exhaustive effort; bounded effort uses one pass")
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("resize_iterations")
                         .long("resize-iterations")
                         .value_name("N")
-                        .default_value("16")
+                        .default_value("4")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum adaptive, batched critical-path sizing rounds")
+                        .help("Maximum timing-improvement rounds")
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("resize_area_iterations")
                         .long("resize-area-iterations")
                         .value_name("N")
-                        .default_value("32")
+                        .default_value("4")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum timing-preserving cell-downsizing moves")
+                        .help("Area trial batches; bounded effort processes one queue with N times the per-iteration evaluation cap")
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("resize_max_evaluations")
                         .long("resize-max-evaluations")
                         .value_name("N")
-                        .default_value("64")
+                        .default_value("32")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum exact sizing trials per iteration; pin swaps use a bounded separate budget")
+                        .help("Maximum exact candidate trials per iteration; bounded effort shares this cap with pin swaps")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2837,40 +2891,41 @@ fn main() {
                         .help("Run exact-Liberty sizing, safe input-pin swapping, and area recovery")
                         .action(ArgAction::Set),
                 )
+                .args(post_mapping_effort_args())
                 .arg(
                     Arg::new("resize_rounds")
                         .long("resize-rounds")
                         .value_name("N")
-                        .default_value("3")
+                        .default_value("1")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum alternating timing-optimization and area-recovery rounds")
+                        .help("Maximum outer rounds in exhaustive effort; bounded effort uses one pass")
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("resize_iterations")
                         .long("resize-iterations")
                         .value_name("N")
-                        .default_value("16")
+                        .default_value("4")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum adaptive, batched critical-path sizing rounds")
+                        .help("Maximum timing-improvement rounds")
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("resize_area_iterations")
                         .long("resize-area-iterations")
                         .value_name("N")
-                        .default_value("32")
+                        .default_value("4")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum timing-preserving area-recovery moves")
+                        .help("Area trial batches; bounded effort processes one queue with N times the per-iteration evaluation cap")
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("resize_max_evaluations")
                         .long("resize-max-evaluations")
                         .value_name("N")
-                        .default_value("64")
+                        .default_value("32")
                         .value_parser(clap::value_parser!(usize))
-                        .help("Maximum exact sizing trials per iteration; pin swaps use a bounded separate budget")
+                        .help("Maximum exact candidate trials per iteration; bounded effort shares this cap with pin swaps")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -4805,6 +4860,48 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         _ => {
             report_cli_error_and_exit("No valid subcommand provided.", None, vec![]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::post_mapping_effort_args;
+    use clap::Command;
+    use xlsynth_g8r::netlist::resize::ResizeOptions;
+
+    #[test]
+    fn post_mapping_work_default_matches_library() {
+        let matches = Command::new("post-map")
+            .args(post_mapping_effort_args())
+            .try_get_matches_from(["post-map"])
+            .unwrap();
+        let budget = *matches
+            .get_one::<usize>("resize_max_propagated_instances")
+            .unwrap();
+        assert_eq!(budget, 2_000_000);
+        assert_eq!(budget, ResizeOptions::default().max_propagated_instances);
+        assert_eq!(
+            matches.get_one::<usize>("resize_refinement_batches"),
+            Some(&ResizeOptions::default().max_refinement_batches)
+        );
+        assert_eq!(
+            matches.get_one::<usize>("resize_refinement_batch_size"),
+            Some(&ResizeOptions::default().max_refinement_batch_size)
+        );
+    }
+
+    #[test]
+    fn post_mapping_work_budget_can_be_overridden() {
+        for (argument, expected) in [("0", 0), ("250000", 250_000), ("750000", 750_000)] {
+            let matches = Command::new("post-map")
+                .args(post_mapping_effort_args())
+                .try_get_matches_from(["post-map", "--resize-max-propagated-instances", argument])
+                .unwrap();
+            assert_eq!(
+                matches.get_one::<usize>("resize_max_propagated_instances"),
+                Some(&expected)
+            );
         }
     }
 }

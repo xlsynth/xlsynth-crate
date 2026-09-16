@@ -87,6 +87,60 @@ pub struct NetlistReport {
     pub outputs: Vec<OutputTimingRow>,
 }
 
+/// Exact endpoint objectives without area tables or register-stage attribution.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NetlistEndpointTiming {
+    pub max_delay: Option<f64>,
+    pub max_input_to_register_delay: Option<f64>,
+    pub max_register_to_register_delay: Option<f64>,
+    pub max_register_to_output_delay: Option<f64>,
+}
+
+impl NetlistEndpointTiming {
+    /// Preserves the full report's endpoint and absent-path conventions.
+    pub(crate) fn from_sta_reports(
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        input_launch: &StaReport,
+        register_launch: Option<&StaReport>,
+    ) -> Result<Self> {
+        let outputs = output_timing_rows(
+            module,
+            nets,
+            interner,
+            input_launch,
+            register_launch.is_none(),
+        )?;
+        let Some(register_launch) = register_launch else {
+            return Ok(Self {
+                max_delay: Some(input_launch.worst_output_arrival),
+                max_input_to_register_delay: None,
+                max_register_to_register_delay: None,
+                max_register_to_output_delay: None,
+            });
+        };
+        let register_outputs = output_timing_rows(module, nets, interner, register_launch, false)?;
+        Ok(Self {
+            max_delay: maximum_output_arrival(&outputs),
+            max_input_to_register_delay: maximum_register_input_arrival(input_launch),
+            max_register_to_register_delay: maximum_register_input_arrival(register_launch),
+            max_register_to_output_delay: maximum_output_arrival(&register_outputs),
+        })
+    }
+}
+
+impl From<&NetlistReport> for NetlistEndpointTiming {
+    fn from(report: &NetlistReport) -> Self {
+        Self {
+            max_delay: report.max_delay,
+            max_input_to_register_delay: report.max_input_to_register_delay,
+            max_register_to_register_delay: report.max_register_to_register_delay,
+            max_register_to_output_delay: report.max_register_to_output_delay,
+        }
+    }
+}
+
 /// Timing and combinational area attributed to one adjacent register stage.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StageReportRow {

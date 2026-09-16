@@ -41,6 +41,7 @@ pub mod result_proto {
 }
 pub mod mcmc_logic;
 pub mod netlist;
+pub(crate) mod optimization_budget;
 pub mod process_ir_path;
 pub mod propose_equiv;
 pub mod prove_gate_fn_equiv_common;

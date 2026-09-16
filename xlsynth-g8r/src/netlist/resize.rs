@@ -29,10 +29,24 @@ use std::collections::{BTreeSet, HashMap};
 /// Bounded critical-path upsizing and timing-protected area-recovery options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResizeOptions {
+    pub effort: crate::netlist::OptimizationEffort,
+    /// Total instance/PI/capture recomputations across bounded trials and
+    /// commits. Initialization and independent final verification are not
+    /// charged. Zero returns the unmodified, independently verified netlist.
+    pub max_propagated_instances: usize,
+    /// Area-capped coordinated batches after the greedy solution; zero
+    /// disables. These share its propagation allowance and never worsen
+    /// endpoint timing.
+    pub max_refinement_batches: usize,
+    /// Maximum independent substitutions in one final refinement batch.
+    pub max_refinement_batch_size: usize,
     pub sta_options: StaOptions,
-    /// Maximum alternating timing-optimization and area-recovery rounds.
+    /// Maximum alternating rounds in exhaustive effort; bounded effort uses
+    /// one timing pass followed by one area pass.
     pub max_outer_iterations: usize,
     pub max_iterations: usize,
+    /// In bounded effort, one area queue gets this many batches of
+    /// `max_evaluations_per_iteration` candidates, without restarting.
     pub max_area_iterations: usize,
     pub max_candidate_paths: usize,
     pub max_evaluations_per_iteration: usize,
@@ -44,12 +58,16 @@ pub struct ResizeOptions {
 impl Default for ResizeOptions {
     fn default() -> Self {
         Self {
+            effort: crate::netlist::OptimizationEffort::Bounded,
+            max_propagated_instances: 2_000_000,
+            max_refinement_batches: 2,
+            max_refinement_batch_size: 8,
             sta_options: StaOptions::default(),
-            max_outer_iterations: 3,
-            max_iterations: 16,
-            max_area_iterations: 32,
+            max_outer_iterations: 1,
+            max_iterations: 4,
+            max_area_iterations: 4,
             max_candidate_paths: 32,
-            max_evaluations_per_iteration: 64,
+            max_evaluations_per_iteration: 32,
             max_cell_candidates_per_instance: 8,
             improvement_epsilon: 1e-9,
             area_epsilon: 1e-12,
@@ -94,6 +112,16 @@ pub struct ResizeStats {
     pub pin_swap_evaluations: usize,
     pub failed_evaluations: usize,
     pub recomputed_instances: usize,
+    /// Actual bounded propagation work, including failed and rolled-back
+    /// trials. Exhaustive effort does not report this counter.
+    pub propagated_instances: usize,
+    /// A bounded pass returned its last completed solution after using its
+    /// propagation allowance. This is not a synthesis failure.
+    pub work_budget_exhausted: bool,
+    /// Atomic coordinated trials after the completed bounded greedy solution.
+    pub refinement_evaluations: usize,
+    /// Coordinated trials that improved endpoint timing within the area cap.
+    pub refinement_batches_accepted: usize,
     pub upsizes: usize,
     pub downsizes: usize,
     /// Accepted drive-strength increases of physical flip-flops.
@@ -168,6 +196,14 @@ pub fn resize_netlist(
 
 /// Rejects budgets and timing assumptions that could produce invalid trials.
 pub(crate) fn validate_options(options: &ResizeOptions) -> Result<()> {
+    if options.max_refinement_batches > 4
+        || options.max_refinement_batch_size == 0
+        || options.max_refinement_batch_size > 64
+    {
+        return Err(anyhow!(
+            "refinement supports at most four batches of 1..=64 cells"
+        ));
+    }
     if options.max_outer_iterations == 0
         || options.max_candidate_paths == 0
         || options.max_evaluations_per_iteration == 0

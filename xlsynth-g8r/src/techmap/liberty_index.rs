@@ -287,6 +287,17 @@ impl LibertyCellIndex {
         library: &Library,
         input_transition: f64,
     ) -> Result<RepresentativePinDelayTable> {
+        self.pin_delays_at(library, input_transition, None)
+    }
+
+    /// Samples an internal operating point without changing external STA
+    /// options.
+    pub(super) fn pin_delays_at(
+        &self,
+        library: &Library,
+        input_transition: f64,
+        output_load_override: Option<f64>,
+    ) -> Result<RepresentativePinDelayTable> {
         if !input_transition.is_finite() || input_transition < 0.0 {
             return Err(anyhow!(
                 "representative input transition must be non-negative and finite; got {}",
@@ -318,7 +329,12 @@ impl LibertyCellIndex {
         } else {
             REPRESENTATIVE_OUTPUT_FANOUT
         };
-        let output_load = output_fanout * median_input_load;
+        let output_load = output_load_override.unwrap_or(output_fanout * median_input_load);
+        if !output_load.is_finite() || output_load < 0.0 {
+            return Err(anyhow!(
+                "internal output load must be non-negative and finite"
+            ));
+        }
         let representative_load = CombinationalOutputLoad {
             rise: output_load,
             fall: output_load,

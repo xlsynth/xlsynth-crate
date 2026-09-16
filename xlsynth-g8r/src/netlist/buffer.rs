@@ -30,6 +30,10 @@ const MAX_BUFFER_OUTPUT_LOAD_FRACTION: f64 = 0.35;
 /// Electrical and fanout bounds for timing-aware mapped-netlist buffering.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BufferOptions {
+    /// Bounded effort uses at most eight timing snapshots and does not split
+    /// rejected optional batches. Exhaustive effort retains the 64-snapshot
+    /// exploratory search.
+    pub effort: crate::netlist::OptimizationEffort,
     /// Largest number of directly connected input pins at a tree level.
     pub max_fanout: usize,
     /// Optional rise/fall load bound in the units of the Liberty library.
@@ -44,6 +48,7 @@ pub struct BufferOptions {
 impl Default for BufferOptions {
     fn default() -> Self {
         Self {
+            effort: crate::netlist::OptimizationEffort::Bounded,
             max_fanout: 12,
             target_load: None,
             module_output_load: 0.0,
@@ -71,6 +76,8 @@ pub struct BufferStats {
     pub timing_evaluations: usize,
     /// Candidate batches rejected because their exact timing did not improve.
     pub rejected_timing_batches: usize,
+    /// Optional batches remained when the deterministic snapshot cap was met.
+    pub evaluation_budget_exhausted: bool,
 }
 
 #[cfg(test)]

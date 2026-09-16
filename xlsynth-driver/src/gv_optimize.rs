@@ -14,6 +14,20 @@ use xlsynth_g8r::netlist::optimize::{
 use xlsynth_g8r::netlist::resize::ResizeOptions;
 use xlsynth_g8r::netlist::sta::StaOptions;
 
+/// Parses the common post-mapping effort selector after Clap validation.
+pub(crate) fn optimization_effort(
+    matches: &ArgMatches,
+) -> xlsynth_g8r::netlist::OptimizationEffort {
+    match matches
+        .get_one::<String>("optimization_effort")
+        .map(String::as_str)
+    {
+        Some("exhaustive") => xlsynth_g8r::netlist::OptimizationEffort::Exhaustive,
+        Some("bounded") => xlsynth_g8r::netlist::OptimizationEffort::Bounded,
+        _ => unreachable!("optimization effort is validated by Clap"),
+    }
+}
+
 /// Buffers and resizes an existing timing-complete mapped netlist.
 pub fn handle_gv_optimize(matches: &ArgMatches) -> Result<()> {
     let netlist_path = matches
@@ -55,6 +69,7 @@ pub fn handle_gv_optimize(matches: &ArgMatches) -> Result<()> {
             .copied()
             .expect("buffer has a default")
             .then(|| BufferOptions {
+                effort: optimization_effort(matches),
                 max_fanout: *matches
                     .get_one::<usize>("max_fanout")
                     .expect("max_fanout has a default"),
@@ -67,6 +82,16 @@ pub fn handle_gv_optimize(matches: &ArgMatches) -> Result<()> {
             .copied()
             .expect("resize has a default")
             .then(|| ResizeOptions {
+                effort: optimization_effort(matches),
+                max_propagated_instances: *matches
+                    .get_one::<usize>("resize_max_propagated_instances")
+                    .expect("propagation budget has a default"),
+                max_refinement_batches: *matches
+                    .get_one::<usize>("resize_refinement_batches")
+                    .expect("refinement batches have a default"),
+                max_refinement_batch_size: *matches
+                    .get_one::<usize>("resize_refinement_batch_size")
+                    .expect("refinement batch size has a default"),
                 sta_options,
                 max_outer_iterations: *matches
                     .get_one::<usize>("resize_rounds")

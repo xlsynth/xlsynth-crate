@@ -11,8 +11,8 @@ use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::load_liberty_with_timing_data_from_path;
 use xlsynth_g8r::netlist::resize::ResizeOptions;
 use xlsynth_g8r::techmap::{
-    SequentialTechMapConstraints, TechMapOptions, TechMapTimingConstraints, TechMapTimingModel,
-    map_choice_aig_portfolio_to_netlist, map_choice_aig_to_netlist,
+    NfCoverSearch, SequentialTechMapConstraints, TechMapOptions, TechMapTimingConstraints,
+    TechMapTimingModel, map_choice_aig_portfolio_to_netlist, map_choice_aig_to_netlist,
     map_sequential_choice_aig_portfolio_to_netlist, map_sequential_choice_aig_to_netlist,
     restrict_mapping_flip_flop,
 };
@@ -105,11 +105,34 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             "buffered-liberty" => TechMapTimingModel::BufferedLiberty,
             value => return Err(anyhow!("unsupported mapping timing model '{value}'")),
         },
+        nf_cover_search: match matches
+            .get_one::<String>("nf_cover_search")
+            .expect("nf_cover_search has a default")
+            .as_str()
+        {
+            "single" => NfCoverSearch::Single,
+            "automatic" => NfCoverSearch::Automatic,
+            "fast-and-area" => NfCoverSearch::FastAndArea,
+            "guarded-area" => NfCoverSearch::GuardedArea,
+            "calibrated-timing" => NfCoverSearch::CalibratedTiming,
+            "load-slew" => NfCoverSearch::LoadSlew,
+            value => return Err(anyhow!("unsupported NF cover search '{value}'")),
+        },
+        nf_cover_max_delay_regression: *matches
+            .get_one::<f64>("nf_cover_max_delay_regression_percent")
+            .expect("NF cover delay allowance has a default")
+            / 100.0,
+        nf_cover_timeout: matches
+            .get_one::<u64>("nf_cover_timeout_seconds")
+            .copied()
+            .filter(|seconds| *seconds != 0)
+            .map(std::time::Duration::from_secs),
         buffer_options: matches
             .get_one::<bool>("buffer")
             .copied()
             .expect("buffer has a default")
             .then(|| BufferOptions {
+                effort: crate::gv_optimize::optimization_effort(matches),
                 max_fanout: *matches
                     .get_one::<usize>("max_fanout")
                     .expect("max_fanout has a default"),
@@ -124,6 +147,16 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             .copied()
             .expect("resize has a default")
             .then(|| ResizeOptions {
+                effort: crate::gv_optimize::optimization_effort(matches),
+                max_propagated_instances: *matches
+                    .get_one::<usize>("resize_max_propagated_instances")
+                    .expect("propagation budget has a default"),
+                max_refinement_batches: *matches
+                    .get_one::<usize>("resize_refinement_batches")
+                    .expect("refinement batches have a default"),
+                max_refinement_batch_size: *matches
+                    .get_one::<usize>("resize_refinement_batch_size")
+                    .expect("refinement batch size has a default"),
                 max_outer_iterations: *matches
                     .get_one::<usize>("resize_rounds")
                     .expect("resize_rounds has a default"),
@@ -272,6 +305,25 @@ pub fn handle_choice_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         sequential_diagnostics,
         portfolio_diagnostics,
     );
+    if let Some(report) = &mapped.stats.nf_cover_search {
+        eprintln!("nf-cover-search: {}", serde_json::to_string(report)?);
+    }
+    if mapped.stats.resize_stats.is_some() || mapped.stats.buffer_stats.is_some() {
+        eprintln!(
+            "optimization-work: {}",
+            serde_json::json!({
+                "effort": matches.get_one::<String>("optimization_effort"),
+                "buffer_timing_evaluations": mapped.stats.buffer_stats.as_ref().map(|s| s.timing_evaluations),
+                "buffer_budget_exhausted": mapped.stats.buffer_stats.as_ref().map(|s| s.evaluation_budget_exhausted),
+                "unresolved_overloaded_nets": mapped.stats.buffer_stats.as_ref().map(|s| s.unresolved_overloaded_nets),
+                "resize_candidate_evaluations": mapped.stats.resize_stats.as_ref().map(|s| s.evaluations),
+                "resize_propagated_instances": mapped.stats.resize_stats.as_ref().map(|s| s.propagated_instances),
+                "resize_budget_exhausted": mapped.stats.resize_stats.as_ref().map(|s| s.work_budget_exhausted),
+                "refinement_evaluations": mapped.stats.resize_stats.as_ref().map(|s| s.refinement_evaluations),
+                "refinement_batches_accepted": mapped.stats.resize_stats.as_ref().map(|s| s.refinement_batches_accepted),
+            })
+        );
+    }
     Ok(())
 }
 

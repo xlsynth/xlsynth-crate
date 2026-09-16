@@ -2,9 +2,11 @@
 
 //! Register-aware final technology mapping for synchronous transition AIGs.
 
+use super::electrical::{ElectricalBoundary, RegisterSource};
 use super::{
-    MappedNetlist, TechMapOptions, TechMapTimingConstraints, TechMapTimingModel,
-    map_choice_aig_to_netlist, map_choice_aig_to_netlist_with_nf_constraints, scalar_bit_name,
+    MappedNetlist, NfCoverSearch, PreparedTechMapLibrary, TechMapOptions, TechMapTimingConstraints,
+    TechMapTimingModel, cover_search, cuts, map_choice_aig_to_netlist,
+    map_choice_aig_to_netlist_with_nf_constraints, scalar_bit_name,
 };
 use crate::aig::{ChoiceAig, GateFn, SequentialGateFn};
 use crate::liberty::cell_formula::{Term, parse_formula};
@@ -189,6 +191,39 @@ pub fn map_sequential_choice_aig_to_netlist(
             primary_input_arrivals: constraints.primary_input_arrivals.clone(),
             primary_output_required: constraints.primary_output_required.clone(),
         };
+        if options.uses_nf_cover_search() {
+            super::assert_supported_timing_model(options)?;
+            let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
+            let analysis = cuts::analyze_choices(choice_aig)?;
+            return cover_search::map_nf_cover_search(
+                choice_aig,
+                &prepared,
+                &analysis,
+                &timing,
+                &effective_options,
+                None,
+                |prepared, cover| {
+                    let mut mapped = cover_search::finish_nf_cover(
+                        choice_aig,
+                        prepared,
+                        &analysis,
+                        cover,
+                        &effective_options,
+                    )?;
+                    reinstate_sequential_boundary(&mut mapped, design, None)?;
+                    finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
+                    apply_requested_sequential_optimization(
+                        &mut mapped,
+                        library,
+                        constraints,
+                        options,
+                        sta_options,
+                        None,
+                    )?;
+                    Ok(mapped)
+                },
+            );
+        }
         let mut mapped = map_transition(choice_aig, library, &timing, &effective_options)?;
         reinstate_sequential_boundary(&mut mapped, design, None)?;
         finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
@@ -224,8 +259,12 @@ pub fn map_sequential_choice_aig_to_netlist(
             sta_options,
             &flip_flop,
             options.resize_options.is_some() && library.boundary_timing_defaults.is_some(),
+            options,
         ) {
             Ok(mut mapped) => {
+                if options.uses_nf_cover_search() {
+                    return Ok(mapped);
+                }
                 apply_requested_sequential_optimization(
                     &mut mapped,
                     library,
@@ -316,6 +355,25 @@ fn apply_requested_sequential_optimization(
     }
     finalize_sequential_mapping(mapped, library, constraints, sta_options)
         .context("verifying buffered and resized sequential mapping")?;
+    if options
+        .resize_options
+        .as_ref()
+        .is_none_or(|sizing| sizing.effort == crate::netlist::OptimizationEffort::Bounded)
+    {
+        // Bounded resizing already performed its single final area pass. Keep
+        // physical launch/capture verification, but do not restart
+        // optimization.
+        if let Some(sizing) = resize_stats.as_mut() {
+            sizing.final_area = mapped.stats.selected_area;
+            sizing.final_delay = mapped.stats.worst_estimated_output_arrival;
+        }
+        if let Some(buffering) = buffer_stats.as_mut() {
+            buffering.final_worst_delay = Some(mapped.stats.worst_estimated_output_arrival);
+        }
+        mapped.stats.buffer_stats = buffer_stats;
+        mapped.stats.resize_stats = resize_stats;
+        return Ok(());
+    }
     if let (Some(buffering), Some(sizing)) = (buffer_stats.as_mut(), resize_stats.as_mut()) {
         revisit_sequential_buffering_after_sizing(
             mapped,
@@ -675,6 +733,7 @@ fn map_with_flip_flop(
     sta_options: StaOptions,
     flip_flop: &FlipFlopBinding,
     defer_input_cleanup: bool,
+    physical_options: &TechMapOptions,
 ) -> Result<MappedNetlist> {
     if let Some(period) = constraints.clock_period {
         if period < flip_flop.setup {
@@ -728,6 +787,63 @@ fn map_with_flip_flop(
         .collect::<BTreeSet<_>>();
     // Preserve actual external electrical conditions while excluding synthetic
     // register Q/D interchange ports from virtual driving and output loading.
+    let restore = |mapped: &mut MappedNetlist| -> Result<()> {
+        reinstate_sequential_boundary(mapped, design, Some(flip_flop))?;
+        bypass_register_boundary_identity_buffers(
+            mapped,
+            library,
+            flip_flop,
+            sta_options,
+            if defer_input_cleanup {
+                RegisterBoundaryCleanupPhase::OutputsOnly
+            } else {
+                RegisterBoundaryCleanupPhase::All
+            },
+        )
+        .context("removing redundant transition-interface identity buffers")?;
+        finalize_sequential_mapping(mapped, library, constraints, sta_options)
+    };
+    if options.uses_nf_cover_search() {
+        super::assert_supported_timing_model(options)?;
+        let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
+        let analysis = cuts::analyze_choices(&adjusted)?;
+        let boundary = matches!(
+            options.nf_cover_search,
+            NfCoverSearch::CalibratedTiming | NfCoverSearch::LoadSlew
+        )
+        .then(|| register_electrical_boundary(design, &adjusted, library, flip_flop))
+        .transpose()?;
+        return cover_search::map_nf_cover_search(
+            &adjusted,
+            &prepared,
+            &analysis,
+            &timing,
+            options,
+            boundary.as_ref(),
+            |prepared, cover| {
+                let mut mapped = {
+                    let _physical_boundary =
+                        ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
+                            physical_inputs.clone(),
+                            physical_outputs.clone(),
+                        );
+                    cover_search::finish_nf_cover(&adjusted, prepared, &analysis, cover, options)
+                }?;
+                // Real FF loading and launch/capture timing must be evaluated
+                // outside the temporary transition-port suppression scope.
+                restore(&mut mapped)?;
+                apply_requested_sequential_optimization(
+                    &mut mapped,
+                    library,
+                    constraints,
+                    physical_options,
+                    sta_options,
+                    Some(flip_flop),
+                )?;
+                Ok(mapped)
+            },
+        );
+    }
     let mut mapped = {
         let _physical_boundary = ScopedBoundaryTimingDefaultsSuppression::for_physical_ports(
             physical_inputs,
@@ -736,21 +852,76 @@ fn map_with_flip_flop(
         map_transition(&adjusted, library, &timing, options)
             .with_context(|| format!("mapping transition for flip-flop '{}'", flip_flop.cell_name))
     }?;
-    reinstate_sequential_boundary(&mut mapped, design, Some(flip_flop))?;
-    bypass_register_boundary_identity_buffers(
-        &mut mapped,
-        library,
-        flip_flop,
-        sta_options,
-        if defer_input_cleanup {
-            RegisterBoundaryCleanupPhase::OutputsOnly
-        } else {
-            RegisterBoundaryCleanupPhase::All
-        },
-    )
-    .context("removing redundant transition-interface identity buffers")?;
-    finalize_sequential_mapping(&mut mapped, library, constraints, sta_options)?;
+    restore(&mut mapped)?;
     Ok(mapped)
+}
+
+/// Resolves physical launch/capture pins without treating transition ports as
+/// IO.
+fn register_electrical_boundary(
+    design: &SequentialGateFn,
+    graph: &ChoiceAig,
+    library: &Library,
+    binding: &FlipFlopBinding,
+) -> Result<ElectricalBoundary> {
+    let cell_index = library
+        .cells
+        .iter()
+        .position(|cell| cell.name == binding.cell_name)
+        .ok_or_else(|| anyhow!("missing selected flip-flop"))?;
+    let cell = &library.cells[cell_index];
+    let output_pin = cell
+        .pins
+        .iter()
+        .position(|pin| library.resolve_string(&pin.name) == binding.output_pin)
+        .ok_or_else(|| anyhow!("missing selected Q pin"))?;
+    let data_pin = cell
+        .pins
+        .iter()
+        .find(|pin| library.resolve_string(&pin.name) == binding.data_pin)
+        .ok_or_else(|| anyhow!("missing selected D pin"))?;
+    let data_load = effective_input_capacitance_for_mapping(data_pin, "register capture load")?;
+    let mut result = ElectricalBoundary::default();
+    let inputs = graph
+        .graph()
+        .inputs
+        .iter()
+        .flat_map(|port| {
+            port.bit_vector
+                .iter_lsb_to_msb()
+                .enumerate()
+                .map(|(bit, operand)| {
+                    (
+                        scalar_bit_name(&port.name, bit, port.get_bit_count()),
+                        operand.node.id,
+                    )
+                })
+        })
+        .collect::<BTreeMap<_, _>>();
+    for register in &design.registers {
+        let q = &design.transition.inputs[register.q.index()];
+        for bit in 0..q.get_bit_count() {
+            let name = scalar_bit_name(&q.name, bit, q.get_bit_count());
+            let node = *inputs
+                .get(&name)
+                .ok_or_else(|| anyhow!("missing optimized Q bit '{name}'"))?;
+            result.registers.insert(
+                node,
+                RegisterSource {
+                    cell: cell_index,
+                    output_pin,
+                    tied_inputs: binding.tied_inputs.clone().into_iter().collect(),
+                },
+            );
+        }
+        let d = &design.transition.outputs[register.d.index()];
+        for bit in 0..d.get_bit_count() {
+            result
+                .output_loads
+                .insert(scalar_bit_name(&d.name, bit, d.get_bit_count()), data_load);
+        }
+    }
+    Ok(result)
 }
 
 /// Identifies one scalar bit without conflating packed-port bit positions.
@@ -2330,7 +2501,7 @@ fn validate_exact_output_requirements(
 }
 
 /// Replaces transition-only estimates with exact full sequential STA and area.
-fn finalize_sequential_mapping(
+pub(super) fn finalize_sequential_mapping(
     mapped: &mut MappedNetlist,
     library: &Library,
     constraints: &SequentialTechMapConstraints,
@@ -2937,6 +3108,325 @@ endmodule
     }
 
     #[test]
+    fn paired_nf_search_runs_both_registered_policies_with_constraints() {
+        let design = test_design();
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let library = test_library();
+        let constraints = SequentialTechMapConstraints {
+            primary_input_arrivals: BTreeMap::from([("data_0".to_string(), 0.4)]),
+            primary_output_required: BTreeMap::from([("out_0".to_string(), 10.0)]),
+            clock_period: Some(10.0),
+        };
+        let options = TechMapOptions {
+            buffer_options: Some(BufferOptions::default()),
+            resize_options: Some(ResizeOptions {
+                max_outer_iterations: 1,
+                max_iterations: 1,
+                max_area_iterations: 1,
+                ..ResizeOptions::default()
+            }),
+            ..TechMapOptions::default()
+        };
+        let baseline = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &library,
+            &constraints,
+            &options,
+        )
+        .unwrap();
+        for search in [NfCoverSearch::FastAndArea, NfCoverSearch::GuardedArea] {
+            let paired = map_sequential_choice_aig_to_netlist(
+                &design,
+                &choices,
+                &library,
+                &constraints,
+                &TechMapOptions {
+                    nf_cover_search: search,
+                    ..options.clone()
+                },
+            )
+            .unwrap();
+            let report = paired.stats.nf_cover_search.as_ref().unwrap();
+            assert_eq!(
+                report
+                    .candidates
+                    .iter()
+                    .map(|c| c.policy.as_str())
+                    .collect::<Vec<_>>(),
+                if search == NfCoverSearch::FastAndArea {
+                    vec!["area-children", "fastest-children"]
+                } else {
+                    vec!["area-children", "area-priority-cuts", "fastest-children"]
+                }
+            );
+            assert_eq!(report.selected_policy, "fastest-children");
+            for candidate in &report.candidates {
+                assert_eq!(candidate.error, None);
+                let metrics = candidate.metrics.as_ref().unwrap();
+                assert_eq!(metrics.area, baseline.stats.selected_area);
+                assert_eq!(
+                    metrics.worst_delay,
+                    baseline.stats.worst_estimated_output_arrival
+                );
+                assert_eq!(metrics.clock_period, Some(10.0));
+                assert_eq!(
+                    metrics.worst_register_slack,
+                    baseline.stats.worst_register_slack
+                );
+                assert_eq!(
+                    metrics.input_to_register,
+                    baseline.stats.worst_input_to_register_arrival
+                );
+                assert_eq!(
+                    metrics.register_to_output,
+                    baseline.stats.worst_register_to_output_arrival
+                );
+            }
+            assert!(paired.stats.buffer_stats.is_some());
+            assert!(paired.stats.resize_stats.is_some());
+            assert_eq!(
+                emit_module_as_netlist_text(&paired.module, &paired.nets, &paired.interner)
+                    .unwrap(),
+                emit_module_as_netlist_text(&baseline.module, &baseline.nets, &baseline.interner)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn paired_nf_search_checks_clock_and_external_output_requirements() {
+        let design = test_design();
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let library = test_library();
+        let options = TechMapOptions {
+            nf_cover_search: NfCoverSearch::FastAndArea,
+            ..TechMapOptions::default()
+        };
+        for constraints in [
+            SequentialTechMapConstraints {
+                clock_period: Some(0.6),
+                primary_input_arrivals: BTreeMap::from([("data_0".to_string(), 0.5)]),
+                ..SequentialTechMapConstraints::default()
+            },
+            SequentialTechMapConstraints {
+                primary_output_required: BTreeMap::from([("out_0".to_string(), 0.01)]),
+                ..SequentialTechMapConstraints::default()
+            },
+        ] {
+            assert!(
+                map_sequential_choice_aig_to_netlist(
+                    &design,
+                    &choices,
+                    &library,
+                    &constraints,
+                    &options
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn electrical_mapping_preserves_scalarized_register_boundaries_and_constraints() {
+        let mut builder = GateBuilder::new("scalar_boundary".into(), GateBuilderOptions::no_opt());
+        let data = builder.add_input("data".into(), 2);
+        let q = builder.add_input("state__q".into(), 2);
+        builder.add_output("out".into(), q.clone());
+        // Inversion creates a real loaded internal cell before each capture.
+        builder.add_output(
+            "state__d".into(),
+            AigBitVector::from_lsb_is_index_0(
+                &data
+                    .iter_lsb_to_msb()
+                    .map(|bit| bit.negate())
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        let mut design = test_design();
+        design.transition = builder.build();
+        let mut scalar = GateBuilder::new("scalar_boundary".into(), GateBuilderOptions::no_opt());
+        let mut inputs = Vec::new();
+        for port in &design.transition.inputs {
+            for bit in 0..port.get_bit_count() {
+                let input: AigOperand = scalar
+                    .add_input(scalar_bit_name(&port.name, bit, port.get_bit_count()), 1)
+                    .try_into()
+                    .unwrap();
+                inputs.push(input);
+            }
+        }
+        for (name, operand) in [
+            ("out_0", inputs[2]),
+            ("out_1", inputs[3]),
+            ("state__d_0", inputs[0].negate()),
+            ("state__d_1", inputs[1].negate()),
+        ] {
+            scalar.add_output(name.into(), operand.into());
+        }
+        let graph = ChoiceAig::without_choices(scalar.build());
+        let library = test_library();
+        let options = TechMapOptions {
+            primary_input_transition: 0.01,
+            module_output_load: 2.0,
+            ..Default::default()
+        };
+        let constraints = SequentialTechMapConstraints {
+            clock_period: Some(10.0),
+            primary_input_arrivals: BTreeMap::from([("data_0".into(), 0.4)]),
+            ..Default::default()
+        };
+        let flip_flop = index_flip_flops(&library, StaOptions::default())
+            .unwrap()
+            .remove(0);
+        let boundary = register_electrical_boundary(&design, &graph, &library, &flip_flop).unwrap();
+        assert_eq!(boundary.registers.len(), 2);
+        assert_eq!(boundary.output_loads["state__d_0"].rise, 0.02);
+        let timing = super::super::electrical::source_timing(
+            inputs[2].node.id,
+            CombinationalOutputLoad {
+                rise: 1.0,
+                fall: 1.0,
+            },
+            &graph,
+            &library,
+            &TechMapTimingConstraints::default(),
+            &options,
+            &boundary,
+        )
+        .unwrap();
+        assert_eq!(timing.rise.arrival, 0.5);
+        assert_eq!(timing.rise.transition, 0.1_f32 as f64);
+        for mode in [NfCoverSearch::CalibratedTiming, NfCoverSearch::LoadSlew] {
+            let mapped = map_sequential_choice_aig_to_netlist(
+                &design,
+                &graph,
+                &library,
+                &constraints,
+                &TechMapOptions {
+                    nf_cover_search: mode,
+                    ..options.clone()
+                },
+            )
+            .unwrap();
+            let report = mapped.stats.nf_cover_search.as_ref().unwrap();
+            assert_eq!(report.candidates.len(), 2);
+            assert_eq!(
+                report.timing_calibration.unwrap().input_transition,
+                0.1_f32 as f64
+            );
+            assert_eq!(report.timing_calibration.unwrap().output_load, 0.02);
+            assert!(
+                report
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.error.is_none())
+            );
+            assert!(report.candidates[0].metrics.is_some());
+            assert_eq!(
+                report.candidates[1].metrics.is_none(),
+                report.alternative_skipped.is_some()
+            );
+            assert_eq!(report.selected_policy, "fastest-children");
+            assert_eq!(mapped.stats.clock_period, Some(10.0));
+        }
+    }
+
+    #[test]
+    fn paired_nf_search_preserves_success_after_a_candidate_evaluation_failure() {
+        let choices = ChoiceAig::without_choices(test_design().transition);
+        let library = test_library();
+        let options = TechMapOptions {
+            nf_cover_search: NfCoverSearch::FastAndArea,
+            ..TechMapOptions::default()
+        };
+        let prepared = PreparedTechMapLibrary::new(&library, options.max_cut_size).unwrap();
+        let analysis = cuts::analyze_choices(&choices).unwrap();
+        let mut attempts = 0;
+        let mapped = cover_search::map_nf_cover_search(
+            &choices,
+            &prepared,
+            &analysis,
+            &TechMapTimingConstraints::default(),
+            &options,
+            None,
+            |prepared, cover| {
+                attempts += 1;
+                if attempts == 1 {
+                    bail!("synthetic physical timing failure");
+                }
+                cover_search::finish_nf_cover(&choices, prepared, &analysis, cover, &options)
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 2);
+        let report = mapped.stats.nf_cover_search.unwrap();
+        assert_eq!(report.selected_policy, "fastest-children");
+        assert_eq!(
+            report.candidates[0].error.as_deref(),
+            Some("synthetic physical timing failure")
+        );
+        assert!(report.candidates[1].metrics.is_some());
+    }
+
+    #[test]
+    fn paired_nf_search_supports_combinational_endpoint_constraints() {
+        let choices = ChoiceAig::without_choices(test_design().transition);
+        let library = test_library();
+        let mapped = map_choice_aig_to_netlist(
+            &choices,
+            &library,
+            &TechMapTimingConstraints {
+                primary_input_arrivals: BTreeMap::from([("data_0".to_string(), 0.4)]),
+                primary_output_required: BTreeMap::from([("state__d_0".to_string(), 10.0)]),
+            },
+            &TechMapOptions {
+                nf_cover_search: NfCoverSearch::FastAndArea,
+                ..TechMapOptions::default()
+            },
+        )
+        .unwrap();
+        let report = mapped.stats.nf_cover_search.unwrap();
+        assert_eq!(report.candidates.len(), 2);
+        for candidate in report.candidates {
+            assert_eq!(candidate.error, None);
+            assert!(candidate.metrics.unwrap().register_to_register.is_none());
+        }
+    }
+
+    #[test]
+    fn paired_nf_search_handles_a_transition_with_no_remaining_registers() {
+        let design = SequentialGateFn::new(
+            "combinational".to_string(),
+            test_design().transition,
+            vec![TransitionInputId::new(0), TransitionInputId::new(1)],
+            vec![TransitionOutputId::new(0), TransitionOutputId::new(1)],
+            None,
+            vec![],
+        )
+        .unwrap();
+        let choices = ChoiceAig::without_choices(design.transition.clone());
+        let mapped = map_sequential_choice_aig_to_netlist(
+            &design,
+            &choices,
+            &test_library(),
+            &SequentialTechMapConstraints::default(),
+            &TechMapOptions {
+                nf_cover_search: NfCoverSearch::FastAndArea,
+                ..TechMapOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(mapped.stats.sequential_instance_count, 0);
+        let report = mapped.stats.nf_cover_search.unwrap();
+        assert_eq!(report.candidates.len(), 2);
+        for candidate in report.candidates {
+            assert_eq!(candidate.error, None);
+            assert!(candidate.metrics.unwrap().register_to_register.is_none());
+        }
+    }
+
+    #[test]
     fn external_mapping_prepares_data_polarity_and_rejects_invalid_cells() {
         let design = test_design();
         let choices = ChoiceAig::without_choices(design.transition.clone());
@@ -3230,24 +3720,33 @@ endmodule
             representative_load_count: 1,
         });
         let choices = ChoiceAig::without_choices(design.transition.clone());
-        let mapped = map_sequential_choice_aig_to_netlist(
-            &design,
-            &choices,
-            &library,
-            &SequentialTechMapConstraints::default(),
-            &TechMapOptions::default(),
-        )
-        .expect("restore package boundary models after mapping internal Q/D pseudo-ports");
+        for nf_cover_search in [
+            NfCoverSearch::Automatic,
+            NfCoverSearch::FastAndArea,
+            NfCoverSearch::GuardedArea,
+        ] {
+            let mapped = map_sequential_choice_aig_to_netlist(
+                &design,
+                &choices,
+                &library,
+                &SequentialTechMapConstraints::default(),
+                &TechMapOptions {
+                    nf_cover_search,
+                    ..TechMapOptions::default()
+                },
+            )
+            .expect("restore package boundary models after mapping internal Q/D pseudo-ports");
 
-        assert_eq!(mapped.stats.selected_instance_count, 2);
-        assert!(
-            (mapped.stats.worst_input_to_register_arrival.unwrap() - 1.25).abs() < 1e-12,
-            "physical external data must still include the representative-driver delay"
-        );
-        assert!(
-            (mapped.stats.worst_register_to_output_arrival.unwrap() - 0.7).abs() < 1e-12,
-            "physical register output must still include the receiver-pin default load"
-        );
+            assert_eq!(mapped.stats.selected_instance_count, 2);
+            assert!(
+                (mapped.stats.worst_input_to_register_arrival.unwrap() - 1.25).abs() < 1e-12,
+                "physical external data must still include the representative-driver delay"
+            );
+            assert!(
+                (mapped.stats.worst_register_to_output_arrival.unwrap() - 0.7).abs() < 1e-12,
+                "physical register output must still include the receiver-pin default load"
+            );
+        }
     }
 
     #[test]

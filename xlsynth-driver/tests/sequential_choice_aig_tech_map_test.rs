@@ -338,9 +338,9 @@ fn choice_aig_portfolio_preserves_register_timing_and_stable_ties() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "choice-aig-tech-map: 4 instances, area=8, delay=3.75, choices=0, cuts=4, candidates=1, buffers=0, upsizes=0, downsizes=0, timing-model=nf-liberty, representative-slew=0.01, representative-load=0.04, registers=1, register-area=4, clock-period=10, worst-register-slack=6.25, portfolio-candidates=2, portfolio-selected=0\n"
+    xlsynth_test_helpers::compare_golden_text(
+        &String::from_utf8(output.stderr).unwrap(),
+        "tests/goldens/choice_aig_registered_portfolio.stderr",
     );
     assert!(fixture.netlist_path.is_file());
 }
@@ -498,7 +498,6 @@ fn choice_aig_portfolio_preserves_combinational_outputs_and_stable_ties() {
     assert!(baseline.status.success());
     let baseline_netlist =
         std::fs::read(&fixture.netlist_path).expect("read deterministic baseline netlist");
-    let baseline_diagnostics = String::from_utf8(baseline.stderr).unwrap();
 
     let alternative_path = fixture
         .aiger_path
@@ -512,12 +511,9 @@ fn choice_aig_portfolio_preserves_combinational_outputs_and_stable_ties() {
         std::fs::read(&fixture.netlist_path).expect("read selected portfolio netlist"),
         baseline_netlist
     );
-    assert_eq!(
-        String::from_utf8(portfolio.stderr).unwrap(),
-        format!(
-            "{}, portfolio-candidates=2, portfolio-selected=0\n",
-            baseline_diagnostics.trim_end()
-        )
+    xlsynth_test_helpers::compare_golden_text(
+        &String::from_utf8(portfolio.stderr).unwrap(),
+        "tests/goldens/choice_aig_combinational_portfolio.stderr",
     );
 }
 

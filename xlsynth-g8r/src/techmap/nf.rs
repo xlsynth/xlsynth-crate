@@ -9,8 +9,10 @@
 //! intermediate GENLIB conversion, this implementation retains the exact area
 //! recorded in the supplied Liberty model.
 
+use super::electrical::{self, ElectricalBoundary, NfTimingCalibration, PinTimingCache};
 use crate::aig::{AigNode, AigOperand, AigRef, ChoiceAig, GateFn};
 use crate::liberty_model::Library;
+use crate::netlist::sta::{CombinationalOutputLoad, SignalTiming};
 use crate::techmap::cover::{CoverPlan, Solution, SolutionChoice, SolutionId, SourceKind};
 use crate::techmap::cuts::{ChoiceAnalysis, Cut};
 use crate::techmap::liberty_index::{CellBindingId, LibertyCellIndex, RepresentativePinDelayTable};
@@ -38,6 +40,56 @@ pub(super) struct NfCover {
     pub plan: CoverPlan,
     pub enumerated_cut_count: usize,
     pub representative_output_load: Option<f64>,
+}
+
+/// Builds a calibrated scalar or per-candidate electrical cover from one seed.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_electrical_cover(
+    choice_aig: &ChoiceAig,
+    analysis: &ChoiceAnalysis,
+    library: &Library,
+    cell_index: &LibertyCellIndex,
+    options: &TechMapOptions,
+    constraints: &TechMapTimingConstraints,
+    context: NfTimingCalibration,
+    boundary: &ElectricalBoundary,
+    feedback: bool,
+) -> Result<NfCover> {
+    let mut mapper = NfMapper::new(
+        choice_aig,
+        analysis,
+        library,
+        cell_index,
+        options,
+        constraints,
+    )?;
+    mapper.pin_delays = Some(cell_index.pin_delays_at(
+        library,
+        context.input_transition,
+        Some(context.output_load),
+    )?);
+    if feedback {
+        mapper.enable_electrical(context, boundary, options, constraints)?;
+    }
+    mapper.map()
+}
+
+/// Timing carried by a candidate; pin delays retain conservative required
+/// bounds.
+#[derive(Clone, Debug)]
+struct ElectricalMatch {
+    timing: SignalTiming,
+    input_delays: SmallVec<[f64; MAX_TRUTH_TABLE_INPUTS]>,
+}
+
+struct ElectricalMapping<'a> {
+    cache: PinTimingCache<'a>,
+    loads: Vec<[CombinationalOutputLoad; 2]>,
+    input_timings: Vec<Option<SignalTiming>>,
+    outputs: Vec<CombinationalOutputLoad>,
+    boundary: ElectricalBoundary,
+    options: TechMapOptions,
+    constraints: TechMapTimingConstraints,
 }
 
 /// Bounded alternative covering policies for unusually large mapped cones.
@@ -183,6 +235,7 @@ enum NfChoice {
 /// Scalar unit-delay arrival, shared-cone area flow, and reconstruction data.
 #[derive(Clone, Debug)]
 struct NfMatch {
+    electrical: Option<ElectricalMatch>,
     arrival: f64,
     flow: f64,
     choice: NfChoice,
@@ -538,6 +591,9 @@ fn enumerate_nf_cuts(
     let mut cut_delays = vec![0.0; graph.gates.len()];
 
     for (node_id, node) in graph.gates.iter().enumerate() {
+        if node_id % 256 == 0 {
+            crate::optimization_budget::check()?;
+        }
         let node_ref = AigRef { id: node_id };
         match node {
             AigNode::Input { .. } => {
@@ -717,6 +773,8 @@ fn refresh_nf_cut(
 
 /// Compact, single-objective state for a complete ABC-shaped NF mapping.
 struct NfMapper<'a> {
+    library: &'a Library,
+    electrical: Option<ElectricalMapping<'a>>,
     choice_aig: &'a ChoiceAig,
     cell_index: &'a LibertyCellIndex,
     pin_delays: Option<RepresentativePinDelayTable>,
@@ -743,7 +801,7 @@ impl<'a> NfMapper<'a> {
     fn new(
         choice_aig: &'a ChoiceAig,
         analysis: &ChoiceAnalysis,
-        library: &Library,
+        library: &'a Library,
         cell_index: &'a LibertyCellIndex,
         options: &TechMapOptions,
         constraints: &TechMapTimingConstraints,
@@ -763,7 +821,7 @@ impl<'a> NfMapper<'a> {
     fn new_with_policy(
         choice_aig: &'a ChoiceAig,
         analysis: &ChoiceAnalysis,
-        library: &Library,
+        library: &'a Library,
         cell_index: &'a LibertyCellIndex,
         options: &TechMapOptions,
         constraints: &TechMapTimingConstraints,
@@ -853,6 +911,9 @@ impl<'a> NfMapper<'a> {
         let mut matched_candidate_count = 0;
 
         for (node_id, node) in graph.gates.iter().enumerate() {
+            if node_id % 256 == 0 {
+                crate::optimization_budget::check()?;
+            }
             if !matches!(node, AigNode::And2 { .. }) {
                 continue;
             }
@@ -908,6 +969,8 @@ impl<'a> NfMapper<'a> {
         }
 
         Ok(Self {
+            library,
+            electrical: None,
             choice_aig,
             cell_index,
             pin_delays,
@@ -932,18 +995,338 @@ impl<'a> NfMapper<'a> {
         })
     }
 
+    /// Seeds unknown internal loads while honoring known capture/output loads.
+    fn enable_electrical(
+        &mut self,
+        context: NfTimingCalibration,
+        boundary: &ElectricalBoundary,
+        options: &TechMapOptions,
+        constraints: &TechMapTimingConstraints,
+    ) -> Result<()> {
+        let load = CombinationalOutputLoad {
+            rise: context.output_load,
+            fall: context.output_load,
+        };
+        let outputs = electrical::output_loads(self.choice_aig, self.library, options, boundary)?;
+        let mut loads = vec![[load; 2]; self.choice_aig.graph().gates.len()];
+        let mut seen = BTreeSet::new();
+        for (output, load) in self.outputs.iter().zip(&outputs) {
+            let slot = &mut loads[output.state.node_id][output.state.polarity_index()];
+            if seen.insert(output.state) {
+                *slot = CombinationalOutputLoad::default();
+            }
+            electrical::add_load(slot, *load);
+        }
+        self.electrical = Some(ElectricalMapping {
+            cache: PinTimingCache::new(self.library, context),
+            loads,
+            input_timings: vec![None; self.choice_aig.graph().gates.len()],
+            outputs,
+            boundary: boundary.clone(),
+            options: options.clone(),
+            constraints: constraints.clone(),
+        });
+        self.refresh_input_timings()
+    }
+
+    /// Recharacterizes actual source drivers at the frozen round loads.
+    fn refresh_input_timings(&mut self) -> Result<()> {
+        let Some(mapping) = self.electrical.as_mut() else {
+            return Ok(());
+        };
+        for (node, kind) in self.choice_aig.graph().gates.iter().enumerate() {
+            if matches!(kind, AigNode::Input { .. }) {
+                mapping.input_timings[node] = Some(electrical::source_timing(
+                    node,
+                    mapping.loads[node][0],
+                    self.choice_aig,
+                    self.library,
+                    &mapping.constraints,
+                    &mapping.options,
+                    &mapping.boundary,
+                )?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Uses only live cover connections, then retimes and rebuilds requireds.
+    fn update_electrical_loads(&mut self) -> Result<()> {
+        let mapping = self
+            .electrical
+            .as_ref()
+            .expect("electrical mapping enabled");
+        let mut loads = vec![[CombinationalOutputLoad::default(); 2]; self.map_refs.len()];
+        for (output, load) in self.outputs.iter().zip(&mapping.outputs) {
+            electrical::add_load(
+                &mut loads[output.state.node_id][output.state.polarity_index()],
+                *load,
+            );
+        }
+        for (node, phases) in self.selected.iter().enumerate() {
+            for (phase, selected) in phases.iter().enumerate() {
+                if self.map_refs[node][phase] == 0 {
+                    continue;
+                }
+                if let Some(NfMatch {
+                    choice: NfChoice::Cell { binding, inputs },
+                    ..
+                }) = selected
+                {
+                    let binding = self.cell_index.binding(*binding);
+                    for (pin, input) in inputs.iter().enumerate() {
+                        electrical::add_load(
+                            &mut loads[input.node_id][input.polarity_index()],
+                            binding.input_capacitances[pin],
+                        );
+                    }
+                }
+            }
+        }
+        let mapping = self.electrical.as_mut().unwrap();
+        for (node, phases) in loads.iter().enumerate() {
+            for (phase, load) in phases.iter().enumerate() {
+                if self.map_refs[node][phase] > 0 {
+                    // Damping changes predictions, not the real final STA
+                    // loads.
+                    let old = mapping.loads[node][phase];
+                    mapping.loads[node][phase] = CombinationalOutputLoad {
+                        rise: 0.5 * old.rise + 0.5 * load.rise,
+                        fall: 0.5 * old.fall + 0.5 * load.fall,
+                    };
+                }
+            }
+        }
+        mapping.cache.clear();
+        self.refresh_input_timings()?;
+        self.reset_exact_matches(0)?;
+        self.target_delay = self
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                self.best[output.state.node_id][output.state.polarity_index()]
+                    .as_ref()
+                    .map(|m| m.arrival)
+            })
+            .fold(0.0_f64, f64::max);
+        self.requireds.fill([f64::INFINITY; 2]);
+        for output in &self.outputs {
+            let slot = &mut self.requireds[output.state.node_id][output.state.polarity_index()];
+            *slot = slot.min(output.required.unwrap_or(self.target_delay));
+        }
+        for node in (0..self.best.len()).rev() {
+            for phase in 0..2 {
+                if self.map_refs[node][phase] == 0 {
+                    continue;
+                }
+                if let Some(selected) = self.best[node][phase].clone() {
+                    if self.is_same_node_inverter(node, &selected) {
+                        self.requireds[node][1 - phase] = self.requireds[node][1 - phase]
+                            .min(self.requireds[node][phase] - self.match_pin_delay(&selected, 0));
+                    }
+                }
+            }
+            for phase in 0..2 {
+                if self.map_refs[node][phase] == 0 {
+                    continue;
+                }
+                if let Some(selected) = self.best[node][phase].clone() {
+                    if let NfChoice::Cell { inputs, .. } = &selected.choice {
+                        if !self.is_same_node_inverter(node, &selected) {
+                            for (pin, input) in inputs.iter().enumerate() {
+                                self.update_required(
+                                    *input,
+                                    self.requireds[node][phase]
+                                        - self.match_pin_delay(&selected, pin),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Uses the chosen match's own arc costs when propagating required times.
+    fn match_pin_delay(&self, selected: &NfMatch, pin: usize) -> f64 {
+        if let Some(timing) = &selected.electrical {
+            return timing.input_delays[pin];
+        }
+        match &selected.choice {
+            NfChoice::Cell { binding, .. } => self.pin_delay(*binding, pin),
+            NfChoice::Source(_) => 0.0,
+        }
+    }
+
+    /// Evaluates only local cell arcs, reusing cached zero-arrival responses.
+    fn electrical_cell(
+        &self,
+        state: NfState,
+        binding: CellBindingId,
+        inputs: &[SignalTiming],
+    ) -> Result<ElectricalMatch> {
+        let mapping = self.electrical.as_ref().expect("electrical mode enabled");
+        let binding = self.cell_index.binding(binding);
+        let mut timing = electrical::uniform_timing(0.0, 0.0);
+        let mut input_delays = SmallVec::new();
+        for (pin, input) in inputs.iter().enumerate() {
+            let (output, delay) = mapping.cache.pin(
+                binding,
+                pin,
+                *input,
+                mapping.loads[state.node_id][state.polarity_index()],
+            )?;
+            timing = electrical::merge_timing(timing, output);
+            input_delays.push(delay);
+        }
+        Ok(ElectricalMatch {
+            timing,
+            input_delays,
+        })
+    }
+
+    /// Propagates separate delay/area child timing points for one candidate.
+    fn score_electrical_candidate(
+        &self,
+        state: NfState,
+        candidate: &NfCandidate,
+        required: f64,
+    ) -> Result<Option<(NfMatch, NfMatch)>> {
+        let Some(inputs) = self.ordered_candidate_inputs(candidate, NfCandidateTimingSource::Flow)
+        else {
+            return Ok(None);
+        };
+        let binding = self.cell_index.binding(candidate.binding);
+        let mut delay_inputs = SmallVec::<[SignalTiming; MAX_TRUTH_TABLE_INPUTS]>::new();
+        let mut area_inputs = SmallVec::<[SignalTiming; MAX_TRUTH_TABLE_INPUTS]>::new();
+        let mut delay_flow = binding.area;
+        let mut area_flow = binding.area;
+        let mapping = self.electrical.as_ref().unwrap();
+        for (pin, input) in inputs.iter().enumerate() {
+            let matches = &self.matches[input.node_id][input.polarity_index()];
+            let Some(fast) = matches.delay.as_ref() else {
+                return Ok(None);
+            };
+            let mut area = fast;
+            if required.is_finite() {
+                if let Some(candidate) = matches.area.as_ref() {
+                    let timing = candidate
+                        .electrical
+                        .as_ref()
+                        .expect("electrical child")
+                        .timing;
+                    let (output, _) = mapping.cache.pin(
+                        binding,
+                        pin,
+                        timing,
+                        mapping.loads[state.node_id][state.polarity_index()],
+                    )?;
+                    if electrical::worst_arrival(output) <= required {
+                        area = candidate;
+                    }
+                }
+            }
+            let delay = if self.policy.preserve_fast_delay_children() {
+                fast
+            } else {
+                area
+            };
+            delay_inputs.push(delay.electrical.as_ref().expect("electrical child").timing);
+            area_inputs.push(area.electrical.as_ref().expect("electrical child").timing);
+            delay_flow += delay.flow;
+            area_flow += area.flow;
+        }
+        let delay = self.electrical_cell(state, candidate.binding, &delay_inputs)?;
+        let area = self.electrical_cell(state, candidate.binding, &area_inputs)?;
+        let references = self.flow_refs[state.node_id][state.polarity_index()].max(1.0);
+        let choice = NfChoice::Cell {
+            binding: candidate.binding,
+            inputs,
+        };
+        Ok(Some((
+            NfMatch {
+                arrival: electrical::worst_arrival(delay.timing),
+                electrical: Some(delay),
+                flow: delay_flow / references,
+                choice: choice.clone(),
+            },
+            NfMatch {
+                arrival: electrical::worst_arrival(area.timing),
+                electrical: Some(area),
+                flow: area_flow / references,
+                choice,
+            },
+        )))
+    }
+
+    /// Keeps inverter phase closure in the same electrical domain as its
+    /// source.
+    fn time_inverter(
+        &self,
+        state: NfState,
+        opposite: &NfMatch,
+        result: &mut NfMatch,
+    ) -> Result<()> {
+        if let Some(source) = &opposite.electrical {
+            let timing = self.electrical_cell(state, self.inverter.unwrap(), &[source.timing])?;
+            result.arrival = electrical::worst_arrival(timing.timing);
+            result.electrical = Some(timing);
+        }
+        Ok(())
+    }
+
+    /// Recomputes the complete electrical match after selected children change.
+    fn retime_match(&self, state: NfState, selected: &mut NfMatch) -> Result<()> {
+        if self.electrical.is_none() {
+            selected.arrival = self.choice_arrival(&selected.choice)?;
+            return Ok(());
+        }
+        let timing = match &selected.choice {
+            NfChoice::Source(SourceKind::Input(node)) => ElectricalMatch {
+                timing: self.electrical.as_ref().unwrap().input_timings[node.id].unwrap(),
+                input_delays: SmallVec::new(),
+            },
+            NfChoice::Source(SourceKind::Literal(_)) => ElectricalMatch {
+                timing: electrical::uniform_timing(0.0, 0.0),
+                input_delays: SmallVec::new(),
+            },
+            NfChoice::Cell { binding, inputs } => {
+                let inputs = inputs
+                    .iter()
+                    .map(|input| {
+                        self.best[input.node_id][input.polarity_index()]
+                            .as_ref()
+                            .and_then(|m| m.electrical.as_ref())
+                            .map(|e| e.timing)
+                            .ok_or_else(|| anyhow!("missing electrical child timing"))
+                    })
+                    .collect::<Result<SmallVec<[SignalTiming; MAX_TRUTH_TABLE_INPUTS]>>>()?;
+                self.electrical_cell(state, *binding, &inputs)?
+            }
+        };
+        selected.arrival = electrical::worst_arrival(timing.timing);
+        selected.electrical = Some(timing);
+        Ok(())
+    }
+
     /// Executes the four mapping/reference rounds and two exact-area rounds.
     fn map(&mut self) -> Result<NfCover> {
         for round in 0..NF_AREA_FLOW_ROUNDS {
+            crate::optimization_budget::check()?;
+            if round > 0 && self.electrical.is_some() {
+                self.update_electrical_loads()?;
+            }
             self.compute_round_matches(round)?;
             self.set_mapping_references(round)?;
         }
 
         for round in 0..NF_EXACT_AREA_ROUNDS {
+            crate::optimization_budget::check()?;
             self.recover_exact_area(round)?;
         }
         self.fix_primary_output_drivers()?;
-        if self.has_endpoint_constraints {
+        if self.has_endpoint_constraints || self.electrical.is_some() {
             // Exact recovery visits roots before their shared children. Bring
             // every selected arrival up to date after the last recovery and
             // any complemented-output cleanup before checking endpoints.
@@ -960,15 +1343,12 @@ impl<'a> NfMapper<'a> {
         })
     }
 
-    /// Returns the timing cost of the selected explicit phase inverter.
-    fn inverter_delay(&self) -> f64 {
-        self.inverter
-            .map_or(NF_UNIT_DELAY, |inverter| self.pin_delay(inverter, 0))
-    }
-
     /// Computes one delay and one flow match for every concrete object phase.
     fn compute_round_matches(&mut self, round: usize) -> Result<()> {
         for node_id in 0..self.choice_aig.graph().gates.len() {
+            if node_id % 256 == 0 {
+                crate::optimization_budget::check()?;
+            }
             if round != 0 {
                 for polarity in [false, true] {
                     let state = NfState { node_id, polarity };
@@ -988,7 +1368,7 @@ impl<'a> NfMapper<'a> {
 
                 for candidate in &self.candidates[node_id][state.polarity_index()] {
                     let Some((delay_candidate, area_candidate)) =
-                        self.score_flow_candidate(state, candidate, required)
+                        self.score_flow_candidate(state, candidate, required)?
                     else {
                         continue;
                     };
@@ -1019,7 +1399,7 @@ impl<'a> NfMapper<'a> {
                 slot.area = direct_area;
             }
 
-            self.close_inverter_phases(node_id, &mut phases, round);
+            self.close_inverter_phases(node_id, &mut phases, round)?;
             self.matches[node_id] = phases;
         }
 
@@ -1047,12 +1427,12 @@ impl<'a> NfMapper<'a> {
         else {
             return f64::INFINITY;
         };
-        let NfChoice::Cell { binding, inputs } = &previous.choice else {
+        let NfChoice::Cell { inputs, .. } = &previous.choice else {
             return previous.arrival;
         };
         let mut inferred: f64 = 0.0;
         for (input_index, child) in inputs.iter().enumerate() {
-            let pin_delay = self.pin_delay(*binding, input_index);
+            let pin_delay = self.match_pin_delay(previous, input_index);
             if let Some(child_match) = self.matches[child.node_id][child.polarity_index()]
                 .delay
                 .as_ref()
@@ -1082,7 +1462,19 @@ impl<'a> NfMapper<'a> {
             }
         };
         Some(NfMatch {
+            electrical: self.electrical.as_ref().map(|electrical| ElectricalMatch {
+                timing: match source {
+                    SourceKind::Input(node) => {
+                        electrical.input_timings[node.id].expect("input timing prepared")
+                    }
+                    SourceKind::Literal(_) => electrical::uniform_timing(0.0, 0.0),
+                },
+                input_delays: SmallVec::new(),
+            }),
             arrival: match source {
+                SourceKind::Input(node) if self.electrical.is_some() => electrical::worst_arrival(
+                    self.electrical.as_ref().unwrap().input_timings[node.id].unwrap(),
+                ),
                 SourceKind::Input(node) => self
                     .input_arrivals
                     .as_ref()
@@ -1156,6 +1548,19 @@ impl<'a> NfMapper<'a> {
         state: NfState,
         candidate: &NfCandidate,
         required: f64,
+    ) -> Result<Option<(NfMatch, NfMatch)>> {
+        if self.electrical.is_some() {
+            return self.score_electrical_candidate(state, candidate, required);
+        }
+        Ok(self.score_scalar_candidate(state, candidate, required))
+    }
+
+    /// Preserves the incumbent scalar matching algorithm exactly.
+    fn score_scalar_candidate(
+        &self,
+        state: NfState,
+        candidate: &NfCandidate,
+        required: f64,
     ) -> Option<(NfMatch, NfMatch)> {
         let binding = self.cell_index.binding(candidate.binding);
         let inputs = self.ordered_candidate_inputs(candidate, NfCandidateTimingSource::Flow)?;
@@ -1198,11 +1603,13 @@ impl<'a> NfMapper<'a> {
         };
         Some((
             NfMatch {
+                electrical: None,
                 arrival: delay_arrival,
                 flow: delay_flow / flow_references,
                 choice: choice.clone(),
             },
             NfMatch {
+                electrical: None,
                 arrival: area_arrival,
                 flow: area_flow / flow_references,
                 choice,
@@ -1216,9 +1623,9 @@ impl<'a> NfMapper<'a> {
         node_id: usize,
         phases: &mut [NfPhaseMatches; 2],
         round: usize,
-    ) {
+    ) -> Result<()> {
         let Some(inverter) = self.inverter else {
-            return;
+            return Ok(());
         };
         let inverter_area = self.cell_index.binding(inverter).area;
         let inverter_delay = self.pin_delay(inverter, 0);
@@ -1228,13 +1635,14 @@ impl<'a> NfMapper<'a> {
             let Some(opposite_delay) = phases[opposite.polarity_index()].delay.clone() else {
                 continue;
             };
-            let candidate = inverter_match(
+            let mut candidate = inverter_match(
                 state,
                 &opposite_delay,
                 inverter,
                 inverter_area,
                 inverter_delay,
             );
+            self.time_inverter(state, &opposite_delay, &mut candidate)?;
             if phases[state.polarity_index()]
                 .delay
                 .as_ref()
@@ -1250,7 +1658,7 @@ impl<'a> NfMapper<'a> {
         // Initial CI polarity preparation requires an inverter, but ABC's
         // area-improving opposite-phase substitutions start after round zero.
         if round == 0 {
-            return;
+            return Ok(());
         }
         for polarity in [false, true] {
             let state = NfState { node_id, polarity };
@@ -1258,13 +1666,14 @@ impl<'a> NfMapper<'a> {
             let Some(opposite_area) = phases[opposite.polarity_index()].area.clone() else {
                 continue;
             };
-            let candidate = inverter_match(
+            let mut candidate = inverter_match(
                 state,
                 &opposite_area,
                 inverter,
                 inverter_area,
                 inverter_delay,
             );
+            self.time_inverter(state, &opposite_area, &mut candidate)?;
             let required = self.requireds[node_id][state.polarity_index()];
             if candidate.arrival <= required
                 && phases[state.polarity_index()]
@@ -1275,6 +1684,7 @@ impl<'a> NfMapper<'a> {
                 phases[state.polarity_index()].area = Some(candidate);
             }
         }
+        Ok(())
     }
 
     /// Selects the live cover in reverse order and propagates its references.
@@ -1356,8 +1766,8 @@ impl<'a> NfMapper<'a> {
             if self.is_same_node_inverter(node_id, selected) {
                 let opposite = state.opposite();
                 self.map_refs[opposite.node_id][opposite.polarity_index()] += 1;
-                let required =
-                    self.requireds[node_id][state.polarity_index()] - self.inverter_delay();
+                let required = self.requireds[node_id][state.polarity_index()]
+                    - self.match_pin_delay(selected, 0);
                 self.update_required(opposite, required);
                 chosen[opposite.polarity_index()] =
                     Some(self.match_under_required(opposite, true)?);
@@ -1370,10 +1780,7 @@ impl<'a> NfMapper<'a> {
                 continue;
             };
             if !self.is_same_node_inverter(node_id, &selected) {
-                self.propagate_choice(
-                    &selected.choice,
-                    self.requireds[node_id][state.polarity_index()],
-                );
+                self.propagate_choice(&selected, self.requireds[node_id][state.polarity_index()]);
             }
             self.selected[node_id][state.polarity_index()] = Some(selected);
         }
@@ -1413,12 +1820,12 @@ impl<'a> NfMapper<'a> {
     }
 
     /// Propagates one selected cell's references and per-pin required times.
-    fn propagate_choice(&mut self, choice: &NfChoice, required: f64) {
-        let NfChoice::Cell { binding, inputs } = choice else {
+    fn propagate_choice(&mut self, selected: &NfMatch, required: f64) {
+        let NfChoice::Cell { inputs, .. } = &selected.choice else {
             return;
         };
         for (input_index, child) in inputs.iter().enumerate() {
-            let pin_delay = self.pin_delay(*binding, input_index);
+            let pin_delay = self.match_pin_delay(selected, input_index);
             self.map_refs[child.node_id][child.polarity_index()] += 1;
             self.update_required(*child, required - pin_delay);
         }
@@ -1433,6 +1840,7 @@ impl<'a> NfMapper<'a> {
     /// Reselects mapped cones using exact reference/dereference cell areas.
     fn recover_exact_area(&mut self, round: usize) -> Result<()> {
         self.reset_exact_matches(round)?;
+        let mut reference_increments = Vec::new();
         self.requireds.fill([f64::INFINITY; 2]);
         for output in &self.outputs {
             let state = output.state;
@@ -1452,7 +1860,10 @@ impl<'a> NfMapper<'a> {
                     .ok_or_else(|| anyhow!("live NF state has no exact-area match"))?;
 
                 if self.is_same_node_inverter(node_id, &current) {
-                    self.update_required(state.opposite(), required - self.inverter_delay());
+                    self.update_required(
+                        state.opposite(),
+                        required - self.match_pin_delay(&current, 0),
+                    );
                     self.selected[node_id][state.polarity_index()] = Some(current);
                     continue;
                 }
@@ -1463,17 +1874,26 @@ impl<'a> NfMapper<'a> {
 
                 self.dereference_choice(&current.choice)?;
                 let mut winner = current.clone();
-                winner.arrival = self.choice_arrival(&winner.choice)?;
-                let mut winner_area = self.trial_reference_area(&winner.choice)?;
+                self.retime_match(state, &mut winner)?;
+                let mut winner_area = self
+                    .trial_reference_area(&winner.choice, f64::INFINITY, &mut reference_increments)?
+                    .expect("an unbounded reference trial must complete");
 
                 let candidate_count = self.candidates[node_id][state.polarity_index()].len();
                 for candidate_index in 0..candidate_count {
                     let candidate =
                         self.candidates[node_id][state.polarity_index()][candidate_index].clone();
-                    let Some(trial) = self.exact_candidate(&candidate, required) else {
+                    let Some(trial) = self.exact_candidate(state, &candidate, required)? else {
                         continue;
                     };
-                    let trial_area = self.trial_reference_area(&trial.choice)?;
+                    // Areas are nonnegative. A partial subtotal above this
+                    // conservative bound cannot win, including delay ties.
+                    let limit = (winner_area + NF_EPSILON).next_up();
+                    let Some(trial_area) =
+                        self.trial_reference_area(&trial.choice, limit, &mut reference_increments)?
+                    else {
+                        continue;
+                    };
                     if trial_area < winner_area - NF_EPSILON
                         || ((trial_area - winner_area).abs() <= NF_EPSILON
                             && trial.arrival < winner.arrival)
@@ -1483,13 +1903,13 @@ impl<'a> NfMapper<'a> {
                     }
                 }
 
-                let mut permanent = Vec::new();
-                self.reference_choice(&winner.choice, &mut permanent)?;
+                self.reference_choice(&winner.choice, &mut reference_increments)?;
+                reference_increments.clear();
                 self.best[node_id][state.polarity_index()] = Some(winner.clone());
                 self.selected[node_id][state.polarity_index()] = Some(winner.clone());
-                if let NfChoice::Cell { binding, inputs } = &winner.choice {
+                if let NfChoice::Cell { inputs, .. } = &winner.choice {
                     for (input_index, child) in inputs.iter().enumerate() {
-                        let pin_delay = self.pin_delay(*binding, input_index);
+                        let pin_delay = self.match_pin_delay(&winner, input_index);
                         self.update_required(*child, required - pin_delay);
                         if self.best[child.node_id][child.polarity_index()]
                             .as_ref()
@@ -1497,7 +1917,14 @@ impl<'a> NfMapper<'a> {
                         {
                             self.update_required(
                                 child.opposite(),
-                                required - pin_delay - self.inverter_delay(),
+                                required
+                                    - pin_delay
+                                    - self.match_pin_delay(
+                                        self.best[child.node_id][child.polarity_index()]
+                                            .as_ref()
+                                            .unwrap(),
+                                        0,
+                                    ),
                             );
                         }
                     }
@@ -1510,6 +1937,9 @@ impl<'a> NfMapper<'a> {
     /// Promotes the selected cover and recomputes its current arc arrivals.
     fn reset_exact_matches(&mut self, round: usize) -> Result<()> {
         for node_id in 0..self.choice_aig.graph().gates.len() {
+            if node_id % 256 == 0 {
+                crate::optimization_budget::check()?;
+            }
             for polarity in [false, true] {
                 let state = NfState { node_id, polarity };
                 let matches = &self.matches[node_id][state.polarity_index()];
@@ -1535,7 +1965,7 @@ impl<'a> NfMapper<'a> {
                 if self.is_same_node_inverter(node_id, &selected) {
                     continue;
                 }
-                selected.arrival = self.choice_arrival(&selected.choice)?;
+                self.retime_match(state, &mut selected)?;
                 self.best[node_id][state.polarity_index()] = Some(selected.clone());
                 if self.map_refs[node_id][state.polarity_index()] != 0 {
                     self.selected[node_id][state.polarity_index()] = Some(selected);
@@ -1550,7 +1980,7 @@ impl<'a> NfMapper<'a> {
                 if !self.is_same_node_inverter(node_id, &selected) {
                     continue;
                 }
-                selected.arrival = self.choice_arrival(&selected.choice)?;
+                self.retime_match(state, &mut selected)?;
                 self.best[node_id][state.polarity_index()] = Some(selected.clone());
                 if self.map_refs[node_id][state.polarity_index()] != 0 {
                     self.selected[node_id][state.polarity_index()] = Some(selected);
@@ -1589,71 +2019,159 @@ impl<'a> NfMapper<'a> {
     }
 
     /// Builds a timing-feasible exact-area candidate from current child states.
-    fn exact_candidate(&self, candidate: &NfCandidate, required: f64) -> Option<NfMatch> {
-        let inputs = self.ordered_candidate_inputs(candidate, NfCandidateTimingSource::Exact)?;
+    fn exact_candidate(
+        &self,
+        state: NfState,
+        candidate: &NfCandidate,
+        required: f64,
+    ) -> Result<Option<NfMatch>> {
+        let Some(inputs) = self.ordered_candidate_inputs(candidate, NfCandidateTimingSource::Exact)
+        else {
+            return Ok(None);
+        };
+        if self.electrical.is_some() {
+            let choice = NfChoice::Cell {
+                binding: candidate.binding,
+                inputs,
+            };
+            let mut result = NfMatch {
+                electrical: None,
+                arrival: 0.0,
+                flow: 0.0,
+                choice,
+            };
+            self.retime_match(state, &mut result)?;
+            return Ok((result.arrival <= required).then_some(result));
+        }
         let mut arrival: f64 = 0.0;
         for (input_index, child) in inputs.iter().enumerate() {
-            let child_match = self.best[child.node_id][child.polarity_index()].as_ref()?;
+            let Some(child_match) = self.best[child.node_id][child.polarity_index()].as_ref()
+            else {
+                return Ok(None);
+            };
             arrival =
                 arrival.max(child_match.arrival + self.pin_delay(candidate.binding, input_index));
             if arrival > required {
-                return None;
+                return Ok(None);
             }
         }
-        Some(NfMatch {
+        Ok(Some(NfMatch {
+            electrical: None,
             arrival,
             flow: 0.0,
             choice: NfChoice::Cell {
                 binding: candidate.binding,
                 inputs,
             },
-        })
+        }))
     }
 
     /// Charges only cells whose fanin cones become live in this trial.
-    fn trial_reference_area(&mut self, choice: &NfChoice) -> Result<f64> {
-        let mut increments = Vec::new();
-        let area = self.reference_choice(choice, &mut increments)?;
-        for state in increments.into_iter().rev() {
+    fn trial_reference_area(
+        &mut self,
+        choice: &NfChoice,
+        limit: f64,
+        increments: &mut Vec<NfState>,
+    ) -> Result<Option<f64>> {
+        debug_assert!(increments.is_empty());
+        let area = Self::reference_choice_with_limit(
+            self.cell_index,
+            &self.best,
+            &mut self.map_refs,
+            choice,
+            increments,
+            limit,
+        );
+        // Restore even a pruned or failed trial, retaining scratch capacity.
+        for state in increments.drain(..).rev() {
             let references = &mut self.map_refs[state.node_id][state.polarity_index()];
             if *references == 0 {
                 return Err(anyhow!("NF exact-area trial lost a recorded reference"));
             }
             *references -= 1;
         }
-        Ok(area)
+        area
     }
 
     /// Recursively references a cone, charging only first-live children.
     fn reference_choice(&mut self, choice: &NfChoice, backup: &mut Vec<NfState>) -> Result<f64> {
+        Ok(Self::reference_choice_with_limit(
+            self.cell_index,
+            &self.best,
+            &mut self.map_refs,
+            choice,
+            backup,
+            f64::INFINITY,
+        )?
+        .expect("an unbounded reference walk must complete"))
+    }
+
+    /// Borrows selected fanins and preserves recursive summation order while
+    /// abandoning only trials whose nonnegative partial area cannot win.
+    fn reference_choice_with_limit(
+        cell_index: &LibertyCellIndex,
+        best: &[[Option<NfMatch>; 2]],
+        map_refs: &mut [[usize; 2]],
+        choice: &NfChoice,
+        backup: &mut Vec<NfState>,
+        limit: f64,
+    ) -> Result<Option<f64>> {
         let NfChoice::Cell { binding, inputs } = choice else {
-            return Ok(0.0);
+            return Ok(Some(0.0));
         };
-        let mut area = self.cell_index.binding(*binding).area;
+        let mut area = cell_index.binding(*binding).area;
+        if area > limit {
+            return Ok(None);
+        }
         for child in inputs {
-            let previous = self.map_refs[child.node_id][child.polarity_index()];
-            self.map_refs[child.node_id][child.polarity_index()] += 1;
+            let previous = map_refs[child.node_id][child.polarity_index()];
+            map_refs[child.node_id][child.polarity_index()] += 1;
             backup.push(*child);
             if previous == 0 {
-                let child_choice = self.best[child.node_id][child.polarity_index()]
+                let child_choice = &best[child.node_id][child.polarity_index()]
                     .as_ref()
                     .ok_or_else(|| anyhow!("NF exact-area trial references an unmapped child"))?
-                    .choice
-                    .clone();
-                area += self.reference_choice(&child_choice, backup)?;
+                    .choice;
+                // Use the whole bound rather than subtracting ancestor area:
+                // this keeps pruning conservative despite f64 rounding.
+                let Some(child_area) = Self::reference_choice_with_limit(
+                    cell_index,
+                    best,
+                    map_refs,
+                    child_choice,
+                    backup,
+                    limit,
+                )?
+                else {
+                    return Ok(None);
+                };
+                area += child_area;
+                if area > limit {
+                    return Ok(None);
+                }
             }
         }
-        Ok(area)
+        Ok(Some(area))
     }
 
     /// Recursively removes exactly the cone that loses its last reference.
     fn dereference_choice(&mut self, choice: &NfChoice) -> Result<f64> {
+        Self::dereference_selected_choice(self.cell_index, &self.best, &mut self.map_refs, choice)
+    }
+
+    /// Removes last-live fanins without cloning their immutable choices.
+    fn dereference_selected_choice(
+        cell_index: &LibertyCellIndex,
+        best: &[[Option<NfMatch>; 2]],
+        map_refs: &mut [[usize; 2]],
+        choice: &NfChoice,
+    ) -> Result<f64> {
         let NfChoice::Cell { binding, inputs } = choice else {
             return Ok(0.0);
         };
-        let mut area = self.cell_index.binding(*binding).area;
+        let mut area = cell_index.binding(*binding).area;
         for child in inputs {
-            let references = &mut self.map_refs[child.node_id][child.polarity_index()];
+            let references = &mut map_refs[child.node_id][child.polarity_index()];
             if *references == 0 {
                 return Err(anyhow!(
                     "NF exact-area recovery encountered an unreferenced child"
@@ -1661,12 +2179,12 @@ impl<'a> NfMapper<'a> {
             }
             *references -= 1;
             if *references == 0 {
-                let child_choice = self.best[child.node_id][child.polarity_index()]
+                let child_choice = &best[child.node_id][child.polarity_index()]
                     .as_ref()
                     .ok_or_else(|| anyhow!("NF exact-area recovery lost a child match"))?
-                    .choice
-                    .clone();
-                area += self.dereference_choice(&child_choice)?;
+                    .choice;
+                area +=
+                    Self::dereference_selected_choice(cell_index, best, map_refs, child_choice)?;
             }
         }
         Ok(area)
@@ -1674,6 +2192,11 @@ impl<'a> NfMapper<'a> {
 
     /// Moves a legal output inverter off the separately implemented phase.
     fn fix_primary_output_drivers(&mut self) -> Result<()> {
+        if self.electrical.is_some() {
+            // This scalar-only phase heuristic is optional; retain the valid
+            // electrical cover instead of comparing incompatible arc costs.
+            return Ok(());
+        }
         let Some(inverter) = self.inverter else {
             return Ok(());
         };
@@ -1785,6 +2308,7 @@ fn inverter_match(
     delay: f64,
 ) -> NfMatch {
     NfMatch {
+        electrical: None,
         arrival: opposite.arrival + delay,
         flow: opposite.flow + area,
         choice: NfChoice::Cell {
@@ -1926,6 +2450,179 @@ mod tests {
             builder.add_output(name.to_string(), operand.into());
         }
         ChoiceAig::without_choices(builder.build())
+    }
+
+    /// Reference calculation with the original exhaustive recursion order.
+    fn exhaustive_reference_area(
+        index: &LibertyCellIndex,
+        best: &[[Option<NfMatch>; 2]],
+        references: &mut [[usize; 2]],
+        choice: &NfChoice,
+    ) -> f64 {
+        let NfChoice::Cell { binding, inputs } = choice else {
+            return 0.0;
+        };
+        let mut area = index.binding(*binding).area;
+        for child in inputs {
+            let previous = references[child.node_id][child.polarity_index()];
+            references[child.node_id][child.polarity_index()] += 1;
+            if previous == 0 {
+                area += exhaustive_reference_area(
+                    index,
+                    best,
+                    references,
+                    &best[child.node_id][child.polarity_index()]
+                        .as_ref()
+                        .unwrap()
+                        .choice,
+                );
+            }
+        }
+        area
+    }
+
+    #[test]
+    fn bounded_exact_area_matches_exhaustive_walk_and_restores_references() {
+        let mut builder = GateBuilder::new("shared_cones".into(), GateBuilderOptions::no_opt());
+        let inputs = (0..24)
+            .map(|i| builder.add_input(format!("x{i}"), 1).try_into().unwrap())
+            .collect::<Vec<_>>();
+        let mut left = inputs[0];
+        let mut right = inputs[1];
+        for input in &inputs[2..] {
+            let shared = builder.add_and_binary(left, *input);
+            right = builder.add_and_binary(right, shared);
+            left = shared;
+        }
+        builder.add_output("y".into(), right.into());
+        let graph = ChoiceAig::without_choices(builder.build());
+        let library = timed_library(&[
+            ("AND2", &["A", "B"], "A*B", 0.123456789, 1.0),
+            ("INV", &["A"], "!A", 0.234567891, 1.0),
+        ]);
+        let index = LibertyCellIndex::build_nf(&library, 6).unwrap();
+        let analysis = crate::techmap::cuts::analyze_choices(&graph).unwrap();
+        let mut mapper = NfMapper::new(
+            &graph,
+            &analysis,
+            &library,
+            &index,
+            &TechMapOptions::default(),
+            &TechMapTimingConstraints::default(),
+        )
+        .unwrap();
+        mapper.map().unwrap();
+        let state = mapper.outputs[0].state;
+        let choice = mapper.best[state.node_id][state.polarity_index()]
+            .as_ref()
+            .unwrap()
+            .choice
+            .clone();
+        let mut scratch = Vec::new();
+        for share_live_cones in [false, true] {
+            mapper.map_refs.fill([0; 2]);
+            if share_live_cones {
+                for (i, refs) in mapper.map_refs.iter_mut().enumerate() {
+                    if i % 7 == 0 {
+                        *refs = [2; 2];
+                    }
+                }
+            }
+            let before = mapper.map_refs.clone();
+            let exact =
+                exhaustive_reference_area(&index, &mapper.best, &mut before.clone(), &choice);
+            for limit in [
+                0.0,
+                exact / 2.0,
+                exact.next_down(),
+                exact,
+                exact.next_up(),
+                f64::INFINITY,
+            ] {
+                let actual = mapper
+                    .trial_reference_area(&choice, limit, &mut scratch)
+                    .unwrap();
+                if let Some(actual) = actual {
+                    assert_eq!(actual.to_bits(), exact.to_bits());
+                    assert!(actual <= limit);
+                } else {
+                    assert!(exact > limit);
+                }
+                assert_eq!(mapper.map_refs, before);
+                assert!(scratch.is_empty());
+            }
+        }
+
+        mapper.map_refs.fill([0; 2]);
+        let NfChoice::Cell { inputs, .. } = &choice else {
+            panic!("test cone must contain cells");
+        };
+        let child = inputs[0];
+        mapper.best[child.node_id][child.polarity_index()] = None;
+        assert!(
+            mapper
+                .trial_reference_area(&choice, f64::INFINITY, &mut scratch)
+                .is_err()
+        );
+        assert!(mapper.map_refs.iter().all(|refs| *refs == [0; 2]));
+        assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn electrical_load_refresh_counts_live_sinks_once_and_preserves_polarities() {
+        let graph = electrical::tests::electrical_graph();
+        let library = electrical::tests::electrical_library();
+        let options = TechMapOptions {
+            primary_input_transition: 0.01,
+            module_output_load: 2.0,
+            ..Default::default()
+        };
+        let constraints = TechMapTimingConstraints::default();
+        let analysis = crate::techmap::cuts::analyze_choices(&graph).unwrap();
+        let index = LibertyCellIndex::build_nf(&library, 6).unwrap();
+        let mut mapper =
+            NfMapper::new(&graph, &analysis, &library, &index, &options, &constraints).unwrap();
+        mapper
+            .enable_electrical(
+                NfTimingCalibration {
+                    input_transition: 4.0,
+                    output_load: 4.0,
+                    sampled_cells: 3,
+                },
+                &ElectricalBoundary::default(),
+                &options,
+                &constraints,
+            )
+            .unwrap();
+        mapper.compute_round_matches(0).unwrap();
+        mapper.set_mapping_references(0).unwrap();
+        let old_loads = mapper.electrical.as_ref().unwrap().loads.clone();
+        mapper.update_electrical_loads().unwrap();
+        let loads = &mapper.electrical.as_ref().unwrap().loads;
+        let and_nodes = graph
+            .graph()
+            .gates
+            .iter()
+            .enumerate()
+            .filter_map(|(id, node)| matches!(node, AigNode::And2 { .. }).then_some(id))
+            .collect::<Vec<_>>();
+        // The first gate has one live sink and one dead AIG sink. The dead
+        // structural alternative is never charged to the electrical cover.
+        assert_eq!(
+            loads[and_nodes[0]][0].rise,
+            (old_loads[and_nodes[0]][0].rise + 1.0) / 2.0
+        );
+        let root = and_nodes[1];
+        assert_eq!(loads[root][0].rise, 2.5); // output load 2 plus the phase inverter.
+        assert_eq!(loads[root][1].rise, 2.0); // separate complemented output load.
+        assert_eq!(mapper.map_refs[*and_nodes.last().unwrap()], [0, 0]);
+        assert_eq!(
+            mapper.electrical.as_ref().unwrap().input_timings[1]
+                .unwrap()
+                .rise
+                .transition,
+            0.01
+        );
     }
 
     /// Builds a two-level AND that also has a shallow three-input cut.
@@ -2133,6 +2830,7 @@ mod tests {
 
         let (delay_match, area_match) = mapper
             .score_flow_candidate(root_state, candidate, 3.0)
+            .unwrap()
             .expect("both child implementations should be available");
 
         assert_eq!(delay_match.arrival, 1.5);
@@ -2222,7 +2920,15 @@ mod tests {
             .find(|candidate| candidate.inputs.iter().all(|input| !input.polarity))
             .expect("the direct symmetric AND candidate should be available");
         let recovered = mapper
-            .exact_candidate(candidate, 14.0)
+            .exact_candidate(
+                NfState {
+                    node_id: root,
+                    polarity: false,
+                },
+                candidate,
+                14.0,
+            )
+            .unwrap()
             .expect("exact-area recovery should preserve the faster assignment");
 
         assert_eq!(recovered.arrival, 9.0);

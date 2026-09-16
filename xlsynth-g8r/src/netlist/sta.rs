@@ -77,6 +77,8 @@ use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
+pub(crate) mod prepared;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
     pub arrival: f64,
@@ -368,6 +370,19 @@ pub struct TimingQueryDiagnosticCounts {
     pub delay_slew_multiple_above_max_clamp_count: usize,
     pub setup_below_min_clamp_count: usize,
     pub setup_above_max_clamp_count: usize,
+}
+
+impl TimingQueryDiagnosticCounts {
+    /// Accumulates shared-coordinate diagnostics once for each evaluated table.
+    fn accumulate(&mut self, other: Self) {
+        self.delay_slew_below_min_clamp_count += other.delay_slew_below_min_clamp_count;
+        self.delay_slew_single_above_max_extrapolation_count +=
+            other.delay_slew_single_above_max_extrapolation_count;
+        self.delay_slew_multiple_above_max_clamp_count +=
+            other.delay_slew_multiple_above_max_clamp_count;
+        self.setup_below_min_clamp_count += other.setup_below_min_clamp_count;
+        self.setup_above_max_clamp_count += other.setup_above_max_clamp_count;
+    }
 }
 
 /// Identifies immutable pooled Liberty values inside one live library scope.
@@ -2619,6 +2634,92 @@ fn update_traced_timing_predecessor(
     }
 }
 
+/// Characterizes one input edge, retaining legal output edges and STA
+/// envelopes.
+#[cfg(test)]
+pub(crate) fn characterize_combinational_pin_edge(
+    library: &crate::liberty_model::Library,
+    cell_name: &str,
+    output_pin: &Pin,
+    input_pin: &str,
+    input_edge: TimingEdge,
+    transition: f64,
+    output_load: CombinationalOutputLoad,
+) -> Result<[Option<EdgeTiming>; 2]> {
+    let mut source = EdgeTimingSet::default();
+    source.insert(EdgeTimingCandidate::from_source_timing(
+        EdgeTiming {
+            arrival: 0.0,
+            transition,
+        },
+        input_edge,
+    ));
+    let mut result: [Option<EdgeTiming>; 2] = [None, None];
+    let mut diagnostics = TimingQueryDiagnosticCounts::default();
+    let known_values = HashMap::new();
+    for arc in &output_pin.timing_arcs {
+        if !split_related_pin_names(library.resolve_string(&arc.related_pin))
+            .any(|pin| pin == input_pin)
+        {
+            continue;
+        }
+        let context = format!("cell '{cell_name}' input '{input_pin}' characterization");
+        if !arc_when_may_apply(library, arc, &known_values, &context)? {
+            continue;
+        }
+        let kind = StaTimingType::from_raw(arc.timing_type_str(library));
+        if !kind.is_combinational() {
+            return Err(anyhow!("{context}: non-combinational arc"));
+        }
+        let sense = StaTimingSense::from_raw(arc.timing_sense_str(library));
+        for (index, rise) in [true, false].into_iter().enumerate() {
+            let allowed = match sense {
+                StaTimingSense::PositiveUnate => rise == (input_edge == TimingEdge::Rise),
+                StaTimingSense::NegativeUnate => rise != (input_edge == TimingEdge::Rise),
+                StaTimingSense::NonUnate | StaTimingSense::Unspecified => true,
+                _ => return Err(anyhow!("{context}: unsupported timing sense")),
+            };
+            if !allowed || (rise && !kind.produces_rise()) || (!rise && !kind.produces_fall()) {
+                continue;
+            }
+            let (delay_kind, slew_kind, load) = if rise {
+                (
+                    StaTimingTableKind::CellRise,
+                    StaTimingTableKind::RiseTransition,
+                    output_load.rise,
+                )
+            } else {
+                (
+                    StaTimingTableKind::CellFall,
+                    StaTimingTableKind::FallTransition,
+                    output_load.fall,
+                )
+            };
+            let edges = evaluate_output_edge_set(
+                library,
+                find_unique_table(arc, delay_kind, &context)?,
+                find_unique_table(arc, slew_kind, &context)?,
+                &source,
+                load,
+                &mut diagnostics,
+                &context,
+                delay_kind,
+                slew_kind,
+            )?;
+            for edge in edges.iter().map(|candidate| candidate.timing) {
+                result[index] = Some(match result[index] {
+                    None => edge,
+                    Some(previous) => EdgeTiming {
+                        arrival: previous.arrival.max(edge.arrival),
+                        transition: previous.transition.max(edge.transition),
+                    },
+                });
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Evaluates one actual flip-flop output using production clock-to-Q tables.
 pub(crate) fn evaluate_sequential_cell_output_timing(
     library: &crate::liberty_model::Library,
@@ -3672,24 +3773,79 @@ fn evaluate_table_with_query_and_diagnostics(
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
     let layout = timing_table_layout(library, table, context)?;
     let rank = array.rank();
+    evaluate_resolved_table(
+        rank,
+        &layout,
+        layout.variables.map(AxisVariable::from_raw),
+        matches!(
+            LibertyTableKind::from_raw(table.kind_str()),
+            LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
+        ),
+        query,
+        timing_query_diagnostic_counts,
+        context,
+        |indices| evaluate_table_corner_value(library, &array, table, indices, context),
+    )
+}
+
+/// Shared interpolation kernel for ordinary and pre-resolved Liberty tables.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_resolved_table(
+    rank: usize,
+    layout: &TimingTableLayout<'_>,
+    variables: [AxisVariable; 3],
+    is_setup: bool,
+    query: TimingTableQuery,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    context: &str,
+    corner_value: impl Fn(&[usize]) -> Result<f64>,
+) -> Result<f64> {
     if rank == 0 {
-        return array
-            .get(&[])
-            .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
+        return corner_value(&[]);
     }
-    let mut bounds = SmallVec::<[(usize, usize, f64); 3]>::with_capacity(rank);
-    let mut axis_queries = SmallVec::<[f64; 3]>::with_capacity(rank);
-    let is_setup = matches!(
-        LibertyTableKind::from_raw(table.kind_str()),
-        LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
-    );
+    let bounds = resolve_table_query(
+        rank,
+        layout,
+        variables,
+        is_setup,
+        query,
+        timing_query_diagnostic_counts,
+        context,
+    )?;
+    let result = interpolate_table_corners(&bounds[..rank], corner_value)?;
+    if !result.is_finite() {
+        return Err(anyhow!(
+            "{context}: timing table evaluation produced non-finite result {}",
+            result
+        ));
+    }
+    Ok(result)
+}
+
+/// Resolves query coordinates once, independently of the table's corner values.
+fn resolve_table_query(
+    rank: usize,
+    layout: &TimingTableLayout<'_>,
+    variables: [AxisVariable; 3],
+    is_setup: bool,
+    query: TimingTableQuery,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    context: &str,
+) -> Result<[(usize, usize, f64); 3]> {
+    let mut bounds = [(0, 0, 0.0); 3];
+    let mut axis_queries = [0.0; 3];
     let mut above_max_axis_count = 0usize;
 
     for axis_idx in 0..rank {
         let axis = layout.axes[axis_idx];
-        let axis_variable = AxisVariable::from_raw(layout.variables[axis_idx]);
-        let raw_axis_query =
-            axis_query_value_with_query(layout.variables[axis_idx], axis_idx, query, context)?;
+        let axis_variable = variables[axis_idx];
+        let raw_axis_query = resolved_axis_query_value(
+            axis_variable,
+            layout.variables[axis_idx],
+            axis_idx,
+            query,
+            context,
+        )?;
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
         let selects_minimum_characterized_coordinate = match query.minimum_characterized_axis {
@@ -3718,7 +3874,7 @@ fn evaluate_table_with_query_and_diagnostics(
         } else if axis_query > axis_hi {
             above_max_axis_count += 1;
         }
-        axis_queries.push(axis_query);
+        axis_queries[axis_idx] = axis_query;
     }
 
     let extrapolate_single_delay_slew_axis = !is_setup && above_max_axis_count == 1;
@@ -3730,7 +3886,7 @@ fn evaluate_table_with_query_and_diagnostics(
         timing_query_diagnostic_counts.delay_slew_multiple_above_max_clamp_count += 1;
     }
 
-    for (axis_idx, raw_axis_query) in axis_queries.into_iter().enumerate() {
+    for (axis_idx, raw_axis_query) in axis_queries.into_iter().take(rank).enumerate() {
         let axis = layout.axes[axis_idx];
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
@@ -3774,11 +3930,61 @@ fn evaluate_table_with_query_and_diagnostics(
         if !extrapolate_single_delay_slew_axis || axis_query <= axis_hi {
             axis_query = axis_query.min(axis_hi);
         }
-        bounds.push(bracket_axis(axis, axis_query));
+        bounds[axis_idx] = bracket_axis(axis, axis_query);
     }
+    Ok(bounds)
+}
 
-    let mut indices = SmallVec::<[usize; 3]>::new();
-    indices.resize(rank, 0);
+/// Interpolates common one/two-dimensional tables in the generic corner order.
+fn interpolate_table_corners(
+    bounds: &[(usize, usize, f64)],
+    corner_value: impl Fn(&[usize]) -> Result<f64>,
+) -> Result<f64> {
+    match bounds {
+        &[(lo, hi, t)] => {
+            return if lo == hi {
+                Ok(0.0 + corner_value(&[lo])?)
+            } else {
+                Ok((0.0 + (1.0 - t) * corner_value(&[lo])?) + t * corner_value(&[hi])?)
+            };
+        }
+        &[(x0, x1, x), (y0, y1, y)] => {
+            // Do not evaluate zero-weight corners on singleton axes. In
+            // particular, do not reassociate these sums into nested lerps:
+            // preserving rounding preserves deterministic mapping tie-breaks.
+            return Ok(match (x0 == x1, y0 == y1) {
+                (true, true) => 0.0 + corner_value(&[x0, y0])?,
+                (true, false) => {
+                    (0.0 + (1.0 - y) * corner_value(&[x0, y0])?) + y * corner_value(&[x0, y1])?
+                }
+                (false, true) => {
+                    (0.0 + (1.0 - x) * corner_value(&[x0, y0])?) + x * corner_value(&[x1, y0])?
+                }
+                (false, false) => {
+                    let mut value = 0.0;
+                    value += (1.0 - x) * (1.0 - y) * corner_value(&[x0, y0])?;
+                    value += x * (1.0 - y) * corner_value(&[x1, y0])?;
+                    value += (1.0 - x) * y * corner_value(&[x0, y1])?;
+                    value += x * y * corner_value(&[x1, y1])?;
+                    value
+                }
+            });
+        }
+        _ => {
+            // Unusual higher-rank tables retain the fully general evaluator.
+        }
+    }
+    interpolate_table_corners_generic(bounds, corner_value)
+}
+
+/// Generic reference for higher-rank tables and exact fast-path regression
+/// tests.
+fn interpolate_table_corners_generic(
+    bounds: &[(usize, usize, f64)],
+    corner_value: impl Fn(&[usize]) -> Result<f64>,
+) -> Result<f64> {
+    let mut indices = [0; 3];
+    let rank = bounds.len();
     let mut varying_axes = SmallVec::<[(usize, usize, usize, f64); 3]>::with_capacity(rank);
     for (axis_idx, (lo, hi, t)) in bounds.iter().copied().enumerate() {
         if lo == hi {
@@ -3801,15 +4007,8 @@ fn evaluate_table_with_query_and_diagnostics(
                 weight *= 1.0 - *t;
             }
         }
-        let value =
-            evaluate_table_corner_value(library, &array, table, indices.as_slice(), context)?;
+        let value = corner_value(&indices[..rank])?;
         result += weight * value;
-    }
-    if !result.is_finite() {
-        return Err(anyhow!(
-            "{context}: timing table evaluation produced non-finite result {}",
-            result
-        ));
     }
     Ok(result)
 }
@@ -4012,13 +4211,31 @@ fn axis_query_value(
     )
 }
 
+#[cfg(test)]
 fn axis_query_value_with_query(
     variable_name: &str,
     axis_idx: usize,
     query: TimingTableQuery,
     context: &str,
 ) -> Result<f64> {
-    match AxisVariable::from_raw(variable_name) {
+    resolved_axis_query_value(
+        AxisVariable::from_raw(variable_name),
+        variable_name,
+        axis_idx,
+        query,
+        context,
+    )
+}
+
+/// Resolves a query using a variable decoded during library preparation.
+fn resolved_axis_query_value(
+    variable: AxisVariable,
+    variable_name: &str,
+    axis_idx: usize,
+    query: TimingTableQuery,
+    context: &str,
+) -> Result<f64> {
+    match variable {
         AxisVariable::Unspecified => match axis_idx {
             0 => Ok(query.input_transition),
             1 => Ok(query.output_load),

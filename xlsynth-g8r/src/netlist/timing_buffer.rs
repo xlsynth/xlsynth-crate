@@ -7,7 +7,7 @@ use crate::netlist::buffer::{BufferOptions, BufferStats};
 use crate::netlist::cell_catalog::{CatalogCell, CellCatalog};
 use crate::netlist::normalized::{BitExpr, BitIndex, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistInstance, NetlistModule, PortDirection};
-use crate::netlist::report::{NetlistReport, build_netlist_report_with_primary_input_arrivals};
+use crate::netlist::report::NetlistEndpointTiming;
 use crate::netlist::sta::{
     CombinationalOutputLoad, SignalTiming, StaOptions, StaReport, TimingQueryDiagnosticCounts,
     analyze_combinational_max_arrival_with_primary_input_arrivals,
@@ -148,7 +148,7 @@ struct TimingSinkGroup {
 
 #[derive(Clone, Debug)]
 struct TimingSnapshot {
-    report: NetlistReport,
+    report: NetlistEndpointTiming,
     combined: StaReport,
 }
 
@@ -529,7 +529,13 @@ fn insert_timing_aware_buffers_with_strategy(
     }
 
     while let Some(batch) = batches.pop_front() {
-        if stats.timing_evaluations >= MAX_TIMING_EVALUATIONS {
+        crate::optimization_budget::check()?;
+        let limit = match options.effort {
+            crate::netlist::OptimizationEffort::Bounded => 8,
+            crate::netlist::OptimizationEffort::Exhaustive => MAX_TIMING_EVALUATIONS,
+        };
+        if stats.timing_evaluations >= limit {
+            stats.evaluation_budget_exhausted = true;
             break;
         }
 
@@ -629,7 +635,7 @@ fn insert_timing_aware_buffers_with_strategy(
 
         if !accepted {
             stats.rejected_timing_batches += 1;
-            if batch.len() > 1 {
+            if batch.len() > 1 && options.effort == crate::netlist::OptimizationEffort::Exhaustive {
                 let midpoint = batch.len() / 2;
                 batches.push_back(batch[..midpoint].to_vec());
                 batches.push_back(batch[midpoint..].to_vec());
@@ -684,6 +690,7 @@ pub(crate) fn consolidate_timing_aware_buffers(
     while stats.buffers_removed < MAX_BUFFER_CONSOLIDATION_MOVES
         && stats.timing_evaluations < MAX_BUFFER_CONSOLIDATION_EVALUATIONS
     {
+        crate::optimization_budget::check()?;
         let snapshot =
             analyze_timing_snapshot(module, nets, interner, library, sta_options, constraints)?;
         let graph = build_timing_graph(
@@ -718,6 +725,7 @@ pub(crate) fn consolidate_timing_aware_buffers(
                 .iter()
                 .take(MAX_BUFFER_CONSOLIDATION_STRENGTHS)
             {
+                crate::optimization_budget::check()?;
                 if stats.timing_evaluations == MAX_BUFFER_CONSOLIDATION_EVALUATIONS {
                     break;
                 }
@@ -1139,15 +1147,6 @@ fn analyze_timing_snapshot(
     options: StaOptions,
     constraints: &BufferTimingConstraints,
 ) -> Result<TimingSnapshot> {
-    let report = build_netlist_report_with_primary_input_arrivals(
-        module,
-        nets,
-        interner,
-        library,
-        options,
-        &constraints.primary_input_arrivals,
-    )
-    .context("computing exact timing-driven buffer endpoint report")?;
     let cells: HashMap<&str, usize> = library
         .cells
         .iter()
@@ -1185,6 +1184,42 @@ fn analyze_timing_snapshot(
             true,
             &registers,
             &constraints.primary_input_arrivals,
+        )?
+    };
+    let report = if registers.is_empty() {
+        // The combined traversal already is the sole combinational launch
+        // class. Reuse it, including full-report output validation.
+        NetlistEndpointTiming::from_sta_reports(module, nets, interner, &combined, None)?
+    } else {
+        // Keep independent launch classes: merging their collapsed arrival /
+        // slew envelopes is not a substitute for the combined STA above.
+        // Stage attribution and per-stage STA are only reporting concerns.
+        let input_launch = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            module,
+            nets,
+            interner,
+            library,
+            options,
+            true,
+            &[],
+            &constraints.primary_input_arrivals,
+        )?;
+        let register_launch = analyze_register_boundary_max_arrival_with_primary_input_arrivals(
+            module,
+            nets,
+            interner,
+            library,
+            options,
+            false,
+            &registers,
+            &BTreeMap::new(),
+        )?;
+        NetlistEndpointTiming::from_sta_reports(
+            module,
+            nets,
+            interner,
+            &input_launch,
+            Some(&register_launch),
         )?
     };
     Ok(TimingSnapshot { report, combined })
@@ -1926,7 +1961,10 @@ fn preserves_constraints(snapshot: &TimingSnapshot, constraints: &BufferTimingCo
 }
 
 /// Protects every independently reported combinational and register endpoint.
-fn preserves_endpoint_timing(candidate: &NetlistReport, current: &NetlistReport) -> bool {
+fn preserves_endpoint_timing(
+    candidate: &NetlistEndpointTiming,
+    current: &NetlistEndpointTiming,
+) -> bool {
     [
         (
             candidate.max_register_to_register_delay,
@@ -1947,7 +1985,7 @@ fn preserves_endpoint_timing(candidate: &NetlistReport, current: &NetlistReport)
 }
 
 /// Gives register capture first priority, then output and input timing.
-fn timing_improves(candidate: &NetlistReport, current: &NetlistReport) -> bool {
+fn timing_improves(candidate: &NetlistEndpointTiming, current: &NetlistEndpointTiming) -> bool {
     let candidate_scores = [
         candidate.max_register_to_register_delay.unwrap_or(0.0),
         candidate.max_input_to_register_delay.unwrap_or(0.0),
@@ -1970,7 +2008,7 @@ fn timing_improves(candidate: &NetlistReport, current: &NetlistReport) -> bool {
 }
 
 /// Returns the complete worst launched or captured endpoint arrival.
-fn worst_path_delay(report: &NetlistReport) -> f64 {
+fn worst_path_delay(report: &NetlistEndpointTiming) -> f64 {
     [
         report.max_delay,
         report.max_input_to_register_delay,
@@ -2487,7 +2525,7 @@ fn max_load(load: CombinationalOutputLoad) -> f64 {
 pub(crate) mod tests {
     use super::{
         BufferTimingConstraints, TimingDriver, TimingFanout, TimingGraph, TimingSink,
-        TimingSinkGroup, TimingSinkTarget, build_electrical_timing_graph,
+        TimingSinkGroup, TimingSinkTarget, analyze_timing_snapshot, build_electrical_timing_graph,
         consolidate_timing_aware_buffers, exceeds_transition_limit, fanout_eligible,
         fanout_is_overloaded, has_slow_shared_primary_output,
         insert_speculative_timing_aware_buffers, insert_timing_aware_buffers, max_load,
@@ -2503,12 +2541,75 @@ pub(crate) mod tests {
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library};
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::parse::NetRef;
-    use crate::netlist::report::build_netlist_report;
+    use crate::netlist::report::{
+        build_netlist_report, build_netlist_report_with_primary_input_arrivals,
+    };
     use crate::netlist::sta::{
         CombinationalOutputLoad, EdgeTiming, ScopedBoundaryTimingDefaultsSuppression, SignalTiming,
         StaOptions, resolved_module_output_load,
     };
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn lightweight_endpoints_match_full_reports_across_register_boundaries() {
+        let library = registered_timing_library();
+        for source in [
+            r#"module top(a, clk, y); input [1:0] a; input clk; output [1:0] y;
+                BUF b(.A(a[0]), .Y(y[0])); assign y[1] = a[1]; endmodule"#,
+            r#"module top(a, clk, y); input [1:0] a; input clk; output [1:0] y;
+                wire q, d;
+                DFF launch(.D(a[0]), .CLK(clk), .Q(q));
+                BUF b(.A(q), .Y(d));
+                DFF capture(.D(d), .CLK(clk), .Q(y[0]));
+                assign y[1] = a[1]; endmodule"#,
+            r#"module top(a, clk, y); input [1:0] a; input clk; output [1:0] y;
+                wire q, r;
+                DFF first(.D(a[0]), .CLK(clk), .Q(q));
+                DFF second(.D(q), .CLK(clk), .Q(r));
+                DFF third(.D(r), .CLK(clk), .Q(y[0]));
+                assign y[1] = 1'b0; endmodule"#,
+            r#"module top(a, clk, y); input [1:0] a; input clk; output [1:0] y;
+                DFF feedback(.D(y[0]), .CLK(clk), .Q(y[0]));
+                assign y[1] = a[0]; endmodule"#,
+            r#"module top(a, clk, y); input [1:0] a; input clk; output [1:0] y;
+                assign y = 2'b00; endmodule"#,
+            r#"module top(a, clk); input [1:0] a; input clk; endmodule"#,
+        ] {
+            let (module, nets, interner) = parse_module(source);
+            for primary_input_arrivals in [
+                BTreeMap::new(),
+                BTreeMap::from([("a_0".to_string(), 3.25), ("a_1".to_string(), 7.5)]),
+            ] {
+                let constraints = BufferTimingConstraints {
+                    primary_input_arrivals,
+                    ..Default::default()
+                };
+                let options = StaOptions {
+                    primary_input_transition: 0.3,
+                    module_output_load: 0.2,
+                };
+                let full = build_netlist_report_with_primary_input_arrivals(
+                    &module,
+                    &nets,
+                    &interner,
+                    &library,
+                    options,
+                    &constraints.primary_input_arrivals,
+                )
+                .unwrap();
+                let snapshot = analyze_timing_snapshot(
+                    &module,
+                    &nets,
+                    &interner,
+                    &library,
+                    options,
+                    &constraints,
+                )
+                .unwrap();
+                assert_eq!(snapshot.report, (&full).into(), "{source}");
+            }
+        }
+    }
 
     /// Builds complete scalar setup tables for a test capture register.
     fn scalar_table(

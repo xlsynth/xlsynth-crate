@@ -11,6 +11,7 @@
 //! ABC-loop feedback protocol in this API.
 
 mod cover;
+mod cover_search;
 mod cuts;
 mod emit;
 mod liberty_index;
@@ -18,6 +19,9 @@ mod nf;
 mod sequential;
 mod truth;
 
+pub use cover_search::{NfCoverCandidateStats, NfCoverMetrics, NfCoverSearch, NfCoverSearchReport};
+pub use electrical::NfTimingCalibration;
+mod electrical;
 pub use sequential::{
     SequentialTechMapConstraints, map_sequential_choice_aig_to_netlist,
     prepare_fixed_flip_flop_transition, restore_fixed_flip_flop_boundary,
@@ -100,6 +104,18 @@ pub struct TechMapOptions {
     pub module_output_load: f64,
     /// Lightweight timing objective for unconstrained structural mapping.
     pub timing_model: TechMapTimingModel,
+    /// Single fastest-child cover by default; other modes explicitly enable
+    /// complete-cover comparisons or the legacy automatic policy.
+    pub nf_cover_search: NfCoverSearch,
+    /// Fractional final-delay allowance for strictly smaller alternative
+    /// covers. Zero preserves strict Pareto selection; 0.02 allows at most
+    /// two percent. Explicit clock and endpoint requirements are never
+    /// relaxed.
+    pub nf_cover_max_delay_regression: f64,
+    /// Optional cooperative wall-time budget for the calibrated/load-slew
+    /// alternative, after completing its incumbent. None is deterministic and
+    /// unlimited; budget expiry retains the fully optimized incumbent.
+    pub nf_cover_timeout: Option<std::time::Duration>,
     /// Optional buffer insertion after mapping; `None` disables the pass.
     pub buffer_options: Option<BufferOptions>,
     /// Incremental exact-Liberty cell sizing; `None` disables the pass.
@@ -116,9 +132,21 @@ impl Default for TechMapOptions {
             primary_input_transition: 0.01,
             module_output_load: 0.0,
             timing_model: TechMapTimingModel::NfLiberty,
+            nf_cover_search: NfCoverSearch::Single,
+            nf_cover_max_delay_regression: 0.0,
+            nf_cover_timeout: None,
             buffer_options: None,
             resize_options: None,
         }
+    }
+}
+
+impl TechMapOptions {
+    /// Explicit non-NF objectives keep their own mapping implementation.
+    fn uses_nf_cover_search(&self) -> bool {
+        self.nf_cover_search != NfCoverSearch::Automatic
+            && (self.nf_cover_search != NfCoverSearch::Single
+                || self.timing_model == TechMapTimingModel::NfLiberty)
     }
 }
 
@@ -157,6 +185,12 @@ impl<'a> PreparedTechMapLibrary<'a> {
 /// Deterministic diagnostics from one final technology-mapping run.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TechMapStats {
+    /// Whether every emitted cell has complete Liberty timing. Single-cover
+    /// mapping still supports Boolean-only libraries with estimated timing.
+    pub timing_complete: bool,
+    /// Policy attempts and final-netlist selection, when paired search is
+    /// requested.
+    pub nf_cover_search: Option<NfCoverSearchReport>,
     /// Structural search objective used by the selected complete cover.
     pub selected_timing_model: TechMapTimingModel,
     /// Input slew used to characterize the fixed NF Liberty pin delays.
@@ -236,11 +270,46 @@ pub struct TechMapPortfolioResult {
 }
 
 /// Prevents callers from accidentally selecting the structural unit-delay mode.
-fn assert_supported_timing_model(options: &TechMapOptions) {
+fn assert_supported_timing_model(options: &TechMapOptions) -> Result<()> {
     assert!(
         options.timing_model != TechMapTimingModel::NfUnit,
         "nf-unit technology mapping is disabled; use nf-liberty representative Liberty pin delays"
     );
+    assert!(
+        matches!(
+            options.nf_cover_search,
+            NfCoverSearch::Automatic | NfCoverSearch::Single
+        ) || options.timing_model == TechMapTimingModel::NfLiberty,
+        "NF cover search requires nf-liberty timing"
+    );
+    if !options.nf_cover_max_delay_regression.is_finite()
+        || !(0.0..=1.0).contains(&options.nf_cover_max_delay_regression)
+    {
+        return Err(anyhow!(
+            "NF cover delay allowance must be a finite fraction between zero and one"
+        ));
+    }
+    if options.nf_cover_timeout.is_some()
+        && !matches!(
+            options.nf_cover_search,
+            NfCoverSearch::CalibratedTiming | NfCoverSearch::LoadSlew
+        )
+    {
+        return Err(anyhow!(
+            "NF alternative timeout requires calibrated-timing or load-slew cover search"
+        ));
+    }
+    if options.nf_cover_max_delay_regression > 0.0
+        && matches!(
+            options.nf_cover_search,
+            NfCoverSearch::Automatic | NfCoverSearch::Single
+        )
+    {
+        return Err(anyhow!(
+            "NF cover delay allowance requires an explicit NF cover search"
+        ));
+    }
+    Ok(())
 }
 
 /// Maps a final choice-rich AIG into a deterministic combinational cell
@@ -251,7 +320,7 @@ pub fn map_choice_aig_to_netlist(
     constraints: &TechMapTimingConstraints,
     options: &TechMapOptions,
 ) -> Result<MappedNetlist> {
-    assert_supported_timing_model(options);
+    assert_supported_timing_model(options)?;
     let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
     map_choice_aig_to_netlist_with_prepared(choice_aig, &prepared, constraints, options)
 }
@@ -267,7 +336,7 @@ pub fn map_choice_aig_portfolio_to_netlist(
     constraints: &TechMapTimingConstraints,
     options: &TechMapOptions,
 ) -> Result<TechMapPortfolioResult> {
-    assert_supported_timing_model(options);
+    assert_supported_timing_model(options)?;
     validate_choice_portfolio_interfaces(choice_aigs)?;
     let prepared = PreparedTechMapLibrary::new(library, options.max_cut_size)?;
     evaluate_choice_mapping_portfolio(choice_aigs, |choice_aig| {
@@ -425,7 +494,10 @@ pub(super) fn map_choice_aig_to_netlist_with_nf_constraints(
     constraints: &TechMapTimingConstraints,
     options: &TechMapOptions,
 ) -> Result<MappedNetlist> {
-    assert_supported_timing_model(options);
+    assert_supported_timing_model(options)?;
+    if options.uses_nf_cover_search() {
+        return map_choice_aig_to_netlist(choice_aig, library, constraints, options);
+    }
     if options.timing_model != TechMapTimingModel::NfLiberty {
         return map_choice_aig_to_netlist(choice_aig, library, constraints, options);
     }
@@ -458,7 +530,7 @@ pub fn map_choice_aig_to_netlist_with_prepared(
     constraints: &TechMapTimingConstraints,
     options: &TechMapOptions,
 ) -> Result<MappedNetlist> {
-    assert_supported_timing_model(options);
+    assert_supported_timing_model(options)?;
     if options.max_cut_size != prepared.max_cut_size {
         return Err(anyhow!(
             "prepared techmap library uses max_cut_size {}, but mapping options request {}",
@@ -468,6 +540,45 @@ pub fn map_choice_aig_to_netlist_with_prepared(
     }
     let cell_index = &prepared.cell_index;
     let analysis = cuts::analyze_choices(choice_aig)?;
+
+    if options.uses_nf_cover_search() {
+        return cover_search::map_nf_cover_search(
+            choice_aig,
+            prepared,
+            &analysis,
+            constraints,
+            options,
+            None,
+            |prepared, cover| {
+                let mut mapped =
+                    cover_search::finish_nf_cover(choice_aig, prepared, &analysis, cover, options)?;
+                if options.nf_cover_search == NfCoverSearch::Single && !mapped.stats.timing_complete
+                {
+                    // Preserve the Boolean-only mapping API: exact timing is
+                    // mandatory for comparing covers, not for emitting one.
+                    return Ok(mapped);
+                }
+                let buffer_stats = mapped.stats.buffer_stats.clone();
+                let resize_stats = mapped.stats.resize_stats.clone();
+                sequential::finalize_sequential_mapping(
+                    &mut mapped,
+                    prepared.library,
+                    &SequentialTechMapConstraints {
+                        primary_input_arrivals: constraints.primary_input_arrivals.clone(),
+                        primary_output_required: constraints.primary_output_required.clone(),
+                        clock_period: None,
+                    },
+                    StaOptions {
+                        primary_input_transition: options.primary_input_transition,
+                        module_output_load: options.module_output_load,
+                    },
+                )?;
+                mapped.stats.buffer_stats = buffer_stats;
+                mapped.stats.resize_stats = resize_stats;
+                Ok(mapped)
+            },
+        );
+    }
 
     if options.timing_model == TechMapTimingModel::NfLiberty
         && constraints.primary_input_arrivals.is_empty()
@@ -506,14 +617,6 @@ pub fn map_choice_aig_to_netlist_with_prepared(
                     sta_options,
                 )?
                 .delay;
-                let alternate_prepared = PreparedTechMapLibrary {
-                    library: prepared.library,
-                    cell_index: liberty_index::LibertyCellIndex::build_nf_stable_roots(
-                        prepared.library,
-                        prepared.max_cut_size,
-                    )?,
-                    max_cut_size: prepared.max_cut_size,
-                };
                 let policies = [
                     (true, nf::NfCoverPolicy::Standard),
                     (false, nf::NfCoverPolicy::NativePinOrder),
@@ -522,75 +625,84 @@ pub fn map_choice_aig_to_netlist_with_prepared(
                     (false, nf::NfCoverPolicy::AreaChildrenStructuralAreaCuts),
                     (false, nf::NfCoverPolicy::NativePinOrderStructuralAreaCuts),
                     (true, nf::NfCoverPolicy::AreaChildren),
-                ];
+                ]
+                .map(|(stable_roots, policy)| cover_search::NfCoverSpec {
+                    stable_roots,
+                    policy,
+                });
                 let mut best: Option<LargeNfCoverCandidate> = None;
-                for (uses_stable_roots, policy) in policies {
-                    let candidate_prepared = if uses_stable_roots {
-                        &alternate_prepared
-                    } else {
-                        prepared
-                    };
-                    let candidate_cover = nf::build_cover_plan_with_policy(
-                        choice_aig,
-                        &analysis,
-                        candidate_prepared.library,
-                        &candidate_prepared.cell_index,
-                        options,
-                        constraints,
-                        policy,
-                    )?;
-                    let candidate_cell_count = selected_cover_cell_count(&candidate_cover.plan);
-                    if !has_substantially_fewer_cover_cells(
-                        selected_cell_count,
-                        candidate_cell_count,
-                    ) {
-                        continue;
-                    }
-                    let candidate_emitted = emit::emit_cover(
-                        choice_aig,
-                        &candidate_cover.plan,
-                        &candidate_prepared.cell_index,
-                        candidate_prepared.library,
-                        options,
-                    )?;
-                    if !candidate_emitted.timing_complete {
-                        continue;
-                    }
-                    let candidate_delay = build_sta_report(
-                        &candidate_emitted.module,
-                        candidate_emitted.nets.as_slice(),
-                        &candidate_emitted.interner,
-                        candidate_prepared.library,
-                        sta_options,
-                    )?
-                    .delay;
-                    if !prefer_compact_nf_cover(
-                        selected_cell_count,
-                        candidate_cell_count,
-                        scalar_output_count,
-                        current_delay,
-                        candidate_delay,
-                    ) {
-                        continue;
-                    }
-                    if best.as_ref().is_none_or(|winner| {
-                        candidate_delay
-                            .total_cmp(&winner.exact_delay)
-                            .then_with(|| candidate_emitted.area.total_cmp(&winner.area))
-                            .then_with(|| candidate_cell_count.cmp(&winner.cell_count))
-                            .is_lt()
-                    }) {
-                        best = Some(LargeNfCoverCandidate {
-                            cover: candidate_cover,
-                            uses_stable_roots,
-                            exact_delay: candidate_delay,
-                            area: candidate_emitted.area,
-                            cell_count: candidate_cell_count,
-                        });
-                    }
-                }
+                cover_search::visit_nf_covers(
+                    choice_aig,
+                    prepared,
+                    &analysis,
+                    constraints,
+                    options,
+                    &policies,
+                    |spec, candidate_prepared, candidate_cover| {
+                        let candidate_cover = candidate_cover?;
+                        let candidate_cell_count = selected_cover_cell_count(&candidate_cover.plan);
+                        if !has_substantially_fewer_cover_cells(
+                            selected_cell_count,
+                            candidate_cell_count,
+                        ) {
+                            return Ok(());
+                        }
+                        let candidate_emitted = emit::emit_cover(
+                            choice_aig,
+                            &candidate_cover.plan,
+                            &candidate_prepared.cell_index,
+                            candidate_prepared.library,
+                            options,
+                        )?;
+                        if !candidate_emitted.timing_complete {
+                            return Ok(());
+                        }
+                        let candidate_delay = build_sta_report(
+                            &candidate_emitted.module,
+                            candidate_emitted.nets.as_slice(),
+                            &candidate_emitted.interner,
+                            candidate_prepared.library,
+                            sta_options,
+                        )?
+                        .delay;
+                        if !prefer_compact_nf_cover(
+                            selected_cell_count,
+                            candidate_cell_count,
+                            scalar_output_count,
+                            current_delay,
+                            candidate_delay,
+                        ) {
+                            return Ok(());
+                        }
+                        if best.as_ref().is_none_or(|winner| {
+                            candidate_delay
+                                .total_cmp(&winner.exact_delay)
+                                .then_with(|| candidate_emitted.area.total_cmp(&winner.area))
+                                .then_with(|| candidate_cell_count.cmp(&winner.cell_count))
+                                .is_lt()
+                        }) {
+                            best = Some(LargeNfCoverCandidate {
+                                cover: candidate_cover,
+                                uses_stable_roots: spec.stable_roots,
+                                exact_delay: candidate_delay,
+                                area: candidate_emitted.area,
+                                cell_count: candidate_cell_count,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?;
                 if let Some(winner) = best {
+                    let alternate_prepared;
                     let winning_prepared = if winner.uses_stable_roots {
+                        alternate_prepared = PreparedTechMapLibrary {
+                            library: prepared.library,
+                            cell_index: liberty_index::LibertyCellIndex::build_nf_stable_roots(
+                                prepared.library,
+                                prepared.max_cut_size,
+                            )?,
+                            max_cut_size: prepared.max_cut_size,
+                        };
                         &alternate_prepared
                     } else {
                         prepared
@@ -813,6 +925,8 @@ fn finish_prepared_choice_cover(
             .unwrap_or(0.0)
     };
     let stats = TechMapStats {
+        timing_complete: emitted.timing_complete,
+        nf_cover_search: None,
         selected_timing_model: options.timing_model,
         representative_input_transition: representative_output_load
             .map(|_| options.primary_input_transition),

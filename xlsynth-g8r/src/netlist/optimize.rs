@@ -112,13 +112,18 @@ pub fn optimize_mapped_netlist(
         None
     };
 
+    let exhaustive = options
+        .resize_options
+        .as_ref()
+        .is_some_and(|sizing| sizing.effort == crate::netlist::OptimizationEffort::Exhaustive);
     if let (Some(buffer_options), Some(resize_options), Some(previous_sizing)) = (
         options.buffer_options.as_ref(),
         options.resize_options.as_ref(),
         resize_stats.as_ref(),
-    ) && (previous_sizing.upsizes > 0
-        || previous_sizing.downsizes > 0
-        || previous_sizing.pin_swaps > 0)
+    ) && exhaustive
+        && (previous_sizing.upsizes > 0
+            || previous_sizing.downsizes > 0
+            || previous_sizing.pin_swaps > 0)
         && module.instances.len() <= MAX_COORDINATED_INSTANCE_COUNT
         && buffer_stats
             .as_ref()
@@ -204,6 +209,7 @@ pub fn optimize_mapped_netlist(
 
     if let (Some(configured), Some(sizing)) =
         (options.buffer_options.as_ref(), resize_stats.as_ref())
+        && exhaustive
         && module.instances.len() <= MAX_COORDINATED_INSTANCE_COUNT
         && buffer_stats.as_ref().is_some_and(|stats| {
             (2..=MAX_COORDINATED_EXISTING_BUFFERS).contains(&stats.buffers_inserted)
@@ -241,6 +247,7 @@ pub fn optimize_mapped_netlist(
     }
 
     if let Some(configured) = &options.resize_options
+        && exhaustive
         && configured.max_area_iterations > 0
         && (MIN_FINAL_AREA_RECOVERY_INSTANCE_COUNT..=MAX_COORDINATED_INSTANCE_COUNT)
             .contains(&module.instances.len())
@@ -305,6 +312,7 @@ pub(crate) fn merge_buffer_stats(initial: &mut BufferStats, subsequent: BufferSt
     initial.final_worst_delay = subsequent.final_worst_delay;
     initial.timing_evaluations += subsequent.timing_evaluations;
     initial.rejected_timing_batches += subsequent.rejected_timing_batches;
+    initial.evaluation_budget_exhausted |= subsequent.evaluation_budget_exhausted;
 }
 
 /// Preserves complete move accounting across coordinated sizing rounds.
@@ -316,6 +324,10 @@ pub(crate) fn merge_resize_stats(initial: &mut ResizeStats, subsequent: ResizeSt
     initial.pin_swap_evaluations += subsequent.pin_swap_evaluations;
     initial.failed_evaluations += subsequent.failed_evaluations;
     initial.recomputed_instances += subsequent.recomputed_instances;
+    initial.propagated_instances += subsequent.propagated_instances;
+    initial.work_budget_exhausted |= subsequent.work_budget_exhausted;
+    initial.refinement_evaluations += subsequent.refinement_evaluations;
+    initial.refinement_batches_accepted += subsequent.refinement_batches_accepted;
     initial.upsizes += subsequent.upsizes;
     initial.downsizes += subsequent.downsizes;
     initial.register_upsizes += subsequent.register_upsizes;
@@ -332,6 +344,7 @@ mod tests {
     use crate::liberty_model::PinDirection;
     use crate::netlist::buffer::BufferOptions;
     use crate::netlist::cell_catalog::test_utils::{parse_module, sizing_library};
+    use crate::netlist::resize::ResizeOptions;
     use crate::netlist::sta::StaOptions;
     use crate::netlist::timing_buffer::tests::{
         slow_shared_output_library, slow_shared_output_source,
@@ -509,6 +522,11 @@ endmodule
             &mut interner,
             &library,
             &NetlistOptimizationOptions {
+                // This test exercises opt-in post-sizing buffer isolation.
+                resize_options: Some(ResizeOptions {
+                    effort: crate::netlist::OptimizationEffort::Exhaustive,
+                    ..ResizeOptions::default()
+                }),
                 sta_options: StaOptions {
                     module_output_load: 0.6,
                     ..StaOptions::default()

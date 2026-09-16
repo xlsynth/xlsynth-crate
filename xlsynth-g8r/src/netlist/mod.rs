@@ -1,5 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
+/// Selects predictable single-pass optimization or the exploratory search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OptimizationEffort {
+    /// Bounded individual-cell optimization with no repeated physical passes.
+    #[default]
+    Bounded,
+    /// Coordinated sizing, repeated recovery, and speculative buffer cleanup.
+    Exhaustive,
+}
+
 pub mod assigns_to_gatefn;
 pub mod bench_synth_netlist;
 pub mod bit_ref;
