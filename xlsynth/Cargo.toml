@@ -26,7 +26,7 @@ regex = "1.11.1"
 serde = { version = "1.0", features = ["derive"] }
 toml.workspace = true
 libc = "0.2"
-prost = "0.12.6"
+prost = "0.14.4"
 cc = "1"
 prettyplease = "0.2"
 syn = { version = "2", features = ["full", "parsing"] }

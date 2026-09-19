@@ -33,9 +33,9 @@ cadical = "0.1.16"
 z3 = { version = "0.12", optional = true }
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
-prost = "0.12.6"
-prost-types = "0.12.6"
-prost-reflect = { version = "0.12.0", features = ["text-format"] }
+prost = "0.14.4"
+prost-types = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["text-format"] }
 string-interner = "0.15"
 anyhow = "1.0.86"
 rand_pcg = "0.3.1"
@@ -59,12 +59,12 @@ pretty_assertions = "1.4.1"
 regex = "1.10.5"
 test-case = "3.3.1"
 maplit = "1.0.2"
-prost-build = "0.12"
+prost-build = "0.14.4"
 tempfile = "3.20"
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers", version = "0.71.0" }
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = "0.14.4"
 
 [features]
 default = []
