@@ -170,7 +170,7 @@ fn accumulate_specializations(
 
         let type_info = tm_current.get_type_info();
         let call_graph = type_info.build_function_call_graph(&module)?;
-        let reachable = reachable_functions(&current_top_name, &call_graph)?;
+        let reachable = reachable_functions(&current_top_name, &call_graph, &functions)?;
         debug!(
             "Iteration {} reachable functions: {:?}",
             iteration, reachable
@@ -387,36 +387,33 @@ fn collect_callers_matching_env(
 fn reachable_functions(
     top: &str,
     graph: &FunctionCallGraph,
+    functions: &HashMap<String, Function>,
 ) -> Result<HashSet<String>, XlsynthError> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
 
-    let mut top_function_handle: Option<Function> = None;
-    for idx in 0..graph.function_count() {
-        if let Some(function) = graph.get_function(idx) {
-            if function.get_identifier() == top {
-                top_function_handle = Some(function);
-                break;
-            }
-        }
-    }
-
-    let Some(start_fn) = top_function_handle else {
+    let Some(start_fn) = functions.get(top) else {
         return Err(XlsynthError(format!(
-            "Top function '{}' not present in call graph.",
+            "Top function '{}' not present in the local module.",
             top
         )));
     };
 
     visited.insert(top.to_string());
-    queue.push_back(start_fn);
+    queue.push_back(start_fn.clone());
 
     while let Some(current) = queue.pop_front() {
         let callee_count = graph.callee_count(&current);
         for idx in 0..callee_count {
             if let Some(callee) = graph.get_callee(&current, idx) {
                 let callee_name = callee.get_identifier();
-                if visited.insert(callee_name.clone()) {
+                // The graph includes imported definitions; only this module is
+                // pruned or specialized.
+                if functions
+                    .get(&callee_name)
+                    .is_some_and(|local| local.is_same_definition(&callee))
+                    && visited.insert(callee_name)
+                {
                     queue.push_back(callee);
                 }
             }
@@ -608,10 +605,10 @@ fn prune_unreachable_functions(
     let type_info = tm.get_type_info();
     let call_graph = type_info.build_function_call_graph(&module)?;
 
-    let mut reachable = reachable_functions(top_function, &call_graph)?;
+    let mut reachable = reachable_functions(top_function, &call_graph, &functions)?;
 
     for keep in extra_keep {
-        match reachable_functions(keep, &call_graph) {
+        match reachable_functions(keep, &call_graph, &functions) {
             Ok(extra_reachable) => {
                 reachable.extend(extra_reachable.into_iter());
             }
@@ -943,6 +940,48 @@ pub fn top() -> u32 {
         assert!(!specialized.source.contains("fn unused"));
 
         Ok(())
+    }
+
+    #[test]
+    fn prune_distinguishes_local_and_imported_functions_with_the_same_name() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("foreign.x"),
+            "pub fn shared(x: u8) -> u8 { x + u8:2 }\npub fn mirror(x: u8) -> u8 { x + u8:3 }",
+        )
+        .unwrap();
+        let path = temp.path().join("example.x");
+        let source = r#"
+import foreign;
+fn local_leaf(x: u8) -> u8 { x + u8:1 }
+pub fn shared(x: u8) -> u8 { local_leaf(x) }
+pub fn external_only(x: u8) -> u8 { foreign::shared(x) }
+pub fn both(x: u8) -> u8 { foreign::shared(x) + shared(x) }
+pub fn mirror(x: u8) -> u8 { foreign::mirror(x) + shared(x) }
+"#;
+        for (top, expected) in [
+            ("external_only", vec!["external_only"]),
+            ("both", vec!["both", "local_leaf", "shared"]),
+            ("mirror", vec!["local_leaf", "mirror", "shared"]),
+        ] {
+            let output =
+                specialize_dslx_module(source, &path, top, None, &[temp.path().to_path_buf()])
+                    .unwrap();
+            assert_eq!(output.top_name, top);
+            let mut imports = ImportData::new(None, &[temp.path()]);
+            let checked = parse_and_typecheck(
+                &output.source,
+                path.to_str().unwrap(),
+                "example",
+                &mut imports,
+            )
+            .unwrap();
+            let mut names: Vec<_> = collect_functions(&checked.get_module())
+                .into_keys()
+                .collect();
+            names.sort();
+            assert_eq!(names, expected, "{top}");
+        }
     }
 
     #[test]
