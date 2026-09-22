@@ -985,6 +985,48 @@ pub fn mirror(x: u8) -> u8 { foreign::mirror(x) + shared(x) }
     }
 
     #[test]
+    fn specialization_distinguishes_parametric_local_and_imported_homonyms() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("foreign.x"),
+            "pub fn shared<N: u32>(x: uN[N]) -> uN[N] { x + uN[N]:2 }",
+        )
+        .unwrap();
+        let path = temp.path().join("example.x");
+        let source = r#"
+import foreign;
+fn leaf<N: u32>(x: uN[N]) -> uN[N] { x + uN[N]:1 }
+fn shared<N: u32>(x: uN[N]) -> uN[N] { leaf(x) }
+pub fn imported_only(x: u8) -> u8 { foreign::shared(x) }
+pub fn local_only(x: u8) -> u8 { shared(x) }
+pub fn both(x: u8) -> (u8, u8) { (foreign::shared(x), shared(x)) }
+"#;
+        for (top, expected) in [
+            ("imported_only", vec!["imported_only"]),
+            ("local_only", vec!["leaf_8", "local_only", "shared_8"]),
+            ("both", vec!["both", "leaf_8", "shared_8"]),
+        ] {
+            let output =
+                specialize_dslx_module(source, &path, top, None, &[temp.path().to_path_buf()])
+                    .unwrap();
+            assert_eq!(output.top_name, top);
+            let mut imports = ImportData::new(None, &[temp.path()]);
+            let checked = parse_and_typecheck(
+                &output.source,
+                path.to_str().unwrap(),
+                "example",
+                &mut imports,
+            )
+            .unwrap();
+            let mut names: Vec<_> = collect_functions(&checked.get_module())
+                .into_keys()
+                .collect();
+            names.sort();
+            assert_eq!(names, expected, "{top}");
+        }
+    }
+
+    #[test]
     fn prune_removes_quickchecks_and_tests() -> Result<(), XlsynthError> {
         let source = r#"
 fn helper_function(x: u32) -> u32 {
