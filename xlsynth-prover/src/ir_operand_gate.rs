@@ -2,7 +2,6 @@
 
 //! Solver-backed proof of conditional clamps at exact IR operand sites.
 
-use xlsynth_pir::ir::{self, MemberType, PackageMember};
 use xlsynth_pir::ir_operand_gate::{
     OperandGateSite, gate_operands_in_package, predicate_is_false_property_in_package,
 };
@@ -30,39 +29,6 @@ pub struct OperandGateProof {
     pub predicate_reachability: PredicateReachability,
 }
 
-/// Chooses a function without silently taking the first of several candidates.
-pub fn select_function<'a>(
-    package: &'a ir::Package,
-    top: Option<&str>,
-) -> Result<&'a ir::Fn, String> {
-    if let Some(top) = top {
-        return package
-            .get_fn(top)
-            .ok_or_else(|| format!("function {top:?} not found in package"));
-    }
-    if let Some((name, kind)) = &package.top {
-        return match kind {
-            MemberType::Function => package
-                .get_fn(name)
-                .ok_or_else(|| format!("top function {name:?} not found")),
-            MemberType::Block => {
-                Err("package top is a block; select a function with --top".to_string())
-            }
-        };
-    }
-    let mut functions = package.members.iter().filter_map(|member| match member {
-        PackageMember::Function(function) => Some(function),
-        PackageMember::Block(_) => None,
-    });
-    match (functions.next(), functions.next()) {
-        (Some(function), None) => Ok(function),
-        (None, _) => Err("package has no functions".to_string()),
-        (Some(_), Some(_)) => {
-            Err("package has multiple functions; select one with --top".to_string())
-        }
-    }
-}
-
 /// Checks whether simultaneous conditional operand clamps preserve every return
 /// bit.
 pub fn prove_operand_gate(
@@ -75,7 +41,7 @@ pub fn prove_operand_gate(
     let package = Parser::new(source)
         .parse_and_validate_package()
         .map_err(|error| format!("invalid IR package: {error}"))?;
-    let original = select_function(&package, top)?;
+    let original = package.select_function(top)?;
     let transformed = gate_operands_in_package(original, &package, when, sites)?;
     let predicate_property = predicate_is_false_property_in_package(original, &package, when)?;
     let prover = prover_for_choice_with_limits(SolverChoice::Bitwuzla, None, limits);
@@ -114,7 +80,6 @@ pub fn prove_operand_gate(
 
 #[cfg(test)]
 mod tests {
-    use super::select_function;
     #[cfg(feature = "has-bitwuzla")]
     use super::{PredicateReachability, prove_operand_gate};
     #[cfg(feature = "has-bitwuzla")]
@@ -123,7 +88,6 @@ mod tests {
     use crate::prover::types::EquivResult;
     #[cfg(feature = "has-bitwuzla")]
     use xlsynth_pir::ir_operand_gate::OperandGateSite;
-    use xlsynth_pir::ir_parser::Parser;
 
     #[cfg(feature = "has-bitwuzla")]
     fn site(operand: usize) -> OperandGateSite {
@@ -223,24 +187,5 @@ top fn main(x: bits[8] id=3, p: bits[1] id=4) -> bits[8] {
         let proof =
             prove_operand_gate(source, None, "p", &[site], SolverLimits::default()).unwrap();
         assert!(matches!(proof.result, EquivResult::Proved));
-    }
-
-    #[test]
-    fn selects_only_unambiguous_function() {
-        let source = r#"package gated
-
-fn main(x: bits[1] id=1) -> bits[1] { ret neg_x: bits[1] = not(x, id=2) }
-fn helper(y: bits[1] id=3) -> bits[1] { ret y2: bits[1] = not(y, id=4) }
-"#;
-        let package = Parser::new(source).parse_and_validate_package().unwrap();
-        assert!(
-            select_function(&package, None)
-                .unwrap_err()
-                .contains("multiple")
-        );
-        assert_eq!(
-            select_function(&package, Some("helper")).unwrap().name,
-            "helper"
-        );
     }
 }

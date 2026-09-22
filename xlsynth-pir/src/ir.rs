@@ -1716,6 +1716,36 @@ pub struct Instantiation {
 }
 
 impl Package {
+    /// Selects an explicit function, the package top, or its sole function.
+    pub fn select_function(&self, name: Option<&str>) -> Result<&Fn, String> {
+        if let Some(name) = name {
+            return self
+                .get_fn(name)
+                .ok_or_else(|| format!("function {name:?} not found in package"));
+        }
+        match &self.top {
+            Some((name, MemberType::Function)) => self
+                .get_fn(name)
+                .ok_or_else(|| format!("top function {name:?} not found in package")),
+            Some((name, MemberType::Block)) => Err(format!(
+                "package top {name:?} is a block; select a function explicitly"
+            )),
+            None => {
+                let mut functions = self.members.iter().filter_map(|member| match member {
+                    PackageMember::Function(function) => Some(function),
+                    PackageMember::Block(_) => None,
+                });
+                match (functions.next(), functions.next()) {
+                    (Some(function), None) => Ok(function),
+                    (None, _) => Err("package has no functions".to_string()),
+                    (Some(_), Some(_)) => {
+                        Err("package has multiple functions; select one explicitly".to_string())
+                    }
+                }
+            }
+        }
+    }
+
     /// Sets the package top to the given function name, if it exists.
     pub fn set_top_fn(&mut self, name: &str) -> Result<(), String> {
         let exists = self.members.iter().any(|m| match m {
@@ -1926,6 +1956,57 @@ mod tests {
     use crate::ir_utils::operands;
 
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn select_function_requires_an_unambiguous_package_function() {
+        let source = r#"package choices
+
+fn first(x: bits[1] id=1) -> bits[1] { ret first_result: bits[1] = not(x, id=2) }
+fn second(y: bits[1] id=3) -> bits[1] { ret second_result: bits[1] = not(y, id=4) }
+"#;
+        let mut package = ir_parser::Parser::new(source)
+            .parse_and_validate_package()
+            .unwrap();
+        assert_eq!(package.get_top_fn().unwrap().name, "first");
+        assert_eq!(
+            package.select_function(None).unwrap_err(),
+            "package has multiple functions; select one explicitly"
+        );
+        assert_eq!(
+            package.select_function(Some("second")).unwrap().name,
+            "second"
+        );
+        assert_eq!(
+            package.select_function(Some("missing")).unwrap_err(),
+            "function \"missing\" not found in package"
+        );
+
+        package.top = Some(("first".to_string(), MemberType::Function));
+        assert_eq!(package.select_function(None).unwrap().name, "first");
+        assert_eq!(
+            package.select_function(Some("second")).unwrap().name,
+            "second"
+        );
+
+        package.top = Some(("other".to_string(), MemberType::Block));
+        assert_eq!(
+            package.select_function(None).unwrap_err(),
+            "package top \"other\" is a block; select a function explicitly"
+        );
+        assert_eq!(
+            package.select_function(Some("second")).unwrap().name,
+            "second"
+        );
+
+        package.top = None;
+        package.members.pop();
+        assert_eq!(package.select_function(None).unwrap().name, "first");
+        package.members.clear();
+        assert_eq!(
+            package.select_function(None).unwrap_err(),
+            "package has no functions"
+        );
+    }
 
     #[test]
     fn checked_type_width_handles_aggregates_and_overflow() {

@@ -7,7 +7,7 @@ use crate::IrValue;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 
-use crate::ir::{self, PackageMember, Type};
+use crate::ir::{self, Type};
 use crate::ir_parser::Parser;
 use crate::random_inputs::generate_uniform_value_with_rng;
 
@@ -116,10 +116,10 @@ pub fn generate_ir_fn_inputs_from_ir_text(
     config: &IrFnGenerateInputsConfig,
 ) -> Result<Vec<IrValue>, String> {
     let mut parser = Parser::new(ir_text);
-    let mut package = parser
+    let package = parser
         .parse_and_validate_package()
         .map_err(|e| format!("failed to parse/validate IR package: {}", e))?;
-    let function = select_function(&mut package, top)?.clone();
+    let function = package.select_function(top)?.clone();
     let float_params = validate_float_params(&function, &config.float_params)?;
     let mut rng = StdRng::seed_from_u64(config.seed);
 
@@ -138,37 +138,6 @@ pub fn generate_ir_fn_inputs_from_ir_text(
         tuples.push(IrValue::make_tuple(&args));
     }
     Ok(tuples)
-}
-
-fn select_function<'a>(
-    package: &'a mut ir::Package,
-    top: Option<&str>,
-) -> Result<&'a ir::Fn, String> {
-    if let Some(top) = top {
-        package
-            .set_top_fn(top)
-            .map_err(|e| format!("failed to set --top: {}", e))?;
-    }
-
-    if package.top.is_some() {
-        return package
-            .get_top_fn()
-            .ok_or_else(|| "package top is not a function; provide --top".to_string());
-    }
-
-    let functions = package
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            PackageMember::Function(function) => Some(function),
-            PackageMember::Block(_) => None,
-        })
-        .collect::<Vec<_>>();
-    match functions.as_slice() {
-        [function] => Ok(function),
-        [] => Err("package has no functions".to_string()),
-        _ => Err("package has no top function; provide --top".to_string()),
-    }
 }
 
 fn validate_float_params(
