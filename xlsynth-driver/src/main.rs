@@ -43,6 +43,7 @@ mod aig_eval;
 mod aig_ir_equiv;
 mod aig_stats;
 mod aig_tech_map;
+mod aig_toggle_hotspots;
 mod blif2g8r;
 mod block2fn;
 mod block2sv;
@@ -1379,11 +1380,22 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("ir-toggle-hotspots")
-                .about("Ranks IR word and AIG AND-gate switching on shared ordered stimulus")
+                .about("Ranks IR word switching on ordered stimulus")
                 .arg(Arg::new("ir_input_file").required(true).index(1).help("Package-form XLS IR file"))
                 .arg(Arg::new("input_irvals").long("input-irvals").required(true).value_name("PATH").help("Ordered named or positional .irvals samples (at least two)"))
                 .arg(Arg::new("top").long("top").value_name("FUNCTION").help("Select a function, overriding the package top"))
-                .arg(Arg::new("limit").long("limit").value_parser(clap::value_parser!(usize)).default_value("20").help("Maximum entries per ranking"))
+                .arg(Arg::new("limit").long("limit").value_parser(clap::value_parser!(usize)).default_value("20").help("Maximum ranked words"))
+                .arg(Arg::new("format").long("format").value_parser(["text", "json"]).default_value("text").help("Result format")),
+        )
+        .subcommand(
+            clap::Command::new("aig-toggle-hotspots")
+                .about("Ranks AND2 switching in an existing combinational AIG artifact")
+                .arg(Arg::new("aig_file").required(true).index(1).help("AIGER (.aag/.aig) or native (.g8r/.g8rbin) artifact"))
+                .arg(Arg::new("input_irvals").long("input-irvals").required(true).value_name("PATH").help("Ordered named or positional .irvals samples (at least two)"))
+                .arg(Arg::new("source_ir").long("source-ir").value_name("PATH").help("Exact IR used for lowering, for parameter types and source ID labels"))
+                .arg(Arg::new("top").long("top").requires("source_ir").value_name("FUNCTION").help("Select a function from --source-ir, overriding its package top"))
+                .arg(Arg::new("fn_type").long("fn-type").value_name("FN_TYPE").help("Regroup the AIG interface with this function type; must match --source-ir if both given"))
+                .arg(Arg::new("limit").long("limit").value_parser(clap::value_parser!(usize)).default_value("20").help("Maximum ranked gates"))
                 .arg(Arg::new("format").long("format").value_parser(["text", "json"]).default_value("text").help("Result format")),
         )
         .subcommand(
@@ -4039,6 +4051,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-toggle-hotspots", subm)) => {
             ir_toggle_hotspots::handle_ir_toggle_hotspots(subm);
+        }
+        Some(("aig-toggle-hotspots", subm)) => {
+            aig_toggle_hotspots::handle_aig_toggle_hotspots(subm);
         }
         Some(("dslx-equiv", subm)) => {
             dslx_equiv::handle_dslx_equiv(subm, &config);

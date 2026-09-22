@@ -1,20 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Ordered IR and AIG switching activity from a shared `.irvals` stimulus.
+//! Ordered IR word switching activity from `.irvals` stimulus.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{self, NodePayload, NodeRef};
 use xlsynth_pir::ir_eval::{self, EvalObserver, FnEvalResult, SelectEvent};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
-use xlsynth_pir::{IrBits, IrValue};
-
-use crate::aig_sim::count_toggles::{ToggleNodeKind, count_toggle_activity};
-use crate::aig_sim::gate_simd::validate_ordered_batch_inputs;
-use crate::gatify::ir2gate::{GatifyOptions, gatify_prepared_fn};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IrNodeLabel {
@@ -33,37 +28,15 @@ pub struct WordActivity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct IrOutputBit {
-    pub ir_node: IrNodeLabel,
-    /// Least-significant-bit-first index in the flattened IR value.
-    pub bit_index: usize,
-    /// Whether the IR bit is the inversion of the AIG node's output.
-    pub inverted: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct GateActivity {
-    pub node_id: usize,
-    pub toggle_count: usize,
-    /// IR nodes credited with creating or sharing this AIG node. May be empty.
-    pub sources: Vec<IrNodeLabel>,
-    /// IR output bits whose lowered signal is precisely this AIG node (possibly
-    /// inverted).
-    pub ir_output_bits: Vec<IrOutputBit>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToggleHotspots {
     pub function: String,
     pub sample_count: usize,
     pub transition_count: usize,
     /// Ranked by word toggles, bit toggles, and then IR node ID.
     pub words: Vec<WordActivity>,
-    /// Output-reachable AND2 nodes ranked by toggles, then AIG node ID.
-    pub gates: Vec<GateActivity>,
 }
 
-fn label(node: &ir::Node) -> IrNodeLabel {
+pub(crate) fn label(node: &ir::Node) -> IrNodeLabel {
     IrNodeLabel {
         id: node.text_id,
         name: node
@@ -138,7 +111,7 @@ pub fn load_irvals_samples(path: &Path, function: &ir::Fn) -> Result<Vec<IrValue
     Ok(samples)
 }
 
-/// Reports switching in the selected IR function and its AIG lowering.
+/// Reports switching in the selected IR function.
 ///
 /// Samples are ordered tuple values, one per cycle; transitions between
 /// adjacent samples are counted. Invokes and loops must be inlined before
@@ -163,17 +136,6 @@ pub fn analyze_toggle_hotspots(
     }) {
         return Err("inline invokes and counted_for loops before analyzing toggles".to_string());
     }
-    if let Some(node) = function
-        .nodes
-        .iter()
-        .find(|node| u32::try_from(node.text_id).is_err())
-    {
-        return Err(format!(
-            "IR node id {} exceeds the u32 AIG provenance limit",
-            node.text_id
-        ));
-    }
-
     let expected = ir::Type::Tuple(
         function
             .param_nodes()
@@ -186,7 +148,6 @@ pub fn analyze_toggle_hotspots(
         word_toggles: vec![0; function.nodes.len()],
         bit_toggles: vec![0; function.nodes.len()],
     };
-    let mut gate_inputs: Vec<Vec<IrBits>> = Vec::with_capacity(samples.len());
     for (sample_index, sample) in samples.iter().enumerate() {
         if sample.type_() != expected {
             return Err(format!(
@@ -197,19 +158,9 @@ pub fn analyze_toggle_hotspots(
             ));
         }
         let args = sample.get_elements().map_err(|e| e.to_string())?;
-        let mut input_bits = Vec::with_capacity(args.len());
-        for ((&node_ref, param), arg) in function
-            .params
-            .iter()
-            .zip(function.param_nodes())
-            .zip(&args)
-        {
+        for (&node_ref, arg) in function.params.iter().zip(&args) {
             observer.record(node_ref, arg)?;
-            let mut flat = Vec::with_capacity(param.ty.bit_count());
-            flatten_ir_value_to_lsb0_bits_for_type(arg, &param.ty, &mut flat)?;
-            input_bits.push(IrBits::from_lsb_is_0(&flat));
         }
-        gate_inputs.push(input_bits);
         match ir_eval::eval_fn_in_package_with_observer(
             package,
             function,
@@ -247,66 +198,11 @@ pub fn analyze_toggle_hotspots(
             .then_with(|| a.ir_node.id.cmp(&b.ir_node.id))
     });
 
-    // Lower this function directly: prep-for-gatify can reuse a text ID for a
-    // different intermediate value, making its remapped bit label incorrect.
-    let lowering = gatify_prepared_fn(
-        function,
-        GatifyOptions {
-            track_pir_node_ids: true,
-            ..GatifyOptions::all_opts_disabled()
-        },
-    )?;
-    validate_ordered_batch_inputs(&lowering.gate_fn, &gate_inputs)?;
-    let activity = count_toggle_activity(&lowering.gate_fn, &gate_inputs);
-    let labels: BTreeMap<usize, IrNodeLabel> = function
-        .nodes
-        .iter()
-        .map(|node| (node.text_id, label(node)))
-        .collect();
-    let mut output_bits: BTreeMap<usize, Vec<IrOutputBit>> = BTreeMap::new();
-    for (node_ref, bits) in &lowering.lowering_map {
-        let ir_node = label(function.get_node(*node_ref));
-        for (bit_index, operand) in bits.iter_lsb_to_msb().enumerate() {
-            output_bits
-                .entry(operand.node.id)
-                .or_default()
-                .push(IrOutputBit {
-                    ir_node: ir_node.clone(),
-                    bit_index,
-                    inverted: operand.negated,
-                });
-        }
-    }
-    for bits in output_bits.values_mut() {
-        bits.sort_by_key(|bit| (bit.ir_node.id, bit.bit_index));
-    }
-    let mut gates = activity
-        .nodes
-        .into_iter()
-        .filter(|node| node.node_kind == ToggleNodeKind::And2 && node.toggle_count > 0)
-        .map(|node| GateActivity {
-            node_id: node.node_id,
-            toggle_count: node.toggle_count,
-            sources: lowering.gate_fn.gates[node.node_id]
-                .get_pir_node_ids()
-                .iter()
-                .filter_map(|id| labels.get(&(*id as usize)).cloned())
-                .collect(),
-            ir_output_bits: output_bits.remove(&node.node_id).unwrap_or_default(),
-        })
-        .collect::<Vec<_>>();
-    gates.sort_by(|a, b| {
-        b.toggle_count
-            .cmp(&a.toggle_count)
-            .then_with(|| a.node_id.cmp(&b.node_id))
-    });
-
     Ok(ToggleHotspots {
         function: function.name.clone(),
         sample_count: samples.len(),
         transition_count: samples.len() - 1,
         words,
-        gates,
     })
 }
 
@@ -331,7 +227,6 @@ pub fn analyze_toggle_hotspots_from_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aig_sim::gate_sim::{self, Collect};
 
     const IR: &str = r#"package test
 
@@ -340,19 +235,8 @@ top fn main(x: bits[2] id=1, y: bits[2] id=2) -> bits[2] {
 }
 "#;
 
-    const OR_REDUCTIONS_IR: &str = r#"package test
-
-top fn main(x: bits[2] id=1, y: bits[2] id=2, z: bits[2] id=3, w: bits[2] id=4) -> bits[1] {
-  a: bits[2] = and(x, y, id=5)
-  b: bits[2] = and(z, w, id=6)
-  ar: bits[1] = or_reduce(a, id=7)
-  br: bits[1] = or_reduce(b, id=8)
-  ret result: bits[1] = or(ar, br, id=9)
-}
-"#;
-
     #[test]
-    fn shared_stimulus_counts_words_bits_and_exact_gate_output_bits() {
+    fn shared_stimulus_counts_words_and_bits() {
         let dir = tempfile::tempdir().unwrap();
         let positional = dir.path().join("positional.irvals");
         let named = dir.path().join("named.irvals");
@@ -381,22 +265,6 @@ top fn main(x: bits[2] id=1, y: bits[2] id=2, z: bits[2] id=3, w: bits[2] id=4) 
         assert_eq!(report.words[1].ir_node.name, "result");
         assert_eq!(report.words[1].word_toggles, 2);
         assert_eq!(report.words[1].bit_toggles, 4);
-        assert_eq!(report.gates.len(), 2);
-        for gate in &report.gates {
-            assert_eq!(gate.toggle_count, 2);
-            assert_eq!(gate.sources[0].id, 3);
-            assert_eq!(gate.ir_output_bits.len(), 1);
-            assert_eq!(gate.ir_output_bits[0].ir_node.name, "result");
-            assert!(!gate.ir_output_bits[0].inverted);
-        }
-        assert_eq!(
-            report
-                .gates
-                .iter()
-                .map(|gate| gate.ir_output_bits[0].bit_index)
-                .collect::<Vec<_>>(),
-            vec![0, 1]
-        );
     }
 
     #[test]
@@ -418,89 +286,8 @@ top fn main(x: bits[2] id=1, y: bits[2] id=2, z: bits[2] id=3, w: bits[2] id=4) 
     }
 
     #[test]
-    fn bit_labels_refer_to_original_values_after_or_reductions() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stimulus.irvals");
-        std::fs::write(
-            &path,
-            "(bits[2]:1, bits[2]:1, bits[2]:0, bits[2]:3)\n(bits[2]:2, bits[2]:2, bits[2]:3, bits[2]:3)\n(bits[2]:0, bits[2]:3, bits[2]:2, bits[2]:2)\n",
-        )
-        .unwrap();
-
-        let report = analyze_toggle_hotspots_from_files(OR_REDUCTIONS_IR, None, &path).unwrap();
-        let package = Parser::new(OR_REDUCTIONS_IR)
-            .parse_and_validate_package()
-            .unwrap();
-        let function = package.get_top_fn().unwrap();
-        let widths = function
-            .nodes
-            .iter()
-            .map(|node| (node.text_id, node.ty.bit_count()))
-            .collect::<BTreeMap<_, _>>();
-        let bits = report
-            .gates
-            .iter()
-            .flat_map(|gate| &gate.ir_output_bits)
-            .collect::<Vec<_>>();
-        assert!(bits.iter().any(|bit| bit.ir_node.name == "ar"));
-        assert!(bits.iter().any(|bit| bit.ir_node.name == "br"));
-        for bit in bits {
-            assert!(
-                bit.bit_index < widths[&bit.ir_node.id],
-                "{}[{}] exceeds original node width",
-                bit.ir_node.name,
-                bit.bit_index
-            );
-        }
-
-        // The OR reductions change on different transitions. Check that each
-        // exact gate signal follows the original IR value, including polarity.
-        let gate_fn = gatify_prepared_fn(
-            function,
-            GatifyOptions {
-                track_pir_node_ids: true,
-                ..GatifyOptions::all_opts_disabled()
-            },
-        )
-        .unwrap()
-        .gate_fn;
-        for (values, ar, br) in [
-            ([1, 1, 0, 3], true, false),
-            ([2, 2, 3, 3], true, true),
-            ([0, 3, 2, 2], false, true),
-        ] {
-            let inputs = values
-                .into_iter()
-                .map(|value| IrBits::make_ubits(2, value).unwrap())
-                .collect::<Vec<_>>();
-            let sim = gate_sim::eval(&gate_fn, &inputs, Collect::AllWithInputs);
-            let gate_values = sim.all_values.unwrap();
-            for gate in &report.gates {
-                for bit in &gate.ir_output_bits {
-                    let expected = match bit.ir_node.name.as_str() {
-                        "ar" => ar,
-                        "br" => br,
-                        _ => {
-                            // This check exercises the two original reductions.
-                            continue;
-                        }
-                    };
-                    assert_eq!(
-                        gate_values[gate.node_id] ^ bit.inverted,
-                        expected,
-                        "gate %{} mislabeled as {}[{}]",
-                        gate.node_id,
-                        bit.ir_node.name,
-                        bit.bit_index
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     #[cfg(target_pointer_width = "64")]
-    fn oversized_provenance_id_is_an_error() {
+    fn ir_word_activity_accepts_ids_larger_than_aig_provenance_can_hold() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stimulus.irvals");
         std::fs::write(&path, "(bits[2]:0)\n(bits[2]:3)\n").unwrap();
@@ -510,7 +297,7 @@ top fn main(x: bits[2] id=4294967296) -> bits[2] {
   ret result: bits[2] = not(x, id=4294967297)
 }
 "#;
-        let error = analyze_toggle_hotspots_from_files(ir, None, &path).unwrap_err();
-        assert!(error.contains("4294967296") && error.contains("u32"));
+        let report = analyze_toggle_hotspots_from_files(ir, None, &path).unwrap();
+        assert_eq!(report.words[0].ir_node.id, 4294967296);
     }
 }

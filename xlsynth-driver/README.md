@@ -118,11 +118,11 @@ errors. This command operates on functions; blocks and procs are not supported.
 ### `ir-toggle-hotspots`
 
 Runs an ordered `.irvals` stimulus sequence through a selected package function
-and its AIG lowering, then ranks the most active IR values and AIG AND2 gates.
+and ranks the most active IR values. This does not lower IR to an AIG; use
+`aig-toggle-hotspots` to analyze a separately produced gate artifact.
 Each pair of adjacent samples is one transition. An IR word toggle counts once
-when any output bit changes; `bit_toggles` counts every flipped bit. A gate
-toggle counts a change at an AND2 node's output. Only nodes that toggle appear
-in the report, and only output-reachable AND2 gates are ranked.
+when any output bit changes; `bit_toggles` counts every flipped bit. Only nodes
+that toggle appear in the report.
 
 ```shell
 xlsynth-driver ir-toggle-hotspots design.ir \
@@ -136,19 +136,57 @@ Flags:
   the function's parameter types, including tuples and arrays.
 - `--top <FUNCTION>` overrides the package top; without a top, a sole function
   is selected. Packages with several functions require this flag.
-- `--limit <COUNT>` prints up to COUNT entries in each ranking (default 20).
-  Equal activity is ordered by IR node ID or AIG node ID.
+- `--limit <COUNT>` prints up to COUNT words (default 20). Equal activity is
+  ordered by IR node ID.
 - `--format <text|json>` chooses text (default) or structured JSON.
 
-The AIG is lowered directly from the selected IR function, with folding and
-hashing enabled, so bit labels refer to the same IR values used in the word
-ranking. Gate `sources` list the IR operations recorded while constructing or
-sharing the AIG node; a gate may have several source operations. `ir_output_bits`
-list IR output bits whose lowering is exactly that gate's signal, with a `bit_index`
-counted from the least significant flattened bit and an `inverted` flag. An
-internal gate can have no corresponding IR output bit. Inline invokes and
-counted loops before using this command. IR node IDs must fit in 32 bits to
-record AIG provenance.
+Inline invokes and counted loops before using this command.
+
+### `aig-toggle-hotspots`
+
+Ranks output-reachable AND2 gates in an existing combinational `.aag`, `.aig`,
+`.g8r`, or `.g8rbin` artifact on an ordered `.irvals` stimulus. Use the separate
+`ir2g8r` lowering command to choose optimization flags and produce an artifact.
+This command does not lower IR. Each adjacent sample pair is one transition;
+only gates that toggle appear. JSON contains `sample_count`, `transition_count`,
+and a ranked `gates` array with `node_id`, `toggle_count`, and `sources`.
+
+```shell
+xlsynth-driver ir-prep-for-gates design.ir --top main \
+  --track-pir-node-ids=true --enable-formal-array-alias-analysis=false \
+  > prepared.ir
+xlsynth-driver ir2g8r design.ir --top main \
+  --track-pir-node-ids=true --enable-formal-array-alias-analysis=false \
+  --bin-out design.g8rbin > /path/to/design.g8r
+xlsynth-driver aig-toggle-hotspots design.g8rbin \
+  --input-irvals stimulus.irvals --source-ir prepared.ir --format json
+```
+
+Flags:
+
+- `--input-irvals <PATH>` (required) reads at least two named or positional
+  `.irvals` records in order. Inputs must match the effective AIG interface.
+- `--source-ir <PATH>` provides the exact IR used for lowering, supplies its
+  parameter names and types, and labels stored provenance IDs with operation
+  names. For a rewritten lowering, supply its prepared IR using the same
+  lowering flags. Use `--top <FUNCTION>` to select a function in this package.
+- `--fn-type <FN_TYPE>` imposes an explicit typed interface on flattened AIGER
+  inputs (for example, `'(bits[8], bits[8]) -> bits[8]'`). With `--source-ir`,
+  this type must agree with the selected IR function.
+- `--limit <COUNT>` prints up to COUNT gates (default 20). Ties are ordered by
+  AIG node ID.
+- `--format <text|json>` chooses text (default) or structured JSON.
+
+Native `.g8r` and `.g8rbin` files retain source node IDs when generated with
+`--track-pir-node-ids=true`; `--source-ir` resolves those IDs to names and ops.
+AIGER does not carry these IDs, so its `sources` arrays are empty. Repacking an
+interface with `--source-ir` or `--fn-type` does not regenerate provenance.
+Source IDs are associations, not exact output-bit matches; serialized artifacts
+do not retain the lowering map needed to identify individual IR bits. Supply the
+IR matching the artifact, such as the prepared IR written with
+`ir2gates --prepared-ir-out` when the lowering performs IR rewrites.
+A [proposed provenance sidecar](../docs/aig_provenance_sidecar.md) describes a
+compact way to preserve precise source bits across artifact formats.
 
 ### `lib2proto`: liberty files to proto
 

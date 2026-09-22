@@ -30,7 +30,6 @@ fn run(matches: &ArgMatches) -> Result<(), String> {
     )?;
     let limit = *matches.get_one::<usize>("limit").expect("default limit");
     report.words.truncate(limit);
-    report.gates.truncate(limit);
 
     if matches
         .get_one::<String>("format")
@@ -54,32 +53,6 @@ fn run(matches: &ArgMatches) -> Result<(), String> {
                 word.ir_node.op,
                 word.word_toggles,
                 word.bit_toggles
-            );
-        }
-        println!("AIG AND2 gates (output changes):");
-        for gate in &report.gates {
-            let sources = gate
-                .sources
-                .iter()
-                .map(|source| source.name.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            let bits = gate
-                .ir_output_bits
-                .iter()
-                .map(|bit| {
-                    format!(
-                        "{}{}[{}]",
-                        if bit.inverted { "!" } else { "" },
-                        bit.ir_node.name,
-                        bit.bit_index
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            println!(
-                "  %{} toggles={} sources=[{}] ir_bits=[{}]",
-                gate.node_id, gate.toggle_count, sources, bits
             );
         }
     }
