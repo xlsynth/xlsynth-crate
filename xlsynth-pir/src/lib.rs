@@ -32,6 +32,7 @@ pub mod ir_fn_to_dslx;
 pub mod ir_inline;
 pub mod ir_match;
 pub mod ir_node_env;
+pub mod ir_operand_gate;
 pub mod ir_outline;
 pub mod ir_parser;
 pub mod ir_query;

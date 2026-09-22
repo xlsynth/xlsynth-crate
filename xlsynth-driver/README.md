@@ -54,6 +54,67 @@ Key flags:
 - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
 - `--output_json <PATH>` to write the JSON result.
 
+### `ir-prove-operand-gate`
+
+Proves that conditionally clamping bits of a selected function operand preserves
+the function's complete return value for every possible input. All requested
+sites are clamped together in one proof. The predicate is evaluated in the
+original function: when it is false, each operand is unchanged; when true,
+the selected bits are replaced with the clamp constant. Assertions are ignored
+when comparing returns.
+
+```shell
+xlsynth-driver ir-prove-operand-gate design.ir \
+  --top main --consumer shrl.42 --operand 0 \
+  --start 0 --width 4 --when near.17 --clamp 0
+```
+
+Flags:
+
+- `--top <FUNCTION>` selects the function; it overrides a package top. Without
+  a package top, the sole function is selected automatically; packages with
+  several functions require `--top`. A package top that is a block also
+  requires an explicit function name.
+- `--when <NODE>` selects a one-bit predicate node in the selected function.
+  Node references can be printed names (including `shrl.42`) or numeric `id=`
+  values. The predicate must not depend on a targeted consumer.
+- `--consumer <NODE> --operand <INDEX> --clamp <VALUE>` describes one site.
+  Operand indexes are zero-based, in XLS IR operand order. Constants are
+  unsigned decimal, `0x` hexadecimal, or `0b` binary; they must fit the
+  selected width, with no truncation.
+- `--start <BIT> --width <COUNT>` optionally selects `[start, start + width)`
+  (bit zero is least significant). Both flags must occur together. Without
+  them, the whole bits-typed operand is clamped.
+- `--sites-json <PATH>` selects several simultaneous sites instead of the
+  single-site flags. The file is an array of objects with `consumer`,
+  `operand`, and string `clamp` fields, and optional `start` and `width`
+  fields. Both optional fields must be present together. Empty site arrays,
+  duplicate/overlapping operand slices, and unobservable consumers are errors.
+- `--time-limit-ms <MS>` limits each Bitwuzla satisfiability check; no limit by
+  default. The in-process Bitwuzla backend must be enabled in the build.
+- `--format <text|json>` selects deterministic output (`text` by default).
+
+Multiple sites example (`sites.json`):
+
+```json
+[
+  {"consumer":"shrl.42","operand":0,"start":0,"width":4,"clamp":"0"},
+  {"consumer":"add.53","operand":1,"start":4,"width":4,"clamp":"0x3"}
+]
+```
+
+```shell
+xlsynth-driver ir-prove-operand-gate design.ir --top main \
+  --when near.17 --sites-json sites.json --format json
+```
+
+The result is `proved`, `counterexample` (including parameter values and
+original/gated returns), or `unknown` with a reason. A separate predicate
+reachability check reports `reachable`, `unreachable`, or `unknown`; a proof
+with an unreachable predicate has `vacuous: true`. Exit codes are 0 for
+`proved`, 1 for `counterexample`, 3 for `unknown`, and 2 for input or solver
+errors. This command operates on functions; blocks and procs are not supported.
+
 ### `lib2proto`: liberty files to proto
 
 Liberty files can be unwieldy and large in their textual form -- this command reformats the data

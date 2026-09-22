@@ -116,6 +116,7 @@ mod ir_localized_eco;
 mod ir_mcmc_minimize;
 mod ir_mcmc_opt;
 mod ir_op_histo;
+mod ir_prove_operand_gate;
 mod ir_query;
 mod ir_query_corpus;
 mod ir_rewrite;
@@ -1359,6 +1360,21 @@ fn main() {
                         .help("Write the JSON result to PATH")
                         .action(clap::ArgAction::Set),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("ir-prove-operand-gate")
+                .about("Proves a conditional operand clamp preserves a function's return")
+                .arg(Arg::new("ir_input_file").required(true).index(1).help("Package-form XLS IR file"))
+                .arg(Arg::new("top").long("top").value_name("FUNCTION").help("Function to prove (overrides the package top)"))
+                .arg(Arg::new("when").long("when").required(true).value_name("NODE").help("Original one-bit predicate node"))
+                .arg(Arg::new("consumer").long("consumer").value_name("NODE").help("Consumer node for a single site"))
+                .arg(Arg::new("operand").long("operand").value_parser(clap::value_parser!(usize)).value_name("INDEX").help("Zero-based operand slot"))
+                .arg(Arg::new("start").long("start").value_parser(clap::value_parser!(usize)).value_name("BIT").help("Least significant bit of the selected slice"))
+                .arg(Arg::new("width").long("width").value_parser(clap::value_parser!(usize)).value_name("BITS").help("Number of bits selected; omit with --start for the entire operand"))
+                .arg(Arg::new("clamp").long("clamp").value_name("VALUE").help("Unsigned constant placed in selected bits"))
+                .arg(Arg::new("sites_json").long("sites-json").value_name("PATH").help("JSON array of sites to clamp simultaneously"))
+                .arg(Arg::new("time_limit_ms").long("time-limit-ms").value_parser(clap::value_parser!(u64)).value_name("MS").help("Optional solver time limit per check"))
+                .arg(Arg::new("format").long("format").value_parser(["text", "json"]).default_value("text").help("Result format")),
         )
         .subcommand(
             clap::Command::new("ir-ged")
@@ -4007,6 +4023,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-equiv-blocks", subm)) => {
             ir_equiv_blocks::handle_ir_equiv_blocks(subm, &config);
+        }
+        Some(("ir-prove-operand-gate", subm)) => {
+            ir_prove_operand_gate::handle_ir_prove_operand_gate(subm);
         }
         Some(("dslx-equiv", subm)) => {
             dslx_equiv::handle_dslx_equiv(subm, &config);
