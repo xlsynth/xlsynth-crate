@@ -119,7 +119,11 @@ pub fn generate_ir_fn_inputs_from_ir_text(
     let package = parser
         .parse_and_validate_package()
         .map_err(|e| format!("failed to parse/validate IR package: {}", e))?;
-    let function = package.get_named_or_top_or_sole_fn(top)?.clone();
+    let function = match top {
+        Some(name) => package.get_named_or_top_or_sole_fn(name)?,
+        None => package.get_top_or_sole_fn()?,
+    }
+    .clone();
     let float_params = validate_float_params(&function, &config.float_params)?;
     let mut rng = StdRng::seed_from_u64(config.seed);
 
