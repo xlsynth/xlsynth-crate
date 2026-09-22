@@ -5,6 +5,7 @@
 pub mod aig;
 pub mod aig_serdes;
 pub mod aig_sim;
+pub mod aig_toggle_hotspots;
 pub mod block2sequential;
 pub mod gatify;
 pub mod ir_aig_sharing;
@@ -19,6 +20,7 @@ pub mod gate_fn_equiv_report;
 pub mod gate_fn_optimize;
 pub mod ir2gate_utils;
 pub mod ir2gates;
+pub mod ir_toggle_hotspots;
 pub mod liberty;
 pub(crate) mod prefix_scan_utils;
 pub mod verilog_version;

@@ -259,12 +259,18 @@ jobs:
           iverilog -V
           vvp -V
 
+      - name: Cache Slang by pinned digest
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: slang
+          key: ${{ runner.os }}-slang-rocky8-${{ hashFiles('scripts/slang_rocky8.sha256') }}
+
       - name: Download Slang
         run: |
           slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
           python3 scripts/download_and_verify.py elf slang \
-            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
-            --sha256 "${slang_sha256}"
+            "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8" \
+            --sha256 "${slang_sha256}" --reuse-valid-existing
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
@@ -330,14 +336,20 @@ jobs:
           echo "Resolved XLS release tag: ${TAG}"
           python3 scripts/download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG}
 
+      - name: Cache Slang by pinned digest
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: slang
+          key: ${{ runner.os }}-slang-rocky8-${{ hashFiles('scripts/slang_rocky8.sha256') }}
+
       - name: Download Slang
         run: |
           # We use the rocky8 binary for these systems since it has an easier requirements for glibc
           # version that works for ubuntu 22.04.
           slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
           python3 scripts/download_and_verify.py elf slang \
-            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
-            --sha256 "${slang_sha256}"
+            "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8" \
+            --sha256 "${slang_sha256}" --reuse-valid-existing
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
@@ -818,12 +830,18 @@ jobs:
             --label "rocky8: after dnf clean" \
             --workspace-root "${GITHUB_WORKSPACE}"
 
+      - name: Cache Slang by pinned digest
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: slang
+          key: ${{ runner.os }}-slang-rocky8-${{ hashFiles('scripts/slang_rocky8.sha256') }}
+
       - name: Download Slang
         run: |
           slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
           python3 scripts/download_and_verify.py elf slang \
-            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
-            --sha256 "${slang_sha256}"
+            "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8" \
+            --sha256 "${slang_sha256}" --reuse-valid-existing
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
@@ -1048,12 +1066,18 @@ jobs:
           echo "Resolved XLS release tag: ${TAG}"
           python3 scripts/download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG}
 
+      - name: Cache Slang by pinned digest
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: slang
+          key: ${{ runner.os }}-slang-rocky8-${{ hashFiles('scripts/slang_rocky8.sha256') }}
+
       - name: Download Slang
         run: |
           slang_sha256="$(tr -d '\n' < scripts/slang_rocky8.sha256)"
           python3 scripts/download_and_verify.py elf slang \
-            "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578" \
-            --sha256 "${slang_sha256}"
+            "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8" \
+            --sha256 "${slang_sha256}" --reuse-valid-existing
           chmod +x slang
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
