@@ -140,13 +140,15 @@ Flags:
   Equal activity is ordered by IR node ID or AIG node ID.
 - `--format <text|json>` chooses text (default) or structured JSON.
 
-Gate `sources` list the IR operations recorded while constructing or sharing
-the AIG node; a gate may have several source operations. `ir_output_bits` list
-IR output bits whose lowering is exactly that gate's signal, with a `bit_index`
+The AIG is lowered directly from the selected IR function, with folding and
+hashing enabled, so bit labels refer to the same IR values used in the word
+ranking. Gate `sources` list the IR operations recorded while constructing or
+sharing the AIG node; a gate may have several source operations. `ir_output_bits`
+list IR output bits whose lowering is exactly that gate's signal, with a `bit_index`
 counted from the least significant flattened bit and an `inverted` flag. An
-internal gate can have no corresponding IR output bit. Prep rewrites may create
-internal gates that do not map to an original source operation. Inline invokes
-and counted loops before using this command.
+internal gate can have no corresponding IR output bit. Inline invokes and
+counted loops before using this command. IR node IDs must fit in 32 bits to
+record AIG provenance.
 
 ### `lib2proto`: liberty files to proto
 
