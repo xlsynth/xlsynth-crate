@@ -67,12 +67,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attempts", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=int, default=60)
     parser.add_argument(
+        "--reuse-valid-existing",
+        action="store_true",
+        help="Use an existing output only if it passes format and pinned SHA-256 checks",
+    )
+    parser.add_argument(
         "--max-retry-wait-seconds",
         type=float,
         default=DEFAULT_MAX_RETRY_WAIT_SECONDS,
         help="Total retry sleep budget (default: 300s), excluding request timeouts",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.reuse_valid_existing and args.sha256 is None:
+        parser.error("--reuse-valid-existing requires --sha256")
+    return args
 
 
 def build_request(url: str) -> urllib.request.Request:
@@ -274,6 +282,41 @@ def download_and_verify_with_retry(
     raise last_error
 
 
+def ensure_verified_artifact(
+    kind: str,
+    url: str,
+    destination: Path,
+    sha256: str,
+    attempts: int,
+    timeout_seconds: int,
+    max_retry_wait_seconds: float = DEFAULT_MAX_RETRY_WAIT_SECONDS,
+) -> None:
+    """Reuses an existing artifact only when both its format and digest match."""
+    expected = normalize_sha256(sha256)
+    if destination.is_file():
+        validation_error = validate_artifact(destination, kind)
+        if validation_error is None:
+            validation_error = validate_sha256(destination, expected)
+        if validation_error is None:
+            return
+        print(
+            "Invalid cached artifact {}: {}; downloading again".format(
+                destination, validation_error
+            ),
+            file=sys.stderr,
+        )
+        destination.unlink()
+    download_and_verify_with_retry(
+        kind,
+        url,
+        destination,
+        attempts,
+        timeout_seconds,
+        sha256=expected,
+        max_retry_wait_seconds=max_retry_wait_seconds,
+    )
+
+
 def detect_binary_kind(path: Path) -> str:
     with path.open("rb") as f:
         magic = f.read(4)
@@ -407,16 +450,27 @@ def main() -> int:
     args = parse_args()
     output = Path(args.output)
     try:
-        download_and_verify_with_retry(
-            args.kind,
-            args.url,
-            output,
-            args.attempts,
-            args.timeout_seconds,
-            sha256=args.sha256,
-            sha256_url=args.sha256_url,
-            max_retry_wait_seconds=args.max_retry_wait_seconds,
-        )
+        if args.reuse_valid_existing:
+            ensure_verified_artifact(
+                args.kind,
+                args.url,
+                output,
+                args.sha256,
+                args.attempts,
+                args.timeout_seconds,
+                max_retry_wait_seconds=args.max_retry_wait_seconds,
+            )
+        else:
+            download_and_verify_with_retry(
+                args.kind,
+                args.url,
+                output,
+                args.attempts,
+                args.timeout_seconds,
+                sha256=args.sha256,
+                sha256_url=args.sha256_url,
+                max_retry_wait_seconds=args.max_retry_wait_seconds,
+            )
     except (urllib.error.URLError, OSError, RuntimeError, ValueError) as exc:
         print(
             f"Failed to download valid {expected_description(args.kind)} "

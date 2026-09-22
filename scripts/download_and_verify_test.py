@@ -248,6 +248,58 @@ def test_literal_sha256_rejects_valid_elf_with_wrong_hash(tmp_path, monkeypatch)
     assert not artifact.exists()
 
 
+def test_cached_elf_is_reused_after_sha256_validation(tmp_path, monkeypatch):
+    artifact = tmp_path / "slang"
+    payload = download_and_verify.ELF_MAGIC + b"pinned-slang"
+    artifact.write_bytes(payload)
+
+    def unexpected_download(*args, **kwargs):
+        raise AssertionError("valid cached binary must not trigger a download")
+
+    monkeypatch.setattr(
+        download_and_verify, "download_and_verify_with_retry", unexpected_download
+    )
+    download_and_verify.ensure_verified_artifact(
+        "elf",
+        "https://example.invalid/slang",
+        artifact,
+        hashlib.sha256(payload).hexdigest(),
+        attempts=1,
+        timeout_seconds=1,
+    )
+    assert artifact.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "bad_payload", [b"not-an-elf", download_and_verify.ELF_MAGIC + b"stale"]
+)
+def test_invalid_cached_elf_is_replaced_and_verified(
+    tmp_path, monkeypatch, bad_payload
+):
+    artifact = tmp_path / "slang"
+    payload = download_and_verify.ELF_MAGIC + b"pinned-slang"
+    artifact.write_bytes(bad_payload)
+    downloads = []
+
+    def fake_download(url, destination, attempts, timeout_seconds):
+        del url, attempts, timeout_seconds
+        downloads.append(True)
+        assert not destination.exists()
+        destination.write_bytes(payload)
+
+    monkeypatch.setattr(download_and_verify, "download_with_retry", fake_download)
+    download_and_verify.ensure_verified_artifact(
+        "elf",
+        "https://example.invalid/slang",
+        artifact,
+        hashlib.sha256(payload).hexdigest(),
+        attempts=1,
+        timeout_seconds=1,
+    )
+    assert downloads == [True]
+    assert artifact.read_bytes() == payload
+
+
 def test_malformed_literal_sha256_fails_before_destination_mutation(tmp_path):
     artifact = tmp_path / "missing-parent" / "slang"
 
@@ -288,6 +340,15 @@ def test_cli_rejects_malformed_literal_sha256_and_checksum_conflict(monkeypatch)
     )
     with pytest.raises(SystemExit) as conflict:
         download_and_verify.parse_args()
+
+    monkeypatch.setattr(
+        download_and_verify.sys,
+        "argv",
+        common_args + ["--reuse-valid-existing"],
+    )
+    with pytest.raises(SystemExit) as missing_digest:
+        download_and_verify.parse_args()
+    assert missing_digest.value.code == 2
     assert conflict.value.code == 2
 
 
@@ -319,7 +380,7 @@ def test_sha256_url_callers_remain_supported(tmp_path, monkeypatch):
     assert artifact.read_bytes() == payload
 
 
-def test_slang_callers_share_asset_id_and_checked_in_digest():
+def test_slang_callers_pin_digest_and_ci_uses_direct_download_on_cache_miss():
     repo_root = Path(__file__).resolve().parent.parent
     digest_text = (repo_root / "scripts/slang_rocky8.sha256").read_text()
     assert re.fullmatch(r"[0-9a-f]{64}\n", digest_text)
@@ -327,21 +388,27 @@ def test_slang_callers_share_asset_id_and_checked_in_digest():
     asset_url = (
         "https://api.github.com/repos/xlsynth/slang-rs/releases/assets/220397578"
     )
-    mutable_url = (
-        "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
-    )
+    direct_url = "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
     workflow_text = (repo_root / ".github/workflows/ci.yml").read_text()
     install_text = (repo_root / "docker/install_tools.sh").read_text()
     dockerfile_text = (repo_root / "docker/Dockerfile").read_text()
 
-    assert workflow_text.count(asset_url) == 4
-    assert workflow_text.count("scripts/slang_rocky8.sha256") == 4
+    assert workflow_text.count(direct_url) == 4
+    # Each caller reads the digest and uses it in the cache key.
+    assert workflow_text.count("scripts/slang_rocky8.sha256") == 8
     assert workflow_text.count('--sha256 "${slang_sha256}"') == 4
+    assert workflow_text.count("--reuse-valid-existing") == 4
+    assert (
+        workflow_text.count(
+            "-slang-rocky8-${{ hashFiles('scripts/slang_rocky8.sha256') }}"
+        )
+        == 4
+    )
     assert asset_url in install_text
     assert "scripts/slang_rocky8.sha256" in install_text
     assert '--sha256 "${slang_sha256}"' in install_text
-    assert mutable_url not in workflow_text
-    assert mutable_url not in install_text
+    assert asset_url not in workflow_text
+    assert direct_url not in install_text
     assert "scripts/slang_rocky8.sha256 scripts/" in dockerfile_text
     assert dockerfile_text.index("scripts/slang_rocky8.sha256") < dockerfile_text.index(
         "RUN bash docker/install_tools.sh"
