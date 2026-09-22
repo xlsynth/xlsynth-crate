@@ -125,6 +125,7 @@ mod tests {
     use xlsynth_pir::ir_operand_gate::OperandGateSite;
     use xlsynth_pir::ir_parser::Parser;
 
+    #[cfg(feature = "has-bitwuzla")]
     fn site(operand: usize) -> OperandGateSite {
         OperandGateSite {
             consumer: "difference".to_string(),
