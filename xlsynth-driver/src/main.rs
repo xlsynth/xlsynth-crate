@@ -123,6 +123,7 @@ mod ir_rewrite;
 mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
+mod ir_toggle_hotspots;
 mod lib2proto;
 mod lib_query;
 mod liberty_proto_info;
@@ -1374,6 +1375,15 @@ fn main() {
                 .arg(Arg::new("clamp").long("clamp").value_name("VALUE").help("Unsigned constant placed in selected bits"))
                 .arg(Arg::new("sites_json").long("sites-json").value_name("PATH").help("JSON array of sites to clamp simultaneously"))
                 .arg(Arg::new("time_limit_ms").long("time-limit-ms").value_parser(clap::value_parser!(u64)).value_name("MS").help("Optional solver time limit per check"))
+                .arg(Arg::new("format").long("format").value_parser(["text", "json"]).default_value("text").help("Result format")),
+        )
+        .subcommand(
+            clap::Command::new("ir-toggle-hotspots")
+                .about("Ranks IR word and AIG AND-gate switching on shared ordered stimulus")
+                .arg(Arg::new("ir_input_file").required(true).index(1).help("Package-form XLS IR file"))
+                .arg(Arg::new("input_irvals").long("input-irvals").required(true).value_name("PATH").help("Ordered named or positional .irvals samples (at least two)"))
+                .arg(Arg::new("top").long("top").value_name("FUNCTION").help("Select a function, overriding the package top"))
+                .arg(Arg::new("limit").long("limit").value_parser(clap::value_parser!(usize)).default_value("20").help("Maximum entries per ranking"))
                 .arg(Arg::new("format").long("format").value_parser(["text", "json"]).default_value("text").help("Result format")),
         )
         .subcommand(
@@ -4026,6 +4036,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-prove-operand-gate", subm)) => {
             ir_prove_operand_gate::handle_ir_prove_operand_gate(subm);
+        }
+        Some(("ir-toggle-hotspots", subm)) => {
+            ir_toggle_hotspots::handle_ir_toggle_hotspots(subm);
         }
         Some(("dslx-equiv", subm)) => {
             dslx_equiv::handle_dslx_equiv(subm, &config);

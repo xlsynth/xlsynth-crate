@@ -115,6 +115,39 @@ with an unreachable predicate has `vacuous: true`. Exit codes are 0 for
 `proved`, 1 for `counterexample`, 3 for `unknown`, and 2 for input or solver
 errors. This command operates on functions; blocks and procs are not supported.
 
+### `ir-toggle-hotspots`
+
+Runs an ordered `.irvals` stimulus sequence through a selected package function
+and its AIG lowering, then ranks the most active IR values and AIG AND2 gates.
+Each pair of adjacent samples is one transition. An IR word toggle counts once
+when any output bit changes; `bit_toggles` counts every flipped bit. A gate
+toggle counts a change at an AND2 node's output. Only nodes that toggle appear
+in the report, and only output-reachable AND2 gates are ranked.
+
+```shell
+xlsynth-driver ir-toggle-hotspots design.ir \
+  --top main --input-irvals stimulus.irvals --limit 30 --format json
+```
+
+Flags:
+
+- `--input-irvals <PATH>` (required) reads at least two named or positional
+  records in the same format as other `.irvals` commands. Samples must match
+  the function's parameter types, including tuples and arrays.
+- `--top <FUNCTION>` overrides the package top; without a top, a sole function
+  is selected. Packages with several functions require this flag.
+- `--limit <COUNT>` prints up to COUNT entries in each ranking (default 20).
+  Equal activity is ordered by IR node ID or AIG node ID.
+- `--format <text|json>` chooses text (default) or structured JSON.
+
+Gate `sources` list the IR operations recorded while constructing or sharing
+the AIG node; a gate may have several source operations. `ir_output_bits` list
+IR output bits whose lowering is exactly that gate's signal, with a `bit_index`
+counted from the least significant flattened bit and an `inverted` flag. An
+internal gate can have no corresponding IR output bit. Prep rewrites may create
+internal gates that do not map to an original source operation. Inline invokes
+and counted loops before using this command.
+
 ### `lib2proto`: liberty files to proto
 
 Liberty files can be unwieldy and large in their textual form -- this command reformats the data
