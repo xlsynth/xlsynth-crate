@@ -185,8 +185,6 @@ Source IDs are associations, not exact output-bit matches; serialized artifacts
 do not retain the lowering map needed to identify individual IR bits. Supply the
 IR matching the artifact, such as the prepared IR written with
 `ir2gates --prepared-ir-out` when the lowering performs IR rewrites.
-A [proposed provenance sidecar](../docs/aig_provenance_sidecar.md) describes a
-compact way to preserve precise source bits across artifact formats.
 
 ### `lib2proto`: liberty files to proto
 
