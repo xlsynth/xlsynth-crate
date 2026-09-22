@@ -41,7 +41,7 @@ pub fn prove_operand_gate(
     let package = Parser::new(source)
         .parse_and_validate_package()
         .map_err(|error| format!("invalid IR package: {error}"))?;
-    let original = package.select_function(top)?;
+    let original = package.get_named_or_top_or_sole_fn(top)?;
     let transformed = gate_operands_in_package(original, &package, when, sites)?;
     let predicate_property = predicate_is_false_property_in_package(original, &package, when)?;
     let prover = prover_for_choice_with_limits(SolverChoice::Bitwuzla, None, limits);

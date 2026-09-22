@@ -1716,8 +1716,8 @@ pub struct Instantiation {
 }
 
 impl Package {
-    /// Selects an explicit function, the package top, or its sole function.
-    pub fn select_function(&self, name: Option<&str>) -> Result<&Fn, String> {
+    /// Gets the named function, the package top, or its sole function.
+    pub fn get_named_or_top_or_sole_fn(&self, name: Option<&str>) -> Result<&Fn, String> {
         if let Some(name) = name {
             return self
                 .get_fn(name)
@@ -1958,7 +1958,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn select_function_requires_an_unambiguous_package_function() {
+    fn get_named_or_top_or_sole_fn_requires_an_unambiguous_function() {
         let source = r#"package choices
 
 fn first(x: bits[1] id=1) -> bits[1] { ret first_result: bits[1] = not(x, id=2) }
@@ -1969,41 +1969,58 @@ fn second(y: bits[1] id=3) -> bits[1] { ret second_result: bits[1] = not(y, id=4
             .unwrap();
         assert_eq!(package.get_top_fn().unwrap().name, "first");
         assert_eq!(
-            package.select_function(None).unwrap_err(),
+            package.get_named_or_top_or_sole_fn(None).unwrap_err(),
             "package has multiple functions; select one explicitly"
         );
         assert_eq!(
-            package.select_function(Some("second")).unwrap().name,
+            package
+                .get_named_or_top_or_sole_fn(Some("second"))
+                .unwrap()
+                .name,
             "second"
         );
         assert_eq!(
-            package.select_function(Some("missing")).unwrap_err(),
+            package
+                .get_named_or_top_or_sole_fn(Some("missing"))
+                .unwrap_err(),
             "function \"missing\" not found in package"
         );
 
         package.top = Some(("first".to_string(), MemberType::Function));
-        assert_eq!(package.select_function(None).unwrap().name, "first");
         assert_eq!(
-            package.select_function(Some("second")).unwrap().name,
+            package.get_named_or_top_or_sole_fn(None).unwrap().name,
+            "first"
+        );
+        assert_eq!(
+            package
+                .get_named_or_top_or_sole_fn(Some("second"))
+                .unwrap()
+                .name,
             "second"
         );
 
         package.top = Some(("other".to_string(), MemberType::Block));
         assert_eq!(
-            package.select_function(None).unwrap_err(),
+            package.get_named_or_top_or_sole_fn(None).unwrap_err(),
             "package top \"other\" is a block; select a function explicitly"
         );
         assert_eq!(
-            package.select_function(Some("second")).unwrap().name,
+            package
+                .get_named_or_top_or_sole_fn(Some("second"))
+                .unwrap()
+                .name,
             "second"
         );
 
         package.top = None;
         package.members.pop();
-        assert_eq!(package.select_function(None).unwrap().name, "first");
+        assert_eq!(
+            package.get_named_or_top_or_sole_fn(None).unwrap().name,
+            "first"
+        );
         package.members.clear();
         assert_eq!(
-            package.select_function(None).unwrap_err(),
+            package.get_named_or_top_or_sole_fn(None).unwrap_err(),
             "package has no functions"
         );
     }
