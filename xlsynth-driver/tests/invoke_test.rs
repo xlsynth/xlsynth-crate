@@ -9363,6 +9363,57 @@ fn main<N: u32>() -> u32 {
     );
 }
 
+#[test]
+#[cfg(feature = "has-bitwuzla")]
+fn test_dslx_equiv_prunes_local_homonyms_of_imported_functions_without_masking_mismatches() {
+    let dir = tempfile::tempdir().unwrap();
+    let lhs = dir.path().join("lhs.x");
+    let rhs = dir.path().join("rhs.x");
+    std::fs::write(
+        dir.path().join("foreign.x"),
+        "pub fn shared(x: u8) -> u8 { x + u8:2 }",
+    )
+    .unwrap();
+    std::fs::write(
+        &lhs,
+        "import foreign;\nfn leaf(x: u8) -> u8 { x + u8:1 }\nfn shared(x: u8) -> u8 { leaf(x) }\npub fn main(x: u8) -> u8 { foreign::shared(x) }",
+    )
+    .unwrap();
+    for (increment, equivalent) in [(2, true), (1, false)] {
+        std::fs::write(
+            &rhs,
+            format!("pub fn main(x: u8) -> u8 {{ x + u8:{increment} }}"),
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("dslx-equiv")
+            .arg(&lhs)
+            .arg(&rhs)
+            .arg("--dslx_top=main")
+            .arg("--dslx_path")
+            .arg(dir.path())
+            .args([
+                "--solver=bitwuzla",
+                "--assume-enum-in-bound=false",
+                "--assertion-semantics=never",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.success(), equivalent, "{stdout}\n{stderr}");
+        if equivalent {
+            assert!(stdout.contains("Solver proved equivalence"), "{stdout}");
+        } else {
+            assert!(
+                stderr.contains("failure") || stdout.contains("failure"),
+                "{stdout}\n{stderr}"
+            );
+            assert!(!stderr.contains("specialization failed"), "{stderr}");
+        }
+    }
+}
+
 #[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "dslx_equiv_default_semantics_bitwuzla"))]
 #[test_case("toolchain"; "dslx_equiv_default_semantics_toolchain")]
 fn test_dslx_equiv_default_semantics_matches_toolchain(solver: &str) {

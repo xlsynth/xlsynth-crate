@@ -1448,6 +1448,13 @@ impl Function {
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_function_to_string(self.ptr)) }
     }
+
+    /// Returns whether two wrappers point at the same DSLX function definition.
+    /// Independently parsed definitions and same-named imports are distinct.
+    pub fn is_same_definition(&self, other: &Function) -> bool {
+        self.ptr == other.ptr
+    }
+
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_function_get_identifier(self.ptr);
