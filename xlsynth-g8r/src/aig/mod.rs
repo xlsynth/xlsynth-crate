@@ -15,6 +15,7 @@ pub mod get_summary_stats;
 pub mod graph_logical_effort;
 pub mod logical_effort;
 pub mod match_and_rewrite;
+pub mod mffc;
 pub mod reassociation;
 pub mod sequential_gate;
 pub mod sequential_pipeline;

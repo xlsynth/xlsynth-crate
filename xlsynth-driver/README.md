@@ -2458,7 +2458,11 @@ sample.
     `(bits[8], bits[8]) -> bits[8]`.
   - `--toggle-output-json <PATH>` – with `--input-irvals`, write ordered
     stimulus toggle activity JSON including aggregate toggle counts plus
-    output-reachable per-node toggle counts and rates.
+    output-reachable per-node toggle counts and rates. The `mffc` section
+    reports the number of disjoint maximal fanout-free AND2 cones and their
+    input/output pin toggles. Each distinct signed frontier signal counts once
+    per cone, and each cone root counts once as an output; constants contribute
+    zero toggles. MFFC totals are supplementary to the ordinary gate totals.
 
 Examples:
 
