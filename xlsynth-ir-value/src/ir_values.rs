@@ -575,15 +575,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             values[0].type_(),
-            crate::ir::Type::Tuple(vec![
-                Box::new(crate::ir::Type::new_array(
-                    crate::ir::Type::Tuple(vec![Box::new(crate::ir::Type::Bits(7))]),
+            crate::Type::Tuple(vec![
+                Box::new(crate::Type::new_array(
+                    crate::Type::Tuple(vec![Box::new(crate::Type::Bits(7))]),
                     2,
                 )),
-                Box::new(crate::ir::Type::Tuple(vec![
-                    Box::new(crate::ir::Type::Token),
-                    Box::new(crate::ir::Type::Bits(0)),
-                    Box::new(crate::ir::Type::Bits(129)),
+                Box::new(crate::Type::Tuple(vec![
+                    Box::new(crate::Type::Token),
+                    Box::new(crate::Type::Bits(0)),
+                    Box::new(crate::Type::Bits(129)),
                 ])),
             ])
         );

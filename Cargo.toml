@@ -12,6 +12,7 @@ members = [
     "xlsynth-pir-compiler",
     "xlsynth-pir-compiler/tests/aot-dslx-test-crate",
     "xlsynth-pir-compiler/tests/aot-ir-test-crate",
+    "xlsynth-ir-value",
     "xlsynth-pir",
     "xlsynth-prover",
     "xlsynth-autocov",

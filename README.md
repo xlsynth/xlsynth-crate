@@ -41,6 +41,9 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
 - `xlsynth-vast`: standalone, Rust-native Verilog/SystemVerilog AST construction,
   register-building and expression-reduction helpers, and deterministic
   emission; does not require `libxls`
+- `xlsynth-ir-value`: native Rust bitvectors of arbitrary width, recursive IR
+  values and structural types, and typed value and `.irvals` parsing; does not
+  require `libxls`
 - `xlsynth-codegen`: Rust-native lowering of XLS block IR to deterministic
   SystemVerilog, including state, aggregate values, block hierarchy, foreign
   instantiations, and optional pipeline-stage formatting
@@ -54,7 +57,8 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
 - `xlsynth-estimator`: Rust implementation of the XLS IR operation-level delay estimation
   methodology
 - `xlsynth-g8r`: _experimental_ XLS IR to gate mapping library
-- `xlsynth-vastly`: Verilog/SystemVerilog simulation and VCD comparison utilities
+- `xlsynth-vastly`: Verilog/SystemVerilog simulation and VCD comparison utilities;
+  library and CLI builds do not require `libxls`
 
 ## External-tool tests
 
