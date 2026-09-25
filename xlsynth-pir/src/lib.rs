@@ -42,7 +42,6 @@ pub mod ir_rebase_ids;
 pub mod ir_rewrite;
 pub mod ir_utils;
 pub mod ir_value_utils;
-pub mod ir_values;
 pub mod ir_verify;
 pub mod ir_verify_parity;
 pub mod known_bits;
@@ -56,7 +55,8 @@ pub mod random_inputs;
 pub mod range_analysis;
 pub mod simple_rebase;
 pub mod structural_similarity;
-pub mod value;
+
+pub use xlsynth_ir_value::{ir_values, value};
 
 pub use aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
 pub use ir_builder::{

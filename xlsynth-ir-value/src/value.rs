@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native Rust values for PIR literals and execution.
+//! Native Rust values for XLS IR literals and execution.
 //!
-//! xlsynth::XlsIrBits and xlsynth::XlsIrValue are convenient libxls-backed
-//! handles, but they make otherwise-native PIR manipulation depend on the XLS
-//! DSO. This module provides the same value-shaped operations needed by PIR
-//! while keeping a canonical Rust-owned representation.
+//! This module provides value operations for XLS IR consumers using a
+//! canonical representation owned by Rust.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -14,9 +12,9 @@ use std::sync::Arc;
 use num_bigint::{BigInt, BigUint, Sign};
 use smallvec::SmallVec;
 
-use crate::ir::{ArrayTypeData, Type};
+use crate::{ArrayTypeData, Type};
 
-/// Error produced by native PIR value construction or conversion.
+/// Error produced by native IR value construction or conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueError(pub String);
 
@@ -28,7 +26,7 @@ impl fmt::Display for ValueError {
 
 impl std::error::Error for ValueError {}
 
-/// Text format used for native PIR values.
+/// Text format used for native IR values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrFormatPreference {
     Default,
@@ -131,7 +129,7 @@ impl IrBits {
 
     /// Packs bits directly into limbs without intermediate Boolean or byte
     /// buffers, visiting each index once in LSB-first order.
-    pub(crate) fn from_lsb_fn(bit_count: usize, mut bit_at: impl FnMut(usize) -> bool) -> Self {
+    pub fn from_lsb_fn(bit_count: usize, mut bit_at: impl FnMut(usize) -> bool) -> Self {
         let mut result = Self::zero(bit_count);
         for (limb_index, limb) in result.limbs.iter_mut().enumerate() {
             let start = limb_index * 64;
@@ -225,29 +223,37 @@ impl IrBits {
         self.to_le_bytes()
     }
 
+    /// Returns the unsigned value if it fits in `u64`, regardless of bit width.
     pub fn to_u64(&self) -> Result<u64, ValueError> {
-        if self.bit_count > 64 {
+        if self.limbs.iter().skip(1).any(|limb| *limb != 0) {
             return Err(ValueError(format!(
-                "IrBits::to_u64(): width {} exceeds 64 bits",
+                "IrBits::to_u64(): bits[{}] value does not fit in u64",
                 self.bit_count
             )));
         }
         Ok(self.limbs.first().copied().unwrap_or(0))
     }
 
+    /// Returns the two's-complement value if it fits in `i64`, regardless of
+    /// bit width.
     pub fn to_i64(&self) -> Result<i64, ValueError> {
-        if self.bit_count > 64 {
-            return Err(ValueError(format!(
-                "IrBits::to_i64(): width {} exceeds 64 bits",
-                self.bit_count
-            )));
-        }
         if self.bit_count == 0 {
             return Ok(0);
         }
-        let unsigned = self.to_u64()?;
-        let shift = 64 - self.bit_count;
-        Ok(((unsigned << shift) as i64) >> shift)
+        let low = self.limbs[0];
+        let sign_extension = if low >> 63 == 0 { 0 } else { u64::MAX };
+        for (index, limb) in self.limbs.iter().enumerate().skip(1) {
+            let limb_width = (self.bit_count - index * 64).min(64);
+            let expected = sign_extension >> (64 - limb_width);
+            if *limb != expected {
+                return Err(ValueError(format!(
+                    "IrBits::to_i64(): bits[{}] value does not fit in i64",
+                    self.bit_count
+                )));
+            }
+        }
+        let shift = 64 - self.bit_count.min(64);
+        Ok(((low << shift) as i64) >> shift)
     }
 
     pub fn is_zero(&self) -> bool {
@@ -662,7 +668,7 @@ impl fmt::Display for IrBits {
 ///
 /// ```compile_fail
 /// use std::sync::Arc;
-/// use xlsynth_pir::{IrArray, IrValue, ir::Type};
+/// use xlsynth_ir_value::{IrArray, IrValue, Type};
 /// let invalid = IrArray {
 ///     element_type: Type::Bits(8),
 ///     elements: Arc::from([IrValue::bool(true)]),
@@ -686,7 +692,7 @@ impl IrArray {
     }
 }
 
-/// A native recursive PIR value.
+/// A native recursive XLS IR value.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum IrValue {
     Token,
@@ -868,14 +874,20 @@ impl IrValue {
         bits.get_bit(0)
     }
 
+    /// Returns the unsigned bits value if it fits in `u64`, regardless of
+    /// width.
     pub fn to_u64(&self) -> Result<u64, ValueError> {
         self.as_bits()?.to_u64()
     }
 
+    /// Returns the two's-complement bits value if it fits in `i64`, regardless
+    /// of width.
     pub fn to_i64(&self) -> Result<i64, ValueError> {
         self.as_bits()?.to_i64()
     }
 
+    /// Returns the unsigned bits value if it fits in `u32`, regardless of
+    /// width.
     pub fn to_u32(&self) -> Result<u32, ValueError> {
         let value = self.to_u64()?;
         u32::try_from(value).map_err(|_| ValueError(format!("value {value} does not fit in u32")))
@@ -1165,9 +1177,36 @@ mod tests {
     }
 
     #[test]
-    fn zero_width_signed_conversion_is_zero() {
+    fn zero_width_integer_conversions_are_zero() {
         let value = IrValue::make_ubits(0, 0).unwrap();
+        assert_eq!(value.to_u64().unwrap(), 0);
         assert_eq!(value.to_i64().unwrap(), 0);
+    }
+
+    #[test]
+    fn integer_conversions_check_numeric_fit_across_limb_boundaries() {
+        for width in [64, 65, 127, 128, 129] {
+            let unsigned_max = IrBits::make_ubits(width, u64::MAX).unwrap();
+            assert_eq!(unsigned_max.to_u64().unwrap(), u64::MAX);
+            let signed_max = IrBits::make_sbits(width, i64::MAX).unwrap();
+            assert_eq!(signed_max.to_i64().unwrap(), i64::MAX);
+            let signed_min = IrBits::make_sbits(width, i64::MIN).unwrap();
+            assert_eq!(signed_min.to_i64().unwrap(), i64::MIN);
+
+            if width == 64 {
+                assert_eq!(unsigned_max.to_i64().unwrap(), -1);
+            } else {
+                assert!(unsigned_max.to_i64().is_err());
+                assert!(signed_min.to_u64().is_err());
+                let positive_overflow = IrBits::make_ubits(width, 1u64 << 63).unwrap();
+                assert!(positive_overflow.to_i64().is_err());
+                // All ones except bit 63 encodes i64::MIN - 1 at these widths.
+                let negative_overflow = IrBits::from_lsb_fn(width, |index| index != 63);
+                assert!(negative_overflow.to_i64().is_err());
+                let unsigned_overflow = IrBits::from_lsb_fn(width, |index| index == 64);
+                assert!(unsigned_overflow.to_u64().is_err());
+            }
+        }
     }
 
     #[test]
@@ -1249,13 +1288,14 @@ mod tests {
     }
 
     #[test]
-    fn scalar_accessors_preserve_width_and_type_checks() {
+    fn scalar_accessors_check_numeric_fit_and_type() {
         let wide = IrValue::make_ubits(129, 7).unwrap();
         assert_eq!(wide.bit_count().unwrap(), 129);
         assert!(wide.bits_equals_u64_value(7));
         assert!(!wide.bits_equals_u64_value(8));
-        assert!(wide.to_u64().is_err());
-        assert!(wide.to_i64().is_err());
+        assert_eq!(wide.to_u64().unwrap(), 7);
+        assert_eq!(wide.to_i64().unwrap(), 7);
+        assert_eq!(wide.to_u32().unwrap(), 7);
         assert!(wide.to_bool().is_err());
         let negative = IrValue::make_sbits(8, -3).unwrap();
         assert_eq!(negative.to_i64().unwrap(), -3);

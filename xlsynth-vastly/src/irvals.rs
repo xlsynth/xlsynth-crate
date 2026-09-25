@@ -2,11 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use xlsynth_pir::IrBits;
-use xlsynth_pir::IrValue;
-use xlsynth_pir::IrValuesFileKind;
-use xlsynth_pir::ValueError;
-use xlsynth_pir::parse_ir_values;
+use xlsynth_ir_value::IrBits;
+use xlsynth_ir_value::IrValue;
+use xlsynth_ir_value::IrValuesFileKind;
+use xlsynth_ir_value::ValueError;
+use xlsynth_ir_value::parse_ir_values;
 
 use crate::Error;
 use crate::LogicBit;

@@ -161,6 +161,8 @@ mod tests {
                 let xa = bits_to_libxls(a).unwrap();
                 assert_eq!(bits_from_libxls(&xa).unwrap(), *a);
                 assert_eq!(a.to_string(), xa.to_string(), "width={width}");
+                assert_eq!(a.to_u64().ok(), xa.to_u64().ok(), "width={width}, a={a}");
+                assert_eq!(a.to_i64().ok(), xa.to_i64().ok(), "width={width}, a={a}");
                 for (native, xls) in [
                     (a.not(), xa.not()),
                     (a.negate(), xa.negate()),

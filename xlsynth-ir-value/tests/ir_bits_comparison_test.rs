@@ -2,7 +2,7 @@
 
 use num_bigint::{BigInt, BigUint, Sign};
 use rand::{RngCore, SeedableRng, rngs::StdRng};
-use xlsynth_pir::IrBits;
+use xlsynth_ir_value::IrBits;
 
 /// Keeps independently decoded arithmetic references beside the public value.
 struct ReferenceValue {

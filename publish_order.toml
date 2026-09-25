@@ -2,6 +2,7 @@
 
 crates = [
     "xlsynth-vast",
+    "xlsynth-ir-value",
     "xlsynth-sys",
     "xlsynth",
     "xlsynth-pir",

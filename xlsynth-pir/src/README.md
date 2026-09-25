@@ -160,8 +160,9 @@ lowering references are documented in [../docs/extensions.md](../docs/extensions
 
 `xlsynth_pir::IrValue` and `xlsynth_pir::IrBits` are the native Rust representations
 used by PIR literals, parsing, evaluation, rewriting, and the Cranelift value
-adapter. They live in this crate alongside `ir::Type`; no separate value crate
-or compatibility type aliases are needed.
+adapter. `xlsynth-ir-value` defines these values and their structural types.
+PIR reexports the value APIs at its crate root and the structural types through
+`ir`, so its public signatures use those same types.
 
 `IrBits` retains its exact width and stores canonical, least-significant-first
 `u64` limbs, with one limb inline. Unused high bits are always zero. Arithmetic
@@ -206,8 +207,9 @@ Gate simulation, netlist literals, gate serialization, and Verilog simulation
 adapters use native values and bits directly. Range-analysis results are copied
 to native storage once, when they leave the XLS analysis API.
 
-This makes value operations native; it does not remove the crate's existing
-libxls dependency for upstream optimization and other XLS integration.
+`xlsynth-pir` depends on libxls for upstream optimization and other XLS
+integration. Consumers that need only native values and `.irvals` parsing can
+depend directly on `xlsynth-ir-value`.
 
 ### Native `.irvals` files
 
@@ -224,5 +226,6 @@ reverse operation for corpus writers. Names with punctuation can be
 JSON-quoted. Mixed record forms and blank lines are rejected by the shared
 parser; callers that allow blank lines or comments can filter them first.
 
-The `.irvals` API lives only in this crate. Consumers that invoke XLS convert
-the parsed native values at the C API boundary with `libxls_bridge`.
+The `.irvals` API is defined in `xlsynth-ir-value` and reexported by PIR.
+Consumers that invoke XLS convert the parsed native values at the C API boundary
+with `libxls_bridge`.
