@@ -7364,7 +7364,13 @@ fn test_aig_eval_input_irvals_writes_toggle_activity_json() {
       "toggle_count": 2,
       "toggle_rate": 1.0
     }
-  ]
+  ],
+  "mffc": {
+    "cone_count": 1,
+    "input_pin_count": 2,
+    "input_pin_toggles": 3,
+    "output_pin_toggles": 2
+  }
 }
 "#
     );
