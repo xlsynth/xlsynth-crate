@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use xlsynth::IrAnalysis;
 
 use crate::IrBits;
 use crate::ir;
+use crate::known_bits::{KnownBits, KnownBitsAnalysis};
 use crate::libxls_bridge::bits_from_libxls;
-
-/// Native known-bit masks copied from the XLS analysis boundary.
-pub struct KnownBits {
-    pub mask: IrBits,
-    pub value: IrBits,
-}
 
 /// An inclusive unsigned interval stored in native bits.
 pub struct Interval {
@@ -62,6 +57,35 @@ fn bit_len_unsigned(bits: &IrBits) -> usize {
 }
 
 impl IrRangeInfo {
+    /// Builds a lowering view of unconditional facts keyed by IR text ID.
+    ///
+    /// The caller must supply facts for the same graph that will be lowered;
+    /// this owned compatibility view does not retain an analysis's graph
+    /// borrow.
+    pub fn from_node_range_info(by_text_id: BTreeMap<usize, NodeRangeInfo>) -> Self {
+        Self { by_text_id }
+    }
+
+    /// Copies scalar masks and population bounds from a forward analysis.
+    pub fn from_known_bits(analysis: &KnownBitsAnalysis<'_>) -> Self {
+        let by_text_id = analysis
+            .iter()
+            .filter_map(|(node, value)| {
+                let known_bits = value.as_bits()?.clone();
+                Some((
+                    analysis.graph().get_node(node).text_id,
+                    NodeRangeInfo {
+                        known_bits: Some(known_bits),
+                        intervals: None,
+                        unsigned_min: None,
+                        unsigned_max: None,
+                    },
+                ))
+            })
+            .collect();
+        Self { by_text_id }
+    }
+
     /// Looks up all recorded range information for a given IR `text_id`.
     pub fn get(&self, text_id: usize) -> Option<&NodeRangeInfo> {
         self.by_text_id.get(&text_id)
@@ -107,9 +131,12 @@ impl IrRangeInfo {
 
     /// Returns true iff analysis proves the node value is never equal to zero.
     pub fn proves_nonzero(&self, text_id: usize) -> bool {
-        // Prefer interval reasoning when available: prove `0` is not in the
-        // interval set.
+        // Either a positive population lower bound or exclusion of zero from
+        // the intervals suffices; neither domain needs to know a fixed one bit.
         if let Some(node) = self.get(text_id) {
+            if node.known_bits.as_ref().is_some_and(|k| k.min_ones() > 0) {
+                return true;
+            }
             if let Some(intervals) = node.intervals.as_ref() {
                 // Zero-width values are always "zero", so we cannot prove
                 // nonzero.
@@ -128,21 +155,6 @@ impl IrRangeInfo {
                     .any(|it| it.lo.ule(&zero) && zero.ule(&it.hi));
                 return !zero_is_possible;
             }
-
-            // Fall back to known-bits: any provably-one bit implies nonzero.
-            if let Some(k) = node.known_bits.as_ref() {
-                let w = k.mask.get_bit_count();
-                for i in 0..w {
-                    let is_known = k.mask.get_bit(i).unwrap_or(false);
-                    if !is_known {
-                        continue;
-                    }
-                    let is_one = k.value.get_bit(i).unwrap_or(false);
-                    if is_one {
-                        return true;
-                    }
-                }
-            }
         }
 
         false
@@ -152,6 +164,17 @@ impl IrRangeInfo {
     /// every node `text_id`.
     pub fn build_from_analysis(analysis: &IrAnalysis, f: &ir::Fn) -> Result<Arc<Self>, String> {
         let mut by_text_id: BTreeMap<usize, NodeRangeInfo> = BTreeMap::new();
+        // These potentially relational queries remove priority logic from
+        // selects and one-hot encoders. Do not query every datapath value.
+        let population_operands: BTreeSet<usize> = f
+            .nodes
+            .iter()
+            .filter_map(|node| match node.payload {
+                ir::NodePayload::PrioritySel { selector, .. } => Some(f.get_node(selector).text_id),
+                ir::NodePayload::OneHot { arg, .. } => Some(f.get_node(arg).text_id),
+                _ => None,
+            })
+            .collect();
 
         for node in &f.nodes {
             let text_id = node.text_id;
@@ -176,10 +199,27 @@ impl IrRangeInfo {
             let known_bits = analysis
                 .get_known_bits_for_node_id(node_id_i64)
                 .map_err(|e| format!("known-bits query failed for node id={}: {}", text_id, e))?;
-            let known_bits = Some(KnownBits {
-                mask: bits_from_libxls(&known_bits.mask).map_err(|e| e.to_string())?,
-                value: bits_from_libxls(&known_bits.value).map_err(|e| e.to_string())?,
-            });
+            let mut known_bits = KnownBits::from_mask_value(
+                bits_from_libxls(&known_bits.mask).map_err(|e| e.to_string())?,
+                bits_from_libxls(&known_bits.value).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            if population_operands.contains(&text_id) {
+                let at_most_one = known_bits.max_ones() <= 1
+                    || analysis.at_most_one_bit_true(node_id_i64).map_err(|e| {
+                        format!("at-most-one query failed for node id={text_id}: {e}")
+                    })?;
+                if at_most_one {
+                    let at_least_one = known_bits.min_ones() > 0
+                        || analysis.at_least_one_bit_true(node_id_i64).map_err(|e| {
+                            format!("at-least-one query failed for node id={text_id}: {e}")
+                        })?;
+                    let max_ones = known_bits.max_ones().min(1);
+                    known_bits = known_bits
+                        .with_popcount_bounds(usize::from(at_least_one), max_ones)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
 
             let interval_set = analysis
                 .get_intervals_for_node_id(node_id_i64)
@@ -203,7 +243,7 @@ impl IrRangeInfo {
             by_text_id.insert(
                 text_id,
                 NodeRangeInfo {
-                    known_bits,
+                    known_bits: Some(known_bits),
                     intervals: Some(intervals),
                     unsigned_min,
                     unsigned_max,

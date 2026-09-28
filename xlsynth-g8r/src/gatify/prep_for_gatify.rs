@@ -1652,9 +1652,9 @@ fn msb_is_provably_zero(
     };
 
     if let Some(k) = info.known_bits.as_ref() {
-        let known = k.mask.get_bit(msb_index).unwrap_or(false);
+        let known = k.mask().get_bit(msb_index).unwrap_or(false);
         if known {
-            let bit_is_one = k.value.get_bit(msb_index).unwrap_or(false);
+            let bit_is_one = k.value().get_bit(msb_index).unwrap_or(false);
             return !bit_is_one;
         }
     }

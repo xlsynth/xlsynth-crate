@@ -8,19 +8,20 @@ use xlsynth::IrAnalysis;
 use crate::desugar_extensions;
 use crate::ir;
 use crate::ir_parser;
-use crate::ir_range_info::{Interval, IrRangeInfo, KnownBits};
+use crate::ir_range_info::{Interval, IrRangeInfo};
+use crate::known_bits::KnownBits;
 
 fn format_known_bits_binary(k: &KnownBits) -> String {
-    let w = k.mask.get_bit_count();
+    let w = k.bit_count();
     let mut s = String::with_capacity(2 + w);
     s.push_str("0b");
     for i in (0..w).rev() {
-        let known = k.mask.get_bit(i).unwrap_or(false);
+        let known = k.mask().get_bit(i).unwrap_or(false);
         if !known {
             s.push('X');
             continue;
         }
-        let bit = k.value.get_bit(i).unwrap_or(false);
+        let bit = k.value().get_bit(i).unwrap_or(false);
         s.push(if bit { '1' } else { '0' });
     }
     s

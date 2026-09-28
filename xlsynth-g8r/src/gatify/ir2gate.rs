@@ -18,6 +18,7 @@ use xlsynth_pir::ir::{self, StartAndLimit};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::ir_verify;
+use xlsynth_pir::known_bits::KnownBits;
 use xlsynth_prover::prover::SolverChoice;
 
 use crate::ir2gate_utils::{
@@ -69,8 +70,8 @@ fn get_known_zero_bit_indices_for_selector(
         None => return vec![],
     };
 
-    let mask = &known.mask;
-    let value = &known.value;
+    let mask = known.mask();
+    let value = known.value();
     let bit_count = mask.get_bit_count();
     assert_eq!(
         bit_count,
@@ -239,8 +240,8 @@ impl GateEnv {
             Some(k) => k,
             None => return,
         };
-        let mask = &known.mask;
-        let value = &known.value;
+        let mask = known.mask();
+        let value = known.value();
 
         let Some(entry) = self.ir_to_g8.get_mut(&ir_node_ref) else {
             return;
@@ -324,12 +325,14 @@ pub(super) fn gatify_add_with_mapping(
     }
 }
 
+/// Uses independent masks when population bounds prove priority unnecessary.
 fn gatify_priority_sel(
     gb: &mut GateBuilder,
     output_bit_count: usize,
     selector_bits: AigBitVector,
     cases: &[AigBitVector],
     default_bits: Option<AigBitVector>,
+    selector_facts: Option<&KnownBits>,
 ) -> AigBitVector {
     assert_eq!(
         selector_bits.get_bit_count(),
@@ -346,6 +349,17 @@ fn gatify_priority_sel(
         );
     }
 
+    if cases.is_empty() {
+        return default_bits.unwrap_or_else(|| AigBitVector::zeros(output_bit_count));
+    }
+    let selector_facts =
+        selector_facts.filter(|facts| facts.bit_count() == selector_bits.get_bit_count());
+    let at_most_one = selector_facts.is_some_and(|facts| facts.max_ones() <= 1);
+    let exactly_one = at_most_one && selector_facts.is_some_and(|facts| facts.min_ones() == 1);
+    if exactly_one && cases.len() == 1 {
+        return cases[0].clone();
+    }
+
     // Binary mux form we just emit as a single binary mux.
     if cases.len() == 1 && default_bits.is_some() {
         assert_eq!(selector_bits.get_bit_count(), 1);
@@ -356,6 +370,23 @@ fn gatify_priority_sel(
             /* on_true= */ &cases[0],
             /* on_false= */ &default_bits.unwrap(),
         );
+    }
+
+    if at_most_one {
+        let selected = gatify_one_hot_select(gb, &selector_bits, cases);
+        if exactly_one {
+            return selected;
+        }
+        if let Some(default_bits) = default_bits {
+            // At-most-one still permits zero: preserve the default arm, using
+            // one shared balanced reduction rather than a priority prefix.
+            let any_selected = gb.add_nez(&selector_bits, ReductionKind::Tree);
+            let none_selected = gb.add_not(any_selected);
+            let default_mask = gb.replicate(none_selected, output_bit_count);
+            let masked_default = gb.add_and_vec(&default_mask, &default_bits);
+            return gb.add_or_vec_nary(&[selected, masked_default], ReductionKind::Tree);
+        }
+        return selected;
     }
 
     // For small output widths and a present default, a mux-chain version tends
@@ -3757,12 +3788,18 @@ fn gatify_node(
             let default_bits =
                 default.map(|d| env.get_bit_vector(d).expect("default should be present"));
 
+            let selector_facts = options
+                .range_info
+                .as_ref()
+                .and_then(|info| info.get(f.get_node(*selector).text_id))
+                .and_then(|info| info.known_bits.as_ref());
             let gates = gatify_priority_sel(
                 g8_builder,
                 output_bit_count,
                 selector_bits,
                 cases.as_slice(),
                 default_bits,
+                selector_facts,
             );
             // Tag the result.
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
@@ -3988,7 +4025,27 @@ fn gatify_node(
                 .range_info
                 .as_ref()
                 .is_some_and(|ri| ri.proves_nonzero(f.get_node(*arg).text_id));
-            let bit_vector = if proven_nonzero {
+            let at_most_one = options
+                .range_info
+                .as_ref()
+                .and_then(|ri| ri.get(f.get_node(*arg).text_id))
+                .and_then(|info| info.known_bits.as_ref())
+                .is_some_and(|known| {
+                    known.bit_count() == bits.get_bit_count() && known.max_ones() <= 1
+                });
+            let bit_vector = if at_most_one {
+                // With no competing set bits, priority does not change the
+                // input. Retain the extra all-zero flag unless nonzero is
+                // independently proven.
+                let zero_flag = if proven_nonzero {
+                    g8_builder.get_false()
+                } else if bits.get_bit_count() == 0 {
+                    g8_builder.get_true()
+                } else {
+                    g8_builder.add_ez(&bits, ReductionKind::Tree)
+                };
+                AigBitVector::concat(zero_flag.into(), bits)
+            } else if proven_nonzero {
                 gatify_one_hot_with_nonzero_flag(g8_builder, &bits, *lsb_prio, true)
             } else {
                 gatify_one_hot(g8_builder, &bits, *lsb_prio)
