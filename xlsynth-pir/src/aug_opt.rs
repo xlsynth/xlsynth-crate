@@ -1571,16 +1571,16 @@ fn proves_node_ne_bits_literal(
     }
 
     if let Some(k) = info.known_bits.as_ref() {
-        let w = k.mask.get_bit_count();
+        let w = k.bit_count();
         if w != lit_bits.get_bit_count() {
             return false;
         }
         for i in 0..w {
-            let is_known = k.mask.get_bit(i).unwrap_or(false);
+            let is_known = k.mask().get_bit(i).unwrap_or(false);
             if !is_known {
                 continue;
             }
-            let kb = k.value.get_bit(i).unwrap_or(false);
+            let kb = k.value().get_bit(i).unwrap_or(false);
             let lb = lit_bits.get_bit(i).unwrap_or(false);
             if kb != lb {
                 return true;
@@ -2259,14 +2259,14 @@ fn known_one_positions(range_info: &IrRangeInfo, text_id: usize) -> Vec<usize> {
     let Some(k) = info.known_bits.as_ref() else {
         return Vec::new();
     };
-    let w = k.mask.get_bit_count();
+    let w = k.bit_count();
     let mut out = Vec::new();
     for i in 0..w {
-        let is_known = k.mask.get_bit(i).unwrap_or(false);
+        let is_known = k.mask().get_bit(i).unwrap_or(false);
         if !is_known {
             continue;
         }
-        let is_one = k.value.get_bit(i).unwrap_or(false);
+        let is_one = k.value().get_bit(i).unwrap_or(false);
         if is_one {
             out.push(i);
         }
