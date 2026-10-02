@@ -9,7 +9,6 @@ use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_match::MatchCtx;
 use crate::ir_utils;
 use crate::ir_value_utils::ir_bits_to_usize;
-use crate::ir_verify::verify_function;
 use crate::local_cost::estimate_local_cost;
 use crate::{IrBits, IrValue};
 
@@ -607,7 +606,6 @@ fn build_candidate(
     }
     ir_utils::compact_and_toposort_in_place(&mut candidate)
         .expect("constant-shift choices remain acyclic");
-    verify_function(&candidate).expect("constant-shift choices preserve well-formed IR");
     Some(ConstantShiftChoiceCandidate {
         function: candidate,
         rewrites,
@@ -619,6 +617,7 @@ mod tests {
     use super::*;
     use crate::ir_eval::eval_fn;
     use crate::ir_parser::Parser;
+    use crate::ir_verify::verify_function;
 
     fn masked_choice(width: usize, op: &str, return_amount: bool) -> ir::Fn {
         let return_type = if return_amount {

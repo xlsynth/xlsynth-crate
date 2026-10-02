@@ -32,6 +32,8 @@
 //! selects over constant bit projections when a bounded PIR-local area/depth
 //! heuristic improves. This estimate is not a final mapped QoR guarantee.
 
+use std::collections::HashSet;
+
 use crate::IrValue;
 use crate::constant_shift_choices::{
     ConstantShiftChoiceLimits, rewrite_profitable_constant_shift_choices,
@@ -40,8 +42,10 @@ use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
+use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils;
 use crate::ir_value_utils::ir_bits_to_usize;
+use crate::ir_verify::verify_package;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AugOptMode {
@@ -290,21 +294,7 @@ fn apply_pir_rewrites_to_ir_text(
     let (rewritten_top, rewrites_in_round, total_in_round) =
         apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()));
 
-    // Swap the rewritten top back into the PIR package.
-    for member in pir_pkg.members.iter_mut() {
-        match member {
-            ir::PackageMember::Function(f) if f.name == top_name => {
-                *f = rewritten_top.clone();
-            }
-            _ => {}
-        }
-    }
-
-    // Preserve the caller-supplied top in emitted IR text (especially for
-    // aug-opt-only mode, where downstream tools may rely on the `top` marker).
-    pir_pkg
-        .set_top_fn(top_name)
-        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+    replace_top_and_validate(&mut pir_pkg, rewritten_top)?;
 
     Ok((pir_pkg.to_string(), rewrites_in_round, total_in_round))
 }
@@ -328,20 +318,40 @@ fn canonicalize_masks_to_sel_for_xls_opt_in_ir_text(
         format!("aug_opt: compact/toposort after mask-to-sel canonicalization failed: {e}")
     })?;
 
-    for member in pir_pkg.members.iter_mut() {
-        match member {
-            ir::PackageMember::Function(f) if f.name == top_name => {
-                *f = rewritten_top.clone();
-            }
-            _ => {}
-        }
-    }
-
-    pir_pkg
-        .set_top_fn(top_name)
-        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+    replace_top_and_validate(&mut pir_pkg, rewritten_top)?;
 
     Ok((pir_pkg.to_string(), rewrite_count))
+}
+
+/// Installs a rewritten top with unique package IDs and validates its callees.
+fn replace_top_and_validate(pkg: &mut ir::Package, mut top: ir::Fn) -> Result<(), String> {
+    let occupied_ids: HashSet<_> = pkg
+        .members
+        .iter()
+        .filter(|member| !matches!(member, ir::PackageMember::Function(f) if f.name == top.name))
+        .flat_map(|member| &member.graph().nodes)
+        .filter(|node| !matches!(node.payload, NodePayload::Nil))
+        .map(|node| node.text_id)
+        .collect();
+    let mut max_id = package_max_emitted_node_id(pkg)
+        .max(top.nodes.iter().map(|node| node.text_id).max().unwrap_or(0));
+    // Function-local rewrites can allocate IDs used by another member. Keep
+    // existing IDs stable and move only collisions above both ID ranges.
+    for node in &mut top.nodes {
+        if !matches!(node.payload, NodePayload::Nil) && occupied_ids.contains(&node.text_id) {
+            max_id = max_id
+                .checked_add(1)
+                .ok_or_else(|| "aug_opt: node ID allocation overflow".to_string())?;
+            node.text_id = max_id;
+        }
+    }
+    let name = top.name.clone();
+    *pkg.get_fn_mut(&name)
+        .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{name}'"))? = top;
+    pkg.set_top_fn(&name)
+        .map_err(|e| format!("aug_opt: set_top_fn('{name}') failed: {e}"))?;
+    // Invokes and loop bodies need their original package's signatures.
+    verify_package(pkg).map_err(|e| format!("aug_opt: rewritten package failed validation: {e}"))
 }
 
 fn optimize_ir_text_preserving_extension_ops(
@@ -2660,7 +2670,7 @@ fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
 mod tests {
     use super::*;
     use crate::IrValue;
-    use crate::ir_eval::{FnEvalResult, eval_fn};
+    use crate::ir_eval::{FnEvalResult, eval_fn_in_package};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
 
     #[test]
@@ -2699,6 +2709,60 @@ top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) ->
                     "f",
                     &[4, 1, 1, 1],
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn aug_opt_constant_choices_preserve_package_calls_and_ids() {
+        for data_op in ["identity(x, id=11)", "invoke(x, to_apply=helper, id=11)"] {
+            let ir_text = format!(
+                r#"package package_choices
+
+fn helper(x: bits[4] id=13) -> bits[4] {{
+  ret result: bits[4] = not(x, id=14)
+}}
+
+top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[4] {{
+  one_bit: bits[1] = literal(value=1, id=5)
+  pair: bits[2] = concat(one_bit, q, id=6)
+  one: bits[2] = literal(value=1, id=7)
+  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
+  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
+  amount: bits[2] = and(chosen, mask, id=10)
+  data: bits[4] = {data_op}
+  ret result: bits[4] = shll(data, amount, id=12)
+}}
+"#,
+            );
+            let mut first_output = None;
+            for rounds in [1, 3] {
+                let result = run_aug_opt_over_ir_text_with_stats(
+                    &ir_text,
+                    Some("main"),
+                    AugOptOptions {
+                        enable: true,
+                        rounds,
+                        mode: AugOptMode::PirOnly,
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.rewrite_stats.constant_shift_choices, 1);
+                assert_eq!(
+                    parse_fn_clone(&ir_text, "helper").to_string(),
+                    parse_fn_clone(&result.output_text, "helper").to_string(),
+                );
+                exhaustive_ir_text_fn_equivalence_ubits(
+                    &ir_text,
+                    &result.output_text,
+                    "main",
+                    &[4, 1, 1, 1],
+                );
+                if let Some(first) = &first_output {
+                    assert_eq!(&result.output_text, first);
+                } else {
+                    first_output = Some(result.output_text);
+                }
             }
         }
     }
@@ -2783,11 +2847,11 @@ top fn f(x: bits[4] id=1, p: bits[1] id=2, amount: bits[65] id=3) -> bits[4] {{
                 args.push(IrValue::make_ubits(w, value as u64).expect("ubits arg"));
             }
 
-            let got0 = match eval_fn(f0, &args) {
+            let got0 = match eval_fn_in_package(&pkg0, f0, &args) {
                 FnEvalResult::Success(s) => s.value.clone(),
                 FnEvalResult::Failure(e) => panic!("unexpected eval failure (lhs): {:?}", e),
             };
-            let got1 = match eval_fn(f1, &args) {
+            let got1 = match eval_fn_in_package(&pkg1, f1, &args) {
                 FnEvalResult::Success(s) => s.value.clone(),
                 FnEvalResult::Failure(e) => panic!("unexpected eval failure (rhs): {:?}", e),
             };
