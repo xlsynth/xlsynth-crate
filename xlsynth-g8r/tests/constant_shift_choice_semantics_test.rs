@@ -192,6 +192,49 @@ fn wide_amounts_and_non_power_of_two_data_preserve_saturation() {
 }
 
 #[test]
+fn right_shift_slice_preserves_padding_and_a_live_full_shift() {
+    let mut builder = FnBuilder::new("right_shift_slice");
+    let data = builder.param("x", Type::Bits(5)).unwrap();
+    let selector = builder.param("selector", Type::Bits(2)).unwrap();
+    let amounts = [0, 2, 4, 7];
+    let cases: Vec<_> = amounts
+        .iter()
+        .map(|&amount| literal(&mut builder, 3, amount))
+        .collect();
+    let amount = builder.select(selector, &cases, None).unwrap();
+    let shifted = builder.shrl(data, amount).unwrap();
+    let sliced = builder.bit_slice(shifted, 1, 3).unwrap();
+    let result = builder.tuple(&[sliced, shifted]).unwrap();
+    let source = builder.build(result).unwrap();
+    let candidate = constant_shift_choice_candidate(&source, ConstantShiftChoiceLimits::default())
+        .expect("the slice and its independently live shift must both be fused");
+    assert_eq!(logical_shift_count(&candidate), 0);
+    let NodePayload::Tuple(elements) = &candidate.get_node(candidate.ret_node_ref.unwrap()).payload
+    else {
+        panic!("both results must remain live");
+    };
+    for &element in elements {
+        assert!(matches!(
+            candidate.get_node(element).payload,
+            NodePayload::Sel { .. }
+        ));
+    }
+    prove_candidate(&source, &candidate);
+
+    for x in 0u64..32 {
+        for (selector, &amount) in amounts.iter().enumerate() {
+            // Shift 2 partially pads the slice, shift 4 zeros only the slice,
+            // and shift 7 zeros both independently observable results.
+            let full = x >> amount;
+            let expected = IrValue::make_tuple(&[bits(3, (full >> 1) & 7), bits(5, full)]);
+            let args = [bits(5, x), bits(2, selector as u64)];
+            assert_eq!(evaluate(&source, &args), expected);
+            assert_eq!(evaluate(&candidate, &args), expected);
+        }
+    }
+}
+
+#[test]
 fn nested_priority_choices_keep_low_bit_precedence_and_default() {
     for direction in [Direction::Left, Direction::Right] {
         let mut builder = FnBuilder::new("nested_priority");

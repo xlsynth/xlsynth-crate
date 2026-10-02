@@ -22,6 +22,9 @@ pub struct ConstantShiftChoiceLimits {
     pub max_visited_nodes: usize,
     /// Conservative upper bound on newly emitted IR nodes for the function.
     pub max_emitted_nodes: usize,
+    /// Largest data or amount width considered, bounding temporary bitvectors
+    /// and projection literals before they are allocated.
+    pub max_bit_width: usize,
 }
 
 impl Default for ConstantShiftChoiceLimits {
@@ -30,6 +33,7 @@ impl Default for ConstantShiftChoiceLimits {
             max_distinct_shifts: 4,
             max_visited_nodes: 64,
             max_emitted_nodes: 128,
+            max_bit_width: 16_384,
         }
     }
 }
@@ -71,6 +75,9 @@ impl<'a> Recognizer<'a> {
         data_width: usize,
         limits: ConstantShiftChoiceLimits,
     ) -> Option<ChoiceDag> {
+        if data_width > limits.max_bit_width {
+            return None;
+        }
         let mut recognizer = Self {
             f,
             data_width,
@@ -274,6 +281,9 @@ impl<'a> Recognizer<'a> {
         }
         self.visit(nr)?;
         let width = MatchCtx::new(self.f).bits_width(nr)?;
+        if width > self.limits.max_bit_width {
+            return None;
+        }
         let choice = match self.f.get_node(nr).payload.clone() {
             NodePayload::Literal(value) => self.shift(self.effective_shift(&value.to_bits().ok()?)),
             NodePayload::Unop(Unop::Identity, arg) => self.read(arg),
@@ -509,13 +519,15 @@ pub fn rewrite_profitable_constant_shift_choices(
     f: &mut ir::Fn,
     limits: ConstantShiftChoiceLimits,
 ) -> usize {
+    // Reject uncostable inputs before allocating candidate projections or
+    // materializing replicated masks during recognition.
+    let Some(incumbent_cost) = estimate_local_cost(f) else {
+        return 0;
+    };
     let Some(candidate) = build_candidate(f, limits) else {
         return 0;
     };
-    let (Some(incumbent_cost), Some(candidate_cost)) = (
-        estimate_local_cost(f),
-        estimate_local_cost(&candidate.function),
-    ) else {
+    let Some(candidate_cost) = estimate_local_cost(&candidate.function) else {
         return 0;
     };
     if !candidate_cost.is_pareto_improvement_on(incumbent_cost) {
@@ -697,6 +709,35 @@ top fn main(x: bits[{width}] id=1, p: bits[1] id=2) -> bits[{width}] {{
             } else {
                 assert_eq!(estimate_local_cost(&function), None);
             }
+            assert_eq!(
+                rewrite_profitable_constant_shift_choices(&mut function, limits),
+                0
+            );
+            assert_eq!(function.to_string(), original);
+        }
+    }
+
+    #[test]
+    fn type_only_wide_inputs_are_rejected_before_materializing_bits() {
+        for (data_width, amount_width) in [(4, 1_000_000_000), (1_000_000_000, 32)] {
+            let mut function = Parser::new(&format!(
+                r#"package wide_choices
+
+top fn main(x: bits[{data_width}] id=1, p: bits[1] id=2) -> bits[{data_width}] {{
+  amount: bits[{amount_width}] = sign_ext(p, new_bit_count={amount_width}, id=3)
+  ret result: bits[{data_width}] = shll(x, amount, id=4)
+}}
+"#,
+            ))
+            .parse_and_validate_package()
+            .unwrap()
+            .get_top_fn()
+            .unwrap()
+            .clone();
+            let original = function.to_string();
+            let limits = ConstantShiftChoiceLimits::default();
+            assert!(constant_shift_choice_candidate(&function, limits).is_none());
+            assert_eq!(rewrite_constant_shift_choices(&mut function, limits), 0);
             assert_eq!(
                 rewrite_profitable_constant_shift_choices(&mut function, limits),
                 0
