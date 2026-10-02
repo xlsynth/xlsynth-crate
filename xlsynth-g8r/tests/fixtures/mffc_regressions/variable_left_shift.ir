@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package mffc_regression
+
+// Unconstrained left shift, including distances at or beyond the data width.
+// DSLX expression:
+//   p1 << p0
+top fn main(p0: bits[4] id=1, p1: bits[9] id=2) -> bits[9] {
+  ret n0: bits[9] = shll(p1, p0, id=3)
+}

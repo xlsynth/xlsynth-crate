@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package mffc_regression
+
+// Fusion case: p1 is the data MSB and forces a zero shift when set.
+// DSLX expression:
+//   {
+//     let amount = if p1 { u2:0 } else if p3 { u2:1 } else { u1:1 ++ !p2 };
+//     (p1 ++ p0) << amount
+//   }
+top fn main(p0: bits[3] id=1, p1: bits[1] id=2, p2: bits[1] id=3, p3: bits[1] id=4) -> bits[4] {
+  n0: bits[1] = literal(value=1, id=5)
+  n1: bits[1] = not(p2, id=6)
+  n2: bits[2] = concat(n0, n1, id=7)
+  n3: bits[2] = literal(value=1, id=8)
+  n4: bits[1] = not(p1, id=9)
+  n5: bits[2] = sel(p3, cases=[n2, n3], id=10)
+  n6: bits[2] = sign_ext(n4, new_bit_count=2, id=11)
+  n7: bits[4] = concat(p1, p0, id=12)
+  n8: bits[2] = and(n5, n6, id=13)
+  ret n9: bits[4] = shll(n7, n8, id=14)
+}

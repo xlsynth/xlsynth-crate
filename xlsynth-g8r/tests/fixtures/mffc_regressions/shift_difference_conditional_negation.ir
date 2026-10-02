@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package mffc_regression
+
+// Logical right shift by a difference modulo 32, zero-extension to 16 bits,
+// optional negation, and sign-extension to 21 bits. The amount is variable.
+// DSLX expression:
+//   {
+//     let (offset, data, negate) = p0.1;
+//     let shifted = ((data ++ u7:0) >> (p1 - offset)) as u16 as s16;
+//     (if negate { -shifted } else { shifted }) as s21 as u21
+//   }
+top fn main(p0: ((bits[5], bits[8], bits[1]), (bits[5], bits[8], bits[1])) id=1, p1: bits[5] id=2) -> bits[21] {
+  n0: (bits[5], bits[8], bits[1]) = tuple_index(p0, index=1, id=3)
+  n1: bits[8] = tuple_index(n0, index=1, id=4)
+  n2: bits[7] = literal(value=0, id=5)
+  n3: bits[5] = tuple_index(n0, index=0, id=6)
+  n4: bits[15] = concat(n1, n2, id=7)
+  n5: bits[5] = sub(p1, n3, id=8)
+  n6: bits[1] = literal(value=0, id=9)
+  n7: bits[15] = shrl(n4, n5, id=10)
+  n8: bits[16] = concat(n6, n7, id=11)
+  n9: bits[1] = tuple_index(n0, index=2, id=12)
+  n10: bits[16] = neg(n8, id=13)
+  n11: bits[16] = sel(n9, cases=[n8, n10], id=14)
+  ret n12: bits[21] = sign_ext(n11, new_bit_count=21, id=15)
+}

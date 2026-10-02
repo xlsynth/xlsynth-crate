@@ -1558,6 +1558,10 @@ Requires `--top <NAME>` to select the entry point.
 - Optional flags:
   - `--aug-opt=true|false` – enable the augmented optimizer “opt sandwich” (default: `false`).
 
+Aug-opt considers bounded constant-shift choice expansion using a PIR estimate
+of area and logic/mux depth. It preserves shared logic and constants in that
+estimate, but final mapped area and Graph LE can still differ.
+
 ### `ir-inline`: inline into the selected top function
 
 Runs a small explicit XLS pass pipeline to flatten calls into the selected top

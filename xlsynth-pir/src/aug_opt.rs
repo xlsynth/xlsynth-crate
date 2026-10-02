@@ -27,8 +27,15 @@
 //! This is useful beyond gate lowering because it exposes a small finite choice
 //! to the regular optimizer instead of hiding it inside a general dynamic shift
 //! cone.
+//!
+//! Bounded constant-choice trees, including masked amounts, also expand into
+//! selects over constant bit projections when a bounded PIR-local area/depth
+//! heuristic improves. This estimate is not a final mapped QoR guarantee.
 
 use crate::IrValue;
+use crate::constant_shift_choices::{
+    ConstantShiftChoiceLimits, rewrite_profitable_constant_shift_choices,
+};
 use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
@@ -55,6 +62,8 @@ pub struct AugOptOptions {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AugOptRewriteStats {
     pub guarded_sel_ne1_nor: usize,
+    /// Shift and shift-slice sites expanded from bounded constant choices.
+    pub constant_shift_choices: usize,
     pub lsb_of_shll: usize,
     pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
@@ -71,6 +80,7 @@ pub struct AugOptRewriteStats {
 impl AugOptRewriteStats {
     pub fn total(&self) -> usize {
         self.guarded_sel_ne1_nor
+            .saturating_add(self.constant_shift_choices)
             .saturating_add(self.lsb_of_shll)
             .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
@@ -88,6 +98,9 @@ impl AugOptRewriteStats {
         self.guarded_sel_ne1_nor = self
             .guarded_sel_ne1_nor
             .saturating_add(other.guarded_sel_ne1_nor);
+        self.constant_shift_choices = self
+            .constant_shift_choices
+            .saturating_add(other.constant_shift_choices);
         self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
         self.eq_shll_slice_literal = self
             .eq_shll_slice_literal
@@ -397,6 +410,12 @@ fn apply_basis_rewrites_to_fn(
     stats.selected_opposite_subtracts = rewrite_selected_opposite_subtracts(&mut cloned);
     stats.ne_shrl_slice_known_one_shift_nonzero =
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
+    // Candidate construction compacts the graph; run it after all consumers of
+    // the original range facts. The next round rebuilds its analysis.
+    stats.constant_shift_choices = rewrite_profitable_constant_shift_choices(
+        &mut cloned,
+        ConstantShiftChoiceLimits::default(),
+    );
     let total_rewrites = stats.total().saturating_add(affine_shift_amount);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
@@ -2643,6 +2662,77 @@ mod tests {
     use crate::IrValue;
     use crate::ir_eval::{FnEvalResult, eval_fn};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
+
+    #[test]
+    fn aug_opt_fuses_constant_choices_and_reaches_fixed_point() {
+        for op in ["shll", "shrl"] {
+            let ir_text = format!(
+                r#"package constant_choices
+
+top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[4] {{
+  one_bit: bits[1] = literal(value=1, id=5)
+  pair: bits[2] = concat(one_bit, q, id=6)
+  one: bits[2] = literal(value=1, id=7)
+  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
+  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
+  amount: bits[2] = and(chosen, mask, id=10)
+  ret result: bits[4] = {op}(x, amount, id=11)
+}}
+"#,
+            );
+            for rounds in [1, 3] {
+                let result = run_aug_opt_over_ir_text_with_stats(
+                    &ir_text,
+                    Some("f"),
+                    AugOptOptions {
+                        enable: true,
+                        rounds,
+                        mode: AugOptMode::PirOnly,
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.rewrite_stats.constant_shift_choices, 1);
+                assert_eq!(result.total_rewrites, 1);
+                exhaustive_ir_text_fn_equivalence_ubits(
+                    &ir_text,
+                    &result.output_text,
+                    "f",
+                    &[4, 1, 1, 1],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aug_opt_does_not_expand_choices_with_variable_leaves() {
+        for op in ["shll", "shrl"] {
+            let ir_text = format!(
+                r#"package variable_choices
+
+top fn f(x: bits[4] id=1, p: bits[1] id=2, amount: bits[65] id=3) -> bits[4] {{
+  one: bits[65] = literal(value=1, id=4)
+  chosen: bits[65] = sel(p, cases=[one, amount], id=5)
+  ret result: bits[4] = {op}(x, chosen, id=6)
+}}
+"#,
+            );
+            let result = run_aug_opt_over_ir_text_with_stats(
+                &ir_text,
+                Some("f"),
+                AugOptOptions {
+                    enable: true,
+                    rounds: 1,
+                    mode: AugOptMode::PirOnly,
+                },
+            )
+            .unwrap();
+            assert_eq!(result.rewrite_stats.constant_shift_choices, 0);
+            assert_eq!(
+                parse_fn_clone(&result.output_text, "f").to_string(),
+                parse_fn_clone(&ir_text, "f").to_string(),
+            );
+        }
+    }
 
     fn resolve_identity<'a>(f: &'a ir::Fn, mut nr: NodeRef) -> &'a ir::Node {
         loop {
