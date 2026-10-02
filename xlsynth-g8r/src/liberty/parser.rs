@@ -3944,6 +3944,8 @@ mod tests {
         let liberty_proto_str = liberty_proto.to_str().unwrap();
         let result_proto_str = result_proto.to_str().unwrap();
         prost_build::Config::new()
+            // Test execution does not guarantee the build script's OUT_DIR.
+            .out_dir(tmp.path())
             // Keep in sync with build.rs for descriptor determinism.
             .protoc_arg("--experimental_allow_proto3_optional")
             .file_descriptor_set_path(&descriptor_path)
