@@ -10,7 +10,7 @@ use crate::common::{
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_pipeline, run_opt_main};
-use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
+use xlsynth_g8r::aug_opt::{AugOptOptions, run_aug_opt_over_ir_text};
 
 pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();

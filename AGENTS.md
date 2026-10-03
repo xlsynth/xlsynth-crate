@@ -159,9 +159,35 @@ All tools, and especially the `xlsynth-driver` subcommands, are expected to prod
 
 Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.
 
+Avoid trivial helpers that hide `unwrap()` or `expect()` on a fallible operation
+behind a plain value return type. Keep the underlying call and its error handling
+visible at the call site, including in tests. Helpers that provide a useful
+abstraction should generally preserve the `Result` or `Option` so callers can
+choose how to handle failure. In particular, dispatch helpers whose `match` arms
+all unwrap fallible calls should return the common `Result` directly (or use `?`
+when more work follows).
+
 For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
 comment at all. A short summary helps readers understand both the local code and
 how it fits into the surrounding codebase.
+
+Use comment examples that match the routine's purpose:
+
+- For value construction or a rewrite's meaning, use compact DSLX expressions
+  when helpful, even in XLS IR code. State relevant bit widths; for example,
+  shifting `x: u8` right by three is `u3:0 ++ x[3:8]`.
+- For graph mechanics (node counts, sharing, traversal, reference updates),
+  describe actual IR nodes, operands, and storage. Use a small IR snippet or
+  explicit node and edge description if an example helps. DSLX syntax does not
+  determine exact IR node counts or sharing after lowering and optimization.
+
+Keep examples selective: concise prose is sufficient when an example adds no
+clarity. Avoid assuming a particular lowering just to make a DSLX example fit a
+graph helper.
+
+Document every significant struct, including private implementation types, with
+at least a one-line Rustdoc comment (`/// ...`) explaining what it represents and
+how it fits into the surrounding system.
 
 Prefer small named structs over larger tuples when returning multiple related
 values. Field names make call sites self-describing and avoid positional
@@ -256,20 +282,25 @@ cargo run -p xlsynth-driver -- ir2pipeline path/to/pkg.ir --top main --delay_mod
 
 ### Standalone binary: `xlsynth-pir-aug-opt`
 
-The `xlsynth-pir` crate provides a dedicated debugging binary that runs the sandwich and allows multiple rounds:
+The `xlsynth-g8r` crate provides a dedicated debugging binary that runs the sandwich and allows multiple rounds:
 
 ```bash
-cargo run -p xlsynth-pir --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1
+cargo run -p xlsynth-g8r --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1
 ```
 
 This binary also accepts `-` as input to read IR text from stdin.
+
+The driver and this binary use `xlsynth_g8r::aug_opt`, which supplies gate-based
+costing for profitability-gated rewrites. The backend-independent
+`xlsynth_pir::aug_opt` entrypoints require an injected `ShiftChoiceCostEvaluator`
+to enable shift-choice fusion; other PIR rewrites also run without a cost model.
 
 ### Aug-opt-only mode (debug binary only)
 
 For isolating aug-opt rewrites (without any libxls optimization passes), use the debug binary's `--aug-opt-only` flag:
 
 ```bash
-cargo run -p xlsynth-pir --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1 --aug-opt-only
+cargo run -p xlsynth-g8r --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1 --aug-opt-only
 ```
 
 ## Test

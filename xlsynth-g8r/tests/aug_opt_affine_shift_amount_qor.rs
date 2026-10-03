@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
+use xlsynth_g8r::aug_opt::run_aug_opt_over_ir_text_with_stats;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify_prepared_fn};
-use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text_with_stats};
+use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 

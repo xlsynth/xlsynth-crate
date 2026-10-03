@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package mffc_regression
+
+// A nonzero p1 sets the data MSB before an unconstrained variable shift.
+// DSLX expression:
+//   (p0 | ((p1 != u4:0) ++ u3:0)) << p2.1
+top fn main(p0: bits[4] id=1, p1: bits[4] id=2, p2: (bits[5], bits[2]) id=3) -> bits[4] {
+  n0: bits[4] = literal(value=0, id=4)
+  n1: bits[1] = ne(p1, n0, id=5)
+  n2: bits[3] = literal(value=0, id=6)
+  n3: bits[4] = concat(n1, n2, id=7)
+  n4: bits[4] = or(n3, p0, id=8)
+  n5: bits[2] = tuple_index(p2, index=1, id=9)
+  ret n6: bits[4] = shll(n4, n5, id=10)
+}

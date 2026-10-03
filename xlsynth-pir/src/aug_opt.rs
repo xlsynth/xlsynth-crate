@@ -13,28 +13,25 @@
 //! - **Bounded effort**: intended as a fast front-end; keep rounds small.
 //! - **Deterministic**: stable iteration order and stable outputs.
 //!
-//! One recurring pattern this pass normalizes is an "affine shift amount":
-//! a dynamic shift whose amount is `K + flag`, where `flag` is a single bit
-//! zero-extended into the amount type. In other words, interpreting the amount
-//! as an unsigned integer, it is the affine expression `K + 1*flag`, so the
-//! shift amount is exactly one of two constants: `K` or `K + 1`; when the
-//! fixed-width add wraps, the `flag=1` case is `0`. The canonical form is:
+//! See [Aug-opt optimizations] for the rewrites and when they apply.
 //!
-//! `shift(x, add(zext(flag), K))`
-//!   →
-//! `sel(flag, cases=[shift(x, K), shift(x, (K + 1) mod 2^amount_w)])`
-//!
-//! This is useful beyond gate lowering because it exposes a small finite choice
-//! to the regular optimizer instead of hiding it inside a general dynamic shift
-//! cone.
+//! [Aug-opt optimizations]: https://github.com/xlsynth/xlsynth-crate/blob/main/xlsynth-pir/docs/aug_opt.md
+
+use std::collections::HashSet;
 
 use crate::IrValue;
+use crate::constant_shift_choices::{
+    ConstantShiftChoiceLimits, rewrite_constant_shift_choices_with_evaluator,
+};
 use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use crate::ir_cost::ShiftChoiceCostEvaluator;
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
+use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils;
 use crate::ir_value_utils::ir_bits_to_usize;
+use crate::ir_verify::verify_package;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AugOptMode {
@@ -55,6 +52,8 @@ pub struct AugOptOptions {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AugOptRewriteStats {
     pub guarded_sel_ne1_nor: usize,
+    /// Shift and shift-slice sites expanded from bounded constant choices.
+    pub constant_shift_choices: usize,
     pub lsb_of_shll: usize,
     pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
@@ -71,6 +70,7 @@ pub struct AugOptRewriteStats {
 impl AugOptRewriteStats {
     pub fn total(&self) -> usize {
         self.guarded_sel_ne1_nor
+            .saturating_add(self.constant_shift_choices)
             .saturating_add(self.lsb_of_shll)
             .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
@@ -88,6 +88,9 @@ impl AugOptRewriteStats {
         self.guarded_sel_ne1_nor = self
             .guarded_sel_ne1_nor
             .saturating_add(other.guarded_sel_ne1_nor);
+        self.constant_shift_choices = self
+            .constant_shift_choices
+            .saturating_add(other.constant_shift_choices);
         self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
         self.eq_shll_slice_literal = self
             .eq_shll_slice_literal
@@ -145,6 +148,7 @@ impl Default for AugOptOptions {
     }
 }
 
+/// Runs backend-independent aug-opt rewrites without a cost evaluator.
 pub fn run_aug_opt_over_ir_text(
     ir_text: &str,
     top: Option<&str>,
@@ -153,10 +157,39 @@ pub fn run_aug_opt_over_ir_text(
     run_aug_opt_over_ir_text_with_stats(ir_text, top, options).map(|result| result.output_text)
 }
 
+/// Runs backend-independent rewrites and reports their counts.
+///
+/// Constant-shift-choice fusion requires a cost evaluator and is skipped here.
+/// Use [`run_aug_opt_over_ir_text_with_evaluator`] to enable cost-gated
+/// rewrites.
 pub fn run_aug_opt_over_ir_text_with_stats(
     ir_text: &str,
     top: Option<&str>,
     options: AugOptOptions,
+) -> Result<AugOptRunResult, String> {
+    run_aug_opt_over_ir_text_impl(ir_text, top, options, None)
+}
+
+/// Runs aug-opt with an injected cost model for profitability-gated rewrites.
+///
+/// The evaluator compares small graphs for individual constant-shift choices.
+/// An evaluation error aborts the run. Rewrites without a profitability gate
+/// are independent of this model.
+pub fn run_aug_opt_over_ir_text_with_evaluator(
+    ir_text: &str,
+    top: Option<&str>,
+    options: AugOptOptions,
+    evaluator: &mut dyn ShiftChoiceCostEvaluator,
+) -> Result<AugOptRunResult, String> {
+    run_aug_opt_over_ir_text_impl(ir_text, top, options, Some(evaluator))
+}
+
+/// Shares the optimization loop between backend-independent and costed runs.
+fn run_aug_opt_over_ir_text_impl(
+    ir_text: &str,
+    top: Option<&str>,
+    options: AugOptOptions,
+    mut evaluator: Option<&mut dyn ShiftChoiceCostEvaluator>,
 ) -> Result<AugOptRunResult, String> {
     if !options.enable {
         return Ok(AugOptRunResult {
@@ -179,7 +212,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
             let mut total_rewrites = 0usize;
             for _round in 0..options.rounds {
                 let (lowered_text, rewrites_in_round, total_in_round) =
-                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
+                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name, &mut evaluator)?;
                 let (sel_text, mask_to_sel_count) =
                     canonicalize_masks_to_sel_for_xls_opt_in_ir_text(&lowered_text, &top_name)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
@@ -229,7 +262,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 
             for _round in 0..options.rounds {
                 let (next_text, rewrites_in_round, total_in_round) =
-                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
+                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name, &mut evaluator)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
                 total_rewrites = total_rewrites.saturating_add(total_in_round);
                 cur_text = next_text;
@@ -246,6 +279,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 fn apply_pir_rewrites_to_ir_text(
     ir_text: &str,
     top_name: &str,
+    evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
 ) -> Result<(String, AugOptRewriteStats, usize), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
@@ -275,23 +309,9 @@ fn apply_pir_rewrites_to_ir_text(
         .map_err(|e| format!("aug_opt: building IrRangeInfo failed: {e}"))?;
 
     let (rewritten_top, rewrites_in_round, total_in_round) =
-        apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()));
+        apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()), evaluator)?;
 
-    // Swap the rewritten top back into the PIR package.
-    for member in pir_pkg.members.iter_mut() {
-        match member {
-            ir::PackageMember::Function(f) if f.name == top_name => {
-                *f = rewritten_top.clone();
-            }
-            _ => {}
-        }
-    }
-
-    // Preserve the caller-supplied top in emitted IR text (especially for
-    // aug-opt-only mode, where downstream tools may rely on the `top` marker).
-    pir_pkg
-        .set_top_fn(top_name)
-        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+    replace_top_and_validate(&mut pir_pkg, rewritten_top)?;
 
     Ok((pir_pkg.to_string(), rewrites_in_round, total_in_round))
 }
@@ -315,20 +335,40 @@ fn canonicalize_masks_to_sel_for_xls_opt_in_ir_text(
         format!("aug_opt: compact/toposort after mask-to-sel canonicalization failed: {e}")
     })?;
 
-    for member in pir_pkg.members.iter_mut() {
-        match member {
-            ir::PackageMember::Function(f) if f.name == top_name => {
-                *f = rewritten_top.clone();
-            }
-            _ => {}
-        }
-    }
-
-    pir_pkg
-        .set_top_fn(top_name)
-        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+    replace_top_and_validate(&mut pir_pkg, rewritten_top)?;
 
     Ok((pir_pkg.to_string(), rewrite_count))
+}
+
+/// Installs a rewritten top with unique package IDs and validates its callees.
+fn replace_top_and_validate(pkg: &mut ir::Package, mut top: ir::Fn) -> Result<(), String> {
+    let occupied_ids: HashSet<_> = pkg
+        .members
+        .iter()
+        .filter(|member| !matches!(member, ir::PackageMember::Function(f) if f.name == top.name))
+        .flat_map(|member| &member.graph().nodes)
+        .filter(|node| !matches!(node.payload, NodePayload::Nil))
+        .map(|node| node.text_id)
+        .collect();
+    let mut max_id = package_max_emitted_node_id(pkg)
+        .max(top.nodes.iter().map(|node| node.text_id).max().unwrap_or(0));
+    // Function-local rewrites can allocate IDs used by another member. Keep
+    // existing IDs stable and move only collisions above both ID ranges.
+    for node in &mut top.nodes {
+        if !matches!(node.payload, NodePayload::Nil) && occupied_ids.contains(&node.text_id) {
+            max_id = max_id
+                .checked_add(1)
+                .ok_or_else(|| "aug_opt: node ID allocation overflow".to_string())?;
+            node.text_id = max_id;
+        }
+    }
+    let name = top.name.clone();
+    *pkg.get_fn_mut(&name)
+        .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{name}'"))? = top;
+    pkg.set_top_fn(&name)
+        .map_err(|e| format!("aug_opt: set_top_fn('{name}') failed: {e}"))?;
+    // Invokes and loop bodies need their original package's signatures.
+    verify_package(pkg).map_err(|e| format!("aug_opt: rewritten package failed validation: {e}"))
 }
 
 fn optimize_ir_text_preserving_extension_ops(
@@ -375,7 +415,8 @@ fn optimize_ir_text_preserving_extension_ops(
 fn apply_basis_rewrites_to_fn(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
-) -> (ir::Fn, AugOptRewriteStats, usize) {
+    evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
+) -> Result<(ir::Fn, AugOptRewriteStats, usize), String> {
     let mut cloned = f.clone();
     let mut stats = AugOptRewriteStats::default();
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
@@ -397,13 +438,22 @@ fn apply_basis_rewrites_to_fn(
     stats.selected_opposite_subtracts = rewrite_selected_opposite_subtracts(&mut cloned);
     stats.ne_shrl_slice_known_one_shift_nonzero =
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
+    // Candidate construction compacts the graph; run it after all consumers of
+    // the original range facts. The next round rebuilds its analysis.
+    if let Some(evaluator) = evaluator.as_deref_mut() {
+        stats.constant_shift_choices = rewrite_constant_shift_choices_with_evaluator(
+            &mut cloned,
+            ConstantShiftChoiceLimits::default(),
+            evaluator,
+        )?;
+    }
     let total_rewrites = stats.total().saturating_add(affine_shift_amount);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
     ir_utils::compact_and_toposort_in_place(&mut cloned)
         .expect("aug_opt: compact_and_toposort_in_place failed");
-    (cloned, stats, total_rewrites)
+    Ok((cloned, stats, total_rewrites))
 }
 
 fn next_text_id(f: &ir::Fn) -> usize {
@@ -2641,8 +2691,52 @@ fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
 mod tests {
     use super::*;
     use crate::IrValue;
-    use crate::ir_eval::{FnEvalResult, eval_fn};
+    use crate::constant_shift_choices::constant_shift_choice_candidate;
+    use crate::ir_eval::{FnEvalResult, eval_fn_in_package};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
+
+    #[test]
+    fn aug_opt_without_evaluator_skips_cost_gated_choices() {
+        for op in ["shll", "shrl"] {
+            let ir_text = format!(
+                r#"package constant_choices
+
+top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[4] {{
+  one_bit: bits[1] = literal(value=1, id=5)
+  pair: bits[2] = concat(one_bit, q, id=6)
+  one: bits[2] = literal(value=1, id=7)
+  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
+  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
+  amount: bits[2] = and(chosen, mask, id=10)
+  ret result: bits[4] = {op}(x, amount, id=11)
+}}
+"#,
+            );
+            let original = parse_fn_clone(&ir_text, "f");
+            assert!(
+                constant_shift_choice_candidate(&original, ConstantShiftChoiceLimits::default())
+                    .is_some()
+            );
+            for rounds in [1, 3] {
+                let result = run_aug_opt_over_ir_text_with_stats(
+                    &ir_text,
+                    Some("f"),
+                    AugOptOptions {
+                        enable: true,
+                        rounds,
+                        mode: AugOptMode::PirOnly,
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.rewrite_stats.constant_shift_choices, 0);
+                assert_eq!(result.total_rewrites, 0);
+                assert_eq!(
+                    parse_fn_clone(&result.output_text, "f").to_string(),
+                    original.to_string(),
+                );
+            }
+        }
+    }
 
     fn resolve_identity<'a>(f: &'a ir::Fn, mut nr: NodeRef) -> &'a ir::Node {
         loop {
@@ -2693,11 +2787,11 @@ mod tests {
                 args.push(IrValue::make_ubits(w, value as u64).expect("ubits arg"));
             }
 
-            let got0 = match eval_fn(f0, &args) {
+            let got0 = match eval_fn_in_package(&pkg0, f0, &args) {
                 FnEvalResult::Success(s) => s.value.clone(),
                 FnEvalResult::Failure(e) => panic!("unexpected eval failure (lhs): {:?}", e),
             };
-            let got1 = match eval_fn(f1, &args) {
+            let got1 = match eval_fn_in_package(&pkg1, f1, &args) {
                 FnEvalResult::Success(s) => s.value.clone(),
                 FnEvalResult::Failure(e) => panic!("unexpected eval failure (rhs): {:?}", e),
             };

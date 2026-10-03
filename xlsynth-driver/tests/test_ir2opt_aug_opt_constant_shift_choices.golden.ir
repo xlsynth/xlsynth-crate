@@ -1,0 +1,15 @@
+package shift_choices
+
+top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[4] {
+  bit_slice.15: bits[1] = bit_slice(x, start=0, width=1, id=15)
+  literal.44: bits[1] = literal(value=0, id=44)
+  bit_slice.12: bits[2] = bit_slice(x, start=0, width=2, id=12)
+  concat.48: bits[2] = concat(bit_slice.15, literal.44, id=48)
+  sel.36: bits[2] = sel(q, cases=[bit_slice.12, concat.48], id=36)
+  concat.50: bits[3] = concat(sel.36, literal.44, id=50)
+  bit_slice.19: bits[3] = bit_slice(x, start=0, width=3, id=19)
+  sel.42: bits[3] = sel(p, cases=[concat.50, bit_slice.19], id=42)
+  concat.52: bits[4] = concat(sel.42, literal.44, id=52)
+  ret sel.23: bits[4] = sel(en, cases=[x, concat.52], id=23)
+}
+

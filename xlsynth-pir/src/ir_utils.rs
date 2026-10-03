@@ -1,33 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Utility functions for working with / on XLS IR.
+//! Helpers for inspecting and editing XLS IR graphs.
 
-use crate::ir::{self, Fn, Node, NodeGraph, NodePayload, NodeRef, Package, Type};
+use crate::IrValue;
+use crate::ir::{self, Binop, Fn, NaryOp, Node, NodeGraph, NodePayload, NodeRef, Package, Type};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrivialFnBody {
-    /// Return value does not depend on any parameter.
-    Constant,
-    /// Return value depends on exactly one parameter and uses only structural
-    /// (zero-cost) operations such as bit slicing / tuple indexing /
-    /// extensions.
-    SingleParamStructural { param_name: String },
-    /// Return value is a single boolean gate operation (e.g. not/and/or/xor)
-    /// applied to structural expressions over parameters/literals.
-    SingleBoolGate { op: String, param_count: usize },
+/// Bitwise operations recognized when classifying trivial function bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoolGateOp {
+    Not,
+    And,
+    Or,
+    Xor,
 }
 
-/// Returns whether `payload` is a "structural" operation.
+/// Simple return cone shapes used when filtering functions for mining.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrivialFnBody {
+    /// The return cone contains only structural nodes and no parameters.
+    Constant,
+    /// The return cone contains only structural nodes and one distinct
+    /// parameter.
+    SingleParamStructural { param_name: String },
+    /// The return cone contains one `not`, `and`, `or`, or `xor` node and
+    /// otherwise structural nodes. Counts distinct parameters in the cone.
+    SingleBoolGate { op: BoolGateOp, param_count: usize },
+}
+
+/// Returns whether this node kind is structural for function classification.
 ///
-/// Structural operations are treated as zero/near-zero semantic complexity for
-/// various analyses: they tend to rearrange, select, or repackage bits, rather
-/// than compute "new" boolean structure.
-///
-/// Note: This intentionally excludes `dynamic_bit_slice` and `bit_slice_update`
-/// because they can introduce substantial logic (e.g. barrel shifting / masked
-/// insertion).
+/// Classification depends only on the node kind: even an `array_slice` with
+/// a dynamic start is included. `dynamic_bit_slice` and `bit_slice_update`
+/// are excluded because they can introduce substantial logic.
 pub fn is_structural_payload(payload: &NodePayload) -> bool {
     match payload {
         NodePayload::Nil => true,
@@ -51,42 +57,43 @@ pub fn is_structural_payload(payload: &NodePayload) -> bool {
     }
 }
 
-fn bool_gate_op_string(payload: &NodePayload) -> Option<String> {
+/// Returns a supported bitwise gate operation, if any.
+fn bool_gate_op(payload: &NodePayload) -> Option<BoolGateOp> {
     match payload {
-        NodePayload::Unop(crate::ir::Unop::Not, _) => Some("not".to_string()),
+        NodePayload::Unop(crate::ir::Unop::Not, _) => Some(BoolGateOp::Not),
         NodePayload::Nary(op, _nodes) => match op {
-            crate::ir::NaryOp::And => Some("and".to_string()),
-            crate::ir::NaryOp::Or => Some("or".to_string()),
-            crate::ir::NaryOp::Xor => Some("xor".to_string()),
+            crate::ir::NaryOp::And => Some(BoolGateOp::And),
+            crate::ir::NaryOp::Or => Some(BoolGateOp::Or),
+            crate::ir::NaryOp::Xor => Some(BoolGateOp::Xor),
             _ => None,
         },
         _ => None,
     }
 }
 
-/// Classifies whether `f` is a "trivial" function body we typically don't care
-/// about when mining cones / samples.
+/// Classifies simple shapes in the graph feeding the function's return.
 ///
-/// Current definition (intentionally conservative):
-/// - The return value is derived using only structural operations (no boolean
-///   logic, no arithmetic, no selects).
-/// - If it depends on no parameters => `Constant`.
-/// - If it depends on exactly one parameter => `SingleParamStructural`.
-/// - Otherwise => not considered trivial (returns `None`).
+/// Cones containing only structural nodes qualify with zero parameters
+/// (`Constant`) or one distinct parameter (`SingleParamStructural`). One `not`,
+/// `and`, `or`, or `xor` node with otherwise structural nodes qualifies as
+/// `SingleBoolGate`, regardless of its parameter count.
+///
+/// Only return ancestry is inspected; unused nodes are ignored and shared
+/// nodes are counted once. This routine does not simplify or evaluate nodes.
 pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     let ret = f.ret_node_ref?;
 
     let mut stack: Vec<NodeRef> = vec![ret];
     let mut visited: HashSet<NodeRef> = HashSet::new();
     let mut used_param_node_refs: HashSet<NodeRef> = HashSet::new();
-    let mut gate_ops: Vec<String> = Vec::new();
+    let mut gate_ops: Vec<BoolGateOp> = Vec::new();
 
     while let Some(nr) = stack.pop() {
         if !visited.insert(nr) {
             continue;
         }
         let node = f.get_node(nr);
-        if let Some(op) = bool_gate_op_string(&node.payload) {
+        if let Some(op) = bool_gate_op(&node.payload) {
             gate_ops.push(op);
         } else if !is_structural_payload(&node.payload) {
             return None;
@@ -109,7 +116,7 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     if gate_ops.len() == 1 {
         let param_count = used_param_node_refs.len();
         return Some(TrivialFnBody::SingleBoolGate {
-            op: gate_ops[0].clone(),
+            op: gate_ops[0],
             param_count,
         });
     }
@@ -131,13 +138,18 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     None
 }
 
-/// Returns the count of nodes in the function, excluding the reserved Nil node.
+/// Counts stored node slots, excluding the reserved `Nil` slot.
+///
+/// Includes parameters, unreachable nodes, and any other `Nil` slots.
 pub fn fn_node_count(f: &Fn) -> usize {
     f.nodes.len().saturating_sub(1)
 }
 
 /// Returns a deterministically ordered set of function names referenced by
 /// `invoke` / `counted_for` nodes in `f`, excluding self-references.
+///
+/// Scans all stored nodes, including unreachable ones, without traversing the
+/// referenced functions. Each referenced function name appears once.
 pub fn external_function_references(f: &Fn) -> BTreeSet<String> {
     let mut refs = BTreeSet::new();
     for node in f.nodes.iter() {
@@ -167,24 +179,27 @@ pub fn has_external_function_references(f: &Fn) -> bool {
     !external_function_references(f).is_empty()
 }
 
-/// Returns a deterministic histogram mapping operator name to count.
+/// Returns a deterministically ordered histogram of stored operation nodes.
 ///
-/// Excludes bookkeeping-only nodes (`nil` and `param`) so the histogram
-/// reflects explicit operation nodes present in the function body.
+/// Excludes all `nil` and `param` nodes but includes unreachable operations.
+/// Each node is counted once regardless of its number of uses.
 pub fn op_histogram(f: &Fn) -> BTreeMap<String, usize> {
     op_histogram_impl(f, false)
 }
 
 /// Returns a deterministic histogram mapping operation signatures to count.
 ///
-/// Signatures include the operator, operand types, and result type, e.g.
-/// `and(bits[1], bits[1]) -> bits[1]`.
+/// Signatures include the operator, operand types, result type, and supported
+/// operation attributes, for example:
+/// `bit_slice(bits[8], start=2, width=4) -> bits[4]`.
 ///
-/// Excludes bookkeeping-only nodes (`nil` and `param`).
+/// Like [`op_histogram`], counts all stored operation nodes except `nil` and
+/// `param`.
 pub fn op_histogram_with_types(f: &Fn) -> BTreeMap<String, usize> {
     op_histogram_impl(f, true)
 }
 
+/// Counts stored operations, optionally distinguishing their signatures.
 fn op_histogram_impl(f: &Fn, include_types: bool) -> BTreeMap<String, usize> {
     let mut hist = BTreeMap::new();
     for node in f.nodes.iter() {
@@ -203,7 +218,9 @@ fn op_histogram_impl(f: &Fn, include_types: bool) -> BTreeMap<String, usize> {
     hist
 }
 
-/// Returns the list of operands for the provided node.
+/// Returns immediate operand references in payload order, retaining duplicates.
+///
+/// Static attributes, such as slice bounds, are not operand references.
 pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     use NodePayload::*;
 
@@ -378,11 +395,7 @@ pub fn is_observable_effect_root(payload: &NodePayload) -> bool {
     )
 }
 
-/// Returns a topologically sorted list of node references for the given IR
-/// function.
-///
-/// The ordering guarantees that for any node, all its dependency nodes will
-/// appear before it in the returned vector.
+/// Orders every stored node after its operands using iterative DFS.
 fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     // Non-recursive DFS that preserves prior postorder semantics.
     let n = nodes.len();
@@ -439,16 +452,20 @@ fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     order
 }
 
+/// Returns every stored node once, with operands before their users.
+///
+/// Includes `Nil` and unreachable nodes. Panics if the graph contains a cycle
+/// or an invalid operand reference.
 pub fn get_topological(f: &NodeGraph) -> Vec<NodeRef> {
     topo_from_nodes(&f.nodes)
 }
 
-/// Returns a topologically sorted list of node references for a standalone node
-/// list. Useful when nodes are not yet wrapped in an `Fn`.
+/// Applies [`get_topological`]'s ordering to a standalone node list.
 pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     topo_from_nodes(nodes)
 }
 
+/// Returns one plus the package's largest text ID, or 1 if empty.
 pub fn next_text_id(pkg: &Package) -> usize {
     pkg.members
         .iter()
@@ -459,8 +476,7 @@ pub fn next_text_id(pkg: &Package) -> usize {
         + 1
 }
 
-/// Returns the `NodeRef` corresponding to the `index`-th parameter of `f`, if
-/// it exists.
+/// Looks up a parameter node by its position, starting at zero.
 pub fn param_node_ref_by_index(f: &Fn, param_index: usize) -> Option<NodeRef> {
     f.params.get(param_index).copied()
 }
@@ -475,7 +491,7 @@ pub fn param_node_ref_by_name(f: &Fn, param_name: &str) -> Option<NodeRef> {
     param_node_ref_by_index(f, index)
 }
 
-/// Returns the `Type` of the `index`-th parameter of `f`, if it exists.
+/// Looks up a parameter type by its position, starting at zero.
 pub fn param_type_by_index(f: &Fn, param_index: usize) -> Option<Type> {
     f.params
         .get(param_index)
@@ -489,7 +505,7 @@ pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
         .map(|param| param.ty.clone())
 }
 
-/// Returns Err with a cycle description if any exist.
+/// Checks operand references for cycles and out-of-range node indices.
 pub fn verify_no_cycle(f: &NodeGraph) -> Result<(), String> {
     let n = f.nodes.len();
     if n == 0 {
@@ -566,6 +582,8 @@ pub fn find_node_by_name(f: &NodeGraph, name: &str) -> Option<NodeRef> {
 ///   before users).
 /// - Remapping all operands, signature parameter references, and the return
 ///   reference to the new indices.
+///
+/// All non-`Nil` nodes are retained, including unused ones.
 ///
 /// Invalid references and cycles return `Err` without modifying the function.
 pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
@@ -654,6 +672,9 @@ pub fn compact_graph_and_toposort_with_mapping_in_place(
 /// and returns the old-to-new node mapping for callers that need to remap
 /// references after compaction.
 ///
+/// `mapping[old.index]` is `Some(new)` for a retained node and `None` for a
+/// removed `Nil` slot. Names, text IDs, and node sharing are preserved.
+///
 /// Parameters remain first in signature order. Invalid signature, operand, or
 /// return references and cycles return an error without modifying the function.
 pub fn compact_and_toposort_with_mapping_in_place(
@@ -685,8 +706,10 @@ pub fn compact_and_toposort_with_mapping_in_place(
     Ok(compacted.mapping)
 }
 
+/// A compact list of nodes that directly consume one IR value.
 pub type UserList = SmallVec<[NodeRef; 2]>;
 
+/// Maps each IR node to its distinct direct consumers for sharing analyses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Users {
     users: Vec<UserList>,
@@ -724,6 +747,9 @@ impl Users {
 /// Each list is sorted and deduplicated, so a node that references the same
 /// operand multiple times is still recorded as one direct user of that operand.
 /// Nodes with no users map to an empty list.
+///
+/// Only direct operand edges count; the function's return reference adds no
+/// extra user.
 pub fn compute_users(f: &NodeGraph) -> Users {
     let n = f.nodes.len();
     let mut users: Vec<UserList> = (0..n).map(|_| UserList::new()).collect();
@@ -747,10 +773,158 @@ pub fn compute_users(f: &NodeGraph) -> Users {
     Users { users }
 }
 
+/// Appends an unnamed IR node with a fresh function-local text ID.
+///
+/// The node has no source location. Existing node references remain valid;
+/// callers update the function's parameter list or return value when needed.
+pub fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
+    let text_id = f
+        .nodes
+        .iter()
+        .map(|node| node.text_id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let index = f.nodes.len();
+    f.nodes.push(ir::Node {
+        text_id,
+        name: None,
+        ty,
+        payload,
+        pos: None,
+    });
+    NodeRef { index }
+}
+
+/// Reuses or appends an unsigned literal of the requested width and value.
+///
+/// For example, `bit_count = 5` and `value = 0` request `u5:0`.
+fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> NodeRef {
+    for (index, node) in f.nodes.iter().enumerate() {
+        if let NodePayload::Literal(literal) = &node.payload {
+            if node.ty.bit_count() == bit_count && literal.bits_equals_u64_value(value) {
+                return NodeRef { index };
+            }
+        }
+    }
+    let literal = IrValue::make_ubits(bit_count, value).expect("ubits literal");
+    push_node(f, Type::Bits(bit_count), NodePayload::Literal(literal))
+}
+
+/// Builds a logical constant shift using slices, zero padding, and
+/// concatenation.
+///
+/// For `arg: u8` and `shift = 3`, the equivalent DSLX expressions are:
+///
+/// ```text
+/// arg[0:5] ++ u3:0 // Shll: arg << u32:3
+/// u3:0 ++ arg[3:8] // Shrl: arg >> u32:3
+/// ```
+///
+/// `op` must be `Shll` or `Shrl`, and `arg` must be a bits value. The result
+/// retains its width; shifts at least that wide produce zero. A zero shift
+/// returns `arg` directly.
+pub fn make_constant_shift_expr(f: &mut ir::Fn, op: Binop, arg: NodeRef, shift: usize) -> NodeRef {
+    let arg_width = f.get_node(arg).ty.bit_count();
+    if shift == 0 {
+        return arg;
+    }
+    if arg_width == 0 || shift >= arg_width {
+        return get_or_insert_ubits_literal(f, arg_width, 0);
+    }
+
+    let shifted_width = arg_width - shift;
+    let shifted_slice = push_node(
+        f,
+        Type::Bits(shifted_width),
+        NodePayload::BitSlice {
+            arg,
+            start: if op == Binop::Shrl { shift } else { 0 },
+            width: shifted_width,
+        },
+    );
+    let zero_padding = get_or_insert_ubits_literal(f, shift, 0);
+    let operands = match op {
+        Binop::Shrl => vec![zero_padding, shifted_slice],
+        Binop::Shll => vec![shifted_slice, zero_padding],
+        _ => unreachable!("constant-shift projection requires a logical shift"),
+    };
+    push_node(
+        f,
+        Type::Bits(arg_width),
+        NodePayload::Nary(NaryOp::Concat, operands),
+    )
+}
+
+/// Builds a slice of a logical right shift using only source bits and zeros.
+///
+/// `arg` must be a bits value. The result has `width` bits, starting at bit
+/// `start` of `arg >> shift`, with bits beyond `arg` filled with zeros. This
+/// avoids constructing the full shifted value when only a slice is needed.
+///
+/// For `arg: u8`, `shift = 3`, `start = 2`, and `width = 4`:
+///
+/// ```text
+/// u1:0 ++ arg[5:8] // (arg >> u32:3)[2:6]
+/// ```
+pub fn make_constant_shrl_bit_slice_expr(
+    f: &mut ir::Fn,
+    arg: NodeRef,
+    shift: usize,
+    start: usize,
+    width: usize,
+) -> NodeRef {
+    let arg_width = f.get_node(arg).ty.bit_count();
+    if width == 0 {
+        return get_or_insert_ubits_literal(f, 0, 0);
+    }
+    let Some(source_start) = start.checked_add(shift) else {
+        return get_or_insert_ubits_literal(f, width, 0);
+    };
+    if source_start >= arg_width {
+        return get_or_insert_ubits_literal(f, width, 0);
+    }
+
+    let valid_width = std::cmp::min(width, arg_width - source_start);
+    if valid_width == 0 {
+        return get_or_insert_ubits_literal(f, width, 0);
+    }
+    if valid_width == width {
+        if source_start == 0 && width == arg_width {
+            return arg;
+        }
+        return push_node(
+            f,
+            Type::Bits(width),
+            NodePayload::BitSlice {
+                arg,
+                start: source_start,
+                width,
+            },
+        );
+    }
+
+    let payload_bits = push_node(
+        f,
+        Type::Bits(valid_width),
+        NodePayload::BitSlice {
+            arg,
+            start: source_start,
+            width: valid_width,
+        },
+    );
+    let zero_prefix = get_or_insert_ubits_literal(f, width - valid_width, 0);
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Nary(NaryOp::Concat, vec![zero_prefix, payload_bits]),
+    )
+}
+
 /// Replaces the payload (and optionally the type) of `target` in `f`.
 ///
-/// This leaves the node index and any users untouched; callers that want to
-/// redirect users to a different node should use `replace_node_with_ref`.
+/// The node index and references from its users are unchanged. To redirect
+/// users to another node, use [`replace_node_with_ref`].
 pub fn replace_node_payload(
     f: &mut NodeGraph,
     target: NodeRef,
@@ -786,8 +960,10 @@ pub fn replace_node_payload(
 /// Redirects all users of `target` (including `ret_node_ref`, if any) to
 /// `replacement`.
 ///
-/// The replaced node's payload is set to `NodePayload::Nil` to allow callers
-/// to remove it later via `compact_and_toposort_in_place`.
+/// The nodes must have the same type. Unless the references are identical,
+/// the replaced node is marked [`NodePayload::Nil`] for later removal by
+/// [`compact_and_toposort_in_place`]. Other interface references, such as
+/// `params`, remain the caller's responsibility.
 pub fn replace_node_with_ref(
     f: &mut Fn,
     target: NodeRef,
@@ -800,8 +976,11 @@ pub fn replace_node_with_ref(
     Ok(())
 }
 
-/// Redirects graph operands and removes the replaced node. Owners must update
-/// any interface references separately.
+/// Redirects graph operands and marks `target` as [`NodePayload::Nil`].
+///
+/// Performs the operand redirection of [`replace_node_with_ref`] while leaving
+/// interface references, such as function returns or block ports, to the owner.
+/// Node indices remain unchanged; identical references have no effect.
 pub fn replace_graph_node_with_ref(
     f: &mut NodeGraph,
     target: NodeRef,
@@ -849,10 +1028,13 @@ pub fn replace_graph_node_with_ref(
     Ok(())
 }
 
-/// Replaces exactly one operand slot of `target` with `replacement`.
+/// Replaces one operand occurrence of `target`, indexed as in [`operands`].
 ///
-/// This leaves all other users of the original operand untouched and does not
-/// compact/toposort; callers should run compaction after batching edits.
+/// Other occurrences of the original operand are unchanged. All consumers
+/// of `target` still reference the same node, with its updated payload.
+///
+/// The replacement must have the original operand's type. Callers should run
+/// compaction/toposorting after batching edits.
 pub fn replace_operand_with_ref(
     f: &mut NodeGraph,
     target: NodeRef,
@@ -907,6 +1089,13 @@ pub fn replace_operand_with_ref(
     Ok(())
 }
 
+/// Returns a payload with each immediate operand slot mapped independently.
+///
+/// The callback receives `(slot, old_ref)` for each operand occurrence.
+/// Slot numbers match [`operands`]; callback invocation order is unspecified.
+/// Operation attributes are preserved, and the input payload is unchanged.
+/// Only immediate references are mapped, without traversing their subgraphs
+/// or validating the replacement references.
 pub fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
 where
     // Map function takes the operand slot and the existing operand and returns the new operand.
@@ -1239,7 +1428,11 @@ pub fn is_valid_identifier_name(s: &str) -> bool {
     true
 }
 
-/// Sanitizes arbitrary text to a valid identifier name deterministically.
+/// Replaces dots in an IR text ID with underscores: `add.7` becomes `add_7`.
+///
+/// Accepts only ASCII letters, digits, `_`, and `.`; panics otherwise.
+/// Use [`is_valid_identifier_name`] to check whether the result is a valid
+/// identifier, since empty inputs and leading digits are preserved.
 pub fn sanitize_text_id_to_identifier_name(s: &str) -> String {
     assert!(
         s.chars()
@@ -1671,7 +1864,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "not".to_string(),
+                op: BoolGateOp::Not,
                 param_count: 1
             })
         );
@@ -1687,7 +1880,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "and".to_string(),
+                op: BoolGateOp::And,
                 param_count: 2
             })
         );
@@ -1703,7 +1896,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "or".to_string(),
+                op: BoolGateOp::Or,
                 param_count: 2
             })
         );
@@ -1719,7 +1912,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "xor".to_string(),
+                op: BoolGateOp::Xor,
                 param_count: 2
             })
         );

@@ -2139,6 +2139,39 @@ top fn my_main(x: bits[32] id=5) -> bits[32] {
 }
 
 #[test]
+fn test_ir2opt_aug_opt_constant_shift_choices() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("shift.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package shift_choices
+
+top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[4] {
+  one_bit: bits[1] = literal(value=1, id=5)
+  pair: bits[2] = concat(one_bit, q, id=6)
+  one: bits[2] = literal(value=1, id=7)
+  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
+  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
+  amount: bits[2] = and(chosen, mask, id=10)
+  ret result: bits[4] = shll(x, amount, id=11)
+}
+"#,
+    )
+    .unwrap();
+    let stdout = run_driver_success(&[
+        "ir2opt",
+        ir_path.to_str().unwrap(),
+        "--top",
+        "main",
+        "--aug-opt=true",
+    ]);
+    compare_golden_text(
+        &String::from_utf8(stdout).unwrap(),
+        "tests/test_ir2opt_aug_opt_constant_shift_choices.golden.ir",
+    );
+}
+
+#[test]
 fn test_ir_inline_subcommand_default_unroll_true() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
