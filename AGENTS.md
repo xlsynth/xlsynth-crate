@@ -159,6 +159,14 @@ All tools, and especially the `xlsynth-driver` subcommands, are expected to prod
 
 Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.
 
+Avoid trivial helpers that hide `unwrap()` or `expect()` on a fallible operation
+behind a plain value return type. Keep the underlying call and its error handling
+visible at the call site, including in tests. Helpers that provide a useful
+abstraction should generally preserve the `Result` or `Option` so callers can
+choose how to handle failure. In particular, dispatch helpers whose `match` arms
+all unwrap fallible calls should return the common `Result` directly (or use `?`
+when more work follows).
+
 For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
 comment at all. A short summary helps readers understand both the local code and
 how it fits into the surrounding codebase.

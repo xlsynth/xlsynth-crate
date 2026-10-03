@@ -9,7 +9,7 @@ use xlsynth_pir::constant_shift_choices::{
 use xlsynth_pir::ir::{self, Binop, NodePayload, Type};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_utils::{find_node_by_name, operands};
-use xlsynth_pir::{BValue, FnBuilder, IrBits, IrValue};
+use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue};
 
 #[derive(Clone, Copy, Debug)]
 enum Direction {
@@ -18,20 +18,18 @@ enum Direction {
 }
 
 impl Direction {
-    fn emit(self, builder: &mut FnBuilder, data: BValue, amount: BValue) -> BValue {
+    /// Emits the selected logical shift, preserving builder validation errors.
+    fn emit(
+        self,
+        builder: &mut FnBuilder,
+        data: BValue,
+        amount: BValue,
+    ) -> Result<BValue, BuilderError> {
         match self {
-            Self::Left => builder.shll(data, amount).unwrap(),
-            Self::Right => builder.shrl(data, amount).unwrap(),
+            Self::Left => builder.shll(data, amount),
+            Self::Right => builder.shrl(data, amount),
         }
     }
-}
-
-fn bits(width: usize, value: u64) -> IrValue {
-    IrValue::make_ubits(width, value).unwrap()
-}
-
-fn literal(builder: &mut FnBuilder, width: usize, value: usize) -> BValue {
-    builder.literal(bits(width, value as u64)).unwrap()
 }
 
 fn evaluate(function: &ir::Fn, args: &[IrValue]) -> IrValue {
@@ -90,9 +88,9 @@ fn masked_choice_fixture(direction: Direction, swapped_mask: bool) -> ir::Fn {
     let en = builder.param("en", Type::Bits(1)).unwrap();
     let p = builder.param("p", Type::Bits(1)).unwrap();
     let q = builder.param("q", Type::Bits(1)).unwrap();
-    let prefix = literal(&mut builder, 1, 1);
+    let prefix = builder.literal(IrValue::make_ubits(1, 1).unwrap()).unwrap();
     let pair = builder.concat(&[prefix, q]).unwrap();
-    let one = literal(&mut builder, 2, 1);
+    let one = builder.literal(IrValue::make_ubits(2, 1).unwrap()).unwrap();
     let chosen = builder.select(p, &[pair, one], None).unwrap();
     let mask = builder.sign_extend(en, 2).unwrap();
     let amount = if swapped_mask {
@@ -100,7 +98,7 @@ fn masked_choice_fixture(direction: Direction, swapped_mask: bool) -> ir::Fn {
     } else {
         builder.and(chosen, mask).unwrap()
     };
-    let result = direction.emit(&mut builder, data, amount);
+    let result = direction.emit(&mut builder, data, amount).unwrap();
     builder.build(result).unwrap()
 }
 
@@ -130,7 +128,7 @@ fn four_bit_masked_choices_match_exhaustive_independent_oracle() {
                         2
                     };
                     let args = [
-                        bits(4, x),
+                        IrValue::make_ubits(4, x).unwrap(),
                         IrValue::bool(en),
                         IrValue::bool(p),
                         IrValue::bool(q),
@@ -154,7 +152,11 @@ fn wide_amounts_and_non_power_of_two_data_preserve_saturation() {
             let amounts = [0, width - 1, width, width + 3];
             let cases: Vec<_> = amounts
                 .iter()
-                .map(|&amount| literal(&mut builder, 130, amount))
+                .map(|&amount| {
+                    builder
+                        .literal(IrValue::make_ubits(130, amount as u64).unwrap())
+                        .unwrap()
+                })
                 .collect();
             let mut huge_bits = vec![false; 130];
             huge_bits[129] = true;
@@ -163,7 +165,7 @@ fn wide_amounts_and_non_power_of_two_data_preserve_saturation() {
                 .literal(IrValue::from_bits(&IrBits::from_lsb_is_0(&huge_bits)))
                 .unwrap();
             let amount = builder.select(selector, &cases, Some(huge)).unwrap();
-            let result = direction.emit(&mut builder, data, amount);
+            let result = direction.emit(&mut builder, data, amount).unwrap();
             let source = builder.build(result).unwrap();
             let candidate =
                 constant_shift_choice_candidate(&source, ConstantShiftChoiceLimits::default())
@@ -173,7 +175,7 @@ fn wide_amounts_and_non_power_of_two_data_preserve_saturation() {
 
             let patterns = [
                 IrValue::from_bits(&IrBits::all_ones(width)),
-                bits(width, 1),
+                IrValue::make_ubits(width, 1).unwrap(),
                 IrValue::from_bits(&IrBits::from_lsb_is_0(
                     &(0..width).map(|index| index % 3 == 0).collect::<Vec<_>>(),
                 )),
@@ -182,7 +184,10 @@ fn wide_amounts_and_non_power_of_two_data_preserve_saturation() {
                 for selector in 0..8 {
                     let expected_amount = amounts.get(selector).copied().unwrap_or(width);
                     let expected = shift_oracle(&data, expected_amount, direction);
-                    let args = [data.clone(), bits(3, selector as u64)];
+                    let args = [
+                        data.clone(),
+                        IrValue::make_ubits(3, selector as u64).unwrap(),
+                    ];
                     assert_eq!(evaluate(&source, &args), expected);
                     assert_eq!(evaluate(&candidate, &args), expected);
                 }
@@ -199,7 +204,11 @@ fn right_shift_slice_preserves_padding_and_a_live_full_shift() {
     let amounts = [0, 2, 4, 7];
     let cases: Vec<_> = amounts
         .iter()
-        .map(|&amount| literal(&mut builder, 3, amount))
+        .map(|&amount| {
+            builder
+                .literal(IrValue::make_ubits(3, amount as u64).unwrap())
+                .unwrap()
+        })
         .collect();
     let amount = builder.select(selector, &cases, None).unwrap();
     let shifted = builder.shrl(data, amount).unwrap();
@@ -226,8 +235,14 @@ fn right_shift_slice_preserves_padding_and_a_live_full_shift() {
             // Shift 2 partially pads the slice, shift 4 zeros only the slice,
             // and shift 7 zeros both independently observable results.
             let full = x >> amount;
-            let expected = IrValue::make_tuple(&[bits(3, (full >> 1) & 7), bits(5, full)]);
-            let args = [bits(5, x), bits(2, selector as u64)];
+            let expected = IrValue::make_tuple(&[
+                IrValue::make_ubits(3, (full >> 1) & 7).unwrap(),
+                IrValue::make_ubits(5, full).unwrap(),
+            ]);
+            let args = [
+                IrValue::make_ubits(5, x).unwrap(),
+                IrValue::make_ubits(2, selector as u64).unwrap(),
+            ];
             assert_eq!(evaluate(&source, &args), expected);
             assert_eq!(evaluate(&candidate, &args), expected);
         }
@@ -241,15 +256,15 @@ fn nested_priority_choices_keep_low_bit_precedence_and_default() {
         let data = builder.param("x", Type::Bits(5)).unwrap();
         let p = builder.param("p", Type::Bits(1)).unwrap();
         let selector = builder.param("selector", Type::Bits(2)).unwrap();
-        let zero = literal(&mut builder, 3, 0);
-        let one = literal(&mut builder, 3, 1);
-        let three = literal(&mut builder, 3, 3);
-        let seven = literal(&mut builder, 3, 7);
+        let zero = builder.literal(IrValue::make_ubits(3, 0).unwrap()).unwrap();
+        let one = builder.literal(IrValue::make_ubits(3, 1).unwrap()).unwrap();
+        let three = builder.literal(IrValue::make_ubits(3, 3).unwrap()).unwrap();
+        let seven = builder.literal(IrValue::make_ubits(3, 7).unwrap()).unwrap();
         let nested = builder.select(p, &[zero, three], None).unwrap();
         let amount = builder
             .priority_select(selector, &[nested, one], seven)
             .unwrap();
-        let result = direction.emit(&mut builder, data, amount);
+        let result = direction.emit(&mut builder, data, amount).unwrap();
         let source = builder.build(result).unwrap();
         let candidate =
             constant_shift_choice_candidate(&source, ConstantShiftChoiceLimits::default())
@@ -265,7 +280,11 @@ fn nested_priority_choices_keep_low_bit_precedence_and_default() {
                     } else {
                         7
                     };
-                    let args = [bits(5, x), bits(1, p), bits(2, selector)];
+                    let args = [
+                        IrValue::make_ubits(5, x).unwrap(),
+                        IrValue::make_ubits(1, p).unwrap(),
+                        IrValue::make_ubits(2, selector).unwrap(),
+                    ];
                     assert_eq!(
                         evaluate(&candidate, &args),
                         shift_oracle(&args[0], amount, direction)
@@ -295,8 +314,8 @@ fn variable_leaves_are_rejected_even_when_nested_or_masked() {
             let p = builder.param("p", Type::Bits(1)).unwrap();
             let q = builder.param("q", Type::Bits(1)).unwrap();
             let variable = builder.param("variable_amount", Type::Bits(3)).unwrap();
-            let two = literal(&mut builder, 3, 2);
-            let three = literal(&mut builder, 3, 3);
+            let two = builder.literal(IrValue::make_ubits(3, 2).unwrap()).unwrap();
+            let three = builder.literal(IrValue::make_ubits(3, 3).unwrap()).unwrap();
             let amount = match shape {
                 0 => builder.select(p, &[two, variable], None).unwrap(),
                 1 => {
@@ -316,7 +335,7 @@ fn variable_leaves_are_rejected_even_when_nested_or_masked() {
                 }
                 _ => unreachable!(),
             };
-            let result = direction.emit(&mut builder, data, amount);
+            let result = direction.emit(&mut builder, data, amount).unwrap();
             assert_rejected(
                 &builder.build(result).unwrap(),
                 ConstantShiftChoiceLimits::default(),
@@ -326,7 +345,7 @@ fn variable_leaves_are_rejected_even_when_nested_or_masked() {
         let mut builder = FnBuilder::new("narrow_variable_is_not_a_choice");
         let data = builder.param("x", Type::Bits(4)).unwrap();
         let variable = builder.param("variable_amount", Type::Bits(1)).unwrap();
-        let result = direction.emit(&mut builder, data, variable);
+        let result = direction.emit(&mut builder, data, variable).unwrap();
         assert_rejected(
             &builder.build(result).unwrap(),
             ConstantShiftChoiceLimits::default(),
@@ -349,9 +368,9 @@ fn generic_and_zero_extended_masks_are_not_replicated_boolean_masks() {
                 2 => builder.sign_extend(two_bits, 3).unwrap(),
                 _ => unreachable!(),
             };
-            let three = literal(&mut builder, 3, 3);
+            let three = builder.literal(IrValue::make_ubits(3, 3).unwrap()).unwrap();
             let amount = builder.and(three, mask).unwrap();
-            let result = direction.emit(&mut builder, data, amount);
+            let result = direction.emit(&mut builder, data, amount).unwrap();
             assert_rejected(
                 &builder.build(result).unwrap(),
                 ConstantShiftChoiceLimits::default(),
@@ -369,8 +388,8 @@ fn reassociated_boolean_masks_preserve_selector_correlations() {
             let en = builder.param("en", Type::Bits(1)).unwrap();
             let p = builder.param("p", Type::Bits(1)).unwrap();
             let q = builder.param("q", Type::Bits(1)).unwrap();
-            let one = literal(&mut builder, 3, 1);
-            let three = literal(&mut builder, 3, 3);
+            let one = builder.literal(IrValue::make_ubits(3, 1).unwrap()).unwrap();
+            let three = builder.literal(IrValue::make_ubits(3, 3).unwrap()).unwrap();
             let chosen = builder.select(q, &[one, three], None).unwrap();
             let predicate = builder.or(p, q).unwrap();
             let first_mask = builder.sign_extend(predicate, 3).unwrap();
@@ -381,7 +400,7 @@ fn reassociated_boolean_masks_preserve_selector_correlations() {
             } else {
                 builder.and_all(&[second_mask, chosen, first_mask]).unwrap()
             };
-            let result = direction.emit(&mut builder, data, amount);
+            let result = direction.emit(&mut builder, data, amount).unwrap();
             let source = builder.build(result).unwrap();
             let candidate =
                 constant_shift_choice_candidate(&source, ConstantShiftChoiceLimits::default())
@@ -398,7 +417,7 @@ fn reassociated_boolean_masks_preserve_selector_correlations() {
                         0
                     };
                     let args = [
-                        bits(5, x),
+                        IrValue::make_ubits(5, x).unwrap(),
                         IrValue::bool(en),
                         IrValue::bool(p),
                         IrValue::bool(q),
@@ -418,8 +437,8 @@ fn arithmetic_right_shifts_are_outside_the_rewrite() {
     let mut builder = FnBuilder::new("arithmetic_shift");
     let data = builder.param("x", Type::Bits(5)).unwrap();
     let p = builder.param("p", Type::Bits(1)).unwrap();
-    let one = literal(&mut builder, 3, 1);
-    let five = literal(&mut builder, 3, 5);
+    let one = builder.literal(IrValue::make_ubits(3, 1).unwrap()).unwrap();
+    let five = builder.literal(IrValue::make_ubits(3, 5).unwrap()).unwrap();
     let amount = builder.select(p, &[one, five], None).unwrap();
     let result = builder.shra(data, amount).unwrap();
     let source = builder.build(result).unwrap();
@@ -436,8 +455,8 @@ fn internal_shifts_retain_amount_users_and_share_the_data_producer() {
     let p = builder.param("p", Type::Bits(1)).unwrap();
     let data = builder.add(lhs, rhs).unwrap();
     builder.set_name(data, "shared_data").unwrap();
-    let one = literal(&mut builder, 3, 1);
-    let three = literal(&mut builder, 3, 3);
+    let one = builder.literal(IrValue::make_ubits(3, 1).unwrap()).unwrap();
+    let three = builder.literal(IrValue::make_ubits(3, 3).unwrap()).unwrap();
     let amount = builder.select(p, &[one, three], None).unwrap();
     builder.set_name(amount, "retained_amount").unwrap();
     let left = builder.shll(data, amount).unwrap();
@@ -478,7 +497,11 @@ fn internal_shifts_retain_amount_users_and_share_the_data_producer() {
     for lhs in [0, 1, 127, 128, 255] {
         for rhs in [0, 1, 127, 255] {
             for p in 0..2 {
-                let args = [bits(8, lhs), bits(8, rhs), bits(1, p)];
+                let args = [
+                    IrValue::make_ubits(8, lhs).unwrap(),
+                    IrValue::make_ubits(8, rhs).unwrap(),
+                    IrValue::make_ubits(1, p).unwrap(),
+                ];
                 assert_eq!(evaluate(&source, &args), evaluate(&candidate, &args));
             }
         }
@@ -509,7 +532,11 @@ fn traversal_emission_and_distinct_shift_budgets_leave_the_source_untouched() {
     let data = builder.param("x", Type::Bits(8)).unwrap();
     let selector = builder.param("selector", Type::Bits(3)).unwrap();
     let cases: Vec<_> = (0..5)
-        .map(|value| literal(&mut builder, 3, value))
+        .map(|value| {
+            builder
+                .literal(IrValue::make_ubits(3, value).unwrap())
+                .unwrap()
+        })
         .collect();
     let amount = builder.select(selector, &cases, Some(cases[0])).unwrap();
     let result = builder.shll(data, amount).unwrap();
@@ -525,8 +552,8 @@ fn repeated_choice_dag(levels: usize) -> ir::Fn {
     let data = builder.param("x", Type::Bits(8)).unwrap();
     let p = builder.param("p", Type::Bits(1)).unwrap();
     let q = builder.param("q", Type::Bits(1)).unwrap();
-    let one = literal(&mut builder, 3, 1);
-    let two = literal(&mut builder, 3, 2);
+    let one = builder.literal(IrValue::make_ubits(3, 1).unwrap()).unwrap();
+    let two = builder.literal(IrValue::make_ubits(3, 2).unwrap()).unwrap();
     let mut choice = builder.select(p, &[one, two], None).unwrap();
     for _ in 0..levels {
         choice = builder.select(q, &[choice, choice], None).unwrap();
@@ -568,7 +595,11 @@ fn generated_choice_dag(width: usize, direction: Direction, seed: u64) -> ir::Fn
     let priority_selector = builder.concat(&[q, p]).unwrap();
     let mut choices: Vec<_> = [0, 1, width - 1, width + 2]
         .into_iter()
-        .map(|value| literal(&mut builder, 6, value))
+        .map(|value| {
+            builder
+                .literal(IrValue::make_ubits(6, value as u64).unwrap())
+                .unwrap()
+        })
         .collect();
     for _ in 0..10 {
         let a = choices[rng.gen_range(0..choices.len())];
@@ -591,7 +622,7 @@ fn generated_choice_dag(width: usize, direction: Direction, seed: u64) -> ir::Fn
     let amount = builder
         .select(r, &[*choices.last().unwrap(), choices[1]], None)
         .unwrap();
-    let result = direction.emit(&mut builder, data, amount);
+    let result = direction.emit(&mut builder, data, amount).unwrap();
     builder.build(result).unwrap()
 }
 
@@ -615,7 +646,7 @@ fn deterministic_choice_dag_property_sweep_preserves_all_controls() {
                 for x in data_values {
                     for controls in 0..8 {
                         let args = [
-                            bits(width, x),
+                            IrValue::make_ubits(width, x).unwrap(),
                             IrValue::bool(controls & 1 != 0),
                             IrValue::bool(controls & 2 != 0),
                             IrValue::bool(controls & 4 != 0),
