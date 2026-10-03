@@ -177,9 +177,16 @@ fn maybe_warn_shift_amount_truncatable(
     }
 }
 
+/// Stores consumer counts densely for whole functions and sparsely for regions.
+enum UseCounts {
+    Function(Vec<usize>),
+    Region(HashMap<ir::NodeRef, usize>),
+}
+
+/// Tracks lowered values and their consumer counts within the mapping boundary.
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
-    use_counts: Vec<usize>,
+    use_counts: UseCounts,
 }
 
 impl GateEnv {
@@ -196,13 +203,35 @@ impl GateEnv {
         }
         Self {
             ir_to_g8: HashMap::new(),
-            use_counts,
+            use_counts: UseCounts::Function(use_counts),
         }
     }
 
-    /// Returns whether a prepared IR node has exactly one consumer.
+    /// Counts only region operand edges and outputs, without scanning the
+    /// function.
+    fn for_region(f: &ir::Fn, nodes: &[ir::NodeRef], outputs: &[ir::NodeRef]) -> Self {
+        let mut use_counts = HashMap::new();
+        for &node in nodes {
+            for operand in ir_utils::operands(&f.get_node(node).payload) {
+                *use_counts.entry(operand).or_default() += 1;
+            }
+        }
+        for &output in outputs {
+            *use_counts.entry(output).or_default() += 1;
+        }
+        Self {
+            ir_to_g8: HashMap::new(),
+            use_counts: UseCounts::Region(use_counts),
+        }
+    }
+
+    /// Returns whether a node has exactly one use within the mapping boundary.
     pub(super) fn has_single_use(&self, ir_node_ref: ir::NodeRef) -> bool {
-        self.use_counts[ir_node_ref.index] == 1
+        let count = match &self.use_counts {
+            UseCounts::Function(counts) => counts[ir_node_ref.index],
+            UseCounts::Region(counts) => counts.get(&ir_node_ref).copied().unwrap_or(0),
+        };
+        count == 1
     }
 
     fn contains(&self, ir_node_ref: ir::NodeRef) -> bool {
@@ -6714,13 +6743,55 @@ top fn f(x: bits[8] id=1) -> bits[8] {
         let doubled = node_ref_with_text_id(2);
         let out = node_ref_with_text_id(3);
 
-        assert_eq!(env.use_counts.len(), ir_fn.nodes.len());
-        assert_eq!(env.use_counts[x.index], 3);
+        let super::UseCounts::Function(counts) = &env.use_counts else {
+            panic!("whole-function lowering should use dense counts");
+        };
+        assert_eq!(counts.len(), ir_fn.nodes.len());
+        assert_eq!(counts[x.index], 3);
         assert!(!env.has_single_use(x));
-        assert_eq!(env.use_counts[doubled.index], 1);
+        assert_eq!(counts[doubled.index], 1);
         assert!(env.has_single_use(doubled));
-        assert_eq!(env.use_counts[out.index], 1);
+        assert_eq!(counts[out.index], 1);
         assert!(env.has_single_use(out));
+    }
+
+    #[test]
+    fn test_gate_env_region_counts_repeated_edges_and_retained_outputs() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  outside: bits[8] = add(x, y, id=3)
+  doubled: bits[8] = add(x, x, id=4)
+  selected: bits[8] = add(doubled, x, id=5)
+  ret out: bits[8] = add(outside, selected, id=6)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let package = parser.parse_and_validate_package().unwrap();
+        let f = package.get_top_fn().unwrap();
+        let node_ref_with_text_id = |text_id| ir::NodeRef {
+            index: f
+                .nodes
+                .iter()
+                .position(|node| node.text_id == text_id)
+                .expect("test node should exist"),
+        };
+        let x = f.params[0];
+        let doubled = node_ref_with_text_id(4);
+        let selected = node_ref_with_text_id(5);
+        let env = super::GateEnv::for_region(f, &[doubled, selected], &[selected, doubled]);
+        let super::UseCounts::Region(counts) = &env.use_counts else {
+            panic!("region lowering should use sparse counts");
+        };
+        assert_eq!(counts.len(), 3);
+        assert_eq!(counts[&x], 3);
+        assert_eq!(counts[&doubled], 2);
+        assert_eq!(counts[&selected], 1);
+        assert!(!env.has_single_use(x));
+        assert!(!env.has_single_use(doubled));
+        assert!(env.has_single_use(selected));
+        assert!(!env.has_single_use(f.params[1]));
+        assert!(!env.has_single_use(f.ret_node_ref.unwrap()));
     }
 
     #[test]

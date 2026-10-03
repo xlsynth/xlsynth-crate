@@ -2,7 +2,8 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::ir::{self, Fn, Node, NodeGraph, NodePayload, NodeRef, Package, Type};
+use crate::IrValue;
+use crate::ir::{self, Binop, Fn, NaryOp, Node, NodeGraph, NodePayload, NodeRef, Package, Type};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -745,6 +746,139 @@ pub fn compute_users(f: &NodeGraph) -> Users {
     }
 
     Users { users }
+}
+
+/// Appends an unnamed IR node with a fresh function-local text ID.
+///
+/// The node has no source location. Existing node references remain valid;
+/// callers update the function's parameter list or return value when needed.
+pub fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
+    let text_id = f
+        .nodes
+        .iter()
+        .map(|node| node.text_id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let index = f.nodes.len();
+    f.nodes.push(ir::Node {
+        text_id,
+        name: None,
+        ty,
+        payload,
+        pos: None,
+    });
+    NodeRef { index }
+}
+
+/// Reuses an existing literal before appending zero padding for a projection.
+fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> NodeRef {
+    for (index, node) in f.nodes.iter().enumerate() {
+        if let NodePayload::Literal(literal) = &node.payload {
+            if node.ty.bit_count() == bit_count && literal.bits_equals_u64_value(value) {
+                return NodeRef { index };
+            }
+        }
+    }
+    let literal = IrValue::make_ubits(bit_count, value).expect("ubits literal");
+    push_node(f, Type::Bits(bit_count), NodePayload::Literal(literal))
+}
+
+/// Builds a logical constant shift using slices, zero padding, and
+/// concatenation.
+///
+/// `op` must be `Shll` or `Shrl`, and `arg` must be a bits value. The result
+/// retains its width; shifts at least that wide produce zero. A zero shift
+/// returns `arg` directly.
+pub fn make_constant_shift_expr(f: &mut ir::Fn, op: Binop, arg: NodeRef, shift: usize) -> NodeRef {
+    let arg_width = f.get_node(arg).ty.bit_count();
+    if shift == 0 {
+        return arg;
+    }
+    if arg_width == 0 || shift >= arg_width {
+        return get_or_insert_ubits_literal(f, arg_width, 0);
+    }
+
+    let shifted_width = arg_width - shift;
+    let shifted_slice = push_node(
+        f,
+        Type::Bits(shifted_width),
+        NodePayload::BitSlice {
+            arg,
+            start: if op == Binop::Shrl { shift } else { 0 },
+            width: shifted_width,
+        },
+    );
+    let zero_padding = get_or_insert_ubits_literal(f, shift, 0);
+    let operands = match op {
+        Binop::Shrl => vec![zero_padding, shifted_slice],
+        Binop::Shll => vec![shifted_slice, zero_padding],
+        _ => unreachable!("constant-shift projection requires a logical shift"),
+    };
+    push_node(
+        f,
+        Type::Bits(arg_width),
+        NodePayload::Nary(NaryOp::Concat, operands),
+    )
+}
+
+/// Builds a slice of a logical right shift using only source bits and zeros.
+///
+/// `arg` must be a bits value. The result has `width` bits, starting at bit
+/// `start` of `arg >> shift`, with bits beyond `arg` filled with zeros. This
+/// avoids constructing the full shifted value when only a slice is needed.
+pub fn make_constant_shrl_bit_slice_expr(
+    f: &mut ir::Fn,
+    arg: NodeRef,
+    shift: usize,
+    start: usize,
+    width: usize,
+) -> NodeRef {
+    let arg_width = f.get_node(arg).ty.bit_count();
+    if width == 0 {
+        return get_or_insert_ubits_literal(f, 0, 0);
+    }
+    let Some(source_start) = start.checked_add(shift) else {
+        return get_or_insert_ubits_literal(f, width, 0);
+    };
+    if source_start >= arg_width {
+        return get_or_insert_ubits_literal(f, width, 0);
+    }
+
+    let valid_width = std::cmp::min(width, arg_width - source_start);
+    if valid_width == 0 {
+        return get_or_insert_ubits_literal(f, width, 0);
+    }
+    if valid_width == width {
+        if source_start == 0 && width == arg_width {
+            return arg;
+        }
+        return push_node(
+            f,
+            Type::Bits(width),
+            NodePayload::BitSlice {
+                arg,
+                start: source_start,
+                width,
+            },
+        );
+    }
+
+    let payload_bits = push_node(
+        f,
+        Type::Bits(valid_width),
+        NodePayload::BitSlice {
+            arg,
+            start: source_start,
+            width: valid_width,
+        },
+    );
+    let zero_prefix = get_or_insert_ubits_literal(f, width - valid_width, 0);
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Nary(NaryOp::Concat, vec![zero_prefix, payload_bits]),
+    )
 }
 
 /// Replaces the payload (and optionally the type) of `target` in `f`.

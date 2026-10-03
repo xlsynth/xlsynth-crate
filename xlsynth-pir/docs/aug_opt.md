@@ -57,6 +57,12 @@ shared controls. Acceptance requires no increase in either estimated area or
 delay and a strict improvement in at least one, with a tolerance for delay
 roundoff. A tie or tradeoff keeps the original site.
 
+Cost graphs borrow regions of the speculative working function. A proposal
+appends replacement nodes before costing; acceptance redirects the original
+users, while rejection discards the appended nodes. Sites are processed in
+sequence so later proposals see the updated sharing. Evaluation errors discard
+the working function and preserve the original input.
+
 The [g8r aug-opt entrypoints](../../xlsynth-g8r/src/aug_opt.rs) supply an
 evaluator using the existing gate builder's AND count and Graph LE. External
 logic, arrival times, and loads are outside this local model; downstream gate

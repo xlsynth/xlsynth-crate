@@ -37,10 +37,12 @@ impl IrCost {
 
 /// Costs the small alternative graphs supplied by the constant-shift rewrite.
 ///
-/// Both alternatives have the same boundary inputs and retained outputs.
+/// Both alternatives borrow the same function and have the same boundary inputs
+/// and retained outputs. Only the explicitly listed region belongs to the cost
+/// graph; other nodes in the containing function must not affect its cost.
 /// Evaluation errors abort the rewrite without changing its input function.
 pub trait ShiftChoiceCostEvaluator {
-    fn estimate(&mut self, graph: &ShiftChoiceCostGraph) -> Result<IrCost, String>;
+    fn estimate(&mut self, graph: &ShiftChoiceCostGraph<'_>) -> Result<IrCost, String>;
 }
 
 #[cfg(test)]

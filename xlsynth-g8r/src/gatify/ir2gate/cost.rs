@@ -2,19 +2,19 @@
 
 //! Local shift-choice costing through the ordinary g8r node lowering.
 
-use super::{GateEnv, GateOrVec, GatifyOptions, gatify_node};
+use super::{GateEnv, GateOrVec, GatifyOptions, gatify_concat, gatify_node};
 use crate::aig::dce::dce;
 use crate::aig::gate::{AigBitVector, AigNode};
 use crate::aig::graph_logical_effort::{GraphLogicalEffortOptions, analyze_graph_logical_effort};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::process_ir_path::CanonicalG8rOptions;
 use xlsynth_pir::constant_shift_choices::ShiftChoiceCostGraph;
-use xlsynth_pir::ir::{NodePayload, NodeRef};
+use xlsynth_pir::ir::NodePayload;
 use xlsynth_pir::ir_cost::{IrCost, ShiftChoiceCostEvaluator};
 
 /// Measures the AND count and Graph LE of a single shift-choice alternative.
 ///
-/// The rewrite supplies a compact graph with shared boundary inputs and outputs
+/// The rewrite borrows a bounded region with shared boundary inputs and outputs
 /// for retained values. Logic and loads outside that graph are not modeled.
 /// No preparation, range analysis, or gate rewriting runs during costing.
 pub struct GateBuilderCostEvaluator {
@@ -47,27 +47,26 @@ impl GateBuilderCostEvaluator {
 }
 
 impl ShiftChoiceCostEvaluator for GateBuilderCostEvaluator {
-    fn estimate(&mut self, graph: &ShiftChoiceCostGraph) -> Result<IrCost, String> {
+    fn estimate(&mut self, graph: &ShiftChoiceCostGraph<'_>) -> Result<IrCost, String> {
         let f = graph.function();
         let mut builder = GateBuilder::new("shift_choice_cost".to_string(), self.options);
-        let mut env = GateEnv::new(f);
+        let mut env = GateEnv::for_region(f, graph.nodes(), graph.outputs());
+        // Structural peepholes must stay disabled: boundary nodes are
+        // independent inputs even when their original payload is an operation.
         let options = GatifyOptions {
             fold: self.options.fold,
             hash: self.options.hash,
             ..GatifyOptions::all_opts_disabled()
         };
-        for &param in &f.params {
-            let node = f.get_node(param);
-            let bits = builder.add_input(node.param_name().to_string(), node.ty.bit_count());
-            env.add(param, GateOrVec::BitVector(bits));
+        for (index, &input) in graph.inputs().iter().enumerate() {
+            let node = f.get_node(input);
+            let bits = builder.add_input(format!("input_{index}"), node.ty.bit_count());
+            env.add(input, GateOrVec::BitVector(bits));
         }
-        // ShiftChoiceCostGraph contains only the selected bitvector region,
-        // in topological order; no traversal of the enclosing function occurs.
-        for (index, node) in f.nodes.iter().enumerate() {
-            if matches!(node.payload, NodePayload::Nil | NodePayload::Param) {
-                continue;
-            }
-            let nr = NodeRef { index };
+        // The listed nodes are in dependency order and exclude the boundary
+        // inputs; no traversal of the enclosing function occurs.
+        for &nr in graph.nodes() {
+            let node = f.get_node(nr);
             let direct = if node.ty.bit_count() == 0 {
                 Some(AigBitVector::zeros(0))
             } else {
@@ -89,8 +88,12 @@ impl ShiftChoiceCostEvaluator for GateBuilderCostEvaluator {
                 gatify_node(f, nr, node, &mut builder, &mut env, &options)?;
             }
         }
-        let output = env.get_bit_vector(f.ret_node_ref.expect("a cost graph has an output"))?;
-        builder.add_output("out".to_string(), output);
+        let outputs = graph
+            .outputs()
+            .iter()
+            .map(|&output| env.get_bit_vector(output))
+            .collect::<Result<Vec<_>, _>>()?;
+        builder.add_output("out".to_string(), gatify_concat(&outputs));
         // Discarded bits must not inflate fanout during Graph LE analysis.
         let gate_fn = dce(&builder.build());
         let area = gate_fn

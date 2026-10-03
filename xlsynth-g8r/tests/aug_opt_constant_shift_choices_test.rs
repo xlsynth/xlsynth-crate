@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -23,7 +23,11 @@ use xlsynth_pir::constant_shift_choices::{
 use xlsynth_pir::ir_cost::{IrCost, ShiftChoiceCostEvaluator};
 use xlsynth_pir::ir_eval::eval_fn;
 use xlsynth_pir::ir_verify::verify_function;
-use xlsynth_pir::{IrValue, ir, ir_parser::Parser, ir_utils::fn_node_count};
+use xlsynth_pir::{
+    IrValue, ir,
+    ir_parser::Parser,
+    ir_utils::{self, fn_node_count},
+};
 
 const GRAPH_LE_TOLERANCE: f64 = 1.0e-6;
 
@@ -93,11 +97,14 @@ struct TransformedInput {
     projection_candidate: bool,
 }
 
+/// Owns a compact copy of an evaluated region for subsequent equivalence
+/// checks.
 struct EvaluatedChoice {
     function: ir::Fn,
     cost: IrCost,
 }
 
+/// Records the region seen by the real g8r evaluator for semantic checks.
 #[derive(Default)]
 struct RecordingCostEvaluator {
     inner: GateBuilderCostEvaluator,
@@ -105,30 +112,91 @@ struct RecordingCostEvaluator {
 }
 
 impl ShiftChoiceCostEvaluator for RecordingCostEvaluator {
-    fn estimate(&mut self, graph: &ShiftChoiceCostGraph) -> Result<IrCost, String> {
+    fn estimate(&mut self, graph: &ShiftChoiceCostGraph<'_>) -> Result<IrCost, String> {
         let cost = self.inner.estimate(graph)?;
         self.evaluations.push(EvaluatedChoice {
-            function: graph.function().clone(),
+            function: materialize_cost_graph(graph),
             cost,
         });
         Ok(cost)
     }
 }
 
-/// Proves both alternatives implement the same function of their shared cut.
-fn prove_local_choices_equivalent(evaluator: &RecordingCostEvaluator) {
-    let [original, candidate] = evaluator.evaluations.as_slice() else {
-        panic!("one rewrite site must produce exactly two local graphs");
+/// Copies only a borrowed region into standalone IR for the equivalence tool.
+fn materialize_cost_graph(graph: &ShiftChoiceCostGraph<'_>) -> ir::Fn {
+    let mut function = ir::Fn {
+        graph: ir::NodeGraph::new("shift_choice_cost"),
+        params: Vec::new(),
+        ret_ty: ir::Type::Bits(0),
+        ret_node_ref: None,
     };
-    let original = &original.function;
-    let candidate = &candidate.function;
-    assert_eq!(original.name, candidate.name);
-    check_equivalence_with_top_via_toolchain(
-        &format!("package local_original\n\ntop {original}"),
-        &format!("package local_candidate\n\ntop {candidate}"),
-        Some(&original.name),
-    )
-    .unwrap();
+    let mut mapping = HashMap::new();
+    for (index, &input) in graph.inputs().iter().enumerate() {
+        let local = ir::NodeRef {
+            index: function.nodes.len(),
+        };
+        function.nodes.push(ir::Node {
+            text_id: local.index,
+            name: Some(format!("input_{index}")),
+            ty: graph.function().get_node(input).ty.clone(),
+            payload: ir::NodePayload::Param,
+            pos: None,
+        });
+        function.params.push(local);
+        assert!(mapping.insert(input, local).is_none());
+    }
+    for &source in graph.nodes() {
+        let local = ir::NodeRef {
+            index: function.nodes.len(),
+        };
+        let source_node = graph.function().get_node(source);
+        let payload = ir_utils::remap_payload_with(&source_node.payload, |(_, arg)| mapping[&arg]);
+        function.nodes.push(ir::Node {
+            text_id: local.index,
+            name: None,
+            ty: source_node.ty.clone(),
+            payload,
+            pos: None,
+        });
+        assert!(mapping.insert(source, local).is_none());
+    }
+    let outputs: Vec<_> = graph.outputs().iter().map(|nr| mapping[nr]).collect();
+    let width = outputs
+        .iter()
+        .map(|nr| function.get_node(*nr).ty.bit_count())
+        .sum();
+    let result = ir::NodeRef {
+        index: function.nodes.len(),
+    };
+    function.nodes.push(ir::Node {
+        text_id: result.index,
+        name: None,
+        ty: ir::Type::Bits(width),
+        payload: ir::NodePayload::Nary(ir::NaryOp::Concat, outputs),
+        pos: None,
+    });
+    function.ret_ty = ir::Type::Bits(width);
+    function.ret_node_ref = Some(result);
+    verify_function(&function).unwrap();
+    function
+}
+
+/// Proves each site's alternatives implement the same function of their cut.
+fn prove_local_choices_equivalent(evaluator: &RecordingCostEvaluator) {
+    assert!(!evaluator.evaluations.is_empty());
+    let mut pairs = evaluator.evaluations.chunks_exact(2);
+    for pair in &mut pairs {
+        let original = &pair[0].function;
+        let candidate = &pair[1].function;
+        assert_eq!(original.name, candidate.name);
+        check_equivalence_with_top_via_toolchain(
+            &format!("package local_original\n\ntop {original}"),
+            &format!("package local_candidate\n\ntop {candidate}"),
+            Some(&original.name),
+        )
+        .unwrap();
+    }
+    assert!(pairs.remainder().is_empty());
 }
 
 #[derive(Default)]
@@ -137,7 +205,7 @@ struct EqualCostEvaluator {
 }
 
 impl ShiftChoiceCostEvaluator for EqualCostEvaluator {
-    fn estimate(&mut self, _: &ShiftChoiceCostGraph) -> Result<IrCost, String> {
+    fn estimate(&mut self, _: &ShiftChoiceCostGraph<'_>) -> Result<IrCost, String> {
         self.calls += 1;
         Ok(IrCost {
             area: 10,
@@ -552,6 +620,105 @@ fn profitability_preserves_input_on_equal_cost() {
 }
 
 #[test]
+fn rejected_local_choice_does_not_affect_the_next_site() {
+    let text = r#"package independent_choices
+
+top fn main(x: bits[8] id=1, y: bits[4] id=2, en: bits[1] id=3, p: bits[1] id=4, q: bits[1] id=5) -> (bits[8], bits[4]) {
+  a_one_bit: bits[1] = literal(value=1, id=6)
+  a_pair: bits[2] = concat(a_one_bit, q, id=7)
+  a_one: bits[2] = literal(value=1, id=8)
+  a_chosen: bits[2] = sel(p, cases=[a_pair, a_one], id=9)
+  a_mask: bits[2] = sign_ext(en, new_bit_count=2, id=10)
+  a_amount: bits[2] = and(a_chosen, a_mask, id=11)
+  a_shifted: bits[8] = shll(x, a_amount, id=12)
+  b_one_bit: bits[1] = literal(value=1, id=13)
+  b_pair: bits[2] = concat(b_one_bit, q, id=14)
+  b_one: bits[2] = literal(value=1, id=15)
+  b_chosen: bits[2] = sel(p, cases=[b_pair, b_one], id=16)
+  b_mask: bits[2] = sign_ext(en, new_bit_count=2, id=17)
+  b_amount: bits[2] = and(b_chosen, b_mask, id=18)
+  b_shifted: bits[4] = shll(y, b_amount, id=19)
+  ret result: (bits[8], bits[4]) = tuple(a_shifted, b_shifted, id=20)
+}
+"#;
+    let mut function = parse_function(text, "main");
+    let mut evaluator = RecordingCostEvaluator::default();
+    assert_eq!(
+        rewrite_constant_shift_choices_with_evaluator(
+            &mut function,
+            ConstantShiftChoiceLimits::default(),
+            &mut evaluator,
+        ),
+        Ok(1)
+    );
+    let [first, first_candidate, second, second_candidate] = evaluator.evaluations.as_slice()
+    else {
+        panic!("both independent sites must be costed");
+    };
+    assert_eq!(first.function.ret_ty, ir::Type::Bits(8));
+    assert_eq!(second.function.ret_ty, ir::Type::Bits(4));
+    assert!(!first_candidate.cost.is_pareto_improvement_on(first.cost));
+    assert!(second_candidate.cost.is_pareto_improvement_on(second.cost));
+    prove_local_choices_equivalent(&evaluator);
+    check_equivalence_with_top_via_toolchain(
+        text,
+        &format!("package rewritten\n\ntop {function}"),
+        Some("main"),
+    )
+    .unwrap();
+    verify_function(&function).unwrap();
+}
+
+#[test]
+fn local_costs_are_independent_of_node_storage_order() {
+    let text = masked_choice_text(4, "shll", false);
+    let original = parse_function(&text, "main");
+    let mut reversed = original.clone();
+    let node_count = reversed.nodes.len();
+    let remap = |node: ir::NodeRef| ir::NodeRef {
+        index: if node.index == 0 {
+            0
+        } else {
+            node_count - node.index
+        },
+    };
+    // Model an intermediate working graph before final compaction: appended
+    // replacements can leave forward references and sparse parameter indices.
+    reversed.nodes[1..].reverse();
+    for node in &mut reversed.nodes[1..] {
+        node.payload = ir_utils::remap_payload_with(&node.payload, |(_, arg)| remap(arg));
+    }
+    reversed.params = reversed.params.iter().copied().map(remap).collect();
+    reversed.ret_node_ref = reversed.ret_node_ref.map(remap);
+    ir_utils::verify_no_cycle(&reversed).unwrap();
+
+    let mut costs = Vec::new();
+    for mut function in [original, reversed] {
+        let mut evaluator = RecordingCostEvaluator::default();
+        assert_eq!(
+            rewrite_constant_shift_choices_with_evaluator(
+                &mut function,
+                ConstantShiftChoiceLimits::default(),
+                &mut evaluator,
+            ),
+            Ok(1)
+        );
+        prove_local_choices_equivalent(&evaluator);
+        check_equivalence_with_top_via_toolchain(
+            &text,
+            &format!("package rewritten\n\ntop {function}"),
+            Some("main"),
+        )
+        .unwrap();
+        costs.push(evaluator.evaluations);
+    }
+    for (original, reversed) in costs[0].iter().zip(&costs[1]) {
+        assert_eq!(original.cost.area, reversed.cost.area);
+        assert!((original.cost.delay - reversed.cost.delay).abs() <= GRAPH_LE_TOLERANCE);
+    }
+}
+
+#[test]
 fn profitable_local_choice_is_independent_of_unrelated_arithmetic() {
     let isolated = masked_choice_text(4, "shll", false);
     let mut arithmetic = String::new();
@@ -564,17 +731,20 @@ fn profitable_local_choice_is_independent_of_unrelated_arithmetic() {
         ));
         previous = next;
     }
+    // The shifted data also has an arithmetic producer. Its boundary binding
+    // must hide that payload as well as the unrelated wide output's logic.
     let embedded = format!(
         r#"package embedded_shift_choices
 
-top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4, a: bits[256] id=12, b: bits[256] id=13) -> (bits[4], bits[256]) {{
+top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4, a: bits[256] id=12, b: bits[256] id=13, bias: bits[4] id=79) -> (bits[4], bits[256]) {{
+  data: bits[4] = add(x, bias, id=80)
   one_bit: bits[1] = literal(value=1, id=5)
   pair: bits[2] = concat(one_bit, q, id=6)
   one: bits[2] = literal(value=1, id=7)
   chosen: bits[2] = sel(p, cases=[pair, one], id=8)
   mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
   amount: bits[2] = and(chosen, mask, id=10)
-  shifted: bits[4] = shll(x, amount, id=11)
+  shifted: bits[4] = shll(data, amount, id=11)
 {arithmetic}  ret result: (bits[4], bits[256]) = tuple(shifted, {previous}, id=78)
 }}
 "#,

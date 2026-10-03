@@ -4,13 +4,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::dce::{get_dead_nodes, remove_dead_nodes};
+use crate::IrBits;
+use crate::dce::get_dead_nodes;
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
-use crate::ir_cost::ShiftChoiceCostEvaluator;
+use crate::ir_cost::{IrCost, ShiftChoiceCostEvaluator};
 use crate::ir_match::MatchCtx;
 use crate::ir_utils;
+use crate::ir_utils::{make_constant_shift_expr, make_constant_shrl_bit_slice_expr, push_node};
 use crate::ir_value_utils::ir_bits_to_usize;
-use crate::{IrBits, IrValue};
 
 /// Bounds for recognizing and emitting one function's constant-shift choices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,21 +39,42 @@ impl Default for ConstantShiftChoiceLimits {
     }
 }
 
-/// One small bitvector graph supplied by the constant-shift-choice rewrite.
+/// Borrows one small IR region supplied by the constant-shift-choice rewrite.
 ///
 /// Each comparison uses the same boundary inputs and returns the shifted
 /// value followed by any interior values needed by users outside the region.
 /// Only matched amount operations, logical shifts, and transparent wiring or
-/// inversion occur inside the region; other computations are inputs.
-#[derive(Clone, Debug)]
-pub struct ShiftChoiceCostGraph {
-    function: ir::Fn,
+/// inversion occur inside the region; other computations are inputs. The
+/// containing function also holds unrelated nodes and speculative alternatives;
+/// evaluators must only lower the listed nodes and treat the inputs as leaves.
+#[derive(Clone, Copy, Debug)]
+pub struct ShiftChoiceCostGraph<'a> {
+    function: &'a ir::Fn,
+    nodes: &'a [NodeRef],
+    inputs: &'a [NodeRef],
+    outputs: &'a [NodeRef],
 }
 
-impl ShiftChoiceCostGraph {
-    /// Borrows the compact, topologically ordered bitvector function to lower.
+impl ShiftChoiceCostGraph<'_> {
+    /// Borrows the containing function to look up the region's node payloads.
     pub fn function(&self) -> &ir::Fn {
-        &self.function
+        self.function
+    }
+
+    /// Lists reachable interior nodes in dependency order, excluding inputs.
+    pub fn nodes(&self) -> &[NodeRef] {
+        self.nodes
+    }
+
+    /// Lists the shared ordered boundary, including inputs unused by this side.
+    pub fn inputs(&self) -> &[NodeRef] {
+        self.inputs
+    }
+
+    /// Lists the primary result followed by retained values in comparison
+    /// order.
+    pub fn outputs(&self) -> &[NodeRef] {
+        self.outputs
     }
 }
 
@@ -360,7 +382,6 @@ impl ChoiceDag {
         &self,
         f: &mut ir::Fn,
         ty: &Type,
-        mut map_ref: impl FnMut(NodeRef) -> NodeRef,
         mut build_case: impl FnMut(&mut ir::Fn, usize) -> NodeRef,
     ) -> NodeRef {
         let mut emitted = Vec::with_capacity(self.choices.len());
@@ -377,13 +398,13 @@ impl ChoiceDag {
                     let default = default.map(|index| emitted[index]);
                     let payload = if *priority {
                         NodePayload::PrioritySel {
-                            selector: map_ref(*selector),
+                            selector: *selector,
                             cases,
                             default,
                         }
                     } else {
                         NodePayload::Sel {
-                            selector: map_ref(*selector),
+                            selector: *selector,
                             cases,
                             default,
                         }
@@ -397,127 +418,7 @@ impl ChoiceDag {
     }
 }
 
-/// Appends a helper node with a fresh text ID and no source location.
-fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = f
-        .nodes
-        .iter()
-        .map(|node| node.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let index = f.nodes.len();
-    f.nodes.push(ir::Node {
-        text_id,
-        name: None,
-        ty,
-        payload,
-        pos: None,
-    });
-    NodeRef { index }
-}
-
-/// Reuses an existing literal before appending zero padding for a projection.
-fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> NodeRef {
-    for (index, node) in f.nodes.iter().enumerate() {
-        if let NodePayload::Literal(literal) = &node.payload {
-            if node.ty.bit_count() == bit_count && literal.bits_equals_u64_value(value) {
-                return NodeRef { index };
-            }
-        }
-    }
-    let literal = IrValue::make_ubits(bit_count, value).expect("ubits literal");
-    push_node(f, Type::Bits(bit_count), NodePayload::Literal(literal))
-}
-
-/// Builds a logical constant shift from an unchanged data operand and wiring.
-fn make_constant_shift_expr(f: &mut ir::Fn, op: Binop, arg: NodeRef, shift: usize) -> NodeRef {
-    let arg_width = f.get_node(arg).ty.bit_count();
-    if shift == 0 {
-        return arg;
-    }
-    if arg_width == 0 || shift >= arg_width {
-        return get_or_insert_ubits_literal(f, arg_width, 0);
-    }
-
-    let shifted_width = arg_width - shift;
-    let shifted_slice = push_node(
-        f,
-        Type::Bits(shifted_width),
-        NodePayload::BitSlice {
-            arg,
-            start: if op == Binop::Shrl { shift } else { 0 },
-            width: shifted_width,
-        },
-    );
-    let zero_padding = get_or_insert_ubits_literal(f, shift, 0);
-    let operands = match op {
-        Binop::Shrl => vec![zero_padding, shifted_slice],
-        Binop::Shll => vec![shifted_slice, zero_padding],
-        _ => unreachable!("constant-shift projection requires a logical shift"),
-    };
-    push_node(
-        f,
-        Type::Bits(arg_width),
-        NodePayload::Nary(NaryOp::Concat, operands),
-    )
-}
-
-/// Builds a slice of a logical right shift using only source bits and zeros.
-fn make_constant_shrl_bit_slice_expr(
-    f: &mut ir::Fn,
-    arg: NodeRef,
-    shift: usize,
-    start: usize,
-    width: usize,
-) -> NodeRef {
-    let arg_width = f.get_node(arg).ty.bit_count();
-    if width == 0 {
-        return get_or_insert_ubits_literal(f, 0, 0);
-    }
-    let Some(source_start) = start.checked_add(shift) else {
-        return get_or_insert_ubits_literal(f, width, 0);
-    };
-    if source_start >= arg_width {
-        return get_or_insert_ubits_literal(f, width, 0);
-    }
-
-    let valid_width = std::cmp::min(width, arg_width - source_start);
-    if valid_width == 0 {
-        return get_or_insert_ubits_literal(f, width, 0);
-    }
-    if valid_width == width {
-        if source_start == 0 && width == arg_width {
-            return arg;
-        }
-        return push_node(
-            f,
-            Type::Bits(width),
-            NodePayload::BitSlice {
-                arg,
-                start: source_start,
-                width,
-            },
-        );
-    }
-
-    let payload_bits = push_node(
-        f,
-        Type::Bits(valid_width),
-        NodePayload::BitSlice {
-            arg,
-            start: source_start,
-            width: valid_width,
-        },
-    );
-    let zero_prefix = get_or_insert_ubits_literal(f, width - valid_width, 0);
-    push_node(
-        f,
-        Type::Bits(width),
-        NodePayload::Nary(NaryOp::Concat, vec![zero_prefix, payload_bits]),
-    )
-}
-
+/// One logical shift, optionally followed by a slice, considered for fusion.
 struct ShiftChoiceSite {
     target: NodeRef,
     shift: NodeRef,
@@ -556,25 +457,65 @@ impl ShiftChoiceSite {
         })
     }
 
-    /// Emits projections in either the original graph or its local copy.
-    fn emit(
-        &self,
-        f: &mut ir::Fn,
-        dag: &ChoiceDag,
-        mut map_ref: impl FnMut(NodeRef) -> NodeRef,
-    ) -> NodeRef {
-        let data = map_ref(self.data);
-        let ty = f.get_node(map_ref(self.target)).ty.clone();
-        dag.emit(f, &ty, map_ref, |f, shift| match self.slice {
+    /// Appends a speculative replacement without redirecting existing users.
+    fn emit(&self, f: &mut ir::Fn, dag: &ChoiceDag) -> NodeRef {
+        let data = self.data;
+        let ty = f.get_node(self.target).ty.clone();
+        dag.emit(f, &ty, |f, shift| match self.slice {
             Some((start, width)) => make_constant_shrl_bit_slice_expr(f, data, shift, start, width),
             None => make_constant_shift_expr(f, self.op, data, shift),
         })
     }
 }
 
-struct ShiftChoiceComparison {
-    incumbent: ShiftChoiceCostGraph,
-    projected: ShiftChoiceCostGraph,
+/// Owns the recognized recipe while the outer rewrite appends and costs it.
+struct ShiftChoiceProposal {
+    site: ShiftChoiceSite,
+    dag: ChoiceDag,
+}
+
+impl ShiftChoiceProposal {
+    /// Analyzes one site without changing its function or constructing IR
+    /// nodes.
+    fn recognize(
+        f: &ir::Fn,
+        target: NodeRef,
+        slice_phase: bool,
+        limits: ConstantShiftChoiceLimits,
+    ) -> Option<Self> {
+        let site = ShiftChoiceSite::at(f, target, slice_phase)?;
+        let data_width = MatchCtx::new(f).bits_width(site.data)?;
+        let dag = Recognizer::recognize(f, site.amount, data_width, limits)?;
+        Some(Self { site, dag })
+    }
+}
+
+/// Fixes the inputs and retained outputs shared by both alternatives at a site.
+struct ShiftChoiceCostBoundary {
+    inputs: Vec<NodeRef>,
+    retained_outputs: Vec<NodeRef>,
+}
+
+impl ShiftChoiceCostBoundary {
+    /// Costs only the region reachable from this result and the retained
+    /// values.
+    fn estimate(
+        &self,
+        f: &ir::Fn,
+        result: NodeRef,
+        evaluator: &mut dyn ShiftChoiceCostEvaluator,
+    ) -> Result<IrCost, String> {
+        let outputs: Vec<_> = std::iter::once(result)
+            .chain(self.retained_outputs.iter().copied())
+            .collect();
+        let nodes = cost_region_order(f, &self.inputs, &outputs);
+        evaluator.estimate(&ShiftChoiceCostGraph {
+            function: f,
+            nodes: &nodes,
+            inputs: &self.inputs,
+            outputs: &outputs,
+        })
+    }
 }
 
 /// Includes only wiring and inversion around the exact matched amount graph.
@@ -643,14 +584,14 @@ fn cost_region_nodes(
     Some(included)
 }
 
-/// Copies one rewrite region, keeping shared inputs and externally used values.
-fn cost_comparison(
+/// Records the original cut before speculative nodes can change use counts.
+fn cost_boundary(
     f: &ir::Fn,
     site: &ShiftChoiceSite,
     dag: &ChoiceDag,
     users: &ir_utils::Users,
     limits: ConstantShiftChoiceLimits,
-) -> Option<ShiftChoiceComparison> {
+) -> Option<ShiftChoiceCostBoundary> {
     let included = cost_region_nodes(f, site, dag, limits)?;
     let mut nodes: Vec<_> = included.iter().copied().collect();
     nodes.sort_by_key(|nr| nr.index);
@@ -664,75 +605,46 @@ fn cost_comparison(
     if included.len().checked_add(inputs.len())? > limits.max_visited_nodes {
         return None;
     }
-
-    let mut function = ir::Fn {
-        graph: ir::NodeGraph::new("shift_choice_cost"),
-        params: Vec::new(),
-        ret_ty: Type::Bits(0),
-        ret_node_ref: None,
-    };
-    let mut mapping = HashMap::new();
-    for (index, input) in inputs.into_iter().enumerate() {
-        let Type::Bits(width) = f.get_node(input).ty else {
-            return None;
-        };
-        if width > limits.max_bit_width {
-            return None;
-        }
-        let nr = push_node(&mut function, Type::Bits(width), NodePayload::Param);
-        function.get_node_mut(nr).name = Some(format!("input_{index}"));
-        function.params.push(nr);
-        mapping.insert(input, nr);
-    }
-    let first_internal = function.nodes.len();
-    for (index, nr) in nodes.iter().enumerate() {
-        mapping.insert(
-            *nr,
-            NodeRef {
-                index: first_internal + index,
-            },
-        );
-    }
-    for nr in &nodes {
-        let node = f.get_node(*nr);
-        let payload = ir_utils::remap_payload_with(&node.payload, |(_, arg)| mapping[&arg]);
-        push_node(&mut function, node.ty.clone(), payload);
-    }
-    let mut roots = vec![mapping[&site.target]];
+    let mut retained_outputs = Vec::new();
     for nr in nodes {
         if nr != site.target
             && (f.ret_node_ref == Some(nr)
                 || users.get(&nr)?.iter().any(|user| !included.contains(user)))
         {
-            roots.push(mapping[&nr]);
+            retained_outputs.push(nr);
         }
     }
-    let output_width = roots.iter().try_fold(0usize, |width, nr| {
-        width.checked_add(function.get_node(*nr).ty.bit_count())
-    })?;
-    function.ret_ty = Type::Bits(output_width);
-    function.ret_node_ref = Some(if roots.len() == 1 {
-        roots[0]
-    } else {
-        push_node(
-            &mut function,
-            Type::Bits(output_width),
-            NodePayload::Nary(NaryOp::Concat, roots),
-        )
-    });
-
-    let mut projected = function.clone();
-    let replacement = site.emit(&mut projected, dag, |nr| mapping[&nr]);
-    ir_utils::replace_node_with_ref(&mut projected, mapping[&site.target], replacement)
-        .expect("constant-shift projections preserve the local output type");
-    Some(ShiftChoiceComparison {
-        incumbent: ShiftChoiceCostGraph {
-            function: remove_dead_nodes(&function),
-        },
-        projected: ShiftChoiceCostGraph {
-            function: remove_dead_nodes(&projected),
-        },
+    // The backend concatenates the outputs; reject an unrepresentable width.
+    std::iter::once(site.target)
+        .chain(retained_outputs.iter().copied())
+        .try_fold(0usize, |width, nr| {
+            width.checked_add(f.get_node(nr).ty.bit_count())
+        })?;
+    Some(ShiftChoiceCostBoundary {
+        inputs,
+        retained_outputs,
     })
+}
+
+/// Walks only a closed region, stopping at its inputs and preserving sharing.
+fn cost_region_order(f: &ir::Fn, inputs: &[NodeRef], outputs: &[NodeRef]) -> Vec<NodeRef> {
+    let mut seen: HashSet<_> = inputs.iter().copied().collect();
+    let mut pending: Vec<_> = outputs.iter().rev().map(|nr| (*nr, false)).collect();
+    let mut nodes = Vec::new();
+    while let Some((nr, expanded)) = pending.pop() {
+        if expanded {
+            nodes.push(nr);
+        } else if seen.insert(nr) {
+            pending.push((nr, true));
+            pending.extend(
+                ir_utils::operands(&f.get_node(nr).payload)
+                    .into_iter()
+                    .rev()
+                    .map(|operand| (operand, false)),
+            );
+        }
+    }
+    nodes
 }
 
 /// Builds a bounded constant-choice candidate, leaving `f` unchanged on
@@ -779,6 +691,7 @@ pub fn rewrite_constant_shift_choices_with_evaluator(
     Ok(candidate.rewrites)
 }
 
+/// Holds a complete speculative function until every selected site succeeds.
 struct ConstantShiftChoiceCandidate {
     function: ir::Fn,
     rewrites: usize,
@@ -807,17 +720,13 @@ fn build_candidate(
             {
                 continue;
             }
-            let Some(site) = ShiftChoiceSite::at(&candidate, target, slice_phase) else {
-                continue;
-            };
-            let Some(data_width) = MatchCtx::new(&candidate).bits_width(site.data) else {
-                continue;
-            };
-            let Some(dag) = Recognizer::recognize(&candidate, site.amount, data_width, limits)
+            let Some(proposal) =
+                ShiftChoiceProposal::recognize(&candidate, target, slice_phase, limits)
             else {
                 continue;
             };
-            let Some(next_emitted_bound) = dag
+            let Some(next_emitted_bound) = proposal
+                .dag
                 .emitted_node_bound()
                 .and_then(|n| emitted_bound.checked_add(n))
             else {
@@ -826,19 +735,30 @@ fn build_candidate(
             if next_emitted_bound > limits.max_emitted_nodes {
                 return Ok(None);
             }
-            if let Some(evaluator) = evaluator.as_deref_mut() {
-                let Some(comparison) = cost_comparison(&candidate, &site, &dag, &users, limits)
+            let boundary = if evaluator.is_some() {
+                let Some(boundary) =
+                    cost_boundary(&candidate, &proposal.site, &proposal.dag, &users, limits)
                 else {
                     continue;
                 };
-                let incumbent = evaluator.estimate(&comparison.incumbent)?;
-                let projected = evaluator.estimate(&comparison.projected)?;
+                Some(boundary)
+            } else {
+                None
+            };
+            // Emission only appends nodes. Both alternatives can then borrow
+            // this function, and rejection can discard the appended suffix.
+            let first_new_node = candidate.nodes.len();
+            let replacement = proposal.site.emit(&mut candidate, &proposal.dag);
+            if let Some(evaluator) = evaluator.as_deref_mut() {
+                let boundary = boundary.expect("costed proposals have a boundary");
+                let incumbent = boundary.estimate(&candidate, target, evaluator)?;
+                let projected = boundary.estimate(&candidate, replacement, evaluator)?;
                 if !projected.is_pareto_improvement_on(incumbent) {
+                    candidate.nodes.truncate(first_new_node);
                     continue;
                 }
             }
             emitted_bound = next_emitted_bound;
-            let replacement = site.emit(&mut candidate, &dag, |nr| nr);
             ir_utils::replace_node_with_ref(&mut candidate, target, replacement)
                 .expect("constant-shift choices preserve the target type");
             rewrites += 1;
@@ -869,20 +789,24 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::IrValue;
     use crate::ir_cost::IrCost;
     use crate::ir_eval::eval_fn;
     use crate::ir_parser::Parser;
     use crate::ir_verify::verify_function;
 
+    /// Records isolated test functions while controlling profitability answers.
     struct ScriptedEvaluator {
         answers: VecDeque<Result<IrCost, String>>,
         inputs: Vec<ir::Fn>,
+        containing_node_counts: Vec<usize>,
     }
 
     impl ShiftChoiceCostEvaluator for ScriptedEvaluator {
-        fn estimate(&mut self, graph: &ShiftChoiceCostGraph) -> Result<IrCost, String> {
-            verify_function(graph.function()).unwrap();
-            self.inputs.push(graph.function().clone());
+        fn estimate(&mut self, graph: &ShiftChoiceCostGraph<'_>) -> Result<IrCost, String> {
+            self.containing_node_counts
+                .push(graph.function().nodes.len());
+            self.inputs.push(materialize_cost_graph(graph));
             self.answers
                 .pop_front()
                 .expect("unexpected cost evaluation")
@@ -901,7 +825,56 @@ mod tests {
                 })
                 .collect(),
             inputs: Vec::new(),
+            containing_node_counts: Vec::new(),
         }
+    }
+
+    /// Materializes a borrowed region only for structural and equivalence
+    /// checks.
+    fn materialize_cost_graph(graph: &ShiftChoiceCostGraph<'_>) -> ir::Fn {
+        let source = graph.function();
+        let mut function = ir::Fn {
+            graph: ir::NodeGraph::new("cost_region"),
+            params: Vec::new(),
+            ret_ty: Type::Bits(0),
+            ret_node_ref: None,
+        };
+        let mut mapping = HashMap::new();
+        for (index, &input) in graph.inputs().iter().enumerate() {
+            let param = push_node(
+                &mut function,
+                source.get_node(input).ty.clone(),
+                NodePayload::Param,
+            );
+            function.get_node_mut(param).name = Some(format!("input_{index}"));
+            function.params.push(param);
+            mapping.insert(input, param);
+        }
+        for &nr in graph.nodes() {
+            let node = source.get_node(nr);
+            let payload = ir_utils::remap_payload_with(&node.payload, |(_, arg)| mapping[&arg]);
+            let mapped = push_node(&mut function, node.ty.clone(), payload);
+            assert!(mapping.insert(nr, mapped).is_none());
+        }
+        let outputs: Vec<_> = graph.outputs().iter().map(|nr| mapping[nr]).collect();
+        function.ret_ty = Type::Bits(
+            outputs
+                .iter()
+                .map(|nr| function.get_node(*nr).ty.bit_count())
+                .sum(),
+        );
+        function.ret_node_ref = Some(if outputs.len() == 1 {
+            outputs[0]
+        } else {
+            let ty = function.ret_ty.clone();
+            push_node(
+                &mut function,
+                ty,
+                NodePayload::Nary(NaryOp::Concat, outputs),
+            )
+        });
+        verify_function(&function).unwrap();
+        function
     }
 
     fn masked_choice(width: usize, op: &str) -> ir::Fn {
@@ -1024,6 +997,15 @@ top fn main(x: bits[{width}] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1]
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
         );
+        // The evaluator borrows the containing function; only its explicit
+        // region is copied into the test functions above.
+        for (isolated_count, extended_count) in isolated_costs
+            .containing_node_counts
+            .iter()
+            .zip(&extended_costs.containing_node_counts)
+        {
+            assert!(extended_count >= &(isolated_count + 64));
+        }
     }
 
     #[test]
@@ -1122,6 +1104,40 @@ top fn main(x: bits[{width}] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1]
             Err("second site failed".to_string())
         );
         assert_eq!(function.to_string(), original.to_string());
+    }
+
+    #[test]
+    fn rejected_speculation_is_removed_before_the_next_site() {
+        let mut function = two_shifts();
+        let mut evaluator = scripted(&[10, 11, 10, 9]);
+        assert_eq!(
+            rewrite_constant_shift_choices_with_evaluator(
+                &mut function,
+                ConstantShiftChoiceLimits::default(),
+                &mut evaluator,
+            ),
+            Ok(1),
+        );
+        assert_eq!(evaluator.containing_node_counts.len(), 4);
+        // Left and right projections append the same number of nodes. The
+        // rejected left-shift proposal must not remain in the second attempt.
+        assert_eq!(
+            evaluator.containing_node_counts[0],
+            evaluator.containing_node_counts[2],
+        );
+        assert!(
+            function
+                .nodes
+                .iter()
+                .any(|node| matches!(node.payload, NodePayload::Binop(Binop::Shll, ..)))
+        );
+        assert!(
+            !function
+                .nodes
+                .iter()
+                .any(|node| matches!(node.payload, NodePayload::Binop(Binop::Shrl, ..)))
+        );
+        verify_function(&function).unwrap();
     }
 
     #[test]
