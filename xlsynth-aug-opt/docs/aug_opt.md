@@ -1,11 +1,17 @@
 # Aug-opt optimizations
 
-The [augmented optimizer](../src/aug_opt.rs) applies local PIR rewrites to the
+The [augmented optimizer](../src/optimizer.rs) applies local PIR rewrites to the
 selected top function. In `Sandwich` mode, XLS optimization runs before the first
 PIR round and after each round. `PirOnly` mode runs the PIR rounds directly.
 Both modes rebuild range and known-bit facts each round.
 The rewrites emit ordinary XLS operations; existing PIR extension operations
 are preserved across XLS optimization through FFI wrappers.
+
+The canonical entrypoints are
+`xlsynth_aug_opt::run_aug_opt_over_ir_text` and
+`xlsynth_aug_opt::run_aug_opt_over_ir_text_with_stats`. Both supply g8r costing
+for profitability checks. See the [crate README](../README.md) for library use,
+the standalone executable, and migration from the PIR and g8r entrypoints.
 
 The following pseudocode uses `sel(p, [a, b])` for a one-bit selection that
 returns `a` when `p` is zero and `b` when it is one. A slice `x[a:b]` contains
@@ -49,13 +55,12 @@ preserves selection defaults, priority, shared data, and oversized amounts.
 A reachable variable amount rejects the candidate; structural limits bound
 recognition and expansion.
 
-This rewrite requires an injected
-[`ShiftChoiceCostEvaluator`](../src/ir_cost.rs). Each site is compared
-independently using small graphs with the same boundary inputs and any interior
-values still needed by outside users. Nearby wiring and inversion preserve
-shared controls. Acceptance requires no increase in either estimated area or
-delay and a strict improvement in at least one, with a tolerance for delay
-roundoff. A tie or tradeoff keeps the original site.
+Each site is compared independently through a
+[`ShiftChoiceCostEvaluator`](../src/ir_cost.rs), using small graphs with the same
+boundary inputs and any interior values still needed by outside users. Nearby
+wiring and inversion preserve shared controls. Acceptance requires no increase
+in either estimated area or delay and a strict improvement in at least one,
+with a tolerance for delay roundoff. A tie or tradeoff keeps the original site.
 
 Cost graphs borrow regions of the speculative working function. A proposal
 appends replacement nodes before costing; acceptance redirects the original
@@ -63,11 +68,12 @@ users, while rejection discards the appended nodes. Sites are processed in
 sequence so later proposals see the updated sharing. Evaluation errors discard
 the working function and preserve the original input.
 
-The [g8r aug-opt entrypoints](../../xlsynth-g8r/src/aug_opt.rs) supply an
-evaluator using the existing gate builder's AND count and Graph LE. External
-logic, arrival times, and loads are outside this local model; downstream gate
-cleanup can also change final costs. PIR entrypoints without an evaluator skip
-this rewrite. The other rewrites run with or without an evaluator.
+The [crate-root entrypoints](../src/lib.rs) supply an evaluator using g8r's
+existing gate builder, reachable AND count, and Graph LE. External logic,
+arrival times, and loads are outside this local model; downstream gate cleanup
+can also change final costs. The optimizer's cost adapter uses g8r's neutral
+region-lowering API, so neither g8r nor PIR depends on optimizer-specific
+graphs or profitability policy.
 
 ### Predicates over shifted bits
 
@@ -135,9 +141,9 @@ unchanged. `PirOnly` mode does not run this canonicalization.
 
 ## Implementation and tests
 
-The pass order and most rewrite tests are in [aug_opt.rs](../src/aug_opt.rs).
+The pass order and most rewrite tests are in [optimizer.rs](../src/optimizer.rs).
 Constant-choice recognition and construction have their own
 [module and unit tests](../src/constant_shift_choices.rs).
-The [g8r integration tests](../../xlsynth-g8r/tests/) include `aug_opt_*` tests
+The [integration tests](../tests/) include `aug_opt_*` tests
 for equivalence and mapped quality, including local cost decisions and their
 composition with XLS optimization.

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use xlsynth_aug_opt::run_aug_opt_over_ir_text_with_stats;
+use xlsynth_aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
-use xlsynth_g8r::aug_opt::run_aug_opt_over_ir_text_with_stats;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify_prepared_fn};
-use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 
@@ -38,7 +38,7 @@ fn parse_top_fn(ir_text: &str) -> ir::Fn {
     pkg.get_top_fn().expect("top fn").clone()
 }
 
-fn aug_opt_for_test(ir_text: &str) -> xlsynth_pir::aug_opt::AugOptRunResult {
+fn aug_opt_for_test(ir_text: &str) -> xlsynth_aug_opt::AugOptRunResult {
     run_aug_opt_over_ir_text_with_stats(
         ir_text,
         Some("affine_shift_qor"),

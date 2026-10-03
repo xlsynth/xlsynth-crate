@@ -5,14 +5,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use xlsynth_g8r::gatify::ir2gate::GateBuilderCostEvaluator;
-use xlsynth_pir::IrValue;
-use xlsynth_pir::constant_shift_choices::{
+use xlsynth_aug_opt::constant_shift_choices::{
     ShiftChoiceCostGraph, rewrite_constant_shift_choices_with_evaluator,
 };
+use xlsynth_aug_opt::cost::GateBuilderCostEvaluator;
+use xlsynth_aug_opt::ir_cost::{IrCost, ShiftChoiceCostEvaluator};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::dce::get_dead_nodes;
 use xlsynth_pir::ir::{self, NodePayload, NodeRef, Type};
-use xlsynth_pir::ir_cost::{IrCost, ShiftChoiceCostEvaluator};
 use xlsynth_pir::ir_eval::eval_fn;
 use xlsynth_pir::ir_utils::{operands, push_node, remap_payload_with};
 use xlsynth_pir::ir_verify::verify_function;
@@ -508,10 +508,10 @@ pub fn check_input(data: &[u8]) -> FuzzStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsynth_pir::FnBuilder;
-    use xlsynth_pir::constant_shift_choices::{
+    use xlsynth_aug_opt::constant_shift_choices::{
         ConstantShiftChoiceLimits, constant_shift_choice_candidate,
     };
+    use xlsynth_pir::FnBuilder;
 
     /// Two independent shifts ensure errors can follow an already applied site.
     fn two_sites() -> Sample {

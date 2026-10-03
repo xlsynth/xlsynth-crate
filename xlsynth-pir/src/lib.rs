@@ -7,10 +7,8 @@
 
 mod analysis_utils;
 pub mod array_alias_rewrite;
-pub mod aug_opt;
 pub mod block2fn;
 pub mod block_inline;
-pub mod constant_shift_choices;
 pub mod corners;
 pub mod dce;
 pub mod desugar_extensions;
@@ -23,7 +21,6 @@ mod ir_block;
 pub mod ir_bool_cones;
 pub mod ir_builder;
 pub mod ir_corpus;
-pub mod ir_cost;
 pub mod ir_deduce;
 pub mod ir_eval;
 pub mod ir_fn_cone_extract;
@@ -60,7 +57,6 @@ pub mod structural_similarity;
 
 pub use xlsynth_ir_value::{ir_values, value};
 
-pub use aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
 pub use ir_builder::{
     BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, NaryAddOptions,
     NaryAddTerm, NormalizeLeftOptions, RegisterWriteOptions, ResetBehavior,
@@ -71,9 +67,6 @@ pub use ir_values::{
     parse_ir_values_file,
 };
 pub use value::{IrArray, IrBits, IrFormatPreference, IrValue, ValueError};
-
-#[cfg(test)]
-pub mod test_utils;
 
 #[cfg(test)]
 mod block2fn_test;

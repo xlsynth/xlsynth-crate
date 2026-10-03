@@ -410,7 +410,6 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
-            aug_opt: Default::default(),
             ..Self::default()
         }
     }
@@ -433,7 +432,6 @@ impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
-            aug_opt: Default::default(),
             ..Self::default()
         }
     }

@@ -13,6 +13,7 @@ crates = [
     "xlsynth-prover",
     "xlsynth-test-helpers",
     "xlsynth-g8r",
+    "xlsynth-aug-opt",
     "xlsynth-codegen",
     "xlsynth-estimator",
     "xlsynth-mcmc-pir",

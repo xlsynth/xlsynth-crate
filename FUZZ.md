@@ -165,20 +165,22 @@ Primarily tests:
 - Optimization preserves semantics
 - Cross-engine equivalence consistency (external tool vs SMT backends)
 
-### xlsynth-pir/fuzz/fuzz_targets/fuzz_aug_opt_equiv.rs
+### xlsynth-aug-opt/fuzz/fuzz_targets/fuzz_aug_opt_equiv.rs
 
 Generates an upstream-standard random XLS IR function, including `gate` and
 arbitrary-width multiply but excluding product-pair operations pending formal
-support, runs the backend-independent PIR aug-opt rewrite loop, and checks toolchain equivalence
-between the original and rewritten IR when at least one rewrite fires. The
-target flags unexpected aug-opt failures or inequivalent rewrites.
+support, runs one PIR-only aug-opt round with the default g8r cost evaluator,
+and checks in-process Bitwuzla equivalence between the original and rewritten
+IR when at least one rewrite fires. The generator stays generic, without
+directed cases for particular rewrites. The target flags unexpected aug-opt
+failures or inequivalent rewrites.
 
 Primarily tests:
 
 - PIR aug-opt rewrites preserve semantics when they apply
-- End-to-end compatibility of PIR lowering and toolchain equivalence checks
+- End-to-end compatibility of PIR lowering and in-process equivalence checks
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_constant_shift_choices.rs
+### xlsynth-aug-opt/fuzz/fuzz_targets/fuzz_constant_shift_choices.rs
 
 Decodes small typed DAGs directly from fuzz bytes to exercise constant-shift-choice
 fusion, including nested selects, priority/default choices, replicated Boolean
@@ -197,7 +199,7 @@ bit projections, selection semantics, lost shared users/effects, or speculative
 changes that survive rejection. Progress counters distinguish completed proofs
 from inconclusives and report exercised decision paths.
 
-From `xlsynth-g8r`, with the normal XLS and system Bitwuzla environment:
+From `xlsynth-aug-opt`, with the normal XLS and system Bitwuzla environment:
 
 ```shell
 cargo +nightly fuzz run fuzz_constant_shift_choices \

@@ -8,6 +8,7 @@ members = [
     "xlsynth-estimator",
     "xlsynth-codegen",
     "xlsynth-g8r",
+    "xlsynth-aug-opt",
     "xlsynth-pir-compiler-runtime",
     "xlsynth-pir-compiler",
     "xlsynth-pir-compiler/tests/aot-dslx-test-crate",

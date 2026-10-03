@@ -15,24 +15,26 @@
 //!
 //! See [Aug-opt optimizations] for the rewrites and when they apply.
 //!
-//! [Aug-opt optimizations]: https://github.com/xlsynth/xlsynth-crate/blob/main/xlsynth-pir/docs/aug_opt.md
+//! [Aug-opt optimizations]: https://github.com/xlsynth/xlsynth-crate/blob/main/xlsynth-aug-opt/docs/aug_opt.md
 
 use std::collections::HashSet;
 
-use crate::IrValue;
 use crate::constant_shift_choices::{
     ConstantShiftChoiceLimits, rewrite_constant_shift_choices_with_evaluator,
 };
-use crate::desugar_extensions::{self, ExtensionEmitMode};
-use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use crate::cost::GateBuilderCostEvaluator;
 use crate::ir_cost::ShiftChoiceCostEvaluator;
-use crate::ir_parser;
-use crate::ir_range_info::IrRangeInfo;
-use crate::ir_rebase_ids::package_max_emitted_node_id;
-use crate::ir_utils;
-use crate::ir_value_utils::ir_bits_to_usize;
-use crate::ir_verify::verify_package;
+use xlsynth_pir::IrValue;
+use xlsynth_pir::desugar_extensions::{self, ExtensionEmitMode};
+use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_range_info::IrRangeInfo;
+use xlsynth_pir::ir_rebase_ids::package_max_emitted_node_id;
+use xlsynth_pir::ir_utils;
+use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
+use xlsynth_pir::ir_verify::verify_package;
 
+/// Chooses PIR rewrites alone or their composition with the upstream optimizer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AugOptMode {
     /// The default "opt sandwich":
@@ -42,6 +44,7 @@ pub enum AugOptMode {
     PirOnly,
 }
 
+/// Controls whether and how many times the augmented optimizer runs.
 #[derive(Debug, Clone, Copy)]
 pub struct AugOptOptions {
     pub enable: bool,
@@ -49,6 +52,7 @@ pub struct AugOptOptions {
     pub mode: AugOptMode,
 }
 
+/// Counts applications of each augmented rewrite across the requested rounds.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AugOptRewriteStats {
     pub guarded_sel_ne1_nor: usize,
@@ -125,6 +129,7 @@ impl AugOptRewriteStats {
     }
 }
 
+/// Contains the optimized IR and aggregate rewrite counts for an optimizer run.
 #[derive(Debug, Clone)]
 pub struct AugOptRunResult {
     pub output_text: String,
@@ -148,7 +153,7 @@ impl Default for AugOptOptions {
     }
 }
 
-/// Runs backend-independent aug-opt rewrites without a cost evaluator.
+/// Runs aug-opt with g8r's local gate cost model.
 pub fn run_aug_opt_over_ir_text(
     ir_text: &str,
     top: Option<&str>,
@@ -157,17 +162,18 @@ pub fn run_aug_opt_over_ir_text(
     run_aug_opt_over_ir_text_with_stats(ir_text, top, options).map(|result| result.output_text)
 }
 
-/// Runs backend-independent rewrites and reports their counts.
-///
-/// Constant-shift-choice fusion requires a cost evaluator and is skipped here.
-/// Use [`run_aug_opt_over_ir_text_with_evaluator`] to enable cost-gated
-/// rewrites.
+/// Runs all aug-opt rewrites with g8r's cost model and reports their counts.
 pub fn run_aug_opt_over_ir_text_with_stats(
     ir_text: &str,
     top: Option<&str>,
     options: AugOptOptions,
 ) -> Result<AugOptRunResult, String> {
-    run_aug_opt_over_ir_text_impl(ir_text, top, options, None)
+    run_aug_opt_over_ir_text_with_evaluator(
+        ir_text,
+        top,
+        options,
+        &mut GateBuilderCostEvaluator::default(),
+    )
 }
 
 /// Runs aug-opt with an injected cost model for profitability-gated rewrites.
@@ -2690,10 +2696,10 @@ fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IrValue;
     use crate::constant_shift_choices::constant_shift_choice_candidate;
-    use crate::ir_eval::{FnEvalResult, eval_fn_in_package};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
+    use xlsynth_pir::IrValue;
+    use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 
     #[test]
     fn aug_opt_without_evaluator_skips_cost_gated_choices() {
@@ -2718,7 +2724,7 @@ top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) ->
                     .is_some()
             );
             for rounds in [1, 3] {
-                let result = run_aug_opt_over_ir_text_with_stats(
+                let result = run_aug_opt_over_ir_text_impl(
                     &ir_text,
                     Some("f"),
                     AugOptOptions {
@@ -2726,6 +2732,7 @@ top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) ->
                         rounds,
                         mode: AugOptMode::PirOnly,
                     },
+                    None,
                 )
                 .unwrap();
                 assert_eq!(result.rewrite_stats.constant_shift_choices, 0);
@@ -3266,7 +3273,7 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
         // XLS rejects a useless default on a bits[1] selector with two cases,
         // so build this graph directly to isolate the `default: Some(_)` guard.
         let mut default_f = ir::Fn {
-            graph: crate::ir::NodeGraph {
+            graph: xlsynth_pir::ir::NodeGraph {
                 name: "selected_sub_qor".to_string(),
                 nodes: vec![
                     ir::Node {

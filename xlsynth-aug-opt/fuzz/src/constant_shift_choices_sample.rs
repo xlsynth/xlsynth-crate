@@ -3,7 +3,7 @@
 //! Structured inputs for the dedicated constant-shift-choice equivalence
 //! fuzzer.
 
-use xlsynth_pir::constant_shift_choices::ConstantShiftChoiceLimits;
+use xlsynth_aug_opt::constant_shift_choices::ConstantShiftChoiceLimits;
 use xlsynth_pir::ir::{self, Type};
 use xlsynth_pir::{BValue, FnBuilder, IrBits, IrValue};
 
@@ -422,7 +422,7 @@ pub fn generate_sample(data: &[u8]) -> Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsynth_pir::constant_shift_choices::constant_shift_choice_candidate;
+    use xlsynth_aug_opt::constant_shift_choices::constant_shift_choice_candidate;
     use xlsynth_pir::ir_utils::operands;
 
     #[test]

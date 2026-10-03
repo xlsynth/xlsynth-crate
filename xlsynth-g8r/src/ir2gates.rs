@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate_builder::GateBuilderOptions;
-use crate::gatify::ir2gate::{self, GateBuilderCostEvaluator};
+use crate::gatify::ir2gate;
 use crate::gatify::prep_for_gatify::PrepForGatifyOptions;
-use xlsynth_pir::aug_opt::AugOptOptions;
 use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -31,7 +29,6 @@ pub struct Ir2GatesOptions {
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub unsafe_gatify_gate_operation: bool,
-    pub aug_opt: AugOptOptions,
 }
 
 impl Ir2GatesOptions {
@@ -53,7 +50,6 @@ impl Ir2GatesOptions {
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
-            aug_opt: AugOptOptions::default(),
         }
     }
 
@@ -75,7 +71,6 @@ impl Ir2GatesOptions {
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
-            aug_opt: AugOptOptions::default(),
         }
     }
 }
@@ -182,10 +177,8 @@ pub fn prepare_ir_for_gatify_from_ir_text(
     top: Option<&str>,
     options: &Ir2GatesOptions,
 ) -> Result<PreparedIrForGatify, String> {
-    let mut ir_text_for_processing: String = ir_text.to_string();
-
     // Parse with PIR for lowering.
-    let mut parser = ir_parser::Parser::new(&ir_text_for_processing);
+    let mut parser = ir_parser::Parser::new(ir_text);
     let mut pir_package = parser
         .parse_and_validate_package()
         .map_err(|e| format!("PIR parse/validate failed: {e}"))?;
@@ -199,25 +192,6 @@ pub fn prepare_ir_for_gatify_from_ir_text(
             pir_top.name.clone()
         }
     };
-
-    if options.aug_opt.enable {
-        let mut evaluator =
-            GateBuilderCostEvaluator::default().with_gate_builder_options(GateBuilderOptions {
-                fold: options.fold,
-                hash: options.hash,
-            });
-        ir_text_for_processing = xlsynth_pir::aug_opt::run_aug_opt_over_ir_text_with_evaluator(
-            &ir_text_for_processing,
-            Some(&top_fn_name),
-            options.aug_opt,
-            &mut evaluator,
-        )?
-        .output_text;
-        let mut parser = ir_parser::Parser::new(&ir_text_for_processing);
-        pir_package = parser
-            .parse_and_validate_package()
-            .map_err(|e| format!("PIR parse/validate failed after aug_opt: {e}"))?;
-    }
 
     apply_formal_array_alias_analysis(
         &mut pir_package,

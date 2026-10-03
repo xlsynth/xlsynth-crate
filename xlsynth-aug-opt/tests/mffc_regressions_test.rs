@@ -4,14 +4,14 @@ use std::path::Path;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use xlsynth_aug_opt::run_aug_opt_over_ir_text_with_stats;
+use xlsynth_aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::graph_logical_effort::{
     GraphLogicalEffortOptions, analyze_graph_logical_effort,
 };
-use xlsynth_g8r::aug_opt::run_aug_opt_over_ir_text_with_stats;
 use xlsynth_g8r::check_equivalence::validate_same_fn_via_toolchain;
 use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, process_ir_text_with_gatefn};
-use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_pir::ir_parser::Parser;
 
 #[derive(Deserialize)]

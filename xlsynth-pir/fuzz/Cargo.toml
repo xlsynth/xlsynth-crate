@@ -111,12 +111,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "fuzz_aug_opt_equiv"
-path = "fuzz_targets/fuzz_aug_opt_equiv.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_ir_opt_equiv"
 path = "fuzz_targets/fuzz_ir_opt_equiv.rs"
 test = false

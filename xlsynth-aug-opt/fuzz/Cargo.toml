@@ -1,0 +1,58 @@
+[package]
+name = "xlsynth-aug-opt-fuzz"
+version = "0.74.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+log = "0.4"
+env_logger = "0.11"
+xlsynth-aug-opt = { path = ".." }
+xlsynth-pir = { path = "../../xlsynth-pir" }
+xlsynth-pir-fuzz = { path = "../../xlsynth-pir/fuzz" }
+xlsynth-prover = { path = "../../xlsynth-prover" }
+
+[lib]
+name = "xlsynth_aug_opt_fuzz"
+path = "src/lib.rs"
+
+# Keep fuzzing dependencies separate from the published workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_aug_opt_equiv"
+path = "fuzz_targets/fuzz_aug_opt_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_constant_shift_choices"
+path = "fuzz_targets/fuzz_constant_shift_choices.rs"
+test = false
+doc = false
+required-features = ["has-bitwuzla"]
+
+[features]
+default = []
+has-bitwuzla = [
+    "xlsynth-aug-opt/has-bitwuzla",
+    "xlsynth-pir-fuzz/has-bitwuzla",
+    "xlsynth-prover/has-bitwuzla",
+]
+with-bitwuzla-system = [
+    "has-bitwuzla",
+    "xlsynth-aug-opt/with-bitwuzla-system",
+    "xlsynth-pir-fuzz/with-bitwuzla-system",
+    "xlsynth-prover/with-bitwuzla-system",
+]
+with-bitwuzla-built = [
+    "has-bitwuzla",
+    "xlsynth-aug-opt/with-bitwuzla-built",
+    "xlsynth-pir-fuzz/with-bitwuzla-built",
+    "xlsynth-prover/with-bitwuzla-built",
+]

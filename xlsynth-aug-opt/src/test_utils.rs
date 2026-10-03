@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Test helpers for `xlsynth-pir`.
+//! Test helpers for `xlsynth-aug-opt`.
 //!
 //! These are intentionally deterministic: helpers use fixed RNG seeds so tests
 //! are reproducible.
 
 use rand_pcg::Pcg64Mcg;
 
-use crate::ir;
-use crate::ir_eval::{FnEvalResult, eval_fn};
-use crate::ir_parser;
-use crate::random_inputs::{
+use xlsynth_pir::ir;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_parser;
+use xlsynth_pir::random_inputs::{
     BitValuePattern, generate_mixed_irbits_with_rng, generate_pattern_irbits,
 };
-use crate::{IrBits, IrValue};
+use xlsynth_pir::{IrBits, IrValue};
 
 /// Deterministically "quickchecks" equivalence of two PIR functions by
 /// evaluating both on a mixture of edge cases and pseudo-random samples.

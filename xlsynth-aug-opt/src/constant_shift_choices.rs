@@ -4,14 +4,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::IrBits;
-use crate::dce::get_dead_nodes;
-use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_cost::{IrCost, ShiftChoiceCostEvaluator};
-use crate::ir_match::MatchCtx;
-use crate::ir_utils;
-use crate::ir_utils::{make_constant_shift_expr, make_constant_shrl_bit_slice_expr, push_node};
-use crate::ir_value_utils::ir_bits_to_usize;
+use xlsynth_pir::IrBits;
+use xlsynth_pir::dce::get_dead_nodes;
+use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use xlsynth_pir::ir_match::MatchCtx;
+use xlsynth_pir::ir_utils;
+use xlsynth_pir::ir_utils::{
+    make_constant_shift_expr, make_constant_shrl_bit_slice_expr, push_node,
+};
+use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 
 /// Bounds for recognizing and emitting one function's constant-shift choices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -789,11 +791,11 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use crate::IrValue;
     use crate::ir_cost::IrCost;
-    use crate::ir_eval::eval_fn;
-    use crate::ir_parser::Parser;
-    use crate::ir_verify::verify_function;
+    use xlsynth_pir::IrValue;
+    use xlsynth_pir::ir_eval::eval_fn;
+    use xlsynth_pir::ir_parser::Parser;
+    use xlsynth_pir::ir_verify::verify_function;
 
     /// Records isolated test functions while controlling profitability answers.
     struct ScriptedEvaluator {
