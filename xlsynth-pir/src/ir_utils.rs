@@ -7,6 +7,15 @@ use crate::ir::{self, Binop, Fn, NaryOp, Node, NodeGraph, NodePayload, NodeRef, 
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+/// Bitwise operations recognized when classifying trivial function bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoolGateOp {
+    Not,
+    And,
+    Or,
+    Xor,
+}
+
 /// Simple return cone shapes used when filtering functions for mining.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrivialFnBody {
@@ -17,7 +26,7 @@ pub enum TrivialFnBody {
     SingleParamStructural { param_name: String },
     /// The return cone contains one `not`, `and`, `or`, or `xor` node and
     /// otherwise structural nodes. Counts distinct parameters in the cone.
-    SingleBoolGate { op: String, param_count: usize },
+    SingleBoolGate { op: BoolGateOp, param_count: usize },
 }
 
 /// Returns whether this node kind is structural for function classification.
@@ -48,14 +57,14 @@ pub fn is_structural_payload(payload: &NodePayload) -> bool {
     }
 }
 
-/// Returns the name of a supported bitwise gate operation, if any.
-fn bool_gate_op_string(payload: &NodePayload) -> Option<String> {
+/// Returns a supported bitwise gate operation, if any.
+fn bool_gate_op(payload: &NodePayload) -> Option<BoolGateOp> {
     match payload {
-        NodePayload::Unop(crate::ir::Unop::Not, _) => Some("not".to_string()),
+        NodePayload::Unop(crate::ir::Unop::Not, _) => Some(BoolGateOp::Not),
         NodePayload::Nary(op, _nodes) => match op {
-            crate::ir::NaryOp::And => Some("and".to_string()),
-            crate::ir::NaryOp::Or => Some("or".to_string()),
-            crate::ir::NaryOp::Xor => Some("xor".to_string()),
+            crate::ir::NaryOp::And => Some(BoolGateOp::And),
+            crate::ir::NaryOp::Or => Some(BoolGateOp::Or),
+            crate::ir::NaryOp::Xor => Some(BoolGateOp::Xor),
             _ => None,
         },
         _ => None,
@@ -77,14 +86,14 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     let mut stack: Vec<NodeRef> = vec![ret];
     let mut visited: HashSet<NodeRef> = HashSet::new();
     let mut used_param_node_refs: HashSet<NodeRef> = HashSet::new();
-    let mut gate_ops: Vec<String> = Vec::new();
+    let mut gate_ops: Vec<BoolGateOp> = Vec::new();
 
     while let Some(nr) = stack.pop() {
         if !visited.insert(nr) {
             continue;
         }
         let node = f.get_node(nr);
-        if let Some(op) = bool_gate_op_string(&node.payload) {
+        if let Some(op) = bool_gate_op(&node.payload) {
             gate_ops.push(op);
         } else if !is_structural_payload(&node.payload) {
             return None;
@@ -107,7 +116,7 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     if gate_ops.len() == 1 {
         let param_count = used_param_node_refs.len();
         return Some(TrivialFnBody::SingleBoolGate {
-            op: gate_ops[0].clone(),
+            op: gate_ops[0],
             param_count,
         });
     }
@@ -1855,7 +1864,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "not".to_string(),
+                op: BoolGateOp::Not,
                 param_count: 1
             })
         );
@@ -1871,7 +1880,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "and".to_string(),
+                op: BoolGateOp::And,
                 param_count: 2
             })
         );
@@ -1887,7 +1896,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "or".to_string(),
+                op: BoolGateOp::Or,
                 param_count: 2
             })
         );
@@ -1903,7 +1912,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(
             classify_trivial_fn_body(&f),
             Some(TrivialFnBody::SingleBoolGate {
-                op: "xor".to_string(),
+                op: BoolGateOp::Xor,
                 param_count: 2
             })
         );
