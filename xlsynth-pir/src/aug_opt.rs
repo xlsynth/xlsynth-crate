@@ -29,17 +29,19 @@
 //! cone.
 //!
 //! Bounded constant-choice trees, including masked amounts, also expand into
-//! selects over constant bit projections when a bounded PIR-local area/depth
-//! heuristic improves. This estimate is not a final mapped QoR guarantee.
+//! selects over constant bit projections when an injected cost evaluator finds
+//! an area/delay improvement. These rewrites require an evaluator; other
+//! rewrites remain independent of the backend.
 
 use std::collections::HashSet;
 
 use crate::IrValue;
 use crate::constant_shift_choices::{
-    ConstantShiftChoiceLimits, rewrite_profitable_constant_shift_choices,
+    ConstantShiftChoiceLimits, rewrite_constant_shift_choices_with_evaluator,
 };
 use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use crate::ir_cost::IrCostEvaluator;
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
 use crate::ir_rebase_ids::package_max_emitted_node_id;
@@ -162,6 +164,7 @@ impl Default for AugOptOptions {
     }
 }
 
+/// Runs backend-independent aug-opt rewrites without a cost evaluator.
 pub fn run_aug_opt_over_ir_text(
     ir_text: &str,
     top: Option<&str>,
@@ -170,10 +173,39 @@ pub fn run_aug_opt_over_ir_text(
     run_aug_opt_over_ir_text_with_stats(ir_text, top, options).map(|result| result.output_text)
 }
 
+/// Runs backend-independent rewrites and reports their counts.
+///
+/// Constant-shift-choice fusion requires a cost evaluator and is skipped here.
+/// Use [`run_aug_opt_over_ir_text_with_evaluator`] to enable cost-gated
+/// rewrites.
 pub fn run_aug_opt_over_ir_text_with_stats(
     ir_text: &str,
     top: Option<&str>,
     options: AugOptOptions,
+) -> Result<AugOptRunResult, String> {
+    run_aug_opt_over_ir_text_impl(ir_text, top, options, None)
+}
+
+/// Runs aug-opt with an injected cost model for profitability-gated rewrites.
+///
+/// The evaluator is reused across rounds and may retain a budget or cache. An
+/// unavailable estimate skips the candidate; an evaluation error aborts the
+/// run. Rewrites without a profitability gate are independent of this model.
+pub fn run_aug_opt_over_ir_text_with_evaluator(
+    ir_text: &str,
+    top: Option<&str>,
+    options: AugOptOptions,
+    evaluator: &mut dyn IrCostEvaluator,
+) -> Result<AugOptRunResult, String> {
+    run_aug_opt_over_ir_text_impl(ir_text, top, options, Some(evaluator))
+}
+
+/// Shares the optimization loop between backend-independent and costed runs.
+fn run_aug_opt_over_ir_text_impl(
+    ir_text: &str,
+    top: Option<&str>,
+    options: AugOptOptions,
+    mut evaluator: Option<&mut dyn IrCostEvaluator>,
 ) -> Result<AugOptRunResult, String> {
     if !options.enable {
         return Ok(AugOptRunResult {
@@ -196,7 +228,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
             let mut total_rewrites = 0usize;
             for _round in 0..options.rounds {
                 let (lowered_text, rewrites_in_round, total_in_round) =
-                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
+                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name, &mut evaluator)?;
                 let (sel_text, mask_to_sel_count) =
                     canonicalize_masks_to_sel_for_xls_opt_in_ir_text(&lowered_text, &top_name)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
@@ -246,7 +278,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 
             for _round in 0..options.rounds {
                 let (next_text, rewrites_in_round, total_in_round) =
-                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
+                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name, &mut evaluator)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
                 total_rewrites = total_rewrites.saturating_add(total_in_round);
                 cur_text = next_text;
@@ -263,6 +295,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 fn apply_pir_rewrites_to_ir_text(
     ir_text: &str,
     top_name: &str,
+    evaluator: &mut Option<&mut dyn IrCostEvaluator>,
 ) -> Result<(String, AugOptRewriteStats, usize), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
@@ -292,7 +325,7 @@ fn apply_pir_rewrites_to_ir_text(
         .map_err(|e| format!("aug_opt: building IrRangeInfo failed: {e}"))?;
 
     let (rewritten_top, rewrites_in_round, total_in_round) =
-        apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()));
+        apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()), evaluator)?;
 
     replace_top_and_validate(&mut pir_pkg, rewritten_top)?;
 
@@ -398,7 +431,8 @@ fn optimize_ir_text_preserving_extension_ops(
 fn apply_basis_rewrites_to_fn(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
-) -> (ir::Fn, AugOptRewriteStats, usize) {
+    evaluator: &mut Option<&mut dyn IrCostEvaluator>,
+) -> Result<(ir::Fn, AugOptRewriteStats, usize), String> {
     let mut cloned = f.clone();
     let mut stats = AugOptRewriteStats::default();
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
@@ -422,17 +456,20 @@ fn apply_basis_rewrites_to_fn(
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
     // Candidate construction compacts the graph; run it after all consumers of
     // the original range facts. The next round rebuilds its analysis.
-    stats.constant_shift_choices = rewrite_profitable_constant_shift_choices(
-        &mut cloned,
-        ConstantShiftChoiceLimits::default(),
-    );
+    if let Some(evaluator) = evaluator.as_deref_mut() {
+        stats.constant_shift_choices = rewrite_constant_shift_choices_with_evaluator(
+            &mut cloned,
+            ConstantShiftChoiceLimits::default(),
+            evaluator,
+        )?;
+    }
     let total_rewrites = stats.total().saturating_add(affine_shift_amount);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
     ir_utils::compact_and_toposort_in_place(&mut cloned)
         .expect("aug_opt: compact_and_toposort_in_place failed");
-    (cloned, stats, total_rewrites)
+    Ok((cloned, stats, total_rewrites))
 }
 
 fn next_text_id(f: &ir::Fn) -> usize {
@@ -2670,11 +2707,12 @@ fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
 mod tests {
     use super::*;
     use crate::IrValue;
+    use crate::constant_shift_choices::constant_shift_choice_candidate;
     use crate::ir_eval::{FnEvalResult, eval_fn_in_package};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
 
     #[test]
-    fn aug_opt_fuses_constant_choices_and_reaches_fixed_point() {
+    fn aug_opt_without_evaluator_skips_cost_gated_choices() {
         for op in ["shll", "shrl"] {
             let ir_text = format!(
                 r#"package constant_choices
@@ -2690,6 +2728,11 @@ top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) ->
 }}
 "#,
             );
+            let original = parse_fn_clone(&ir_text, "f");
+            assert!(
+                constant_shift_choice_candidate(&original, ConstantShiftChoiceLimits::default())
+                    .is_some()
+            );
             for rounds in [1, 3] {
                 let result = run_aug_opt_over_ir_text_with_stats(
                     &ir_text,
@@ -2701,100 +2744,13 @@ top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) ->
                     },
                 )
                 .unwrap();
-                assert_eq!(result.rewrite_stats.constant_shift_choices, 1);
-                assert_eq!(result.total_rewrites, 1);
-                exhaustive_ir_text_fn_equivalence_ubits(
-                    &ir_text,
-                    &result.output_text,
-                    "f",
-                    &[4, 1, 1, 1],
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn aug_opt_constant_choices_preserve_package_calls_and_ids() {
-        for data_op in ["identity(x, id=11)", "invoke(x, to_apply=helper, id=11)"] {
-            let ir_text = format!(
-                r#"package package_choices
-
-fn helper(x: bits[4] id=13) -> bits[4] {{
-  ret result: bits[4] = not(x, id=14)
-}}
-
-top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[4] {{
-  one_bit: bits[1] = literal(value=1, id=5)
-  pair: bits[2] = concat(one_bit, q, id=6)
-  one: bits[2] = literal(value=1, id=7)
-  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
-  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
-  amount: bits[2] = and(chosen, mask, id=10)
-  data: bits[4] = {data_op}
-  ret result: bits[4] = shll(data, amount, id=12)
-}}
-"#,
-            );
-            let mut first_output = None;
-            for rounds in [1, 3] {
-                let result = run_aug_opt_over_ir_text_with_stats(
-                    &ir_text,
-                    Some("main"),
-                    AugOptOptions {
-                        enable: true,
-                        rounds,
-                        mode: AugOptMode::PirOnly,
-                    },
-                )
-                .unwrap();
-                assert_eq!(result.rewrite_stats.constant_shift_choices, 1);
+                assert_eq!(result.rewrite_stats.constant_shift_choices, 0);
+                assert_eq!(result.total_rewrites, 0);
                 assert_eq!(
-                    parse_fn_clone(&ir_text, "helper").to_string(),
-                    parse_fn_clone(&result.output_text, "helper").to_string(),
+                    parse_fn_clone(&result.output_text, "f").to_string(),
+                    original.to_string(),
                 );
-                exhaustive_ir_text_fn_equivalence_ubits(
-                    &ir_text,
-                    &result.output_text,
-                    "main",
-                    &[4, 1, 1, 1],
-                );
-                if let Some(first) = &first_output {
-                    assert_eq!(&result.output_text, first);
-                } else {
-                    first_output = Some(result.output_text);
-                }
             }
-        }
-    }
-
-    #[test]
-    fn aug_opt_does_not_expand_choices_with_variable_leaves() {
-        for op in ["shll", "shrl"] {
-            let ir_text = format!(
-                r#"package variable_choices
-
-top fn f(x: bits[4] id=1, p: bits[1] id=2, amount: bits[65] id=3) -> bits[4] {{
-  one: bits[65] = literal(value=1, id=4)
-  chosen: bits[65] = sel(p, cases=[one, amount], id=5)
-  ret result: bits[4] = {op}(x, chosen, id=6)
-}}
-"#,
-            );
-            let result = run_aug_opt_over_ir_text_with_stats(
-                &ir_text,
-                Some("f"),
-                AugOptOptions {
-                    enable: true,
-                    rounds: 1,
-                    mode: AugOptMode::PirOnly,
-                },
-            )
-            .unwrap();
-            assert_eq!(result.rewrite_stats.constant_shift_choices, 0);
-            assert_eq!(
-                parse_fn_clone(&result.output_text, "f").to_string(),
-                parse_fn_clone(&ir_text, "f").to_string(),
-            );
         }
     }
 

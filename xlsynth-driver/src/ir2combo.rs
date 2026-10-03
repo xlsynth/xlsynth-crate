@@ -13,7 +13,7 @@ use crate::common::{
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_combinational, run_opt_main};
-use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
+use xlsynth_g8r::aug_opt::{AugOptOptions, run_aug_opt_over_ir_text};
 
 /// Entry point invoked from `main.rs` when the `ir2combo` subcommand is used.
 pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {

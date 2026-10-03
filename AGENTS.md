@@ -256,20 +256,25 @@ cargo run -p xlsynth-driver -- ir2pipeline path/to/pkg.ir --top main --delay_mod
 
 ### Standalone binary: `xlsynth-pir-aug-opt`
 
-The `xlsynth-pir` crate provides a dedicated debugging binary that runs the sandwich and allows multiple rounds:
+The `xlsynth-g8r` crate provides a dedicated debugging binary that runs the sandwich and allows multiple rounds:
 
 ```bash
-cargo run -p xlsynth-pir --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1
+cargo run -p xlsynth-g8r --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1
 ```
 
 This binary also accepts `-` as input to read IR text from stdin.
+
+The driver and this binary use `xlsynth_g8r::aug_opt`, which supplies gate-based
+costing for profitability-gated rewrites. The backend-independent
+`xlsynth_pir::aug_opt` entrypoints require an injected `IrCostEvaluator` to enable
+those rewrites; other PIR rewrites also run without a cost model.
 
 ### Aug-opt-only mode (debug binary only)
 
 For isolating aug-opt rewrites (without any libxls optimization passes), use the debug binary's `--aug-opt-only` flag:
 
 ```bash
-cargo run -p xlsynth-pir --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1 --aug-opt-only
+cargo run -p xlsynth-g8r --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1 --aug-opt-only
 ```
 
 ## Test

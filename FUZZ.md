@@ -169,7 +169,7 @@ Primarily tests:
 
 Generates an upstream-standard random XLS IR function, including `gate` and
 arbitrary-width multiply but excluding product-pair operations pending formal
-support, runs the PIR aug-opt rewrite loop, and checks toolchain equivalence
+support, runs the backend-independent PIR aug-opt rewrite loop, and checks toolchain equivalence
 between the original and rewritten IR when at least one rewrite fires. The
 target flags unexpected aug-opt failures or inequivalent rewrites.
 

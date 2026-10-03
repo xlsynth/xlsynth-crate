@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! CLI wrapper for `xlsynth_pir::aug_opt`.
+//! CLI wrapper for aug-opt with g8r's profitability cost model.
 //!
 //! Intent: "opt_main"-like usage for debugging and corpus scans. For end-user
 //! workflows, prefer wiring this into `xlsynth-driver`.
@@ -8,7 +8,7 @@
 use std::io::Read;
 
 use clap::Parser;
-use xlsynth_pir::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
+use xlsynth_g8r::aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
 
 #[derive(Debug, Parser)]
 #[command(

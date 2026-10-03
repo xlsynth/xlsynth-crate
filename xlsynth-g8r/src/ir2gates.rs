@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gatify::ir2gate;
+use crate::gate_builder::GateBuilderOptions;
+use crate::gatify::ir2gate::{self, GateBuilderCostEvaluator};
 use crate::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_pir::aug_opt::AugOptOptions;
 use xlsynth_pir::desugar_extensions;
@@ -200,11 +201,18 @@ pub fn prepare_ir_for_gatify_from_ir_text(
     };
 
     if options.aug_opt.enable {
-        ir_text_for_processing = xlsynth_pir::aug_opt::run_aug_opt_over_ir_text(
+        let mut evaluator =
+            GateBuilderCostEvaluator::default().with_gate_builder_options(GateBuilderOptions {
+                fold: options.fold,
+                hash: options.hash,
+            });
+        ir_text_for_processing = xlsynth_pir::aug_opt::run_aug_opt_over_ir_text_with_evaluator(
             &ir_text_for_processing,
             Some(&top_fn_name),
             options.aug_opt,
-        )?;
+            &mut evaluator,
+        )?
+        .output_text;
         let mut parser = ir_parser::Parser::new(&ir_text_for_processing);
         pir_package = parser
             .parse_and_validate_package()

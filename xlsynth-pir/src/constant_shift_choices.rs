@@ -6,10 +6,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dce::get_dead_nodes;
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use crate::ir_cost::IrCostEvaluator;
 use crate::ir_match::MatchCtx;
 use crate::ir_utils;
 use crate::ir_value_utils::ir_bits_to_usize;
-use crate::local_cost::estimate_local_cost;
 use crate::{IrBits, IrValue};
 
 /// Bounds for recognizing and emitting one function's constant-shift choices.
@@ -509,31 +509,32 @@ pub fn rewrite_constant_shift_choices(f: &mut ir::Fn, limits: ConstantShiftChoic
     candidate.rewrites
 }
 
-/// Applies a candidate only when the bounded PIR-local area/depth heuristic
-/// improves.
+/// Applies a bounded candidate when the supplied area/delay model improves.
 ///
-/// Unknown estimates and cost tradeoffs retain the input. This estimate does
-/// not guarantee an improvement after a backend maps and optimizes the IR.
-pub fn rewrite_profitable_constant_shift_choices(
+/// Unknown estimates and cost tradeoffs retain the input. Evaluation errors
+/// propagate without mutating it. This enables backend-specific costing while
+/// keeping recognition and candidate construction independent of the backend.
+pub fn rewrite_constant_shift_choices_with_evaluator(
     f: &mut ir::Fn,
     limits: ConstantShiftChoiceLimits,
-) -> usize {
+    evaluator: &mut dyn IrCostEvaluator,
+) -> Result<usize, String> {
     // Reject uncostable inputs before allocating candidate projections or
     // materializing replicated masks during recognition.
-    let Some(incumbent_cost) = estimate_local_cost(f) else {
-        return 0;
+    let Some(incumbent_cost) = evaluator.estimate(f)? else {
+        return Ok(0);
     };
     let Some(candidate) = build_candidate(f, limits) else {
-        return 0;
+        return Ok(0);
     };
-    let Some(candidate_cost) = estimate_local_cost(&candidate.function) else {
-        return 0;
+    let Some(candidate_cost) = evaluator.estimate(&candidate.function)? else {
+        return Ok(0);
     };
     if !candidate_cost.is_pareto_improvement_on(incumbent_cost) {
-        return 0;
+        return Ok(0);
     }
     *f = candidate.function;
-    candidate.rewrites
+    Ok(candidate.rewrites)
 }
 
 struct ConstantShiftChoiceCandidate {
@@ -614,34 +615,40 @@ fn build_candidate(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
+    use crate::ir_cost::IrCost;
     use crate::ir_eval::eval_fn;
     use crate::ir_parser::Parser;
     use crate::ir_verify::verify_function;
 
-    fn masked_choice(width: usize, op: &str, return_amount: bool) -> ir::Fn {
-        let return_type = if return_amount {
-            format!("(bits[{width}], bits[2])")
-        } else {
-            format!("bits[{width}]")
-        };
-        let result = if return_amount {
-            "tuple(shifted, amount, id=12)"
-        } else {
-            "identity(shifted, id=12)"
-        };
+    struct ScriptedEvaluator {
+        answers: VecDeque<Result<Option<IrCost>, String>>,
+        inputs: Vec<String>,
+    }
+
+    impl IrCostEvaluator for ScriptedEvaluator {
+        fn estimate(&mut self, function: &ir::Fn) -> Result<Option<IrCost>, String> {
+            self.inputs.push(function.to_string());
+            self.answers
+                .pop_front()
+                .expect("unexpected cost evaluation")
+        }
+    }
+
+    fn masked_choice(width: usize, op: &str) -> ir::Fn {
         Parser::new(&format!(
             r#"package constant_choices
 
-top fn main(x: bits[{width}] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> {return_type} {{
+top fn main(x: bits[{width}] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[{width}] {{
   one_bit: bits[1] = literal(value=1, id=5)
   pair: bits[2] = concat(one_bit, q, id=6)
   one: bits[2] = literal(value=1, id=7)
   chosen: bits[2] = sel(p, cases=[pair, one], id=8)
   mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
   amount: bits[2] = and(chosen, mask, id=10)
-  shifted: bits[{width}] = {op}(x, amount, id=11)
-  ret result: {return_type} = {result}
+  ret result: bits[{width}] = {op}(x, amount, id=11)
 }}
 "#,
         ))
@@ -653,66 +660,62 @@ top fn main(x: bits[{width}] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1]
     }
 
     #[test]
-    fn profitability_rejects_area_tradeoffs_and_preserves_shared_amounts() {
-        for width in [4, 8, 16] {
-            for op in ["shll", "shrl"] {
-                for return_amount in [false, true] {
-                    let mut function = masked_choice(width, op, return_amount);
-                    let original = function.to_string();
-                    let limits = ConstantShiftChoiceLimits::default();
-                    assert!(constant_shift_choice_candidate(&function, limits).is_some());
-                    let expected = usize::from(width == 4 && !return_amount);
-                    assert_eq!(
-                        rewrite_profitable_constant_shift_choices(&mut function, limits),
-                        expected,
-                        "width={width}, op={op}, return_amount={return_amount}"
-                    );
-                    if expected == 0 {
-                        assert_eq!(function.to_string(), original);
-                    }
-                    assert_eq!(
-                        rewrite_profitable_constant_shift_choices(&mut function, limits),
-                        0
-                    );
-                }
-            }
-        }
+    fn injected_cost_model_controls_candidate_acceptance() {
+        let mut function = masked_choice(16, "shll");
+        let original = function.to_string();
+        let limits = ConstantShiftChoiceLimits::default();
+        let candidate = constant_shift_choice_candidate(&function, limits).unwrap();
+        let mut evaluator = ScriptedEvaluator {
+            answers: VecDeque::from([
+                Ok(Some(IrCost {
+                    area: 10,
+                    delay: 5.0,
+                })),
+                Ok(Some(IrCost {
+                    area: 9,
+                    delay: 5.0,
+                })),
+            ]),
+            inputs: Vec::new(),
+        };
+        assert_eq!(
+            rewrite_constant_shift_choices_with_evaluator(&mut function, limits, &mut evaluator),
+            Ok(1),
+        );
+        assert_eq!(evaluator.inputs, [original, candidate.to_string()]);
+        assert_eq!(function.to_string(), candidate.to_string());
+        assert!(evaluator.answers.is_empty());
     }
 
     #[test]
-    fn profitability_keeps_input_on_equal_cost_or_exhausted_estimate() {
-        for width in [1, 16_384] {
-            let mut function = Parser::new(&format!(
-                r#"package guarded_choices
-
-top fn main(x: bits[{width}] id=1, p: bits[1] id=2) -> bits[{width}] {{
-  zero: bits[1] = literal(value=0, id=3)
-  one: bits[1] = literal(value=1, id=4)
-  amount: bits[1] = sel(p, cases=[zero, one], id=5)
-  ret result: bits[{width}] = shll(x, amount, id=6)
-}}
-"#,
-            ))
-            .parse_and_validate_package()
-            .unwrap()
-            .get_top_fn()
-            .unwrap()
-            .clone();
-            let original = function.to_string();
-            let limits = ConstantShiftChoiceLimits::default();
-            let candidate = constant_shift_choice_candidate(&function, limits)
-                .expect("eligibility must not depend on the cost estimate");
-            if width == 1 {
-                let cost = estimate_local_cost(&function).expect("small estimate completes");
-                assert_eq!(estimate_local_cost(&candidate), Some(cost));
-            } else {
-                assert_eq!(estimate_local_cost(&function), None);
+    fn injected_cost_failure_preserves_input() {
+        let known_cost = Ok(Some(IrCost {
+            area: 10,
+            delay: 5.0,
+        }));
+        for failed_call in [0, 1] {
+            for failure in [Ok(None), Err("cost backend failed".to_string())] {
+                let mut function = masked_choice(4, "shrl");
+                let original = function.to_string();
+                let mut answers = VecDeque::new();
+                if failed_call == 1 {
+                    answers.push_back(known_cost.clone());
+                }
+                answers.push_back(failure.clone());
+                let mut evaluator = ScriptedEvaluator {
+                    answers,
+                    inputs: Vec::new(),
+                };
+                let result = rewrite_constant_shift_choices_with_evaluator(
+                    &mut function,
+                    ConstantShiftChoiceLimits::default(),
+                    &mut evaluator,
+                );
+                assert_eq!(result, failure.map(|_| 0));
+                assert_eq!(function.to_string(), original);
+                assert_eq!(evaluator.inputs.len(), failed_call + 1);
+                assert!(evaluator.answers.is_empty());
             }
-            assert_eq!(
-                rewrite_profitable_constant_shift_choices(&mut function, limits),
-                0
-            );
-            assert_eq!(function.to_string(), original);
         }
     }
 
@@ -737,10 +740,6 @@ top fn main(x: bits[{data_width}] id=1, p: bits[1] id=2) -> bits[{data_width}] {
             let limits = ConstantShiftChoiceLimits::default();
             assert!(constant_shift_choice_candidate(&function, limits).is_none());
             assert_eq!(rewrite_constant_shift_choices(&mut function, limits), 0);
-            assert_eq!(
-                rewrite_profitable_constant_shift_choices(&mut function, limits),
-                0
-            );
             assert_eq!(function.to_string(), original);
         }
     }
@@ -766,30 +765,25 @@ top fn main(x: bits[4] id=1, selector: bits[1] id=2, enabled: bits[1] id=3) -> b
         .parse_and_validate_package()
         .unwrap();
         let original = package.get_top_fn().unwrap();
-        for rewrite in [
-            rewrite_constant_shift_choices,
-            rewrite_profitable_constant_shift_choices,
-        ] {
-            let mut rewritten = original.clone();
-            assert_eq!(
-                rewrite(&mut rewritten, ConstantShiftChoiceLimits::default()),
-                1
-            );
-            verify_function(&rewritten).unwrap();
+        let mut rewritten = original.clone();
+        assert_eq!(
+            rewrite_constant_shift_choices(&mut rewritten, ConstantShiftChoiceLimits::default()),
+            1
+        );
+        verify_function(&rewritten).unwrap();
 
-            // Equality includes trace messages, cover counts, and assertion
-            // failures, even though none of their nodes contribute to the
-            // returned value.
-            for x in 0..16 {
-                for selector in 0..2 {
-                    for enabled in 0..2 {
-                        let args = [
-                            IrValue::make_ubits(4, x).unwrap(),
-                            IrValue::make_ubits(1, selector).unwrap(),
-                            IrValue::make_ubits(1, enabled).unwrap(),
-                        ];
-                        assert_eq!(eval_fn(&rewritten, &args), eval_fn(original, &args));
-                    }
+        // Equality includes trace messages, cover counts, and assertion
+        // failures, even though none of their nodes contribute to the
+        // returned value.
+        for x in 0..16 {
+            for selector in 0..2 {
+                for enabled in 0..2 {
+                    let args = [
+                        IrValue::make_ubits(4, x).unwrap(),
+                        IrValue::make_ubits(1, selector).unwrap(),
+                        IrValue::make_ubits(1, enabled).unwrap(),
+                    ];
+                    assert_eq!(eval_fn(&rewritten, &args), eval_fn(original, &args));
                 }
             }
         }

@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Instant;
 
 use serde::Deserialize;
 use serde_json::json;
@@ -10,16 +9,21 @@ use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::graph_logical_effort::{
     GraphLogicalEffortOptions, analyze_graph_logical_effort,
 };
+use xlsynth_g8r::aug_opt::run_aug_opt_over_ir_text_with_stats;
 use xlsynth_g8r::check_equivalence::{
     check_equivalence_with_top_via_toolchain, validate_same_fn_via_toolchain,
 };
+use xlsynth_g8r::gatify::ir2gate::GateBuilderCostEvaluator;
 use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, process_ir_text_with_gatefn};
-use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text_with_stats};
+use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_pir::constant_shift_choices::{
     ConstantShiftChoiceLimits, constant_shift_choice_candidate,
+    rewrite_constant_shift_choices_with_evaluator,
 };
-use xlsynth_pir::local_cost::estimate_local_cost;
-use xlsynth_pir::{ir, ir_parser::Parser, ir_utils::fn_node_count};
+use xlsynth_pir::ir_cost::IrCostEvaluator;
+use xlsynth_pir::ir_eval::eval_fn;
+use xlsynth_pir::ir_verify::verify_function;
+use xlsynth_pir::{IrValue, ir, ir_parser::Parser, ir_utils::fn_node_count};
 
 const GRAPH_LE_TOLERANCE: f64 = 1.0e-6;
 
@@ -101,20 +105,7 @@ fn fixtures(cases: Vec<CorpusCase>) -> Vec<Fixture> {
                 expect_constant_shift_rewrite: width == 4,
                 require_no_aug_opt_regression: matches!(width, 4 | 8 | 16),
                 synthetic_qor_width: matches!(width, 4 | 8 | 16).then_some(width),
-                text: format!(
-                    r#"package synthetic_shift_choices
-
-top fn main(x: bits[{width}] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[{width}] {{
-  one_bit: bits[1] = literal(value=1, id=5)
-  pair: bits[2] = concat(one_bit, q, id=6)
-  one: bits[2] = literal(value=1, id=7)
-  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
-  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
-  amount: bits[2] = and(chosen, mask, id=10)
-  ret result: bits[{width}] = {op}(x, amount, id=11)
-}}
-"#,
-                ),
+                text: masked_choice_text(width, op, false),
             });
         }
     }
@@ -258,6 +249,36 @@ fn parse_function(text: &str, top: &str) -> ir::Fn {
         .clone()
 }
 
+/// Makes the shift amount optionally observable as a second output.
+fn masked_choice_text(width: usize, op: &str, return_amount: bool) -> String {
+    let return_type = if return_amount {
+        format!("(bits[{width}], bits[2])")
+    } else {
+        format!("bits[{width}]")
+    };
+    let result = if return_amount {
+        format!(
+            "shifted: bits[{width}] = {op}(x, amount, id=11)\n  ret result: {return_type} = tuple(shifted, amount, id=12)"
+        )
+    } else {
+        format!("ret result: bits[{width}] = {op}(x, amount, id=11)")
+    };
+    format!(
+        r#"package synthetic_shift_choices
+
+top fn main(x: bits[{width}] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> {return_type} {{
+  one_bit: bits[1] = literal(value=1, id=5)
+  pair: bits[2] = concat(one_bit, q, id=6)
+  one: bits[2] = literal(value=1, id=7)
+  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
+  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
+  amount: bits[2] = and(chosen, mask, id=10)
+  {result}
+}}
+"#,
+    )
+}
+
 /// Classifies both objectives; graph depth is diagnostic, not an objective.
 fn cost_relation(cost: MeasuredCost, baseline: MeasuredCost) -> &'static str {
     let better = cost.and_nodes < baseline.and_nodes
@@ -291,6 +312,13 @@ fn assert_quality_envelope(width: usize, cost: MeasuredCost) {
     );
 }
 
+#[derive(Default)]
+struct ComparisonSummary {
+    relations: BTreeMap<&'static str, usize>,
+    log_cost_ratio_sum: f64,
+    count: usize,
+}
+
 /// Compares costed aug-opt and unconditional projection through normal mapping.
 #[test]
 fn compare_costed_aug_opt_shift_choice_pipelines() {
@@ -302,7 +330,7 @@ fn compare_costed_aug_opt_shift_choice_pipelines() {
         beta1: profile.canonical_options.graph_logical_effort_beta1,
         beta2: profile.canonical_options.graph_logical_effort_beta2,
     };
-    let mut summaries = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
+    let mut summaries = BTreeMap::<&str, ComparisonSummary>::new();
     for fixture in fixtures(corpus.cases) {
         let original = parse_function(&fixture.text, &fixture.top);
         let mut fixed_ir_cost = None;
@@ -314,13 +342,8 @@ fn compare_costed_aug_opt_shift_choice_pipelines() {
             Pipeline::AugOptSandwich,
         ] {
             let context = format!("{} / {}", fixture.name, pipeline.label());
-            let start = Instant::now();
             let transformed = transform(&fixture, pipeline);
-            let transform_us = start.elapsed().as_micros();
             let transformed_fn = parse_function(&transformed.text, &fixture.top);
-            let start = Instant::now();
-            let local_cost = estimate_local_cost(&transformed_fn);
-            let local_cost_us = start.elapsed().as_micros();
             if !matches!(pipeline, Pipeline::FixedIr) {
                 check_equivalence_with_top_via_toolchain(
                     &fixture.text,
@@ -351,10 +374,8 @@ fn compare_costed_aug_opt_shift_choice_pipelines() {
             );
             options.cut_db_rewrite_max_iterations = profile.cut_db_rewrite_max_iterations;
             options.cut_db_rewrite_max_cuts_per_node = profile.cut_db_rewrite_max_cuts_per_node;
-            let start = Instant::now();
             let (gate_fn, _) = process_ir_text_with_gatefn(&transformed.text, &options)
                 .unwrap_or_else(|error| panic!("{context}: mapping failed: {error}"));
-            let map_us = start.elapsed().as_micros();
             validate_same_fn_via_toolchain(&original, &gate_fn)
                 .unwrap_or_else(|error| panic!("{context}: graph equivalence failed: {error}"));
             let stats = get_aig_stats(&gate_fn);
@@ -364,7 +385,7 @@ fn compare_costed_aug_opt_shift_choice_pipelines() {
                 depth: stats.max_depth,
             };
             assert!(cost.graph_le.is_finite(), "{context}: non-finite cost");
-            // Timings are diagnostic metadata and never regression criteria.
+            let baseline = *fixed_ir_cost.get_or_insert(cost);
             eprintln!(
                 "shift_choice_comparison {}",
                 json!({
@@ -374,17 +395,12 @@ fn compare_costed_aug_opt_shift_choice_pipelines() {
                     "total_rewrites": transformed.total_rewrites,
                     "constant_shift_rewrites": transformed.constant_shift_rewrites,
                     "projection_candidate": transformed.projection_candidate,
-                    "ir_and_equivalents": local_cost.as_ref().map(|cost| cost.and_equivalents),
-                    "ir_logic_depth": local_cost.as_ref().map(|cost| cost.logic_depth),
-                    "local_cost_us": local_cost_us,
                     "and_nodes": cost.and_nodes,
                     "graph_le": cost.graph_le,
                     "depth": cost.depth,
-                    "transform_us": transform_us,
-                    "map_us": map_us,
+                    "relation_to_fixed_ir": cost_relation(cost, baseline),
                 })
             );
-            let baseline = *fixed_ir_cost.get_or_insert(cost);
             if matches!(pipeline, Pipeline::AugOptPirOnly | Pipeline::AugOptSandwich) {
                 if fixture.require_no_aug_opt_regression {
                     assert!(
@@ -397,21 +413,265 @@ fn compare_costed_aug_opt_shift_choice_pipelines() {
                     assert_quality_envelope(width, cost);
                 }
             }
-            *summaries
-                .entry(pipeline.label())
-                .or_default()
+            let summary = summaries.entry(pipeline.label()).or_default();
+            *summary
+                .relations
                 .entry(cost_relation(cost, baseline))
                 .or_default() += 1;
+            summary.log_cost_ratio_sum += ((cost.and_nodes as f64 * cost.graph_le)
+                / (baseline.and_nodes as f64 * baseline.graph_le))
+                .ln();
+            summary.count += 1;
         }
     }
-    for (pipeline, relations) in summaries {
+    for (pipeline, summary) in summaries {
         eprintln!(
             "shift_choice_summary {}",
             json!({
                 "pipeline": pipeline,
                 "baseline": "fixed_ir",
-                "relations": relations,
+                "relations": summary.relations,
+                "and_graph_le_geomean_ratio":
+                    (summary.log_cost_ratio_sum / summary.count as f64).exp(),
             })
         );
+    }
+}
+
+#[test]
+fn profitability_rejects_area_tradeoffs_and_preserves_shared_amounts() {
+    let limits = ConstantShiftChoiceLimits::default();
+    let mut evaluator = GateBuilderCostEvaluator::default();
+    for width in [4, 8, 16] {
+        for op in ["shll", "shrl"] {
+            for return_amount in [false, true] {
+                let text = masked_choice_text(width, op, return_amount);
+                let mut function = parse_function(&text, "main");
+                let original = function.to_string();
+                assert!(constant_shift_choice_candidate(&function, limits).is_some());
+                let expected = usize::from(width == 4 && !return_amount);
+                assert_eq!(
+                    rewrite_constant_shift_choices_with_evaluator(
+                        &mut function,
+                        limits,
+                        &mut evaluator,
+                    )
+                    .unwrap(),
+                    expected,
+                    "width={width}, op={op}, return_amount={return_amount}"
+                );
+                if expected == 0 {
+                    assert_eq!(function.to_string(), original);
+                } else {
+                    check_equivalence_with_top_via_toolchain(
+                        &text,
+                        &format!("package rewritten\n\ntop {function}"),
+                        Some("main"),
+                    )
+                    .unwrap();
+                }
+                assert_eq!(
+                    rewrite_constant_shift_choices_with_evaluator(
+                        &mut function,
+                        limits,
+                        &mut evaluator,
+                    ),
+                    Ok(0)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn profitability_preserves_input_on_equal_cost_or_exhausted_estimate() {
+    let limits = ConstantShiftChoiceLimits::default();
+    let mut evaluator = GateBuilderCostEvaluator::default();
+    for width in [1, 16_384] {
+        let mut function = parse_function(
+            &format!(
+                r#"package guarded_choices
+
+top fn main(x: bits[{width}] id=1, p: bits[1] id=2) -> bits[{width}] {{
+  zero: bits[1] = literal(value=0, id=3)
+  one: bits[1] = literal(value=1, id=4)
+  amount: bits[1] = sel(p, cases=[zero, one], id=5)
+  ret result: bits[{width}] = shll(x, amount, id=6)
+}}
+"#,
+            ),
+            "main",
+        );
+        let original = function.to_string();
+        let candidate = constant_shift_choice_candidate(&function, limits)
+            .expect("candidate eligibility is independent of estimation work limits");
+        let cost = evaluator.estimate(&function).unwrap();
+        if width == 1 {
+            assert!(cost.is_some());
+            assert_eq!(evaluator.estimate(&candidate).unwrap(), cost);
+        } else {
+            assert_eq!(cost, None);
+        }
+        assert_eq!(
+            rewrite_constant_shift_choices_with_evaluator(&mut function, limits, &mut evaluator),
+            Ok(0)
+        );
+        assert_eq!(function.to_string(), original);
+    }
+}
+
+#[test]
+fn aug_opt_fuses_constant_choices_and_reaches_fixed_point() {
+    for op in ["shll", "shrl"] {
+        let text = masked_choice_text(4, op, false);
+        let mut first_output = None;
+        for rounds in [1, 3] {
+            let result = run_aug_opt_over_ir_text_with_stats(
+                &text,
+                Some("main"),
+                AugOptOptions {
+                    enable: true,
+                    rounds,
+                    mode: AugOptMode::PirOnly,
+                },
+            )
+            .unwrap();
+            assert_eq!(result.rewrite_stats.constant_shift_choices, 1);
+            assert_eq!(result.total_rewrites, 1);
+            check_equivalence_with_top_via_toolchain(&text, &result.output_text, Some("main"))
+                .unwrap();
+            if let Some(first) = &first_output {
+                assert_eq!(&result.output_text, first);
+            } else {
+                first_output = Some(result.output_text);
+            }
+        }
+    }
+}
+
+#[test]
+fn aug_opt_constant_choices_preserve_package_calls_and_ids() {
+    for data_op in ["identity(x, id=11)", "invoke(x, to_apply=helper, id=11)"] {
+        let text = format!(
+            r#"package package_choices
+
+fn helper(x: bits[4] id=13) -> bits[4] {{
+  ret result: bits[4] = not(x, id=14)
+}}
+
+top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) -> bits[4] {{
+  one_bit: bits[1] = literal(value=1, id=5)
+  pair: bits[2] = concat(one_bit, q, id=6)
+  one: bits[2] = literal(value=1, id=7)
+  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
+  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
+  amount: bits[2] = and(chosen, mask, id=10)
+  data: bits[4] = {data_op}
+  ret result: bits[4] = shll(data, amount, id=12)
+}}
+"#,
+        );
+        let mut first_output = None;
+        for rounds in [1, 3] {
+            let result = run_aug_opt_over_ir_text_with_stats(
+                &text,
+                Some("main"),
+                AugOptOptions {
+                    enable: true,
+                    rounds,
+                    mode: AugOptMode::PirOnly,
+                },
+            )
+            .unwrap();
+            assert_eq!(result.rewrite_stats.constant_shift_choices, 1);
+            assert_eq!(
+                parse_function(&text, "helper").to_string(),
+                parse_function(&result.output_text, "helper").to_string(),
+            );
+            // libxls also enforces uniqueness of node IDs across the package.
+            xlsynth::IrPackage::parse_ir(&result.output_text, None).unwrap();
+            check_equivalence_with_top_via_toolchain(&text, &result.output_text, Some("main"))
+                .unwrap();
+            if let Some(first) = &first_output {
+                assert_eq!(&result.output_text, first);
+            } else {
+                first_output = Some(result.output_text);
+            }
+        }
+    }
+}
+
+#[test]
+fn aug_opt_does_not_expand_choices_with_variable_leaves() {
+    for op in ["shll", "shrl"] {
+        let text = format!(
+            r#"package variable_choices
+
+top fn main(x: bits[4] id=1, p: bits[1] id=2, amount: bits[65] id=3) -> bits[4] {{
+  one: bits[65] = literal(value=1, id=4)
+  chosen: bits[65] = sel(p, cases=[one, amount], id=5)
+  ret result: bits[4] = {op}(x, chosen, id=6)
+}}
+"#,
+        );
+        let result = run_aug_opt_over_ir_text_with_stats(
+            &text,
+            Some("main"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.rewrite_stats.constant_shift_choices, 0);
+        assert_eq!(
+            parse_function(&result.output_text, "main").to_string(),
+            parse_function(&text, "main").to_string(),
+        );
+    }
+}
+
+#[test]
+fn profitable_rewrite_preserves_effects_and_shift_used_only_by_trace() {
+    let original = parse_function(
+        r#"package effects
+
+top fn main(x: bits[4] id=1, selector: bits[1] id=2, enabled: bits[1] id=3) -> bits[1] {
+  one: bits[2] = literal(value=1, id=4)
+  two: bits[2] = literal(value=2, id=5)
+  amount: bits[2] = sel(selector, cases=[one, two], id=6)
+  shifted: bits[4] = shll(x, amount, id=7)
+  tok: token = after_all(id=8)
+  traced: token = trace(tok, enabled, format="shifted={}", data_operands=[shifted], verbosity=0, id=9)
+  covered: () = cover(enabled, label="enabled", id=10)
+  checked: token = assert(traced, enabled, message="disabled", label="check", id=11)
+  ret out: bits[1] = literal(value=0, id=12)
+}
+"#,
+        "main",
+    );
+    let mut rewritten = original.clone();
+    assert_eq!(
+        rewrite_constant_shift_choices_with_evaluator(
+            &mut rewritten,
+            ConstantShiftChoiceLimits::default(),
+            &mut GateBuilderCostEvaluator::default(),
+        ),
+        Ok(1)
+    );
+    verify_function(&rewritten).unwrap();
+    for x in 0..16 {
+        for selector in 0..2 {
+            for enabled in 0..2 {
+                let args = [
+                    IrValue::make_ubits(4, x).unwrap(),
+                    IrValue::make_ubits(1, selector).unwrap(),
+                    IrValue::make_ubits(1, enabled).unwrap(),
+                ];
+                // Include trace data, coverage, and assertion failures.
+                assert_eq!(eval_fn(&rewritten, &args), eval_fn(&original, &args));
+            }
+        }
     }
 }
