@@ -1558,12 +1558,6 @@ Requires `--top <NAME>` to select the entry point.
 - Optional flags:
   - `--aug-opt=true|false` – enable the augmented optimizer “opt sandwich” (default: `false`).
 
-Aug-opt compares the small subgraphs for each constant-shift choice using g8r's
-gate builder and Graph LE analysis. It preserves shared inputs and values needed
-by outside users, accepting a candidate when neither local AND count nor Graph
-LE gets worse and at least one improves. External logic and loads are outside
-this local model; later gate cleanup can also change the final costs.
-
 ### `ir-inline`: inline into the selected top function
 
 Runs a small explicit XLS pass pipeline to flatten calls into the selected top
