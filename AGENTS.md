@@ -163,6 +163,11 @@ For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
 comment at all. A short summary helps readers understand both the local code and
 how it fits into the surrounding codebase.
 
+Use compact DSLX expressions in comments when they help explain what a routine
+computes or constructs, even when it operates on XLS IR. An expression can convey
+the intended behavior more clearly than a verbose IR listing or the
+implementation alone.
+
 Document every significant struct, including private implementation types, with
 at least a one-line Rustdoc comment (`/// ...`) explaining what it represents and
 how it fits into the surrounding system.
