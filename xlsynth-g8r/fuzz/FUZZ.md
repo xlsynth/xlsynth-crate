@@ -77,6 +77,16 @@ crashes or shape inconsistencies in sequential labeled toggle accounting.
 Zero-output samples still exercise the full lowering, mapping, loading,
 simulation, and toggle-report path for crash detection.
 
+## `fuzz_constant_shift_choices`
+
+Generates typed, shared shift-amount DAGs to exercise constant-shift-choice
+fusion directly, with forced decisions and the real g8r cost evaluator. It
+proves local alternatives and complete rewritten functions equivalent with
+Bitwuzla, checks exact rollback on rejection/errors, and exhausts small
+effectful cases including trace-only uses. This targets incorrect projections,
+priority/default handling, lost shared users, and leaked speculative changes.
+See the [repository fuzz overview](../../FUZZ.md) for the full target contract.
+
 ## `fuzz_gatify`
 
 Generates bounded gatify-supported PIR directly with

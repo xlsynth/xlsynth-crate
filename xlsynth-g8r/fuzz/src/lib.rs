@@ -3,6 +3,11 @@
 pub mod external_yosys;
 pub mod random_block;
 
+#[cfg(feature = "has-bitwuzla")]
+pub mod constant_shift_choices;
+#[cfg(feature = "has-bitwuzla")]
+pub mod constant_shift_choices_sample;
+
 use std::time::Duration;
 
 use arbitrary::Arbitrary;

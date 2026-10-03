@@ -178,6 +178,33 @@ Primarily tests:
 - PIR aug-opt rewrites preserve semantics when they apply
 - End-to-end compatibility of PIR lowering and toolchain equivalence checks
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_constant_shift_choices.rs
+
+Decodes small typed DAGs directly from fuzz bytes to exercise constant-shift-choice
+fusion, including nested selects, priority/default choices, replicated Boolean
+masks, literal-prefix concats, shared controls, wide shift amounts, and slices.
+Explicitly eligible cases must reach the evaluator; valid near misses and limit
+boundaries also exercise rejection. The target uses forced acceptance, real g8r
+costing, mixed decisions, and injected evaluator failures, including failures
+after an earlier accepted site.
+
+Bitwuzla proves both the completed local incumbent/candidate pairs (including
+rejected alternatives and all retained outputs) and complete rewritten functions
+equivalent through direct PIR-to-SMT translation. Small effectful cases exhaust
+inputs and compare full interpreter results. Structural checks cover local graph
+closure, unchanged signatures, and exact rollback. Failures expose incorrect
+bit projections, selection semantics, lost shared users/effects, or speculative
+changes that survive rejection. Progress counters distinguish completed proofs
+from inconclusives and report exercised decision paths.
+
+From `xlsynth-g8r`, with the normal XLS and system Bitwuzla environment:
+
+```shell
+cargo +nightly fuzz run fuzz_constant_shift_choices \
+  --features with-bitwuzla-system --sanitizer none -- \
+  -max_total_time=3600 -timeout=90 -print_final_stats=1
+```
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs
 
 Generates small two-stage DSLX stitch-pipeline samples with parameter names
