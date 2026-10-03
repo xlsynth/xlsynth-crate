@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Helpers for inspecting and editing XLS IR graphs.
-//!
-//! DSLX examples illustrate IR graph shapes. Assume the shown operations are
-//! retained as written, with local names standing for node references.
 
 use crate::IrValue;
 use crate::ir::{self, Binop, Fn, NaryOp, Node, NodeGraph, NodePayload, NodeRef, Package, Type};
@@ -24,10 +21,6 @@ pub enum TrivialFnBody {
 }
 
 /// Returns whether this node kind is structural for function classification.
-///
-/// DSLX `x[0:4]`, `(x, y)`, and `x ++ y` illustrate structural slicing,
-/// packing, and concatenation. Arithmetic such as `x + y` and dynamic bit
-/// slicing such as `x[start+:u4]` are excluded.
 ///
 /// Classification depends only on the node kind: even an `array_slice` with
 /// a dynamic start is included. `dynamic_bit_slice` and `bit_slice_update`
@@ -76,16 +69,8 @@ fn bool_gate_op_string(payload: &NodePayload) -> Option<String> {
 /// `and`, `or`, or `xor` node with otherwise structural nodes qualifies as
 /// `SingleBoolGate`, regardless of its parameter count.
 ///
-/// For distinct `u8` parameters `x` and `y`, DSLX examples are:
-///
-/// - `u8:7`: `Constant`.
-/// - `x[0:4]`: `SingleParamStructural` for `x`.
-/// - `let t = x & y; (t, t)`: `SingleBoolGate` with `op = "and"` and
-///   `param_count = 2`; the shared operation is counted once.
-/// - `(x, y)` or `x + y`: `None`.
-///
-/// Only return ancestry is inspected; unused nodes are ignored. This routine
-/// does not simplify or evaluate expressions.
+/// Only return ancestry is inspected; unused nodes are ignored and shared
+/// nodes are counted once. This routine does not simplify or evaluate nodes.
 pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     let ret = f.ret_node_ref?;
 
@@ -146,9 +131,7 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
 
 /// Counts stored node slots, excluding the reserved `Nil` slot.
 ///
-/// Includes parameters, unreachable nodes, and any other `Nil` slots. For
-/// `let sum = x + y; (sum, sum)`, a graph containing just the two parameters,
-/// addition, and tuple has four counted nodes.
+/// Includes parameters, unreachable nodes, and any other `Nil` slots.
 pub fn fn_node_count(f: &Fn) -> usize {
     f.nodes.len().saturating_sub(1)
 }
@@ -156,9 +139,8 @@ pub fn fn_node_count(f: &Fn) -> usize {
 /// Returns a deterministically ordered set of function names referenced by
 /// `invoke` / `counted_for` nodes in `f`, excluding self-references.
 ///
-/// For `let a = helper(x); helper(a)`, the two invokes contribute the helper's
-/// IR function name once. Scans all stored nodes, including unreachable ones,
-/// without traversing the referenced functions.
+/// Scans all stored nodes, including unreachable ones, without traversing the
+/// referenced functions. Each referenced function name appears once.
 pub fn external_function_references(f: &Fn) -> BTreeSet<String> {
     let mut refs = BTreeSet::new();
     for node in f.nodes.iter() {
@@ -191,8 +173,7 @@ pub fn has_external_function_references(f: &Fn) -> bool {
 /// Returns a deterministically ordered histogram of stored operation nodes.
 ///
 /// Excludes all `nil` and `param` nodes but includes unreachable operations.
-/// `let sum = x + y; (sum, sum)` illustrates `{"add": 1, "tuple": 1}`:
-/// a shared node is counted once regardless of its number of uses.
+/// Each node is counted once regardless of its number of uses.
 pub fn op_histogram(f: &Fn) -> BTreeMap<String, usize> {
     op_histogram_impl(f, false)
 }
@@ -200,7 +181,7 @@ pub fn op_histogram(f: &Fn) -> BTreeMap<String, usize> {
 /// Returns a deterministic histogram mapping operation signatures to count.
 ///
 /// Signatures include the operator, operand types, result type, and supported
-/// operation attributes. For `x[2:6]` with `x: u8`, the slice contributes
+/// operation attributes, for example:
 /// `bit_slice(bits[8], start=2, width=4) -> bits[4]`.
 ///
 /// Like [`op_histogram`], counts all stored operation nodes except `nil` and
@@ -230,8 +211,7 @@ fn op_histogram_impl(f: &Fn, include_types: bool) -> BTreeMap<String, usize> {
 
 /// Returns immediate operand references in payload order, retaining duplicates.
 ///
-/// DSLX `x + x` has operands `[x, x]`; `x[4:8]` has only `[x]`, because the
-/// static slice bounds are attributes rather than operand nodes.
+/// Static attributes, such as slice bounds, are not operand references.
 pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     use NodePayload::*;
 
@@ -395,10 +375,6 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
 /// whether their referenced body emits events requires package-level analysis.
 /// Block state and instantiation nodes are intentionally excluded:
 /// reachability of those nodes is determined by block-to-function conversion.
-///
-/// For example, a DSLX `trace_fmt!("x = {}", x)` must be retained even when
-/// its result does not feed the returned value. An unused `helper(x)` call is
-/// also retained conservatively because the helper may emit events.
 pub fn is_observable_effect_root(payload: &NodePayload) -> bool {
     matches!(
         payload,
@@ -469,10 +445,8 @@ fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
 
 /// Returns every stored node once, with operands before their users.
 ///
-/// For `let sum = a + b; sum * c`, `a` and `b` precede `sum`, and `sum` and
-/// `c` precede the multiply. Includes `Nil` and unreachable nodes.
-///
-/// Panics if the graph contains a cycle or an invalid operand reference.
+/// Includes `Nil` and unreachable nodes. Panics if the graph contains a cycle
+/// or an invalid operand reference.
 pub fn get_topological(f: &NodeGraph) -> Vec<NodeRef> {
     topo_from_nodes(&f.nodes)
 }
@@ -690,7 +664,7 @@ pub fn compact_graph_and_toposort_with_mapping_in_place(
 /// references after compaction.
 ///
 /// `mapping[old.index]` is `Some(new)` for a retained node and `None` for a
-/// removed `Nil` slot. Names, text IDs, and expression sharing are preserved.
+/// removed `Nil` slot. Names, text IDs, and node sharing are preserved.
 ///
 /// Parameters remain first in signature order. Invalid signature, operand, or
 /// return references and cycles return an error without modifying the function.
@@ -765,9 +739,8 @@ impl Users {
 /// operand multiple times is still recorded as one direct user of that operand.
 /// Nodes with no users map to an empty list.
 ///
-/// For `let a = x + x; let b = a & y; (a, b)`, `x` has one user (`a`),
-/// while `a` has two (`b` and the tuple). Only direct operand edges count;
-/// the function's return reference adds no extra user.
+/// Only direct operand edges count; the function's return reference adds no
+/// extra user.
 pub fn compute_users(f: &NodeGraph) -> Users {
     let n = f.nodes.len();
     let mut users: Vec<UserList> = (0..n).map(|_| UserList::new()).collect();
@@ -792,9 +765,6 @@ pub fn compute_users(f: &NodeGraph) -> Users {
 }
 
 /// Appends an unnamed IR node with a fresh function-local text ID.
-///
-/// An add payload using the references for `x` and `y` appends the node for
-/// `x + y`; callers can use the returned reference in subsequent expressions.
 ///
 /// The node has no source location. Existing node references remain valid;
 /// callers update the function's parameter list or return value when needed.
@@ -835,7 +805,7 @@ fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> 
 /// Builds a logical constant shift using slices, zero padding, and
 /// concatenation.
 ///
-/// For `arg: u8` and `shift = 3`, the constructed DSLX expressions are:
+/// For `arg: u8` and `shift = 3`, the equivalent DSLX expressions are:
 ///
 /// ```text
 /// arg[0:5] ++ u3:0 // Shll: arg << u32:3
@@ -944,10 +914,8 @@ pub fn make_constant_shrl_bit_slice_expr(
 
 /// Replaces the payload (and optionally the type) of `target` in `f`.
 ///
-/// Example edit: replacing the add payload in `let t = x + y; (t, t)` with
-/// xor gives `let t = x ^ y; (t, t)`. Existing uses retain the same node
-/// reference and observe its new value. To redirect uses to another node,
-/// use [`replace_node_with_ref`].
+/// The node index and references from its users are unchanged. To redirect
+/// users to another node, use [`replace_node_with_ref`].
 pub fn replace_node_payload(
     f: &mut NodeGraph,
     target: NodeRef,
@@ -982,9 +950,6 @@ pub fn replace_node_payload(
 
 /// Redirects all users of `target` (including `ret_node_ref`, if any) to
 /// `replacement`.
-///
-/// Example edit: replacing `t` with an existing `y` changes
-/// `let t = x + x; (t, t)` to `(y, y)`.
 ///
 /// The nodes must have the same type. Unless the references are identical,
 /// the replaced node is marked [`NodePayload::Nil`] for later removal by
@@ -1056,10 +1021,8 @@ pub fn replace_graph_node_with_ref(
 
 /// Replaces one operand occurrence of `target`, indexed as in [`operands`].
 ///
-/// Example edit: replacing slot 1 of the addition in
-/// `let t = x + x; (t, t, x)` gives `let t = x + y; (t, t, x)`.
-/// Only the selected use of `x` changes; every user of `t` observes the
-/// edited addition.
+/// Other occurrences of the original operand are unchanged. All consumers
+/// of `target` still reference the same node, with its updated payload.
 ///
 /// The replacement must have the original operand's type. Callers should run
 /// compaction/toposorting after batching edits.
@@ -1119,8 +1082,7 @@ pub fn replace_operand_with_ref(
 
 /// Returns a payload with each immediate operand slot mapped independently.
 ///
-/// For `x + x`, the callback receives slots `(0, x)` and `(1, x)`. Changing
-/// only slot 1 to `y` produces `x + y`; mapping every `x` to `y` gives `y + y`.
+/// The callback receives `(slot, old_ref)` for each operand occurrence.
 /// Slot numbers match [`operands`]; callback invocation order is unspecified.
 /// Operation attributes are preserved, and the input payload is unchanged.
 /// Only immediate references are mapped, without traversing their subgraphs

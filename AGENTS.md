@@ -163,10 +163,11 @@ For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
 comment at all. A short summary helps readers understand both the local code and
 how it fits into the surrounding codebase.
 
-Use compact DSLX expressions in comments when they help explain what a routine
-computes or constructs, even when it operates on XLS IR. An expression can convey
-the intended behavior more clearly than a verbose IR listing or the
-implementation alone.
+Use compact DSLX expressions in comments when they clarify the value a routine
+computes or constructs, such as the result of a shift or slice helper, even when
+it operates on XLS IR. Describe graph mechanics (node counts, sharing, traversal,
+and reference updates) in terms of actual IR nodes and operands. DSLX expressions
+do not uniquely determine those graph properties.
 
 Document every significant struct, including private implementation types, with
 at least a one-line Rustdoc comment (`/// ...`) explaining what it represents and
