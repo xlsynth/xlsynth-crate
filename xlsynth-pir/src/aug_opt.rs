@@ -41,7 +41,7 @@ use crate::constant_shift_choices::{
 };
 use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
-use crate::ir_cost::IrCostEvaluator;
+use crate::ir_cost::ShiftChoiceCostEvaluator;
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
 use crate::ir_rebase_ids::package_max_emitted_node_id;
@@ -188,14 +188,14 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 
 /// Runs aug-opt with an injected cost model for profitability-gated rewrites.
 ///
-/// The evaluator is reused across rounds and may retain a budget or cache. An
-/// unavailable estimate skips the candidate; an evaluation error aborts the
-/// run. Rewrites without a profitability gate are independent of this model.
+/// The evaluator compares small graphs for individual constant-shift choices.
+/// An evaluation error aborts the run. Rewrites without a profitability gate
+/// are independent of this model.
 pub fn run_aug_opt_over_ir_text_with_evaluator(
     ir_text: &str,
     top: Option<&str>,
     options: AugOptOptions,
-    evaluator: &mut dyn IrCostEvaluator,
+    evaluator: &mut dyn ShiftChoiceCostEvaluator,
 ) -> Result<AugOptRunResult, String> {
     run_aug_opt_over_ir_text_impl(ir_text, top, options, Some(evaluator))
 }
@@ -205,7 +205,7 @@ fn run_aug_opt_over_ir_text_impl(
     ir_text: &str,
     top: Option<&str>,
     options: AugOptOptions,
-    mut evaluator: Option<&mut dyn IrCostEvaluator>,
+    mut evaluator: Option<&mut dyn ShiftChoiceCostEvaluator>,
 ) -> Result<AugOptRunResult, String> {
     if !options.enable {
         return Ok(AugOptRunResult {
@@ -295,7 +295,7 @@ fn run_aug_opt_over_ir_text_impl(
 fn apply_pir_rewrites_to_ir_text(
     ir_text: &str,
     top_name: &str,
-    evaluator: &mut Option<&mut dyn IrCostEvaluator>,
+    evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
 ) -> Result<(String, AugOptRewriteStats, usize), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
@@ -431,7 +431,7 @@ fn optimize_ir_text_preserving_extension_ops(
 fn apply_basis_rewrites_to_fn(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
-    evaluator: &mut Option<&mut dyn IrCostEvaluator>,
+    evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
 ) -> Result<(ir::Fn, AugOptRewriteStats, usize), String> {
     let mut cloned = f.clone();
     let mut stats = AugOptRewriteStats::default();

@@ -17,10 +17,10 @@ use xlsynth_g8r::gatify::ir2gate::GateBuilderCostEvaluator;
 use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, process_ir_text_with_gatefn};
 use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_pir::constant_shift_choices::{
-    ConstantShiftChoiceLimits, constant_shift_choice_candidate,
+    ConstantShiftChoiceLimits, ShiftChoiceCostGraph, constant_shift_choice_candidate,
     rewrite_constant_shift_choices_with_evaluator,
 };
-use xlsynth_pir::ir_cost::IrCostEvaluator;
+use xlsynth_pir::ir_cost::{IrCost, ShiftChoiceCostEvaluator};
 use xlsynth_pir::ir_eval::eval_fn;
 use xlsynth_pir::ir_verify::verify_function;
 use xlsynth_pir::{IrValue, ir, ir_parser::Parser, ir_utils::fn_node_count};
@@ -91,6 +91,59 @@ struct TransformedInput {
     total_rewrites: usize,
     constant_shift_rewrites: usize,
     projection_candidate: bool,
+}
+
+struct EvaluatedChoice {
+    function: ir::Fn,
+    cost: IrCost,
+}
+
+#[derive(Default)]
+struct RecordingCostEvaluator {
+    inner: GateBuilderCostEvaluator,
+    evaluations: Vec<EvaluatedChoice>,
+}
+
+impl ShiftChoiceCostEvaluator for RecordingCostEvaluator {
+    fn estimate(&mut self, graph: &ShiftChoiceCostGraph) -> Result<IrCost, String> {
+        let cost = self.inner.estimate(graph)?;
+        self.evaluations.push(EvaluatedChoice {
+            function: graph.function().clone(),
+            cost,
+        });
+        Ok(cost)
+    }
+}
+
+/// Proves both alternatives implement the same function of their shared cut.
+fn prove_local_choices_equivalent(evaluator: &RecordingCostEvaluator) {
+    let [original, candidate] = evaluator.evaluations.as_slice() else {
+        panic!("one rewrite site must produce exactly two local graphs");
+    };
+    let original = &original.function;
+    let candidate = &candidate.function;
+    assert_eq!(original.name, candidate.name);
+    check_equivalence_with_top_via_toolchain(
+        &format!("package local_original\n\ntop {original}"),
+        &format!("package local_candidate\n\ntop {candidate}"),
+        Some(&original.name),
+    )
+    .unwrap();
+}
+
+#[derive(Default)]
+struct EqualCostEvaluator {
+    calls: usize,
+}
+
+impl ShiftChoiceCostEvaluator for EqualCostEvaluator {
+    fn estimate(&mut self, _: &ShiftChoiceCostGraph) -> Result<IrCost, String> {
+        self.calls += 1;
+        Ok(IrCost {
+            area: 10,
+            delay: 5.0,
+        })
+    }
 }
 
 /// Exercises encoded shift choices and the fixed MFFC corpus with one profile.
@@ -484,39 +537,100 @@ fn profitability_rejects_area_tradeoffs_and_preserves_shared_amounts() {
 }
 
 #[test]
-fn profitability_preserves_input_on_equal_cost_or_exhausted_estimate() {
+fn profitability_preserves_input_on_equal_cost() {
     let limits = ConstantShiftChoiceLimits::default();
-    let mut evaluator = GateBuilderCostEvaluator::default();
-    for width in [1, 16_384] {
-        let mut function = parse_function(
-            &format!(
-                r#"package guarded_choices
+    let mut evaluator = EqualCostEvaluator::default();
+    let mut function = parse_function(&masked_choice_text(4, "shll", false), "main");
+    let original = function.to_string();
+    assert!(constant_shift_choice_candidate(&function, limits).is_some());
+    assert_eq!(
+        rewrite_constant_shift_choices_with_evaluator(&mut function, limits, &mut evaluator),
+        Ok(0)
+    );
+    assert_eq!(evaluator.calls, 2);
+    assert_eq!(function.to_string(), original);
+}
 
-top fn main(x: bits[{width}] id=1, p: bits[1] id=2) -> bits[{width}] {{
-  zero: bits[1] = literal(value=0, id=3)
-  one: bits[1] = literal(value=1, id=4)
-  amount: bits[1] = sel(p, cases=[zero, one], id=5)
-  ret result: bits[{width}] = shll(x, amount, id=6)
+#[test]
+fn profitable_local_choice_is_independent_of_unrelated_arithmetic() {
+    let isolated = masked_choice_text(4, "shll", false);
+    let mut arithmetic = String::new();
+    let mut previous = "a".to_string();
+    for index in 0..64 {
+        let next = format!("sum_{index}");
+        arithmetic.push_str(&format!(
+            "  {next}: bits[256] = add({previous}, b, id={})\n",
+            index + 14,
+        ));
+        previous = next;
+    }
+    let embedded = format!(
+        r#"package embedded_shift_choices
+
+top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4, a: bits[256] id=12, b: bits[256] id=13) -> (bits[4], bits[256]) {{
+  one_bit: bits[1] = literal(value=1, id=5)
+  pair: bits[2] = concat(one_bit, q, id=6)
+  one: bits[2] = literal(value=1, id=7)
+  chosen: bits[2] = sel(p, cases=[pair, one], id=8)
+  mask: bits[2] = sign_ext(en, new_bit_count=2, id=9)
+  amount: bits[2] = and(chosen, mask, id=10)
+  shifted: bits[4] = shll(x, amount, id=11)
+{arithmetic}  ret result: (bits[4], bits[256]) = tuple(shifted, {previous}, id=78)
 }}
 "#,
-            ),
-            "main",
-        );
-        let original = function.to_string();
-        let candidate = constant_shift_choice_candidate(&function, limits)
-            .expect("candidate eligibility is independent of estimation work limits");
-        let cost = evaluator.estimate(&function).unwrap();
-        if width == 1 {
-            assert!(cost.is_some());
-            assert_eq!(evaluator.estimate(&candidate).unwrap(), cost);
-        } else {
-            assert_eq!(cost, None);
-        }
+    );
+    let mut evaluations = Vec::new();
+    for text in [&isolated, &embedded] {
+        let mut function = parse_function(text, "main");
+        let mut evaluator = RecordingCostEvaluator::default();
         assert_eq!(
-            rewrite_constant_shift_choices_with_evaluator(&mut function, limits, &mut evaluator),
-            Ok(0)
+            rewrite_constant_shift_choices_with_evaluator(
+                &mut function,
+                ConstantShiftChoiceLimits::default(),
+                &mut evaluator,
+            ),
+            Ok(1)
         );
-        assert_eq!(function.to_string(), original);
+        prove_local_choices_equivalent(&evaluator);
+        check_equivalence_with_top_via_toolchain(
+            text,
+            &format!("package rewritten\n\ntop {function}"),
+            Some("main"),
+        )
+        .unwrap();
+        evaluations.push(evaluator.evaluations);
+    }
+    for (isolated, embedded) in evaluations[0].iter().zip(&evaluations[1]) {
+        assert_eq!(isolated.cost, embedded.cost);
+        assert_eq!(isolated.function.nodes.len(), embedded.function.nodes.len());
+        assert!(
+            embedded
+                .function
+                .nodes
+                .iter()
+                .all(|node| !matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Add, _, _)))
+        );
+    }
+}
+
+#[test]
+fn local_cost_graphs_preserve_shared_amount_output() {
+    let fixture = context_fixtures()
+        .into_iter()
+        .find(|fixture| fixture.name == "shared_amount_and_data_shll_4")
+        .unwrap();
+    let mut function = parse_function(&fixture.text, "main");
+    let mut evaluator = RecordingCostEvaluator::default();
+    rewrite_constant_shift_choices_with_evaluator(
+        &mut function,
+        ConstantShiftChoiceLimits::default(),
+        &mut evaluator,
+    )
+    .unwrap();
+    prove_local_choices_equivalent(&evaluator);
+    for evaluation in &evaluator.evaluations {
+        // Four result bits plus the two amount bits needed by its other user.
+        assert_eq!(evaluation.function.ret_ty, ir::Type::Bits(6));
     }
 }
 

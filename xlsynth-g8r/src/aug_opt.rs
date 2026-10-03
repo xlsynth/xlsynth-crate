@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Augmented IR optimization with bounded g8r area and Graph LE costing.
+//! Augmented IR optimization with local g8r area and Graph LE costing.
 
 use crate::gatify::ir2gate::GateBuilderCostEvaluator;
 

@@ -266,8 +266,8 @@ This binary also accepts `-` as input to read IR text from stdin.
 
 The driver and this binary use `xlsynth_g8r::aug_opt`, which supplies gate-based
 costing for profitability-gated rewrites. The backend-independent
-`xlsynth_pir::aug_opt` entrypoints require an injected `IrCostEvaluator` to enable
-those rewrites; other PIR rewrites also run without a cost model.
+`xlsynth_pir::aug_opt` entrypoints require an injected `ShiftChoiceCostEvaluator`
+to enable shift-choice fusion; other PIR rewrites also run without a cost model.
 
 ### Aug-opt-only mode (debug binary only)
 

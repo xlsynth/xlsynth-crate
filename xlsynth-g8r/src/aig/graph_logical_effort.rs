@@ -14,19 +14,6 @@ struct State {
     prev: Option<(AigRef, f64, usize, f64)>,
 }
 
-/// Counts visits to graph entries and frontier states, or leaves work
-/// unlimited.
-struct WorkBudget(Option<usize>);
-
-impl WorkBudget {
-    fn spend(&mut self, work: usize) -> Option<()> {
-        if let Some(remaining) = &mut self.0 {
-            *remaining = remaining.checked_sub(work)?;
-        }
-        Some(())
-    }
-}
-
 /// Computes the worst-case delay in a DAG using logical effort analysis.
 ///
 /// - `dag` maps each node to a list of outgoing edges `(v, g, p)` where `g` is
@@ -34,27 +21,28 @@ impl WorkBudget {
 /// - `pin_load` is a function computing the load `h` for edge `(u, v)`.
 ///
 /// Returns a tuple `(path, delay)` where `path` is the sequence of nodes
-/// and `delay` is the worst-case delay value, or `None` on budget exhaustion.
+/// and `delay` is the worst-case delay value.
 #[allow(non_snake_case)]
 fn worst_case_delay<F>(
     dag: &HashMap<AigRef, Vec<(AigRef, f64, f64)>>,
     pin_load: F,
     gate_nodes: &[AigNode],
-    budget: &mut WorkBudget,
-) -> Option<(Vec<AigRef>, f64)>
+) -> (Vec<AigRef>, f64)
 where
     F: Fn(AigRef, AigRef) -> f64,
 {
     // global constants
-    let mut g_max = 0.0_f64;
-    let mut p_max_global = 0.0_f64;
+    let g_max = dag
+        .values()
+        .flat_map(|edges| edges.iter().map(|&(_, g, _)| g))
+        .fold(0.0_f64, |a, b| a.max(b));
+    let p_max_global = dag
+        .values()
+        .flat_map(|edges| edges.iter().map(|&(_, _, p)| p))
+        .fold(0.0_f64, |a, b| a.max(b));
     let mut h_max = 0.0_f64;
-    budget.spend(dag.len())?;
     for (&u, edges) in dag.iter() {
-        budget.spend(edges.len())?;
-        for &(v, g, p) in edges {
-            g_max = g_max.max(g);
-            p_max_global = p_max_global.max(p);
+        for &(v, _, _) in edges {
             let h = pin_load(u, v);
             if h > h_max {
                 h_max = h;
@@ -63,21 +51,14 @@ where
     }
     let log_gh_max = (g_max * h_max).ln();
 
-    // Prepay the node tables and traversal passes before topo_sort_refs
-    // allocates. Each AIG node has at most two operands, so ten visits per
-    // node bounds its linear setup and traversal work on an acyclic graph.
-    for _ in 0..10 {
-        budget.spend(gate_nodes.len())?;
-    }
+    // Use topo_sort_refs for topological order
     let topo: Vec<AigRef> = topo_sort_refs(gate_nodes);
 
     // compute longest path R in reverse topological order
     let mut R: HashMap<AigRef, usize> = HashMap::new();
     for &u in topo.iter().rev() {
-        budget.spend(1)?;
         let mut max_r = 0;
         if let Some(edges) = dag.get(&u) {
-            budget.spend(edges.len())?;
             for &(v, _, _) in edges {
                 let rv = *R.get(&v).unwrap_or(&0);
                 max_r = max_r.max(rv + 1);
@@ -107,10 +88,8 @@ where
     }
 
     for &u in topo.iter() {
-        budget.spend(1)?;
         // initialize the frontier
         if S.get(&u).map_or(true, |v| v.is_empty()) {
-            budget.spend(1)?;
             S.insert(
                 u,
                 vec![State {
@@ -124,13 +103,10 @@ where
         // propagate to successors
         if let Some(edges) = dag.get(&u) {
             for &(v, g, p) in edges {
-                budget.spend(1)?;
                 let h = pin_load(u, v);
                 let w = g.ln() + h.ln();
-                budget.spend(S.get(&u).unwrap().len())?;
                 let current_states = S.get(&u).unwrap().clone();
                 for state in current_states {
-                    budget.spend(1)?;
                     let cand_log_f = state.log_f + w;
                     let cand_n = state.n + 1;
                     let cand_p = state.p + p;
@@ -153,7 +129,6 @@ where
                     // local Pareto pruning
                     let mut keep = true;
                     for o in out.iter() {
-                        budget.spend(1)?;
                         if dominates(o, &cand)
                             || (o.n == cand_n && o.log_f >= cand_log_f && o.p >= cand_p)
                         {
@@ -164,9 +139,7 @@ where
                     if !keep {
                         continue;
                     }
-                    budget.spend(out.len())?;
                     out.retain(|o| !dominates(&cand, o));
-                    budget.spend(1)?;
                     out.push(cand);
                     // if v is a sink, maybe update champion
                     let is_sink = dag.get(&v).map_or(true, |e| e.is_empty());
@@ -186,11 +159,9 @@ where
     if let Some((mut node, mut state)) = best_state {
         let mut path: Vec<AigRef> = Vec::new();
         while {
-            budget.spend(1)?;
             path.push(node);
             if let Some((prev_node, plog_f, p_n, p_p)) = state.prev {
                 if let Some(states) = S.get(&prev_node) {
-                    budget.spend(states.len())?;
                     if let Some(&next_state) = states
                         .iter()
                         .find(|s| s.log_f == plog_f && s.n == p_n && s.p == p_p)
@@ -208,11 +179,10 @@ where
                 false
             }
         } {}
-        budget.spend(path.len())?;
         path.reverse();
-        Some((path, best_delay))
+        (path, best_delay)
     } else {
-        Some((Vec::new(), best_delay))
+        (Vec::new(), best_delay)
     }
 }
 
@@ -248,7 +218,6 @@ pub struct LogicalEffortAnalysis {
     pub delay: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
 pub struct GraphLogicalEffortOptions {
     pub beta1: f64,
     pub beta2: f64,
@@ -260,31 +229,6 @@ pub fn analyze_graph_logical_effort(
     gate_fn: &GateFn,
     options: &GraphLogicalEffortOptions,
 ) -> LogicalEffortAnalysis {
-    analyze_with_budget(gate_fn, options, &mut WorkBudget(None))
-        .expect("unlimited logical effort analysis cannot exhaust its work budget")
-}
-
-/// Analyzes logical effort, returning `None` before exceeding the work budget.
-///
-/// Units count graph node/edge visits and frontier-state cloning, propagation,
-/// comparisons, retention, and path reconstruction. Linear helper traversals
-/// are conservatively prepaid before allocation. As with the unlimited API,
-/// the input must be an acyclic graph with valid operand references.
-pub fn analyze_graph_logical_effort_with_budget(
-    gate_fn: &GateFn,
-    options: &GraphLogicalEffortOptions,
-    work_budget: usize,
-) -> Option<LogicalEffortAnalysis> {
-    analyze_with_budget(gate_fn, options, &mut WorkBudget(Some(work_budget)))
-}
-
-/// Shares the numerical analysis between bounded and unlimited callers.
-fn analyze_with_budget(
-    gate_fn: &GateFn,
-    options: &GraphLogicalEffortOptions,
-    budget: &mut WorkBudget,
-) -> Option<LogicalEffortAnalysis> {
-    budget.spend(gate_fn.gates.len())?;
     let g_nand = 4.0 / 3.0;
     let p_nand = 2.0;
     let mut dag: HashMap<AigRef, Vec<(AigRef, f64, f64)>> = HashMap::new();
@@ -292,19 +236,15 @@ fn analyze_with_budget(
         let u = AigRef { id: i };
         match node {
             AigNode::And2 { a, b, .. } => {
-                budget.spend(2)?;
                 dag.entry(a.node).or_default().push((u, g_nand, p_nand));
                 dag.entry(b.node).or_default().push((u, g_nand, p_nand));
             }
-            _ => {
-                // Inputs and literals have no incoming gate edges.
-            }
+            _ => {}
         }
     }
-    budget.spend(dag.len())?;
     let pin_load = eff_with_branch(&dag, options.beta1, options.beta2);
-    let (path, delay) = worst_case_delay(&dag, pin_load, &gate_fn.gates, budget)?;
-    Some(LogicalEffortAnalysis { dag, path, delay })
+    let (path, delay) = worst_case_delay(&dag, pin_load, &gate_fn.gates);
+    LogicalEffortAnalysis { dag, path, delay }
 }
 
 #[cfg(test)]
@@ -421,36 +361,6 @@ mod tests {
             (analysis.delay - expected).abs() < epsilon,
             "delay was {}",
             analysis.delay
-        );
-        let bounded = analyze_graph_logical_effort_with_budget(&gate_fn, &options, 10_000).unwrap();
-        assert_eq!(bounded.dag, analysis.dag);
-        assert_eq!(bounded.path, analysis.path);
-        assert_eq!(bounded.delay, analysis.delay);
-        assert!(analyze_graph_logical_effort_with_budget(&gate_fn, &options, 0).is_none());
-    }
-
-    #[test]
-    fn bounded_analysis_declines_large_reconvergent_frontiers() {
-        let mut gb = GateBuilder::new("reconvergent".to_string(), GateBuilderOptions::no_opt());
-        let mut a = *gb.add_input("a".to_string(), 1).get_lsb(0);
-        let mut b = *gb.add_input("b".to_string(), 1).get_lsb(0);
-        for _ in 0..999 {
-            let next = gb.add_and_binary(a, b);
-            a = b;
-            b = next;
-        }
-        gb.add_output("out".to_string(), b.into());
-        let gate_fn = gb.build();
-        let options = GraphLogicalEffortOptions {
-            beta1: 2.0,
-            beta2: 0.0,
-        };
-        // Enough for linear graph setup; the many nondominated paths exhaust
-        // the budget during frontier propagation and comparison.
-        let work_budget = 100_000;
-        assert!(work_budget > 64 * gate_fn.gates.len());
-        assert!(
-            analyze_graph_logical_effort_with_budget(&gate_fn, &options, work_budget).is_none()
         );
     }
 }

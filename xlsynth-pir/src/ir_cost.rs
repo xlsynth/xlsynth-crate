@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Backend-supplied cost models for deciding whether to apply PIR rewrites.
+//! Backend-supplied costs for comparing constant-shift choices.
 
-use crate::ir;
+use crate::constant_shift_choices::ShiftChoiceCostGraph;
 
 /// Ignores floating-point noise when comparing delays from the same model.
 const DELAY_COMPARISON_TOLERANCE: f64 = 1e-9;
 
-/// Estimated area and delay of a function in a backend's cost model.
+/// Estimated area and delay of a local graph in a backend's cost model.
 ///
 /// Compare values from the same evaluator: evaluators define the units and
 /// which operations contribute to the estimate.
@@ -35,17 +35,12 @@ impl IrCost {
     }
 }
 
-/// Supplies a cost model without making PIR depend on a particular backend.
+/// Costs the small alternative graphs supplied by the constant-shift rewrite.
 ///
-/// The input must be a well-typed, acyclic function graph in its containing
-/// package; nodes need not be stored in topological order. Evaluators may treat
-/// operations requiring package context as opaque boundaries.
-/// `Ok(None)` declines an estimate (for example, after exhausting a work
-/// budget); `Err` reports an unexpected evaluation failure. Rewrites compare
-/// both alternatives using the same evaluator and preserve the input on either
-/// outcome. Implementations may retain caches or budgets between calls.
-pub trait IrCostEvaluator {
-    fn estimate(&mut self, function: &ir::Fn) -> Result<Option<IrCost>, String>;
+/// Both alternatives have the same boundary inputs and retained outputs.
+/// Evaluation errors abort the rewrite without changing its input function.
+pub trait ShiftChoiceCostEvaluator {
+    fn estimate(&mut self, graph: &ShiftChoiceCostGraph) -> Result<IrCost, String>;
 }
 
 #[cfg(test)]

@@ -1558,10 +1558,11 @@ Requires `--top <NAME>` to select the entry point.
 - Optional flags:
   - `--aug-opt=true|false` – enable the augmented optimizer “opt sandwich” (default: `false`).
 
-Aug-opt considers bounded constant-shift choice expansion using g8r's gate
-builder and Graph LE analysis. It accepts a candidate only when neither AND
-count nor Graph LE gets worse and at least one improves. Costing preserves
-sharing and constants; later gate cleanup can still change the final costs.
+Aug-opt compares the small subgraphs for each constant-shift choice using g8r's
+gate builder and Graph LE analysis. It preserves shared inputs and values needed
+by outside users, accepting a candidate when neither local AND count nor Graph
+LE gets worse and at least one improves. External logic and loads are outside
+this local model; later gate cleanup can also change the final costs.
 
 ### `ir-inline`: inline into the selected top function
 
