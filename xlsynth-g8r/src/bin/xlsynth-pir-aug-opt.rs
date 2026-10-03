@@ -2,6 +2,10 @@
 
 //! CLI wrapper for aug-opt with g8r's profitability cost model.
 //!
+//! This binary currently lives in `xlsynth-g8r` to inject its gate builder
+//! cost model into PIR's aug-opt rewrites. g8r already depends on PIR, so
+//! hosting this integration in PIR would introduce a crate dependency cycle.
+//!
 //! Intent: "opt_main"-like usage for debugging and corpus scans. For end-user
 //! workflows, prefer wiring this into `xlsynth-driver`.
 
