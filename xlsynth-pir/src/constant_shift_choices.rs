@@ -69,12 +69,23 @@ enum Choice {
     },
 }
 
+/// Recognized shift-amount DAG used to emit and cost constant-shift fusion.
+///
+/// Leaves hold effective constant shifts; select entries reference earlier
+/// entries, preserving shared branches. `root` identifies the amount's result,
+/// and `amount_nodes` records the original IR nodes needed for local costing.
 struct ChoiceDag {
     choices: Vec<Choice>,
     root: usize,
     amount_nodes: HashSet<NodeRef>,
 }
 
+/// Traversal state for recognizing one shift amount without modifying its IR.
+///
+/// Memoizes recognized IR expressions and interns equivalent choices to
+/// preserve sharing, while tracking recognition limits and normalizing
+/// oversized shifts to the data width. A successful traversal yields a
+/// `ChoiceDag`.
 struct Recognizer<'a> {
     f: &'a ir::Fn,
     data_width: usize,
