@@ -163,11 +163,19 @@ For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
 comment at all. A short summary helps readers understand both the local code and
 how it fits into the surrounding codebase.
 
-Use compact DSLX expressions in comments when they clarify the value a routine
-computes or constructs, such as the result of a shift or slice helper, even when
-it operates on XLS IR. Describe graph mechanics (node counts, sharing, traversal,
-and reference updates) in terms of actual IR nodes and operands. DSLX expressions
-do not uniquely determine those graph properties.
+Use comment examples that match the routine's purpose:
+
+- For value construction or a rewrite's meaning, use compact DSLX expressions
+  when helpful, even in XLS IR code. State relevant bit widths; for example,
+  shifting `x: u8` right by three is `u3:0 ++ x[3:8]`.
+- For graph mechanics (node counts, sharing, traversal, reference updates),
+  describe actual IR nodes, operands, and storage. Use a small IR snippet or
+  explicit node and edge description if an example helps. DSLX syntax does not
+  determine exact IR node counts or sharing after lowering and optimization.
+
+Keep examples selective: concise prose is sufficient when an example adds no
+clarity. Avoid assuming a particular lowering just to make a DSLX example fit a
+graph helper.
 
 Document every significant struct, including private implementation types, with
 at least a one-line Rustdoc comment (`/// ...`) explaining what it represents and
