@@ -13,25 +13,9 @@
 //! - **Bounded effort**: intended as a fast front-end; keep rounds small.
 //! - **Deterministic**: stable iteration order and stable outputs.
 //!
-//! One recurring pattern this pass normalizes is an "affine shift amount":
-//! a dynamic shift whose amount is `K + flag`, where `flag` is a single bit
-//! zero-extended into the amount type. In other words, interpreting the amount
-//! as an unsigned integer, it is the affine expression `K + 1*flag`, so the
-//! shift amount is exactly one of two constants: `K` or `K + 1`; when the
-//! fixed-width add wraps, the `flag=1` case is `0`. The canonical form is:
+//! See [Aug-opt optimizations] for the rewrites and when they apply.
 //!
-//! `shift(x, add(zext(flag), K))`
-//!   →
-//! `sel(flag, cases=[shift(x, K), shift(x, (K + 1) mod 2^amount_w)])`
-//!
-//! This is useful beyond gate lowering because it exposes a small finite choice
-//! to the regular optimizer instead of hiding it inside a general dynamic shift
-//! cone.
-//!
-//! Bounded constant-choice trees, including masked amounts, also expand into
-//! selects over constant bit projections when an injected cost evaluator finds
-//! an area/delay improvement. These rewrites require an evaluator; other
-//! rewrites remain independent of the backend.
+//! [Aug-opt optimizations]: https://github.com/xlsynth/xlsynth-crate/blob/main/xlsynth-pir/docs/aug_opt.md
 
 use std::collections::HashSet;
 
