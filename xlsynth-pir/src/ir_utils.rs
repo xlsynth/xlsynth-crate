@@ -787,6 +787,13 @@ fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> 
 /// Builds a logical constant shift using slices, zero padding, and
 /// concatenation.
 ///
+/// For `arg: u8` and `shift = 3`, the constructed DSLX expressions are:
+///
+/// ```text
+/// arg[0+:u5] ++ u3:0 // Shll: arg << u32:3
+/// u3:0 ++ arg[3+:u5] // Shrl: arg >> u32:3
+/// ```
+///
 /// `op` must be `Shll` or `Shrl`, and `arg` must be a bits value. The result
 /// retains its width; shifts at least that wide produce zero. A zero shift
 /// returns `arg` directly.
