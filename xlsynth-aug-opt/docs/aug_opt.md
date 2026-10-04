@@ -13,6 +13,12 @@ The canonical entrypoints are
 for profitability checks. See the [crate README](../README.md) for library use,
 the standalone executable, and migration from the PIR and g8r entrypoints.
 
+Both modes run a bounded number of rounds (`AugOptOptions::rounds`, default 1),
+so opposing rewrites could cause repeated work but would not make this loop
+unbounded. The round limit is not a substitute for compatible canonicalization
+directions: changes to interacting passes should include stability tests across
+repeated rounds, including the libxls passes in sandwich mode.
+
 The following pseudocode uses `sel(p, [a, b])` for a one-bit selection that
 returns `a` when `p` is zero and `b` when it is one. A slice `x[a:b]` contains
 bits `a` through `b - 1`. Arithmetic on `N`-bit values is modulo `2^N`, and
@@ -133,6 +139,13 @@ mapping. It has no local gate-cost acceptance test: mapped area and delay can
 trade off, including after gate cleanup. `AugOptOptions::recover_split_adders`
 defaults to `true`; disabling it leaves the other rewrites enabled for
 comparisons. `AugOptRewriteStats::split_adders_recovered` counts applications.
+
+The full-width `add` is the preferred aug-opt form of this identity. Aug-opt
+rewrites should preserve that direction; choosing a split implementation for
+gate cost belongs in downstream mapping. Constant folding or simplification
+using additional facts may still eliminate the addition. The regression tests
+check that repeated PIR and sandwich rounds produce stable output without
+recovering the same addition again.
 
 ### Other arithmetic rewrites
 

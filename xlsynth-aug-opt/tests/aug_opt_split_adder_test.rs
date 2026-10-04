@@ -286,6 +286,67 @@ fn width_sweep_preserves_wrapping_addition_in_both_modes() {
 }
 
 #[test]
+fn recovered_adders_are_stable_across_optimizer_rounds() {
+    for width in [2, 3, 5, 8, 16, 32, 65, 129] {
+        for consumer in [Consumer::Sum, Consumer::Masked, Consumer::SharedCarry] {
+            let source = split_adder_ir(width, Spelling::default(), consumer);
+            for mode in [AugOptMode::PirOnly, AugOptMode::Sandwich] {
+                let options = AugOptOptions {
+                    enable: true,
+                    mode,
+                    ..Default::default()
+                };
+                let first =
+                    run_aug_opt_over_ir_text_with_stats(&source, Some("main"), options).unwrap();
+                // At width two, XLS may simplify the one-bit upper arithmetic
+                // before recovery. Wider unconstrained sums should stay adds.
+                if mode == AugOptMode::PirOnly || width > 2 {
+                    assert_eq!(first.rewrite_stats.split_adders_recovered, 1);
+                    let function = parse_main(&first.output_text).unwrap();
+                    assert!(function.nodes.iter().any(|node| {
+                        node.ty == ir::Type::Bits(width)
+                            && matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Add, ..))
+                    }));
+                }
+                // Check the whole pipeline, including the trailing libxls pass.
+                // Equal final text alone could hide splitting and recovering
+                // the same addition again on every round.
+                let multiple = run_aug_opt_over_ir_text_with_stats(
+                    &source,
+                    Some("main"),
+                    AugOptOptions {
+                        rounds: 3,
+                        ..options
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    multiple.rewrite_stats.split_adders_recovered,
+                    first.rewrite_stats.split_adders_recovered,
+                    "width={width}, consumer={consumer:?}, mode={mode:?}"
+                );
+                assert_eq!(
+                    multiple.output_text, first.output_text,
+                    "width={width}, consumer={consumer:?}, mode={mode:?}"
+                );
+                // Re-entering also reruns the sandwich's initial libxls pass.
+                let again =
+                    run_aug_opt_over_ir_text_with_stats(&first.output_text, Some("main"), options)
+                        .unwrap();
+                assert_eq!(
+                    again.rewrite_stats.split_adders_recovered, 0,
+                    "width={width}, consumer={consumer:?}, mode={mode:?}"
+                );
+                assert_eq!(
+                    again.output_text, first.output_text,
+                    "width={width}, consumer={consumer:?}, mode={mode:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn commutation_reassociation_and_id_order_preserve_recognition() {
     for upper_order in [
         [0, 1, 2],
