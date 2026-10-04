@@ -35,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
             enable: true,
             rounds: 1,
             mode: xlsynth_aug_opt::AugOptMode::PirOnly,
+            ..Default::default()
         },
     ) {
         Ok(result) => result,

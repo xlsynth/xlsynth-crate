@@ -348,6 +348,7 @@ fn transform(fixture: &Fixture, pipeline: Pipeline) -> TransformedInput {
                     } else {
                         AugOptMode::Sandwich
                     },
+                    ..Default::default()
                 },
             )
             .expect("aug-opt comparison pipeline succeeds");
@@ -817,6 +818,7 @@ fn aug_opt_fuses_constant_choices_and_reaches_fixed_point() {
                     enable: true,
                     rounds,
                     mode: AugOptMode::PirOnly,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -864,6 +866,7 @@ top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4)
                     enable: true,
                     rounds,
                     mode: AugOptMode::PirOnly,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -905,6 +908,7 @@ top fn main(x: bits[4] id=1, p: bits[1] id=2, amount: bits[65] id=3) -> bits[4] 
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .unwrap();

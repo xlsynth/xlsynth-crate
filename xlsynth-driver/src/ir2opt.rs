@@ -11,11 +11,11 @@ fn ir2opt(
     input_file: &std::path::Path,
     top: &str,
     config: &Option<ToolchainConfig>,
-    aug_opt: bool,
+    aug_options: AugOptOptions,
 ) {
     log::info!("ir2opt");
 
-    if aug_opt {
+    if aug_options.enable {
         if config
             .as_ref()
             .and_then(|c| c.tool_path.as_deref())
@@ -27,16 +27,7 @@ fn ir2opt(
             std::process::exit(2);
         }
         let input_text = std::fs::read_to_string(input_file).unwrap();
-        let out = run_aug_opt_over_ir_text(
-            &input_text,
-            Some(top),
-            AugOptOptions {
-                enable: true,
-                rounds: 1,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let out = run_aug_opt_over_ir_text(&input_text, Some(top), aug_options).unwrap();
         println!("{out}");
         return;
     }
@@ -57,9 +48,16 @@ pub fn handle_ir2opt(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let top = matches.get_one::<String>("ir_top").unwrap();
     let input_path = std::path::Path::new(input_file);
 
-    let aug_opt = matches
-        .get_one::<String>("aug_opt")
-        .is_some_and(|s| s == "true");
-
-    ir2opt(input_path, top, config, aug_opt);
+    let defaults = AugOptOptions::default();
+    let aug_options = AugOptOptions {
+        enable: matches
+            .get_one::<String>("aug_opt")
+            .is_some_and(|s| s == "true"),
+        recover_split_adders: matches
+            .get_one::<bool>("aug_opt_recover_split_adders")
+            .copied()
+            .unwrap_or(defaults.recover_split_adders),
+        ..defaults
+    };
+    ir2opt(input_path, top, config, aug_options);
 }

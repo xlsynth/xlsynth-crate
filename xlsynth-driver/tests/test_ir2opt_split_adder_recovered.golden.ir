@@ -1,0 +1,6 @@
+package split_adder
+
+top fn main(x: bits[5] id=1, y: bits[5] id=2) -> bits[5] {
+  ret result: bits[5] = add(x, y, id=12)
+}
+

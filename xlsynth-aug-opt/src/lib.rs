@@ -10,6 +10,7 @@ pub mod constant_shift_choices;
 pub mod cost;
 pub mod ir_cost;
 mod optimizer;
+pub mod split_adder;
 
 #[cfg(test)]
 mod test_utils;

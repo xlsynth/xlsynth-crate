@@ -1557,6 +1557,8 @@ Requires `--top <NAME>` to select the entry point.
 
 - Optional flags:
   - `--aug-opt=true|false` – enable the augmented optimizer “opt sandwich” (default: `false`).
+  - `--aug-opt-recover-split-adders=true|false` – control split-adder recovery
+    within aug-opt (default: `true`); useful for comparing mappings in the same build.
 
 With `--aug-opt=true`, `xlsynth-aug-opt` applies local PIR rewrites between XLS
 optimization passes. See the [optimizer guide](../xlsynth-aug-opt/docs/aug_opt.md)

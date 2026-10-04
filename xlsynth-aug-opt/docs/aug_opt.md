@@ -112,6 +112,30 @@ graphs or profitability policy.
 
 ## Arithmetic
 
+### Split-adder recovery
+
+[Split-adder recovery](../src/split_adder.rs) recognizes the low sum bit and
+upper carry sum as one modular addition. For `x, y: bits[N]`, `N >= 2`, with
+one-bit `xlo = x[0:1]` and `ylo = y[0:1]`:
+
+```text
+concat(x[1:N] + y[1:N] + zext<N-1>(xlo & ylo), xlo ^ ylo)
+  -> x + y
+```
+
+The upper arithmetic must have exactly `N-1` bits. Matching allows commuted
+operands and reassociated additions, and accepts a zero-prefix concatenation
+for the carry extension. Upper arithmetic and the low XOR must have no users
+outside the matched expression. Source operands may be shared.
+
+This recovers an ordinary XLS `add` for downstream optimization and operator
+mapping. It has no local gate-cost acceptance test: mapped area and delay can
+trade off, including after gate cleanup. `AugOptOptions::recover_split_adders`
+defaults to `true`; disabling it leaves the other rewrites enabled for
+comparisons. `AugOptRewriteStats::split_adders_recovered` counts applications.
+
+### Other arithmetic rewrites
+
 - **Sum equal to zero:** `x + y == 0` becomes `y == 0 - x`, exposing a modular
   equation that XLS may simplify further.
 - **Sum unequal to all ones:** `x + y != all_ones` becomes `!x != y`, where

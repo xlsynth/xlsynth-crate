@@ -94,6 +94,7 @@ fn mffc_corpus_respects_equivalence_and_qor_limits() {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug-opt succeeds on corpus fixture");
