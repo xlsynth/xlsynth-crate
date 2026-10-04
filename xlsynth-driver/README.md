@@ -1376,7 +1376,7 @@ DSLX warnings and errors appear on **stderr**.
 Optional optimization:
 
 - `--opt=true` – run the IR optimizer before emitting. When set, `--dslx_top` becomes required.
-- `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
+- `--aug-opt=true|false` – use the [augmented optimizer](../xlsynth-aug-opt/docs/aug_opt.md) “opt sandwich” when `--opt=true` (default: `false`).
 
 Additional flags:
 
@@ -1557,6 +1557,11 @@ Requires `--top <NAME>` to select the entry point.
 
 - Optional flags:
   - `--aug-opt=true|false` – enable the augmented optimizer “opt sandwich” (default: `false`).
+
+With `--aug-opt=true`, `xlsynth-aug-opt` applies local PIR rewrites between XLS
+optimization passes. See the [optimizer guide](../xlsynth-aug-opt/docs/aug_opt.md)
+for the rewrites and the
+[crate README](../xlsynth-aug-opt/README.md) for direct library use.
 
 ### `ir-inline`: inline into the selected top function
 
@@ -1744,7 +1749,7 @@ files is reported on **stderr**.
 Optional optimization:
 
 - `--opt=true` – optimize the IR before scheduling/codegen.
-- `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
+- `--aug-opt=true|false` – use the [augmented optimizer](../xlsynth-aug-opt/docs/aug_opt.md) “opt sandwich” when `--opt=true` (default: `false`).
 
 Extern-Verilog policy:
 
@@ -1763,7 +1768,7 @@ All the usual code-gen flags (e.g., `--use_system_verilog`, `--add_invariant_ass
 Optional optimization:
 
 - `--opt=true` – optimize the IR before code generation.
-- `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
+- `--aug-opt=true|false` – use the [augmented optimizer](../xlsynth-aug-opt/docs/aug_opt.md) “opt sandwich” when `--opt=true` (default: `false`).
 
 Extern-Verilog policy:
 

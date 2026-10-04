@@ -32,8 +32,8 @@ use crate::ir2gate_utils::{
 
 use crate::gate_builder::ReductionKind;
 
-mod cost;
-pub use cost::GateBuilderCostEvaluator;
+mod region;
+pub use region::{IrRegion, gatify_region};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArrayIndexLoweringStrategy {

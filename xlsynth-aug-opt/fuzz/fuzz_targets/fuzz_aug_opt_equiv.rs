@@ -4,8 +4,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
+use xlsynth_aug_opt::{AugOptOptions, run_aug_opt_over_ir_text_with_stats};
 use xlsynth_pir_fuzz::{fuzz_solver_limits, generate_upstream_formal_random_pir_package};
-use xlsynth_pir::aug_opt::{run_aug_opt_over_ir_text_with_stats, AugOptOptions};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
 #[cfg(feature = "has-bitwuzla")]
@@ -34,7 +34,7 @@ fuzz_target!(|data: &[u8]| {
         AugOptOptions {
             enable: true,
             rounds: 1,
-            mode: xlsynth_pir::aug_opt::AugOptMode::PirOnly,
+            mode: xlsynth_aug_opt::AugOptMode::PirOnly,
         },
     ) {
         Ok(result) => result,

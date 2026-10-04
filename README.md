@@ -56,7 +56,10 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
 - `sample-usage`: demonstrates use of the APIs provided by the `xlsynth` crate
 - `xlsynth-estimator`: Rust implementation of the XLS IR operation-level delay estimation
   methodology
+- `xlsynth-pir`: Rust IR representation, parsing, matching, analysis, and manipulation
 - `xlsynth-g8r`: _experimental_ XLS IR to gate mapping library
+- [`xlsynth-aug-opt`](xlsynth-aug-opt/README.md): augmented IR optimization that
+  combines XLS passes, PIR rewrites, and g8r cost estimates
 - `xlsynth-vastly`: Verilog/SystemVerilog simulation and VCD comparison utilities;
   library and CLI builds do not require `libxls`
 

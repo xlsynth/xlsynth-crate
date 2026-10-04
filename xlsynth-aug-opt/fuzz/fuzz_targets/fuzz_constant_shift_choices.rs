@@ -5,7 +5,7 @@
 use std::sync::{Mutex, Once, OnceLock};
 
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r_fuzz::constant_shift_choices::{FuzzStats, check_input};
+use xlsynth_aug_opt_fuzz::constant_shift_choices::{FuzzStats, check_input};
 
 static LOGGER: Once = Once::new();
 static TOTALS: OnceLock<Mutex<FuzzStats>> = OnceLock::new();

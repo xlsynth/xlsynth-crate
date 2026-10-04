@@ -1,0 +1,32 @@
+[package]
+name = "xlsynth-aug-opt"
+version = "0.74.0"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "Augmented XLS IR optimization with g8r gate costs"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth-aug-opt"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlsynth = { path = "../xlsynth", version = "0.74.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.74.0" }
+xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.74.0" }
+log = "0.4"
+clap = { version = "4.5.21", features = ["derive"] }
+
+[dev-dependencies]
+rand = "0.8"
+rand_pcg = "0.3.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[features]
+default = []
+has-bitwuzla = ["xlsynth-g8r/has-bitwuzla"]
+with-bitwuzla-system = ["xlsynth-g8r/with-bitwuzla-system", "has-bitwuzla"]
+with-bitwuzla-built = ["xlsynth-g8r/with-bitwuzla-built", "has-bitwuzla"]

@@ -16,6 +16,6 @@ g8r mapping profile for both.
 Run from the workspace root with the solver/toolchain environment configured:
 
 ```sh
-cargo test -p xlsynth-g8r --features with-bitwuzla-system \
+cargo test -p xlsynth-aug-opt --features with-bitwuzla-system \
   --test mffc_regressions_test -- --nocapture
 ```

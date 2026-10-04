@@ -2,6 +2,9 @@
 target/
 .vscode
 .cursor
+xlsynth-aug-opt/fuzz/Cargo.lock
+xlsynth-aug-opt/fuzz/corpus/
+xlsynth-aug-opt/fuzz/artifacts/
 xlsynth-g8r/fuzz/Cargo.lock
 xlsynth-g8r/fuzz/corpus/
 xlsynth-g8r/fuzz/artifacts/

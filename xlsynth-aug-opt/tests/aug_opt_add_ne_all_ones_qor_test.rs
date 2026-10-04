@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use xlsynth_aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
 use xlsynth_g8r::ir2gates;
-use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions};
 
 fn sample_ir_text() -> &'static str {
     r#"package add_ne_all_ones_qor
@@ -16,16 +16,16 @@ top fn cone(leaf_303: bits[8] id=1, leaf_304: bits[8] id=2) -> bits[1] {
 }
 
 fn stats_for_aug_opt_mode(enable_aug_opt: bool) -> (usize, usize) {
-    let out = ir2gates::ir2gates_from_ir_text(
+    let out = xlsynth_aug_opt::ir2gates_from_ir_text(
         sample_ir_text(),
         Some("cone"),
+        AugOptOptions {
+            enable: enable_aug_opt,
+            rounds: 1,
+            mode: AugOptMode::PirOnly,
+        },
         ir2gates::Ir2GatesOptions {
             check_equivalence: true,
-            aug_opt: AugOptOptions {
-                enable: enable_aug_opt,
-                rounds: 1,
-                mode: AugOptMode::PirOnly,
-            },
             ..ir2gates::Ir2GatesOptions::all_opts_disabled()
         },
     )

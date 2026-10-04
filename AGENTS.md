@@ -282,25 +282,33 @@ cargo run -p xlsynth-driver -- ir2pipeline path/to/pkg.ir --top main --delay_mod
 
 ### Standalone binary: `xlsynth-pir-aug-opt`
 
-The `xlsynth-g8r` crate provides a dedicated debugging binary that runs the sandwich and allows multiple rounds:
+The `xlsynth-aug-opt` crate provides a dedicated debugging binary that runs the sandwich and allows multiple rounds:
 
 ```bash
-cargo run -p xlsynth-g8r --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1
+cargo run -p xlsynth-aug-opt --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1
 ```
 
 This binary also accepts `-` as input to read IR text from stdin.
 
-The driver and this binary use `xlsynth_g8r::aug_opt`, which supplies gate-based
-costing for profitability-gated rewrites. The backend-independent
-`xlsynth_pir::aug_opt` entrypoints require an injected `ShiftChoiceCostEvaluator`
-to enable shift-choice fusion; other PIR rewrites also run without a cost model.
+The driver and this binary use the canonical
+`xlsynth_aug_opt::run_aug_opt_over_ir_text` entrypoint, which supplies g8r costing
+for profitability-gated rewrites. The `_with_stats` variant also reports rewrite
+counts. Optimizer options, results, and rewrites belong to `xlsynth-aug-opt`;
+PIR and g8r remain dependencies of that crate and do not re-export its APIs.
+
+For optimization followed by gate mapping, use
+`xlsynth_aug_opt::ir2gates_from_ir_text(ir_text, top, aug_options, g8r_options)`.
+It optimizes before g8r preparation and uses the mapper's folding and hashing
+settings during costing. `Ir2GatesOptions` contains only mapping options.
+See the [crate README](xlsynth-aug-opt/README.md) for API migration and the
+[optimizer guide](xlsynth-aug-opt/docs/aug_opt.md) for rewrite details.
 
 ### Aug-opt-only mode (debug binary only)
 
 For isolating aug-opt rewrites (without any libxls optimization passes), use the debug binary's `--aug-opt-only` flag:
 
 ```bash
-cargo run -p xlsynth-g8r --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1 --aug-opt-only
+cargo run -p xlsynth-aug-opt --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1 --aug-opt-only
 ```
 
 ## Test

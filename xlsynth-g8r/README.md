@@ -11,6 +11,11 @@
 
 Most functionality is exposed via the `xlsynth_g8r` library and thin binaries under `src/bin/`.
 
+Augmented IR optimization is provided by
+[`xlsynth-aug-opt`](../xlsynth-aug-opt/README.md), which depends on g8r for local
+cost estimates. Use `xlsynth_aug_opt::ir2gates_from_ir_text` to optimize before
+mapping; `xlsynth_g8r::ir2gates::Ir2GatesOptions` contains only mapping options.
+
 ## Additional docs
 
 - `docs/g8r_lib_timing_design.md`: why Liberty loading has `Library` (no timing) vs `LibraryWithTimingData` and the observed ASAP7 size/load tradeoffs.

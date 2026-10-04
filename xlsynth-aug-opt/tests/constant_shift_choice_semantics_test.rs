@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify_prepared_fn};
-use xlsynth_pir::constant_shift_choices::{
+use xlsynth_aug_opt::constant_shift_choices::{
     ConstantShiftChoiceLimits, constant_shift_choice_candidate,
 };
+use xlsynth_g8r::check_equivalence;
+use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify_prepared_fn};
 use xlsynth_pir::ir::{self, Binop, NodePayload, Type};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_utils::{find_node_by_name, operands};

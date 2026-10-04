@@ -307,33 +307,6 @@ Main failure modes surfaced:
 
 ______________________________________________________________________
 
-# Augmented Optimizer Equivalence Fuzz Target
-
-This fuzz target generates an upstream-standard random PIR function, runs the
-PIR-only augmented optimizer rewrite loop, and proves equivalence when at least
-one rewrite fires.
-
-Target name: `fuzz_aug_opt_equiv`
-
-Essential property under test:
-
-- PIR aug-opt rewrites preserve semantics when they apply.
-
-Early returns justification:
-
-- Samples with no aug-opt rewrite are skipped because there is no transformed
-  output to compare.
-- Configured solver resource-limit inconclusive results are skipped because
-  they are expected fuzzing noise, not rewrite failures.
-
-Main failure modes surfaced:
-
-- Aug-opt rejects valid generated PIR unexpectedly.
-- A PIR rewrite changes semantics.
-- Rewritten PIR cannot be checked by the configured in-process prover.
-
-______________________________________________________________________
-
 # XLS IR Optimizer Equivalence Fuzz Target
 
 This fuzz target builds an XLS IR package from an upstream-standard random PIR

@@ -208,8 +208,10 @@ adapters use native values and bits directly. Range-analysis results are copied
 to native storage once, when they leave the XLS analysis API.
 
 `xlsynth-pir` depends on libxls for upstream optimization and other XLS
-integration. Consumers that need only native values and `.irvals` parsing can
-depend directly on `xlsynth-ir-value`.
+integration. The [augmented optimizer](../../xlsynth-aug-opt/README.md), including
+its local PIR rewrites and g8r cost integration, lives in `xlsynth-aug-opt`.
+Consumers that need only native values and `.irvals` parsing can depend directly
+on `xlsynth-ir-value`.
 
 ### Native `.irvals` files
 
