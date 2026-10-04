@@ -7,8 +7,11 @@ use std::path::Path;
 use mffc_corpus::Expectations;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use xlsynth_g8r::ir2gate_utils::AdderMapping;
 
 pub mod mffc_corpus;
+
+const PROFILE: &str = include_str!("fixtures/mffc_regressions/profile.textproto");
 
 const INPUT: &str = r#"// SPDX-License-Identifier: Apache-2.0
 
@@ -33,10 +36,7 @@ const SPLIT_ADDER: &str = r#"split_adder {
 /// fixtures.
 fn corpus_directory() -> Result<TempDir, std::io::Error> {
     let directory = tempfile::tempdir()?;
-    fs::write(
-        directory.path().join("profile.json"),
-        include_str!("fixtures/mffc_regressions/profile.json"),
-    )?;
+    fs::write(directory.path().join("profile.textproto"), PROFILE)?;
     Ok(directory)
 }
 
@@ -160,22 +160,98 @@ fn requires_explicit_expectations_and_valid_bounds() -> Result<(), Box<dyn Error
 
 #[test]
 fn rejects_invalid_tolerance() -> Result<(), Box<dyn Error>> {
-    for tolerance in ["-1", "1e999", "NaN"] {
+    for tolerance in ["-1", "inf", "nan"] {
         let directory = corpus_directory()?;
         write_case(directory.path(), "sample", INPUT, SHIFT)?;
-        let profile_path = directory.path().join("profile.json");
-        let mut profile: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&profile_path)?)?;
-        profile["graph_le_tolerance"] = serde_json::Value::String("TOLERANCE".into());
         fs::write(
-            &profile_path,
-            serde_json::to_string(&profile)?.replace("\"TOLERANCE\"", tolerance),
+            directory.path().join("profile.textproto"),
+            PROFILE.replace(
+                "graph_le_tolerance: 0.000001",
+                &format!("graph_le_tolerance: {tolerance}"),
+            ),
         )?;
         assert!(
             mffc_corpus::load_from_dir(directory.path()).is_err(),
             "accepted tolerance {tolerance}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn rejects_incomplete_or_invalid_profiles() -> Result<(), Box<dyn Error>> {
+    for (description, profile) in [
+        (
+            "missing option with a serde default",
+            PROFILE.replace("  track_pir_node_ids: false\n", ""),
+        ),
+        (
+            "missing tolerance",
+            PROFILE.replace("graph_le_tolerance: 0.000001\n", ""),
+        ),
+        (
+            "unknown nested field",
+            PROFILE.replace(
+                "canonical_options {",
+                "canonical_options { unknown_option: true",
+            ),
+        ),
+        (
+            "invalid enum spelling",
+            PROFILE.replace(
+                "adder_mapping: \"brent-kung\"",
+                "adder_mapping: \"invalid\"",
+            ),
+        ),
+    ] {
+        let directory = corpus_directory()?;
+        write_case(directory.path(), "sample", INPUT, SHIFT)?;
+        fs::write(directory.path().join("profile.textproto"), profile)?;
+        assert!(
+            mffc_corpus::load_from_dir(directory.path()).is_err(),
+            "accepted {description}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn preserves_profile_presence_and_integer_precision() -> Result<(), Box<dyn Error>> {
+    let directory = corpus_directory()?;
+    write_case(directory.path(), "sample", INPUT, SHIFT)?;
+    let corpus = mffc_corpus::load_from_dir(directory.path())?;
+    assert_eq!(corpus.profile.canonical_options.mul_adder_mapping, None);
+
+    // False and zero must survive decoding even for options whose serde
+    // defaults are true or nonzero. Large integer seeds must not pass
+    // through an f64.
+    let profile = PROFILE
+        .replace("  fold: true", "  fold: false")
+        .replace(
+            "  enable_formal_array_alias_analysis: true",
+            "  enable_formal_array_alias_analysis: false",
+        )
+        .replace(
+            "  cadical_terminate_limit: 1000",
+            "  cadical_terminate_limit: 0",
+        )
+        .replace(
+            "  toggle_sample_seed: 0",
+            &format!("  toggle_sample_seed: {}", u64::MAX),
+        )
+        .replace(
+            "  adder_mapping: \"brent-kung\"",
+            "  adder_mapping: \"brent-kung\"\n  mul_adder_mapping: \"kogge-stone\"",
+        );
+    fs::write(directory.path().join("profile.textproto"), profile)?;
+    let options = mffc_corpus::load_from_dir(directory.path())?
+        .profile
+        .canonical_options;
+    assert!(!options.fold);
+    assert!(!options.enable_formal_array_alias_analysis);
+    assert_eq!(options.cadical_terminate_limit, 0);
+    assert_eq!(options.toggle_sample_seed, u64::MAX);
+    assert_eq!(options.mul_adder_mapping, Some(AdderMapping::KoggeStone));
     Ok(())
 }
 

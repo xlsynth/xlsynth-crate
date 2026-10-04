@@ -12,7 +12,7 @@ regression expectations. Tests discover these pairs automatically; the case name
 comes from the filename and the top function from the IR. Historical measurements
 belong in comments in the corresponding `.textproto`.
 
-[profile.json](profile.json) pins the shared mapping options and Graph LE
+[profile.textproto](profile.textproto) pins the shared mapping options and Graph LE
 tolerance used by [mffc_regressions_test.rs](../../mffc_regressions_test.rs).
 The shift cases compare fixed IR with one PIR-only aug-opt round. The split-adder
 cases compare recovery disabled and enabled in both PIR-only and sandwich modes.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# proto-file: xlsynth-aug-opt/tests/mffc_corpus/case.proto
+# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
 # proto-message: xlsynth.mffc_regressions.Case
 
 # Historical AND / Graph LE / depth, using 0.73.0 statistics:

@@ -3,12 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, MessageDescriptor, ReflectMessage, SerializeOptions, Value,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
+
+const PROFILE_FILE_NAME: &str = "profile.textproto";
 
 /// Shares one mapping profile across validated, name-ordered regression cases.
 #[derive(Debug)]
@@ -21,7 +25,6 @@ pub struct Corpus {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MappingProfile {
-    _spdx: String,
     pub canonical_options: CanonicalG8rOptions,
     pub cut_db_rewrite_max_iterations: usize,
     pub cut_db_rewrite_max_cuts_per_node: usize,
@@ -67,20 +70,11 @@ pub fn load() -> Result<Corpus, String> {
 
 /// Discovers paired fixtures and validates all metadata before any measurement.
 pub fn load_from_dir(root: &Path) -> Result<Corpus, String> {
-    let profile_path = root.join("profile.json");
-    let profile_text = std::fs::read_to_string(&profile_path)
-        .map_err(|error| format!("{}: {error}", profile_path.display()))?;
-    let profile: MappingProfile = serde_json::from_str(&profile_text)
-        .map_err(|error| format!("{}: {error}", profile_path.display()))?;
-    if !profile.graph_le_tolerance.is_finite() || profile.graph_le_tolerance < 0.0 {
-        return Err(format!(
-            "{}: graph_le_tolerance must be finite and nonnegative",
-            profile_path.display()
-        ));
-    }
-
-    let pool = DescriptorPool::decode(include_bytes!("case.bin").as_slice())
+    let pool = DescriptorPool::decode(include_bytes!("corpus.bin").as_slice())
         .map_err(|error| format!("invalid corpus descriptor: {error}"))?;
+    let profile_path = root.join(PROFILE_FILE_NAME);
+    let profile = load_profile(&profile_path, &pool)
+        .map_err(|error| format!("{}: {error}", profile_path.display()))?;
     let descriptor = pool
         .get_message_by_name("xlsynth.mffc_regressions.Case")
         .ok_or_else(|| "corpus descriptor has no Case message".to_string())?;
@@ -94,14 +88,67 @@ pub fn load_from_dir(root: &Path) -> Result<Corpus, String> {
     Ok(Corpus { profile, cases })
 }
 
+/// Reuses the Rust options' enum parsing after validating the textproto schema.
+fn load_profile(path: &Path, pool: &DescriptorPool) -> Result<MappingProfile, String> {
+    let descriptor = pool
+        .get_message_by_name("xlsynth.mffc_regressions.MappingProfile")
+        .ok_or_else(|| "corpus descriptor has no MappingProfile message".to_string())?;
+    let message = read_textproto(path, &descriptor)?;
+    // Preserve Rust field names and numeric u64 values through the serde
+    // bridge. Absent optional mul_adder_mapping remains absent, so serde
+    // produces None.
+    let options = SerializeOptions::new()
+        .use_proto_field_name(true)
+        .stringify_64_bit_integers(false);
+    let value = message
+        .serialize_with_options(serde_json::value::Serializer, &options)
+        .map_err(|error| error.to_string())?;
+    let profile: MappingProfile =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    if !profile.graph_le_tolerance.is_finite() || profile.graph_le_tolerance < 0.0 {
+        return Err("graph_le_tolerance must be finite and nonnegative".to_string());
+    }
+    Ok(profile)
+}
+
+/// Parses typed fixture metadata and rejects omissions before serde can
+/// default.
+fn read_textproto(path: &Path, descriptor: &MessageDescriptor) -> Result<DynamicMessage, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let message = DynamicMessage::parse_text_format(descriptor.clone(), &text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    validate_required_fields(&message).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(message)
+}
+
+/// Checks required fields in this schema's scalar and nested-message records.
+fn validate_required_fields(message: &DynamicMessage) -> Result<(), String> {
+    for field in message.descriptor().fields() {
+        if message.has_field(&field) {
+            if let Some(nested) = message.get_field(&field).as_message() {
+                validate_required_fields(nested)?;
+            }
+        } else if field.is_required() {
+            return Err(format!("missing required field {}", field.full_name()));
+        }
+    }
+    Ok(())
+}
+
 /// Finds IR inputs in deterministic order and rejects unpaired sidecars.
 fn discover_pairs(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut inputs = Vec::new();
     let mut sidecars = BTreeSet::new();
+    let profile_path = root.join(PROFILE_FILE_NAME);
     for entry in std::fs::read_dir(root).map_err(|error| format!("{}: {error}", root.display()))? {
         let path = entry
             .map_err(|error| format!("{}: {error}", root.display()))?
             .path();
+        if path == profile_path {
+            // The shared profile is not a per-fixture expectation sidecar.
+            continue;
+        }
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("ir") => inputs.push(path),
             Some("textproto") => {
@@ -139,10 +186,7 @@ fn load_case(path: &Path, descriptor: &MessageDescriptor, tolerance: f64) -> Res
         .ok_or_else(|| "fixture filename must have a UTF-8 stem".to_string())?
         .to_string();
     let sidecar_path = path.with_extension("textproto");
-    let metadata = std::fs::read_to_string(&sidecar_path)
-        .map_err(|error| format!("{}: {error}", sidecar_path.display()))?;
-    let metadata = DynamicMessage::parse_text_format(descriptor.clone(), &metadata)
-        .map_err(|error| format!("{}: {error}", sidecar_path.display()))?;
+    let metadata = read_textproto(&sidecar_path, descriptor)?;
     let sha256 = required_field(&metadata, "sha256")?
         .as_str()
         .ok_or_else(|| "sha256 must be a string".to_string())?;
