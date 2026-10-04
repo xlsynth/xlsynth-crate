@@ -63,6 +63,11 @@ Use `-` as the input path to read stdin, or add `--aug-opt-only` to select
 `PirOnly`. The main driver exposes the same optimizer through `--aug-opt=true`
 on its supported optimization and code-generation commands.
 
+For comparisons, set `AugOptOptions::recover_split_adders` to `false` to disable
+only split-adder recovery. The debugging executable accepts
+`--recover-split-adders=false`; `xlsynth-driver ir2opt` accepts
+`--aug-opt-recover-split-adders=false` alongside `--aug-opt=true`.
+
 ## API migration
 
 | Previous API or location | Replacement |

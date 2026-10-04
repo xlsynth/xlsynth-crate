@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
+# proto-message: xlsynth.mffc_regressions.Case
+
+# Historical AND / Graph LE / depth, using 0.73.0 statistics:
+# 0.49.0: 19 / 17.926451830422394 / 4.
+# 0.73.0 and fusion development build, disabled: 22 / 21.60734084394832 / 5.
+# Fusion development build, enabled: 19 / 15.975193499846508 / 4.
+sha256: "1ad6ab17e135bf38b80bb42075b2ab9f5e0a437447e364b43f68c48f8eb091dd"
+shift {
+  require_improvement: true
+  limits {
+    and_nodes_max: 19
+    graph_le_max: 15.975193499846508
+    depth_max: 4
+  }
+}

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 
-use serde::Deserialize;
+use mffc_corpus::{Case, Expectations};
 use serde_json::json;
 use xlsynth_aug_opt::constant_shift_choices::{
     ConstantShiftChoiceLimits, ShiftChoiceCostGraph, constant_shift_choice_candidate,
@@ -20,7 +19,7 @@ use xlsynth_g8r::aig::graph_logical_effort::{
 use xlsynth_g8r::check_equivalence::{
     check_equivalence_with_top_via_toolchain, validate_same_fn_via_toolchain,
 };
-use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, process_ir_text_with_gatefn};
+use xlsynth_g8r::process_ir_path::process_ir_text_with_gatefn;
 use xlsynth_pir::ir_eval::eval_fn;
 use xlsynth_pir::ir_verify::verify_function;
 use xlsynth_pir::{
@@ -31,26 +30,7 @@ use xlsynth_pir::{
 
 const GRAPH_LE_TOLERANCE: f64 = 1.0e-6;
 
-#[derive(Deserialize)]
-struct Corpus {
-    measurement_mode: MappingProfile,
-    cases: Vec<CorpusCase>,
-}
-
-#[derive(Deserialize)]
-struct MappingProfile {
-    canonical_options: CanonicalG8rOptions,
-    cut_db_rewrite_max_iterations: usize,
-    cut_db_rewrite_max_cuts_per_node: usize,
-}
-
-#[derive(Deserialize)]
-struct CorpusCase {
-    name: String,
-    file: String,
-    top: String,
-    require_improvement: bool,
-}
+pub mod mffc_corpus;
 
 struct Fixture {
     name: String,
@@ -215,7 +195,7 @@ impl ShiftChoiceCostEvaluator for EqualCostEvaluator {
 }
 
 /// Exercises encoded shift choices and the fixed MFFC corpus with one profile.
-fn fixtures(cases: Vec<CorpusCase>) -> Vec<Fixture> {
+fn fixtures(cases: Vec<Case>) -> Vec<Fixture> {
     let mut fixtures = Vec::new();
     for op in ["shll", "shrl"] {
         for width in [2, 3, 4, 5, 6, 8, 12, 16, 32] {
@@ -230,16 +210,25 @@ fn fixtures(cases: Vec<CorpusCase>) -> Vec<Fixture> {
             });
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mffc_regressions");
-    fixtures.extend(cases.into_iter().map(|case| Fixture {
-        text: std::fs::read_to_string(root.join(&case.file)).expect("read MFFC fixture"),
-        name: case.name,
-        top: case.top,
-        expect_constant_shift_candidate: case.require_improvement,
-        expect_constant_shift_rewrite: case.require_improvement,
-        require_no_aug_opt_regression: case.require_improvement,
-        synthetic_qor_width: None,
-    }));
+    for case in cases {
+        let Expectations::Shift {
+            require_improvement,
+            ..
+        } = case.expectations
+        else {
+            // The add-recovery cases have a separate pipeline comparison.
+            continue;
+        };
+        fixtures.push(Fixture {
+            text: case.text,
+            name: case.name,
+            top: case.original.name.clone(),
+            expect_constant_shift_candidate: require_improvement,
+            expect_constant_shift_rewrite: require_improvement,
+            require_no_aug_opt_regression: require_improvement,
+            synthetic_qor_width: None,
+        });
+    }
     fixtures.extend(context_fixtures());
     fixtures
 }
@@ -348,6 +337,7 @@ fn transform(fixture: &Fixture, pipeline: Pipeline) -> TransformedInput {
                     } else {
                         AugOptMode::Sandwich
                     },
+                    ..Default::default()
                 },
             )
             .expect("aug-opt comparison pipeline succeeds");
@@ -443,10 +433,8 @@ struct ComparisonSummary {
 /// Compares costed aug-opt and unconditional projection through normal mapping.
 #[test]
 fn compare_costed_aug_opt_shift_choice_pipelines() {
-    let corpus: Corpus =
-        serde_json::from_str(include_str!("fixtures/mffc_regressions/manifest.json"))
-            .expect("valid MFFC manifest");
-    let profile = &corpus.measurement_mode;
+    let corpus = mffc_corpus::load().unwrap();
+    let profile = &corpus.profile;
     let graph_le_options = GraphLogicalEffortOptions {
         beta1: profile.canonical_options.graph_logical_effort_beta1,
         beta2: profile.canonical_options.graph_logical_effort_beta2,
@@ -817,6 +805,7 @@ fn aug_opt_fuses_constant_choices_and_reaches_fixed_point() {
                     enable: true,
                     rounds,
                     mode: AugOptMode::PirOnly,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -864,6 +853,7 @@ top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4)
                     enable: true,
                     rounds,
                     mode: AugOptMode::PirOnly,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -905,6 +895,7 @@ top fn main(x: bits[4] id=1, p: bits[1] id=2, amount: bits[65] id=3) -> bits[4] 
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .unwrap();

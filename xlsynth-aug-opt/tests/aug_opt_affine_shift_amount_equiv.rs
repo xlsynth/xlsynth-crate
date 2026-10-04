@@ -80,6 +80,7 @@ fn aug_opt_for_test(ir_text: &str) -> ir::Fn {
             enable: true,
             rounds: 1,
             mode: AugOptMode::PirOnly,
+            ..Default::default()
         },
     )
     .expect("run aug-opt");
@@ -404,6 +405,7 @@ fn assert_does_not_rewrite(ir_text: &str, label: &str) {
             enable: true,
             rounds: 1,
             mode: AugOptMode::PirOnly,
+            ..Default::default()
         },
     )
     .expect("run aug-opt");

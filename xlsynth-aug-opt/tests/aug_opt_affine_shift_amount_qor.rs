@@ -46,6 +46,7 @@ fn aug_opt_for_test(ir_text: &str) -> xlsynth_aug_opt::AugOptRunResult {
             enable: true,
             rounds: 1,
             mode: AugOptMode::PirOnly,
+            ..Default::default()
         },
     )
     .expect("run aug-opt")

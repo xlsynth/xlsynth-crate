@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
+# proto-message: xlsynth.mffc_regressions.Case
+
+sha256: "1a5a14f793bb076dbe415bcb2c30816b788600a5866819aa93c0cc4f6b23f8dc"
+split_adder {
+  disabled_limits {
+    and_nodes_max: 66
+    graph_le_max: 47.30230014772293
+    depth_max: 10
+  }
+  enabled_limits {
+    and_nodes_max: 55
+    graph_le_max: 46.4951181135767
+    depth_max: 10
+  }
+}

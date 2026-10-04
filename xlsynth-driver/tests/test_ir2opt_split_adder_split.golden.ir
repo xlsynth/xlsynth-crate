@@ -1,0 +1,16 @@
+package split_adder
+
+top fn main(x: bits[5] id=1, y: bits[5] id=2) -> bits[5] {
+  xlo: bits[1] = bit_slice(x, start=0, width=1, id=3)
+  ylo: bits[1] = bit_slice(y, start=0, width=1, id=4)
+  xhi: bits[4] = bit_slice(x, start=1, width=4, id=5)
+  yhi: bits[4] = bit_slice(y, start=1, width=4, id=6)
+  literal.14: bits[3] = literal(value=0, id=14)
+  carry: bits[1] = and(xlo, ylo, id=7)
+  partial: bits[4] = add(xhi, yhi, id=9)
+  extended: bits[4] = concat(literal.14, carry, id=15)
+  high: bits[4] = add(partial, extended, id=10)
+  low: bits[1] = xor(xlo, ylo, id=11)
+  ret result: bits[5] = concat(high, low, id=12)
+}
+

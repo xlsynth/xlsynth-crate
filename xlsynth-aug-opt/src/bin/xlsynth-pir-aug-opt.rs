@@ -10,6 +10,7 @@ use std::io::Read;
 use clap::Parser;
 use xlsynth_aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
 
+/// Command-line options for exercising the augmented optimizer.
 #[derive(Debug, Parser)]
 #[command(
     name = "xlsynth-pir-aug-opt",
@@ -32,6 +33,10 @@ struct Args {
     /// Run only the aug-opt rewrites (no libxls optimization passes).
     #[arg(long, default_value_t = false)]
     aug_opt_only: bool,
+
+    /// Recover split additions as full-width add operations.
+    #[arg(long, action = clap::ArgAction::Set, default_value_t = AugOptOptions::default().recover_split_adders)]
+    recover_split_adders: bool,
 }
 
 fn read_ir_text(input: &str) -> Result<String, String> {
@@ -70,6 +75,7 @@ fn main() {
             } else {
                 AugOptMode::Sandwich
             },
+            recover_split_adders: args.recover_split_adders,
         },
     ) {
         Ok(s) => s,

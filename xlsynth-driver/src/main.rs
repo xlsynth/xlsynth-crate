@@ -1076,6 +1076,15 @@ fn main() {
                         .value_parser(["true", "false"])
                         .num_args(1)
                         .help("Enable the augmented optimizer sandwich (default: false)"),
+                )
+                .arg(
+                    Arg::new("aug_opt_recover_split_adders")
+                        .long("aug-opt-recover-split-adders")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(bool))
+                        .num_args(1)
+                        .help("Recover split additions within aug-opt (default: true)"),
                 ),
         )
         .subcommand(

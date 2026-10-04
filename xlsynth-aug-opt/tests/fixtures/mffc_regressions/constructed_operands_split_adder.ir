@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package mffc_regression
+
+// Split five-bit addition with operands constructed from data and predicate masks.
+// Inputs: p0 and p1 are u4; p2 through p11 are u1.
+// DSLX expression:
+//   {
+//     let x_mask: u5 = if !(p3 | p6 | p2) { u5:31 } else { u5:0 };
+//     let y_mask: u5 = if !(p9 | p10 | p11) { u5:31 } else { u5:0 };
+//     let x: u5 = (u1:0 ++ p1) | ((u4:15 ++ (p4 | p5)) & x_mask);
+//     let y: u5 = (u1:0 ++ p0) | ((u4:15 ++ (p7 | p8)) & y_mask);
+//     let low: u1 = x[0:1] ^ y[0:1];
+//     let carry: u4 = (x[0:1] & y[0:1]) as u4;
+//     let high: u4 = x[1:5] + y[1:5] + carry;
+//     high ++ low
+//   }
+top fn main(p0: bits[4] id=1, p1: bits[4] id=2, p2: bits[1] id=3, p3: bits[1] id=4, p4: bits[1] id=5, p5: bits[1] id=6, p6: bits[1] id=7, p7: bits[1] id=8, p8: bits[1] id=9, p9: bits[1] id=10, p10: bits[1] id=11, p11: bits[1] id=12) -> bits[5] {
+  literal.13: bits[3] = literal(value=0, id=13)
+  literal.14: bits[4] = literal(value=15, id=14)
+  or.15: bits[1] = or(p4, p5, id=15)
+  nor.16: bits[1] = nor(p3, p6, p2, id=16)
+  or.17: bits[1] = or(p7, p8, id=17)
+  nor.18: bits[1] = nor(p9, p10, p11, id=18)
+  literal.19: bits[1] = literal(value=0, id=19)
+  concat.20: bits[5] = concat(literal.14, or.15, id=20)
+  sign_ext.21: bits[5] = sign_ext(nor.16, new_bit_count=5, id=21)
+  concat.22: bits[5] = concat(literal.14, or.17, id=22)
+  sign_ext.23: bits[5] = sign_ext(nor.18, new_bit_count=5, id=23)
+  concat.24: bits[5] = concat(literal.19, p1, id=24)
+  and.25: bits[5] = and(concat.20, sign_ext.21, id=25)
+  concat.26: bits[5] = concat(literal.19, p0, id=26)
+  and.27: bits[5] = and(concat.22, sign_ext.23, id=27)
+  or.28: bits[5] = or(concat.24, and.25, id=28)
+  or.29: bits[5] = or(concat.26, and.27, id=29)
+  bit_slice.30: bits[1] = bit_slice(or.28, start=0, width=1, id=30)
+  bit_slice.31: bits[1] = bit_slice(or.29, start=0, width=1, id=31)
+  bit_slice.32: bits[4] = bit_slice(or.28, start=1, width=4, id=32)
+  bit_slice.33: bits[4] = bit_slice(or.29, start=1, width=4, id=33)
+  and.34: bits[1] = and(bit_slice.30, bit_slice.31, id=34)
+  add.35: bits[4] = add(bit_slice.32, bit_slice.33, id=35)
+  concat.36: bits[4] = concat(literal.13, and.34, id=36)
+  add.37: bits[4] = add(add.35, concat.36, id=37)
+  xor.38: bits[1] = xor(bit_slice.30, bit_slice.31, id=38)
+  ret concat.39: bits[5] = concat(add.37, xor.38, id=39)
+}

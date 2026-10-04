@@ -2172,6 +2172,53 @@ top fn main(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4)
 }
 
 #[test]
+fn test_ir2opt_aug_opt_split_adder_recovery() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("split.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package split_adder
+
+top fn main(x: bits[5] id=1, y: bits[5] id=2) -> bits[5] {
+  xlo: bits[1] = bit_slice(x, start=0, width=1, id=3)
+  ylo: bits[1] = bit_slice(y, start=0, width=1, id=4)
+  xhi: bits[4] = bit_slice(x, start=1, width=4, id=5)
+  yhi: bits[4] = bit_slice(y, start=1, width=4, id=6)
+  carry: bits[1] = and(xlo, ylo, id=7)
+  extended: bits[4] = zero_ext(carry, new_bit_count=4, id=8)
+  partial: bits[4] = add(xhi, yhi, id=9)
+  high: bits[4] = add(partial, extended, id=10)
+  low: bits[1] = xor(xlo, ylo, id=11)
+  ret result: bits[5] = concat(high, low, id=12)
+}
+"#,
+    )
+    .unwrap();
+    for (flag, golden) in [
+        (None, "tests/test_ir2opt_split_adder_recovered.golden.ir"),
+        (
+            Some("--aug-opt-recover-split-adders=true"),
+            "tests/test_ir2opt_split_adder_recovered.golden.ir",
+        ),
+        (
+            Some("--aug-opt-recover-split-adders=false"),
+            "tests/test_ir2opt_split_adder_split.golden.ir",
+        ),
+    ] {
+        let mut args = vec![
+            "ir2opt",
+            ir_path.to_str().unwrap(),
+            "--top",
+            "main",
+            "--aug-opt=true",
+        ];
+        args.extend(flag);
+        let output = run_driver_success(&args);
+        compare_golden_text(&String::from_utf8(output).unwrap(), golden);
+    }
+}
+
+#[test]
 fn test_ir_inline_subcommand_default_unroll_true() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();

@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Regenerate the checked-in descriptor with protoc 28.0-rc3 from this directory:
+// protoc --include_source_info --descriptor_set_out=corpus.bin corpus.proto
+syntax = "proto2";
+
+package xlsynth.mffc_regressions;
+
+// Absolute bounds on the mapped result, with tolerance in profile.textproto.
+message Limits {
+  required uint64 and_nodes_max = 1;
+  required double graph_le_max = 2;
+  required uint64 depth_max = 3;
+}
+
+// Shift cases also compare their optimized result with the fixed input.
+message ShiftExpectations {
+  required bool require_improvement = 1;
+  required Limits limits = 2;
+}
+
+// Split-adder cases measure both settings of the recovery option.
+message SplitAdderExpectations {
+  required Limits disabled_limits = 1;
+  required Limits enabled_limits = 2;
+  optional string same_as = 3;
+}
+
+// The filename supplies the case name; the paired IR supplies its top function.
+message Case {
+  required string sha256 = 1;
+  oneof expectations {
+    ShiftExpectations shift = 2;
+    SplitAdderExpectations split_adder = 3;
+  }
+}
+
+// The shared mapping configuration for every case in the directory.
+message MappingProfile {
+  required CanonicalG8rOptions canonical_options = 1;
+  required uint64 cut_db_rewrite_max_iterations = 2;
+  required uint64 cut_db_rewrite_max_cuts_per_node = 3;
+  required double graph_le_tolerance = 4;
+}
+
+// Pins the existing Rust options explicitly, including their default values.
+// Enum names use the Rust serde spellings and are validated by that deserializer.
+message CanonicalG8rOptions {
+  required bool fold = 1;
+  required bool hash = 2;
+  required bool track_pir_node_ids = 3;
+  required bool enable_rewrite_carry_out = 4;
+  required bool enable_rewrite_prio_encode = 5;
+  required bool enable_rewrite_nary_add = 6;
+  required bool enable_rewrite_mask_low = 7;
+  required bool enable_rewrite_normalize_left = 8;
+  required bool enable_formal_array_alias_analysis = 9;
+  required string adder_mapping = 10;
+  // Omit to inherit the regular adder mapping for multiplier accumulation.
+  optional string mul_adder_mapping = 11;
+  required bool unsafe_gatify_gate_operation = 12;
+  required bool fraig = 13;
+  required bool reassociation = 14;
+  required uint64 max_fraig_sim_samples = 15;
+  required string gate_formal_backend = 16;
+  required uint32 cadical_terminate_limit = 17;
+  required bool compute_graph_logical_effort = 18;
+  required double graph_logical_effort_beta1 = 19;
+  required double graph_logical_effort_beta2 = 20;
+  required bool cut_db_rewrite = 21;
+  required bool cut_db_enable_large_cone_rewrite = 22;
+  required string cut_db_rewrite_mode = 23;
+  required uint64 toggle_sample_count = 24;
+  required uint64 toggle_sample_seed = 25;
+}

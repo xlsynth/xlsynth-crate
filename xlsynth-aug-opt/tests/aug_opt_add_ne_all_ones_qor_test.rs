@@ -23,6 +23,7 @@ fn stats_for_aug_opt_mode(enable_aug_opt: bool) -> (usize, usize) {
             enable: enable_aug_opt,
             rounds: 1,
             mode: AugOptMode::PirOnly,
+            ..Default::default()
         },
         ir2gates::Ir2GatesOptions {
             check_equivalence: true,

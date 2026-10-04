@@ -13,6 +13,12 @@ The canonical entrypoints are
 for profitability checks. See the [crate README](../README.md) for library use,
 the standalone executable, and migration from the PIR and g8r entrypoints.
 
+Both modes run a bounded number of rounds (`AugOptOptions::rounds`, default 1),
+so opposing rewrites could cause repeated work but would not make this loop
+unbounded. The round limit is not a substitute for compatible canonicalization
+directions: changes to interacting passes should include stability tests across
+repeated rounds, including the libxls passes in sandwich mode.
+
 The following pseudocode uses `sel(p, [a, b])` for a one-bit selection that
 returns `a` when `p` is zero and `b` when it is one. A slice `x[a:b]` contains
 bits `a` through `b - 1`. Arithmetic on `N`-bit values is modulo `2^N`, and
@@ -111,6 +117,37 @@ graphs or profitability policy.
   have a single user to avoid replicating comparisons across several consumers.
 
 ## Arithmetic
+
+### Split-adder recovery
+
+[Split-adder recovery](../src/split_adder.rs) recognizes the low sum bit and
+upper carry sum as one modular addition. For `x, y: bits[N]`, `N >= 2`, with
+one-bit `xlo = x[0:1]` and `ylo = y[0:1]`:
+
+```text
+concat(x[1:N] + y[1:N] + zext<N-1>(xlo & ylo), xlo ^ ylo)
+  -> x + y
+```
+
+The upper arithmetic must have exactly `N-1` bits. Matching allows commuted
+operands and reassociated additions, and accepts a zero-prefix concatenation
+for the carry extension. Upper arithmetic and the low XOR must have no users
+outside the matched expression. Source operands may be shared.
+
+This recovers an ordinary XLS `add` for downstream optimization and operator
+mapping. It has no local gate-cost acceptance test: mapped area and delay can
+trade off, including after gate cleanup. `AugOptOptions::recover_split_adders`
+defaults to `true`; disabling it leaves the other rewrites enabled for
+comparisons. `AugOptRewriteStats::split_adders_recovered` counts applications.
+
+The full-width `add` is the preferred aug-opt form of this identity. Aug-opt
+rewrites should preserve that direction; choosing a split implementation for
+gate cost belongs in downstream mapping. Constant folding or simplification
+using additional facts may still eliminate the addition. The regression tests
+check that repeated PIR and sandwich rounds produce stable output without
+recovering the same addition again.
+
+### Other arithmetic rewrites
 
 - **Sum equal to zero:** `x + y == 0` becomes `y == 0 - x`, exposing a modular
   equation that XLS may simplify further.

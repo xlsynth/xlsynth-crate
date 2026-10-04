@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
+# proto-message: xlsynth.mffc_regressions.MappingProfile
+
+canonical_options {
+  fold: true
+  hash: true
+  track_pir_node_ids: false
+  enable_rewrite_carry_out: true
+  enable_rewrite_prio_encode: true
+  enable_rewrite_nary_add: true
+  enable_rewrite_mask_low: true
+  enable_rewrite_normalize_left: true
+  enable_formal_array_alias_analysis: true
+  adder_mapping: "brent-kung"
+  unsafe_gatify_gate_operation: false
+  fraig: false
+  reassociation: true
+  max_fraig_sim_samples: 8192
+  gate_formal_backend: "cadical"
+  cadical_terminate_limit: 1000
+  compute_graph_logical_effort: true
+  graph_logical_effort_beta1: 1.0
+  graph_logical_effort_beta2: 0.0
+  cut_db_rewrite: true
+  cut_db_enable_large_cone_rewrite: true
+  cut_db_rewrite_mode: "Delay"
+  toggle_sample_count: 0
+  toggle_sample_seed: 0
+}
+cut_db_rewrite_max_iterations: 0
+cut_db_rewrite_max_cuts_per_node: 64
+graph_le_tolerance: 0.000001

@@ -19,6 +19,7 @@ const PIR_ONLY: AugOptOptions = AugOptOptions {
     enable: true,
     rounds: 1,
     mode: AugOptMode::PirOnly,
+    recover_split_adders: true,
 };
 
 #[test]
@@ -49,6 +50,7 @@ top fn package_top(x: bits[4] id=3) -> bits[4] {
                     enable,
                     mode,
                     rounds: 1,
+                    ..Default::default()
                 },
                 Ir2GatesOptions::all_opts_disabled(),
             )

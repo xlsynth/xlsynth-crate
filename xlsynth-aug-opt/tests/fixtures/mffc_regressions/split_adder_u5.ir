@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package mffc_regression
+
+// Five-bit addition split into a low XOR and a four-bit sum with carry.
+// Inputs: x and y are u5.
+// DSLX expression:
+//   {
+//     let low: u1 = x[0:1] ^ y[0:1];
+//     let carry: u4 = (x[0:1] & y[0:1]) as u4;
+//     let high: u4 = x[1:5] + y[1:5] + carry;
+//     high ++ low
+//   }
+top fn main(x: bits[5] id=1, y: bits[5] id=2) -> bits[5] {
+  xlo: bits[1] = bit_slice(x, start=0, width=1, id=3)
+  ylo: bits[1] = bit_slice(y, start=0, width=1, id=4)
+  xhi: bits[4] = bit_slice(x, start=1, width=4, id=5)
+  yhi: bits[4] = bit_slice(y, start=1, width=4, id=6)
+  c: bits[1] = and(xlo, ylo, id=7)
+  cext: bits[4] = zero_ext(c, new_bit_count=4, id=8)
+  hi: bits[4] = add(xhi, yhi, id=9)
+  hic: bits[4] = add(hi, cext, id=10)
+  low: bits[1] = xor(xlo, ylo, id=11)
+  ret out: bits[5] = concat(hic, low, id=12)
+}

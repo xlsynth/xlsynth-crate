@@ -24,6 +24,7 @@ use crate::constant_shift_choices::{
 };
 use crate::cost::GateBuilderCostEvaluator;
 use crate::ir_cost::ShiftChoiceCostEvaluator;
+use crate::split_adder::rewrite_split_adders;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::desugar_extensions::{self, ExtensionEmitMode};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -50,6 +51,8 @@ pub struct AugOptOptions {
     pub enable: bool,
     pub rounds: usize,
     pub mode: AugOptMode,
+    /// Recover full-width additions from their low sum bit and upper carry sum.
+    pub recover_split_adders: bool,
 }
 
 /// Counts applications of each augmented rewrite across the requested rounds.
@@ -58,6 +61,8 @@ pub struct AugOptRewriteStats {
     pub guarded_sel_ne1_nor: usize,
     /// Shift and shift-slice sites expanded from bounded constant choices.
     pub constant_shift_choices: usize,
+    /// Split low-bit/upper-carry sums reconstructed as full-width additions.
+    pub split_adders_recovered: usize,
     pub lsb_of_shll: usize,
     pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
@@ -75,6 +80,7 @@ impl AugOptRewriteStats {
     pub fn total(&self) -> usize {
         self.guarded_sel_ne1_nor
             .saturating_add(self.constant_shift_choices)
+            .saturating_add(self.split_adders_recovered)
             .saturating_add(self.lsb_of_shll)
             .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
@@ -95,6 +101,9 @@ impl AugOptRewriteStats {
         self.constant_shift_choices = self
             .constant_shift_choices
             .saturating_add(other.constant_shift_choices);
+        self.split_adders_recovered = self
+            .split_adders_recovered
+            .saturating_add(other.split_adders_recovered);
         self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
         self.eq_shll_slice_literal = self
             .eq_shll_slice_literal
@@ -149,6 +158,7 @@ impl Default for AugOptOptions {
             enable: false,
             rounds: 1,
             mode: AugOptMode::Sandwich,
+            recover_split_adders: true,
         }
     }
 }
@@ -218,7 +228,12 @@ fn run_aug_opt_over_ir_text_impl(
             let mut total_rewrites = 0usize;
             for _round in 0..options.rounds {
                 let (lowered_text, rewrites_in_round, total_in_round) =
-                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name, &mut evaluator)?;
+                    apply_pir_rewrites_to_ir_text(
+                        &cur_text,
+                        &top_name,
+                        options.recover_split_adders,
+                        &mut evaluator,
+                    )?;
                 let (sel_text, mask_to_sel_count) =
                     canonicalize_masks_to_sel_for_xls_opt_in_ir_text(&lowered_text, &top_name)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
@@ -267,8 +282,12 @@ fn run_aug_opt_over_ir_text_impl(
             }
 
             for _round in 0..options.rounds {
-                let (next_text, rewrites_in_round, total_in_round) =
-                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name, &mut evaluator)?;
+                let (next_text, rewrites_in_round, total_in_round) = apply_pir_rewrites_to_ir_text(
+                    &cur_text,
+                    &top_name,
+                    options.recover_split_adders,
+                    &mut evaluator,
+                )?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
                 total_rewrites = total_rewrites.saturating_add(total_in_round);
                 cur_text = next_text;
@@ -285,6 +304,7 @@ fn run_aug_opt_over_ir_text_impl(
 fn apply_pir_rewrites_to_ir_text(
     ir_text: &str,
     top_name: &str,
+    recover_split_adders: bool,
     evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
 ) -> Result<(String, AugOptRewriteStats, usize), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
@@ -314,8 +334,12 @@ fn apply_pir_rewrites_to_ir_text(
     let range_info = IrRangeInfo::build_from_analysis(&analysis, &top_fn)
         .map_err(|e| format!("aug_opt: building IrRangeInfo failed: {e}"))?;
 
-    let (rewritten_top, rewrites_in_round, total_in_round) =
-        apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()), evaluator)?;
+    let (rewritten_top, rewrites_in_round, total_in_round) = apply_basis_rewrites_to_fn(
+        &top_fn,
+        Some(range_info.as_ref()),
+        recover_split_adders,
+        evaluator,
+    )?;
 
     replace_top_and_validate(&mut pir_pkg, rewritten_top)?;
 
@@ -421,6 +445,7 @@ fn optimize_ir_text_preserving_extension_ops(
 fn apply_basis_rewrites_to_fn(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
+    recover_split_adders: bool,
     evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
 ) -> Result<(ir::Fn, AugOptRewriteStats, usize), String> {
     let mut cloned = f.clone();
@@ -444,6 +469,9 @@ fn apply_basis_rewrites_to_fn(
     stats.selected_opposite_subtracts = rewrite_selected_opposite_subtracts(&mut cloned);
     stats.ne_shrl_slice_known_one_shift_nonzero =
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
+    if recover_split_adders {
+        stats.split_adders_recovered = rewrite_split_adders(&mut cloned);
+    }
     // Candidate construction compacts the graph; run it after all consumers of
     // the original range facts. The next round rebuilds its analysis.
     if let Some(evaluator) = evaluator.as_deref_mut() {
@@ -2731,6 +2759,7 @@ top fn f(x: bits[4] id=1, en: bits[1] id=2, p: bits[1] id=3, q: bits[1] id=4) ->
                         enable: true,
                         rounds,
                         mode: AugOptMode::PirOnly,
+                        ..Default::default()
                     },
                     None,
                 )
@@ -2827,6 +2856,7 @@ top fn selected_sub_qor(p: bits[1] id=1, a: bits[{width}] id=2, b: bits[{width}]
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt")
@@ -3156,6 +3186,7 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3, z: bits[8] id=4) 
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::Sandwich,
+                ..Default::default()
             },
         )
         .expect("aug opt sandwich");
@@ -3208,6 +3239,7 @@ top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt pir-only");
@@ -3426,6 +3458,7 @@ top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3)
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::Sandwich,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3467,6 +3500,7 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::Sandwich,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3497,6 +3531,7 @@ top fn cone(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3556,6 +3591,7 @@ top fn cone(sel: bits[2] id=1, a: bits[6] id=2, b: bits[6] id=3, d: bits[6] id=4
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3616,6 +3652,7 @@ top fn cone(s: bits[1] id=1, a: bits[3] id=2, b: bits[3] id=3) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3668,6 +3705,7 @@ top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3)
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt aug-opt-only");
@@ -3723,6 +3761,7 @@ fn b(y: bits[1] id=10) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt aug-opt-only");
@@ -3751,6 +3790,7 @@ top fn main(x: bits[4] id=1) -> bits[3] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::Sandwich,
+                ..Default::default()
             },
         )
         .expect("aug opt should preserve ext ops through FFI wrappers");
@@ -3785,6 +3825,7 @@ top fn main(x: bits[4] id=1) -> bits[3] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt pir-only should not reject ext ops");
@@ -3821,6 +3862,7 @@ top fn cone(sel: bits[1] id=1, x: bits[5] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3875,6 +3917,7 @@ top fn cone(leaf_52: bits[2] id=1, y: bits[5] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3935,6 +3978,7 @@ top fn cone(leaf_303: bits[8] id=1, leaf_304: bits[8] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -3994,6 +4038,7 @@ top fn cone(leaf_168: bits[10] id=1, leaf_236: bits[4] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4049,6 +4094,7 @@ top fn cone(x: bits[10] id=1, s: bits[4] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4101,6 +4147,7 @@ top fn cone(x: bits[9] id=1, s: bits[4] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4152,6 +4199,7 @@ top fn cone(x: bits[{x_width}] id=1, s: bits[{s_width}] id=2) -> bits[1] {{
                                     enable: true,
                                     rounds: 1,
                                     mode: AugOptMode::PirOnly,
+                                    ..Default::default()
                                 },
                             )
                             .expect("aug opt");
@@ -4192,6 +4240,7 @@ top fn cone(x: bits[{width}] id=1, s: bits[7] id=2) -> bits[1] {{
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4232,6 +4281,7 @@ top fn main(a: bits[10] id=1, b: bits[10] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4287,6 +4337,7 @@ top fn cone(x: bits[8] id=1, a: bits[7] id=2) -> bits[1] {
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4334,6 +4385,7 @@ fn b(y: bits[1] id=10) -> bits[1] {
                 enable: true,
                 rounds: 0,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt aug-opt-only rounds=0");
@@ -4362,6 +4414,7 @@ top fn a(x: bits[1] id=1) -> bits[1] {
                 enable: true,
                 rounds: 0,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect_err("expected invalid top to error");
@@ -4392,6 +4445,7 @@ top fn cone(s: bits[1] id=1, x: bits[8] id=2, a: bits[8] id=3, b: bits[8] id=4) 
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4447,6 +4501,7 @@ top fn cone(
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
@@ -4518,6 +4573,7 @@ top fn cone(
                 enable: true,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
+                ..Default::default()
             },
         )
         .expect("aug opt");
