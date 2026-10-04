@@ -36,7 +36,7 @@
     "cut_db_rewrite_max_iterations": 0,
     "cut_db_rewrite_max_cuts_per_node": 64
   },
-  "candidate_description": "Constant-shift choice expansion; historical measurements used g8r fusion, regression checks use one PIR-only aug-opt round.",
+  "candidate_description": "Shift cases compare fixed IR with aug-opt; split-adder cases compare recovery disabled and enabled in PIR-only and sandwich modes.",
   "cases": [
     {
       "name": "controlled_constant_left_shift",
@@ -180,6 +180,81 @@
         "graph_le_max": 31.05390204572749,
         "depth_max": 7,
         "graph_le_tolerance": 1e-06
+      }
+    }
+  ],
+  "split_adder_cases": [
+    {
+      "name": "split_adder_u5",
+      "file": "split_adder_u5.ir",
+      "top": "main",
+      "sha256": "62cc44b43fed0756049f8ce883ec3fe9e4615327a78e173ee078850dabca4e3e",
+      "disabled_limits": {
+        "and_nodes_max": 52,
+        "graph_le_max": 33.7798350897849,
+        "depth_max": 7,
+        "graph_le_tolerance": 0.000001
+      },
+      "enabled_limits": {
+        "and_nodes_max": 35,
+        "graph_le_max": 31.91506471605578,
+        "depth_max": 7,
+        "graph_le_tolerance": 0.000001
+      }
+    },
+    {
+      "name": "constructed_operands_split_adder",
+      "file": "constructed_operands_split_adder.ir",
+      "top": "main",
+      "sha256": "1a5a14f793bb076dbe415bcb2c30816b788600a5866819aa93c0cc4f6b23f8dc",
+      "disabled_limits": {
+        "and_nodes_max": 66,
+        "graph_le_max": 47.30230014772293,
+        "depth_max": 10,
+        "graph_le_tolerance": 0.000001
+      },
+      "enabled_limits": {
+        "and_nodes_max": 55,
+        "graph_le_max": 46.4951181135767,
+        "depth_max": 10,
+        "graph_le_tolerance": 0.000001
+      }
+    },
+    {
+      "name": "masked_split_adder",
+      "file": "masked_split_adder.ir",
+      "top": "main",
+      "sha256": "1a6707fbbd1b7380a32c6bc46c01c082e53a2210fdea57a682aad3f5418028ef",
+      "disabled_limits": {
+        "and_nodes_max": 85,
+        "graph_le_max": 50.88375016140581,
+        "depth_max": 11,
+        "graph_le_tolerance": 0.000001
+      },
+      "enabled_limits": {
+        "and_nodes_max": 77,
+        "graph_le_max": 46.4951181135767,
+        "depth_max": 10,
+        "graph_le_tolerance": 0.000001
+      }
+    },
+    {
+      "name": "masked_split_adder_reordered",
+      "file": "masked_split_adder_reordered.ir",
+      "top": "main",
+      "sha256": "372ba639fdeec3d8878e8f58a081ea618c2ee30424dcb48ede2739ec193deeae",
+      "same_as": "masked_split_adder",
+      "disabled_limits": {
+        "and_nodes_max": 85,
+        "graph_le_max": 50.88375016140581,
+        "depth_max": 11,
+        "graph_le_tolerance": 0.000001
+      },
+      "enabled_limits": {
+        "and_nodes_max": 77,
+        "graph_le_max": 46.4951181135767,
+        "depth_max": 10,
+        "graph_le_tolerance": 0.000001
       }
     }
   ]
