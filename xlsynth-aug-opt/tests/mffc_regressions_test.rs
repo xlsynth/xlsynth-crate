@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use mffc_corpus::{Expectations, Limits, MappingProfile};
 use xlsynth_aug_opt::run_aug_opt_over_ir_text_with_stats;
 use xlsynth_aug_opt::{AugOptMode, AugOptOptions};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
@@ -12,67 +10,12 @@ use xlsynth_g8r::aig::graph_logical_effort::{
     GraphLogicalEffortOptions, analyze_graph_logical_effort,
 };
 use xlsynth_g8r::check_equivalence::validate_same_fn_via_toolchain;
-use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, process_ir_text_with_gatefn};
+use xlsynth_g8r::process_ir_path::process_ir_text_with_gatefn;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::node_hashing::functions_structurally_equivalent;
 
-/// Pins the shared mapping profile and expectations for each fixture family.
-#[derive(Deserialize)]
-struct Corpus {
-    schema: String,
-    measurement_mode: MeasurementMode,
-    cases: Vec<Case>,
-    split_adder_cases: Vec<SplitAdderCase>,
-}
-
-/// Keeps gate mapping identical across the compared optimizer configurations.
-#[derive(Deserialize)]
-struct MeasurementMode {
-    input: String,
-    abc: bool,
-    canonical_options: CanonicalG8rOptions,
-    cut_db_rewrite_max_iterations: usize,
-    cut_db_rewrite_max_cuts_per_node: usize,
-}
-
-/// Identifies a fixed IR input and detects accidental changes to its contents.
-#[derive(Deserialize)]
-struct Fixture {
-    name: String,
-    file: String,
-    top: String,
-    sha256: String,
-}
-
-/// Retains the original shift corpus's strict nonregression expectations.
-#[derive(Deserialize)]
-struct Case {
-    #[serde(flatten)]
-    fixture: Fixture,
-    require_improvement: bool,
-    regression_limits: Limits,
-}
-
-/// Shares measured bounds for add recovery across exact-input and sandwich
-/// modes.
-#[derive(Deserialize)]
-struct SplitAdderCase {
-    #[serde(flatten)]
-    fixture: Fixture,
-    disabled_limits: Limits,
-    enabled_limits: Limits,
-    same_as: Option<String>,
-}
-
-/// Allows improvements while guarding each measured area and delay metric.
-#[derive(Deserialize)]
-struct Limits {
-    and_nodes_max: usize,
-    graph_le_max: f64,
-    depth_max: usize,
-    graph_le_tolerance: f64,
-}
+pub mod mffc_corpus;
 
 /// Records reachable gate cost after the same internal cleanup on both sides.
 #[derive(Debug)]
@@ -82,43 +25,20 @@ struct MeasuredCost {
     depth: usize,
 }
 
-/// Owns a verified fixture's text and parsed function for equivalence checking.
-struct LoadedFixture {
-    text: String,
-    original: ir::Fn,
-}
-
 /// Retains one serialization's results for comparison with its ordering
 /// variant.
-struct RecoveryResult {
-    original: ir::Fn,
+struct RecoveryResult<'a> {
+    original: &'a ir::Fn,
     optimized: ir::Fn,
     disabled: MeasuredCost,
     enabled: MeasuredCost,
-}
-
-/// Reads a fixed input and checks its hash, syntax, and declared top function.
-fn load_fixture(root: &Path, fixture: &Fixture) -> Result<LoadedFixture, String> {
-    let text = std::fs::read_to_string(root.join(&fixture.file)).map_err(|e| e.to_string())?;
-    let actual_hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-    if actual_hash != fixture.sha256 {
-        return Err(format!("{}: fixture content changed", fixture.name));
-    }
-    let package = Parser::new(&text)
-        .parse_and_validate_package()
-        .map_err(|e| e.to_string())?;
-    let original = package
-        .get_fn(&fixture.top)
-        .cloned()
-        .ok_or_else(|| format!("{}: fixture top is missing", fixture.name))?;
-    Ok(LoadedFixture { text, original })
 }
 
 /// Maps and proves one optimizer output against its untouched fixture.
 fn measure_cost(
     text: &str,
     original: &ir::Fn,
-    mode: &MeasurementMode,
+    mode: &MappingProfile,
 ) -> Result<MeasuredCost, String> {
     let mut options = mode.canonical_options.to_process_ir_path_options(
         Some(&original.name),
@@ -144,11 +64,10 @@ fn measure_cost(
 }
 
 /// Checks absolute bounds so known area/delay tradeoffs remain reviewable.
-fn assert_within_limits(cost: &MeasuredCost, limits: &Limits, context: &str) {
-    assert!(limits.graph_le_tolerance.is_finite() && limits.graph_le_tolerance >= 0.0);
+fn assert_within_limits(cost: &MeasuredCost, limits: &Limits, tolerance: f64, context: &str) {
     assert!(
         cost.and_nodes <= limits.and_nodes_max
-            && cost.graph_le <= limits.graph_le_max + limits.graph_le_tolerance
+            && cost.graph_le <= limits.graph_le_max + tolerance
             && cost.depth <= limits.depth_max,
         "{context}: exceeded recorded QoR limits: {cost:?}",
     );
@@ -157,25 +76,29 @@ fn assert_within_limits(cost: &MeasuredCost, limits: &Limits, context: &str) {
 /// Checks fixed IR and aug-opt under one pinned mapping profile.
 #[test]
 fn mffc_corpus_respects_equivalence_and_qor_limits() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mffc_regressions");
-    let corpus: Corpus =
-        serde_json::from_str(include_str!("fixtures/mffc_regressions/manifest.json"))
-            .expect("valid regression manifest");
-    assert_eq!(corpus.schema, "g8r-standalone-ir-regression-corpus-v1");
-    assert!(!corpus.cases.is_empty());
-    let mode = &corpus.measurement_mode;
-    assert_eq!(
-        mode.input,
-        "fixed IR baseline; one PIR-only aug-opt round for the candidate"
+    let corpus = mffc_corpus::load().unwrap();
+    assert!(
+        corpus
+            .cases
+            .iter()
+            .any(|case| matches!(case.expectations, Expectations::Shift { .. }))
     );
-    assert!(!mode.abc && !mode.canonical_options.fraig);
+    let mode = &corpus.profile;
+    let tolerance = mode.graph_le_tolerance;
+    assert!(!mode.canonical_options.fraig);
 
     for case in corpus.cases {
-        let fixture = &case.fixture;
-        let LoadedFixture { text, original } = load_fixture(&root, fixture).unwrap();
+        let Expectations::Shift {
+            require_improvement,
+            limits,
+        } = case.expectations
+        else {
+            // Add recovery has its own flag comparison and bounds below.
+            continue;
+        };
         let rewritten = run_aug_opt_over_ir_text_with_stats(
-            &text,
-            Some(&fixture.top),
+            &case.text,
+            Some(&case.original.name),
             AugOptOptions {
                 enable: true,
                 rounds: 1,
@@ -184,34 +107,32 @@ fn mffc_corpus_respects_equivalence_and_qor_limits() {
             },
         )
         .expect("aug-opt succeeds on corpus fixture");
-        if case.require_improvement {
+        if require_improvement {
             assert!(rewritten.rewrite_stats.constant_shift_choices > 0);
         }
         let [fixed, augmented] = [
-            ("fixed IR", text.as_str()),
+            ("fixed IR", case.text.as_str()),
             ("aug-opt", rewritten.output_text.as_str()),
         ]
         .map(|(pipeline, input)| {
-            measure_cost(input, &original, mode)
-                .unwrap_or_else(|error| panic!("{} ({pipeline}): {error}", fixture.name))
+            measure_cost(input, &case.original, mode)
+                .unwrap_or_else(|error| panic!("{} ({pipeline}): {error}", case.name))
         });
 
-        let limits = &case.regression_limits;
-        let tolerance = limits.graph_le_tolerance;
-        eprintln!("{}: fixed={fixed:?}, aug-opt={augmented:?}", fixture.name);
-        assert_within_limits(&augmented, limits, &fixture.name);
+        eprintln!("{}: fixed={fixed:?}, aug-opt={augmented:?}", case.name);
+        assert_within_limits(&augmented, &limits, tolerance, &case.name);
         assert!(
             augmented.and_nodes <= fixed.and_nodes
                 && augmented.graph_le <= fixed.graph_le + tolerance,
             "{}: aug-opt regressed: fixed={fixed:?}, augmented={augmented:?}",
-            fixture.name,
+            case.name,
         );
-        if case.require_improvement {
+        if require_improvement {
             assert!(
                 augmented.and_nodes < fixed.and_nodes
                     || augmented.graph_le < fixed.graph_le - tolerance,
                 "{}: expected aug-opt to improve: fixed={fixed:?}, augmented={augmented:?}",
-                fixture.name,
+                case.name,
             );
         }
     }
@@ -220,23 +141,33 @@ fn mffc_corpus_respects_equivalence_and_qor_limits() {
 /// Checks both add-recovery flag settings without imposing a Pareto policy.
 #[test]
 fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mffc_regressions");
-    let corpus: Corpus =
-        serde_json::from_str(include_str!("fixtures/mffc_regressions/manifest.json"))
-            .expect("valid regression manifest");
-    assert!(!corpus.split_adder_cases.is_empty());
-    assert!(!corpus.measurement_mode.abc && !corpus.measurement_mode.canonical_options.fraig);
+    let corpus = mffc_corpus::load().unwrap();
+    assert!(
+        corpus
+            .cases
+            .iter()
+            .any(|case| matches!(case.expectations, Expectations::SplitAdder { .. }))
+    );
+    assert!(!corpus.profile.canonical_options.fraig);
+    let tolerance = corpus.profile.graph_le_tolerance;
 
     for mode in [AugOptMode::PirOnly, AugOptMode::Sandwich] {
         let mut results = BTreeMap::new();
-        for case in &corpus.split_adder_cases {
-            let fixture = &case.fixture;
-            let context = format!("{} ({mode:?})", fixture.name);
-            let LoadedFixture { text, original } = load_fixture(&root, fixture).unwrap();
+        for case in &corpus.cases {
+            let Expectations::SplitAdder {
+                disabled_limits,
+                enabled_limits,
+                ..
+            } = &case.expectations
+            else {
+                // Shift fixtures are exercised with their own comparison above.
+                continue;
+            };
+            let context = format!("{} ({mode:?})", case.name);
             let [disabled, enabled] = [false, true].map(|recover_split_adders| {
                 run_aug_opt_over_ir_text_with_stats(
-                    &text,
-                    Some(&fixture.top),
+                    &case.text,
+                    Some(&case.original.name),
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
@@ -254,31 +185,33 @@ fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
             let optimized = Parser::new(&enabled.output_text)
                 .parse_and_validate_package()
                 .unwrap()
-                .get_fn(&fixture.top)
+                .get_fn(&case.original.name)
                 .unwrap()
                 .clone();
-            let disabled = measure_cost(&disabled.output_text, &original, &corpus.measurement_mode)
+            let disabled = measure_cost(&disabled.output_text, &case.original, &corpus.profile)
                 .unwrap_or_else(|e| panic!("{context}: recovery disabled: {e}"));
-            let enabled = measure_cost(&enabled.output_text, &original, &corpus.measurement_mode)
+            let enabled = measure_cost(&enabled.output_text, &case.original, &corpus.profile)
                 .unwrap_or_else(|e| panic!("{context}: recovery enabled: {e}"));
             eprintln!(
                 "{} {mode:?}: disabled={disabled:?}, enabled={enabled:?}",
-                fixture.name
+                case.name
             );
             assert_within_limits(
                 &disabled,
-                &case.disabled_limits,
+                disabled_limits,
+                tolerance,
                 &format!("{context}, disabled"),
             );
             assert_within_limits(
                 &enabled,
-                &case.enabled_limits,
+                enabled_limits,
+                tolerance,
                 &format!("{context}, enabled"),
             );
             results.insert(
-                fixture.name.as_str(),
+                case.name.as_str(),
                 RecoveryResult {
-                    original,
+                    original: &case.original,
                     optimized,
                     disabled,
                     enabled,
@@ -286,28 +219,32 @@ fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
             );
         }
 
-        for case in &corpus.split_adder_cases {
-            let Some(same_as) = &case.same_as else {
+        for case in &corpus.cases {
+            let Expectations::SplitAdder {
+                same_as: Some(same_as),
+                ..
+            } = &case.expectations
+            else {
                 // Only designated ordering variants need a peer comparison.
                 continue;
             };
-            let actual = &results[case.fixture.name.as_str()];
+            let actual = &results[case.name.as_str()];
             let expected = &results[same_as.as_str()];
             assert!(functions_structurally_equivalent(
-                &actual.original,
-                &expected.original
+                actual.original,
+                expected.original
             ));
             assert!(functions_structurally_equivalent(
                 &actual.optimized,
                 &expected.optimized
             ));
-            for (actual, expected, limits) in [
-                (&actual.disabled, &expected.disabled, &case.disabled_limits),
-                (&actual.enabled, &expected.enabled, &case.enabled_limits),
+            for (actual, expected) in [
+                (&actual.disabled, &expected.disabled),
+                (&actual.enabled, &expected.enabled),
             ] {
                 assert_eq!(actual.and_nodes, expected.and_nodes);
                 assert_eq!(actual.depth, expected.depth);
-                assert!((actual.graph_le - expected.graph_le).abs() <= limits.graph_le_tolerance);
+                assert!((actual.graph_le - expected.graph_le).abs() <= tolerance);
             }
         }
     }
