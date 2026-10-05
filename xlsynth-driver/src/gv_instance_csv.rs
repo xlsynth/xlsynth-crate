@@ -9,7 +9,7 @@ use flate2::write::GzEncoder;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
-use xlsynth_g8r::netlist::io::parse_netlist_from_path;
+use xlsynth_g8r::netlist::io::read_gv_from_path;
 use xlsynth_g8r::netlist::utils::module_instance_names_and_types;
 
 pub fn do_gv_instance_csv(opts: &ArgMatches) -> Result<(), String> {
@@ -21,7 +21,7 @@ pub fn do_gv_instance_csv(opts: &ArgMatches) -> Result<(), String> {
         .ok_or("--output argument is required")?;
     // Open and parse the gate-level netlist (supports plain and .gz inputs)
     // using the shared netlist I/O helper for consistent error reporting.
-    let parsed = parse_netlist_from_path(Path::new(input_path))
+    let parsed = read_gv_from_path(Path::new(input_path))
         .map_err(|e| format!("failed to parse gate-level netlist: {e}"))?;
     // Extract (module_name, instance_name, cell_type) triples.
     let triples = module_instance_names_and_types(&parsed.modules, &parsed.interner);

@@ -37,7 +37,7 @@
 //! ```
 
 mod aig2ir;
-mod aig2v;
+mod aig2ugv;
 mod aig_equiv;
 mod aig_eval;
 mod aig_ir_equiv;
@@ -68,7 +68,7 @@ mod fn_type_arg;
 mod g8r2blif;
 mod g8r2ir_block;
 mod g8r2ir_fn;
-mod g8r2v;
+mod g8r2ugv;
 mod g8r_cli;
 mod g8r_equiv;
 mod g8r_eval;
@@ -77,7 +77,6 @@ mod g8r_optimize;
 mod g8r_stitch_pipeline;
 mod g8r_table;
 mod gate_ir_equiv;
-mod gv2aig;
 mod gv2block;
 mod gv2ir;
 mod gv_area;
@@ -128,6 +127,7 @@ mod ir_toggle_hotspots;
 mod lib2proto;
 mod lib_query;
 mod liberty_proto_info;
+mod netlist2aig;
 mod obsolete_options;
 mod proofs;
 mod prove_enum_in_bound;
@@ -1814,10 +1814,10 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
-                    clap::Arg::new("netlist_out")
-                        .long("netlist-out")
+                    clap::Arg::new("ugv_out")
+                        .long("ugv-out")
                         .value_name("PATH")
-                        .help("Path to write the gate-level netlist (human-readable)")
+                        .help("Path to write unmapped gate Verilog (UGV)")
                         .action(clap::ArgAction::Set),
                 )
         )
@@ -1854,10 +1854,10 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
-                    clap::Arg::new("netlist_out")
-                        .long("netlist-out")
+                    clap::Arg::new("ugv_out")
+                        .long("ugv-out")
                         .value_name("PATH")
-                        .help("Path to write the optimized human-readable gate-level netlist")
+                        .help("Path to write optimized unmapped gate Verilog (UGV)")
                         .action(clap::ArgAction::Set),
                 ),
         )
@@ -2179,18 +2179,18 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("gv2aig")
-                .about("Converts a gate-level netlist to AIGER, with or without a Liberty proto")
+                .about("Converts GV cells and wiring to AIGER using Liberty")
                 .arg(
                     Arg::new("netlist")
                         .long("netlist")
-                        .help("Input gate-level netlist (.gv, .v, or .gv.gz)")
+                        .help("Input GV cell netlist (.gv, .v, or gzip-compressed)")
                         .required(true)
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Optional Liberty proto (.proto, .textproto, or either with .gz). Omit this for assign-only structural netlists that use only ~, &, |, and ^.")
+                        .help("Required Liberty proto (.proto, .textproto, or gzip-compressed); use ugv2aig for unmapped gate Verilog")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2215,6 +2215,32 @@ fn main() {
                         .default_value("true")
                         .value_parser(clap::value_parser!(bool))
                         .help("If true, collapse sequential state variables by substituting next_state.")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ugv2aig")
+                .about("Converts combinational unmapped gate Verilog to AIGER")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input UGV Boolean netlist (.ugv, .v, or gzip-compressed)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("aiger_out")
+                        .long("aiger-out")
+                        .value_name("PATH")
+                        .help("Path to write AIGER output; use .aag for ASCII or .aig for binary")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to select when netlist contains multiple modules")
                         .action(ArgAction::Set),
                 ),
         )
@@ -2611,7 +2637,7 @@ fn main() {
                 ),
         )
         .subcommand(
-            clap::Command::new("g8r2v")
+            clap::Command::new("g8r2ugv")
                 .about("Converts a .g8r or .g8rbin sequential design to a .ugv netlist on stdout, emitting stored registers and optionally adding boundary registers.")
                 .arg(
                     clap::Arg::new("g8r_input_file")
@@ -2672,8 +2698,8 @@ fn main() {
                 )
         )
         .subcommand(
-            clap::Command::new("aig2v")
-                .about("Converts an AIGER file to a gate-level netlist on stdout, optionally adding a clocked wrapper.")
+            clap::Command::new("aig2ugv")
+                .about("Converts an AIGER file to unmapped gate Verilog (UGV) on stdout, optionally adding a clocked wrapper.")
                 .arg(
                     clap::Arg::new("aig_input_file")
                         .help("The input AIGER file (.aag or .aig)")
@@ -4148,7 +4174,10 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
             gv2ir::handle_gv2ir(subm);
         }
         Some(("gv2aig", subm)) => {
-            gv2aig::handle_gv2aig(subm);
+            netlist2aig::handle_gv2aig(subm);
+        }
+        Some(("ugv2aig", subm)) => {
+            netlist2aig::handle_ugv2aig(subm);
         }
         Some(("gv-eval", subm)) => {
             if let Err(e) = gv_eval::handle_gv_eval(subm) {
@@ -4174,8 +4203,8 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("gv-dump-cone", subm)) => {
             gv_dump_cone::handle_gv_dump_cone(subm);
         }
-        Some(("g8r2v", subm)) => {
-            if let Err(e) = g8r2v::handle_g8r2v(subm) {
+        Some(("g8r2ugv", subm)) => {
+            if let Err(e) = g8r2ugv::handle_g8r2ugv(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
             }
         }
@@ -4189,9 +4218,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 report_cli_error::report_cli_error_and_exit(&e, Some("blif2g8r"), vec![]);
             }
         }
-        Some(("aig2v", subm)) => {
-            if let Err(e) = aig2v::handle_aig2v(subm) {
-                report_cli_error::report_cli_error_and_exit(&e, Some("aig2v"), vec![]);
+        Some(("aig2ugv", subm)) => {
+            if let Err(e) = aig2ugv::handle_aig2ugv(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("aig2ugv"), vec![]);
             }
         }
         Some(("g8r2ir-block", subm)) => {

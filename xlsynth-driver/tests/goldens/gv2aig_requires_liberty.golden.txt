@@ -1,0 +1,1 @@
+gv2aig requires --liberty_proto; use ugv2aig for unmapped gate Verilog

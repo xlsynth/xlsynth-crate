@@ -103,7 +103,7 @@ pub fn handle_g8r_optimize(matches: &ArgMatches) -> Result<(), String> {
             .map_err(|error| format!("could not write g8r optimization stats '{path}': {error}"))?;
     }
 
-    if let Some(path) = matches.get_one::<String>("netlist_out") {
+    if let Some(path) = matches.get_one::<String>("ugv_out") {
         let netlist = emit_netlist::emit_netlist(&design, false)
             .map_err(|error| format!("could not emit optimized gate-level netlist: {error}"))?;
         std::fs::write(path, netlist)

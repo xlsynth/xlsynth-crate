@@ -2,8 +2,8 @@
 
 //! Token scanner and parser for gate-level netlists.
 //!
-//! For the Liberty-free structural `assign` subset used by `gv2aig`, see
-//! `src/netlist/STRUCTURAL_ASSIGNS.md`.
+//! For the structural `assign` subset used by `ugv2aig`, see
+//! `src/netlist/UGV.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -155,8 +155,8 @@ impl NetRef {
 
 /// Expression tree for the narrow structural-assign subset.
 ///
-/// The parser preserves syntax here; Liberty-free `gv2aig` later applies the
-/// exact-width structural rules documented in `STRUCTURAL_ASSIGNS.md`.
+/// The parser preserves syntax here; `ugv2aig` later applies the
+/// exact-width structural rules documented in `UGV.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignExpr {
     Leaf(NetRef),
@@ -214,6 +214,15 @@ pub enum Keyword {
     Input,
     Output,
     Inout,
+    Reg,
+    Logic,
+    Always,
+    AlwaysFf,
+    AlwaysComb,
+    AlwaysLatch,
+    Initial,
+    Generate,
+    Genvar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +265,9 @@ pub enum TokenPayload {
 }
 
 fn is_simple_identifier(s: &str) -> bool {
+    if Keyword::from_str(s).is_some() {
+        return false;
+    }
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -297,12 +309,7 @@ impl fmt::Display for TokenPayload {
                     write!(f, "\\{} ", s)
                 }
             }
-            TokenPayload::Keyword(Keyword::Module) => write!(f, "module"),
-            TokenPayload::Keyword(Keyword::Wire) => write!(f, "wire"),
-            TokenPayload::Keyword(Keyword::Endmodule) => write!(f, "endmodule"),
-            TokenPayload::Keyword(Keyword::Input) => write!(f, "input"),
-            TokenPayload::Keyword(Keyword::Output) => write!(f, "output"),
-            TokenPayload::Keyword(Keyword::Inout) => write!(f, "inout"),
+            TokenPayload::Keyword(keyword) => write!(f, "{}", keyword.as_str()),
             TokenPayload::OParen => write!(f, "("),
             TokenPayload::CParen => write!(f, ")"),
             TokenPayload::OBrack => write!(f, "["),
@@ -1168,6 +1175,15 @@ impl<R: Read + 'static> TokenScanner<R> {
                     None => Ok(None),
                 };
             } // skip newlines
+            b'+' | b'-' | b'*' | b'/' | b'%' | b'?' | b'<' | b'>' | b'!' => {
+                return Err(self.error_with_context(
+                    &format!(
+                        "unsupported Verilog operator '{}'; structural expressions support only ~, &, |, and ^",
+                        b as char
+                    ),
+                    Span { start, limit: self.pos },
+                ));
+            }
             _ => {
                 // Error for unknown token
                 let limit = self.pos;
@@ -1186,6 +1202,41 @@ impl<R: Read + 'static> TokenScanner<R> {
 }
 
 impl Keyword {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Module => "module",
+            Self::Wire => "wire",
+            Self::Endmodule => "endmodule",
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::Inout => "inout",
+            Self::Reg => "reg",
+            Self::Logic => "logic",
+            Self::Always => "always",
+            Self::AlwaysFf => "always_ff",
+            Self::AlwaysComb => "always_comb",
+            Self::AlwaysLatch => "always_latch",
+            Self::Initial => "initial",
+            Self::Generate => "generate",
+            Self::Genvar => "genvar",
+        }
+    }
+
+    fn is_unsupported_construct(&self) -> bool {
+        matches!(
+            self,
+            Self::Reg
+                | Self::Logic
+                | Self::Always
+                | Self::AlwaysFf
+                | Self::AlwaysComb
+                | Self::AlwaysLatch
+                | Self::Initial
+                | Self::Generate
+                | Self::Genvar
+        )
+    }
+
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "module" => Some(Keyword::Module),
@@ -1194,13 +1245,22 @@ impl Keyword {
             "input" => Some(Keyword::Input),
             "output" => Some(Keyword::Output),
             "inout" => Some(Keyword::Inout),
+            "reg" => Some(Keyword::Reg),
+            "logic" => Some(Keyword::Logic),
+            "always" => Some(Keyword::Always),
+            "always_ff" => Some(Keyword::AlwaysFf),
+            "always_comb" => Some(Keyword::AlwaysComb),
+            "always_latch" => Some(Keyword::AlwaysLatch),
+            "initial" => Some(Keyword::Initial),
+            "generate" => Some(Keyword::Generate),
+            "genvar" => Some(Keyword::Genvar),
             _ => None,
         }
     }
 }
 
 // --- Recursive descent parser ---
-pub struct Parser<R: Read + 'static> {
+pub(crate) struct Parser<R: Read + 'static> {
     scanner: TokenScanner<R>,
     pub interner: StringInterner<StringBackend<SymbolU32>>,
     pub nets: Vec<Net>,
@@ -1850,6 +1910,166 @@ impl<R: Read + 'static> Parser<R> {
             },
         })
     }
+    /// Parses one integer endpoint of a packed port width.
+    fn parse_port_width_endpoint(&mut self, what: &str) -> Result<u32, ScanError> {
+        let token = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: format!("expected {what} in port width"),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        let TokenPayload::VerilogInt { value, .. } = token.payload else {
+            return Err(ScanError {
+                message: format!("expected integer for {what} in port width"),
+                span: token.span,
+            });
+        };
+        xlsynth_pir::IrValue::from_bits(&value)
+            .to_u32()
+            .map_err(|_| ScanError {
+                message: format!("{what} in port width does not fit in u32"),
+                span: token.span,
+            })
+    }
+
+    /// Parses the optional `wire` qualifier and packed width of a port.
+    fn parse_optional_port_type(&mut self) -> Result<Option<(u32, u32)>, ScanError> {
+        self.skip_trivia()?;
+        if self
+            .scanner
+            .peekt()?
+            .is_some_and(|token| matches!(token.payload, TokenPayload::Keyword(Keyword::Wire)))
+        {
+            self.scanner.popt()?;
+        }
+        self.skip_trivia()?;
+        if !self
+            .scanner
+            .peekt()?
+            .is_some_and(|token| matches!(token.payload, TokenPayload::OBrack))
+        {
+            return Ok(None);
+        }
+        self.scanner.popt()?;
+        let msb = self.parse_port_width_endpoint("msb")?;
+        let colon = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected ':' in port width".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(colon.payload, TokenPayload::Colon) {
+            return Err(ScanError {
+                message: "expected ':' in port width".to_string(),
+                span: colon.span,
+            });
+        }
+        let lsb = self.parse_port_width_endpoint("lsb")?;
+        let close = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected ']' after port width".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(close.payload, TokenPayload::CBrack) {
+            return Err(ScanError {
+                message: "expected ']' after port width".to_string(),
+                span: close.span,
+            });
+        }
+        Ok(Some((msb, lsb)))
+    }
+
+    /// Parses ANSI port declarations through the closing parenthesis.
+    fn parse_ansi_port_list(&mut self) -> Result<(Vec<PortId>, Vec<NetlistPort>), ScanError> {
+        let mut names = Vec::new();
+        let mut ports = Vec::new();
+        let mut current_type: Option<(PortDirection, Option<(u32, u32)>)> = None;
+        loop {
+            self.skip_trivia()?;
+            let pos = self.scanner.pos;
+            let token = self.scanner.peekt()?.cloned().ok_or_else(|| ScanError {
+                message: "unexpected EOF in ANSI port list".to_string(),
+                span: Span {
+                    start: pos,
+                    limit: pos,
+                },
+            })?;
+            if matches!(token.payload, TokenPayload::CParen) {
+                self.scanner.popt()?;
+                break;
+            }
+            let direction = match token.payload {
+                TokenPayload::Keyword(Keyword::Input) => Some(PortDirection::Input),
+                TokenPayload::Keyword(Keyword::Output) => Some(PortDirection::Output),
+                TokenPayload::Keyword(Keyword::Inout) => Some(PortDirection::Inout),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                self.scanner.popt()?;
+                current_type = Some((direction, self.parse_optional_port_type()?));
+            }
+            let (direction, width) = current_type.clone().ok_or_else(|| ScanError {
+                message: "expected direction in ANSI port list".to_string(),
+                span: token.span,
+            })?;
+            let name_token = self.scanner.popt()?.ok_or_else(|| ScanError {
+                message: "expected name in ANSI port list".to_string(),
+                span: Span {
+                    start: self.scanner.pos,
+                    limit: self.scanner.pos,
+                },
+            })?;
+            let name = match name_token.payload {
+                TokenPayload::Identifier(name) => name,
+                TokenPayload::Keyword(keyword) if keyword.is_unsupported_construct() => {
+                    return Err(ScanError {
+                        message: format!("unsupported Verilog declaration '{}'", keyword.as_str()),
+                        span: name_token.span,
+                    });
+                }
+                _ => {
+                    return Err(ScanError {
+                        message: "expected name in ANSI port list".to_string(),
+                        span: name_token.span,
+                    });
+                }
+            };
+            let name = self.interner.get_or_intern(name);
+            self.ensure_net(name, width, name_token.span)?;
+            names.push(name);
+            ports.push(NetlistPort {
+                direction,
+                width,
+                name,
+            });
+            self.skip_trivia()?;
+            let separator = self.scanner.popt()?.ok_or_else(|| ScanError {
+                message: "expected ',' or ')' after ANSI port".to_string(),
+                span: Span {
+                    start: self.scanner.pos,
+                    limit: self.scanner.pos,
+                },
+            })?;
+            match separator.payload {
+                TokenPayload::Comma => {
+                    // Continue with the next ANSI port declaration.
+                }
+                TokenPayload::CParen => break,
+                _ => {
+                    return Err(ScanError {
+                        message: "expected ',' or ')' after ANSI port".to_string(),
+                        span: separator.span,
+                    });
+                }
+            }
+        }
+        Ok((names, ports))
+    }
+
     pub fn parse_file(&mut self) -> Result<Vec<NetlistModule>, ScanError> {
         log::trace!("parse_file: start");
         let mut modules = Vec::new();
@@ -1945,37 +2165,49 @@ impl<R: Read + 'static> Parser<R> {
                 span: oparen_tok.span,
             });
         }
-        // Parse port list: identifier[, identifier ...]
-        let mut port_names = Vec::new();
-        loop {
-            let t = self.scanner.popt()?.ok_or_else(|| ScanError {
-                message: "expected token in port list".to_string(),
-                span: Span {
-                    start: self.scanner.pos,
-                    limit: self.scanner.pos,
-                },
-            })?;
-            match t.payload {
-                TokenPayload::Identifier(s) => {
-                    let sym = self.interner.get_or_intern(s);
-                    port_names.push(sym);
-                    // If next is ',', continue
-                    if let Some(next) = self.scanner.peekt()? {
-                        if matches!(next.payload, TokenPayload::Comma) {
-                            self.scanner.popt()?; // consume ','
-                            continue;
+        self.skip_trivia()?;
+        let ansi_ports = self.scanner.peekt()?.is_some_and(|token| {
+            matches!(
+                token.payload,
+                TokenPayload::Keyword(Keyword::Input | Keyword::Output | Keyword::Inout)
+            )
+        });
+        let (port_names, mut ports) = if ansi_ports {
+            self.parse_ansi_port_list()?
+        } else {
+            // Parse a non-ANSI port list: identifier[, identifier ...].
+            let mut port_names = Vec::new();
+            loop {
+                let t = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: "expected token in port list".to_string(),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                match t.payload {
+                    TokenPayload::Identifier(s) => {
+                        let sym = self.interner.get_or_intern(s);
+                        port_names.push(sym);
+                        // If next is ',', continue
+                        if let Some(next) = self.scanner.peekt()? {
+                            if matches!(next.payload, TokenPayload::Comma) {
+                                self.scanner.popt()?; // consume ','
+                                continue;
+                            }
                         }
                     }
-                }
-                TokenPayload::CParen => break,
-                _ => {
-                    return Err(ScanError {
-                        message: format!("unexpected token in port list: {:?}", t.payload),
-                        span: t.span,
-                    });
+                    TokenPayload::CParen => break,
+                    _ => {
+                        return Err(ScanError {
+                            message: format!("unexpected token in port list: {:?}", t.payload),
+                            span: t.span,
+                        });
+                    }
                 }
             }
-        }
+            (port_names, Vec::new())
+        };
         // Expect ';'
         let semi_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected ';' after port list".to_string(),
@@ -1991,7 +2223,6 @@ impl<R: Read + 'static> Parser<R> {
             });
         }
         // Parse body: ports, wires, and instances until 'endmodule'
-        let mut ports = Vec::new();
         let mut wires = Vec::new();
         let mut assigns = Vec::new();
         let mut instances = Vec::new();
@@ -2026,6 +2257,15 @@ impl<R: Read + 'static> Parser<R> {
                     }
                     TokenPayload::Identifier(s) if s == "tran" => {
                         assigns.push(self.parse_tran()?);
+                    }
+                    TokenPayload::Keyword(keyword) if keyword.is_unsupported_construct() => {
+                        return Err(ScanError {
+                            message: format!(
+                                "unsupported Verilog construct '{}'",
+                                keyword.as_str()
+                            ),
+                            span: tok.span,
+                        });
                     }
                     TokenPayload::Identifier(_) => {
                         let instance = self.parse_instance()?;
@@ -2117,76 +2357,7 @@ impl<R: Read + 'static> Parser<R> {
                 span: kw_tok.span,
             });
         }
-        // Optional width: [msb:lsb]
-        let mut width = None;
-        if let Some(next) = self.scanner.peekt()? {
-            if matches!(next.payload, TokenPayload::OBrack) {
-                self.scanner.popt()?; // consume '['
-                let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected msb in width".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                let msb = match msb_tok.payload {
-                    TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
-                    }
-                    _ => {
-                        return Err(ScanError {
-                            message: "expected integer for msb".to_string(),
-                            span: msb_tok.span,
-                        });
-                    }
-                };
-                let colon_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected ':' in width".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                if !matches!(colon_tok.payload, TokenPayload::Colon) {
-                    return Err(ScanError {
-                        message: "expected ':' in width".to_string(),
-                        span: colon_tok.span,
-                    });
-                }
-                let lsb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected lsb in width".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                let lsb = match lsb_tok.payload {
-                    TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
-                    }
-                    _ => {
-                        return Err(ScanError {
-                            message: "expected integer for lsb".to_string(),
-                            span: lsb_tok.span,
-                        });
-                    }
-                };
-                let cbrack_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected ']' after width".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                if !matches!(cbrack_tok.payload, TokenPayload::CBrack) {
-                    return Err(ScanError {
-                        message: "expected ']' after width".to_string(),
-                        span: cbrack_tok.span,
-                    });
-                }
-                width = Some((msb, lsb));
-            }
-        }
+        let width = self.parse_optional_port_type()?;
         // Parse one or more identifiers (comma-separated)
         let mut ports = Vec::new();
         loop {

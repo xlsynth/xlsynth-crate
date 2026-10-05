@@ -6,7 +6,7 @@
 //! used, outputs that are never driven, and wires that are declared but never
 //! connected.
 //!
-//! See `src/netlist/STRUCTURAL_ASSIGNS.md` for the accepted Liberty-free
+//! See `src/netlist/UGV.md` for the accepted Liberty-free
 //! structural-assign subset and its sizing rules.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -872,7 +872,7 @@ fn render_net_ref(
 }
 
 /// Validates the Liberty-free structural-assign netlist subset used by
-/// `gv2aig` when no Liberty library is provided.
+/// `ugv2aig`.
 pub fn validate_structural_assign_module(
     module: &NetlistModule,
     nets: &[Net],

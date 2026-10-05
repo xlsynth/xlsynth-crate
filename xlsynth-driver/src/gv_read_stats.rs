@@ -8,7 +8,7 @@ pub fn handle_gv_read_stats(matches: &ArgMatches) {
     let netlist_path = matches
         .get_one::<String>("netlist")
         .expect("netlist path is required");
-    match stats::read_netlist_stats(Path::new(netlist_path)) {
+    match stats::read_gv_stats(Path::new(netlist_path)) {
         Ok(s) => {
             println!("Instances: {}", s.num_instances);
             println!("Nets: {}", s.num_nets);

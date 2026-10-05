@@ -3,11 +3,10 @@
 //! Convert a gate-level netlist + Liberty proto into a `GateFn` (AIG form).
 
 use crate::aig::GateFn;
-use crate::netlist::assigns_to_gatefn::project_gatefn_from_structural_assigns;
 use crate::netlist::gatefn_from_netlist::{
     GateFnProjectOptions, project_gatefn_from_netlist_and_liberty_with_options,
 };
-use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
+use crate::netlist::io::{load_liberty_from_path, read_gv_from_path, select_module};
 use anyhow::{Result, anyhow};
 use std::path::Path;
 
@@ -28,20 +27,14 @@ impl Default for Gv2AigOptions {
     }
 }
 
-pub fn convert_gv2aig_paths_with_optional_liberty(
+/// Converts strict GV and its Liberty library to a combinational AIG.
+pub fn convert_gv2aig_paths(
     netlist_path: &Path,
-    liberty_proto_path: Option<&Path>,
+    liberty_proto_path: &Path,
     opts: &Gv2AigOptions,
 ) -> Result<GateFn> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
+    let parsed = read_gv_from_path(netlist_path)?;
     let module = select_module(&parsed, opts.module_name.as_deref())?;
-
-    let Some(liberty_proto_path) = liberty_proto_path else {
-        // See STRUCTURAL_ASSIGNS.md for the exact Liberty-free assign subset
-        // and sizing semantics accepted by this path.
-        return project_gatefn_from_structural_assigns(module, &parsed.nets, &parsed.interner)
-            .map_err(|e| anyhow!(e));
-    };
 
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
 
@@ -61,12 +54,4 @@ pub fn convert_gv2aig_paths_with_optional_liberty(
     .map_err(|e| anyhow!(e))?;
 
     Ok(gate_fn)
-}
-
-pub fn convert_gv2aig_paths(
-    netlist_path: &Path,
-    liberty_proto_path: &Path,
-    opts: &Gv2AigOptions,
-) -> Result<GateFn> {
-    convert_gv2aig_paths_with_optional_liberty(netlist_path, Some(liberty_proto_path), opts)
 }

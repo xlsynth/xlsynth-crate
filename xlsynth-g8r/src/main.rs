@@ -80,10 +80,10 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     enable_formal_array_alias_analysis: bool,
 
-    /// Whether to emit the netlist.
+    /// Whether to emit unmapped gate Verilog (UGV).
     #[arg(long, default_value_t = false)]
     #[arg(action = clap::ArgAction::Set)]
-    emit_netlist: bool,
+    emit_ugv: bool,
 
     /// Number of random input samples for toggle stats (0 disables)
     #[arg(long, default_value_t = 0)]
@@ -153,8 +153,8 @@ fn main() {
         reassociation: args.reassociation,
         emit_independent_op_stats: false,
         ir_top: None,
-        emit_netlist: args.emit_netlist,
-        quiet: args.emit_netlist,
+        emit_netlist: args.emit_ugv,
+        quiet: args.emit_ugv,
         toggle_sample_count: args.toggle_sample_count,
         toggle_sample_seed: args.toggle_sample_seed,
         compute_graph_logical_effort: args.compute_graph_logical_effort,

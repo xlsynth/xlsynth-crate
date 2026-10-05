@@ -5,15 +5,14 @@
 
 use clap::Parser;
 use std::collections::HashMap;
-use std::{fs::File, path::PathBuf};
+use std::path::PathBuf;
 use xlsynth_g8r::liberty::cell_formula::{self, Term};
 
 // Use the crate's prost-generated proto module
 use xlsynth_g8r::liberty_model;
 
 use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_pir;
-use xlsynth_g8r::netlist::io::load_liberty_from_path;
-use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
+use xlsynth_g8r::netlist::io::{load_liberty_from_path, read_gv_from_path};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -54,35 +53,21 @@ fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
     println!("Reading netlist from {}...", args.netlist.display());
-    let file = File::open(&args.netlist).unwrap();
-    let scanner = TokenScanner::from_file_with_path(file, args.netlist.clone());
-    let mut parser = NetlistParser::new(scanner);
+    let parsed = read_gv_from_path(&args.netlist).unwrap_or_else(|error| {
+        eprintln!("{error:#}");
+        std::process::exit(1);
+    });
     // Read and decode Liberty once, skipping timing payloads by default.
     let liberty_lib = load_liberty_from_path(&args.liberty_proto).expect("failed to load liberty");
-    let modules = match parser.parse_file() {
-        Ok(m) => m,
-        Err(e) => {
-            // Print error message, line context, and caret
-            eprintln!("parse error: {} at {:?}", e.message, e.span);
-            // Use the public get_line method from the parser
-            let line = parser
-                .get_line(e.span.start.lineno)
-                .unwrap_or_else(|| "<line unavailable>".to_string());
-            let col = (e.span.start.colno as usize).saturating_sub(1);
-            eprintln!("{}", line);
-            eprintln!("{}^", " ".repeat(col));
-            std::process::exit(1);
-        }
-    };
     // Log all net names and indices
-    for (i, net) in parser.nets.iter().enumerate() {
-        let net_name = parser.interner.resolve(net.name).unwrap();
+    for (i, net) in parsed.nets.iter().enumerate() {
+        let net_name = parsed.interner.resolve(net.name).unwrap();
         log::info!("Net[{}]: {} width={:?}", i, net_name, net.width);
     }
-    let total_instances: usize = modules.iter().map(|m| m.instances.len()).sum();
+    let total_instances: usize = parsed.modules.iter().map(|m| m.instances.len()).sum();
     println!(
         "Parsed {} modules, total {} instances.",
-        modules.len(),
+        parsed.modules.len(),
         total_instances
     );
     // Load Liberty proto and build cell formula map
@@ -91,19 +76,19 @@ fn main() {
         "Loaded {} cell formulas from Liberty proto.",
         cell_formula_map.len()
     );
-    if modules.len() != 1 {
+    if parsed.modules.len() != 1 {
         eprintln!(
             "Error: Only single-module netlists are supported (got {}).",
-            modules.len()
+            parsed.modules.len()
         );
         std::process::exit(1);
     }
-    let module = &modules[0];
+    let module = &parsed.modules[0];
     let gate_fn =
         xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty(
             module,
-            &parser.nets,
-            &parser.interner,
+            &parsed.nets,
+            &parsed.interner,
             &liberty_lib,
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),

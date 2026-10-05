@@ -3,7 +3,7 @@
 use clap::ArgMatches;
 use serde::Serialize;
 use std::path::Path;
-use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, parse_netlist_from_path};
+use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, read_gv_from_path};
 use xlsynth_g8r::netlist::report::{
     NetlistStaReport, OutputTimingRow, build_sta_report, select_module,
 };
@@ -48,7 +48,7 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
         .expect("module_output_load has default");
     let json_out = matches.get_one::<String>("json_out");
 
-    let parsed = match parse_netlist_from_path(Path::new(netlist_path)) {
+    let parsed = match read_gv_from_path(Path::new(netlist_path)) {
         Ok(p) => p,
         Err(e) => {
             eprintln!(

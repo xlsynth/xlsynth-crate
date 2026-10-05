@@ -763,8 +763,7 @@ endmodule
     let err = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
         .expect_err("expected top-level logic assign to be rejected");
     let err_text = err.to_string();
-    assert!(err_text.contains("gv2block only supports techmapped netlists"));
-    assert!(err_text.contains("run technology mapping first"));
+    assert!(err_text.contains("GV permits only wiring in assignments"));
 }
 
 #[test]

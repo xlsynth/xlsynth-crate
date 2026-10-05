@@ -2,7 +2,7 @@
 
 use clap::ArgMatches;
 use std::path::Path;
-use xlsynth_g8r::netlist::io::{load_liberty_from_path, parse_netlist_from_path};
+use xlsynth_g8r::netlist::io::{load_liberty_from_path, read_gv_from_path};
 use xlsynth_g8r::netlist::report::{NetlistAreaReport, build_area_report, select_module};
 
 const SUBCOMMAND: &str = "gv-area";
@@ -17,7 +17,7 @@ pub fn handle_gv_area(matches: &ArgMatches) {
     let module_name = matches.get_one::<String>("module_name").map(|s| s.as_str());
     let json_out = matches.get_one::<String>("json_out");
 
-    let parsed = parse_netlist_from_path(netlist_path).unwrap_or_else(|e| {
+    let parsed = read_gv_from_path(netlist_path).unwrap_or_else(|e| {
         eprintln!(
             "{} error: failed to parse netlist '{}': {:#}",
             SUBCOMMAND,

@@ -4883,7 +4883,7 @@ fn test_ir2g8r_emits_all_outputs() {
         .arg(g8rbin_path.to_str().unwrap())
         .arg("--stats-out")
         .arg(stats_path.to_str().unwrap())
-        .arg("--netlist-out")
+        .arg("--ugv-out")
         .arg(ugv_path.to_str().unwrap())
         .output()
         .unwrap();
@@ -4961,7 +4961,7 @@ block pipe(clk: clock, data: bits[1], le: bits[1], out: bits[1]) {
         .arg("pipe")
         .arg("--bin-out")
         .arg(&bin_path)
-        .arg("--netlist-out")
+        .arg("--ugv-out")
         .arg(&netlist_path)
         .output()
         .unwrap();
@@ -5816,7 +5816,7 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 }
 
 #[test]
-fn test_aig2v_ascii_comb_module_name() {
+fn test_aig2ugv_ascii_comb_module_name() {
     let mut g8_builder = GateBuilder::new("source_name".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);
     let y_val = g8_builder.add_and_binary(*a_val.get_lsb(0), *a_val.get_lsb(0));
@@ -5828,7 +5828,7 @@ fn test_aig2v_ascii_comb_module_name() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("newmod")
@@ -5848,7 +5848,7 @@ fn test_aig2v_ascii_comb_module_name() {
 }
 
 #[test]
-fn test_aig2v_preserves_duplicate_output_literals() {
+fn test_aig2ugv_preserves_duplicate_output_literals() {
     let mut g8_builder = GateBuilder::new("dup_outputs".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);
     let a_bit = *a_val.get_lsb(0);
@@ -5861,7 +5861,7 @@ fn test_aig2v_preserves_duplicate_output_literals() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("dup_outputs")
@@ -5881,7 +5881,7 @@ fn test_aig2v_preserves_duplicate_output_literals() {
 }
 
 #[test]
-fn test_aig2v_binary_flop_inputs_outputs() {
+fn test_aig2ugv_binary_flop_inputs_outputs() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new("source_inv".to_string(), GateBuilderOptions::no_opt());
@@ -5895,7 +5895,7 @@ fn test_aig2v_binary_flop_inputs_outputs() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aig_path.to_str().unwrap())
         .arg("--module-name")
         .arg("my_flop_inv")
@@ -5919,7 +5919,7 @@ fn test_aig2v_binary_flop_inputs_outputs() {
 }
 
 #[test]
-fn test_aig2v_flop_requires_clk_port_error() {
+fn test_aig2ugv_flop_requires_clk_port_error() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new("dummy".to_string(), GateBuilderOptions::no_opt());
@@ -5933,7 +5933,7 @@ fn test_aig2v_flop_requires_clk_port_error() {
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     for flop_flag in ["--flop-inputs", "--flop-outputs"] {
         let output = Command::new(command_path)
-            .arg("aig2v")
+            .arg("aig2ugv")
             .arg(aag_path.to_str().unwrap())
             .arg("--module-name")
             .arg("dummy")
@@ -5962,7 +5962,7 @@ fn test_aig2v_flop_requires_clk_port_error() {
 }
 
 #[test]
-fn test_aig2v_requires_module_name() {
+fn test_aig2ugv_requires_module_name() {
     let mut g8_builder = GateBuilder::new("dummy".to_string(), GateBuilderOptions::no_opt());
     let i_val = g8_builder.add_input("i".to_string(), 1);
     g8_builder.add_output("o".to_string(), AigBitVector::from_bit(*i_val.get_lsb(0)));
@@ -5973,7 +5973,7 @@ fn test_aig2v_requires_module_name() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .output()
         .unwrap();
@@ -5988,7 +5988,7 @@ fn test_aig2v_requires_module_name() {
 }
 
 #[test]
-fn test_aig2v_fn_type_emits_packed_ports() {
+fn test_aig2ugv_fn_type_emits_packed_ports() {
     let mut g8_builder = GateBuilder::new("typed_xor".to_string(), GateBuilderOptions::no_opt());
     let lhs = g8_builder.add_input("a".to_string(), 16);
     let rhs = g8_builder.add_input("b".to_string(), 16);
@@ -6001,7 +6001,7 @@ fn test_aig2v_fn_type_emits_packed_ports() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("typed_xor")
@@ -6030,7 +6030,7 @@ fn test_aig2v_fn_type_emits_packed_ports() {
 }
 
 #[test]
-fn test_aig2v_fn_type_reports_input_width_mismatch() {
+fn test_aig2ugv_fn_type_reports_input_width_mismatch() {
     let mut g8_builder =
         GateBuilder::new("typed_bad_input".to_string(), GateBuilderOptions::no_opt());
     let lhs = g8_builder.add_input("a".to_string(), 8);
@@ -6044,7 +6044,7 @@ fn test_aig2v_fn_type_reports_input_width_mismatch() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("typed_bad_input")
@@ -6068,7 +6068,7 @@ fn test_aig2v_fn_type_reports_input_width_mismatch() {
 }
 
 #[test]
-fn test_aig2v_fn_type_reports_output_width_mismatch() {
+fn test_aig2ugv_fn_type_reports_output_width_mismatch() {
     let mut g8_builder =
         GateBuilder::new("typed_bad_output".to_string(), GateBuilderOptions::no_opt());
     let lhs = g8_builder.add_input("a".to_string(), 8);
@@ -6082,7 +6082,7 @@ fn test_aig2v_fn_type_reports_output_width_mismatch() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("typed_bad_output")
@@ -6106,7 +6106,7 @@ fn test_aig2v_fn_type_reports_output_width_mismatch() {
 }
 
 #[test]
-fn test_aig2v_fn_type_rejects_non_bits_types() {
+fn test_aig2ugv_fn_type_rejects_non_bits_types() {
     let mut g8_builder = GateBuilder::new("typed_array".to_string(), GateBuilderOptions::no_opt());
     let lhs = g8_builder.add_input("a".to_string(), 16);
     g8_builder.add_output("y".to_string(), lhs);
@@ -6117,7 +6117,7 @@ fn test_aig2v_fn_type_rejects_non_bits_types() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("typed_array")
@@ -6141,7 +6141,7 @@ fn test_aig2v_fn_type_rejects_non_bits_types() {
 }
 
 #[test]
-fn test_aig2v_fn_type_rejects_non_bits_return_type() {
+fn test_aig2ugv_fn_type_rejects_non_bits_return_type() {
     let mut g8_builder = GateBuilder::new(
         "typed_array_return".to_string(),
         GateBuilderOptions::no_opt(),
@@ -6155,7 +6155,7 @@ fn test_aig2v_fn_type_rejects_non_bits_return_type() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("typed_array_return")
@@ -6179,7 +6179,7 @@ fn test_aig2v_fn_type_rejects_non_bits_return_type() {
 }
 
 #[test]
-fn test_aig2v_fn_type_tuple_return_simulates_against_aig_eval_and_ir_fn_eval() {
+fn test_aig2ugv_fn_type_tuple_return_simulates_against_aig_eval_and_ir_fn_eval() {
     let ir = r#"package test
 
 fn f(a: bits[2] id=1, b: bits[3] id=2) -> (bits[3], bits[2]) {
@@ -6214,7 +6214,7 @@ fn f(a: bits[2] id=1, b: bits[3] id=2) -> (bits[3], bits[2]) {
     );
 
     let sv_output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("tuple_word")
@@ -6228,7 +6228,7 @@ fn f(a: bits[2] id=1, b: bits[3] id=2) -> (bits[3], bits[2]) {
         .unwrap();
     assert!(
         sv_output.status.success(),
-        "aig2v failed: stdout: {} stderr: {}",
+        "aig2ugv failed: stdout: {} stderr: {}",
         String::from_utf8_lossy(&sv_output.stdout),
         String::from_utf8_lossy(&sv_output.stderr)
     );
@@ -6251,7 +6251,7 @@ fn f(a: bits[2] id=1, b: bits[3] id=2) -> (bits[3], bits[2]) {
     assert!(sv.contains("assign output_value_0 = p0_output_value_0"));
     assert!(sv.contains("assign output_value_1 = p0_output_value_1"));
     let module =
-        compile_pipeline_module(&sv).expect("vastly should compile tuple-return aig2v output");
+        compile_pipeline_module(&sv).expect("vastly should compile tuple-return aig2ugv output");
 
     let input_vectors = [(0u64, 0u64), (1, 4), (2, 5), (3, 7)];
     let cycles = input_vectors
@@ -6274,7 +6274,7 @@ fn f(a: bits[2] id=1, b: bits[3] id=2) -> (bits[3], bits[2]) {
         cycles,
     };
     let outputs = run_pipeline_and_collect_outputs(&module, &stimulus, &module.initial_state_x())
-        .expect("vastly should simulate tuple-return aig2v output");
+        .expect("vastly should simulate tuple-return aig2ugv output");
 
     for ((a_value, b_value), cycle_outputs) in input_vectors.iter().zip(outputs.iter()) {
         let args = format!("(bits[2]:0x{a_value:x}, bits[3]:0x{b_value:x})");
@@ -6342,7 +6342,7 @@ fn f(a: bits[2] id=1, b: bits[3] id=2) -> (bits[3], bits[2]) {
 }
 
 #[test]
-fn test_aig2v_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
+fn test_aig2ugv_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
     let mut g8_builder =
         GateBuilder::new("typed_xor_sim".to_string(), GateBuilderOptions::no_opt());
     let lhs = g8_builder.add_input("a".to_string(), 16);
@@ -6356,7 +6356,7 @@ fn test_aig2v_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let sv_output = Command::new(command_path)
-        .arg("aig2v")
+        .arg("aig2ugv")
         .arg(aag_path.to_str().unwrap())
         .arg("--module-name")
         .arg("typed_xor_sim")
@@ -6370,7 +6370,7 @@ fn test_aig2v_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
         .unwrap();
     assert!(
         sv_output.status.success(),
-        "aig2v failed: stdout: {} stderr: {}",
+        "aig2ugv failed: stdout: {} stderr: {}",
         String::from_utf8_lossy(&sv_output.stdout),
         String::from_utf8_lossy(&sv_output.stderr)
     );
@@ -6380,7 +6380,7 @@ fn test_aig2v_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
         1,
         "expected exactly one top-level module declaration:\n{sv}"
     );
-    let module = compile_pipeline_module(&sv).expect("vastly should compile typed aig2v output");
+    let module = compile_pipeline_module(&sv).expect("vastly should compile typed aig2ugv output");
 
     let input_vectors = [
         (0x0000u64, 0xffffu64),
@@ -6407,7 +6407,7 @@ fn test_aig2v_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
         cycles,
     };
     let outputs = run_pipeline_and_collect_outputs(&module, &stimulus, &module.initial_state_x())
-        .expect("vastly should simulate typed aig2v output");
+        .expect("vastly should simulate typed aig2ugv output");
 
     for ((lhs_value, rhs_value), cycle_outputs) in input_vectors.iter().zip(outputs.iter()) {
         let eval_output = Command::new(command_path)
@@ -6440,7 +6440,7 @@ fn test_aig2v_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
 }
 
 #[test]
-fn test_g8r2v_add_clk_port_behavior() {
+fn test_g8r2ugv_add_clk_port_behavior() {
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);
     // Create a simple AND gate y = a & a, which is effectively y = a
@@ -6454,7 +6454,7 @@ fn test_g8r2v_add_clk_port_behavior() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--add-clk-port")
         .arg("clk")
@@ -6672,14 +6672,14 @@ fn test_g8r_eval_accepts_one_clocked_toggle_cycle() {
 }
 
 #[test]
-fn test_g8r2v_emits_stored_sequential_gate_fn_registers() {
+fn test_g8r2ugv_emits_stored_sequential_gate_fn_registers() {
     let design = make_pipeline_sequential_design();
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().join("pipeline.g8r");
     std::fs::write(&path, emit_g8r(&design)).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(path.to_str().unwrap())
         .output()
         .unwrap();
@@ -6698,7 +6698,7 @@ fn test_g8r2v_emits_stored_sequential_gate_fn_registers() {
 }
 
 #[test]
-fn test_g8r2v_module_name() {
+fn test_g8r2ugv_module_name() {
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);
     let y_val = g8_builder.add_and_binary(*a_val.get_lsb(0), *a_val.get_lsb(0));
@@ -6711,14 +6711,14 @@ fn test_g8r2v_module_name() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "g8r2v failed: {}",
+        "g8r2ugv failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -6730,14 +6730,14 @@ fn test_g8r2v_module_name() {
 
     // Override module name
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--module-name=newmod")
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "g8r2v failed: {}",
+        "g8r2ugv failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -6754,7 +6754,7 @@ fn test_g8r2v_module_name() {
 }
 
 #[test]
-fn test_g8r2v_flop_inputs_outputs() {
+fn test_g8r2ugv_flop_inputs_outputs() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new("my_flop_inv".to_string(), GateBuilderOptions::no_opt());
@@ -6769,7 +6769,7 @@ fn test_g8r2v_flop_inputs_outputs() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--flop-inputs")
         .arg("--flop-outputs")
@@ -6791,7 +6791,7 @@ fn test_g8r2v_flop_inputs_outputs() {
 }
 
 #[test]
-fn test_g8r2v_flop_inputs_only() {
+fn test_g8r2ugv_flop_inputs_only() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder =
@@ -6807,7 +6807,7 @@ fn test_g8r2v_flop_inputs_only() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--flop-inputs")
         .arg("--add-clk-port")
@@ -6840,7 +6840,7 @@ endmodule
 }
 
 #[test]
-fn test_g8r2v_flop_outputs_only() {
+fn test_g8r2ugv_flop_outputs_only() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder =
@@ -6856,7 +6856,7 @@ fn test_g8r2v_flop_outputs_only() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--flop-outputs")
         .arg("--add-clk-port")
@@ -6877,7 +6877,7 @@ fn test_g8r2v_flop_outputs_only() {
 }
 
 #[test]
-fn test_g8r2v_flop_requires_clk_port_error() {
+fn test_g8r2ugv_flop_requires_clk_port_error() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new("dummy".to_string(), GateBuilderOptions::no_opt());
@@ -6892,7 +6892,7 @@ fn test_g8r2v_flop_requires_clk_port_error() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--flop-inputs") // Enable flopping
         // Missing --add-clk-port
@@ -6911,7 +6911,7 @@ fn test_g8r2v_flop_requires_clk_port_error() {
 }
 
 #[test]
-fn test_g8r2v_flop_with_custom_clk_name() {
+fn test_g8r2ugv_flop_with_custom_clk_name() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new(
@@ -6929,7 +6929,7 @@ fn test_g8r2v_flop_with_custom_clk_name() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--flop-inputs")
         .arg("--add-clk-port")
@@ -6965,7 +6965,7 @@ fn test_g8r2v_flop_with_custom_clk_name() {
 }
 
 #[test]
-fn test_g8r2v_use_system_verilog() {
+fn test_g8r2ugv_use_system_verilog() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new("my_sv_inv".to_string(), GateBuilderOptions::no_opt());
@@ -6980,7 +6980,7 @@ fn test_g8r2v_use_system_verilog() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2v")
+        .arg("g8r2ugv")
         .arg(g8r_path.to_str().unwrap())
         .arg("--use-system-verilog")
         // No flopping, so clock is not strictly needed by emit_netlist for file type choice,

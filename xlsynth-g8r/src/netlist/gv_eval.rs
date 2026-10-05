@@ -22,7 +22,7 @@ use crate::netlist::gatefn_from_netlist::{
     project_labeled_sequential_netlist_aig_with_boundaries,
 };
 use crate::netlist::hierarchy::elaborate_hierarchy;
-use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
+use crate::netlist::io::{load_liberty_from_path, read_gv_from_path, select_module};
 use crate::netlist::parse::PortDirection;
 use crate::netlist::power::{
     GvDynamicPowerOptions, GvDynamicPowerReport, GvSequentialDynamicPowerOptions,
@@ -229,7 +229,7 @@ pub fn load_labeled_netlist_aig_with_liberty(
     liberty: &Library,
     options: &GvEvalOptions,
 ) -> Result<LabeledNetlistAig> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
+    let parsed = read_gv_from_path(netlist_path)?;
     let module = select_module(&parsed, options.module_name.as_deref())?;
     let elaborated = elaborate_hierarchy(&parsed, module)?;
     project_labeled_netlist_aig_with_boundaries(
@@ -269,7 +269,7 @@ pub fn load_labeled_sequential_netlist_aig_with_liberty(
     liberty: &Library,
     options: &GvEvalOptions,
 ) -> Result<LabeledSequentialNetlistAig> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
+    let parsed = read_gv_from_path(netlist_path)?;
     let module = select_module(&parsed, options.module_name.as_deref())?;
     let elaborated = elaborate_hierarchy(&parsed, module)?;
     project_labeled_sequential_netlist_aig_with_boundaries(

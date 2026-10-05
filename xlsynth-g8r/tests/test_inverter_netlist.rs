@@ -3,13 +3,12 @@
 //! Integration test for a single inverter netlist and matching Liberty proto.
 
 use prost::Message;
-use std::fs::File;
 use std::io::Write;
 use tempfile::NamedTempFile;
 use xlsynth_g8r::liberty::model::library_from_proto;
 use xlsynth_g8r::liberty_proto::Library as WireLibrary;
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
-use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
+use xlsynth_g8r::netlist::io::read_gv_from_path;
 
 const LIBERTY_INVERTER_AND_BUF_TEXTPROTO: &str = r#"
 format_magic: 5496997758177923663
@@ -90,12 +89,9 @@ endmodule
     liberty_bin_file.write_all(&liberty_bin).unwrap();
 
     // Parse netlist
-    let file = File::open(netlist_path).unwrap();
-    let scanner = TokenScanner::from_file_with_path(file, netlist_path.to_path_buf());
-    let mut parser = NetlistParser::new(scanner);
-    let modules = parser.parse_file().unwrap();
-    assert_eq!(modules.len(), 1);
-    let module = &modules[0];
+    let parsed = read_gv_from_path(netlist_path).unwrap();
+    assert_eq!(parsed.modules.len(), 1);
+    let module = &parsed.modules[0];
 
     // Parse Liberty proto
     let liberty_lib = library_from_proto(WireLibrary::decode(&*liberty_bin).unwrap()).unwrap();
@@ -103,8 +99,8 @@ endmodule
     // Use the helper to build the GateFn
     let gate_fn = project_gatefn_from_netlist_and_liberty(
         module,
-        &parser.nets,
-        &parser.interner,
+        &parsed.nets,
+        &parsed.interner,
         &liberty_lib,
         &std::collections::HashSet::new(),
         &std::collections::HashSet::new(),
@@ -161,15 +157,9 @@ endmodule
     dyn_msg.encode(&mut liberty_bin).unwrap();
 
     // Parse netlist
-    let file = std::fs::File::open(netlist_path).unwrap();
-    let scanner = xlsynth_g8r::netlist::parse::TokenScanner::from_file_with_path(
-        file,
-        netlist_path.to_path_buf(),
-    );
-    let mut parser = xlsynth_g8r::netlist::parse::Parser::new(scanner);
-    let modules = parser.parse_file().unwrap();
-    assert_eq!(modules.len(), 1);
-    let module = &modules[0];
+    let parsed = read_gv_from_path(netlist_path).unwrap();
+    assert_eq!(parsed.modules.len(), 1);
+    let module = &parsed.modules[0];
 
     // Parse Liberty proto
     let liberty_lib = library_from_proto(WireLibrary::decode(&*liberty_bin).unwrap()).unwrap();
@@ -178,8 +168,8 @@ endmodule
     let gate_fn =
         xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty(
             module,
-            &parser.nets,
-            &parser.interner,
+            &parsed.nets,
+            &parsed.interner,
             &liberty_lib,
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),

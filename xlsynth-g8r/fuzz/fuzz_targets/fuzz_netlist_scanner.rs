@@ -36,6 +36,15 @@ enum ArbKeyword {
     Input,
     Output,
     Inout,
+    Reg,
+    Logic,
+    Always,
+    AlwaysFf,
+    AlwaysComb,
+    AlwaysLatch,
+    Initial,
+    Generate,
+    Genvar,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -90,7 +99,9 @@ fn sanitize_identifier(s: &str) -> String {
     }
     // Avoid reserved keywords becoming Keyword tokens
     match out.as_str() {
-        "module" | "wire" | "endmodule" | "input" | "output" | "inout" => {
+        "module" | "wire" | "endmodule" | "input" | "output" | "inout"
+        | "reg" | "logic" | "always" | "always_ff" | "always_comb"
+        | "always_latch" | "initial" | "generate" | "genvar" => {
             out.push('_');
         }
         _ => {}
@@ -108,6 +119,15 @@ fn to_token_payload(a: &ArbPayload) -> TokenPayload {
             ArbKeyword::Input => Keyword::Input,
             ArbKeyword::Output => Keyword::Output,
             ArbKeyword::Inout => Keyword::Inout,
+            ArbKeyword::Reg => Keyword::Reg,
+            ArbKeyword::Logic => Keyword::Logic,
+            ArbKeyword::Always => Keyword::Always,
+            ArbKeyword::AlwaysFf => Keyword::AlwaysFf,
+            ArbKeyword::AlwaysComb => Keyword::AlwaysComb,
+            ArbKeyword::AlwaysLatch => Keyword::AlwaysLatch,
+            ArbKeyword::Initial => Keyword::Initial,
+            ArbKeyword::Generate => Keyword::Generate,
+            ArbKeyword::Genvar => Keyword::Genvar,
         }),
         ArbPayload::Punct(p) => match p {
             ArbPunct::OParen => TokenPayload::OParen,

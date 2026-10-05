@@ -1,0 +1,4 @@
+UGV reader: UGV does not permit leaf cell instance 'u_buf' of type 'BUF'; use gv2aig with --liberty_proto for cell netlists @ <string>:6:7..6:7
+  BUF u_buf (.A(n), .Y(y));
+      ^
+UGV supports combinational Boolean assignments; procedural registers and leaf cells are unsupported.

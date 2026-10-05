@@ -3,7 +3,7 @@
 use std::io::Write;
 use tempfile::NamedTempFile;
 use xlsynth_g8r::liberty::load::load_library_with_timing_data_from_path;
-use xlsynth_g8r::netlist::io::parse_netlist_from_path;
+use xlsynth_g8r::netlist::io::read_gv_from_path;
 use xlsynth_g8r::netlist::sta::{StaOptions, analyze_combinational_max_arrival};
 
 const SYNTHETIC_TIMING_LIBRARY: &str = r#"
@@ -310,7 +310,7 @@ endmodule
 
     for case in cases {
         let netlist_file = write_temp_file(case.netlist);
-        let parsed = parse_netlist_from_path(netlist_file.path())
+        let parsed = read_gv_from_path(netlist_file.path())
             .unwrap_or_else(|e| panic!("parse case '{}': {e}", case.name));
         let module = parsed
             .modules
@@ -358,7 +358,7 @@ module slow (a, y);
 endmodule
 "#,
     );
-    let parsed = parse_netlist_from_path(netlist_file.path()).expect("parse netlist");
+    let parsed = read_gv_from_path(netlist_file.path()).expect("parse netlist");
     let module = parsed
         .modules
         .iter()

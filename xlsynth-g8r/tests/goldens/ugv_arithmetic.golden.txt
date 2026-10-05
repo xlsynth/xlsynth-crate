@@ -1,0 +1,4 @@
+UGV reader: unsupported Verilog operator '+'; structural expressions support only ~, &, |, and ^ @ <string>:5:16..5:16
+  assign y = a + b;
+               ^
+UGV supports combinational Boolean assignments; procedural registers and leaf cells are unsupported.

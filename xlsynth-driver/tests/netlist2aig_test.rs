@@ -6,15 +6,18 @@ use std::process::Output;
 
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
+use xlsynth_g8r::test_utils::structurally_equivalent;
 
-fn run_gv2aig(
-    netlist_text: &str,
-    liberty_text: Option<&str>,
-) -> (tempfile::TempDir, PathBuf, Output) {
-    run_gv2aig_with_module_name(netlist_text, liberty_text, None)
+fn run_gv2aig(netlist_text: &str, liberty_text: &str) -> (tempfile::TempDir, PathBuf, Output) {
+    run_netlist2aig("gv2aig", netlist_text, Some(liberty_text), None)
 }
 
-fn run_gv2aig_with_module_name(
+fn run_ugv2aig(netlist_text: &str) -> (tempfile::TempDir, PathBuf, Output) {
+    run_netlist2aig("ugv2aig", netlist_text, None, None)
+}
+
+fn run_netlist2aig(
+    command_name: &str,
     netlist_text: &str,
     liberty_text: Option<&str>,
     module_name: Option<&str>,
@@ -28,7 +31,7 @@ fn run_gv2aig_with_module_name(
 
     let mut command = Command::new(driver);
     command
-        .arg("gv2aig")
+        .arg(command_name)
         .arg("--netlist")
         .arg(netlist_path.as_os_str())
         .arg("--aiger-out")
@@ -44,14 +47,16 @@ fn run_gv2aig_with_module_name(
         command.arg("--liberty_proto").arg(liberty_path.as_os_str());
     }
 
-    let output = command.output().expect("gv2aig invocation should run");
+    let output = command
+        .output()
+        .expect("netlist-to-AIG invocation should run");
     (temp_dir, out_path, output)
 }
 
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
-        "gv2aig failed: status={:?}\nstdout={}\nstderr={}",
+        "netlist-to-AIG failed: status={:?}\nstdout={}\nstderr={}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -91,7 +96,7 @@ module top (a, b, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, Some(liberty_text));
+    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, liberty_text);
     assert_success(&output);
 
     let loaded = load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
@@ -103,7 +108,7 @@ endmodule
 }
 
 #[test]
-fn gv2aig_without_liberty_emits_parseable_aiger_for_structural_assigns() {
+fn ugv2aig_emits_parseable_aiger_for_structural_assigns() {
     let netlist_text = r#"
 module top(a, b, y);
   input a;
@@ -115,7 +120,7 @@ module top(a, b, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, out_path, output) = run_ugv2aig(netlist_text);
     assert_success(&output);
 
     let loaded = load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
@@ -127,7 +132,7 @@ endmodule
 }
 
 #[test]
-fn gv2aig_without_liberty_supports_vector_xor() {
+fn ugv2aig_supports_vector_xor() {
     let netlist_text = r#"
 module top(a, b, y);
   input [1:0] a;
@@ -137,14 +142,14 @@ module top(a, b, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, out_path, output) = run_ugv2aig(netlist_text);
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load vector xor aiger");
 }
 
 #[test]
-fn gv2aig_without_liberty_supports_bus_slice_assembly() {
+fn ugv2aig_supports_bus_slice_assembly() {
     let netlist_text = r#"
 module top(lo, hi, y);
   input [1:0] lo;
@@ -155,14 +160,14 @@ module top(lo, hi, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, out_path, output) = run_ugv2aig(netlist_text);
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load bus slice assembly aiger");
 }
 
 #[test]
-fn gv2aig_without_liberty_supports_bare_literal_tieoff_resize() {
+fn ugv2aig_supports_bare_literal_tieoff_resize() {
     let netlist_text = r#"
 module top(y);
   output [3:0] y;
@@ -170,14 +175,14 @@ module top(y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, out_path, output) = run_ugv2aig(netlist_text);
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load literal tie-off structural aiger");
 }
 
 #[test]
-fn gv2aig_without_liberty_supports_declarations_after_assigns() {
+fn ugv2aig_supports_declarations_after_assigns() {
     let netlist_text = r#"
 module top(a, y);
   assign y[3:0] = a;
@@ -186,14 +191,14 @@ module top(a, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, out_path, output) = run_ugv2aig(netlist_text);
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load declarations-after-assigns structural aiger");
 }
 
 #[test]
-fn gv2aig_without_liberty_supports_acyclic_overlapping_slice_dependencies() {
+fn ugv2aig_supports_acyclic_overlapping_slice_dependencies() {
     let netlist_text = r#"
 module top(a, y);
   input a;
@@ -203,14 +208,14 @@ module top(a, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, out_path, output) = run_ugv2aig(netlist_text);
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load overlapping-slice structural aiger");
 }
 
 #[test]
-fn gv2aig_without_liberty_supports_ascending_packed_range_selects() {
+fn ugv2aig_supports_ascending_packed_range_selects() {
     let netlist_text = r#"
 module top(a, y);
   input [0:3] a;
@@ -220,14 +225,14 @@ module top(a, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, out_path, output) = run_ugv2aig(netlist_text);
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load ascending-range structural aiger");
 }
 
 #[test]
-fn gv2aig_without_liberty_rejects_mixed_width_bitwise_ops() {
+fn ugv2aig_rejects_mixed_width_bitwise_ops() {
     let netlist_text = r#"
 module top(a, y);
   input [3:0] a;
@@ -236,7 +241,7 @@ module top(a, y);
 endmodule
 "#;
 
-    let (_temp_dir, _out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, _out_path, output) = run_ugv2aig(netlist_text);
     assert!(
         !output.status.success(),
         "mixed-width bitwise ops should fail\nstdout={}\nstderr={}",
@@ -251,7 +256,7 @@ endmodule
 }
 
 #[test]
-fn gv2aig_without_liberty_scopes_port_lookup_to_selected_module() {
+fn ugv2aig_scopes_port_lookup_to_selected_module() {
     let netlist_text = r#"
 module helper(a, y);
   input a;
@@ -266,15 +271,14 @@ module top(a, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) =
-        run_gv2aig_with_module_name(netlist_text, None, Some("top"));
+    let (_temp_dir, out_path, output) = run_netlist2aig("ugv2aig", netlist_text, None, Some("top"));
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load selected-module structural aiger");
 }
 
 #[test]
-fn gv2aig_without_liberty_rejects_cycles() {
+fn ugv2aig_rejects_cycles() {
     let netlist_text = r#"
 module top(a, y);
   input a;
@@ -285,7 +289,7 @@ module top(a, y);
 endmodule
 "#;
 
-    let (_temp_dir, _out_path, output) = run_gv2aig(netlist_text, None);
+    let (_temp_dir, _out_path, output) = run_ugv2aig(netlist_text);
     assert!(
         !output.status.success(),
         "cycle should fail\nstdout={}\nstderr={}",
@@ -301,7 +305,7 @@ endmodule
 }
 
 #[test]
-fn gv2aig_with_liberty_supports_preserved_assigns() {
+fn gv2aig_supports_preserved_wiring_assigns() {
     let liberty_text = r#"
 format_magic: 5496997758177923663
 cells: {
@@ -310,6 +314,7 @@ cells: {
   pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
   area: 1.0
 }
+
 interned_strings: ["A", "Y"]
 "#;
     let netlist_text = r#"
@@ -322,8 +327,52 @@ module top(a, y);
 endmodule
 "#;
 
-    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, Some(liberty_text));
+    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, liberty_text);
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load liberty-backed preserved assign aiger");
+}
+
+#[test]
+fn gv2aig_requires_liberty() {
+    let source = "module top(a, y); input a; output y; assign y = a; endmodule";
+    let (_dir, _path, output) = run_netlist2aig("gv2aig", source, None, None);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        include_str!("goldens/gv2aig_requires_liberty.golden.txt")
+    );
+}
+
+#[test]
+fn aig2ugv_output_roundtrips_through_ugv2aig() {
+    let dir = tempfile::tempdir().unwrap();
+    let input_path = dir.path().join("input.aag");
+    std::fs::write(
+        &input_path,
+        r#"aag 3 2 0 1 1
+2
+4
+6
+6 2 5
+i0 a
+i1 b
+o0 y
+c
+"#,
+    )
+    .unwrap();
+    let emitted = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig2ugv")
+        .arg(&input_path)
+        .args(["--module-name", "top"])
+        .output()
+        .unwrap();
+    assert_success(&emitted);
+    let ugv = String::from_utf8(emitted.stdout).unwrap();
+    let (_output_dir, output_path, output) = run_ugv2aig(&ugv);
+    assert_success(&output);
+    let original = load_aiger_auto_from_path(&input_path, GateBuilderOptions::no_opt()).unwrap();
+    let rebuilt = load_aiger_auto_from_path(&output_path, GateBuilderOptions::no_opt()).unwrap();
+    assert!(structurally_equivalent(&original.gate_fn, &rebuilt.gate_fn));
 }

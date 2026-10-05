@@ -30,11 +30,11 @@ fn load_aig_gate_fn(path: &Path) -> Result<GateFn, String> {
 fn require_nonzero_bits_type(kind: &str, ty: &ir::Type) -> Result<(), String> {
     match ty {
         ir::Type::Bits(0) => Err(format!(
-            "aig2v --fn-type {kind} has zero width; packed Verilog ports require bits[N] with N > 0"
+            "aig2ugv --fn-type {kind} has zero width; packed Verilog ports require bits[N] with N > 0"
         )),
         ir::Type::Bits(_) => Ok(()),
         _ => Err(format!(
-            "aig2v --fn-type currently supports only top-level bits[N] parameters and a bits[M] or top-level tuple of bits[M] return; {kind} has type {ty}"
+            "aig2ugv --fn-type currently supports only top-level bits[N] parameters and a bits[M] or top-level tuple of bits[M] return; {kind} has type {ty}"
         )),
     }
 }
@@ -53,7 +53,7 @@ fn output_ports_from_supported_return_type(
         ir::Type::Tuple(elements) => {
             if elements.is_empty() {
                 return Err(
-                    "aig2v --fn-type return value has zero width; packed Verilog ports require bits[N] with N > 0"
+                    "aig2ugv --fn-type return value has zero width; packed Verilog ports require bits[N] with N > 0"
                         .to_string(),
                 );
             }
@@ -123,7 +123,7 @@ fn make_design_for_emission(
     Ok(design)
 }
 
-pub fn handle_aig2v(matches: &clap::ArgMatches) -> Result<(), String> {
+pub fn handle_aig2ugv(matches: &clap::ArgMatches) -> Result<(), String> {
     let aig_input_file = matches.get_one::<String>("aig_input_file").unwrap();
     let module_name = matches.get_one::<String>("module-name").unwrap();
     let add_clk_port = matches.get_one::<String>("add-clk-port").cloned();
