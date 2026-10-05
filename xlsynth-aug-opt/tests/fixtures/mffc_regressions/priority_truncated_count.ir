@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 package nextpow2
+// Synthetic priority-result regression control.
+// DSLX expression: { let n = (clz(x - u32:1) as u5) as u32; let k = if x != u32:0 { u32:32 - n } else { u32:0 }; u32:1 << k }
 top fn main(x: bits[32] id=1) -> bits[32] {
   one: bits[32] = literal(value=1,id=2)
   y: bits[32] = sub(x,one,id=3)

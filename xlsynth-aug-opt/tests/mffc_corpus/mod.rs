@@ -53,6 +53,11 @@ pub enum Expectations {
         enabled_limits: Limits,
         same_as: Option<String>,
     },
+    PriorityResult {
+        expected_fusions: usize,
+        disabled_limits: Limits,
+        enabled_limits: Limits,
+    },
 }
 
 /// Allows improvements while bounding mapped area, logical effort, and depth.
@@ -295,8 +300,18 @@ fn parse_expectations(message: &DynamicMessage, tolerance: f64) -> Result<Expect
             enabled_limits,
             same_as,
         })
+    } else if message.has_field_by_name("priority_result") {
+        let priority = required_message(message, "priority_result")?;
+        Ok(Expectations::PriorityResult {
+            expected_fusions: required_usize(priority, "expected_fusions")?,
+            disabled_limits: parse_limits(
+                required_message(priority, "disabled_limits")?,
+                tolerance,
+            )?,
+            enabled_limits: parse_limits(required_message(priority, "enabled_limits")?, tolerance)?,
+        })
     } else {
-        Err("missing expectation family: set shift or split_adder".to_string())
+        Err("missing expectation family: set shift, split_adder, or priority_result".to_string())
     }
 }
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 package priority
+// Synthetic priority-result regression control.
+// DSLX expression: std::next_pow2(x as u8)
 top fn main(x: bits[8] id=1) -> bits[8] {
   one: bits[8] = literal(value=1, id=2)
   y: bits[8] = sub(x, one, id=3)

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 package nextpow2
-top fn main(x: bits[63] id=1) -> (bits[63],bits[6]) {
+// Synthetic priority-result regression control.
+// DSLX expression: { let k = if x != uN[63]:0 { uN[63]:63 - clz(x - uN[63]:1) } else { uN[63]:0 }; (uN[63]:1 << k, k) }
+top fn main(x: bits[63] id=1) -> (bits[63],bits[63]) {
   one: bits[63] = literal(value=1,id=2)
   y: bits[63] = sub(x,one,id=3)
   r: bits[63] = reverse(y,id=4)
@@ -15,5 +17,5 @@ top fn main(x: bits[63] id=1) -> (bits[63],bits[6]) {
   mask: bits[63] = sign_ext(nz,new_bit_count=63,id=12)
   k: bits[63] = and(difference,mask,id=13)
   result: bits[63] = shll(one,k,id=14)
-  ret out: (bits[63],bits[6]) = tuple(result,n,id=15)
+  ret out: (bits[63],bits[63]) = tuple(result,k,id=15)
 }

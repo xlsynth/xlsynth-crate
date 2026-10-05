@@ -26,12 +26,20 @@ message SplitAdderExpectations {
   optional string same_as = 3;
 }
 
+// Priority fusion checks the option's effect and both mapped results.
+message PriorityResultExpectations {
+  required uint64 expected_fusions = 1;
+  required Limits disabled_limits = 2;
+  required Limits enabled_limits = 3;
+}
+
 // The filename supplies the case name; the paired IR supplies its top function.
 message Case {
   required string sha256 = 1;
   oneof expectations {
     ShiftExpectations shift = 2;
     SplitAdderExpectations split_adder = 3;
+    PriorityResultExpectations priority_result = 4;
   }
 }
 

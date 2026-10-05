@@ -9,12 +9,14 @@ fn aug_opt_priority_fusion_defaults_off_and_preserves_external_amount_sharing() 
     for (source, activates) in [
         (
             include_str!(
-                "../../xlsynth-aug-opt/tests/testdata/priority_result/historical-priority.ir"
+                "../../xlsynth-aug-opt/tests/fixtures/mffc_regressions/priority_historical.ir"
             ),
             true,
         ),
         (
-            include_str!("../../xlsynth-aug-opt/tests/testdata/priority_result/shared-amount63.ir"),
+            include_str!(
+                "../../xlsynth-aug-opt/tests/fixtures/mffc_regressions/priority_shared_amount63.ir"
+            ),
             false,
         ),
     ] {

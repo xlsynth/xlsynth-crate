@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 package historical_priority
+// Origin: std.x::next_pow2 MFFC __mffc_5f7cec8fcb15a5b1.
+// DSLX expression: std::next_pow2(leaf_1 as u32)
 top fn __mffc_5f7cec8fcb15a5b1(leaf_1: bits[32] id=57) -> bits[32] {
   literal.58: bits[32] = literal(value=4294967295, id=58)
   add.59: bits[32] = add(leaf_1, literal.58, id=59)
