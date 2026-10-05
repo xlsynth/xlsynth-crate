@@ -2217,6 +2217,12 @@ fn main() {
                         .value_parser(clap::value_parser!(bool))
                         .help("If true, collapse sequential state variables by substituting next_state.")
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("collapse_load_enable_feedback")
+                        .long("collapse_load_enable_feedback")
+                        .help("Collapse recognized load-enable feedback loops, assuming prior Q is zero (disabled by default)")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(

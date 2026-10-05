@@ -5,8 +5,10 @@ use std::process::Command;
 use std::process::Output;
 
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
+use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::test_utils::structurally_equivalent;
+use xlsynth_pir::IrBits;
 
 fn run_gv2aig(netlist_text: &str, liberty_text: &str) -> (tempfile::TempDir, PathBuf, Output) {
     run_netlist2aig("gv2aig", netlist_text, Some(liberty_text), None)
@@ -21,6 +23,16 @@ fn run_netlist2aig(
     netlist_text: &str,
     liberty_text: Option<&str>,
     module_name: Option<&str>,
+) -> (tempfile::TempDir, PathBuf, Output) {
+    run_netlist2aig_with_options(command_name, netlist_text, liberty_text, module_name, &[])
+}
+
+fn run_netlist2aig_with_options(
+    command_name: &str,
+    netlist_text: &str,
+    liberty_text: Option<&str>,
+    module_name: Option<&str>,
+    extra_args: &[&str],
 ) -> (tempfile::TempDir, PathBuf, Output) {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = tempfile::tempdir().expect("create temp dir");
@@ -46,6 +58,7 @@ fn run_netlist2aig(
         std::fs::write(&liberty_path, liberty_text).expect("write liberty");
         command.arg("--liberty_proto").arg(liberty_path.as_os_str());
     }
+    command.args(extra_args);
 
     let output = command
         .output()
@@ -105,6 +118,75 @@ endmodule
         !loaded.gate_fn.gates.is_empty(),
         "expected non-empty GateFn"
     );
+}
+
+#[test]
+fn gv2aig_load_enable_feedback_requires_opt_in() {
+    let liberty_text = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "DFFEN"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 3 direction: INPUT }
+  pins: { name_string_id: 4 direction: INPUT }
+  pins: { name_string_id: 5 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 6 direction: OUTPUT function_string_id: 7 }
+  sequential: {
+    state_var: "S"
+    next_state: "(PRIOR & HOLD) | (DATA & LOAD)"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+cells: {
+  name: "INV"
+  pins: { name_string_id: 8 direction: INPUT }
+  pins: { name_string_id: 9 direction: OUTPUT function_string_id: 10 }
+}
+interned_strings: ["DATA", "LOAD", "HOLD", "PRIOR", "CLK", "Q", "S", "A", "Y", "(!A)"]
+"#;
+    let netlist_text = r#"
+module top(data, enable, clk, y);
+  input data;
+  input enable;
+  input clk;
+  output y;
+  wire hold;
+  INV u_hold (.A(enable), .Y(hold));
+  DFFEN u_pipe (.DATA(data), .LOAD(enable), .HOLD(hold), .PRIOR(y),
+                 .CLK(clk), .Q(y));
+endmodule
+"#;
+
+    let (_default_dir, _default_path, default_output) = run_gv2aig(netlist_text, liberty_text);
+    assert!(!default_output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default_output.stderr),
+        include_str!("golden/gv2aig_load_enable_feedback.golden.txt")
+    );
+
+    let (_enabled_dir, enabled_path, enabled_output) = run_netlist2aig_with_options(
+        "gv2aig",
+        netlist_text,
+        Some(liberty_text),
+        None,
+        &["--collapse_load_enable_feedback"],
+    );
+    assert_success(&enabled_output);
+    let loaded = load_aiger_auto_from_path(&enabled_path, GateBuilderOptions::no_opt())
+        .expect("load AIGER with collapsed load-enable feedback");
+    let mut sim = PreparedGateSim::new(&loaded.gate_fn);
+    for data in 0..=1 {
+        for enable in 0..=1 {
+            let outputs = sim.eval_outputs(&[
+                IrBits::make_ubits(1, data).unwrap(),
+                IrBits::make_ubits(1, enable).unwrap(),
+                IrBits::make_ubits(1, 0).unwrap(),
+            ]);
+            assert_eq!(outputs, vec![IrBits::make_ubits(1, data & enable).unwrap()]);
+        }
+    }
 }
 
 #[test]

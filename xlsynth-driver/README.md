@@ -476,7 +476,12 @@ Flags:
 - `--liberty_proto <PATH>` – required Liberty proto, optionally gzip-compressed.
 - `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
 - `--module_name <MODULE>` – select the module when the input contains multiple modules.
-- `--collapse_sequential <BOOL>` – if true (default), substitute Liberty `next_state` formulas for sequential state variables. If false, unresolved sequential state causes projection to fail.
+- `--collapse_sequential <BOOL>` – if true (default), collapse reached flops by substituting their next-state formulas. If false, reaching a flop is an error.
+- `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential true`.
+
+The extractor elaborates structural module hierarchy, starts at every top-module output, and walks backward to the top-module inputs. It preserves top-module port names and declaration order.
+
+Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`. With `--collapse_load_enable_feedback`, a direct Q feedback connection implementing `(old_q & !enable) | (data & enable)` is collapsed with the prior Q value assumed zero. The enable signals may differ by one external inverter, and constant cell inputs such as disabled scan controls are folded when recognizing this pattern. No implicit inputs are added. Asynchronous clear/preset, Liberty-internal state-dependent `next_state` formulas, and other feedback patterns remain unsupported. The result is a combinational AIG with no latches under the stated zero-prior-state assumption.
 
 ### `ugv2aig`: combinational UGV to AIGER
 

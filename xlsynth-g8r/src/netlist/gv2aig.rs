@@ -3,9 +3,8 @@
 //! Convert a gate-level netlist + Liberty proto into a `GateFn` (AIG form).
 
 use crate::aig::GateFn;
-use crate::netlist::gatefn_from_netlist::{
-    GateFnProjectOptions, project_gatefn_from_netlist_and_liberty_with_options,
-};
+use crate::netlist::gv2aig_boundaries::extract_gatefn_all_top_ports;
+use crate::netlist::hierarchy::elaborate_hierarchy;
 use crate::netlist::io::{load_liberty_from_path, read_gv_from_path, select_module};
 use anyhow::{Result, anyhow};
 use std::path::Path;
@@ -16,6 +15,11 @@ pub struct Gv2AigOptions {
 
     /// If true, collapse sequential state variables by substituting next_state.
     pub collapse_sequential: bool,
+
+    /// If true, collapse recognized load-enable feedback while assuming prior Q
+    /// is zero. Applies only when `collapse_sequential` is true; defaults to
+    /// false.
+    pub collapse_load_enable_feedback: bool,
 }
 
 impl Default for Gv2AigOptions {
@@ -23,6 +27,7 @@ impl Default for Gv2AigOptions {
         Self {
             module_name: None,
             collapse_sequential: true,
+            collapse_load_enable_feedback: false,
         }
     }
 }
@@ -35,23 +40,13 @@ pub fn convert_gv2aig_paths(
 ) -> Result<GateFn> {
     let parsed = read_gv_from_path(netlist_path)?;
     let module = select_module(&parsed, opts.module_name.as_deref())?;
-
-    let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
-
-    let empty_dff_cells = std::collections::HashSet::new();
-
-    let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
-        module,
-        &parsed.nets,
-        &parsed.interner,
-        &liberty_lib,
-        &empty_dff_cells,
-        &empty_dff_cells,
-        &GateFnProjectOptions {
-            collapse_sequential: opts.collapse_sequential,
-        },
+    let elaborated = elaborate_hierarchy(&parsed, module)?;
+    let liberty = load_liberty_from_path(liberty_proto_path)?;
+    extract_gatefn_all_top_ports(
+        &elaborated,
+        Some(&liberty),
+        opts.collapse_sequential,
+        opts.collapse_load_enable_feedback,
     )
-    .map_err(|e| anyhow!(e))?;
-
-    Ok(gate_fn)
+    .map_err(|error| anyhow!(error))
 }
