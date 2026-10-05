@@ -185,8 +185,8 @@ fn aug_opt_tuning_args() -> [Arg; 2] {
             .value_name("BOOL")
             .action(ArgAction::Set)
             .value_parser(clap::value_parser!(bool))
-            .default_value("false")
-            .help("Fuse priority encode/decode results within aug-opt (default: false)"),
+            .default_value("true")
+            .help("Fuse priority encode/decode results within aug-opt (default: true)"),
     ]
 }
 

@@ -54,8 +54,8 @@ pub struct AugOptOptions {
     /// Recover full-width additions from their low sum bit and upper carry sum.
     pub recover_split_adders: bool,
     /// Preserve decoded priority results when the reference g8r cost improves.
-    /// Disabled by default; other backends can have different area/delay
-    /// tradeoffs.
+    /// Enabled by default within aug-opt. Profitability uses raw g8r AND
+    /// count and graph logical effort before FRAIG or ABC.
     pub fuse_priority_results: bool,
 }
 
@@ -169,7 +169,7 @@ impl Default for AugOptOptions {
             rounds: 1,
             mode: AugOptMode::Sandwich,
             recover_split_adders: true,
-            fuse_priority_results: false,
+            fuse_priority_results: true,
         }
     }
 }

@@ -72,7 +72,7 @@ only split-adder recovery. The debugging executable accepts
 
 ## Priority-result fusion
 
-`AugOptOptions::fuse_priority_results` defaults to false. Enabling it rewires
+`AugOptOptions::fuse_priority_results` defaults to true within aug-opt. It rewires
 `decode(F(encode(one_hot(x))))` or `1 << F(encode(one_hot(x)))` directly from
 the one-hot result. Each affine operation in `F` retains its original modular
 width; the zero-input sentinel and overshifts are included. An optional final
@@ -88,7 +88,8 @@ through subsequent XLS optimization in sandwich mode.
 The pass emits only ordinary XLS IR. Whole-function costing prepares private
 clones with g8r, preserving external sharing and loads in the comparison.
 The reference profile uses folded/hashed Brent-Kung mapping without range
-information, gate DCE, and graph logical effort with beta1=1/beta2=0.
+information, gate DCE, and graph logical effort with beta1=1/beta2=0, before
+FRAIG or ABC.
 It requires a strict improvement in live AND count or graph logical effort
 without worsening either. The gate-mapping library wrapper forwards its
 fold/hash settings. Unsupported shapes, externally shared count/index
@@ -97,13 +98,22 @@ intermediates, exhausted node IDs, cost errors, and ties preserve the input.
 This is a g8r cost policy, not a universal backend benefit or physical PPA
 claim. Matched Yosys/ABC measurements include an area/delay tradeoff for a
 256-bit affine decoder and a small whole-function regression for
-`std::next_pow2(u32)`. Keep the option explicit when comparing backends.
+`std::next_pow2(u32)`. Those backend comparisons are diagnostic; acceptance
+uses raw g8r AND count and graph logical effort.
 
-The driver accepts `--aug-opt-fuse-priority-results=true` and
-`--aug-opt-rounds=N` (default one) on `ir2opt`, `dslx2ir`, `ir2combo`, and
-`ir2pipeline`, together with `--aug-opt=true`. The debugging executable accepts
-`--fuse-priority-results=true` and its existing `--rounds N`.
-`AugOptRewriteStats::priority_results_fused` reports accepted sites.
+Aug-opt itself remains opt-in: set `AugOptOptions::enable` to true or pass
+`--aug-opt=true` to `ir2opt`, `dslx2ir`, `ir2combo`, or `ir2pipeline`.
+No separate fusion flag is needed. For ablation, set `fuse_priority_results`
+to false or pass `--aug-opt-fuse-priority-results=false`; the debugging
+executable accepts `--fuse-priority-results=false`. The default round count
+remains one, configurable with `--aug-opt-rounds=N` or the debugger's
+`--rounds N`. `AugOptRewriteStats::priority_results_fused` reports accepted sites.
+
+The optimizing `xlsynth_aug_opt::ir2gates_from_ir_text` wrapper includes fusion
+when aug-opt is enabled. Plain `xlsynth_g8r` mapping APIs and the driver's
+`ir2gates`, `ir2g8r`, and `dslx-g8r-stats` paths do not invoke aug-opt.
+To optimize before these lowering commands, run `ir2opt --aug-opt=true`
+first. Semantic rewrites remain in aug-opt; prep performs synthesis shaping.
 
 ## API migration
 

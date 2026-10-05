@@ -8,8 +8,9 @@ const PRIORITY8: &str = include_str!("fixtures/mffc_regressions/priority_u8.ir")
 const ZERO: &str = include_str!("fixtures/mffc_regressions/priority_zero.ir");
 
 #[test]
-fn priority_fusion_defaults_off_when_aug_opt_is_enabled() {
-    assert!(!AugOptOptions::default().fuse_priority_results);
+fn priority_fusion_defaults_on_when_aug_opt_is_enabled() {
+    assert!(AugOptOptions::default().fuse_priority_results);
+    assert!(!AugOptOptions::default().enable);
     for mode in [AugOptMode::PirOnly, AugOptMode::Sandwich] {
         let options = AugOptOptions {
             enable: true,
@@ -22,15 +23,27 @@ fn priority_fusion_defaults_off_when_aug_opt_is_enabled() {
             PRIORITY8,
             Some("main"),
             AugOptOptions {
+                fuse_priority_results: true,
+                ..options
+            },
+        )
+        .unwrap();
+        let disabled = run_aug_opt_over_ir_text_with_stats(
+            PRIORITY8,
+            Some("main"),
+            AugOptOptions {
                 fuse_priority_results: false,
                 ..options
             },
         )
         .unwrap();
-        assert_eq!(implicit.rewrite_stats.priority_results_fused, 0, "{mode:?}");
-        assert_eq!(explicit.rewrite_stats.priority_results_fused, 0, "{mode:?}");
+        assert_eq!(implicit.rewrite_stats.priority_results_fused, 1, "{mode:?}");
+        assert_eq!(explicit.rewrite_stats.priority_results_fused, 1, "{mode:?}");
+        assert_eq!(disabled.rewrite_stats.priority_results_fused, 0, "{mode:?}");
         assert_eq!(implicit.output_text, explicit.output_text, "{mode:?}");
+        assert_ne!(implicit.output_text, disabled.output_text, "{mode:?}");
         assert_eq!(implicit.total_rewrites, explicit.total_rewrites, "{mode:?}");
+        check_equivalence_via_toolchain(PRIORITY8, &implicit.output_text).unwrap();
     }
 }
 

@@ -28,6 +28,7 @@ fn priority_fusion_declines_uncostable_package_calls_without_changing_them() {
             enable: true,
             rounds,
             mode: AugOptMode::PirOnly,
+            fuse_priority_results: false,
             ..Default::default()
         };
         let disabled = run_aug_opt_over_ir_text_with_stats(SOURCE, Some("main"), options).unwrap();
