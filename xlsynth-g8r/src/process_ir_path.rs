@@ -464,11 +464,20 @@ fn prepared_ir_text_from_package(
     top_fn_name: &str,
     range_info: &IrRangeInfo,
     prep_opts: PrepForGatifyOptions,
+    priority_result: bool,
 ) -> Result<String, String> {
     let ir_top = ir_package
         .get_fn(top_fn_name)
         .expect("top fn should exist in pir_package");
-    let prepared_fn = prep_for_gatify(ir_top, Some(range_info), prep_opts);
+    let prepared_fn = if priority_result {
+        crate::gatify::prep_for_gatify::prep_for_gatify_with_priority_result(
+            ir_top,
+            Some(range_info),
+            prep_opts,
+        )
+    } else {
+        prep_for_gatify(ir_top, Some(range_info), prep_opts)
+    };
     let external_refs = ir_utils::external_function_references(&prepared_fn);
     if !external_refs.is_empty() {
         let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
@@ -515,6 +524,26 @@ pub fn canonical_ir_text_to_prepared_gatify_ir(
         &prepared.top_fn_name,
         prepared.range_info.as_ref(),
         prep_opts,
+        false,
+    )
+}
+
+/// Emits prepared PIR with exclusive priority-result preservation enabled.
+pub fn canonical_ir_text_to_priority_result_prepared_gatify_ir(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+) -> Result<String, String> {
+    let prep_opts = prep_options_from_canonical_options(lowering_options);
+    let ir2gates_options = ir2gates::Ir2GatesOptions::from(lowering_options);
+    let prepared =
+        ir2gates::prepare_ir_for_gatify_from_ir_text(ir_text, ir_top, &ir2gates_options)?;
+    prepared_ir_text_from_package(
+        &prepared.pir_package,
+        &prepared.top_fn_name,
+        prepared.range_info.as_ref(),
+        prep_opts,
+        true,
     )
 }
 
@@ -573,6 +602,7 @@ pub fn process_ir_text_with_gatefn(
             &top_fn_name,
             range_info.as_ref(),
             prep_opts,
+            false,
         )?;
         std::fs::write(out_path, prepared_text.as_bytes()).map_err(|e| {
             format!(

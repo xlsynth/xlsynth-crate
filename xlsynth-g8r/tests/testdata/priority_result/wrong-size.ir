@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package nextpow2
+top fn main(x: bits[32] id=1) -> bits[32] {
+  one: bits[32] = literal(value=1,id=2)
+  y: bits[32] = sub(x,one,id=3)
+  r: bits[32] = reverse(y,id=4)
+  h: bits[33] = one_hot(r,lsb_prio=true,id=5)
+  n: bits[6] = encode(h,id=6)
+  nw: bits[32] = zero_ext(n,new_bit_count=32,id=7)
+  size: bits[32] = literal(value=31,id=8)
+  difference: bits[32] = sub(size,nw,id=9)
+  zero: bits[32] = literal(value=0,id=10)
+  nz: bits[1] = ne(x,zero,id=11)
+  mask: bits[32] = sign_ext(nz,new_bit_count=32,id=12)
+  k: bits[32] = and(difference,mask,id=13)
+  ret out: bits[32] = shll(one,k,id=14)
+}

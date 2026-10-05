@@ -1,0 +1,51 @@
+{
+  "_spdx": "SPDX-License-Identifier: Apache-2.0",
+  "schema_version": 1,
+  "crate_version": "0.73.0",
+  "dso_version": "0.59.0",
+  "site": "https://bvc.xlsynth.org/sites/f7ac7f04dc92ce056d6e79147bc45d07b5f0608a873b6657eee9ea8c8d12428e/mffc-discrepancies",
+  "samples": [
+    {
+      "file": "historical-priority.ir",
+      "source": "std.x::next_pow2",
+      "source_action_id": "d5ea1dffddf3a34454f8c4fbc5fd90cdd12f2dd9f4f0f16acd6b2965fc866b65",
+      "extracted_action_id": "91a080035abe8c783a6e607b34aa9e46288a7e11b24a841c36ef5e8575072964",
+      "fixture_sha256": "a0603617c804e094694f43d1fb3ac1ccc7087e6541735f8376ad227a152a23bd",
+      "computed_structural_hash": "2e2f5734f10c5f591111d0294601894704f10ac4aa29fe8211c9a94e022c79e7"
+    }
+  ],
+  "synthetic_controls": [
+    {
+      "file": "priority8.ir",
+      "sha256": "6db43f8a45995a37e3a7cd0e3ab7c5071af1d2647db6db329c821767eb367776"
+    },
+    {
+      "file": "shared-amount63.ir",
+      "sha256": "122dacfcca926bd9ba5b4e8e43e70d4c5cbf45df76cac1064612ed61a1feaf10"
+    },
+    {
+      "file": "shared-count63.ir",
+      "sha256": "89da9e8f74225748aa91f63749dedbfff1191d081bd961fcdd900040b0e6acd3"
+    },
+    {
+      "file": "shared-hot63.ir",
+      "sha256": "2bfa97af54c999466e31f78809c6e3c6900d2c56e5230a1b5553fd1689e9599e"
+    },
+    {
+      "file": "truncated-count.ir",
+      "sha256": "3e26ae35ec464a406da3f644afb86c44142ec7e836101830456cfc1b0ba43327"
+    },
+    {
+      "file": "wrong-size.ir",
+      "sha256": "9c83badb7df2c17418e48920cd6222a897d481e4dddbcdb9d7a965bbfffdd33f"
+    },
+    {
+      "file": "zero.ir",
+      "sha256": "a930e6283473208fe2c9aebd465c3819275a835d9d664165cf02b5f940db6978"
+    },
+    {
+      "file": "shared-input63.ir",
+      "sha256": "1e6cca9d18b47e08d169cc0fc9df19f1c6b0e7a24391617615764ea637997e31"
+    }
+  ]
+}

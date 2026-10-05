@@ -1747,6 +1747,7 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .add_ir_top_arg(false)
+                .add_bool_arg("experimental-priority-result", "Opt into exclusive priority-result preservation (default false)")
                 .add_g8r_lowering_flags(),
         )
         .subcommand(

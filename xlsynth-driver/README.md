@@ -1005,6 +1005,10 @@ Example:
 xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
 ```
 
+The optional `--experimental-priority-result=true` flag preserves an exclusive
+next-power-of-two priority one-hot result instead of encoding and decoding it.
+It defaults to false. Only preparation opts in; ordinary gate mapping is unchanged.
+
 ### `g8r2v`: SequentialGateFn to gate-level netlist (Verilog-like)
 
 Converts a `.g8r` (text) or `.g8rbin` (binary) `SequentialGateFn` design to a
