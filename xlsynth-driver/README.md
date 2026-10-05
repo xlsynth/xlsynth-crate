@@ -983,6 +983,33 @@ xlsynth-driver g8r-optimize gatified.g8rbin \
 
 Similarly, a FRAIG-only run uses `--fraig=true --reassociation=false --cut-db-rewrite=false`, and a cut-DB-only run uses `--fraig=false --reassociation=false --cut-db-rewrite=true`.
 
+### Priority-result fusion in aug-opt
+
+The `ir2opt`, `dslx2ir`, `ir2combo`, and `ir2pipeline` commands accept
+`--aug-opt-fuse-priority-results=true` with `--aug-opt=true`.
+The fusion option defaults to false; `--aug-opt-rounds=N` defaults to one.
+It preserves a one-hot result when an affine encoded priority index feeds
+`decode` or a constant-one left shift. Both priority directions, modular
+constant addition/subtraction, lossless zero extensions, and an optional
+one-bit predicate mask are supported. Truncated counts, externally shared
+count/index intermediates, and incompletely guarded expanded decoders are
+declined.
+
+Candidates remain ordinary XLS IR and pass through the complete aug-opt
+sandwich, including subsequent XLS optimization. Profitability compares two
+complete private gate graphs after mandatory DCE, with folding/hashing,
+Brent-Kung adders, no range information, and graph logical effort beta1=1,
+beta2=0. At least one of live AND count and graph logical effort must improve,
+and neither may worsen. Cost errors preserve the input. This reference
+g8r profile does not guarantee gains for another mapping or physical PPA:
+the measured whole-function Yosys/ABC case adds two AND nodes and slightly
+increases graph logical effort.
+
+```sh
+xlsynth-driver ir2opt input.ir --top main --aug-opt=true \
+  --aug-opt-fuse-priority-results=true --aug-opt-rounds=3 > output.ir
+```
+
 ### `ir-prep-for-gates`: IR to prepared residual PIR
 
 Runs the same `prep_for_gatify` stage used by `ir2gates` / `ir2g8r`, then emits
@@ -1004,10 +1031,6 @@ Example:
 ```shell
 xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
 ```
-
-The optional `--experimental-priority-result=true` flag preserves an exclusive
-next-power-of-two priority one-hot result instead of encoding and decoding it.
-It defaults to false. Only preparation opts in; ordinary gate mapping is unchanged.
 
 ### `g8r2v`: SequentialGateFn to gate-level netlist (Verilog-like)
 

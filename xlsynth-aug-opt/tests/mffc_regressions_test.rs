@@ -173,6 +173,7 @@ fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
                         rounds: 1,
                         mode,
                         recover_split_adders,
+                        fuse_priority_results: false,
                     },
                 )
                 .unwrap_or_else(|e| panic!("{context}: recovery={recover_split_adders}: {e}"))

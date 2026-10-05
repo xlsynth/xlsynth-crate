@@ -8,7 +8,8 @@ use clap::ArgMatches;
 use std::process;
 
 use crate::common::{
-    CodegenFlags, enforce_extern_verilog_codegen_policy, extract_codegen_flags, parse_bool_flag_or,
+    CodegenFlags, enforce_extern_verilog_codegen_policy, extract_codegen_flags,
+    parse_aug_opt_options, parse_bool_flag_or,
 };
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
@@ -32,10 +33,7 @@ pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         .map(|s| s == "true")
         .unwrap_or(false);
 
-    let aug_opt = matches
-        .get_one::<String>("aug_opt")
-        .map(|s| s == "true")
-        .unwrap_or(false);
+    let aug_options = parse_aug_opt_options(matches);
     let allow_extern_verilog = parse_bool_flag_or(matches, "allow_extern_verilog", true);
 
     let ir_top_opt = matches.get_one::<String>("ir_top");
@@ -45,7 +43,7 @@ pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         delay_model,
         &codegen_flags,
         optimize,
-        aug_opt,
+        aug_options,
         allow_extern_verilog,
         ir_top_opt.map(|s| s.as_str()),
         &keep_temps,
@@ -58,14 +56,14 @@ fn ir2combo(
     delay_model: &str,
     codegen_flags: &CodegenFlags,
     optimize: bool,
-    aug_opt: bool,
+    aug_options: AugOptOptions,
     allow_extern_verilog: bool,
     ir_top: Option<&str>,
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
     log::info!("ir2combo");
-    if aug_opt && !optimize {
+    if aug_options.enable && !optimize {
         eprintln!("error: ir2combo: --aug-opt=true requires --opt=true");
         process::exit(2);
     }
@@ -85,19 +83,11 @@ fn ir2combo(
     // If requested, optimize first.
     let ir_for_codegen_path: std::path::PathBuf = if optimize {
         let top_name = ir_top.expect("--opt requires --top to be specified");
-        let opt_ir = if aug_opt {
+        let opt_ir = if aug_options.enable {
             let input_text =
                 std::fs::read_to_string(input_file).expect("IR input file should be readable");
-            run_aug_opt_over_ir_text(
-                &input_text,
-                Some(top_name),
-                AugOptOptions {
-                    enable: true,
-                    rounds: 1,
-                    ..Default::default()
-                },
-            )
-            .expect("aug_opt should succeed")
+            run_aug_opt_over_ir_text(&input_text, Some(top_name), aug_options)
+                .expect("aug_opt should succeed")
         } else {
             run_opt_main(input_file, Some(top_name), tool_path)
         };

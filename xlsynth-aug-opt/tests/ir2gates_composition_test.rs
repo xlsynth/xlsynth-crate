@@ -20,6 +20,7 @@ const PIR_ONLY: AugOptOptions = AugOptOptions {
     rounds: 1,
     mode: AugOptMode::PirOnly,
     recover_split_adders: true,
+    fuse_priority_results: false,
 };
 
 #[test]

@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use crate::constant_shift_choices::{
     ConstantShiftChoiceLimits, rewrite_constant_shift_choices_with_evaluator,
 };
-use crate::cost::GateBuilderCostEvaluator;
+use crate::cost::{G8rFunctionCostEvaluator, GateBuilderCostEvaluator};
 use crate::ir_cost::ShiftChoiceCostEvaluator;
 use crate::split_adder::rewrite_split_adders;
 use xlsynth_pir::IrValue;
@@ -53,6 +53,10 @@ pub struct AugOptOptions {
     pub mode: AugOptMode,
     /// Recover full-width additions from their low sum bit and upper carry sum.
     pub recover_split_adders: bool,
+    /// Preserve decoded priority results when the reference g8r cost improves.
+    /// Disabled by default; other backends can have different area/delay
+    /// tradeoffs.
+    pub fuse_priority_results: bool,
 }
 
 /// Counts applications of each augmented rewrite across the requested rounds.
@@ -63,6 +67,8 @@ pub struct AugOptRewriteStats {
     pub constant_shift_choices: usize,
     /// Split low-bit/upper-carry sums reconstructed as full-width additions.
     pub split_adders_recovered: usize,
+    /// Priority encode/index/decode roundtrips replaced by one-hot wiring.
+    pub priority_results_fused: usize,
     pub lsb_of_shll: usize,
     pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
@@ -81,6 +87,7 @@ impl AugOptRewriteStats {
         self.guarded_sel_ne1_nor
             .saturating_add(self.constant_shift_choices)
             .saturating_add(self.split_adders_recovered)
+            .saturating_add(self.priority_results_fused)
             .saturating_add(self.lsb_of_shll)
             .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
@@ -104,6 +111,9 @@ impl AugOptRewriteStats {
         self.split_adders_recovered = self
             .split_adders_recovered
             .saturating_add(other.split_adders_recovered);
+        self.priority_results_fused = self
+            .priority_results_fused
+            .saturating_add(other.priority_results_fused);
         self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
         self.eq_shll_slice_literal = self
             .eq_shll_slice_literal
@@ -159,6 +169,7 @@ impl Default for AugOptOptions {
             rounds: 1,
             mode: AugOptMode::Sandwich,
             recover_split_adders: true,
+            fuse_priority_results: false,
         }
     }
 }
@@ -186,11 +197,12 @@ pub fn run_aug_opt_over_ir_text_with_stats(
     )
 }
 
-/// Runs aug-opt with an injected cost model for profitability-gated rewrites.
+/// Runs aug-opt with an injected cost model for constant-shift choices.
 ///
 /// The evaluator compares small graphs for individual constant-shift choices.
-/// An evaluation error aborts the run. Rewrites without a profitability gate
-/// are independent of this model.
+/// An evaluation error aborts the run. Enabled priority-result fusion uses its
+/// private g8r reference model; the supplied evaluator does not affect it.
+/// Rewrites without a profitability gate are independent of this model.
 pub fn run_aug_opt_over_ir_text_with_evaluator(
     ir_text: &str,
     top: Option<&str>,
@@ -205,7 +217,24 @@ fn run_aug_opt_over_ir_text_impl(
     ir_text: &str,
     top: Option<&str>,
     options: AugOptOptions,
+    evaluator: Option<&mut dyn ShiftChoiceCostEvaluator>,
+) -> Result<AugOptRunResult, String> {
+    run_aug_opt_with_cost_evaluators(
+        ir_text,
+        top,
+        options,
+        evaluator,
+        &mut G8rFunctionCostEvaluator::default(),
+    )
+}
+
+/// Uses caller-specific gate folding and sharing for whole-function costs.
+pub(crate) fn run_aug_opt_with_cost_evaluators(
+    ir_text: &str,
+    top: Option<&str>,
+    options: AugOptOptions,
     mut evaluator: Option<&mut dyn ShiftChoiceCostEvaluator>,
+    function_evaluator: &mut G8rFunctionCostEvaluator,
 ) -> Result<AugOptRunResult, String> {
     if !options.enable {
         return Ok(AugOptRunResult {
@@ -220,19 +249,32 @@ fn run_aug_opt_over_ir_text_impl(
         .to_string();
     match options.mode {
         AugOptMode::Sandwich => {
-            // One initial libxls opt pass before the co-recursive rounds.
+            // Preserve semantic priority-index structure before XLS narrows
+            // arithmetic and distributes predicate masks. The ordinary rounds
+            // also recognize shapes exposed by subsequent XLS optimization.
+            let (initial_text, initial_fusions) =
+                if options.fuse_priority_results && options.rounds > 0 {
+                    fuse_priority_results_in_ir_text(ir_text, &top_name, function_evaluator)?
+                } else {
+                    (ir_text.to_string(), 0)
+                };
+            // Every accepted basis candidate traverses the complete sandwich.
             let mut cur_text =
-                optimize_ir_text_preserving_extension_ops(ir_text, &top_name, "initial")?;
+                optimize_ir_text_preserving_extension_ops(&initial_text, &top_name, "initial")?;
 
-            let mut rewrite_stats = AugOptRewriteStats::default();
-            let mut total_rewrites = 0usize;
+            let mut rewrite_stats = AugOptRewriteStats {
+                priority_results_fused: initial_fusions,
+                ..AugOptRewriteStats::default()
+            };
+            let mut total_rewrites = initial_fusions;
             for _round in 0..options.rounds {
                 let (lowered_text, rewrites_in_round, total_in_round) =
                     apply_pir_rewrites_to_ir_text(
                         &cur_text,
                         &top_name,
-                        options.recover_split_adders,
+                        options,
                         &mut evaluator,
+                        function_evaluator,
                     )?;
                 let (sel_text, mask_to_sel_count) =
                     canonicalize_masks_to_sel_for_xls_opt_in_ir_text(&lowered_text, &top_name)?;
@@ -285,8 +327,9 @@ fn run_aug_opt_over_ir_text_impl(
                 let (next_text, rewrites_in_round, total_in_round) = apply_pir_rewrites_to_ir_text(
                     &cur_text,
                     &top_name,
-                    options.recover_split_adders,
+                    options,
                     &mut evaluator,
+                    function_evaluator,
                 )?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
                 total_rewrites = total_rewrites.saturating_add(total_in_round);
@@ -301,11 +344,35 @@ fn run_aug_opt_over_ir_text_impl(
     }
 }
 
+/// Applies the range-independent semantic pass before XLS changes its shape.
+fn fuse_priority_results_in_ir_text(
+    ir_text: &str,
+    top_name: &str,
+    evaluator: &mut G8rFunctionCostEvaluator,
+) -> Result<(String, usize), String> {
+    let mut package = ir_parser::Parser::new(ir_text)
+        .parse_and_validate_package()
+        .map_err(|e| format!("aug_opt: PIR parse/validate before priority fusion failed: {e}"))?;
+    let mut function = package
+        .get_fn(top_name)
+        .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
+        .clone();
+    let rewrites = crate::priority_result_fusion::rewrite_with_evaluator(&mut function, &mut |f| {
+        evaluator.estimate(f)
+    });
+    if rewrites == 0 {
+        return Ok((ir_text.to_string(), 0));
+    }
+    replace_top_and_validate(&mut package, function)?;
+    Ok((package.to_string(), rewrites))
+}
+
 fn apply_pir_rewrites_to_ir_text(
     ir_text: &str,
     top_name: &str,
-    recover_split_adders: bool,
+    options: AugOptOptions,
     evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
+    function_evaluator: &mut G8rFunctionCostEvaluator,
 ) -> Result<(String, AugOptRewriteStats, usize), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
@@ -337,8 +404,9 @@ fn apply_pir_rewrites_to_ir_text(
     let (rewritten_top, rewrites_in_round, total_in_round) = apply_basis_rewrites_to_fn(
         &top_fn,
         Some(range_info.as_ref()),
-        recover_split_adders,
+        options,
         evaluator,
+        function_evaluator,
     )?;
 
     replace_top_and_validate(&mut pir_pkg, rewritten_top)?;
@@ -445,8 +513,9 @@ fn optimize_ir_text_preserving_extension_ops(
 fn apply_basis_rewrites_to_fn(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
-    recover_split_adders: bool,
+    options: AugOptOptions,
     evaluator: &mut Option<&mut dyn ShiftChoiceCostEvaluator>,
+    function_evaluator: &mut G8rFunctionCostEvaluator,
 ) -> Result<(ir::Fn, AugOptRewriteStats, usize), String> {
     let mut cloned = f.clone();
     let mut stats = AugOptRewriteStats::default();
@@ -469,7 +538,7 @@ fn apply_basis_rewrites_to_fn(
     stats.selected_opposite_subtracts = rewrite_selected_opposite_subtracts(&mut cloned);
     stats.ne_shrl_slice_known_one_shift_nonzero =
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
-    if recover_split_adders {
+    if options.recover_split_adders {
         stats.split_adders_recovered = rewrite_split_adders(&mut cloned);
     }
     // Candidate construction compacts the graph; run it after all consumers of
@@ -480,6 +549,12 @@ fn apply_basis_rewrites_to_fn(
             ConstantShiftChoiceLimits::default(),
             evaluator,
         )?;
+    }
+    if options.fuse_priority_results {
+        stats.priority_results_fused =
+            crate::priority_result_fusion::rewrite_with_evaluator(&mut cloned, &mut |function| {
+                function_evaluator.estimate(function)
+            });
     }
     let total_rewrites = stats.total().saturating_add(affine_shift_amount);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a

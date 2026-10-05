@@ -4,6 +4,7 @@ use clap::ArgMatches;
 use xlsynth::IrPackage;
 use xlsynth_aug_opt::{AugOptOptions, run_aug_opt_over_ir_text};
 
+use crate::common::parse_aug_opt_options;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_opt_main;
 
@@ -48,11 +49,8 @@ pub fn handle_ir2opt(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let top = matches.get_one::<String>("ir_top").unwrap();
     let input_path = std::path::Path::new(input_file);
 
-    let defaults = AugOptOptions::default();
+    let defaults = parse_aug_opt_options(matches);
     let aug_options = AugOptOptions {
-        enable: matches
-            .get_one::<String>("aug_opt")
-            .is_some_and(|s| s == "true"),
         recover_split_adders: matches
             .get_one::<bool>("aug_opt_recover_split_adders")
             .copied()

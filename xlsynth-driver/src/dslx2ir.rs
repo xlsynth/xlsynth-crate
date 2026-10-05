@@ -5,7 +5,7 @@ use xlsynth::{DslxConvertOptions, IrPackage};
 use xlsynth_aug_opt::{AugOptOptions, run_aug_opt_over_ir_text};
 
 use crate::{
-    common::parse_bool_flag_or,
+    common::{parse_aug_opt_options, parse_bool_flag_or},
     toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path},
     tools::{run_ir_converter_main, run_opt_main},
 };
@@ -19,7 +19,7 @@ fn dslx2ir(
     enable_warnings: Option<&[String]>,
     disable_warnings: Option<&[String]>,
     opt: bool,
-    aug_opt: bool,
+    aug_options: AugOptOptions,
     convert_tests: bool,
 ) {
     log::info!("dslx2ir");
@@ -37,7 +37,7 @@ fn dslx2ir(
             disable_warnings,
             convert_tests,
         );
-        if aug_opt && !opt {
+        if aug_options.enable && !opt {
             eprintln!("error: dslx2ir: --aug-opt=true requires --opt=true");
             std::process::exit(2);
         }
@@ -47,15 +47,11 @@ fn dslx2ir(
             let temp_file_path = temp_file.path();
             std::fs::write(temp_file_path, output).unwrap();
             let ir_top = xlsynth::mangle_dslx_name(dslx_module_name, dslx_top.unwrap()).unwrap();
-            if aug_opt {
+            if aug_options.enable {
                 output = run_aug_opt_over_ir_text(
                     &std::fs::read_to_string(temp_file_path).unwrap(),
                     Some(&ir_top),
-                    AugOptOptions {
-                        enable: true,
-                        rounds: 1,
-                        ..Default::default()
-                    },
+                    aug_options,
                 )
                 .unwrap();
             } else {
@@ -64,7 +60,7 @@ fn dslx2ir(
         }
         println!("{}", output);
     } else {
-        if aug_opt && !opt {
+        if aug_options.enable && !opt {
             eprintln!("error: dslx2ir: --aug-opt=true requires --opt=true");
             std::process::exit(2);
         }
@@ -99,17 +95,8 @@ fn dslx2ir(
 
         let result_text: String = if opt {
             let ir_top = xlsynth::mangle_dslx_name(dslx_module_name, dslx_top.unwrap()).unwrap();
-            if aug_opt {
-                run_aug_opt_over_ir_text(
-                    &result.ir,
-                    Some(&ir_top),
-                    AugOptOptions {
-                        enable: true,
-                        rounds: 1,
-                        ..Default::default()
-                    },
-                )
-                .unwrap()
+            if aug_options.enable {
+                run_aug_opt_over_ir_text(&result.ir, Some(&ir_top), aug_options).unwrap()
             } else {
                 let ir_package = IrPackage::parse_ir(&result.ir, Some(&ir_top)).unwrap();
                 let optimized_ir_package = xlsynth::optimize_ir(&ir_package, &ir_top).unwrap();
@@ -149,7 +136,7 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
 
     let opt = parse_bool_flag_or(matches, "opt", false);
-    let aug_opt = parse_bool_flag_or(matches, "aug_opt", false);
+    let aug_options = parse_aug_opt_options(matches);
 
     let convert_tests = parse_bool_flag_or(
         matches,
@@ -174,7 +161,7 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         enable_warnings,
         disable_warnings,
         opt,
-        aug_opt,
+        aug_options,
         convert_tests,
     );
 }

@@ -205,13 +205,12 @@ pub fn handle_ir_prep_for_gates(matches: &ArgMatches, _config: &Option<Toolchain
     let ir_text = std::fs::read_to_string(input_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_path.display(), e));
     let lowering_options = crate::g8r_cli::parse_g8r_cli_options(matches);
-    let prepare =
-        if crate::common::parse_bool_flag_or(matches, "experimental-priority-result", false) {
-            process_ir_path::canonical_ir_text_to_priority_result_prepared_gatify_ir
-        } else {
-            process_ir_path::canonical_ir_text_to_prepared_gatify_ir
-        };
-    let prepared_ir = prepare(&ir_text, ir_top, &lowering_options).unwrap_or_else(|err| {
+    let prepared_ir = process_ir_path::canonical_ir_text_to_prepared_gatify_ir(
+        &ir_text,
+        ir_top,
+        &lowering_options,
+    )
+    .unwrap_or_else(|err| {
         eprintln!("Error encountered preparing IR for gates: {}", err);
         std::process::exit(1);
     });
