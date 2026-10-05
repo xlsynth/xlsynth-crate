@@ -476,12 +476,75 @@ Flags:
 - `--liberty_proto <PATH>` – required Liberty proto, optionally gzip-compressed.
 - `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
 - `--module_name <MODULE>` – select the module when the input contains multiple modules.
-- `--collapse_sequential <BOOL>` – if true (default), collapse reached flops by substituting their next-state formulas. If false, reaching a flop is an error.
+- `--collapse_sequential <BOOL>` – if true (default), collapse reached flops by substituting their next-state formulas. If false, reaching a flop that is not a source boundary is an error.
 - `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential true`.
+- `--cone_sources <SELECTOR>` – add a compact source selector; repeat the flag for multiple selectors.
+- `--cone_sinks <SELECTOR>` – add a compact sink selector; repeat the flag for multiple selectors.
+- `--cone_boundary_file <PATH>` – read compact source and sink selectors from a JSON file. This cannot be combined with `--cone_sources` or `--cone_sinks`.
 
-The extractor elaborates structural module hierarchy, starts at every top-module output, and walks backward to the top-module inputs. It preserves top-module port names and declaration order.
+#### Source and sink boundaries
 
-Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`. With `--collapse_load_enable_feedback`, a direct Q feedback connection implementing `(old_q & !enable) | (data & enable)` is collapsed with the prior Q value assumed zero. The enable signals may differ by one external inverter, and constant cell inputs such as disabled scan controls are folded when recognizing this pattern. No implicit inputs are added. Asynchronous clear/preset, Liberty-internal state-dependent `next_state` formulas, and other feedback patterns remain unsupported. The result is a combinational AIG with no latches under the stated zero-prior-state assumption.
+The extractor elaborates structural module hierarchy, walks backward from the selected module outputs, and stops at the selected module inputs or mapped flop output pins. With no cone flags, it selects all top-module input and output ports in declaration order. Use the cone flags to select particular datapaths through this same traversal.
+
+For example, `boundaries.json` can contain:
+
+```json
+{
+  "sources": [
+    "input_port:data",
+    "flop_output_regex:u_state_reg_[0-9]+:Q"
+  ],
+  "sinks": [
+    "output_port:result"
+  ]
+}
+```
+
+```shell
+xlsynth-driver gv2aig \
+  --netlist design.gv \
+  --liberty_proto cells.proto \
+  --module_name top \
+  --cone_boundary_file boundaries.json \
+  --collapse_sequential true \
+  --aiger-out datapath.aig
+```
+
+The same selection can be supplied directly. Each flag takes one selector, so regexp commas remain part of the regexp:
+
+```shell
+xlsynth-driver gv2aig \
+  --netlist design.gv \
+  --liberty_proto cells.proto \
+  --module_name top \
+  --cone_sources 'input_port:data' \
+  --cone_sources 'flop_output_regex:u_state_reg_[0-9]+:Q' \
+  --cone_sinks 'output_port:result' \
+  --aiger-out datapath.aig
+```
+
+Selectors use `[<aig-name>=]<kind>:<endpoint-or-regexp>`:
+
+| Kind | Endpoint or regexp example | Meaning |
+|---|---|---|
+| `input_port` | `data` or `u_stage:data` | Exact top or child module input port |
+| `input_port_regex` | `data_[0-9]+` | Regexp over module input endpoints |
+| `flop_output` | `u_stage/u_state_reg_0:Q` | Exact mapped flop output pin |
+| `flop_output_regex` | `u_stage/u_state_reg_[0-9]+:Q` | Regexp over mapped flop output endpoints |
+| `output_port` | `result` or `u_stage:result` | Exact top or child module output port |
+| `output_port_regex` | `result_[0-9]+` | Regexp over module output endpoints |
+
+- A top-module port endpoint is its port name. A child-module endpoint is `<instance_name>:<port>`, and a flop endpoint is `<instance_name>:<pin>`. Instance names are exact names after hierarchy elaboration; nested instances use qualified names such as `u_stage/u_state_reg_0`.
+- Regexp selectors use Rust `regex` syntax and require a full match of the canonical endpoint text. Use `.*` explicitly for a substring match. The regexp includes the port or pin suffix, and everything after the selector kind's first `:` belongs to the regexp. Invalid regexps and selectors matching no eligible endpoints are errors.
+- Exact endpoint components escape a literal `:` as `\:` and a literal backslash as `\\`. Canonical endpoint text uses these same escapes during regexp matching. In JSON, each backslash must also be escaped according to JSON syntax. AIG aliases additionally escape a literal `=` as `\=`.
+- An optional alias sets the extracted AIG port name, for example `state_bit_0=flop_output:u_state_reg_0:Q`. An alias requires exactly one match. Otherwise, each matched endpoint's canonical text becomes its AIG name.
+- The file's `sources` and `sinks` arrays are both required. Sources accept input-port and flop-output selectors; sinks accept output-port selectors. Cone extraction requires at least one sink. Direct CLI selectors and `--cone_boundary_file` are mutually exclusive.
+- A module input source selects the entire port. A flop output source selects one connected scalar output pin of a mapped leaf whose Liberty cell has an FF definition. A sink selects an entire module output port. Sources cut the selected signal, including any `tran` aliases of it.
+- Selector order determines AIG interface order, with each regexp's matches sorted lexicographically by canonical endpoint text. Names must be unique within each list, and selected source net bits must not overlap. Vector bits are emitted least-significant bit first, with AIGER symbols such as `data_0`, `data_1`. Every declared source remains an input, including unused sources.
+- With `--collapse_sequential true` (the default), reached flops that are not sources are replaced by their Liberty `next_state` expressions. Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`.
+- With `--collapse_load_enable_feedback`, a direct Q feedback connection implementing `(old_q & !enable) | (data & enable)` is collapsed with the prior Q value assumed zero. The enable signals may differ by one external inverter, and constant cell inputs such as disabled scan controls are folded when recognizing this pattern. This zero-prior-state assumption applies only to collapsed flops; explicitly selected `flop_output` sources retain their arbitrary input values. No implicit inputs are added. Asynchronous clear/preset, Liberty-internal state-dependent `next_state` formulas, and other feedback patterns remain unsupported. The result is a combinational AIG with no latches under the stated zero-prior-state assumption.
+- With `--collapse_sequential false`, reaching an unselected sequential cell is an error. Reaching an unselected top-module input, an undriven or multiply driven signal, an unknown value, or a dependency cycle is also an error. This requires the source list to cover every terminal signal needed by the selected sinks.
+- Without any cone flags, the source and sink lists contain all top-module inputs and outputs, preserving their names and declaration order. The same traversal and flop-collapsing logic handles default and explicit boundaries.
 
 ### `ugv2aig`: combinational UGV to AIGER
 

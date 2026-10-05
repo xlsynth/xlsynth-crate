@@ -1,31 +1,100 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Projects gate-level netlists to AIGs while collapsing pipeline flops.
+//! Named source/sink extraction for gate-level netlists projected to AIGs.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
 use crate::aig::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::{EmitContext, Term};
-use crate::liberty_model::{Library, PinDirection};
+use crate::liberty_model::{Library, PinDirection, SequentialKind};
 use crate::netlist::gatefn_from_netlist::build_cell_formula_map;
-use crate::netlist::hierarchy::ElaboratedNetlist;
+use crate::netlist::hierarchy::{ElaboratedModuleBoundary, ElaboratedNetlist};
 use crate::netlist::normalized::{BitExpr, BitIndex, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, PortDirection};
 
 mod feedback;
+mod selectors;
 
-/// Extracts all top-module inputs and outputs, optionally collapsing reached
-/// flops. Recognized direct hold-feedback flops use zero for their prior Q
-/// value when load-enable feedback collapsing is enabled.
-pub(super) fn extract_gatefn_all_top_ports(
+pub use selectors::{
+    Gv2AigBoundaryEndpoint, Gv2AigBoundaryKind, Gv2AigBoundaryMatcher, Gv2AigBoundaryRequest,
+    Gv2AigBoundarySelection, load_gv2aig_boundary_request,
+};
+
+/// Ordered source and sink boundaries for one extracted AIG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gv2AigBoundarySpec {
+    pub sources: Vec<Gv2AigSourceBoundary>,
+    pub sinks: Vec<Gv2AigSinkBoundary>,
+}
+
+/// One named input of the extracted AIG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gv2AigSourceBoundary {
+    pub name: String,
+    pub selector: Gv2AigSourceSelector,
+}
+
+/// A module input port or mapped flop output pin at which traversal stops.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Gv2AigSourceSelector {
+    ModuleInput {
+        /// Exact elaborated module instance name; empty selects the top.
+        #[serde(default)]
+        instance_name: String,
+        port: String,
+    },
+    FlopOutput {
+        /// Exact elaborated name of the mapped leaf instance.
+        instance_name: String,
+        pin: String,
+    },
+}
+
+/// One named output of the extracted AIG, selected from a module output port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gv2AigSinkBoundary {
+    pub name: String,
+    /// Exact elaborated module instance name; empty selects the top.
+    #[serde(default)]
+    pub instance_name: String,
+    pub port: String,
+}
+
+/// An extracted AIG together with the exact boundaries resolved from selectors.
+pub struct Gv2AigBoundaryExtraction {
+    pub gate_fn: GateFn,
+    pub boundaries: Gv2AigBoundarySpec,
+}
+
+/// Loads a JSON boundary specification from a file.
+pub fn load_gv2aig_boundary_spec(path: &Path) -> anyhow::Result<Gv2AigBoundarySpec> {
+    let contents = std::fs::read(path)
+        .with_context(|| format!("failed to read boundary specification {}", path.display()))?;
+    serde_json::from_slice(&contents)
+        .with_context(|| format!("failed to parse boundary specification {}", path.display()))
+}
+
+/// Extracts the selected cones, stopping at sources and optionally crossing
+/// other flops. When load-enable feedback collapsing is enabled, crossing a
+/// recognized direct hold-feedback flop assumes its prior Q value is zero.
+/// Explicit source boundaries remain arbitrary inputs.
+pub fn extract_gatefn_with_boundaries(
     elaborated: &ElaboratedNetlist,
     liberty: &Library,
     collapse_sequential: bool,
     collapse_load_enable_feedback: bool,
+    boundaries: &Gv2AigBoundarySpec,
 ) -> Result<GateFn, String> {
     BoundaryExtractor::new(
         elaborated,
@@ -33,7 +102,33 @@ pub(super) fn extract_gatefn_all_top_ports(
         collapse_sequential,
         collapse_load_enable_feedback,
     )?
-    .extract()
+    .extract(boundaries)
+}
+
+/// Resolves compact selectors, or selects all top-module ports, and extracts
+/// their source/sink cones through the same traversal.
+pub fn extract_gatefn_with_optional_boundary_request(
+    elaborated: &ElaboratedNetlist,
+    liberty: &Library,
+    collapse_sequential: bool,
+    collapse_load_enable_feedback: bool,
+    request: Option<&Gv2AigBoundaryRequest>,
+) -> Result<Gv2AigBoundaryExtraction, String> {
+    let extractor = BoundaryExtractor::new(
+        elaborated,
+        liberty,
+        collapse_sequential,
+        collapse_load_enable_feedback,
+    )?;
+    let boundaries = match request {
+        Some(request) => extractor.resolve_request(request)?,
+        None => extractor.top_port_boundaries(),
+    };
+    let gate_fn = extractor.extract(&boundaries)?;
+    Ok(Gv2AigBoundaryExtraction {
+        gate_fn,
+        boundaries,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -77,10 +172,12 @@ struct BoundaryExtractor<'a> {
     normalized: NormalizedNetlistModule<'a>,
     nets: &'a [Net],
     interner: &'a StringInterner<StringBackend<SymbolU32>>,
+    module_boundaries: &'a [ElaboratedModuleBoundary],
     liberty: &'a Library,
     collapse_sequential: bool,
     collapse_load_enable_feedback: bool,
     cell_index_by_name: HashMap<String, usize>,
+    instance_index_by_name: HashMap<String, usize>,
     drivers: Vec<Vec<BitDriver>>,
     values: Vec<Option<AigOperand>>,
     source_owners: Vec<Option<String>>,
@@ -128,7 +225,7 @@ impl<'a> BoundaryExtractor<'a> {
                 return Err(format!("Liberty contains duplicate cell '{}'", cell.name));
             }
         }
-        let mut instance_names = HashSet::new();
+        let mut instance_index_by_name = HashMap::new();
         let mut drivers = vec![Vec::new(); normalized.bit_count()];
         for port in &normalized.ports {
             if port.direction == PortDirection::Input {
@@ -154,7 +251,10 @@ impl<'a> BoundaryExtractor<'a> {
                 .resolve(instance.instance_name)
                 .unwrap()
                 .to_string();
-            if !instance_names.insert(instance_name.clone()) {
+            if instance_index_by_name
+                .insert(instance_name.clone(), instance_index)
+                .is_some()
+            {
                 return Err(format!(
                     "duplicate flattened instance name '{}'",
                     instance_name
@@ -200,10 +300,12 @@ impl<'a> BoundaryExtractor<'a> {
             normalized,
             nets: &elaborated.nets,
             interner: &elaborated.interner,
+            module_boundaries: &elaborated.module_boundaries,
             liberty,
             collapse_sequential,
             collapse_load_enable_feedback,
             cell_index_by_name,
+            instance_index_by_name,
             drivers,
             values: vec![None; bit_count],
             source_owners: vec![None; bit_count],
@@ -214,42 +316,54 @@ impl<'a> BoundaryExtractor<'a> {
         })
     }
 
-    /// Creates the top-module interface and lowers logic reached from its
-    /// outputs.
-    fn extract(mut self) -> Result<GateFn, String> {
-        let inputs = self
-            .normalized
-            .ports
-            .iter()
-            .filter(|port| port.direction == PortDirection::Input)
-            .map(|port| {
-                (
-                    self.interner.resolve(port.name).unwrap().to_string(),
-                    port.bits.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let outputs = self
-            .normalized
-            .ports
-            .iter()
-            .filter(|port| port.direction == PortDirection::Output)
-            .map(|port| {
-                (
-                    self.interner.resolve(port.name).unwrap().to_string(),
-                    port.bits.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        if outputs.is_empty() {
-            return Err("gv2aig requires at least one top-module output".to_string());
+    /// Selects every directed top-module port in declaration order.
+    fn top_port_boundaries(&self) -> Gv2AigBoundarySpec {
+        let mut boundaries = Gv2AigBoundarySpec {
+            sources: Vec::new(),
+            sinks: Vec::new(),
+        };
+        for port in &self.normalized.ports {
+            let name = self.interner.resolve(port.name).unwrap().to_string();
+            match &port.direction {
+                PortDirection::Input => boundaries.sources.push(Gv2AigSourceBoundary {
+                    name: name.clone(),
+                    selector: Gv2AigSourceSelector::ModuleInput {
+                        instance_name: String::new(),
+                        port: name,
+                    },
+                }),
+                PortDirection::Output => boundaries.sinks.push(Gv2AigSinkBoundary {
+                    name: name.clone(),
+                    instance_name: String::new(),
+                    port: name,
+                }),
+                PortDirection::Inout => unreachable!("inout ports were rejected"),
+            }
         }
-        validate_names(inputs.iter().map(|(name, _)| name.as_str()), "source")?;
-        validate_names(outputs.iter().map(|(name, _)| name.as_str()), "sink")?;
-        for (name, bits) in inputs {
-            let input = self.builder.add_input(name.clone(), bits.len());
+        boundaries
+    }
+
+    /// Resolves selectors, creates the ordered interface, and lowers only sink
+    /// cones.
+    fn extract(mut self, boundaries: &Gv2AigBoundarySpec) -> Result<GateFn, String> {
+        if boundaries.sinks.is_empty() {
+            return Err("boundary specification must contain at least one sink".to_string());
+        }
+        validate_names(
+            boundaries.sources.iter().map(|source| source.name.as_str()),
+            "source",
+        )?;
+        validate_names(
+            boundaries.sinks.iter().map(|sink| sink.name.as_str()),
+            "sink",
+        )?;
+        for source in &boundaries.sources {
+            let bits = self
+                .resolve_source(&source.selector)
+                .map_err(|error| format!("while resolving source '{}': {}", source.name, error))?;
+            let input = self.builder.add_input(source.name.clone(), bits.len());
             for (offset, &bit) in bits.iter().enumerate() {
-                let owner = format!("{}[{}]", name, offset);
+                let owner = format!("{}[{}]", source.name, offset);
                 if let Some(previous) = &self.source_owners[bit] {
                     return Err(format!(
                         "source '{}' selects net bit '{}' already selected by source '{}'",
@@ -262,19 +376,137 @@ impl<'a> BoundaryExtractor<'a> {
                 self.values[bit] = Some(*input.get_lsb(offset));
             }
         }
-        for (name, bits) in outputs {
+        for sink in &boundaries.sinks {
+            let bits = self
+                .module_port_bits(&sink.instance_name, &sink.port, PortDirection::Output)
+                .map_err(|error| format!("while resolving sink '{}': {}", sink.name, error))?;
             let mut output_bits = Vec::with_capacity(bits.len());
             for bit in bits {
-                output_bits.push(
-                    self.resolve_bit(bit).map_err(|error| {
-                        format!("while extracting output '{}': {}", name, error)
-                    })?,
-                );
+                output_bits.push(self.resolve_bit(bit).map_err(|error| {
+                    format!("while extracting sink '{}': {}", sink.name, error)
+                })?);
             }
-            self.builder
-                .add_output(name, AigBitVector::from_lsb_is_index_0(&output_bits));
+            self.builder.add_output(
+                sink.name.clone(),
+                AigBitVector::from_lsb_is_index_0(&output_bits),
+            );
         }
         Ok(self.builder.build())
+    }
+
+    /// Resolves a source selector to canonical signal bits.
+    fn resolve_source(&self, selector: &Gv2AigSourceSelector) -> Result<Vec<BitIndex>, String> {
+        match selector {
+            Gv2AigSourceSelector::ModuleInput {
+                instance_name,
+                port,
+            } => self.module_port_bits(instance_name, port, PortDirection::Input),
+            Gv2AigSourceSelector::FlopOutput { instance_name, pin } => self
+                .flop_output_bit(instance_name, pin)
+                .map(|bit| vec![bit]),
+        }
+    }
+
+    /// Resolves a top or child module port to canonical bits in LSB-first
+    /// order.
+    fn module_port_bits(
+        &self,
+        instance_name: &str,
+        port_name: &str,
+        expected_direction: PortDirection,
+    ) -> Result<Vec<BitIndex>, String> {
+        if instance_name.is_empty() {
+            let port = self
+                .normalized
+                .ports
+                .iter()
+                .find(|port| self.interner.resolve(port.name) == Some(port_name))
+                .ok_or_else(|| format!("top module has no port '{}'", port_name))?;
+            if port.direction != expected_direction {
+                return Err(format!(
+                    "top module port '{}' has direction {:?}; expected {:?}",
+                    port_name, port.direction, expected_direction
+                ));
+            }
+            return Ok(port.bits.clone());
+        }
+        let boundary = self
+            .module_boundaries
+            .iter()
+            .find(|boundary| boundary.instance_path == instance_name)
+            .ok_or_else(|| format!("module instance '{}' was not found", instance_name))?;
+        let port = boundary
+            .ports
+            .iter()
+            .find(|port| self.interner.resolve(port.name) == Some(port_name))
+            .ok_or_else(|| {
+                format!(
+                    "module instance '{}' has no port '{}'",
+                    instance_name, port_name
+                )
+            })?;
+        if port.direction != expected_direction {
+            return Err(format!(
+                "module instance '{}' port '{}' has direction {:?}; expected {:?}",
+                instance_name, port_name, port.direction, expected_direction
+            ));
+        }
+        Ok(self
+            .normalized
+            .net_bits(port.net)
+            .iter()
+            .map(|&bit| self.normalized.canonical_bit(bit))
+            .collect())
+    }
+
+    /// Resolves and validates one mapped FF output pin selected as a source.
+    fn flop_output_bit(&self, instance_name: &str, pin_name: &str) -> Result<BitIndex, String> {
+        let instance_index = self
+            .instance_index_by_name
+            .get(instance_name)
+            .ok_or_else(|| format!("flop instance '{}' was not found", instance_name))?;
+        let instance = &self.normalized.instances[*instance_index];
+        let type_name = self.interner.resolve(instance.type_name).unwrap();
+        let library = self.liberty;
+        let cell = &library.cells[self.cell_index_by_name[type_name]];
+        if !cell
+            .sequential
+            .iter()
+            .any(|sequential| sequential.kind == SequentialKind::Ff as i32)
+        {
+            return Err(format!(
+                "source instance '{}' (cell '{}') is not a Liberty FF",
+                instance_name, type_name
+            ));
+        }
+        let pin = cell
+            .pins
+            .iter()
+            .find(|pin| library.resolve_string(&pin.name) == pin_name)
+            .ok_or_else(|| format!("cell '{}' has no pin '{}'", type_name, pin_name))?;
+        if pin.direction != PinDirection::Output as i32 {
+            return Err(format!(
+                "flop instance '{}' pin '{}' is not an output",
+                instance_name, pin_name
+            ));
+        }
+        let connection = instance
+            .connections
+            .iter()
+            .find(|connection| self.interner.resolve(connection.port) == Some(pin_name))
+            .ok_or_else(|| {
+                format!(
+                    "flop instance '{}' pin '{}' is unconnected",
+                    instance_name, pin_name
+                )
+            })?;
+        let [BitSource::Bit(bit)] = connection.bits.as_slice() else {
+            return Err(format!(
+                "flop instance '{}' pin '{}' must connect to one net bit",
+                instance_name, pin_name
+            ));
+        };
+        Ok(*bit)
     }
 
     /// Resolves one sink bit with iterative DFS so long netlist chains do not
@@ -397,7 +629,7 @@ impl<'a> BoundaryExtractor<'a> {
         let cell = &library.cells[self.cell_index_by_name[&type_name]];
         if !self.collapse_sequential && !cell.sequential.is_empty() {
             return Err(format!(
-                "reached sequential cell '{}' instance '{}' output '{}'; enable collapse_sequential",
+                "reached sequential cell '{}' instance '{}' output '{}'; select it as a source or enable collapse_sequential",
                 type_name, instance_name, pin_name
             ));
         }
@@ -588,6 +820,7 @@ mod tests {
     use xlsynth_pir::IrBits;
 
     use super::*;
+    use crate::aig_serdes::emit_aiger::emit_aiger;
     use crate::aig_sim::gate_sim::PreparedGateSim;
     use crate::netlist::hierarchy::elaborate_hierarchy;
     use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, select_module};
@@ -646,6 +879,58 @@ cells: {
 interned_strings: ["D", "CLK", "Q", "IQ", "RSTN", "d0_0", "d0_1", "d1_0", "d1_1", "ti", "te", "I", "O", "!I"]
 "#;
 
+    const NETLIST: &str = r#"
+module stage(data, spare, clk, rstn, result, complement, unused);
+  input [1:0] data;
+  input spare;
+  input clk;
+  input rstn;
+  output [1:0] result;
+  output complement;
+  output unused;
+  wire state;
+  wire state_next;
+  wire pipe_next;
+  wire pipe_q;
+  wire result_hi;
+  assign state_next = state ^ spare;
+  DFFR u_state (.D(state_next), .CLK(clk), .RSTN(rstn), .Q(state));
+  assign pipe_next = data[0] ^ state;
+  DFF u_pipe (.D(pipe_next), .CLK(clk), .Q(pipe_q));
+  assign result_hi = data[1] & state;
+  assign result = {result_hi, pipe_q};
+  assign complement = ~pipe_q;
+  assign unused = spare;
+endmodule
+
+module top(ext_data, spare, clk, rstn, top_result, unused_top);
+  input [1:0] ext_data;
+  input spare;
+  input clk;
+  input rstn;
+  output [1:0] top_result;
+  output unused_top;
+  wire [1:0] pre_data;
+  wire complement;
+  assign pre_data = ~ext_data;
+  stage u_stage (.data(pre_data), .spare(spare), .clk(clk), .rstn(rstn),
+                   .result(top_result), .complement(complement), .unused(unused_top));
+endmodule
+"#;
+
+    const BOUNDARIES: &str = r#"
+{
+  "sources": [
+    {"name": "state", "selector": {"kind": "flop_output", "instance_name": "u_stage/u_state", "pin": "Q"}},
+    {"name": "data", "selector": {"kind": "module_input", "instance_name": "u_stage", "port": "data"}}
+  ],
+  "sinks": [
+    {"name": "not_result_bit", "instance_name": "u_stage", "port": "complement"},
+    {"name": "result", "instance_name": "u_stage", "port": "result"}
+  ]
+}
+"#;
+
     /// Parses a small netlist and provides its elaboration and test Liberty.
     fn with_fixture<T>(
         netlist: &'static str,
@@ -667,6 +952,219 @@ interned_strings: ["D", "CLK", "Q", "IQ", "RSTN", "d0_0", "d0_1", "d1_0", "d1_1"
         f(&elaborated, &liberty)
     }
 
+    /// Parses a small netlist and extracts its selected top-module cones.
+    fn extract_fixture(
+        netlist: &'static str,
+        boundaries: &Gv2AigBoundarySpec,
+        collapse_sequential: bool,
+    ) -> Result<GateFn, String> {
+        with_fixture(netlist, |elaborated, liberty| {
+            extract_gatefn_with_boundaries(
+                elaborated,
+                liberty,
+                collapse_sequential,
+                /* collapse_load_enable_feedback= */ false,
+                boundaries,
+            )
+        })
+    }
+
+    fn boundary_spec() -> Gv2AigBoundarySpec {
+        serde_json::from_str(BOUNDARIES).unwrap()
+    }
+
+    #[test]
+    fn resolves_regexp_boundaries_across_hierarchy_in_lexical_order() {
+        let request = Gv2AigBoundaryRequest::from_selectors(
+            &[
+                "flop_output_regex:u_stage/u_(?:pipe|state):Q".to_string(),
+                "input_port_regex:u_stage:data".to_string(),
+            ],
+            &["output_port_regex:u_stage:(?:complement|result)".to_string()],
+        )
+        .unwrap();
+        let extraction = with_fixture(NETLIST, |elaborated, liberty| {
+            extract_gatefn_with_optional_boundary_request(
+                elaborated,
+                liberty,
+                /* collapse_sequential= */ false,
+                /* collapse_load_enable_feedback= */ false,
+                Some(&request),
+            )
+        })
+        .unwrap();
+        let expected: Gv2AigBoundarySpec = serde_json::from_str(
+            r#"{
+              "sources": [
+                {"name": "u_stage/u_pipe:Q", "selector": {"kind": "flop_output", "instance_name": "u_stage/u_pipe", "pin": "Q"}},
+                {"name": "u_stage/u_state:Q", "selector": {"kind": "flop_output", "instance_name": "u_stage/u_state", "pin": "Q"}},
+                {"name": "u_stage:data", "selector": {"kind": "module_input", "instance_name": "u_stage", "port": "data"}}
+              ],
+              "sinks": [
+                {"name": "u_stage:complement", "instance_name": "u_stage", "port": "complement"},
+                {"name": "u_stage:result", "instance_name": "u_stage", "port": "result"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(extraction.boundaries, expected);
+        let exact = extract_fixture(NETLIST, &expected, false).unwrap();
+        assert_eq!(
+            emit_aiger(&extraction.gate_fn, true).unwrap(),
+            emit_aiger(&exact, true).unwrap()
+        );
+        assert_eq!(
+            extraction
+                .gate_fn
+                .inputs
+                .iter()
+                .map(|input| (input.name.as_str(), input.bit_vector.get_bit_count()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("u_stage/u_pipe:Q", 1),
+                ("u_stage/u_state:Q", 1),
+                ("u_stage:data", 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_hierarchical_cones_across_pipeline_flops() {
+        let gate_fn = extract_fixture(NETLIST, &boundary_spec(), true).unwrap();
+        assert_eq!(
+            gate_fn
+                .inputs
+                .iter()
+                .map(|input| (input.name.as_str(), input.bit_vector.get_bit_count()))
+                .collect::<Vec<_>>(),
+            vec![("state", 1), ("data", 2)]
+        );
+        assert_eq!(
+            gate_fn
+                .outputs
+                .iter()
+                .map(|output| (output.name.as_str(), output.bit_vector.get_bit_count()))
+                .collect::<Vec<_>>(),
+            vec![("not_result_bit", 1), ("result", 2)]
+        );
+
+        // The selected state output hides its feedback and asynchronous reset.
+        // The selected child input hides the parent inverter. The pipeline FF
+        // contributes its D expression, while unused outputs add no inputs.
+        let mut sim = PreparedGateSim::new(&gate_fn);
+        for state in 0..=1 {
+            for data in 0..=3 {
+                let pipe = (data & 1) ^ state;
+                let result = (((data >> 1) & state) << 1) | pipe;
+                let outputs = sim.eval_outputs(&[
+                    IrBits::make_ubits(1, state).unwrap(),
+                    IrBits::make_ubits(2, data).unwrap(),
+                ]);
+                assert_eq!(
+                    outputs,
+                    vec![
+                        IrBits::make_ubits(1, pipe ^ 1).unwrap(),
+                        IrBits::make_ubits(2, result).unwrap(),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_reached_unselected_flop_when_collapse_is_disabled() {
+        let error = extract_fixture(NETLIST, &boundary_spec(), false).unwrap_err();
+        assert!(error.contains("reached sequential cell 'DFF' instance 'u_stage/u_pipe'"));
+    }
+
+    #[test]
+    fn selected_flop_outputs_work_with_collapse_disabled() {
+        let mut boundaries = boundary_spec();
+        boundaries.sources.push(Gv2AigSourceBoundary {
+            name: "pipe".to_string(),
+            selector: Gv2AigSourceSelector::FlopOutput {
+                instance_name: "u_stage/u_pipe".to_string(),
+                pin: "Q".to_string(),
+            },
+        });
+        let gate_fn = extract_fixture(NETLIST, &boundaries, false).unwrap();
+        let mut sim = PreparedGateSim::new(&gate_fn);
+        for state in 0..=1 {
+            for data in 0..=3 {
+                for pipe in 0..=1 {
+                    let outputs = sim.eval_outputs(&[
+                        IrBits::make_ubits(1, state).unwrap(),
+                        IrBits::make_ubits(2, data).unwrap(),
+                        IrBits::make_ubits(1, pipe).unwrap(),
+                    ]);
+                    let result = (((data >> 1) & state) << 1) | pipe;
+                    assert_eq!(
+                        outputs,
+                        vec![
+                            IrBits::make_ubits(1, pipe ^ 1).unwrap(),
+                            IrBits::make_ubits(2, result).unwrap(),
+                        ]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unselected_terminal_input() {
+        let mut boundaries = boundary_spec();
+        boundaries.sources.pop();
+        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        assert!(error.contains("reached unselected top module input 'ext_data'"));
+    }
+
+    #[test]
+    fn rejects_duplicate_source_signal_through_hierarchy_alias() {
+        let mut boundaries = boundary_spec();
+        for (name, instance_name) in [("top_spare", ""), ("child_spare", "u_stage")] {
+            boundaries.sources.push(Gv2AigSourceBoundary {
+                name: name.to_string(),
+                selector: Gv2AigSourceSelector::ModuleInput {
+                    instance_name: instance_name.to_string(),
+                    port: "spare".to_string(),
+                },
+            });
+        }
+        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        assert!(error.contains("already selected by source 'top_spare[0]'"));
+    }
+
+    #[test]
+    fn rejects_invalid_selector_direction() {
+        let mut boundaries = boundary_spec();
+        boundaries.sinks[0].port = "data".to_string();
+        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        assert!(error.contains("port 'data' has direction Input; expected Output"));
+    }
+
+    #[test]
+    fn rejects_feedback_cycle_when_crossing_an_unselected_flop() {
+        let netlist = r#"
+module top(a, clk, y);
+  input a;
+  input clk;
+  output y;
+  wire next;
+  assign next = y ^ a;
+  DFF u_feedback (.D(next), .CLK(clk), .Q(y));
+endmodule
+"#;
+        let boundaries = serde_json::from_str(
+            r#"{
+              "sources": [{"name": "a", "selector": {"kind": "module_input", "port": "a"}}],
+              "sinks": [{"name": "y", "port": "y"}]
+            }"#,
+        )
+        .unwrap();
+        let error = extract_fixture(netlist, &boundaries, true).unwrap_err();
+        assert!(error.contains("dependency cycle"));
+    }
+
     #[test]
     fn collapses_direct_hold_feedback_with_zero_prior_state() {
         let netlist = r#"
@@ -684,10 +1182,14 @@ module top(data, valid, clk, y);
 endmodule
 "#;
         let gate_fn = with_fixture(netlist, |elaborated, liberty| {
-            extract_gatefn_all_top_ports(
-                elaborated, liberty, /* collapse_sequential= */ true,
+            extract_gatefn_with_optional_boundary_request(
+                elaborated,
+                liberty,
+                /* collapse_sequential= */ true,
                 /* collapse_load_enable_feedback= */ true,
+                None,
             )
+            .map(|extraction| extraction.gate_fn)
         })
         .unwrap();
         assert_eq!(
@@ -727,13 +1229,17 @@ module top(data, enable, clk, y);
                    .ti(1'b0), .te(1'b0), .CLK(clk), .Q(y));
 endmodule
 "#;
-        let error = with_fixture(netlist, |elaborated, liberty| {
-            extract_gatefn_all_top_ports(
-                elaborated, liberty, /* collapse_sequential= */ true,
-                /* collapse_load_enable_feedback= */ false,
-            )
-        })
-        .unwrap_err();
+        let boundaries = serde_json::from_str(
+            r#"{
+              "sources": [
+                {"name": "data", "selector": {"kind": "module_input", "port": "data"}},
+                {"name": "enable", "selector": {"kind": "module_input", "port": "enable"}}
+              ],
+              "sinks": [{"name": "y", "port": "y"}]
+            }"#,
+        )
+        .unwrap();
+        let error = extract_fixture(netlist, &boundaries, true).unwrap_err();
         assert!(error.contains("dependency cycle"));
     }
 }

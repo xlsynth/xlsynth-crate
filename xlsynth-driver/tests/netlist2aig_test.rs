@@ -10,6 +10,28 @@ use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::test_utils::structurally_equivalent;
 use xlsynth_pir::IrBits;
 
+const CONE_TEST_LIBERTY: &str = r#"
+format_magic: 5496997758177923663
+cells: {
+  name: "INV"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
+}
+cells: {
+  name: "XOR2"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 5 }
+}
+cells: {
+  name: "AND2"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 6 }
+}
+interned_strings: ["A", "B", "Y", "(!A)", "(A ^ B)", "(A & B)"]
+"#;
+
 fn run_gv2aig(netlist_text: &str, liberty_text: &str) -> (tempfile::TempDir, PathBuf, Output) {
     run_netlist2aig("gv2aig", netlist_text, Some(liberty_text), None)
 }
@@ -24,7 +46,14 @@ fn run_netlist2aig(
     liberty_text: Option<&str>,
     module_name: Option<&str>,
 ) -> (tempfile::TempDir, PathBuf, Output) {
-    run_netlist2aig_with_options(command_name, netlist_text, liberty_text, module_name, &[])
+    run_netlist2aig_with_options(
+        command_name,
+        netlist_text,
+        liberty_text,
+        module_name,
+        None,
+        &[],
+    )
 }
 
 fn run_netlist2aig_with_options(
@@ -32,6 +61,7 @@ fn run_netlist2aig_with_options(
     netlist_text: &str,
     liberty_text: Option<&str>,
     module_name: Option<&str>,
+    boundaries_text: Option<&str>,
     extra_args: &[&str],
 ) -> (tempfile::TempDir, PathBuf, Output) {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
@@ -57,6 +87,13 @@ fn run_netlist2aig_with_options(
         let liberty_path = temp_dir.path().join("lib.textproto");
         std::fs::write(&liberty_path, liberty_text).expect("write liberty");
         command.arg("--liberty_proto").arg(liberty_path.as_os_str());
+    }
+    if let Some(boundaries_text) = boundaries_text {
+        let boundaries_path = temp_dir.path().join("boundaries.json");
+        std::fs::write(&boundaries_path, boundaries_text).expect("write boundaries");
+        command
+            .arg("--cone_boundary_file")
+            .arg(boundaries_path.as_os_str());
     }
     command.args(extra_args);
 
@@ -170,6 +207,7 @@ endmodule
         "gv2aig",
         netlist_text,
         Some(liberty_text),
+        None,
         None,
         &["--collapse_load_enable_feedback"],
     );
@@ -457,4 +495,127 @@ c
     let original = load_aiger_auto_from_path(&input_path, GateBuilderOptions::no_opt()).unwrap();
     let rebuilt = load_aiger_auto_from_path(&output_path, GateBuilderOptions::no_opt()).unwrap();
     assert!(structurally_equivalent(&original.gate_fn, &rebuilt.gate_fn));
+}
+
+#[test]
+fn gv2aig_boundaries_select_named_inputs_and_outputs() {
+    let netlist_text = r#"
+module top(a, b, y, ignored);
+  input [1:0] a;
+  input b;
+  output [1:0] y;
+  output ignored;
+  INV u_y0 (.A(a[0]), .Y(y[0]));
+  INV u_y1 (.A(a[1]), .Y(y[1]));
+  assign ignored = b;
+endmodule
+"#;
+    let boundaries_text = r#"
+{
+  "sources": [
+    "value=input_port:a"
+  ],
+  "sinks": [
+    "result=output_port:y"
+  ]
+}
+"#;
+
+    let (_temp_dir, out_path, output) = run_netlist2aig_with_options(
+        "gv2aig",
+        netlist_text,
+        Some(CONE_TEST_LIBERTY),
+        None,
+        Some(boundaries_text),
+        &[],
+    );
+    assert_success(&output);
+    let loaded = load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
+        .expect("load extracted AIGER");
+    assert_eq!(
+        loaded
+            .gate_fn
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["value_0", "value_1"]
+    );
+    assert_eq!(
+        loaded
+            .gate_fn
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["result_0", "result_1"]
+    );
+    let mut sim = PreparedGateSim::new(&loaded.gate_fn);
+    for value in 0..=3 {
+        let outputs = sim.eval_outputs(&[
+            IrBits::make_ubits(1, value & 1).unwrap(),
+            IrBits::make_ubits(1, (value >> 1) & 1).unwrap(),
+        ]);
+        assert_eq!(
+            outputs,
+            vec![
+                IrBits::make_ubits(1, (value & 1) ^ 1).unwrap(),
+                IrBits::make_ubits(1, ((value >> 1) & 1) ^ 1).unwrap(),
+            ]
+        );
+    }
+}
+
+#[test]
+fn gv2aig_default_and_cone_cli_match_regexp_boundary_file() {
+    let netlist_text = r#"
+module top(enable, data_1, data_10, data_2, result_1, result_2);
+  input enable;
+  input data_1;
+  input data_10;
+  input data_2;
+  output result_1;
+  output result_2;
+  XOR2 u_result_1 (.A(data_1), .B(data_10), .Y(result_1));
+  AND2 u_result_2 (.A(data_2), .B(enable), .Y(result_2));
+endmodule
+"#;
+    let boundaries_text = r#"
+{
+  "sources": ["input_port:enable", "input_port_regex:data_[0-9]{1,2}"],
+  "sinks": ["output_port:result_1", "output_port_regex:result_2"]
+}
+"#;
+    let (_file_dir, file_path, file_output) = run_netlist2aig_with_options(
+        "gv2aig",
+        netlist_text,
+        Some(CONE_TEST_LIBERTY),
+        None,
+        Some(boundaries_text),
+        &[],
+    );
+    assert_success(&file_output);
+    let (_default_dir, default_path, default_output) = run_gv2aig(netlist_text, CONE_TEST_LIBERTY);
+    assert_success(&default_output);
+    let (_cli_dir, cli_path, cli_output) = run_netlist2aig_with_options(
+        "gv2aig",
+        netlist_text,
+        Some(CONE_TEST_LIBERTY),
+        None,
+        None,
+        &[
+            "--cone_sources",
+            "input_port:enable",
+            "--cone_sources",
+            "input_port_regex:data_[0-9]{1,2}",
+            "--cone_sinks",
+            "output_port:result_1",
+            "--cone_sinks",
+            "output_port_regex:result_2",
+        ],
+    );
+    assert_success(&cli_output);
+    let file_aig = std::fs::read(file_path).unwrap();
+    assert_eq!(file_aig, std::fs::read(cli_path).unwrap());
+    assert_eq!(file_aig, std::fs::read(default_path).unwrap());
 }

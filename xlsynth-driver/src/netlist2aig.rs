@@ -8,7 +8,12 @@ use xlsynth_g8r::aig::get_summary_stats::AigStats;
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use xlsynth_g8r::netlist::gv2aig::{Gv2AigOptions, convert_gv2aig_paths};
+use xlsynth_g8r::netlist::gv2aig::{
+    Gv2AigOptions, convert_gv2aig_paths_with_optional_boundary_request,
+};
+use xlsynth_g8r::netlist::gv2aig_boundaries::{
+    Gv2AigBoundaryRequest, load_gv2aig_boundary_request,
+};
 use xlsynth_g8r::netlist::ugv2aig::{Ugv2AigOptions, convert_ugv2aig_paths};
 
 fn format_fanout_histogram(stats: &AigStats) -> String {
@@ -43,11 +48,35 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
         collapse_load_enable_feedback: matches.get_flag("collapse_load_enable_feedback"),
     };
 
-    let gate_fn = match convert_gv2aig_paths(
-        Path::new(netlist_path),
-        Path::new(liberty_proto_path),
-        &opts,
-    ) {
+    let cone_request = if let Some(path) = matches.get_one::<String>("cone_boundary_file") {
+        Some(load_gv2aig_boundary_request(Path::new(path)))
+    } else {
+        let sources = matches
+            .get_many::<String>("cone_sources")
+            .map(|values| values.cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let sinks = matches
+            .get_many::<String>("cone_sinks")
+            .map(|values| values.cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if sources.is_empty() && sinks.is_empty() {
+            None
+        } else {
+            Some(
+                Gv2AigBoundaryRequest::from_selectors(&sources, &sinks).map_err(anyhow::Error::msg),
+            )
+        }
+    };
+    let conversion = cone_request.transpose().and_then(|request| {
+        convert_gv2aig_paths_with_optional_boundary_request(
+            Path::new(netlist_path),
+            Path::new(liberty_proto_path),
+            &opts,
+            request.as_ref(),
+        )
+        .map(|extraction| extraction.gate_fn)
+    });
+    let gate_fn = match conversion {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Failed to convert GV to AIG: {:#}", e);
