@@ -1,8 +1,9 @@
 # Aug-opt optimizations
 
 The [augmented optimizer](../src/optimizer.rs) applies local PIR rewrites to the
-selected top function. In `Sandwich` mode, XLS optimization runs before the first
-PIR round and after each round. `PirOnly` mode runs the PIR rounds directly.
+selected top function. In `Sandwich` mode, an initial PIR phase runs before the
+first XLS optimization, followed by PIR rounds with XLS optimization after each
+round. `PirOnly` mode runs the PIR rounds directly.
 Both modes rebuild range and known-bit facts each round.
 The rewrites emit ordinary XLS operations; existing PIR extension operations
 are preserved across XLS optimization through FFI wrappers.
@@ -18,6 +19,16 @@ so opposing rewrites could cause repeated work but would not make this loop
 unbounded. The round limit is not a substitute for compatible canonicalization
 directions: changes to interacting passes should include stability tests across
 repeated rounds, including the libxls passes in sandwich mode.
+
+The initial phase is explicitly scheduled in `apply_pre_xls_rewrites_to_ir_text`.
+It currently runs priority-result fusion, which consumes the encode/affine-index/
+decode structure before XLS narrows arithmetic or distributes predicate masks.
+A pass belongs here when it needs no range analysis and has demonstrated a benefit
+from running before XLS changes its input structure. Priority-result fusion also
+runs in ordinary PIR rounds to catch newly exposed forms. The other rewrites stay
+in the ordinary rounds; mask-to-selection canonicalization runs immediately before
+each post-rewrite XLS optimization. Zero rounds skips the initial PIR phase while
+retaining the initial XLS optimization in `Sandwich` mode.
 
 The following pseudocode uses `sel(p, [a, b])` for a one-bit selection that
 returns `a` when `p` is zero and `b` when it is one. A slice `x[a:b]` contains

@@ -39,7 +39,7 @@ use xlsynth_pir::ir_verify::verify_package;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AugOptMode {
     /// The default "opt sandwich":
-    /// libxls opt -> PIR rewrites -> libxls opt.
+    /// Initial PIR rewrites -> libxls opt -> (PIR rewrites -> libxls opt)*.
     Sandwich,
     /// Apply PIR rewrites only (no libxls optimization passes).
     PirOnly,
@@ -249,24 +249,17 @@ pub(crate) fn run_aug_opt_with_cost_evaluators(
         .to_string();
     match options.mode {
         AugOptMode::Sandwich => {
-            // Preserve semantic priority-index structure before XLS narrows
-            // arithmetic and distributes predicate masks. The ordinary rounds
-            // also recognize shapes exposed by subsequent XLS optimization.
-            let (initial_text, initial_fusions) =
-                if options.fuse_priority_results && options.rounds > 0 {
-                    fuse_priority_results_in_ir_text(ir_text, &top_name, function_evaluator)?
-                } else {
-                    (ir_text.to_string(), 0)
-                };
+            let initial =
+                apply_pre_xls_rewrites_to_ir_text(ir_text, &top_name, options, function_evaluator)?;
             // Every accepted basis candidate traverses the complete sandwich.
-            let mut cur_text =
-                optimize_ir_text_preserving_extension_ops(&initial_text, &top_name, "initial")?;
+            let mut cur_text = optimize_ir_text_preserving_extension_ops(
+                &initial.output_text,
+                &top_name,
+                "initial",
+            )?;
 
-            let mut rewrite_stats = AugOptRewriteStats {
-                priority_results_fused: initial_fusions,
-                ..AugOptRewriteStats::default()
-            };
-            let mut total_rewrites = initial_fusions;
+            let mut rewrite_stats = initial.rewrite_stats;
+            let mut total_rewrites = initial.total_rewrites;
             for _round in 0..options.rounds {
                 let (lowered_text, rewrites_in_round, total_in_round) =
                     apply_pir_rewrites_to_ir_text(
@@ -344,27 +337,46 @@ pub(crate) fn run_aug_opt_with_cost_evaluators(
     }
 }
 
-/// Applies the range-independent semantic pass before XLS changes its shape.
-fn fuse_priority_results_in_ir_text(
+/// Applies rewrites that consume structure the initial XLS optimization can
+/// erase.
+///
+/// Schedule passes here only when they can run without range analysis and have
+/// demonstrated a benefit from running before XLS. They may also run in
+/// ordinary PIR rounds to recognize forms exposed by later optimization.
+fn apply_pre_xls_rewrites_to_ir_text(
     ir_text: &str,
     top_name: &str,
+    options: AugOptOptions,
     evaluator: &mut G8rFunctionCostEvaluator,
-) -> Result<(String, usize), String> {
+) -> Result<AugOptRunResult, String> {
+    let mut result = AugOptRunResult {
+        output_text: ir_text.to_string(),
+        total_rewrites: 0,
+        rewrite_stats: AugOptRewriteStats::default(),
+    };
+    if options.rounds == 0 || !options.fuse_priority_results {
+        return Ok(result);
+    }
     let mut package = ir_parser::Parser::new(ir_text)
         .parse_and_validate_package()
-        .map_err(|e| format!("aug_opt: PIR parse/validate before priority fusion failed: {e}"))?;
+        .map_err(|e| format!("aug_opt: PIR parse/validate before initial XLS failed: {e}"))?;
     let mut function = package
         .get_fn(top_name)
         .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
         .clone();
-    let rewrites = crate::priority_result_fusion::rewrite_with_evaluator(&mut function, &mut |f| {
-        evaluator.estimate(f)
-    });
-    if rewrites == 0 {
-        return Ok((ir_text.to_string(), 0));
+
+    // Priority-result fusion consumes the affine index and its final predicate
+    // mask before XLS narrows arithmetic or distributes the mask.
+    result.rewrite_stats.priority_results_fused =
+        crate::priority_result_fusion::rewrite_with_evaluator(&mut function, &mut |f| {
+            evaluator.estimate(f)
+        });
+    result.total_rewrites = result.rewrite_stats.total();
+    if result.rewrote() {
+        replace_top_and_validate(&mut package, function)?;
+        result.output_text = package.to_string();
     }
-    replace_top_and_validate(&mut package, function)?;
-    Ok((package.to_string(), rewrites))
+    Ok(result)
 }
 
 fn apply_pir_rewrites_to_ir_text(
