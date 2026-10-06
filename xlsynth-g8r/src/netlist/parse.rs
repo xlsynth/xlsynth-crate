@@ -1319,6 +1319,12 @@ impl<R: Read + 'static> Parser<R> {
         Ok(())
     }
 
+    /// Consumes the next token after skipping comments and annotations.
+    fn pop_non_trivia(&mut self) -> Result<Option<Token>, ScanError> {
+        self.skip_trivia()?;
+        self.scanner.popt()
+    }
+
     fn parse_non_concat_netref_from_token(&mut self, net_tok: Token) -> Result<NetRef, ScanError> {
         match net_tok.payload {
             TokenPayload::Identifier(s) => {
@@ -1912,7 +1918,7 @@ impl<R: Read + 'static> Parser<R> {
     }
     /// Parses one integer endpoint of a packed port width.
     fn parse_port_width_endpoint(&mut self, what: &str) -> Result<u32, ScanError> {
-        let token = self.scanner.popt()?.ok_or_else(|| ScanError {
+        let token = self.pop_non_trivia()?.ok_or_else(|| ScanError {
             message: format!("expected {what} in port width"),
             span: Span {
                 start: self.scanner.pos,
@@ -1953,7 +1959,7 @@ impl<R: Read + 'static> Parser<R> {
         }
         self.scanner.popt()?;
         let msb = self.parse_port_width_endpoint("msb")?;
-        let colon = self.scanner.popt()?.ok_or_else(|| ScanError {
+        let colon = self.pop_non_trivia()?.ok_or_else(|| ScanError {
             message: "expected ':' in port width".to_string(),
             span: Span {
                 start: self.scanner.pos,
@@ -1967,7 +1973,7 @@ impl<R: Read + 'static> Parser<R> {
             });
         }
         let lsb = self.parse_port_width_endpoint("lsb")?;
-        let close = self.scanner.popt()?.ok_or_else(|| ScanError {
+        let close = self.pop_non_trivia()?.ok_or_else(|| ScanError {
             message: "expected ']' after port width".to_string(),
             span: Span {
                 start: self.scanner.pos,
@@ -1986,6 +1992,7 @@ impl<R: Read + 'static> Parser<R> {
     /// Parses ANSI port declarations through the closing parenthesis.
     fn parse_ansi_port_list(&mut self) -> Result<(Vec<PortId>, Vec<NetlistPort>), ScanError> {
         let mut names = Vec::new();
+        let mut seen_names = HashSet::new();
         let mut ports = Vec::new();
         let mut current_type: Option<(PortDirection, Option<(u32, u32)>)> = None;
         loop {
@@ -2016,7 +2023,7 @@ impl<R: Read + 'static> Parser<R> {
                 message: "expected direction in ANSI port list".to_string(),
                 span: token.span,
             })?;
-            let name_token = self.scanner.popt()?.ok_or_else(|| ScanError {
+            let name_token = self.pop_non_trivia()?.ok_or_else(|| ScanError {
                 message: "expected name in ANSI port list".to_string(),
                 span: Span {
                     start: self.scanner.pos,
@@ -2039,6 +2046,15 @@ impl<R: Read + 'static> Parser<R> {
                 }
             };
             let name = self.interner.get_or_intern(name);
+            if !seen_names.insert(name) {
+                return Err(ScanError {
+                    message: format!(
+                        "duplicate ANSI port name '{}'",
+                        self.interner.resolve(name).unwrap()
+                    ),
+                    span: name_token.span,
+                });
+            }
             self.ensure_net(name, width, name_token.span)?;
             names.push(name);
             ports.push(NetlistPort {
@@ -2046,8 +2062,7 @@ impl<R: Read + 'static> Parser<R> {
                 width,
                 name,
             });
-            self.skip_trivia()?;
-            let separator = self.scanner.popt()?.ok_or_else(|| ScanError {
+            let separator = self.pop_non_trivia()?.ok_or_else(|| ScanError {
                 message: "expected ',' or ')' after ANSI port".to_string(),
                 span: Span {
                     start: self.scanner.pos,
@@ -2232,6 +2247,16 @@ impl<R: Read + 'static> Parser<R> {
         loop {
             match self.scanner.peekt()? {
                 Some(tok) => match &tok.payload {
+                    TokenPayload::Keyword(Keyword::Input | Keyword::Output | Keyword::Inout)
+                        if ansi_ports =>
+                    {
+                        return Err(ScanError {
+                            message:
+                                "body port declarations are not allowed with an ANSI port list"
+                                    .to_string(),
+                            span: tok.span,
+                        });
+                    }
                     TokenPayload::Keyword(Keyword::Input) => {
                         let mut decls = self.parse_port_decl(PortDirection::Input)?;
                         ports.append(&mut decls);
@@ -4030,6 +4055,88 @@ endmodule
             NetRef::Unconnected => {}
             other => panic!("expected Unconnected for .B(), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_ansi_ports_reject_duplicate_header_names() {
+        for src in [
+            "module m(input a, a); endmodule",
+            "module m(input [3:0] a, output [7:0] a); endmodule",
+        ] {
+            let mut parser = Parser::new(TokenScanner::from_str(src));
+            let err = parser
+                .parse_file()
+                .expect_err("duplicate ANSI port name should fail");
+            assert_eq!(err.message, "duplicate ANSI port name 'a'");
+        }
+    }
+
+    #[test]
+    fn test_ansi_ports_reject_body_port_declarations() {
+        for src in [
+            "module m(input a, output y); input a; endmodule",
+            "module m(input a, output y); output y; endmodule",
+            "module m(input a, output y); inout extra; endmodule",
+        ] {
+            let mut parser = Parser::new(TokenScanner::from_str(src));
+            let err = parser
+                .parse_file()
+                .expect_err("body port declaration after ANSI header should fail");
+            assert_eq!(
+                err.message,
+                "body port declarations are not allowed with an ANSI port list"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ansi_ports_allow_body_wire_declarations() {
+        let src = r#"
+module m(input wire [3:0] a, output y);
+  wire [3:0] a;
+  wire y;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser
+            .parse_file()
+            .expect("wire declarations should remain valid");
+        assert_eq!(modules[0].ports.len(), 2);
+        assert_eq!(parser.nets.len(), 2);
+    }
+
+    #[test]
+    fn test_ansi_ports_allow_trivia_throughout_declarations() {
+        let src = r#"
+module m(
+  input // after direction
+  (* kind = "data" *) wire // after qualifier
+  [ // before msb
+  7 (* endpoint = "msb" *) // before colon
+  : // before lsb
+  0 (* endpoint = "lsb" *) // before closing bracket
+  ] // before name
+  (* port = "a" *) a,
+  // before an inherited-type name
+  b,
+  output wire [3:0] // before output name
+  y
+);
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser
+            .parse_file()
+            .expect("comments and annotations should be ignored");
+        let port_names: Vec<&str> = modules[0]
+            .ports
+            .iter()
+            .map(|port| parser.interner.resolve(port.name).unwrap())
+            .collect();
+        assert_eq!(port_names, vec!["a", "b", "y"]);
+        assert_eq!(modules[0].ports[0].width, Some((7, 0)));
+        assert_eq!(modules[0].ports[1].width, Some((7, 0)));
+        assert_eq!(modules[0].ports[2].width, Some((3, 0)));
     }
 
     #[test]

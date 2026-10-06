@@ -1,1 +1,6 @@
-gv2aig requires --liberty_proto; use ugv2aig for unmapped gate Verilog
+error: the following required arguments were not provided:
+  --liberty_proto <liberty_proto>
+
+Usage: xlsynth-driver gv2aig --netlist <netlist> --liberty_proto <liberty_proto> --aiger-out <PATH>
+
+For more information, try '--help'.

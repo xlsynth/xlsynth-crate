@@ -27,10 +27,7 @@ fn format_fanout_histogram(stats: &AigStats) -> String {
 /// Converts GV with required Liberty cell definitions.
 pub fn handle_gv2aig(matches: &clap::ArgMatches) {
     let netlist_path = matches.get_one::<String>("netlist").unwrap();
-    let Some(liberty_proto_path) = matches.get_one::<String>("liberty_proto") else {
-        eprintln!("gv2aig requires --liberty_proto; use ugv2aig for unmapped gate Verilog");
-        std::process::exit(1);
-    };
+    let liberty_proto_path = matches.get_one::<String>("liberty_proto").unwrap();
     let aiger_out = matches.get_one::<String>("aiger_out").unwrap();
 
     let module_name: Option<String> = matches.get_one::<String>("module_name").cloned();

@@ -14,7 +14,8 @@ use std::fmt;
 
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::parse::{
-    AssignExpr, Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
+    AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, NetlistModule,
+    NetlistPort, PortDirection,
 };
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -891,6 +892,16 @@ pub fn validate_structural_assign_module(
     {
         return Err(StructuralAssignValidationError(
             "Liberty-free structural mode does not support inout ports".to_string(),
+        ));
+    }
+
+    if module
+        .assigns
+        .iter()
+        .any(|assign| assign.kind == NetlistAssignKind::Tran)
+    {
+        return Err(StructuralAssignValidationError(
+            "UGV does not support bidirectional tran connections".to_string(),
         ));
     }
 

@@ -337,7 +337,7 @@ endmodule
 fn gv2aig_requires_liberty() {
     let source = "module top(a, y); input a; output y; assign y = a; endmodule";
     let (_dir, _path, output) = run_netlist2aig("gv2aig", source, None, None);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         include_str!("goldens/gv2aig_requires_liberty.golden.txt")

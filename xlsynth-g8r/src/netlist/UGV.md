@@ -21,7 +21,7 @@ projection stay deterministic and easy to reason about.
 
 ## Rejected syntax
 
-- Cell instances, `inout` ports, concatenation, ternaries, logical operators,
+- Cell instances, `tran` primitives, `inout` ports, concatenation, ternaries, logical operators,
   arithmetic, shifts, reductions, and procedural statements.
 - The reader distinguishes helper modules from leaf cells, but `ugv2aig`
   currently requires the selected module to be flattened before conversion.

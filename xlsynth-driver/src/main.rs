@@ -2191,6 +2191,7 @@ fn main() {
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
                         .help("Required Liberty proto (.proto, .textproto, or gzip-compressed); use ugv2aig for unmapped gate Verilog")
+                        .required(true)
                         .action(ArgAction::Set),
                 )
                 .arg(

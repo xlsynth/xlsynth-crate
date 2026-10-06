@@ -496,7 +496,7 @@ Flags:
 - `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
 - `--module_name <MODULE>` – select the module when the input contains multiple modules.
 
-The current converter rejects leaf cells, procedural blocks, `inout` ports,
+The current converter rejects leaf cells, `tran` primitives, procedural blocks, `inout` ports,
 concatenations, ternaries, logical operators, arithmetic, shifts, and
 reductions. The selected module must be flattened; helper-module hierarchy is
 not projected by this converter. Bitwise expressions use exact-width structural

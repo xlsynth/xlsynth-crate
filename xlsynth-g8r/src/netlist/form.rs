@@ -8,7 +8,9 @@ use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
 use crate::netlist::bit_ref;
-use crate::netlist::parse::{AssignExpr, Net, NetlistModule, Pos, ScanError, Span};
+use crate::netlist::parse::{
+    AssignExpr, Net, NetlistAssignKind, NetlistModule, Pos, ScanError, Span,
+};
 
 /// Requires every GV assignment to be pure wiring, leaving logic to cells.
 pub(crate) fn validate_gv_form(
@@ -32,7 +34,7 @@ pub(crate) fn validate_gv_form(
     Ok(())
 }
 
-/// Requires every UGV instance to refer to a module defined in the same input.
+/// Requires continuous UGV assignments and instances defined in the same input.
 pub(crate) fn validate_ugv_form(
     modules: &[NetlistModule],
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -42,6 +44,14 @@ pub(crate) fn validate_ugv_form(
         .map(|module| module.name)
         .collect::<HashSet<_>>();
     for module in modules {
+        for assign in &module.assigns {
+            if assign.kind == NetlistAssignKind::Tran {
+                return Err(ScanError {
+                    message: "UGV does not support bidirectional tran connections; use continuous assignments for directional wiring".to_string(),
+                    span: assign.span,
+                });
+            }
+        }
         for instance in &module.instances {
             if !module_names.contains(&instance.type_name) {
                 let pos = Pos {
