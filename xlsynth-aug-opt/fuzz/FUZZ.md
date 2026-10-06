@@ -31,3 +31,52 @@ Bitwuzla, checks exact rollback on rejection/errors, and exhausts small
 effectful cases including trace-only uses. This targets incorrect projections,
 priority/default handling, lost shared users, and leaked speculative changes.
 See the [repository fuzz overview](../../FUZZ.md) for the full target contract.
+
+## `fuzz_priority_result_fusion`
+
+Generates typed priority encode/index/decode graphs from coverage-guided bytes.
+Bounded index-operation sequences vary constant additions/subtractions, reflection,
+zero extensions, and literal-zero prefixes. Cases include both priority directions,
+predicate masks, direct decode and one-shift outputs, expanded concat/XOR decoder
+leaves, wide inputs/constants, wrapping, overshifts, and retained users. Valid near
+misses cover shared count/amount intermediates, truncation, incomplete overflow
+checks, reversed leaves, non-one shifts, variable arithmetic, and sign extension.
+The generic `fuzz_aug_opt_equiv` generator remains unchanged.
+
+Forced acceptance proves the semantic rewrite independently of g8r profitability;
+cost ties/errors must preserve the exact input. The real optimizer runs with fusion
+off/on in one PIR-only round or one/three sandwich rounds. Direct PIR-to-Bitwuzla
+proofs compare each result with the original, and small signatures also exhaust
+concrete interpreter inputs. Failures surface wrong bit wiring, sentinel/wrapping/
+overshift errors, unsafe recognition, lost shared values, leaked rejected changes,
+and optimizer-composition failures. Solver limits count as inconclusive, not proofs.
+
+Named case/feature counters distinguish generated samples, forced and real fusions,
+completed proofs, rejection checks, and inconclusives. Replay validation requires
+proved fusions across the positive case families and important feature axes,
+checked/proved rejection cases, and a proved real-cost fusion in each pipeline mode.
+It rejects a corpus that merely visits labels without exercising the rewrite.
+
+From `xlsynth-aug-opt`, with the normal XLS and Bitwuzla environment:
+
+```shell
+# Validate the deterministic matrix, including its actual rewrite/proof coverage.
+cargo test --manifest-path fuzz/Cargo.toml --release \
+  --features with-bitwuzla-system --lib priority_result_fusion
+
+# Create a focused seed corpus, then run coverage-guided mutation.
+cargo run --manifest-path fuzz/Cargo.toml --release \
+  --features with-bitwuzla-system --example priority_result_fusion_coverage -- \
+  --write-corpus /tmp/priority-fusion-corpus
+cargo +nightly fuzz run fuzz_priority_result_fusion /tmp/priority-fusion-corpus \
+  --features with-bitwuzla-system --sanitizer none -- \
+  -max_total_time=3600 -timeout=90 -max_len=256 -print_final_stats=1
+
+# Replay the saved corpus; exit unsuccessfully if required coverage is missing.
+cargo run --manifest-path fuzz/Cargo.toml --release \
+  --features with-bitwuzla-system --example priority_result_fusion_coverage -- \
+  /tmp/priority-fusion-corpus
+```
+
+Omit the replay example's arguments to audit its built-in deterministic matrix.
+Use `with-bitwuzla-built` instead when a system Bitwuzla installation is unavailable.

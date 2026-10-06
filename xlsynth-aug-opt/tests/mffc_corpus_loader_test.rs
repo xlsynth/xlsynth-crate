@@ -32,6 +32,12 @@ const SPLIT_ADDER: &str = r#"split_adder {
   enabled_limits { and_nodes_max: 0 graph_le_max: 0 depth_max: 0 }
 }"#;
 
+const PRIORITY_RESULT: &str = r#"priority_result {
+  expected_fusions: 0
+  disabled_limits { and_nodes_max: 0 graph_le_max: 0 depth_max: 0 }
+  enabled_limits { and_nodes_max: 0 graph_le_max: 0 depth_max: 0 }
+}"#;
+
 /// Creates an isolated corpus using the same profile as the checked-in
 /// fixtures.
 fn corpus_directory() -> Result<TempDir, std::io::Error> {
@@ -154,6 +160,56 @@ fn requires_explicit_expectations_and_valid_bounds() -> Result<(), Box<dyn Error
             mffc_corpus::load_from_dir(directory.path()).is_err(),
             "accepted {description}"
         );
+    }
+    Ok(())
+}
+
+/// Covers zero presence and host-sized integers through the protobuf/serde
+/// bridge.
+#[test]
+fn priority_expectations_preserve_presence_and_integer_precision() -> Result<(), Box<dyn Error>> {
+    for expected_fusions in [0, usize::MAX] {
+        let directory = corpus_directory()?;
+        let expectations = PRIORITY_RESULT
+            .replace(
+                "expected_fusions: 0",
+                &format!("expected_fusions: {expected_fusions}"),
+            )
+            .replace(
+                "and_nodes_max: 0",
+                &format!("and_nodes_max: {}", usize::MAX),
+            )
+            .replace("depth_max: 0", &format!("depth_max: {}", usize::MAX));
+        write_case(directory.path(), "sample", INPUT, &expectations)?;
+        let corpus = mffc_corpus::load_from_dir(directory.path())?;
+        let Expectations::PriorityResult {
+            expected_fusions: actual_fusions,
+            disabled_limits,
+            enabled_limits,
+        } = &corpus.cases[0].expectations
+        else {
+            panic!("expected priority-result expectations");
+        };
+        assert_eq!(*actual_fusions, expected_fusions);
+        for limits in [disabled_limits, enabled_limits] {
+            assert_eq!(limits.and_nodes_max, usize::MAX);
+            assert_eq!(limits.depth_max, usize::MAX);
+            assert_eq!(limits.graph_le_max, 0.0);
+        }
+    }
+    for omitted in [
+        "expected_fusions: 0",
+        "disabled_limits { and_nodes_max: 0 graph_le_max: 0 depth_max: 0 }",
+        "enabled_limits { and_nodes_max: 0 graph_le_max: 0 depth_max: 0 }",
+    ] {
+        let directory = corpus_directory()?;
+        write_case(
+            directory.path(),
+            "sample",
+            INPUT,
+            &PRIORITY_RESULT.replace(omitted, ""),
+        )?;
+        assert!(mffc_corpus::load_from_dir(directory.path()).is_err());
     }
     Ok(())
 }

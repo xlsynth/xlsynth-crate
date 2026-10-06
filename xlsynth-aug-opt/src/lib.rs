@@ -10,7 +10,7 @@ pub mod constant_shift_choices;
 pub mod cost;
 pub mod ir_cost;
 mod optimizer;
-mod priority_result_fusion;
+pub mod priority_result_fusion;
 pub mod split_adder;
 
 #[cfg(test)]

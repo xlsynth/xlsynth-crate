@@ -2,11 +2,27 @@
 
 //! Eliminates priority encode/index/decode roundtrips by rewiring one-hot bits.
 //!
-//! For each ordinal i (including the one-hot zero-input sentinel), evaluate the
-//! affine index with its original bit widths. An in-range result j wires h[i]
-//! to output[j]; an overshift contributes zero. An optional index mask
-//! index & sign_ext(p) selects this result when p is true and bit zero
-//! otherwise. The pass is independent of the source of h and the meaning of p.
+//! Work out where each one-hot bit would land in the output, including the
+//! extra bit that represents an all-zero input. Use each operation's original
+//! bit width so wrapping behaves the same. Then wire the bits directly to their
+//! output positions; out-of-range positions contribute zero.
+//!
+//! For example, let `h = one_hot(x)` for `x: bits[3]`, so `h` has four bits.
+//! With a two-bit encoded index, two-bit addition, and a four-bit output:
+//!
+//! ```text
+//! Before: y = decode(encode(h) + u2:1)
+//! After:  y = h[0:3] ++ h[3:4]
+//!
+//! h[0] ----> y[1]
+//! h[1] ----> y[2]
+//! h[2] ----> y[3]
+//! h[3] ----> y[0]   (all-zero input; 3 + 1 wraps to 0)
+//! ```
+//!
+//! An optional index mask `index & sign_ext(p)` selects the wired result when
+//! `p` is true and the value 1 (only bit zero set) otherwise. The pass is
+//! independent of the source of the one-hot value and the meaning of `p`.
 //!
 //! Candidates contain only basis IR. The caller supplies a whole-function cost
 //! comparison so external sharing and loads remain part of profitability. Both
@@ -519,7 +535,7 @@ fn candidate(f: &ir::Fn) -> Option<PriorityResultCandidate> {
 /// Unsupported shapes, shared intermediate indices, exhausted IDs, invalid
 /// costs, and cost errors preserve the input. The caller may cost prepared
 /// clones, but preparation never escapes into the returned function.
-pub(crate) fn rewrite_with_evaluator(
+pub fn rewrite_with_evaluator(
     f: &mut ir::Fn,
     evaluator: &mut impl FnMut(&ir::Fn) -> Result<IrCost, String>,
 ) -> usize {

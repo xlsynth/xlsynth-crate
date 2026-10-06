@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use prost_reflect::{
-    DescriptorPool, DynamicMessage, MessageDescriptor, ReflectMessage, SerializeOptions, Value,
+    DescriptorPool, DynamicMessage, MessageDescriptor, ReflectMessage, SerializeOptions,
 };
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_pir::ir;
@@ -42,7 +43,8 @@ pub struct Case {
 }
 
 /// Selects the comparisons required by the fixture's optimizer family.
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Expectations {
     Shift {
         require_improvement: bool,
@@ -61,11 +63,19 @@ pub enum Expectations {
 }
 
 /// Allows improvements while bounding mapped area, logical effort, and depth.
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub struct Limits {
     pub and_nodes_max: usize,
     pub graph_le_max: f64,
     pub depth_max: usize,
+}
+
+/// Deserializes the sidecar's hash and its selected protobuf oneof together.
+#[derive(Deserialize)]
+struct CaseMetadata {
+    sha256: String,
+    #[serde(flatten)]
+    expectations: Expectations,
 }
 
 /// Loads the checked-in corpus shared by the characterization tests.
@@ -99,21 +109,23 @@ fn load_profile(path: &Path, pool: &DescriptorPool) -> Result<MappingProfile, St
         .get_message_by_name("xlsynth.mffc_regressions.MappingProfile")
         .ok_or_else(|| "corpus descriptor has no MappingProfile message".to_string())?;
     let message = read_textproto(path, &descriptor)?;
-    // Preserve Rust field names and numeric u64 values through the serde
-    // bridge. Absent optional mul_adder_mapping remains absent, so serde
-    // produces None.
+    let profile: MappingProfile = deserialize_message(&message)?;
+    if !profile.graph_le_tolerance.is_finite() || profile.graph_le_tolerance < 0.0 {
+        return Err("graph_le_tolerance must be finite and nonnegative".to_string());
+    }
+    Ok(profile)
+}
+
+/// Bridges schema-validated protobuf fields into typed Rust values.
+fn deserialize_message<T: DeserializeOwned>(message: &DynamicMessage) -> Result<T, String> {
+    // Preserve Rust field names, exact u64 values, and absent optional fields.
     let options = SerializeOptions::new()
         .use_proto_field_name(true)
         .stringify_64_bit_integers(false);
     let value = message
         .serialize_with_options(serde_json::value::Serializer, &options)
         .map_err(|error| error.to_string())?;
-    let profile: MappingProfile =
-        serde_json::from_value(value).map_err(|error| error.to_string())?;
-    if !profile.graph_le_tolerance.is_finite() || profile.graph_le_tolerance < 0.0 {
-        return Err("graph_le_tolerance must be finite and nonnegative".to_string());
-    }
-    Ok(profile)
+    serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
 /// Parses typed fixture metadata and rejects omissions before serde can
@@ -191,18 +203,16 @@ fn load_case(path: &Path, descriptor: &MessageDescriptor, tolerance: f64) -> Res
         .ok_or_else(|| "fixture filename must have a UTF-8 stem".to_string())?
         .to_string();
     let sidecar_path = path.with_extension("textproto");
-    let metadata = read_textproto(&sidecar_path, descriptor)?;
-    let sha256 = required_field(&metadata, "sha256")?
-        .as_str()
-        .ok_or_else(|| "sha256 must be a string".to_string())?;
+    let metadata: CaseMetadata = deserialize_message(&read_textproto(&sidecar_path, descriptor)?)?;
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let actual_hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-    if sha256 != actual_hash {
+    if metadata.sha256 != actual_hash {
         return Err(format!(
-            "sha256 mismatch: sidecar records {sha256}, IR hashes to {actual_hash}"
+            "sha256 mismatch: sidecar records {}, IR hashes to {actual_hash}",
+            metadata.sha256
         ));
     }
-    let expectations = parse_expectations(&metadata, tolerance)?;
+    validate_expectations(&metadata.expectations, tolerance)?;
     let package = Parser::new(&text)
         .parse_and_verify_package()
         .map_err(|error| format!("invalid IR: {error}"))?;
@@ -217,101 +227,39 @@ fn load_case(path: &Path, descriptor: &MessageDescriptor, tolerance: f64) -> Res
         name,
         text,
         original,
-        expectations,
+        expectations: metadata.expectations,
     })
-}
-
-/// Requires explicit presence, including for fields whose scalar value is zero.
-fn required_field<'a>(message: &'a DynamicMessage, name: &str) -> Result<&'a Value, String> {
-    // fields() visits populated fields only; get_field_by_name() would also
-    // return protobuf defaults for omitted required fields.
-    message
-        .fields()
-        .find_map(|(field, value)| (field.name() == name).then_some(value))
-        .ok_or_else(|| format!("missing required field {name}"))
-}
-
-/// Extracts a required nested message without accepting an omitted default.
-fn required_message<'a>(
-    message: &'a DynamicMessage,
-    name: &str,
-) -> Result<&'a DynamicMessage, String> {
-    required_field(message, name)?
-        .as_message()
-        .ok_or_else(|| format!("{name} must be a message"))
-}
-
-/// Converts an explicit protobuf bound without truncating it on narrower hosts.
-fn required_usize(message: &DynamicMessage, name: &str) -> Result<usize, String> {
-    let value = required_field(message, name)?
-        .as_u64()
-        .ok_or_else(|| format!("{name} must be an unsigned integer"))?;
-    usize::try_from(value).map_err(|_| format!("{name} is too large for this host"))
 }
 
 /// Rejects nonfinite bounds so a malformed fixture cannot disable comparison.
-fn parse_limits(message: &DynamicMessage, tolerance: f64) -> Result<Limits, String> {
-    let graph_le_max = required_field(message, "graph_le_max")?
-        .as_f64()
-        .ok_or_else(|| "graph_le_max must be a double".to_string())?;
-    if !graph_le_max.is_finite() || graph_le_max < 0.0 {
+fn validate_limits(limits: &Limits, tolerance: f64) -> Result<(), String> {
+    if !limits.graph_le_max.is_finite() || limits.graph_le_max < 0.0 {
         return Err("graph_le_max must be finite and nonnegative".to_string());
     }
-    if !(graph_le_max + tolerance).is_finite() {
+    if !(limits.graph_le_max + tolerance).is_finite() {
         return Err("graph_le_max plus graph_le_tolerance must be finite".to_string());
     }
-    Ok(Limits {
-        and_nodes_max: required_usize(message, "and_nodes_max")?,
-        graph_le_max,
-        depth_max: required_usize(message, "depth_max")?,
-    })
+    Ok(())
 }
 
-/// Decodes the single expectation family selected by the sidecar's oneof.
-fn parse_expectations(message: &DynamicMessage, tolerance: f64) -> Result<Expectations, String> {
-    if message.has_field_by_name("shift") {
-        let shift = required_message(message, "shift")?;
-        let require_improvement = required_field(shift, "require_improvement")?
-            .as_bool()
-            .ok_or_else(|| "require_improvement must be a boolean".to_string())?;
-        let limits = parse_limits(required_message(shift, "limits")?, tolerance)?;
-        Ok(Expectations::Shift {
-            require_improvement,
-            limits,
-        })
-    } else if message.has_field_by_name("split_adder") {
-        let split_adder = required_message(message, "split_adder")?;
-        let disabled_limits =
-            parse_limits(required_message(split_adder, "disabled_limits")?, tolerance)?;
-        let enabled_limits =
-            parse_limits(required_message(split_adder, "enabled_limits")?, tolerance)?;
-        let same_as = if split_adder.has_field_by_name("same_as") {
-            Some(
-                required_field(split_adder, "same_as")?
-                    .as_str()
-                    .ok_or_else(|| "same_as must be a string".to_string())?
-                    .to_string(),
-            )
-        } else {
-            None
-        };
-        Ok(Expectations::SplitAdder {
+/// Validates semantic bounds after typed deserialization of the selected
+/// family.
+fn validate_expectations(expectations: &Expectations, tolerance: f64) -> Result<(), String> {
+    match expectations {
+        Expectations::Shift { limits, .. } => validate_limits(limits, tolerance),
+        Expectations::SplitAdder {
             disabled_limits,
             enabled_limits,
-            same_as,
-        })
-    } else if message.has_field_by_name("priority_result") {
-        let priority = required_message(message, "priority_result")?;
-        Ok(Expectations::PriorityResult {
-            expected_fusions: required_usize(priority, "expected_fusions")?,
-            disabled_limits: parse_limits(
-                required_message(priority, "disabled_limits")?,
-                tolerance,
-            )?,
-            enabled_limits: parse_limits(required_message(priority, "enabled_limits")?, tolerance)?,
-        })
-    } else {
-        Err("missing expectation family: set shift, split_adder, or priority_result".to_string())
+            ..
+        }
+        | Expectations::PriorityResult {
+            disabled_limits,
+            enabled_limits,
+            ..
+        } => {
+            validate_limits(disabled_limits, tolerance)?;
+            validate_limits(enabled_limits, tolerance)
+        }
     }
 }
 
