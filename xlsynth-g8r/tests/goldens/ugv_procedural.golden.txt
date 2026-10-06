@@ -1,0 +1,4 @@
+UGV reader: unsupported Verilog construct 'always_ff' @ <string>:5:3..5:12
+  always_ff @ (posedge clk) y <= a;
+  ^
+UGV supports combinational Boolean assignments; procedural registers and leaf cells are unsupported.

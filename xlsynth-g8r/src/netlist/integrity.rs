@@ -6,7 +6,7 @@
 //! used, outputs that are never driven, and wires that are declared but never
 //! connected.
 //!
-//! See `src/netlist/STRUCTURAL_ASSIGNS.md` for the accepted Liberty-free
+//! See `src/netlist/UGV.md` for the accepted Liberty-free
 //! structural-assign subset and its sizing rules.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -14,7 +14,8 @@ use std::fmt;
 
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::parse::{
-    AssignExpr, Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
+    AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, NetlistModule,
+    NetlistPort, PortDirection,
 };
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -872,7 +873,7 @@ fn render_net_ref(
 }
 
 /// Validates the Liberty-free structural-assign netlist subset used by
-/// `gv2aig` when no Liberty library is provided.
+/// `ugv2aig`.
 pub fn validate_structural_assign_module(
     module: &NetlistModule,
     nets: &[Net],
@@ -891,6 +892,16 @@ pub fn validate_structural_assign_module(
     {
         return Err(StructuralAssignValidationError(
             "Liberty-free structural mode does not support inout ports".to_string(),
+        ));
+    }
+
+    if module
+        .assigns
+        .iter()
+        .any(|assign| assign.kind == NetlistAssignKind::Tran)
+    {
+        return Err(StructuralAssignValidationError(
+            "UGV does not support bidirectional tran connections".to_string(),
         ));
     }
 

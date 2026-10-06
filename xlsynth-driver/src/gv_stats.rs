@@ -2,7 +2,7 @@
 
 use clap::ArgMatches;
 use std::path::Path;
-use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, parse_netlist_from_path};
+use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, read_gv_from_path};
 use xlsynth_g8r::netlist::report::{NetlistReport, build_netlist_report, select_module};
 use xlsynth_g8r::netlist::sta::StaOptions;
 use xlsynth_g8r::netlist::stages::StagePartitionStatus;
@@ -204,7 +204,7 @@ pub fn handle_gv_stats(matches: &ArgMatches) {
         .expect("module_output_load has default");
     let json_out = matches.get_one::<String>("json_out");
 
-    let parsed = parse_netlist_from_path(netlist_path).unwrap_or_else(|e| {
+    let parsed = read_gv_from_path(netlist_path).unwrap_or_else(|e| {
         eprintln!(
             "{} error: failed to parse netlist '{}': {:#}",
             SUBCOMMAND,

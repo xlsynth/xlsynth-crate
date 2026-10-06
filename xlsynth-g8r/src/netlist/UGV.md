@@ -1,9 +1,11 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Liberty-free structural-assign semantics
+# Unmapped gate Verilog (UGV)
 
-This document describes the narrow Verilog subset accepted by the Liberty-free
-`gv2aig` structural path.
+UGV is unmapped gate Verilog emitted from a generic Boolean gate graph.
+This document describes the combinational subset accepted by `ugv2aig`.
+The UGV emitters can also write procedural registers; importing those registers
+is not currently supported.
 
 ## Intent
 
@@ -13,14 +15,16 @@ projection stay deterministic and easy to reason about.
 
 ## Supported syntax
 
-- Continuous `assign` statements only.
+- ANSI or non-ANSI input/output declarations, wire declarations, and continuous `assign` statements.
 - Combinational bitwise operators `~`, `&`, `|`, and `^`.
 - Simple nets, bit-selects, part-selects, parentheses, and literals.
 
 ## Rejected syntax
 
-- Cell instances, `inout` ports, concatenation, ternaries, logical operators,
+- Cell instances, `tran` primitives, `inout` ports, concatenation, ternaries, logical operators,
   arithmetic, shifts, reductions, and procedural statements.
+- The reader distinguishes helper modules from leaf cells, but `ugv2aig`
+  currently requires the selected module to be flattened before conversion.
 
 ## Width semantics
 

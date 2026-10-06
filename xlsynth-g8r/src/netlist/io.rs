@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared helpers for reading and parsing gate-level netlists from disk.
+//! Explicit GV and UGV readers with shared source loading and diagnostics.
 //!
 //! This module centralizes the logic for:
-//! - Handling plain `.gv` and `.gv.gz` inputs.
+//! - Handling plain and gzip-compressed inputs.
 //! - Wiring up `TokenScanner::with_line_lookup` so that parse errors can show
 //!   source-line context.
 //! - Producing the parsed modules together with the global `nets` array and
@@ -11,12 +11,16 @@
 
 use crate::liberty::Library;
 use crate::liberty::load::{load_library_from_path, load_library_with_timing_data_from_path};
-use crate::netlist::parse::{Net, NetlistModule, Parser as NetlistParser, PortId, TokenScanner};
+use crate::netlist::form::{validate_gv_form, validate_ugv_form};
+use crate::netlist::parse::{
+    Net, NetlistModule, Parser as NetlistParser, PortId, ScanError, TokenScanner,
+};
 use anyhow::{Result, anyhow};
 use flate2::read::MultiGzDecoder;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::Path;
+use std::time::{Duration, Instant};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
@@ -25,6 +29,12 @@ pub struct ParsedNetlist {
     pub modules: Vec<NetlistModule>,
     pub nets: Vec<Net>,
     pub interner: StringInterner<StringBackend<SymbolU32>>,
+}
+
+/// Parsed input with syntax-parsing time, excluding format validation.
+pub(crate) struct TimedParsedNetlist {
+    pub parsed: ParsedNetlist,
+    pub parse_duration: Duration,
 }
 
 /// Resolves one interned netlist symbol with an actionable error.
@@ -90,9 +100,67 @@ pub fn select_module<'a>(
     ))
 }
 
-/// Parse a gate-level netlist (optionally gzipped) into modules, nets, and the
-/// interner, with rich error messages including source-line context.
-pub fn parse_netlist_from_path(path: &Path) -> Result<ParsedNetlist> {
+#[derive(Clone, Copy)]
+enum NetlistFormat {
+    Gv,
+    Ugv,
+}
+
+impl NetlistFormat {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Gv => "GV",
+            Self::Ugv => "UGV",
+        }
+    }
+
+    fn guidance(self) -> &'static str {
+        match self {
+            Self::Gv => {
+                "GV supports cell instances and wiring assignments; procedural RTL and logic assignments are unsupported."
+            }
+            Self::Ugv => {
+                "UGV supports combinational Boolean assignments; procedural registers and leaf cells are unsupported."
+            }
+        }
+    }
+}
+
+/// Reads GV containing cell instances and wiring-only assignments.
+pub fn read_gv_from_path(path: &Path) -> Result<ParsedNetlist> {
+    read_netlist_from_path(path, NetlistFormat::Gv).map(|result| result.parsed)
+}
+
+/// Reads combinational UGV containing Boolean assignments and no leaf cells.
+pub fn read_ugv_from_path(path: &Path) -> Result<ParsedNetlist> {
+    read_netlist_from_path(path, NetlistFormat::Ugv).map(|result| result.parsed)
+}
+
+/// Reads GV while retaining the parser-only duration used by `gv-read-stats`.
+pub(crate) fn read_gv_from_path_timed(path: &Path) -> Result<TimedParsedNetlist> {
+    read_netlist_from_path(path, NetlistFormat::Gv)
+}
+
+/// Reads GV from an in-memory string.
+pub fn read_gv_from_str(source: &str) -> Result<ParsedNetlist> {
+    read_netlist_from_str(source, NetlistFormat::Gv).map(|result| result.parsed)
+}
+
+/// Reads combinational UGV from an in-memory string.
+pub fn read_ugv_from_str(source: &str) -> Result<ParsedNetlist> {
+    read_netlist_from_str(source, NetlistFormat::Ugv).map(|result| result.parsed)
+}
+
+fn read_netlist_from_str(source: &str, format: NetlistFormat) -> Result<TimedParsedNetlist> {
+    let lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let scanner = TokenScanner::with_line_lookup(
+        Cursor::new(source.as_bytes().to_vec()),
+        Box::new(move |lineno| lines.get((lineno - 1) as usize).cloned()),
+    );
+    read_netlist(scanner, "<string>", format)
+}
+
+fn read_netlist_from_path(path: &Path, format: NetlistFormat) -> Result<TimedParsedNetlist> {
     let file = File::open(path)
         .map_err(|e| anyhow!(format!("opening netlist '{}': {}", path.display(), e)))?;
     let is_gz = path.extension().map(|e| e == "gz").unwrap_or(false);
@@ -118,23 +186,47 @@ pub fn parse_netlist_from_path(path: &Path) -> Result<ParsedNetlist> {
     };
 
     let scanner = TokenScanner::with_line_lookup(reader, Box::new(lookup));
-    let mut parser: NetlistParser<Box<dyn Read>> = NetlistParser::new(scanner);
-    let modules = parser.parse_file().map_err(|e| {
-        anyhow!(format!(
-            "{} @ {}\n{}\n{}^",
-            e.message,
-            e.span.to_human_string(),
-            parser
-                .get_line(e.span.start.lineno)
-                .unwrap_or_else(|| "<line unavailable>".to_string()),
-            " ".repeat((e.span.start.colno as usize).saturating_sub(1))
-        ))
-    })?;
+    read_netlist(scanner, &path.display().to_string(), format)
+}
 
-    Ok(ParsedNetlist {
-        modules,
-        nets: parser.nets,
-        interner: parser.interner,
+fn read_netlist<R: Read + 'static>(
+    scanner: TokenScanner<R>,
+    source_name: &str,
+    format: NetlistFormat,
+) -> Result<TimedParsedNetlist> {
+    let mut parser = NetlistParser::new(scanner);
+    let render_error = |error: ScanError, parser: &NetlistParser<R>| {
+        anyhow!(
+            "{} reader: {} @ {}:{}\n{}\n{}^\n{}",
+            format.name(),
+            error.message,
+            source_name,
+            error.span.to_human_string(),
+            parser
+                .get_line(error.span.start.lineno)
+                .unwrap_or_else(|| "<line unavailable>".to_string()),
+            " ".repeat((error.span.start.colno as usize).saturating_sub(1)),
+            format.guidance()
+        )
+    };
+    let parse_start = Instant::now();
+    let modules = parser
+        .parse_file()
+        .map_err(|error| render_error(error, &parser))?;
+    let parse_duration = parse_start.elapsed();
+    match format {
+        NetlistFormat::Gv => validate_gv_form(&modules, &parser.nets, &parser.interner),
+        NetlistFormat::Ugv => validate_ugv_form(&modules, &parser.interner),
+    }
+    .map_err(|error| render_error(error, &parser))?;
+
+    Ok(TimedParsedNetlist {
+        parsed: ParsedNetlist {
+            modules,
+            nets: parser.nets,
+            interner: parser.interner,
+        },
+        parse_duration,
     })
 }
 

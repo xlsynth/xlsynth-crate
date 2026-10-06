@@ -5,7 +5,7 @@
 use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, parse_formula};
 use crate::liberty::indexed::IndexedLibrary;
 use crate::liberty_model::{Cell, Library, PinDirection};
-use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
+use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, read_gv_from_path};
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedInstance, NormalizedNetlistModule,
 };
@@ -19,7 +19,7 @@ use xlsynth_pir::ir_builder::is_valid_identifier;
 use xlsynth_pir::{BValue, BlockBuilder, IrValue, RegisterWriteOptions, ResetBehavior};
 
 pub fn convert_gv2block_paths(netlist_path: &Path, liberty_proto_path: &Path) -> Result<Package> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
+    let parsed = read_gv_from_path(netlist_path)?;
     if parsed.modules.len() != 1 {
         return Err(anyhow!(format!(
             "expected exactly one module, got {}",

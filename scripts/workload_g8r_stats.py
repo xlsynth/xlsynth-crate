@@ -10,7 +10,7 @@ Outputs into --out-dir:
 - <workload>.g8r (GateFn text), <workload>.g8r.bin (bincode)
 - <workload>.aig (binary AIGER emitted from GateFn; suitable for Berkeley ABC `read_aiger`)
 - <workload>.g8r.ir (XLS IR package reconstructed from the GateFn)
-- <workload>.gv (gate-level netlist emitted from GateFn)
+- <workload>.ugv (unmapped gate Verilog emitted from GateFn)
 - <workload>.combo.v (IR-level combinational SystemVerilog codegen via ir2combo)
 - report.txt (human-readable ir2gates report incl. repeated structures)
 - stats.json (core stats only; no toggle data)
@@ -463,12 +463,12 @@ def main() -> int:
     g8r_bin_path = out_dir / f"{base}.g8rbin"
     aiger_aig_path = out_dir / f"{base}.aig"
     g8r_ir_path = out_dir / f"{base}.g8r.ir"
-    gv_path = out_dir / f"{base}.gv"
+    ugv_path = out_dir / f"{base}.ugv"
     codegen_combo_path = out_dir / f"{base}.combo.v"
     report_txt_path = out_dir / "report.txt"
     stats_json_path = out_dir / "stats.json"
     run_json_path = out_dir / "run.json"
-    netlist_flags: list[str] = ["--netlist-out", str(gv_path)]
+    netlist_flags: list[str] = ["--ugv-out", str(ugv_path)]
     toolchain_flag: list[str] = []
     toolchain_meta: Optional[str] = None
     if xlsynth_tools_env:
@@ -674,7 +674,7 @@ def main() -> int:
             "g8r_bin": str(g8r_bin_path),
             "aiger_aig": str(aiger_aig_path),
             "g8r_ir": str(g8r_ir_path),
-            "netlist_gv": str(gv_path),
+            "netlist_ugv": str(ugv_path),
             "codegen_combo_v": str(codegen_combo_path) if combo_generated else None,
             "stats_json": str(stats_json_path),
             "proof_json": str(proof_json_path),

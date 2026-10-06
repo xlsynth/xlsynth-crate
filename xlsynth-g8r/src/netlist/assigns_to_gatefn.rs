@@ -2,7 +2,7 @@
 
 //! Project a Liberty-free structural assign netlist into a `GateFn`.
 //!
-//! See `src/netlist/STRUCTURAL_ASSIGNS.md` for the accepted Liberty-free
+//! See `src/netlist/UGV.md` for the accepted Liberty-free
 //! structural subset and its sizing rules.
 
 use crate::aig::{AigBitVector, AigOperand, GateFn};

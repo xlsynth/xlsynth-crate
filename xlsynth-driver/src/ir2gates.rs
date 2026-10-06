@@ -223,7 +223,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let bin_out = matches.get_one::<String>("bin_out");
     let aiger_out = matches.get_one::<String>("aiger_out");
     let stats_out = matches.get_one::<String>("stats_out");
-    let netlist_out = matches.get_one::<String>("netlist_out");
+    let ugv_out = matches.get_one::<String>("ugv_out");
     let input_path = std::path::Path::new(input_file);
     let ir_text = std::fs::read_to_string(input_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_path.display(), e));
@@ -295,8 +295,8 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         f.write_all(json.as_bytes())
             .expect("Failed to write stats_out file");
     }
-    // If --netlist-out is given, write the gate-level netlist (human-readable)
-    if let Some(netlist_path) = netlist_out {
+    // If --ugv-out is given, write the gate-level netlist (human-readable)
+    if let Some(netlist_path) = ugv_out {
         let netlist = match emit_netlist::emit_netlist(design, false) {
             Ok(netlist) => netlist,
             Err(e) => {
@@ -304,8 +304,8 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
                 std::process::exit(1);
             }
         };
-        let mut f = File::create(netlist_path).expect("Failed to create netlist_out file");
+        let mut f = File::create(netlist_path).expect("Failed to create ugv_out file");
         f.write_all(netlist.as_bytes())
-            .expect("Failed to write netlist_out file");
+            .expect("Failed to write ugv_out file");
     }
 }

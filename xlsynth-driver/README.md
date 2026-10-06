@@ -440,53 +440,71 @@ xlsynth-driver block2sv input.block.ir \
   --register_codegen_options=registers.toml > output.sv
 ```
 
-### `gv2aig`: gate-level netlist to AIGER
+### GV and UGV netlist formats
 
-Converts a gate-level netlist into an AIGER file.
+GV is gate Verilog whose logic is represented by cell instances. Continuous
+assignments may only provide wiring: aliases, bit selects, slices,
+concatenations, and literal tie-offs. Plain `tran` aliases are also supported.
+Assignments containing Boolean operators are rejected, including when cells
+are present elsewhere in the input. Commands that interpret cell behavior
+require a Liberty proto.
 
-`gv2aig` supports two modes:
+UGV means **unmapped gate Verilog**. It represents generic Boolean logic using
+continuous assignments. The UGV emitters can also write procedural registers,
+but `ugv2aig` currently accepts only the combinational subset described in
+[UGV.md](../xlsynth-g8r/src/netlist/UGV.md). Leaf cell instances are rejected.
 
-- Liberty-backed cell projection: provide `--liberty_proto` for traditional gate-instance netlists whose cell behavior comes from a Liberty proto.
-- Liberty-free structural-assign projection: omit `--liberty_proto` for combinational netlists built from continuous `assign` statements using only bitwise `~`, `&`, `|`, and `^`.
+The command selects the input format; filename extensions do not select it.
+Plain and gzip-compressed files are supported. Both readers accept ANSI and
+non-ANSI port declarations.
+
+### `gv2aig`: GV plus Liberty to AIGER
+
+Converts a GV cell netlist into a combinational AIGER file. Boolean logic in
+assignments must be technology-mapped into cells first.
 
 ```shell
 xlsynth-driver gv2aig \
-  --netlist ~/my_design_gates.v \
-  --liberty_proto ~/asap7.proto \
-  --aiger-out ~/my_design_gates.aig
+  --netlist my_design.gv \
+  --liberty_proto cells.proto \
+  --aiger-out my_design.aig
 ```
 
-- Liberty-free structural-assign mode:
+Flags:
+
+- `--netlist <PATH>` – required GV input.
+- `--liberty_proto <PATH>` – required Liberty proto, optionally gzip-compressed.
+- `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
+- `--module_name <MODULE>` – select the module when the input contains multiple modules.
+- `--collapse_sequential <BOOL>` – if true (default), substitute Liberty `next_state` formulas for sequential state variables. If false, unresolved sequential state causes projection to fail.
+
+### `ugv2aig`: combinational UGV to AIGER
+
+Converts unmapped Boolean Verilog into a combinational AIGER file without
+Liberty. It accepts continuous assignments using bitwise `~`, `&`, `|`, and
+`^`, plus simple nets, bit selects, part selects, parentheses, and literals.
 
 ```shell
-xlsynth-driver gv2aig \
-  --netlist ~/my_design_structural.v \
-  --aiger-out ~/my_design_structural.aag
+xlsynth-driver ugv2aig \
+  --netlist my_design.ugv \
+  --aiger-out my_design.aig
 ```
 
-- Also prints a one-line summary of AIG stats to stdout (AND-node count, depth, and fanout histogram excluding literals).
-- Output format:
-  - Use a `.aig` suffix for **binary** AIGER (`aig`).
-  - Use a `.aag` suffix for **ASCII** AIGER (`aag`).
-- Optional flags:
-  - `--liberty_proto <LIBERTY_PROTO>` – optional for `gv2aig`. Required for cell-instance netlists; omit it for assign-only structural netlists.
-  - `--module_name <MODULE>` – select the module when the netlist contains multiple modules.
-  - `--collapse_sequential <BOOL>` – if true (default), collapse sequential state variables by substituting next_state during projection. If false and a pin function references a sequential state variable (e.g., `IQ`/`IQN`), projection will fail.
+Flags:
 
-When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally narrow:
+- `--netlist <PATH>` – required UGV input.
+- `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
+- `--module_name <MODULE>` – select the module when the input contains multiple modules.
 
-- Only continuous `assign` statements are supported; real cell instances are rejected.
-- Only bitwise `~`, `&`, `|`, and `^` are supported, with parentheses plus simple nets, bit-selects, part-selects, and literals.
-- Bitwise operators use exact-width structural semantics in this mode; we do not apply implicit Verilog operand sizing to `&`, `|`, or `^`.
-- Bare literal tie-offs are the one width-conversion exception: a plain literal RHS such as `assign y = 0;` or `assign y[3:0] = 1'b0;` is zero-extended or truncated to the destination width.
-- Concatenation, ternary operators, logical operators, arithmetic, shifts, procedural blocks, and `inout` ports are rejected.
-- Validation is strict before projection:
-  - Each net bit must have a single driver.
-  - Output bits must be fully driven.
-  - Reads from undriven internal nets are rejected.
-  - Dependency cycles between assigns are rejected.
+The current converter rejects leaf cells, `tran` primitives, procedural blocks, `inout` ports,
+concatenations, ternaries, logical operators, arithmetic, shifts, and
+reductions. The selected module must be flattened; helper-module hierarchy is
+not projected by this converter. Bitwise expressions use exact-width structural
+semantics. Bare literal tie-offs are zero-extended or truncated to the destination width.
+Every output must be driven, and dependency cycles are rejected.
 
-`gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
+Both commands print a one-line AIG summary containing the AND-node count,
+depth, and fanout histogram excluding literals.
 
 ### `gv-eval`: evaluate a gate-level netlist
 
@@ -879,7 +897,7 @@ combinational transition logic is lowered into the stored transition function.
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
   - `--stats-out <PATH>` – write a JSON summary of structural statistics for a selected function. Sequential block statistics are not yet exposed by this command.
-  - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
+  - `--ugv-out <PATH>` – write unmapped gate Verilog to a file.
 - For selected functions, the same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--reassociation`, `--toggle-sample-count`, ...).
 - For selected blocks, the transition lowering honors gatification flags such as `--fold`, `--hash`, `--enable-rewrite-*`, and adder mapping; function-only post-lowering statistics are not run.
   - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `true`.
@@ -916,7 +934,7 @@ Block example:
 ```shell
 xlsynth-driver ir2g8r pipeline.ir --top pipe \
   --bin-out pipeline.g8rbin \
-  --netlist-out pipeline.ugv > pipeline.g8r
+  --ugv-out pipeline.ugv > pipeline.g8r
 ```
 
 The function example above leaves three artifacts:
@@ -947,7 +965,7 @@ rewriting.
   binary output.
 - `--stats-out <PATH>` – write deterministic input/output AIG node and level
   metrics plus FRAIG statistics as JSON.
-- `--netlist-out <PATH>` – write the optimized human-readable gate netlist.
+- `--ugv-out <PATH>` – write the optimized design as unmapped gate Verilog.
 - `--fraig=<BOOL>` – run FRAIG. Default `true`.
 - `--reassociation=<BOOL>` – rebalance single-fanout AND supergates after
   FRAIG and again after cut-DB when cut-DB is enabled. Default `true`.
@@ -1005,7 +1023,7 @@ Example:
 xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
 ```
 
-### `g8r2v`: SequentialGateFn to gate-level netlist (Verilog-like)
+### `g8r2ugv`: SequentialGateFn to UGV
 
 Converts a `.g8r` (text) or `.g8rbin` (binary) `SequentialGateFn` design to a
 `.ugv` netlist (human-readable, Verilog-like) on **stdout**. Stored register
@@ -1034,13 +1052,13 @@ Example usage:
 
 ```shell
 # No clock port
-xlsynth-driver g8r2v my_module.g8r > my_module.ugv
+xlsynth-driver g8r2ugv my_module.g8r > my_module.ugv
 
 # Add a clock port named 'clk'
-xlsynth-driver g8r2v my_module.g8r --add-clk-port > my_module.ugv
+xlsynth-driver g8r2ugv my_module.g8r --add-clk-port > my_module.ugv
 
 # Add a clock port named 'myclk'
-xlsynth-driver g8r2v my_module.g8r --add-clk-port=myclk > my_module.ugv
+xlsynth-driver g8r2ugv my_module.g8r --add-clk-port=myclk > my_module.ugv
 ```
 
 The output is always written to stdout; redirect to a `.ugv` file as needed.
@@ -1048,7 +1066,7 @@ The output is always written to stdout; redirect to a `.ugv` file as needed.
 Example with flops and SystemVerilog output:
 
 ```shell
-xlsynth-driver g8r2v my_module.g8r \
+xlsynth-driver g8r2ugv my_module.g8r \
   --add-clk-port=clk \
   --flop-inputs --flop-outputs \
   --use-system-verilog \
@@ -1090,10 +1108,10 @@ Example usage:
 xlsynth-driver blif2g8r pipeline.blif > pipeline.g8r
 ```
 
-### `aig2v`: AIGER to gate-level netlist
+### `aig2ugv`: AIGER to UGV
 
-Converts a combinational AIGER file (`.aag` or `.aig`) to a gate-level
-Verilog-like netlist on **stdout**. This is useful for materializing an AIGER
+Converts a combinational AIGER file (`.aag` or `.aig`) to unmapped gate
+Verilog on **stdout**. This is useful for materializing an AIGER
 artifact as Verilog/SystemVerilog without lifting it through XLS IR.
 
 The generated module name must be provided explicitly with `--module-name`
@@ -1104,7 +1122,7 @@ performed by default.
 
 `--fn-type <FN_TYPE>` opts into a typed packed-port interpretation of the raw
 AIGER bitstream. The same function-type parser used by `aig2ir` and `aig-eval`
-is used here, but `aig2v` initially supports only top-level `bits[N]`
+is used here, but `aig2ugv` initially supports only top-level `bits[N]`
 parameters and either a `bits[M]` return value or a top-level tuple of
 `bits[M]` return elements, with all widths greater than zero. In this mode the
 generated ports are synthetic because the function-type syntax does not carry
@@ -1141,12 +1159,12 @@ Note: AIGER latch support is not implemented in the underlying loader, so
 sequential AIGER files with latches are rejected.
 
 AIGER artifacts may come from other tools, such as ABC, before being passed to
-`aig2v`; this command only consumes the AIGER file it is given.
+`aig2ugv`; this command only consumes the AIGER file it is given.
 
 Example with clocked input/output flops:
 
 ```shell
-xlsynth-driver aig2v design.aig \
+xlsynth-driver aig2ugv design.aig \
   --module-name add_bf16 \
   --add-clk-port clk \
   --fn-type '(bits[16], bits[16]) -> bits[16]' \
@@ -1157,7 +1175,7 @@ xlsynth-driver aig2v design.aig \
 Combinational example:
 
 ```shell
-xlsynth-driver aig2v design.aig \
+xlsynth-driver aig2ugv design.aig \
   --module-name add_bf16 > add_bf16_comb.v
 ```
 

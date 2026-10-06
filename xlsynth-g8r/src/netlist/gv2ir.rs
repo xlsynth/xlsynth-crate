@@ -4,7 +4,7 @@ use crate::aig_serdes::gate2ir::gate_fn_to_pir;
 use crate::netlist::gatefn_from_netlist::{
     GateFnProjectOptions, project_gatefn_from_netlist_and_liberty_with_options,
 };
-use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path, select_module};
+use crate::netlist::io::{load_liberty_from_path, read_gv_from_path, select_module};
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::Path;
@@ -111,7 +111,7 @@ pub fn convert_gv2ir_paths_with_options(
     liberty_proto_path: &Path,
     opts: &Gv2IrOptions,
 ) -> Result<String> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
+    let parsed = read_gv_from_path(netlist_path)?;
     let module = select_module(&parsed, opts.module_name.as_deref())?;
     let module_function_name = parsed
         .interner

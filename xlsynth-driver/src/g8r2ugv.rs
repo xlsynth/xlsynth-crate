@@ -5,7 +5,7 @@ use std::path::Path;
 use xlsynth_g8r::aig::{ClockPort, add_input_registers, add_output_registers};
 use xlsynth_g8r::aig_serdes::g8r::load_sequential_gate_fn_from_path;
 
-pub fn handle_g8r2v(matches: &clap::ArgMatches) -> Result<(), String> {
+pub fn handle_g8r2ugv(matches: &clap::ArgMatches) -> Result<(), String> {
     let g8r_input_file = matches.get_one::<String>("g8r_input_file").unwrap();
     let add_clk_port = matches.get_one::<String>("add-clk-port").cloned();
     let flop_inputs = matches.get_flag("flop-inputs");

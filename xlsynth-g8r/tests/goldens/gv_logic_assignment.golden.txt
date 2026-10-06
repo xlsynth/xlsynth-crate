@@ -1,0 +1,4 @@
+GV reader: GV permits only wiring in assignments; assignment to 'n' computes Boolean logic. Represent the logic with cells, or use ugv2aig for a cell-free UGV netlist @ <string>:5:3..5:17
+  assign n = ~a;
+  ^
+GV supports cell instances and wiring assignments; procedural RTL and logic assignments are unsupported.

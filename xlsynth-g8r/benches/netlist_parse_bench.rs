@@ -2,7 +2,7 @@
 
 //! Benchmarks for parsing large synthetic gate-level netlists.
 //!
-//! These benches exercise `netlist::io::parse_netlist_from_path` on
+//! These benches exercise `netlist::io::read_gv_from_path` on
 //! deterministically generated single-module netlists with long chains of
 //! `INV` instances. The synthetic inputs are intended to approximate the
 //! tokenization and parsing workload of large Genus-style gate-level netlists
@@ -13,12 +13,12 @@ use std::io::Write as IoWrite;
 use tempfile::NamedTempFile;
 use xlsynth_g8r::netlist;
 
-fn netlist_parse_benchmark(c: &mut Criterion) {
+fn gv_read_benchmark(c: &mut Criterion) {
     // Instance counts chosen to keep runtime reasonable while still stressing
     // the parser on large inputs.
     let sizes: &[usize] = &[5_000, 20_000];
 
-    let mut group = c.benchmark_group("netlist_parse_chain_inv");
+    let mut group = c.benchmark_group("gv_read_chain_inv");
 
     // Keep temporary files alive for the duration of the benchmarks so their
     // paths remain valid.
@@ -37,7 +37,7 @@ fn netlist_parse_benchmark(c: &mut Criterion) {
             &path_buf,
             |b, path| {
                 b.iter(|| {
-                    let parsed = netlist::io::parse_netlist_from_path(black_box(path))
+                    let parsed = netlist::io::read_gv_from_path(black_box(path))
                         .expect("synthetic netlist should parse successfully");
                     black_box(parsed);
                 });
@@ -51,5 +51,5 @@ fn netlist_parse_benchmark(c: &mut Criterion) {
     drop(temp_files);
 }
 
-criterion_group!(benches, netlist_parse_benchmark);
+criterion_group!(benches, gv_read_benchmark);
 criterion_main!(benches);

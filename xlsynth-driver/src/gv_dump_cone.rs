@@ -166,7 +166,7 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
         );
     }
 
-    let parsed_netlist = match netlist::io::parse_netlist_from_path(Path::new(netlist_path)) {
+    let parsed_netlist = match netlist::io::read_gv_from_path(Path::new(netlist_path)) {
         Ok(p) => p,
         Err(e) => {
             report_cli_error_and_exit(

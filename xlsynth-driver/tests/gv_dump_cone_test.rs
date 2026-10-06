@@ -80,7 +80,7 @@ INV,u2,A,1
 }
 
 #[test]
-fn gv_dump_cone_traverses_preserved_assigns() {
+fn gv_dump_cone_traverses_preserved_wiring_assigns() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
 
     let liberty_text = r#"
@@ -108,7 +108,7 @@ module top (a, y);
   wire n0;
   wire n1;
   BUF u0 (.A(a), .Y(n0));
-  assign n1 = n0 & n0;
+  assign n1 = n0;
   BUF u1 (.A(n1), .Y(y));
 endmodule
 "#;
