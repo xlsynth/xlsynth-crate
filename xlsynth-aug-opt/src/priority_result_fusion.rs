@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Eliminates priority encode/index/decode roundtrips by rewiring one-hot bits.
+//! Replaces decoded priority results and scalar predicates with one-hot wiring.
 //!
 //! Work out where each one-hot bit would land in the output, including the
 //! extra bit that represents an all-zero input. Use each operation's original
@@ -27,6 +27,12 @@
 //! Candidates contain only basis IR. The caller supplies a whole-function cost
 //! comparison so external sharing and loads remain part of profitability. Both
 //! area and delay must not worsen and at least one must improve.
+//!
+//! A scalar predicate can also be evaluated for each reachable encoded ordinal.
+//! For example, `clz(x: u161) < 2` selects the first two one-hot positions
+//! after reversing x, so only x[159:161] is relevant. This produces one boolean
+//! bit; it does not produce a two-bit count. The zero-input ordinal is
+//! evaluated too.
 
 use crate::ir_cost::IrCost;
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -456,6 +462,163 @@ fn wired_result(
     )
 }
 
+/// A one-bit reduction or unsigned comparison of an exact-width index.
+enum IndexPredicate {
+    Reduction {
+        op: Unop,
+        start: usize,
+        width: usize,
+    },
+    Comparison {
+        op: Binop,
+        constant: IrBits,
+    },
+}
+
+impl IndexPredicate {
+    /// Evaluates a reachable ordinal without converting wide values to
+    /// integers.
+    fn at(&self, amount: &IrBits) -> bool {
+        match self {
+            Self::Reduction { op, start, width } => {
+                let mut bits = (*start..start + width).map(|i| amount.get_bit(i).unwrap());
+                match op {
+                    Unop::OrReduce => bits.any(|bit| bit),
+                    Unop::AndReduce => bits.all(|bit| bit),
+                    Unop::XorReduce => bits.fold(false, |parity, bit| parity ^ bit),
+                    _ => unreachable!("matched bit reduction"),
+                }
+            }
+            Self::Comparison { op, constant } => {
+                let order = amount
+                    .to_bytes()
+                    .iter()
+                    .rev()
+                    .cmp(constant.to_bytes().iter().rev());
+                match op {
+                    Binop::Eq => order.is_eq(),
+                    Binop::Ne => !order.is_eq(),
+                    Binop::Ult => order.is_lt(),
+                    Binop::Ule => !order.is_gt(),
+                    Binop::Ugt => order.is_gt(),
+                    Binop::Uge => !order.is_lt(),
+                    _ => unreachable!("matched unsigned comparison"),
+                }
+            }
+        }
+    }
+}
+
+/// Matches reductions of index bits, or comparisons with a literal on either
+/// side.
+fn priority_index_predicate(f: &ir::Fn, root: NodeRef) -> Option<(PriorityIndex, IndexPredicate)> {
+    if bits_width(&f.get_node(root).ty) != Some(1) {
+        return None;
+    }
+    let (amount, predicate) = match &f.get_node(root).payload {
+        NodePayload::Unop(op @ (Unop::OrReduce | Unop::AndReduce | Unop::XorReduce), arg) => {
+            let (amount, start, width) = match f.get_node(*arg).payload {
+                NodePayload::BitSlice { arg, start, width } => (arg, start, width),
+                _ => (*arg, 0, bits_width(&f.get_node(*arg).ty)?),
+            };
+            if width == 0 {
+                // Empty reductions are constants; leave them to ordinary
+                // folding.
+                return None;
+            }
+            (
+                amount,
+                IndexPredicate::Reduction {
+                    op: *op,
+                    start,
+                    width,
+                },
+            )
+        }
+        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), ..) => {
+            let bindings = MatchCtx::new(f).matches(
+                root,
+                ir_match::commutative_binop(*op, ir_match::any("a"), ir_match::any("b")),
+            )?;
+            let a = bindings.get_node("a")?;
+            let b = bindings.get_node("b")?;
+            let (amount, constant) = if let Some(value) = literal_bits(f, a) {
+                (b, value)
+            } else {
+                (a, literal_bits(f, b)?)
+            };
+            (amount, IndexPredicate::Comparison { op: *op, constant })
+        }
+        NodePayload::Binop(op @ (Binop::Ult | Binop::Ule | Binop::Ugt | Binop::Uge), a, b) => {
+            let (amount, op, constant) = if let Some(value) = literal_bits(f, *b) {
+                (*a, *op, value)
+            } else {
+                // Reversing a noncommutative comparison reverses its direction.
+                let reversed = match op {
+                    Binop::Ult => Binop::Ugt,
+                    Binop::Ule => Binop::Uge,
+                    Binop::Ugt => Binop::Ult,
+                    Binop::Uge => Binop::Ule,
+                    _ => unreachable!("matched unsigned comparison"),
+                };
+                (*b, reversed, literal_bits(f, *a)?)
+            };
+            (amount, IndexPredicate::Comparison { op, constant })
+        }
+        _ => return None,
+    };
+    Some((priority_index(f, amount)?, predicate))
+}
+
+/// Selects the smaller truth set, using the one-hot invariant to complement it.
+fn wired_predicate(
+    f: &mut ir::Fn,
+    builder: &mut NodeAppender,
+    index: &PriorityIndex,
+    predicate: &IndexPredicate,
+) -> Option<NodeRef> {
+    let hot_width = bits_width(&f.get_node(index.hot).ty)?;
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    for ordinal in 0..hot_width {
+        if predicate.at(&index.at(ordinal)) {
+            accepted.push(ordinal);
+        } else {
+            rejected.push(ordinal);
+        }
+    }
+    // one_hot sets exactly one of these bits, including its all-zero sentinel.
+    // Complementing an arbitrary at-most-one value would be incorrect here.
+    let complement = rejected.len() < accepted.len();
+    let sources = if complement { rejected } else { accepted };
+    let wired = wired_result(f, builder, index.hot, &[sources])?;
+    if complement {
+        builder.push(f, Type::Bits(1), NodePayload::Unop(Unop::Not, wired))
+    } else {
+        Some(wired)
+    }
+}
+
+/// Replaces exclusive count predicates while retaining shared inputs/one-hot
+/// values.
+fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
+    let mut rewrites = 0;
+    let mut builder = NodeAppender::new(f);
+    for index in 0..f.nodes.len() {
+        let root = NodeRef { index };
+        let Some((index_expr, predicate)) = priority_index_predicate(f, root) else {
+            continue;
+        };
+        if !priority_result_cone_is_exclusive(f, root, None, index_expr.hot) {
+            continue;
+        }
+        let wired = wired_predicate(f, &mut builder, &index_expr, &predicate)?;
+        f.nodes[root.index].payload = f.get_node(wired).payload.clone();
+        rewrites += 1;
+    }
+    Some(rewrites)
+}
+
 /// Rewrites exclusive affine-index decoders, returning None if text IDs run
 /// out. The caller must discard the partially rewritten function on exhaustion.
 fn rewrite_priority_results(f: &mut ir::Fn) -> Option<usize> {
@@ -522,7 +685,8 @@ struct PriorityResultCandidate {
 
 fn candidate(f: &ir::Fn) -> Option<PriorityResultCandidate> {
     let mut function = f.clone();
-    let rewrites = rewrite_priority_results(&mut function)?;
+    let rewrites =
+        rewrite_priority_results(&mut function)? + rewrite_priority_predicates(&mut function)?;
     if rewrites == 0 {
         return None;
     }
@@ -840,5 +1004,173 @@ top fn main(x: bits[32] id=1, p: bits[1] id=2) -> bits[33] {
             0
         );
         assert_eq!(f.to_string(), original.to_string());
+    }
+
+    /// Builds a count predicate with exact-width arithmetic before its
+    /// consumer.
+    fn scalar_case(n: usize, low: bool, form: &str, predicate: &str) -> String {
+        let cw = ceil_log2(n + 1);
+        let (aw, steps) = match form {
+            "identity" => (cw, String::new()),
+            "wrap_add" => (
+                cw,
+                format!(
+                    "  k: bits[{cw}] = literal(value=1, id=4)\n  amount: bits[{cw}] = add(k, count, id=5)\n"
+                ),
+            ),
+            "wrap_sub" => (
+                cw,
+                format!(
+                    "  k: bits[{cw}] = literal(value=1, id=4)\n  amount: bits[{cw}] = sub(count, k, id=5)\n"
+                ),
+            ),
+            "reflect" => (
+                cw,
+                format!(
+                    "  k: bits[{cw}] = literal(value=0, id=4)\n  amount: bits[{cw}] = sub(k, count, id=5)\n"
+                ),
+            ),
+            "wide_add" => (
+                80,
+                format!(
+                    "  wide: bits[80] = zero_ext(count, new_bit_count=80, id=4)\n  k: bits[80] = literal(value=1208925819614629174706175, id=5)\n  amount: bits[80] = add(wide, k, id=6)\n"
+                ),
+            ),
+            _ => unreachable!("test arithmetic"),
+        };
+        let amount = if form == "identity" {
+            "count"
+        } else {
+            "amount"
+        };
+        let consumer = match predicate {
+            "or_slice" => {
+                let start = usize::from(aw > 1);
+                format!(
+                    "  view: bits[{}] = bit_slice({amount}, start={start}, width={}, id=8)\n  ret out: bits[1] = or_reduce(view, id=9)",
+                    aw - start,
+                    aw - start
+                )
+            }
+            "and" | "xor" => format!("  ret out: bits[1] = {predicate}_reduce({amount}, id=9)"),
+            "left_ult" => format!(
+                "  limit: bits[{aw}] = literal(value=1, id=8)\n  ret out: bits[1] = ult(limit, {amount}, id=9)"
+            ),
+            op => format!(
+                "  limit: bits[{aw}] = literal(value=1, id=8)\n  ret out: bits[1] = {op}({amount}, limit, id=9)"
+            ),
+        };
+        format!(
+            "package scalar\ntop fn main(x: bits[{n}] id=1) -> bits[1] {{\n  hot: bits[{}] = one_hot(x, lsb_prio={low}, id=2)\n  count: bits[{cw}] = encode(hot, id=3)\n{steps}{consumer}\n}}\n",
+            n + 1
+        )
+    }
+
+    #[test]
+    fn scalar_predicates_preserve_sentinels_arithmetic_wrap_and_wide_values() {
+        for (n, form) in [
+            (1, "identity"),
+            (3, "wrap_add"),
+            (8, "wrap_sub"),
+            (65, "reflect"),
+            (7, "wide_add"),
+        ] {
+            for low in [false, true] {
+                for predicate in ["or_slice", "eq", "left_ult"] {
+                    let source = scalar_case(n, low, form, predicate);
+                    let package = Parser::new(&source).parse_and_validate_package().unwrap();
+                    let mut rewritten = package.get_top_fn().unwrap().clone();
+                    assert_eq!(
+                        rewrite_priority_predicates(&mut rewritten),
+                        Some(1),
+                        "{n} {low} {form} {predicate}"
+                    );
+                    ir_utils::compact_and_toposort_in_place(&mut rewritten).unwrap();
+                    check_equivalence_via_toolchain(
+                        &source,
+                        &format!("package result\n\ntop {rewritten}"),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        for predicate in ["and", "xor", "ne", "ult", "ule", "ugt", "uge"] {
+            let source = scalar_case(3, true, "wrap_add", predicate);
+            let package = Parser::new(&source).parse_and_validate_package().unwrap();
+            let mut rewritten = package.get_top_fn().unwrap().clone();
+            assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(1));
+            ir_utils::compact_and_toposort_in_place(&mut rewritten).unwrap();
+            check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn scalar_predicates_reject_shared_counts_and_unsupported_paths() {
+        let source = scalar_case(8, true, "identity", "or_slice");
+        let shared = source
+            .replace("-> bits[1]", "-> (bits[1], bits[4])")
+            .replace("ret out:", "out:")
+            .replace(
+                "\n}",
+                "\n  ret both: (bits[1], bits[4]) = tuple(out, count, id=10)\n}",
+            );
+        let truncated_arithmetic = source.replace(
+            "  view: bits[3] = bit_slice(count, start=1, width=3, id=8)",
+            "  trunc: bits[3] = bit_slice(count, start=0, width=3, id=11)\n  k: bits[3] = literal(value=1, id=12)\n  view: bits[3] = add(trunc, k, id=8)");
+        let unknown_hot = source
+            .replace("x: bits[8] id=1", "x: bits[8] id=1, unknown: bits[9] id=11")
+            .replace("encode(hot,", "encode(unknown,");
+        let empty_reduction = source.replace(
+            "view: bits[3] = bit_slice(count, start=1, width=3",
+            "view: bits[0] = bit_slice(count, start=1, width=0",
+        );
+        for input in [
+            shared,
+            truncated_arithmetic,
+            unknown_hot,
+            empty_reduction,
+            scalar_case(8, false, "identity", "slt"),
+        ] {
+            let package = Parser::new(&input).parse_and_validate_package().unwrap();
+            let mut rewritten = package.get_top_fn().unwrap().clone();
+            let original = rewritten.to_string();
+            assert_eq!(
+                rewrite_priority_predicates(&mut rewritten),
+                Some(0),
+                "{input}"
+            );
+            assert_eq!(rewritten.to_string(), original);
+        }
+    }
+
+    #[test]
+    fn scalar_predicates_allow_shared_onehot_but_preserve_input_on_id_exhaustion() {
+        let source = scalar_case(8, false, "identity", "or_slice")
+            .replace("-> bits[1]", "-> (bits[1], bits[9])")
+            .replace("ret out:", "out:")
+            .replace(
+                "\n}",
+                "\n  ret both: (bits[1], bits[9]) = tuple(out, hot, id=10)\n}",
+            );
+        let package = Parser::new(&source).parse_and_validate_package().unwrap();
+        let original = package.get_top_fn().unwrap();
+        let mut rewritten = original.clone();
+        assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(1));
+        ir_utils::compact_and_toposort_in_place(&mut rewritten).unwrap();
+        check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
+            .unwrap();
+        for largest_id in [usize::MAX - 1, usize::MAX] {
+            let mut rewritten = original.clone();
+            rewritten.nodes[original.params[0].index].text_id = largest_id;
+            let before = rewritten.to_string();
+            assert_eq!(
+                rewrite_with_evaluator(&mut rewritten, &mut |_| panic!(
+                    "exhausted candidate must not be costed"
+                )),
+                0
+            );
+            assert_eq!(rewritten.to_string(), before);
+        }
     }
 }

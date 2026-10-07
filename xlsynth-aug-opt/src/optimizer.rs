@@ -53,9 +53,9 @@ pub struct AugOptOptions {
     pub mode: AugOptMode,
     /// Recover full-width additions from their low sum bit and upper carry sum.
     pub recover_split_adders: bool,
-    /// Preserve decoded priority results when the reference g8r cost improves.
-    /// Enabled by default within aug-opt. Profitability uses raw g8r AND
-    /// count and graph logical effort before FRAIG or ABC.
+    /// Fuse decoded priority results and scalar predicates when g8r costs
+    /// improve. Enabled by default within aug-opt. Profitability uses raw
+    /// g8r AND count and graph logical effort before FRAIG or ABC.
     pub fuse_priority_results: bool,
 }
 
@@ -365,8 +365,8 @@ fn apply_pre_xls_rewrites_to_ir_text(
         .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
         .clone();
 
-    // Priority-result fusion consumes the affine index and its final predicate
-    // mask before XLS narrows arithmetic or distributes the mask.
+    // Priority-result fusion consumes affine decoders and scalar predicates
+    // before XLS narrows arithmetic or distributes predicate masks.
     result.rewrite_stats.priority_results_fused =
         crate::priority_result_fusion::rewrite_with_evaluator(&mut function, &mut |f| {
             evaluator.estimate(f)

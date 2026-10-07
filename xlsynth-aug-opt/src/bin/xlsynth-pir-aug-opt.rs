@@ -38,7 +38,8 @@ struct Args {
     #[arg(long, action = clap::ArgAction::Set, default_value_t = AugOptOptions::default().recover_split_adders)]
     recover_split_adders: bool,
 
-    /// Fuse affine priority encode/decode roundtrips when gate costs improve.
+    /// Fuse decoded priority results and scalar predicates when gate costs
+    /// improve.
     #[arg(long, action = clap::ArgAction::Set, default_value_t = AugOptOptions::default().fuse_priority_results)]
     fuse_priority_results: bool,
 }

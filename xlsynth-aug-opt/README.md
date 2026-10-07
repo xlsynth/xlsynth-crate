@@ -79,6 +79,22 @@ width; the zero-input sentinel and overshifts are included. An optional final
 `F(...) & sign_ext(p)` selects the wired result when the one-bit predicate is
 true and bit zero otherwise.
 
+Scalar predicates on the encoded index are also evaluated for every reachable
+one-hot position, including the zero-input sentinel. Supported consumers are
+`or_reduce`, `and_reduce`, and `xor_reduce` (optionally on a bit slice), and
+equality or unsigned comparisons with literals on either side. The index may
+retain exact-width constant addition/subtraction and zero extensions. The pass
+ORs the selected one-hot bits, or complements the rejected bits when fewer are
+needed. This relies on the exact one-hot invariant, including its sentinel.
+
+For example, `!x[160] && (clz(x: u161) < 2)` becomes `!x[160] && x[159]`.
+The result is one boolean bit; it is not a two-bit count. An all-zero input has
+count 161 and returns false. Signed comparisons, masked indices, and arithmetic
+after a truncated count are outside this scalar matcher's scope. Empty
+reductions remain with ordinary constant folding. Shared count intermediates
+are rejected; shared inputs and one-hot results remain subject to the same
+whole-function profitability check.
+
 The pass runs before initial XLS optimization and in each requested PIR round.
 This preserves semantic index structure before XLS narrows arithmetic or
 distributes predicate masks, while allowing later rounds to recognize newly

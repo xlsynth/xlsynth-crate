@@ -257,7 +257,23 @@ fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
 /// Preserves positive and negative priority cases through the full sandwich.
 #[test]
 fn priority_result_corpus_respects_equivalence_and_qor_limits() {
-    let corpus = mffc_corpus::load().unwrap();
+    check_priority_result_corpus(mffc_corpus::load().unwrap());
+}
+
+/// Reuses the generic corpus harness with a strict raw mapping profile.
+#[test]
+fn priority_predicate_corpus_respects_equivalence_and_raw_qor_limits() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/priority_predicates");
+    let corpus = mffc_corpus::load_from_dir(&root).unwrap();
+    assert!(!corpus.profile.canonical_options.fraig);
+    assert!(!corpus.profile.canonical_options.reassociation);
+    assert!(!corpus.profile.canonical_options.cut_db_rewrite);
+    check_priority_result_corpus(corpus);
+}
+
+/// Checks the selected fixtures without changing their pinned mapping profile.
+fn check_priority_result_corpus(corpus: mffc_corpus::Corpus) {
     assert!(
         corpus
             .cases
