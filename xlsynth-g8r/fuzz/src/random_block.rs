@@ -302,7 +302,10 @@ fn cycle_eval_fn(block: &Block, state: &[IrValue]) -> CycleEvalFn {
     };
     let mut result = Fn {
         graph,
-        params: block.input_ports().collect(),
+        params: block
+            .input_ports()
+            .map(|node| block_to_function[node.index])
+            .collect(),
         ret_ty: Type::nil(),
         ret_node_ref: None,
     };
