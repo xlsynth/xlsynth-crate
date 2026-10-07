@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Origin: google/xls xls/fuzzer/crashers/crasher_2026-03-31_9c27.x,
+// commit 17f5c7a22148462b26c294eb61106689d2f5e548. Saved optimized IR;
+// source positions removed. The encoded index feeds distinct consumers.
+// DSLX expression: {
+//   let c = encode(one_hot(x1, true));
+//   let v = x3 ^ (c as u53);
+//   let k = ((-(c as u7)) ++ u1:0) as s8 as s36 as u36;
+//   (v, (-x1)[x3+:u31], v ++ k ++ u1:1, u19:490833, u19:490833)
+// }
+package priority_shared_index
+
+
+top fn main(x0: (bits[4], bits[42]) id=1, x1: bits[36] id=2, x2: (bits[53], bits[36], bits[3]) id=3, x3: bits[53] id=4, x4: bits[28] id=5) -> (bits[53], bits[31], bits[90], bits[19], bits[19]) {
+  one_hot.8: bits[37] = one_hot(x1, lsb_prio=true, id=8)
+  literal.104: bits[1] = literal(value=0, id=104)
+  encode.9: bits[6] = encode(one_hot.8, id=9)
+  literal.140: bits[7] = literal(value=0, id=140)
+  concat.142: bits[7] = concat(literal.104, encode.9, id=142)
+  sub.137: bits[7] = sub(literal.140, concat.142, id=137)
+  bit_slice.73: bits[6] = bit_slice(x3, start=0, width=6, id=73)
+  concat.139: bits[8] = concat(sub.137, literal.104, id=139)
+  bit_slice.74: bits[47] = bit_slice(x3, start=6, width=47, id=74)
+  x16__1: bits[6] = xor(bit_slice.73, encode.9, id=75)
+  x9: bits[36] = neg(x1, id=15)
+  x17: bits[36] = sign_ext(concat.139, new_bit_count=36, id=97)
+  x13: bits[1] = literal(value=1, id=128)
+  x16: bits[53] = concat(bit_slice.74, x16__1, id=76)
+  x15: bits[31] = dynamic_bit_slice(x9, x3, width=31, id=22)
+  x22: bits[90] = concat(bit_slice.74, x16__1, x17, x13, id=103)
+  x26: bits[19] = literal(value=490833, id=36)
+  ret tuple.39: (bits[53], bits[31], bits[90], bits[19], bits[19]) = tuple(x16, x15, x22, x26, x26, id=39)
+}
