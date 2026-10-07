@@ -224,8 +224,9 @@ solver inconclusives do not count as proofs. See the
 coverage validation commands.
 Scalar families cover reductions and literal equality/unsigned comparisons. The
 audit requires proved real-cost acceptance in PIR-only mode for each family and
-priority direction, and checks width/wrap/sentinel/sharing controls. Run this
-standalone audit in addition to the short mutation smoke test; CI wiring is pending.
+priority direction, and checks width/wrap/sentinel/sharing controls. CI's Fuzz Smoke
+Test job requires this standalone audit to pass before the short mutation smoke
+test and retains the coverage counts in its log.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs
 
