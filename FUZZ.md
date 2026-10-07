@@ -300,6 +300,15 @@ cargo fuzz run --features=with-bitwuzla-system --sanitizer=none fuzz_g8r_formal
 Use `with-bitwuzla-built` instead of `with-bitwuzla-system` to build the solver
 from source.
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_sentinel_lowering.rs
+
+Exercises canonical CLZ and both priority sentinel lowerings, with width, offset,
+wrap, sharing and builder-fold controls. Explicit Bitwuzla checks compare the
+lowered gates to desugared source semantics, including concrete zero inputs.
+A deterministic coverage audit requires actual canonical lowerings and completed
+proofs for all families; generic fuzz smoke success alone is insufficient. See
+the [g8r fuzz guide](xlsynth-g8r/fuzz/FUZZ.md) for reproducible commands and limits.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_fn_roundtrip.rs
 
 Builds a random `GateFn`, serializes to text, parses it back, and checks structural equivalence of the original vs parsed `GateFn`.

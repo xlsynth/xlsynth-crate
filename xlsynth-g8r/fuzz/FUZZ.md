@@ -106,3 +106,43 @@ Generates gatify-supported PIR directly, including PIR extension operations,
 gatifies it, applies FRAIG and cut-database
 rewriting, then checks provenance IDs on surviving gates. Failures expose
 provenance corruption introduced by gate-level optimization.
+
+## `fuzz_sentinel_lowering`
+
+Generates live canonical `ext_clz` and both `ext_prio_encode` directions over
+widths 1 through 161, plus offset, widened-output (including 80-bit), and
+truncated-output CLZ controls. Shared inputs/results, input reversal, post-count
+modular addition, and fold/hash on/off settings vary independently. It lowers
+without FRAIG/cuts/reassociation, lifts the gates to PIR, and explicitly proves
+them equivalent to independently desugared source PIR with Bitwuzla. Every
+sample also compares concrete all-zero input evaluation. Failures expose wrong
+sentinels, lost sharing, offset/wrap/truncation errors, or incorrect gate export.
+
+Counters distinguish completed canonical lowerings, directly reused count bits
+(sentinel-zero output positions), fallback controls, proofs, and inconclusives.
+These lowerings have no profitability gate; canonical branch counts are not
+aug-opt acceptance counts. The replay audit requires proved canonical paths and
+nonzero direct-count-bit coverage for CLZ and each priority direction, every
+input width, builder settings and sharing controls. It rejects inconclusives.
+Zero-width inputs remain covered by the existing directed regression tests;
+this mutation grammar starts at one bit. The generic g8r generators are unchanged.
+
+From `xlsynth-g8r`, use the normal XLS environment and run:
+
+```shell
+cargo run --release --manifest-path fuzz/Cargo.toml \
+  --features with-bitwuzla-built --example sentinel_lowering_coverage -- \
+  --write-corpus /tmp/sentinel-corpus
+XLSYNTH_FUZZ_REPORT_SAMPLES=1 cargo +nightly fuzz run fuzz_sentinel_lowering \
+  /tmp/sentinel-corpus --features with-bitwuzla-built --sanitizer none -- \
+  -seed=109601 -runs=3000 -max_total_time=300 -timeout=90 -max_len=128 \
+  -print_final_stats=1
+cargo run --release --manifest-path fuzz/Cargo.toml \
+  --features with-bitwuzla-built --example sentinel_lowering_coverage -- \
+  /tmp/sentinel-corpus
+```
+
+Omit replay arguments to audit the built-in matrix. Run this standalone audit
+in addition to the mutation smoke target; CI wiring is pending. Per-sample reporting records exact input bytes
+and lowering/proof counts; retain logs, seeds and libFuzzer artifacts for replay.
+`with-bitwuzla-system` is also supported.

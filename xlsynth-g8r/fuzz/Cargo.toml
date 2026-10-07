@@ -196,3 +196,15 @@ with-boolector-system = ["has-boolector", "xlsynth-prover/with-boolector-system"
 with-boolector-built = ["has-boolector", "xlsynth-prover/with-boolector-built"]
 with-z3-system = ["xlsynth-g8r/with-z3-system"]
 with-z3-built = ["xlsynth-g8r/with-z3-built"]
+
+[[bin]]
+name = "fuzz_sentinel_lowering"
+path = "fuzz_targets/fuzz_sentinel_lowering.rs"
+test = false
+doc = false
+required-features = ["has-bitwuzla"]
+
+[[example]]
+name = "sentinel_lowering_coverage"
+path = "examples/sentinel_lowering_coverage.rs"
+required-features = ["has-bitwuzla"]
