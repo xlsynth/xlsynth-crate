@@ -92,9 +92,10 @@ supported. All widths receive a concrete zero-input check in addition to SMT.
 The replay audit requires forced and real-cost proved fusions for every scalar
 family in both priority directions, specifically in PIR-only mode, so later XLS
 canonicalization cannot fill a missing scalar hit. It also rejects any
-inconclusive proof. Run this standalone audit separately from the short mutation
-smoke run; CI wiring is pending, and a passing smoke run alone does not demonstrate
-these hits.
+inconclusive proof. CI's Fuzz Smoke Test job runs this standalone audit against
+the deterministic matrix in a separate step before the short mutation smoke run
+and retains its coverage counts in the job log. A passing smoke run alone does
+not demonstrate these hits.
 
 For bounded campaigns, set `XLSYNTH_FUZZ_REPORT_SAMPLES=1` to log exact input
 bytes, family/feature labels, accepted rewrites, and completed/inconclusive proof
