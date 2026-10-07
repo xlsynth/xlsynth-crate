@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// Origin: BVC site 59e4728ba6e49a53259f5a21b4821b8834b6ff82fa2c248e116d550a070ea637; k3-cone-1e24c3a360bd6fdc-0708f27263d8
+// Original source SHA256: ffc8602129a0700821153138f283f719759f92a259fc26c71058db30d2c491b6
+package replay_input
+
+top fn __k3_cone_1e24c3a360bd6fdc(leaf_135: bits[161] id=1008, leaf_136: bits[1] id=1009) -> bits[1] {
+  neg.1010: bits[161] = neg(leaf_135, id=1010)
+  sel.1011: bits[161] = sel(leaf_136, cases=[leaf_135, neg.1010], id=1011)
+  reverse.1012: bits[161] = reverse(sel.1011, id=1012)
+  one_hot.1013: bits[162] = one_hot(reverse.1012, lsb_prio=true, id=1013)
+  encode.1014: bits[8] = encode(one_hot.1013, id=1014)
+  bit_slice.1015: bits[7] = bit_slice(encode.1014, start=1, width=7, id=1015)
+  or_reduce.1016: bits[1] = or_reduce(bit_slice.1015, id=1016)
+  bit_slice.1017: bits[1] = bit_slice(sel.1011, start=160, width=1, id=1017)
+  ret nor.1018: bits[1] = nor(bit_slice.1017, or_reduce.1016, id=1018)
+}

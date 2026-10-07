@@ -22,7 +22,8 @@ repeated rounds, including the libxls passes in sandwich mode.
 
 The initial phase is explicitly scheduled in `apply_pre_xls_rewrites_to_ir_text`.
 It currently runs priority-result fusion, which consumes the encode/affine-index/
-decode structure before XLS narrows arithmetic or distributes predicate masks.
+decode or scalar-predicate structure before XLS narrows arithmetic or distributes
+predicate masks.
 A pass belongs here when it needs no range analysis and has demonstrated a benefit
 from running before XLS changes its input structure. Priority-result fusion also
 runs in ordinary PIR rounds to catch newly exposed forms. The other rewrites stay

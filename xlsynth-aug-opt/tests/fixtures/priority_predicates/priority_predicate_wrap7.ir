@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Origin: Synthetic count-predicate n7-low1-add-and_slice-share-none
+// Original source SHA256: 3f2c44f4c9882b3a537cfb9f47c8184c2e87632c48c7aada42ed6306cb5b9f5d
+package synth
+top fn main(x: bits[7] id=1) -> bits[1] {
+  hot: bits[8] = one_hot(x, lsb_prio=true, id=2)
+  count: bits[3] = encode(hot, id=3)
+  k: bits[3] = literal(value=1, id=5)
+  amount0: bits[3] = add(k, count, id=6)
+  view: bits[2] = bit_slice(amount0, start=1, width=2, id=8)
+  ret out: bits[1] = and_reduce(view, id=9)
+}

@@ -16,7 +16,7 @@ use xlsynth_prover::prover::types::EquivResult;
 use xlsynth_prover::prover::{SolverChoice, prover_for_choice_with_limits};
 
 use crate::fuzz_solver_limits;
-use crate::priority_result_fusion_sample::{CASE_NAMES, generate_sample};
+use crate::priority_result_fusion_sample::{CASE_NAMES, SCALAR_DIRECTIONS, generate_sample};
 
 /// Distinguishes reached shapes, accepted rewrites, and completed proofs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -30,6 +30,7 @@ pub struct Coverage {
     pub proofs: u64,
     pub inconclusive: u64,
     pub exhaustive_assignments: u64,
+    pub zero_input_assignments: u64,
 }
 
 impl Coverage {
@@ -43,6 +44,7 @@ impl Coverage {
         self.proofs += other.proofs;
         self.inconclusive += other.inconclusive;
         self.exhaustive_assignments += other.exhaustive_assignments;
+        self.zero_input_assignments += other.zero_input_assignments;
     }
 }
 
@@ -73,7 +75,7 @@ impl CoverageReport {
                 .cases
                 .get(*name)
                 .ok_or_else(|| format!("missing case {name}"))?;
-            if matches!(case, 4..=9 | 13 | 15) {
+            if matches!(case, 4..=9 | 13 | 15 | 25 | 26 | 30..=33) {
                 if coverage.rejection_checks == 0 || coverage.proofs == 0 {
                     return Err(format!(
                         "case {name} lacks a checked rejection and completed proof"
@@ -82,6 +84,59 @@ impl CoverageReport {
             } else if coverage.forced_proofs == 0 {
                 return Err(format!("case {name} lacks a proved fusion"));
             }
+        }
+        for name in &CASE_NAMES[16..25] {
+            if self.cases.get(*name).is_none_or(|c| c.real_proofs == 0) {
+                return Err(format!(
+                    "scalar family {name} lacks a proved real-cost fusion"
+                ));
+            }
+        }
+        for name in SCALAR_DIRECTIONS.into_iter().flatten() {
+            if self
+                .features
+                .get(&format!("{name}_pir_only"))
+                .is_none_or(|c| c.forced_proofs == 0 || c.real_proofs == 0)
+            {
+                return Err(format!(
+                    "scalar family/direction {name} lacks a proved PIR-only real-cost fusion"
+                ));
+            }
+            if self
+                .features
+                .get(name)
+                .is_none_or(|c| c.forced_proofs == 0 || c.real_proofs == 0)
+            {
+                return Err(format!(
+                    "scalar family/direction {name} lacks forced and real-cost proofs"
+                ));
+            }
+        }
+        for name in [
+            "scalar_sentinel",
+            "scalar_wrapping",
+            "scalar_wide_constant",
+            "scalar_widen_before",
+            "scalar_widen_after",
+            "scalar_sliced",
+            "scalar_full_reduction",
+            "scalar_literal_left",
+            "scalar_literal_right",
+            "scalar_wide_input",
+            "scalar_narrow_input",
+        ] {
+            if self.features.get(name).is_none_or(|c| c.forced_proofs == 0) {
+                return Err(format!("scalar feature {name} lacks a proved fusion"));
+            }
+        }
+        if self.total.inconclusive != 0 {
+            return Err(format!(
+                "{} inconclusive proofs in audited corpus",
+                self.total.inconclusive
+            ));
+        }
+        if self.total.zero_input_assignments == 0 {
+            return Err("no concrete zero-input sentinel checks".to_string());
         }
         for feature in [
             "msb_priority",
@@ -164,8 +219,16 @@ fn check_equivalence(lhs: &ir::Fn, rhs: &ir::Fn, counts: &mut Coverage) -> Resul
     }
 }
 
-/// Exhausts small signatures to cross-check the SMT oracle with interpretation.
+/// Checks zero sentinels at every width and exhausts small signatures.
 fn check_small_inputs(lhs: &ir::Fn, rhs: &ir::Fn, counts: &mut Coverage) -> Result<(), String> {
+    let zero_args = lhs
+        .param_nodes()
+        .map(|node| IrValue::make_ubits(node.ty.bit_count(), 0).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if eval_fn(lhs, &zero_args) != eval_fn(rhs, &zero_args) {
+        return Err("zero-input sentinel interpreter mismatch".to_string());
+    }
+    counts.zero_input_assignments += 1;
     let total_bits: usize = lhs.param_nodes().map(|node| node.ty.bit_count()).sum();
     if total_bits > 8 {
         // Larger signatures are covered by the quantified SMT proof instead
@@ -292,14 +355,22 @@ pub fn check_input(data: &[u8]) -> Result<CoverageReport, String> {
         }
         check_small_inputs(original, rewritten, &mut counts)?;
     }
+    let mut features: BTreeMap<String, Coverage> = sample
+        .features
+        .iter()
+        .map(|name| (name.to_string(), counts))
+        .collect();
+    if sample.pipeline == 0 && (16..25).contains(&sample.case) {
+        for name in SCALAR_DIRECTIONS[sample.case - 16] {
+            if sample.features.contains(name) {
+                features.insert(format!("{name}_pir_only"), counts);
+            }
+        }
+    }
     Ok(CoverageReport {
         total: counts,
         cases: BTreeMap::from([(CASE_NAMES[sample.case].to_string(), counts)]),
-        features: sample
-            .features
-            .iter()
-            .map(|name| (name.to_string(), counts))
-            .collect(),
+        features,
     })
 }
 
@@ -322,6 +393,22 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}\n{coverage:#?}"));
         assert_eq!(coverage.total.inconclusive, 0);
         assert!(coverage.total.exhaustive_assignments > 0);
+        let real = coverage.cases["scalar_eq"].real_proofs;
+        coverage.cases.get_mut("scalar_eq").unwrap().real_proofs = 0;
+        assert!(
+            coverage.validate().is_err(),
+            "forced scalar proofs cannot replace real-cost hits"
+        );
+        coverage.cases.get_mut("scalar_eq").unwrap().real_proofs = real;
+        coverage
+            .features
+            .get_mut("scalar_eq_lsb")
+            .unwrap()
+            .real_proofs = 0;
+        assert!(
+            coverage.validate().is_err(),
+            "the other priority direction cannot fill a missing hit"
+        );
     }
 
     #[test]

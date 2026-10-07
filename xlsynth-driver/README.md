@@ -1007,6 +1007,11 @@ The `ir2opt`, `dslx2ir`, `ir2combo`, and `ir2pipeline` commands accept
 `--aug-opt-fuse-priority-results=false` to disable priority fusion for ablation.
 Fusion defaults to true whenever `--aug-opt=true`; aug-opt itself remains
 opt-in. `--aug-opt-rounds=N` defaults to one.
+Scalar reductions and unsigned comparisons with literals can also use selected
+one-hot bits directly. Each reachable ordinal, including the zero-input
+sentinel and exact-width arithmetic wrap, is evaluated before wiring the
+one-bit predicate. The same whole-function raw AND/LE profitability gate
+applies; shared count intermediates are rejected.
 It preserves a one-hot result when an affine encoded priority index feeds
 `decode` or a constant-one left shift. Both priority directions, modular
 constant addition/subtraction, lossless zero extensions, and an optional

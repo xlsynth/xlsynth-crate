@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// Origin: BVC site 59e4728ba6e49a53259f5a21b4821b8834b6ff82fa2c248e116d550a070ea637; k3-cone-b89efe600ae981a8-0d24e018fa76
+// Original source SHA256: dd8645fa7b4d60c944437e2158f65dfa0255b20cfdfb72762ef0b0c2cf4f4c2d
+package replay_input
+
+top fn __k3_cone_b89efe600ae981a8(leaf_124: bits[161] id=6737, leaf_126: bits[1] id=6738, leaf_133: bits[162] id=6739) -> bits[1] {
+  neg.6740: bits[161] = neg(leaf_124, id=6740)
+  sel.6741: bits[161] = sel(leaf_126, cases=[leaf_124, neg.6740], id=6741)
+  sign_ext.6742: bits[162] = sign_ext(sel.6741, new_bit_count=162, id=6742)
+  add.6743: bits[162] = add(sign_ext.6742, leaf_133, id=6743)
+  bit_slice.6744: bits[161] = bit_slice(add.6743, start=0, width=161, id=6744)
+  bit_slice.6745: bits[1] = bit_slice(add.6743, start=161, width=1, id=6745)
+  neg.6746: bits[161] = neg(bit_slice.6744, id=6746)
+  sel.6747: bits[161] = sel(bit_slice.6745, cases=[bit_slice.6744, neg.6746], id=6747)
+  reverse.6748: bits[161] = reverse(sel.6747, id=6748)
+  one_hot.6749: bits[162] = one_hot(reverse.6748, lsb_prio=true, id=6749)
+  encode.6750: bits[8] = encode(one_hot.6749, id=6750)
+  bit_slice.6751: bits[7] = bit_slice(encode.6750, start=1, width=7, id=6751)
+  or_reduce.6752: bits[1] = or_reduce(bit_slice.6751, id=6752)
+  bit_slice.6753: bits[1] = bit_slice(sel.6747, start=160, width=1, id=6753)
+  ret nand.6754: bits[1] = nand(bit_slice.6753, or_reduce.6752, id=6754)
+}

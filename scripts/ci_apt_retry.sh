@@ -22,7 +22,20 @@ Acquire::Retries "5";
 Acquire::http::Timeout "30";
 Acquire::https::Timeout "30";
 Acquire::http::Pipeline-Depth "0";
+APT::Update::Error-Mode "any";
 EOF
+
+  # Hosted runners can select the failing Azure HTTP endpoint for package
+  # downloads even after fetching indexes from the HTTPS archive fallback.
+  # Use that HTTPS archive consistently within the runner's mirror lists.
+  local mirror_list
+  for mirror_list in /etc/apt/apt-mirrors.txt /etc/apt/apt-mirrors-security.txt; do
+    if [ -f "${mirror_list}" ]; then
+      sed -i \
+        's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        "${mirror_list}"
+    fi
+  done
 }
 
 rewrite_sources_file_to_fallback() {
