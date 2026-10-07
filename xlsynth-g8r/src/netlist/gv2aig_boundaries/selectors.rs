@@ -13,14 +13,14 @@ use super::{
     BoundaryExtractor, Gv2AigBoundarySpec, Gv2AigSinkBoundary, Gv2AigSourceBoundary,
     Gv2AigSourceSelector, validate_names,
 };
-use crate::liberty_model::{PinDirection, SequentialKind};
+use crate::liberty_model::PinDirection;
 use crate::netlist::parse::PortDirection;
 
 /// The kind of netlist endpoint selected by a compact boundary selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gv2AigBoundaryKind {
     InputPort,
-    FlopOutput,
+    CellOutput,
     OutputPort,
 }
 
@@ -28,7 +28,7 @@ pub enum Gv2AigBoundaryKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gv2AigBoundaryEndpoint {
     pub instance_name: String,
-    /// A module port name or mapped flop output pin name.
+    /// A module port name or mapped cell output pin name.
     pub terminal_name: String,
 }
 
@@ -91,7 +91,7 @@ impl Gv2AigBoundaryRequest {
         for selection in &self.sources {
             if selection.kind == Gv2AigBoundaryKind::OutputPort {
                 return Err(format!(
-                    "source selector '{}' must select an input port or flop output",
+                    "source selector '{}' must select an input port or cell output",
                     selection.to_compact_string()
                 ));
             }
@@ -115,8 +115,8 @@ impl Gv2AigBoundarySelection {
         let prefix = match (self.kind, is_regex) {
             (Gv2AigBoundaryKind::InputPort, false) => "input_port",
             (Gv2AigBoundaryKind::InputPort, true) => "input_port_regex",
-            (Gv2AigBoundaryKind::FlopOutput, false) => "flop_output",
-            (Gv2AigBoundaryKind::FlopOutput, true) => "flop_output_regex",
+            (Gv2AigBoundaryKind::CellOutput, false) => "cell_output",
+            (Gv2AigBoundaryKind::CellOutput, true) => "cell_output_regex",
             (Gv2AigBoundaryKind::OutputPort, false) => "output_port",
             (Gv2AigBoundaryKind::OutputPort, true) => "output_port_regex",
         };
@@ -201,8 +201,8 @@ fn parse_kind(prefix: &str) -> Option<(Gv2AigBoundaryKind, bool)> {
     match prefix {
         "input_port" => Some((Gv2AigBoundaryKind::InputPort, false)),
         "input_port_regex" => Some((Gv2AigBoundaryKind::InputPort, true)),
-        "flop_output" => Some((Gv2AigBoundaryKind::FlopOutput, false)),
-        "flop_output_regex" => Some((Gv2AigBoundaryKind::FlopOutput, true)),
+        "cell_output" => Some((Gv2AigBoundaryKind::CellOutput, false)),
+        "cell_output_regex" => Some((Gv2AigBoundaryKind::CellOutput, true)),
         "output_port" => Some((Gv2AigBoundaryKind::OutputPort, false)),
         "output_port_regex" => Some((Gv2AigBoundaryKind::OutputPort, true)),
         _ => None,
@@ -275,8 +275,8 @@ fn parse_endpoint(
     if terminal_name.is_empty() {
         return Err("endpoint port or pin name must be nonempty".to_string());
     }
-    if kind == Gv2AigBoundaryKind::FlopOutput && instance_name.is_empty() {
-        return Err("flop output requires '<instance_name>:<pin>'".to_string());
+    if kind == Gv2AigBoundaryKind::CellOutput && instance_name.is_empty() {
+        return Err("cell output requires '<instance_name>:<pin>'".to_string());
     }
     Ok(Gv2AigBoundaryEndpoint {
         instance_name,
@@ -304,7 +304,7 @@ impl BoundaryCandidate {
 #[derive(Default)]
 struct BoundaryInventory {
     inputs: Vec<BoundaryCandidate>,
-    flops: Vec<BoundaryCandidate>,
+    cell_outputs: Vec<BoundaryCandidate>,
     outputs: Vec<BoundaryCandidate>,
 }
 
@@ -312,7 +312,7 @@ impl BoundaryInventory {
     fn candidates(&self, kind: Gv2AigBoundaryKind) -> &[BoundaryCandidate] {
         match kind {
             Gv2AigBoundaryKind::InputPort => &self.inputs,
-            Gv2AigBoundaryKind::FlopOutput => &self.flops,
+            Gv2AigBoundaryKind::CellOutput => &self.cell_outputs,
             Gv2AigBoundaryKind::OutputPort => &self.outputs,
         }
     }
@@ -338,7 +338,7 @@ impl BoundaryExtractor<'_> {
                         instance_name: candidate.endpoint.instance_name.clone(),
                         port: candidate.endpoint.terminal_name.clone(),
                     },
-                    Gv2AigBoundaryKind::FlopOutput => Gv2AigSourceSelector::FlopOutput {
+                    Gv2AigBoundaryKind::CellOutput => Gv2AigSourceSelector::CellOutput {
                         instance_name: candidate.endpoint.instance_name.clone(),
                         pin: candidate.endpoint.terminal_name.clone(),
                     },
@@ -412,20 +412,13 @@ impl BoundaryExtractor<'_> {
                 let instance_name = self.interner.resolve(instance.instance_name).unwrap();
                 let type_name = self.interner.resolve(instance.type_name).unwrap();
                 let cell = &library.cells[self.cell_index_by_name[type_name]];
-                if !cell
-                    .sequential
-                    .iter()
-                    .any(|sequential| sequential.kind == SequentialKind::Ff as i32)
-                {
-                    continue;
-                }
                 for pin in &cell.pins {
                     if pin.direction != PinDirection::Output as i32 {
                         continue;
                     }
                     let pin_name = library.resolve_string(&pin.name);
-                    if self.flop_output_bit(instance_name, pin_name).is_ok() {
-                        inventory.flops.push(BoundaryCandidate::new(
+                    if self.cell_output_bit(instance_name, pin_name).is_ok() {
+                        inventory.cell_outputs.push(BoundaryCandidate::new(
                             instance_name.to_string(),
                             pin_name.to_string(),
                         ));
@@ -434,7 +427,7 @@ impl BoundaryExtractor<'_> {
             }
         }
         inventory.inputs.sort_by(|a, b| a.text.cmp(&b.text));
-        inventory.flops.sort_by(|a, b| a.text.cmp(&b.text));
+        inventory.cell_outputs.sort_by(|a, b| a.text.cmp(&b.text));
         inventory.outputs.sort_by(|a, b| a.text.cmp(&b.text));
         inventory
     }
@@ -503,11 +496,11 @@ mod tests {
         for text in [
             "input_port:data",
             "input_port:u_stage:data",
-            "state=flop_output:u_stage/u_reg:Q",
+            "state=cell_output:u_stage/u_reg:Q",
             r"a\=b=output_port:u\:stage:out\\name",
             r"input_port\:alias=output_port:result",
             r"input_port_regex:(?:data|value)_[0-9]{1,2}=x",
-            r"flop_output_regex:u_reg\[[0-9]+\]:q",
+            r"cell_output_regex:u_reg\[[0-9]+\]:q",
         ] {
             let selection: Gv2AigBoundarySelection = text.parse().unwrap();
             assert_eq!(selection.to_compact_string(), text);
@@ -518,8 +511,8 @@ mod tests {
     fn rejects_invalid_compact_selectors_and_roles() {
         for text in [
             "input_port:",
-            "flop_output:q",
-            "flop_output:u_reg:q:extra",
+            "cell_output:q",
+            "cell_output:u_reg:q:extra",
             r"input_port:bad\name",
             "unknown:data",
             "=input_port:data",

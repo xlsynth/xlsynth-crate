@@ -13,7 +13,7 @@ use string_interner::{StringInterner, backend::StringBackend};
 use crate::aig::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::{EmitContext, Term};
-use crate::liberty_model::{Library, PinDirection, SequentialKind};
+use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::build_cell_formula_map;
 use crate::netlist::hierarchy::{ElaboratedModuleBoundary, ElaboratedNetlist};
 use crate::netlist::normalized::{BitExpr, BitIndex, BitSource, NormalizedNetlistModule};
@@ -43,7 +43,7 @@ pub struct Gv2AigSourceBoundary {
     pub selector: Gv2AigSourceSelector,
 }
 
-/// A module input port or mapped flop output pin at which traversal stops.
+/// A module input port or mapped cell output pin at which traversal stops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Gv2AigSourceSelector {
@@ -53,7 +53,9 @@ pub enum Gv2AigSourceSelector {
         instance_name: String,
         port: String,
     },
-    FlopOutput {
+    /// Cuts one connected scalar output pin of a combinational or sequential
+    /// leaf cell, making its signal an independent AIG input.
+    CellOutput {
         /// Exact elaborated name of the mapped leaf instance.
         instance_name: String,
         pin: String,
@@ -401,8 +403,8 @@ impl<'a> BoundaryExtractor<'a> {
                 instance_name,
                 port,
             } => self.module_port_bits(instance_name, port, PortDirection::Input),
-            Gv2AigSourceSelector::FlopOutput { instance_name, pin } => self
-                .flop_output_bit(instance_name, pin)
+            Gv2AigSourceSelector::CellOutput { instance_name, pin } => self
+                .cell_output_bit(instance_name, pin)
                 .map(|bit| vec![bit]),
         }
     }
@@ -459,26 +461,16 @@ impl<'a> BoundaryExtractor<'a> {
             .collect())
     }
 
-    /// Resolves and validates one mapped FF output pin selected as a source.
-    fn flop_output_bit(&self, instance_name: &str, pin_name: &str) -> Result<BitIndex, String> {
+    /// Resolves and validates one mapped cell output pin selected as a source.
+    fn cell_output_bit(&self, instance_name: &str, pin_name: &str) -> Result<BitIndex, String> {
         let instance_index = self
             .instance_index_by_name
             .get(instance_name)
-            .ok_or_else(|| format!("flop instance '{}' was not found", instance_name))?;
+            .ok_or_else(|| format!("cell instance '{}' was not found", instance_name))?;
         let instance = &self.normalized.instances[*instance_index];
         let type_name = self.interner.resolve(instance.type_name).unwrap();
         let library = self.liberty;
         let cell = &library.cells[self.cell_index_by_name[type_name]];
-        if !cell
-            .sequential
-            .iter()
-            .any(|sequential| sequential.kind == SequentialKind::Ff as i32)
-        {
-            return Err(format!(
-                "source instance '{}' (cell '{}') is not a Liberty FF",
-                instance_name, type_name
-            ));
-        }
         let pin = cell
             .pins
             .iter()
@@ -486,7 +478,7 @@ impl<'a> BoundaryExtractor<'a> {
             .ok_or_else(|| format!("cell '{}' has no pin '{}'", type_name, pin_name))?;
         if pin.direction != PinDirection::Output as i32 {
             return Err(format!(
-                "flop instance '{}' pin '{}' is not an output",
+                "cell instance '{}' pin '{}' is not an output",
                 instance_name, pin_name
             ));
         }
@@ -496,13 +488,13 @@ impl<'a> BoundaryExtractor<'a> {
             .find(|connection| self.interner.resolve(connection.port) == Some(pin_name))
             .ok_or_else(|| {
                 format!(
-                    "flop instance '{}' pin '{}' is unconnected",
+                    "cell instance '{}' pin '{}' is unconnected",
                     instance_name, pin_name
                 )
             })?;
         let [BitSource::Bit(bit)] = connection.bits.as_slice() else {
             return Err(format!(
-                "flop instance '{}' pin '{}' must connect to one net bit",
+                "cell instance '{}' pin '{}' must connect to one net bit",
                 instance_name, pin_name
             ));
         };
@@ -876,7 +868,22 @@ cells: {
   pins: { name_string_id: 12 direction: INPUT }
   pins: { name_string_id: 13 direction: OUTPUT function_string_id: 14 }
 }
-interned_strings: ["D", "CLK", "Q", "IQ", "RSTN", "d0_0", "d0_1", "d1_0", "d1_1", "ti", "te", "I", "O", "!I"]
+cells: {
+  name: "BUF_INV"
+  pins: { name_string_id: 12 direction: INPUT }
+  pins: { name_string_id: 13 direction: OUTPUT function_string_id: 12 }
+  pins: { name_string_id: 15 direction: OUTPUT function_string_id: 14 }
+}
+interned_strings: ["D", "CLK", "Q", "IQ", "RSTN", "d0_0", "d0_1", "d1_0", "d1_1", "ti", "te", "I", "O", "!I", "ON"]
+"#;
+
+    const MULTI_OUTPUT_NETLIST: &str = r#"
+module top(data, y, z);
+  input data;
+  output y;
+  output z;
+  BUF_INV u_pair (.I(data), .O(y), .ON(z));
+endmodule
 "#;
 
     const NETLIST: &str = r#"
@@ -921,7 +928,7 @@ endmodule
     const BOUNDARIES: &str = r#"
 {
   "sources": [
-    {"name": "state", "selector": {"kind": "flop_output", "instance_name": "u_stage/u_state", "pin": "Q"}},
+    {"name": "state", "selector": {"kind": "cell_output", "instance_name": "u_stage/u_state", "pin": "Q"}},
     {"name": "data", "selector": {"kind": "module_input", "instance_name": "u_stage", "port": "data"}}
   ],
   "sinks": [
@@ -977,7 +984,7 @@ endmodule
     fn resolves_regexp_boundaries_across_hierarchy_in_lexical_order() {
         let request = Gv2AigBoundaryRequest::from_selectors(
             &[
-                "flop_output_regex:u_stage/u_(?:pipe|state):Q".to_string(),
+                "cell_output_regex:u_stage/u_(?:pipe|state):Q".to_string(),
                 "input_port_regex:u_stage:data".to_string(),
             ],
             &["output_port_regex:u_stage:(?:complement|result)".to_string()],
@@ -996,8 +1003,8 @@ endmodule
         let expected: Gv2AigBoundarySpec = serde_json::from_str(
             r#"{
               "sources": [
-                {"name": "u_stage/u_pipe:Q", "selector": {"kind": "flop_output", "instance_name": "u_stage/u_pipe", "pin": "Q"}},
-                {"name": "u_stage/u_state:Q", "selector": {"kind": "flop_output", "instance_name": "u_stage/u_state", "pin": "Q"}},
+                {"name": "u_stage/u_pipe:Q", "selector": {"kind": "cell_output", "instance_name": "u_stage/u_pipe", "pin": "Q"}},
+                {"name": "u_stage/u_state:Q", "selector": {"kind": "cell_output", "instance_name": "u_stage/u_state", "pin": "Q"}},
                 {"name": "u_stage:data", "selector": {"kind": "module_input", "instance_name": "u_stage", "port": "data"}}
               ],
               "sinks": [
@@ -1078,11 +1085,11 @@ endmodule
     }
 
     #[test]
-    fn selected_flop_outputs_work_with_collapse_disabled() {
+    fn selected_cell_outputs_stop_at_flops_with_collapse_disabled() {
         let mut boundaries = boundary_spec();
         boundaries.sources.push(Gv2AigSourceBoundary {
             name: "pipe".to_string(),
-            selector: Gv2AigSourceSelector::FlopOutput {
+            selector: Gv2AigSourceSelector::CellOutput {
                 instance_name: "u_stage/u_pipe".to_string(),
                 pin: "Q".to_string(),
             },
@@ -1108,6 +1115,89 @@ endmodule
                 }
             }
         }
+    }
+
+    #[test]
+    fn selected_combinational_cell_output_does_not_cut_other_outputs() {
+        let boundaries = serde_json::from_str(
+            r#"{
+              "sources": [
+                {"name": "cut", "selector": {"kind": "cell_output", "instance_name": "u_pair", "pin": "O"}},
+                {"name": "data", "selector": {"kind": "module_input", "port": "data"}}
+              ],
+              "sinks": [{"name": "y", "port": "y"}, {"name": "z", "port": "z"}]
+            }"#,
+        )
+        .unwrap();
+        let gate_fn = extract_fixture(MULTI_OUTPUT_NETLIST, &boundaries, false).unwrap();
+        let mut sim = PreparedGateSim::new(&gate_fn);
+        for cut in 0..=1 {
+            for data in 0..=1 {
+                let outputs = sim.eval_outputs(&[
+                    IrBits::make_ubits(1, cut).unwrap(),
+                    IrBits::make_ubits(1, data).unwrap(),
+                ]);
+                assert_eq!(
+                    outputs,
+                    vec![
+                        IrBits::make_ubits(1, cut).unwrap(),
+                        IrBits::make_ubits(1, data ^ 1).unwrap(),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selected_cell_outputs_are_independent_inputs() {
+        let request = Gv2AigBoundaryRequest::from_selectors(
+            &["cell_output_regex:u_pair:(?:O|ON)".to_string()],
+            &["output_port:y".to_string(), "output_port:z".to_string()],
+        )
+        .unwrap();
+        let extraction = with_fixture(MULTI_OUTPUT_NETLIST, |elaborated, liberty| {
+            extract_gatefn_with_optional_boundary_request(
+                elaborated,
+                liberty,
+                /* collapse_sequential= */ false,
+                /* collapse_load_enable_feedback= */ false,
+                Some(&request),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            extraction
+                .gate_fn
+                .inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u_pair:O", "u_pair:ON"]
+        );
+        let mut sim = PreparedGateSim::new(&extraction.gate_fn);
+        for y in 0..=1 {
+            for z in 0..=1 {
+                let inputs = [
+                    IrBits::make_ubits(1, y).unwrap(),
+                    IrBits::make_ubits(1, z).unwrap(),
+                ];
+                assert_eq!(sim.eval_outputs(&inputs), inputs.to_vec());
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_cell_input_pin_as_source() {
+        let mut boundaries = boundary_spec();
+        boundaries.sources[0].selector = Gv2AigSourceSelector::CellOutput {
+            instance_name: "u_stage/u_pipe".to_string(),
+            pin: "D".to_string(),
+        };
+        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        assert_eq!(
+            error,
+            "while resolving source 'state': cell instance 'u_stage/u_pipe' pin 'D' is not an output"
+        );
     }
 
     #[test]
