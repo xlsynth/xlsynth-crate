@@ -300,20 +300,19 @@ jobs:
       fail-fast: false
 
     steps:
+      - name: Check out code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
       - name: Install libc++ from llvm-18
+        timeout-minutes: 15
         run: |
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg curl cmake
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install wget gnupg curl cmake
           cd /tmp/
           wget -4 https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
-          sudo apt-get install -y libz3-dev
-
-      - name: Check out code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install libc++-18-dev libc++abi-18-dev libz3-dev
 
       - name: Resolve XLS release tag
         id: resolve-xls-tag-matrix
@@ -477,6 +476,20 @@ jobs:
     steps:
       - name: Install Git for checkout
         run: |
+          # The repository's apt helper is unavailable until checkout. Apply
+          # this lane's mirror and retry policy to the bootstrap install too.
+          sed -i \
+            -e 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+            -e 's|http://security.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list
+          cat > /etc/apt/apt.conf.d/99ci-retries <<'EOF'
+          Acquire::ForceIPv4 "true";
+          Acquire::Retries "5";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          Acquire::http::Pipeline-Depth "0";
+          APT::Update::Error-Mode "any";
+          EOF
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
 
@@ -1042,15 +1055,15 @@ jobs:
           iverilog -V
 
       - name: Install libc++ from llvm-18
+        timeout-minutes: 15
         run: |
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y curl wget gnupg
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install curl wget gnupg
           cd /tmp/
           wget -4 https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install libc++-18-dev libc++abi-18-dev
 
       - name: Install valgrind
         run: |
