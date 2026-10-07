@@ -209,7 +209,8 @@ cargo +nightly fuzz run fuzz_constant_shift_choices \
 
 ### xlsynth-aug-opt/fuzz/fuzz_targets/fuzz_priority_result_fusion.rs
 
-Generates focused, typed priority encode/index/decode graphs with bounded affine
+Generates focused, typed priority encode/index/decode and scalar-predicate graphs
+with bounded affine
 operation sequences, either priority, predicates, wide constants, direct/expanded
 decoders, sharing, and valid rejection controls. It proves the forced semantic
 candidate and the real off/on PIR-only or one/three-round sandwich results against
@@ -221,6 +222,10 @@ and a corpus replay audit require actual proved fusions and checked rejection pa
 solver inconclusives do not count as proofs. See the
 [aug-opt fuzz guide](xlsynth-aug-opt/fuzz/FUZZ.md) for seed generation, campaign, and
 coverage validation commands.
+Scalar families cover reductions and literal equality/unsigned comparisons. The
+audit requires proved real-cost acceptance in PIR-only mode for each family and
+priority direction, and checks width/wrap/sentinel/sharing controls. Run this
+standalone audit in addition to the short mutation smoke test; CI wiring is pending.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs
 

@@ -80,3 +80,25 @@ cargo run --manifest-path fuzz/Cargo.toml --release \
 
 Omit the replay example's arguments to audit its built-in deterministic matrix.
 Use `with-bitwuzla-built` instead when a system Bitwuzla installation is unavailable.
+
+Scalar consumers include OR/AND/XOR reductions (full and sliced), equality, and
+all four unsigned comparisons, with literals on either side. The scalar grammar
+adds exact-width wrap and widen-before/after controls, 80-bit constants, widths
+1 through 161, explicit zero inputs, and shared count/amount/hot/input/result
+cases. Truncation followed by arithmetic, masked/signed indices, and arbitrary
+one-hot-shaped inputs are rejection controls. A final sliced reduction is
+supported. All widths receive a concrete zero-input check in addition to SMT.
+
+The replay audit requires forced and real-cost proved fusions for every scalar
+family in both priority directions, specifically in PIR-only mode, so later XLS
+canonicalization cannot fill a missing scalar hit. It also rejects any
+inconclusive proof. Run this standalone audit separately from the short mutation
+smoke run; CI wiring is pending, and a passing smoke run alone does not demonstrate
+these hits.
+
+For bounded campaigns, set `XLSYNTH_FUZZ_REPORT_SAMPLES=1` to log exact input
+bytes, family/feature labels, accepted rewrites, and completed/inconclusive proof
+counts for every iteration. Keep the starting corpus, libFuzzer `-seed`, binary
+revision, logs, and artifact directory. For example, append `-seed=109701 -runs=3000 -max_total_time=300 -max_len=128 -print_final_stats=1` to the fuzz
+command above. The corpus replay example accepts any number of files or
+directories and reports a failing input index and its bytes.

@@ -43,8 +43,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Result<Vec<_>, _>>()?
     };
     let mut coverage = CoverageReport::default();
-    for input in inputs {
-        coverage.accumulate(check_input(&input)?);
+    for (index, input) in inputs.iter().enumerate() {
+        coverage.accumulate(
+            check_input(input)
+                .map_err(|error| format!("replay input {index}, bytes={input:02x?}: {error}"))?,
+        );
     }
     println!("{coverage:#?}");
     coverage.validate()?;
