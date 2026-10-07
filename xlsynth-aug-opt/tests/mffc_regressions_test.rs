@@ -327,3 +327,38 @@ fn priority_result_corpus_respects_equivalence_and_qor_limits() {
         }
     }
 }
+
+/// Keeps sentinel lowering gains visible before any global gate rewriting.
+#[test]
+fn priority_count_corpus_respects_raw_gate_limits() {
+    let mut corpus = mffc_corpus::load().unwrap();
+    let mode = &mut corpus.profile;
+    mode.canonical_options.fraig = false;
+    mode.canonical_options.cut_db_rewrite = false;
+    mode.canonical_options.reassociation = false;
+    mode.canonical_options.enable_formal_array_alias_analysis = false;
+
+    // Existing std::next_pow2 fixtures and a published fuzzer priority index,
+    // including separately returned counts and distinct index consumers.
+    // Sentinel mux baselines: (376, 282.87), (90, 105.42), (658, 466.81),
+    // and (895, 120.46).
+    for (name, and_nodes_max, graph_le_max, depth_max) in [
+        ("priority_historical", 371, 279.21, 50),
+        ("priority_u8", 87, 101.71, 20),
+        ("priority_shared_count63", 652, 463.59, 78),
+        ("priority_shared_index", 889, 115.65, 23),
+    ] {
+        let case = corpus.cases.iter().find(|case| case.name == name).unwrap();
+        let cost = measure_cost(&case.text, &case.original, mode).unwrap();
+        assert_within_limits(
+            &cost,
+            &Limits {
+                and_nodes_max,
+                graph_le_max,
+                depth_max,
+            },
+            mode.graph_le_tolerance,
+            name,
+        );
+    }
+}

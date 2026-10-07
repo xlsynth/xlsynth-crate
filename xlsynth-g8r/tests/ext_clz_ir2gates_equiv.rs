@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
@@ -183,5 +184,42 @@ fn gate_graph_equivalence_old_vs_clz_rewrite_width_sweep() {
                 "expected old vs rewritten CLZ lowering to be equivalent for bit_count={bit_count}: {e}"
             )
         });
+    }
+}
+
+#[test]
+fn canonical_ext_clz_large_and_non_power_of_two_widths_match_desugared() {
+    for bit_count in [20u32, 32, 65, 97, 128] {
+        let out_w = ceil_log2((bit_count as usize).saturating_add(1));
+        let pir_fn = parse_top_fn(&build_ext_clz_ir_text_with_offset(bit_count, out_w, 0));
+        let mut desugared = pir_fn.clone();
+        desugar_extensions_in_fn(&mut desugared).expect("desugar");
+        let direct = gatify_for_test(&pir_fn, false);
+        let reference = gatify_for_test(&desugared, false);
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&direct, &reference)
+            .expect("canonical CLZ must preserve zero sentinel and every nonzero input");
+    }
+}
+
+#[test]
+fn canonical_ext_clz_eliminates_redundant_sentinel_mask_gates() {
+    // Exact live AND counts characterize the same priority-count kernel with
+    // the already-masked count bits used directly, before gate optimization.
+    for (bit_count, expected) in [
+        (2u32, 2usize),
+        (3, 8),
+        (8, 19),
+        (20, 66),
+        (32, 99),
+        (65, 225),
+    ] {
+        let out_w = ceil_log2((bit_count as usize).saturating_add(1));
+        let pir_fn = parse_top_fn(&build_ext_clz_ir_text_with_offset(bit_count, out_w, 0));
+        let gates = gatify_for_test(&pir_fn, false);
+        assert_eq!(
+            get_aig_stats(&gates).and_nodes,
+            expected,
+            "width={bit_count}"
+        );
     }
 }
