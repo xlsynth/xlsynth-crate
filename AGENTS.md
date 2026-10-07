@@ -229,6 +229,11 @@ Note there is no space before the value: `/*kwarg=*/false` (not `/*kwarg=*/ fals
 
 ## Documentation
 
+When reporting graph logical effort (graph LE) in documentation, PR descriptions,
+or other human-facing summaries, generally use two decimal places (e.g., 282.87).
+Precision beyond that is almost always irrelevant. Preserve full precision for
+calculations, comparisons, and machine-readable results.
+
 When adding a **new** `xlsynth-driver` subcommand you **must** add a corresponding
 section to `xlsynth-driver/README.md` that follows the style of the existing
 entries (name, short description, flag list, example usage, etc.). Pull requests

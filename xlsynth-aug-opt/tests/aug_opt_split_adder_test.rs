@@ -189,6 +189,7 @@ fn optimize_and_prove(text: &str, mode: AugOptMode) -> Result<OptimizationPair, 
         rounds: 1,
         mode,
         recover_split_adders: false,
+        fuse_priority_results: false,
     };
     let disabled = run_aug_opt_over_ir_text_with_stats(text, Some("main"), options)?;
     let enabled = run_aug_opt_over_ir_text_with_stats(

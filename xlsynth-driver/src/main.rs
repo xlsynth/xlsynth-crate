@@ -170,6 +170,26 @@ fn obsolete_type_inference_arg() -> Arg {
         .hide(true)
 }
 
+/// Builds the shared tuning flags for commands that run aug-opt.
+fn aug_opt_tuning_args() -> [Arg; 2] {
+    [
+        Arg::new("aug_opt_rounds")
+            .long("aug-opt-rounds")
+            .value_name("N")
+            .action(ArgAction::Set)
+            .value_parser(clap::value_parser!(usize))
+            .default_value("1")
+            .help("Number of augmented optimizer rounds (default: 1)"),
+        Arg::new("aug_opt_fuse_priority_results")
+            .long("aug-opt-fuse-priority-results")
+            .value_name("BOOL")
+            .action(ArgAction::Set)
+            .value_parser(clap::value_parser!(bool))
+            .default_value("true")
+            .help("Fuse priority encode/decode results within aug-opt (default: true)"),
+    ]
+}
+
 /// Builds the shared solver-selection argument used by formal subcommands.
 fn solver_arg(help: &'static str) -> Arg {
     Arg::new("solver")
@@ -906,6 +926,7 @@ fn main() {
                         .num_args(1)
                         .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
                 )
+                .args(aug_opt_tuning_args())
                 .arg(obsolete_type_inference_arg())
                 .add_bool_arg(
                     "convert_tests",
@@ -1077,6 +1098,7 @@ fn main() {
                         .num_args(1)
                         .help("Enable the augmented optimizer sandwich (default: false)"),
                 )
+                .args(aug_opt_tuning_args())
                 .arg(
                     Arg::new("aug_opt_recover_split_adders")
                         .long("aug-opt-recover-split-adders")
@@ -1135,6 +1157,7 @@ fn main() {
                         .num_args(1)
                         .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
                 )
+                .args(aug_opt_tuning_args())
                 .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(
@@ -1163,6 +1186,7 @@ fn main() {
                         .num_args(1)
                         .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
                 )
+                .args(aug_opt_tuning_args())
                 .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(

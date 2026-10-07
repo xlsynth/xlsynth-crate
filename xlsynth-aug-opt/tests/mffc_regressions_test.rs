@@ -9,6 +9,8 @@ use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::graph_logical_effort::{
     GraphLogicalEffortOptions, analyze_graph_logical_effort,
 };
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_g8r::check_equivalence::check_equivalence;
 use xlsynth_g8r::check_equivalence::validate_same_fn_via_toolchain;
 use xlsynth_g8r::process_ir_path::process_ir_text_with_gatefn;
 use xlsynth_pir::ir;
@@ -93,7 +95,7 @@ fn mffc_corpus_respects_equivalence_and_qor_limits() {
             limits,
         } = case.expectations
         else {
-            // Add recovery has its own flag comparison and bounds below.
+            // Other rewrite families have their own flag comparisons below.
             continue;
         };
         let rewritten = run_aug_opt_over_ir_text_with_stats(
@@ -160,7 +162,8 @@ fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
                 ..
             } = &case.expectations
             else {
-                // Shift fixtures are exercised with their own comparison above.
+                // Other rewrite families are exercised by their own
+                // comparisons.
                 continue;
             };
             let context = format!("{} ({mode:?})", case.name);
@@ -173,6 +176,7 @@ fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
                         rounds: 1,
                         mode,
                         recover_split_adders,
+                        fuse_priority_results: false,
                     },
                 )
                 .unwrap_or_else(|e| panic!("{context}: recovery={recover_split_adders}: {e}"))
@@ -245,6 +249,80 @@ fn split_adder_corpus_respects_equivalence_limits_and_ordering() {
                 assert_eq!(actual.and_nodes, expected.and_nodes);
                 assert_eq!(actual.depth, expected.depth);
                 assert!((actual.graph_le - expected.graph_le).abs() <= tolerance);
+            }
+        }
+    }
+}
+
+/// Preserves positive and negative priority cases through the full sandwich.
+#[test]
+fn priority_result_corpus_respects_equivalence_and_qor_limits() {
+    let corpus = mffc_corpus::load().unwrap();
+    assert!(
+        corpus
+            .cases
+            .iter()
+            .any(|case| matches!(case.expectations, Expectations::PriorityResult { .. }))
+    );
+    for (mode, rounds) in [
+        (AugOptMode::PirOnly, 1),
+        (AugOptMode::Sandwich, 1),
+        (AugOptMode::Sandwich, 3),
+    ] {
+        for case in &corpus.cases {
+            let Expectations::PriorityResult {
+                expected_fusions,
+                disabled_limits,
+                enabled_limits,
+            } = &case.expectations
+            else {
+                // Other rewrite families retain their own comparisons above.
+                continue;
+            };
+            let context = format!("{} ({mode:?}, rounds={rounds})", case.name);
+            let [disabled, enabled] = [false, true].map(|fuse_priority_results| {
+                run_aug_opt_over_ir_text_with_stats(
+                    &case.text,
+                    Some(&case.original.name),
+                    AugOptOptions {
+                        enable: true,
+                        mode,
+                        rounds,
+                        fuse_priority_results,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{context}: {error}"))
+            });
+            assert_eq!(
+                disabled.rewrite_stats.priority_results_fused, 0,
+                "{context}"
+            );
+            assert_eq!(
+                enabled.rewrite_stats.priority_results_fused, *expected_fusions,
+                "{context}"
+            );
+            assert_eq!(
+                disabled.output_text != enabled.output_text,
+                *expected_fusions != 0,
+                "{context}"
+            );
+            for (label, result, limits) in [
+                ("disabled", disabled, disabled_limits),
+                ("enabled", enabled, enabled_limits),
+            ] {
+                #[cfg(feature = "has-bitwuzla")]
+                check_equivalence(&case.text, &result.output_text)
+                    .unwrap_or_else(|error| panic!("{context}, {label}: {error}"));
+                let cost = measure_cost(&result.output_text, &case.original, &corpus.profile)
+                    .unwrap_or_else(|error| panic!("{context}, {label}: {error}"));
+                eprintln!("{context}, {label}: {cost:?}");
+                assert_within_limits(
+                    &cost,
+                    limits,
+                    corpus.profile.graph_le_tolerance,
+                    &format!("{context}, {label}"),
+                );
             }
         }
     }

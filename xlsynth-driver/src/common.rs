@@ -6,6 +6,7 @@ use std::io::Write;
 use std::process;
 use std::process::Command;
 use xlsynth::mangle_dslx_name;
+use xlsynth_aug_opt::AugOptOptions;
 use xlsynth_pir::ir_parser;
 
 // By default in the driver we treat warnings as errors.
@@ -31,6 +32,23 @@ pub fn parse_bool_flag(matches: &ArgMatches, flag_name: &str) -> Option<bool> {
 /// present on the command line.
 pub fn parse_bool_flag_or(matches: &ArgMatches, flag_name: &str, default_value: bool) -> bool {
     parse_bool_flag(matches, flag_name).unwrap_or(default_value)
+}
+
+/// Reads shared aug-opt controls for optimization and code-generation commands.
+pub fn parse_aug_opt_options(matches: &ArgMatches) -> AugOptOptions {
+    let defaults = AugOptOptions::default();
+    AugOptOptions {
+        enable: parse_bool_flag_or(matches, "aug_opt", defaults.enable),
+        rounds: matches
+            .get_one::<usize>("aug_opt_rounds")
+            .copied()
+            .unwrap_or(defaults.rounds),
+        fuse_priority_results: matches
+            .get_one::<bool>("aug_opt_fuse_priority_results")
+            .copied()
+            .unwrap_or(defaults.fuse_priority_results),
+        ..defaults
+    }
 }
 
 /// Rejects codegen IR that still carries Verilog FFI declarations unless the

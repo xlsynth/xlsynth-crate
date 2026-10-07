@@ -20,6 +20,7 @@ const PIR_ONLY: AugOptOptions = AugOptOptions {
     rounds: 1,
     mode: AugOptMode::PirOnly,
     recover_split_adders: true,
+    fuse_priority_results: false,
 };
 
 #[test]
@@ -242,4 +243,55 @@ top fn main(value: bits[8] id=1, read_index: bits[2] id=2, shift: bits[3] id=3) 
             .known_bits
             .as_ref()
     );
+}
+
+/// Enabling the optimizing mapper no longer needs a separate fusion opt-in.
+#[test]
+fn priority_fusion_default_reaches_gate_mapping() {
+    let text = include_str!("fixtures/mffc_regressions/priority_u8.ir");
+    let options = AugOptOptions {
+        enable: true,
+        ..Default::default()
+    };
+    let map = |options| {
+        ir2gates_from_ir_text(
+            text,
+            None,
+            options,
+            Ir2GatesOptions {
+                enable_formal_array_alias_analysis: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let normal = map(options);
+    let enabled = map(AugOptOptions {
+        fuse_priority_results: true,
+        ..options
+    });
+    let disabled = map(AugOptOptions {
+        fuse_priority_results: false,
+        ..options
+    });
+    assert_eq!(
+        serde_json::to_value(&normal.gatify_output.gate_fn).unwrap(),
+        serde_json::to_value(&enabled.gatify_output.gate_fn).unwrap()
+    );
+    assert_ne!(
+        normal.pir_package.to_string(),
+        disabled.pir_package.to_string()
+    );
+    for value in 0..256 {
+        let input = [IrBits::make_ubits(8, value).unwrap()];
+        let evaluate = |result: &ir2gates::Ir2GatesOutput| {
+            gate_sim::eval(
+                &result.gatify_output.gate_fn,
+                &input,
+                gate_sim::Collect::None,
+            )
+            .outputs
+        };
+        assert_eq!(evaluate(&normal), evaluate(&disabled), "input={value}");
+    }
 }

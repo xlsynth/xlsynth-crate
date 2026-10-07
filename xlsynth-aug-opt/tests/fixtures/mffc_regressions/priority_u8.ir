@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package priority
+// Synthetic priority-result regression control.
+// DSLX expression: std::next_pow2(x as u8)
+top fn main(x: bits[8] id=1) -> bits[8] {
+  one: bits[8] = literal(value=1, id=2)
+  y: bits[8] = sub(x, one, id=3)
+  r: bits[8] = reverse(y, id=4)
+  h: bits[9] = one_hot(r, lsb_prio=true, id=5)
+  n: bits[4] = encode(h, id=6)
+  nw: bits[8] = zero_ext(n, new_bit_count=8, id=7)
+  size: bits[8] = literal(value=8, id=8)
+  difference: bits[8] = sub(size, nw, id=9)
+  zero: bits[8] = literal(value=0, id=10)
+  nz: bits[1] = ne(x, zero, id=11)
+  mask: bits[8] = sign_ext(nz, new_bit_count=8, id=12)
+  k: bits[8] = and(difference, mask, id=13)
+  ret out: bits[8] = shll(one, k, id=14)
+}

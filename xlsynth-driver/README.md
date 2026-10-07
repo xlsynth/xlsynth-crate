@@ -1001,6 +1001,40 @@ xlsynth-driver g8r-optimize gatified.g8rbin \
 
 Similarly, a FRAIG-only run uses `--fraig=true --reassociation=false --cut-db-rewrite=false`, and a cut-DB-only run uses `--fraig=false --reassociation=false --cut-db-rewrite=true`.
 
+### Priority-result fusion in aug-opt
+
+The `ir2opt`, `dslx2ir`, `ir2combo`, and `ir2pipeline` commands accept
+`--aug-opt-fuse-priority-results=false` to disable priority fusion for ablation.
+Fusion defaults to true whenever `--aug-opt=true`; aug-opt itself remains
+opt-in. `--aug-opt-rounds=N` defaults to one.
+It preserves a one-hot result when an affine encoded priority index feeds
+`decode` or a constant-one left shift. Both priority directions, modular
+constant addition/subtraction, lossless zero extensions, and an optional
+one-bit predicate mask are supported. Truncated counts, externally shared
+count/index intermediates, and incompletely guarded expanded decoders are
+declined.
+
+Candidates remain ordinary XLS IR and pass through the complete aug-opt
+sandwich, including subsequent XLS optimization. Profitability compares two
+complete private gate graphs after mandatory DCE, with folding/hashing,
+Brent-Kung adders, no range information, and graph logical effort beta1=1,
+beta2=0. At least one of live AND count and graph logical effort must improve,
+and neither may worsen. Cost errors preserve the input. This reference
+g8r profile does not guarantee gains for another mapping or physical PPA:
+the measured whole-function Yosys/ABC case adds two AND nodes and slightly
+increases graph logical effort. Such downstream results are diagnostic;
+acceptance uses raw g8r AND count and graph logical effort before FRAIG or ABC.
+
+```sh
+xlsynth-driver ir2opt input.ir --top main --aug-opt=true \
+  --aug-opt-rounds=3 > output.ir
+```
+
+The lowering commands `ir2gates`, `ir2g8r`, and `dslx-g8r-stats` do not
+invoke aug-opt. Use the optimized IR from `ir2opt --aug-opt=true` when composing
+it with gate mapping; changing the fusion default does not enable aug-opt in
+those commands.
+
 ### `ir-prep-for-gates`: IR to prepared residual PIR
 
 Runs the same `prep_for_gatify` stage used by `ir2gates` / `ir2g8r`, then emits

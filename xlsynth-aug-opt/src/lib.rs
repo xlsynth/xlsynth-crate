@@ -10,6 +10,7 @@ pub mod constant_shift_choices;
 pub mod cost;
 pub mod ir_cost;
 mod optimizer;
+pub mod priority_result_fusion;
 pub mod split_adder;
 
 #[cfg(test)]
@@ -52,11 +53,17 @@ pub fn ir2gates_from_ir_text(
             fold: gate_options.fold,
             hash: gate_options.hash,
         });
-    let optimized = run_aug_opt_over_ir_text_with_evaluator(
+    let mut function_evaluator = cost::G8rFunctionCostEvaluator::default()
+        .with_gate_builder_options(GateBuilderOptions {
+            fold: gate_options.fold,
+            hash: gate_options.hash,
+        });
+    let optimized = optimizer::run_aug_opt_with_cost_evaluators(
         ir_text,
         Some(&top_name),
         aug_options,
-        &mut evaluator,
+        Some(&mut evaluator),
+        &mut function_evaluator,
     )?;
     xlsynth_g8r::ir2gates::ir2gates_from_ir_text(
         &optimized.output_text,

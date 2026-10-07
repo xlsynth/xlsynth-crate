@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package zero
+// Synthetic priority-result regression control.
+// DSLX expression: uN[0]:0
+top fn main(x:bits[0] id=1)->bits[0] {
+ ret out:bits[0]=literal(value=0,id=2)
+}

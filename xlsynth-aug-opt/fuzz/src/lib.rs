@@ -8,3 +8,8 @@ pub use xlsynth_pir_fuzz::fuzz_solver_limits;
 pub mod constant_shift_choices;
 #[cfg(feature = "has-bitwuzla")]
 pub mod constant_shift_choices_sample;
+
+#[cfg(feature = "has-bitwuzla")]
+pub mod priority_result_fusion;
+#[cfg(feature = "has-bitwuzla")]
+pub mod priority_result_fusion_sample;
