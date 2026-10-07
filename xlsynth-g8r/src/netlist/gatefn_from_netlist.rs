@@ -188,7 +188,9 @@ fn substitute_state_vars_in_term(
     }
 }
 
-fn build_cell_formula_map(
+/// Builds output formulas for selected cell types, optionally replacing
+/// sequential state.
+pub(crate) fn build_cell_formula_map(
     liberty_lib: &Library,
     collapse_sequential: bool,
     used_cells: &HashSet<String>,

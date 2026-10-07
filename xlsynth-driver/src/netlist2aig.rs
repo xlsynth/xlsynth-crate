@@ -40,6 +40,7 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
     let opts = Gv2AigOptions {
         module_name,
         collapse_sequential,
+        collapse_load_enable_feedback: matches.get_flag("collapse_load_enable_feedback"),
     };
 
     let gate_fn = match convert_gv2aig_paths(
