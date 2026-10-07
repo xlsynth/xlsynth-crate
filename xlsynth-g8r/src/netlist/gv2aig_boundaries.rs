@@ -2,11 +2,8 @@
 
 //! Named source/sink extraction for gate-level netlists projected to AIGs.
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
@@ -27,7 +24,8 @@ pub use selectors::{
     Gv2AigBoundarySelection, load_gv2aig_boundary_request,
 };
 
-/// Ordered source and sink boundaries for one extracted AIG.
+/// Exact ordered source and sink boundaries resolved from a request and
+/// returned with the extracted AIG.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gv2AigBoundarySpec {
@@ -79,36 +77,11 @@ pub struct Gv2AigBoundaryExtraction {
     pub boundaries: Gv2AigBoundarySpec,
 }
 
-/// Loads a JSON boundary specification from a file.
-pub fn load_gv2aig_boundary_spec(path: &Path) -> anyhow::Result<Gv2AigBoundarySpec> {
-    let contents = std::fs::read(path)
-        .with_context(|| format!("failed to read boundary specification {}", path.display()))?;
-    serde_json::from_slice(&contents)
-        .with_context(|| format!("failed to parse boundary specification {}", path.display()))
-}
-
-/// Extracts the selected cones, stopping at sources and optionally crossing
-/// other flops. When load-enable feedback collapsing is enabled, crossing a
-/// recognized direct hold-feedback flop assumes its prior Q value is zero.
-/// Explicit source boundaries remain arbitrary inputs.
-pub fn extract_gatefn_with_boundaries(
-    elaborated: &ElaboratedNetlist,
-    liberty: &Library,
-    collapse_sequential: bool,
-    collapse_load_enable_feedback: bool,
-    boundaries: &Gv2AigBoundarySpec,
-) -> Result<GateFn, String> {
-    BoundaryExtractor::new(
-        elaborated,
-        liberty,
-        collapse_sequential,
-        collapse_load_enable_feedback,
-    )?
-    .extract(boundaries)
-}
-
 /// Resolves compact selectors, or selects all top-module ports, and extracts
-/// their source/sink cones through the same traversal.
+/// their source/sink cones through the same traversal. When load-enable
+/// feedback collapsing is enabled, crossing a recognized direct hold-feedback
+/// flop assumes its prior Q value is zero. Explicit source boundaries remain
+/// arbitrary inputs.
 pub fn extract_gatefn_with_optional_boundary_request(
     elaborated: &ElaboratedNetlist,
     liberty: &Library,
@@ -116,6 +89,9 @@ pub fn extract_gatefn_with_optional_boundary_request(
     collapse_load_enable_feedback: bool,
     request: Option<&Gv2AigBoundaryRequest>,
 ) -> Result<Gv2AigBoundaryExtraction, String> {
+    if let Some(request) = request {
+        request.validate()?;
+    }
     let extractor = BoundaryExtractor::new(
         elaborated,
         liberty,
@@ -815,8 +791,7 @@ mod tests {
     use crate::aig_serdes::emit_aiger::emit_aiger;
     use crate::aig_sim::gate_sim::PreparedGateSim;
     use crate::netlist::hierarchy::elaborate_hierarchy;
-    use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, select_module};
-    use crate::netlist::parse::{Parser, TokenScanner};
+    use crate::netlist::io::{load_liberty_from_path, read_gv_from_str, select_module};
 
     const LIBERTY: &str = r#"
 format_magic: 5496997758177923663
@@ -874,7 +849,19 @@ cells: {
   pins: { name_string_id: 13 direction: OUTPUT function_string_id: 12 }
   pins: { name_string_id: 15 direction: OUTPUT function_string_id: 14 }
 }
-interned_strings: ["D", "CLK", "Q", "IQ", "RSTN", "d0_0", "d0_1", "d1_0", "d1_1", "ti", "te", "I", "O", "!I", "ON"]
+cells: {
+  name: "XOR2"
+  pins: { name_string_id: 16 direction: INPUT }
+  pins: { name_string_id: 17 direction: INPUT }
+  pins: { name_string_id: 18 direction: OUTPUT function_string_id: 19 }
+}
+cells: {
+  name: "AND2"
+  pins: { name_string_id: 16 direction: INPUT }
+  pins: { name_string_id: 17 direction: INPUT }
+  pins: { name_string_id: 18 direction: OUTPUT function_string_id: 20 }
+}
+interned_strings: ["D", "CLK", "Q", "IQ", "RSTN", "d0_0", "d0_1", "d1_0", "d1_1", "ti", "te", "I", "O", "!I", "ON", "A", "B", "Y", "(A ^ B)", "(A & B)"]
 "#;
 
     const MULTI_OUTPUT_NETLIST: &str = r#"
@@ -900,13 +887,13 @@ module stage(data, spare, clk, rstn, result, complement, unused);
   wire pipe_next;
   wire pipe_q;
   wire result_hi;
-  assign state_next = state ^ spare;
+  XOR2 u_state_next (.A(state), .B(spare), .Y(state_next));
   DFFR u_state (.D(state_next), .CLK(clk), .RSTN(rstn), .Q(state));
-  assign pipe_next = data[0] ^ state;
+  XOR2 u_pipe_next (.A(data[0]), .B(state), .Y(pipe_next));
   DFF u_pipe (.D(pipe_next), .CLK(clk), .Q(pipe_q));
-  assign result_hi = data[1] & state;
+  AND2 u_result_hi (.A(data[1]), .B(state), .Y(result_hi));
   assign result = {result_hi, pipe_q};
-  assign complement = ~pipe_q;
+  INV u_complement (.I(pipe_q), .O(complement));
   assign unused = spare;
 endmodule
 
@@ -919,23 +906,11 @@ module top(ext_data, spare, clk, rstn, top_result, unused_top);
   output unused_top;
   wire [1:0] pre_data;
   wire complement;
-  assign pre_data = ~ext_data;
+  INV u_pre_data_0 (.I(ext_data[0]), .O(pre_data[0]));
+  INV u_pre_data_1 (.I(ext_data[1]), .O(pre_data[1]));
   stage u_stage (.data(pre_data), .spare(spare), .clk(clk), .rstn(rstn),
                    .result(top_result), .complement(complement), .unused(unused_top));
 endmodule
-"#;
-
-    const BOUNDARIES: &str = r#"
-{
-  "sources": [
-    {"name": "state", "selector": {"kind": "cell_output", "instance_name": "u_stage/u_state", "pin": "Q"}},
-    {"name": "data", "selector": {"kind": "module_input", "instance_name": "u_stage", "port": "data"}}
-  ],
-  "sinks": [
-    {"name": "not_result_bit", "instance_name": "u_stage", "port": "complement"},
-    {"name": "result", "instance_name": "u_stage", "port": "result"}
-  ]
-}
 "#;
 
     /// Parses a small netlist and provides its elaboration and test Liberty.
@@ -943,13 +918,7 @@ endmodule
         netlist: &'static str,
         f: impl FnOnce(&ElaboratedNetlist, &Library) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut parser = Parser::new(TokenScanner::from_str(netlist));
-        let modules = parser.parse_file().unwrap();
-        let parsed = ParsedNetlist {
-            modules,
-            nets: parser.nets,
-            interner: parser.interner,
-        };
+        let parsed = read_gv_from_str(netlist).unwrap();
         let module = select_module(&parsed, Some("top")).unwrap();
         let elaborated = elaborate_hierarchy(&parsed, module).unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -962,22 +931,33 @@ endmodule
     /// Parses a small netlist and extracts its selected top-module cones.
     fn extract_fixture(
         netlist: &'static str,
-        boundaries: &Gv2AigBoundarySpec,
+        request: &Gv2AigBoundaryRequest,
         collapse_sequential: bool,
     ) -> Result<GateFn, String> {
         with_fixture(netlist, |elaborated, liberty| {
-            extract_gatefn_with_boundaries(
+            extract_gatefn_with_optional_boundary_request(
                 elaborated,
                 liberty,
                 collapse_sequential,
                 /* collapse_load_enable_feedback= */ false,
-                boundaries,
+                Some(request),
             )
+            .map(|extraction| extraction.gate_fn)
         })
     }
 
-    fn boundary_spec() -> Gv2AigBoundarySpec {
-        serde_json::from_str(BOUNDARIES).unwrap()
+    fn boundary_request() -> Gv2AigBoundaryRequest {
+        Gv2AigBoundaryRequest::from_selectors(
+            &[
+                "state=cell_output:u_stage/u_state:Q".to_string(),
+                "data=input_port:u_stage:data".to_string(),
+            ],
+            &[
+                "not_result_bit=output_port:u_stage:complement".to_string(),
+                "result=output_port:u_stage:result".to_string(),
+            ],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1015,7 +995,19 @@ endmodule
         )
         .unwrap();
         assert_eq!(extraction.boundaries, expected);
-        let exact = extract_fixture(NETLIST, &expected, false).unwrap();
+        let exact_request = Gv2AigBoundaryRequest::from_selectors(
+            &[
+                "cell_output:u_stage/u_pipe:Q".to_string(),
+                "cell_output:u_stage/u_state:Q".to_string(),
+                "input_port:u_stage:data".to_string(),
+            ],
+            &[
+                "output_port:u_stage:complement".to_string(),
+                "output_port:u_stage:result".to_string(),
+            ],
+        )
+        .unwrap();
+        let exact = extract_fixture(NETLIST, &exact_request, false).unwrap();
         assert_eq!(
             emit_aiger(&extraction.gate_fn, true).unwrap(),
             emit_aiger(&exact, true).unwrap()
@@ -1037,7 +1029,7 @@ endmodule
 
     #[test]
     fn extracts_hierarchical_cones_across_pipeline_flops() {
-        let gate_fn = extract_fixture(NETLIST, &boundary_spec(), true).unwrap();
+        let gate_fn = extract_fixture(NETLIST, &boundary_request(), true).unwrap();
         assert_eq!(
             gate_fn
                 .inputs
@@ -1080,21 +1072,17 @@ endmodule
 
     #[test]
     fn rejects_reached_unselected_flop_when_collapse_is_disabled() {
-        let error = extract_fixture(NETLIST, &boundary_spec(), false).unwrap_err();
+        let error = extract_fixture(NETLIST, &boundary_request(), false).unwrap_err();
         assert!(error.contains("reached sequential cell 'DFF' instance 'u_stage/u_pipe'"));
     }
 
     #[test]
     fn selected_cell_outputs_stop_at_flops_with_collapse_disabled() {
-        let mut boundaries = boundary_spec();
-        boundaries.sources.push(Gv2AigSourceBoundary {
-            name: "pipe".to_string(),
-            selector: Gv2AigSourceSelector::CellOutput {
-                instance_name: "u_stage/u_pipe".to_string(),
-                pin: "Q".to_string(),
-            },
-        });
-        let gate_fn = extract_fixture(NETLIST, &boundaries, false).unwrap();
+        let mut request = boundary_request();
+        request
+            .sources
+            .push("pipe=cell_output:u_stage/u_pipe:Q".parse().unwrap());
+        let gate_fn = extract_fixture(NETLIST, &request, false).unwrap();
         let mut sim = PreparedGateSim::new(&gate_fn);
         for state in 0..=1 {
             for data in 0..=3 {
@@ -1119,17 +1107,15 @@ endmodule
 
     #[test]
     fn selected_combinational_cell_output_does_not_cut_other_outputs() {
-        let boundaries = serde_json::from_str(
-            r#"{
-              "sources": [
-                {"name": "cut", "selector": {"kind": "cell_output", "instance_name": "u_pair", "pin": "O"}},
-                {"name": "data", "selector": {"kind": "module_input", "port": "data"}}
-              ],
-              "sinks": [{"name": "y", "port": "y"}, {"name": "z", "port": "z"}]
-            }"#,
+        let request = Gv2AigBoundaryRequest::from_selectors(
+            &[
+                "cut=cell_output:u_pair:O".to_string(),
+                "data=input_port:data".to_string(),
+            ],
+            &["output_port:y".to_string(), "output_port:z".to_string()],
         )
         .unwrap();
-        let gate_fn = extract_fixture(MULTI_OUTPUT_NETLIST, &boundaries, false).unwrap();
+        let gate_fn = extract_fixture(MULTI_OUTPUT_NETLIST, &request, false).unwrap();
         let mut sim = PreparedGateSim::new(&gate_fn);
         for cut in 0..=1 {
             for data in 0..=1 {
@@ -1188,47 +1174,66 @@ endmodule
 
     #[test]
     fn rejects_cell_input_pin_as_source() {
-        let mut boundaries = boundary_spec();
-        boundaries.sources[0].selector = Gv2AigSourceSelector::CellOutput {
-            instance_name: "u_stage/u_pipe".to_string(),
-            pin: "D".to_string(),
-        };
-        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        let mut request = boundary_request();
+        request.sources[0] = "state=cell_output:u_stage/u_pipe:D".parse().unwrap();
+        let error = extract_fixture(NETLIST, &request, true).unwrap_err();
         assert_eq!(
             error,
-            "while resolving source 'state': cell instance 'u_stage/u_pipe' pin 'D' is not an output"
+            "selector 'state=cell_output:u_stage/u_pipe:D': cell instance 'u_stage/u_pipe' pin 'D' is not an output"
         );
     }
 
     #[test]
+    fn exact_selectors_preserve_duplicate_port_rejection() {
+        let netlist = r#"
+module top(a, y);
+  input a;
+  input a;
+  output y;
+  assign y = a;
+endmodule
+"#;
+        for selector in ["input_port:a", "value=input_port:a"] {
+            let request = Gv2AigBoundaryRequest::from_selectors(
+                &[selector.to_string()],
+                &["output_port:y".to_string()],
+            )
+            .unwrap();
+            let error = extract_fixture(netlist, &request, false).unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "selector '{selector}': module port endpoint 'a' matches multiple declarations"
+                )
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unselected_terminal_input() {
-        let mut boundaries = boundary_spec();
-        boundaries.sources.pop();
-        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        let mut request = boundary_request();
+        request.sources.pop();
+        let error = extract_fixture(NETLIST, &request, true).unwrap_err();
         assert!(error.contains("reached unselected top module input 'ext_data'"));
     }
 
     #[test]
     fn rejects_duplicate_source_signal_through_hierarchy_alias() {
-        let mut boundaries = boundary_spec();
-        for (name, instance_name) in [("top_spare", ""), ("child_spare", "u_stage")] {
-            boundaries.sources.push(Gv2AigSourceBoundary {
-                name: name.to_string(),
-                selector: Gv2AigSourceSelector::ModuleInput {
-                    instance_name: instance_name.to_string(),
-                    port: "spare".to_string(),
-                },
-            });
+        let mut request = boundary_request();
+        for (name, endpoint) in [("top_spare", "spare"), ("child_spare", "u_stage:spare")] {
+            request
+                .sources
+                .push(format!("{name}=input_port:{endpoint}").parse().unwrap());
         }
-        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        let error = extract_fixture(NETLIST, &request, true).unwrap_err();
         assert!(error.contains("already selected by source 'top_spare[0]'"));
     }
 
     #[test]
     fn rejects_invalid_selector_direction() {
-        let mut boundaries = boundary_spec();
-        boundaries.sinks[0].port = "data".to_string();
-        let error = extract_fixture(NETLIST, &boundaries, true).unwrap_err();
+        let mut request = boundary_request();
+        request.sinks[0] = "not_result_bit=output_port:u_stage:data".parse().unwrap();
+        let error = extract_fixture(NETLIST, &request, true).unwrap_err();
         assert!(error.contains("port 'data' has direction Input; expected Output"));
     }
 
@@ -1240,18 +1245,16 @@ module top(a, clk, y);
   input clk;
   output y;
   wire next;
-  assign next = y ^ a;
+  XOR2 u_next (.A(y), .B(a), .Y(next));
   DFF u_feedback (.D(next), .CLK(clk), .Q(y));
 endmodule
 "#;
-        let boundaries = serde_json::from_str(
-            r#"{
-              "sources": [{"name": "a", "selector": {"kind": "module_input", "port": "a"}}],
-              "sinks": [{"name": "y", "port": "y"}]
-            }"#,
+        let request = Gv2AigBoundaryRequest::from_selectors(
+            &["input_port:a".to_string()],
+            &["output_port:y".to_string()],
         )
         .unwrap();
-        let error = extract_fixture(netlist, &boundaries, true).unwrap_err();
+        let error = extract_fixture(netlist, &request, true).unwrap_err();
         assert!(error.contains("dependency cycle"));
     }
 
@@ -1273,11 +1276,8 @@ endmodule
 "#;
         let gate_fn = with_fixture(netlist, |elaborated, liberty| {
             extract_gatefn_with_optional_boundary_request(
-                elaborated,
-                liberty,
-                /* collapse_sequential= */ true,
-                /* collapse_load_enable_feedback= */ true,
-                None,
+                elaborated, liberty, /* collapse_sequential= */ true,
+                /* collapse_load_enable_feedback= */ true, None,
             )
             .map(|extraction| extraction.gate_fn)
         })
@@ -1319,17 +1319,15 @@ module top(data, enable, clk, y);
                    .ti(1'b0), .te(1'b0), .CLK(clk), .Q(y));
 endmodule
 "#;
-        let boundaries = serde_json::from_str(
-            r#"{
-              "sources": [
-                {"name": "data", "selector": {"kind": "module_input", "port": "data"}},
-                {"name": "enable", "selector": {"kind": "module_input", "port": "enable"}}
-              ],
-              "sinks": [{"name": "y", "port": "y"}]
-            }"#,
+        let request = Gv2AigBoundaryRequest::from_selectors(
+            &[
+                "input_port:data".to_string(),
+                "input_port:enable".to_string(),
+            ],
+            &["output_port:y".to_string()],
         )
         .unwrap();
-        let error = extract_fixture(netlist, &boundaries, true).unwrap_err();
+        let error = extract_fixture(netlist, &request, true).unwrap_err();
         assert!(error.contains("dependency cycle"));
     }
 }

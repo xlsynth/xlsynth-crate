@@ -47,7 +47,7 @@ pub struct Gv2AigBoundarySelection {
     pub matcher: Gv2AigBoundaryMatcher,
 }
 
-/// Ordered compact selectors to resolve before extracting source/sink cones.
+/// Public boundary input containing ordered exact or regexp selectors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gv2AigBoundaryRequest {
     pub sources: Vec<Gv2AigBoundarySelection>,
@@ -62,7 +62,8 @@ struct BoundaryFile {
 }
 
 impl Gv2AigBoundaryRequest {
-    /// Parses the selector lists accepted by the CLI and boundary JSON file.
+    /// Parses and validates the selector lists accepted by the CLI and
+    /// boundary JSON file without inspecting a netlist.
     pub fn from_selectors(sources: &[String], sinks: &[String]) -> Result<Self, String> {
         let parse_list = |selectors: &[String], role: &str| {
             selectors
@@ -79,12 +80,12 @@ impl Gv2AigBoundaryRequest {
             sources: parse_list(sources, "source")?,
             sinks: parse_list(sinks, "sink")?,
         };
-        request.validate_roles()?;
+        request.validate()?;
         Ok(request)
     }
 
-    /// Checks that source and sink lists contain selectors of the right kind.
-    fn validate_roles(&self) -> Result<(), String> {
+    /// Checks selector roles and regexp syntax without inspecting a netlist.
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.sinks.is_empty() {
             return Err("boundary specification must contain at least one sink".to_string());
         }
@@ -102,6 +103,11 @@ impl Gv2AigBoundaryRequest {
                     "sink selector '{}' must select an output port",
                     selection.to_compact_string()
                 ));
+            }
+        }
+        for selection in self.sources.iter().chain(&self.sinks) {
+            if let Gv2AigBoundaryMatcher::Regex(pattern) = &selection.matcher {
+                compile_selection_regex(selection, pattern)?;
             }
         }
         Ok(())
@@ -319,49 +325,44 @@ impl BoundaryInventory {
 }
 
 impl BoundaryExtractor<'_> {
-    /// Expands compact selectors into the exact specification used by
-    /// extraction.
+    /// Expands validated compact selectors into the exact specification used
+    /// by extraction.
     pub(super) fn resolve_request(
         &self,
         request: &Gv2AigBoundaryRequest,
     ) -> Result<Gv2AigBoundarySpec, String> {
-        request.validate_roles()?;
-        let inventory = self.boundary_inventory();
+        let inventory = self.boundary_inventory(request);
         let mut boundaries = Gv2AigBoundarySpec {
             sources: Vec::new(),
             sinks: Vec::new(),
         };
         for selection in &request.sources {
-            for candidate in resolve_selection(selection, &inventory)? {
+            for candidate in self.resolve_selection(selection, &inventory)? {
+                let BoundaryCandidate { endpoint, text } = candidate;
                 let selector = match selection.kind {
                     Gv2AigBoundaryKind::InputPort => Gv2AigSourceSelector::ModuleInput {
-                        instance_name: candidate.endpoint.instance_name.clone(),
-                        port: candidate.endpoint.terminal_name.clone(),
+                        instance_name: endpoint.instance_name,
+                        port: endpoint.terminal_name,
                     },
                     Gv2AigBoundaryKind::CellOutput => Gv2AigSourceSelector::CellOutput {
-                        instance_name: candidate.endpoint.instance_name.clone(),
-                        pin: candidate.endpoint.terminal_name.clone(),
+                        instance_name: endpoint.instance_name,
+                        pin: endpoint.terminal_name,
                     },
                     Gv2AigBoundaryKind::OutputPort => unreachable!("roles were validated"),
                 };
                 boundaries.sources.push(Gv2AigSourceBoundary {
-                    name: selection
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| candidate.text.clone()),
+                    name: selection.name.clone().unwrap_or(text),
                     selector,
                 });
             }
         }
         for selection in &request.sinks {
-            for candidate in resolve_selection(selection, &inventory)? {
+            for candidate in self.resolve_selection(selection, &inventory)? {
+                let BoundaryCandidate { endpoint, text } = candidate;
                 boundaries.sinks.push(Gv2AigSinkBoundary {
-                    name: selection
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| candidate.text.clone()),
-                    instance_name: candidate.endpoint.instance_name.clone(),
-                    port: candidate.endpoint.terminal_name.clone(),
+                    name: selection.name.clone().unwrap_or(text),
+                    instance_name: endpoint.instance_name,
+                    port: endpoint.terminal_name,
                 });
             }
         }
@@ -376,37 +377,133 @@ impl BoundaryExtractor<'_> {
         Ok(boundaries)
     }
 
-    /// Collects eligible endpoints once and sorts each kind by canonical text.
-    fn boundary_inventory(&self) -> BoundaryInventory {
+    /// Resolves exact endpoints directly and expands regexps from their
+    /// requested endpoint inventory.
+    fn resolve_selection(
+        &self,
+        selection: &Gv2AigBoundarySelection,
+        inventory: &BoundaryInventory,
+    ) -> Result<Vec<BoundaryCandidate>, String> {
+        match &selection.matcher {
+            Gv2AigBoundaryMatcher::Exact(endpoint) => {
+                let result = match selection.kind {
+                    Gv2AigBoundaryKind::InputPort => {
+                        self.validate_exact_module_port(endpoint, PortDirection::Input)
+                    }
+                    Gv2AigBoundaryKind::CellOutput => self
+                        .cell_output_bit(&endpoint.instance_name, &endpoint.terminal_name)
+                        .map(|_| ()),
+                    Gv2AigBoundaryKind::OutputPort => {
+                        self.validate_exact_module_port(endpoint, PortDirection::Output)
+                    }
+                };
+                result.map_err(|error| {
+                    format!("selector '{}': {error}", selection.to_compact_string())
+                })?;
+                Ok(vec![BoundaryCandidate::new(
+                    endpoint.instance_name.clone(),
+                    endpoint.terminal_name.clone(),
+                )])
+            }
+            Gv2AigBoundaryMatcher::Regex(pattern) => {
+                resolve_regexp_selection(selection, pattern, inventory.candidates(selection.kind))
+            }
+        }
+    }
+
+    /// Validates an exact module port and rejects duplicate declarations in
+    /// its selected scope without building a global inventory.
+    fn validate_exact_module_port(
+        &self,
+        endpoint: &Gv2AigBoundaryEndpoint,
+        direction: PortDirection,
+    ) -> Result<(), String> {
+        self.module_port_bits(
+            &endpoint.instance_name,
+            &endpoint.terminal_name,
+            direction.clone(),
+        )?;
+        let duplicate = if endpoint.instance_name.is_empty() {
+            self.normalized
+                .ports
+                .iter()
+                .filter(|port| {
+                    port.direction == direction
+                        && self.interner.resolve(port.name) == Some(endpoint.terminal_name.as_str())
+                })
+                .nth(1)
+                .is_some()
+        } else {
+            self.module_boundaries
+                .iter()
+                .filter(|boundary| boundary.instance_path == endpoint.instance_name)
+                .flat_map(|boundary| &boundary.ports)
+                .filter(|port| {
+                    port.direction == direction
+                        && self.interner.resolve(port.name) == Some(endpoint.terminal_name.as_str())
+                })
+                .nth(1)
+                .is_some()
+        };
+        if duplicate {
+            return Err(format!(
+                "module port endpoint '{}' matches multiple declarations",
+                endpoint.render()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Collects endpoint kinds needed by regexps and sorts each by canonical
+    /// text. Exact selectors do not require an inventory.
+    fn boundary_inventory(&self, request: &Gv2AigBoundaryRequest) -> BoundaryInventory {
+        let requests_kind = |kind| {
+            request
+                .sources
+                .iter()
+                .chain(&request.sinks)
+                .any(|selection| {
+                    selection.kind == kind
+                        && matches!(selection.matcher, Gv2AigBoundaryMatcher::Regex(_))
+                })
+        };
+        let include_inputs = requests_kind(Gv2AigBoundaryKind::InputPort);
+        let include_cell_outputs = requests_kind(Gv2AigBoundaryKind::CellOutput);
+        let include_outputs = requests_kind(Gv2AigBoundaryKind::OutputPort);
         let mut inventory = BoundaryInventory::default();
         let mut add_port = |instance_name: &str, port_name: &str, direction: &PortDirection| {
-            let candidate =
-                BoundaryCandidate::new(instance_name.to_string(), port_name.to_string());
-            match direction {
-                PortDirection::Input => inventory.inputs.push(candidate),
-                PortDirection::Output => inventory.outputs.push(candidate),
-                PortDirection::Inout => {
-                    // Cone boundaries only support directed module ports.
+            let candidates = match direction {
+                PortDirection::Input if include_inputs => &mut inventory.inputs,
+                PortDirection::Output if include_outputs => &mut inventory.outputs,
+                _ => {
+                    // This direction has no requested regexp inventory.
+                    return;
                 }
-            }
+            };
+            candidates.push(BoundaryCandidate::new(
+                instance_name.to_string(),
+                port_name.to_string(),
+            ));
         };
-        for port in &self.normalized.ports {
-            add_port(
-                "",
-                self.interner.resolve(port.name).unwrap(),
-                &port.direction,
-            );
-        }
-        for boundary in self.module_boundaries {
-            for port in &boundary.ports {
+        if include_inputs || include_outputs {
+            for port in &self.normalized.ports {
                 add_port(
-                    &boundary.instance_path,
+                    "",
                     self.interner.resolve(port.name).unwrap(),
                     &port.direction,
                 );
             }
+            for boundary in self.module_boundaries {
+                for port in &boundary.ports {
+                    add_port(
+                        &boundary.instance_path,
+                        self.interner.resolve(port.name).unwrap(),
+                        &port.direction,
+                    );
+                }
+            }
         }
-        {
+        if include_cell_outputs {
             let library = self.liberty;
             for instance in &self.normalized.instances {
                 let instance_name = self.interner.resolve(instance.instance_name).unwrap();
@@ -433,30 +530,18 @@ impl BoundaryExtractor<'_> {
     }
 }
 
-/// Resolves one selection while preserving the inventory's lexical ordering.
-fn resolve_selection<'a>(
+/// Resolves one regexp selection while preserving the inventory's lexical
+/// ordering.
+fn resolve_regexp_selection(
     selection: &Gv2AigBoundarySelection,
-    inventory: &'a BoundaryInventory,
-) -> Result<Vec<&'a BoundaryCandidate>, String> {
-    let candidates = inventory.candidates(selection.kind);
-    let matched = match &selection.matcher {
-        Gv2AigBoundaryMatcher::Exact(endpoint) => candidates
-            .iter()
-            .filter(|candidate| candidate.endpoint == *endpoint)
-            .collect::<Vec<_>>(),
-        Gv2AigBoundaryMatcher::Regex(pattern) => {
-            let regex = compile_full_regex(pattern).map_err(|error| {
-                format!(
-                    "invalid regexp in selector '{}': {error}",
-                    selection.to_compact_string()
-                )
-            })?;
-            candidates
-                .iter()
-                .filter(|candidate| regex.is_match(&candidate.text))
-                .collect::<Vec<_>>()
-        }
-    };
+    pattern: &str,
+    candidates: &[BoundaryCandidate],
+) -> Result<Vec<BoundaryCandidate>, String> {
+    let regex = compile_selection_regex(selection, pattern)?;
+    let matched = candidates
+        .iter()
+        .filter(|candidate| regex.is_match(&candidate.text))
+        .collect::<Vec<_>>();
     if matched.is_empty() {
         return Err(format!(
             "selector '{}' matched no eligible endpoints",
@@ -470,7 +555,20 @@ fn resolve_selection<'a>(
             matched.len()
         ));
     }
-    Ok(matched)
+    Ok(matched.into_iter().cloned().collect())
+}
+
+/// Compiles one selector's regexp with context for user-facing errors.
+fn compile_selection_regex(
+    selection: &Gv2AigBoundarySelection,
+    pattern: &str,
+) -> Result<Regex, String> {
+    compile_full_regex(pattern).map_err(|error| {
+        format!(
+            "invalid regexp in selector '{}': {error}",
+            selection.to_compact_string()
+        )
+    })
 }
 
 /// Anchors a regexp while preserving a trailing comment in verbose mode.
@@ -532,6 +630,26 @@ mod tests {
     }
 
     #[test]
+    fn checked_requests_reject_invalid_regexp_before_resolution() {
+        let error = Gv2AigBoundaryRequest::from_selectors(
+            &["input_port_regex:[".to_string()],
+            &["output_port:result".to_string()],
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid regexp in selector 'input_port_regex:['"));
+
+        let request = Gv2AigBoundaryRequest {
+            sources: Vec::new(),
+            sinks: vec![Gv2AigBoundarySelection {
+                name: None,
+                kind: Gv2AigBoundaryKind::OutputPort,
+                matcher: Gv2AigBoundaryMatcher::Regex("[".to_string()),
+            }],
+        };
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
     fn regexp_resolution_is_full_match_sorted_and_checks_alias_cardinality() {
         let mut inventory = BoundaryInventory::default();
         for name in ["data_2", "prefix_data_1", "data_10", "data_1"] {
@@ -540,8 +658,14 @@ mod tests {
                 .push(BoundaryCandidate::new(String::new(), name.to_string()));
         }
         inventory.inputs.sort_by(|a, b| a.text.cmp(&b.text));
-        let selection = "input_port_regex:data_[0-9]+".parse().unwrap();
-        let matched = resolve_selection(&selection, &inventory).unwrap();
+        let resolve = |text: &str| -> Result<Vec<BoundaryCandidate>, String> {
+            let selection: Gv2AigBoundarySelection = text.parse()?;
+            let Gv2AigBoundaryMatcher::Regex(pattern) = &selection.matcher else {
+                return Err("test selector must be a regexp".to_string());
+            };
+            resolve_regexp_selection(&selection, pattern, &inventory.inputs)
+        };
+        let matched = resolve("input_port_regex:data_[0-9]+").unwrap();
         assert_eq!(
             matched
                 .iter()
@@ -549,15 +673,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["data_1", "data_10", "data_2"]
         );
-        let named = "data=input_port_regex:data_[0-9]+".parse().unwrap();
-        assert!(resolve_selection(&named, &inventory).is_err());
-        let missing = "input_port_regex:missing.*".parse().unwrap();
-        assert!(resolve_selection(&missing, &inventory).is_err());
-        let invalid = "input_port_regex:[".parse().unwrap();
-        assert!(resolve_selection(&invalid, &inventory).is_err());
-        let verbose = "input_port_regex:(?x)data_[0-9]+ # selected data ports"
-            .parse()
-            .unwrap();
-        assert_eq!(resolve_selection(&verbose, &inventory).unwrap().len(), 3);
+        assert!(resolve("data=input_port_regex:data_[0-9]+").is_err());
+        assert!(resolve("input_port_regex:missing.*").is_err());
+        assert_eq!(
+            resolve("input_port_regex:(?x)data_[0-9]+ # selected data ports")
+                .unwrap()
+                .len(),
+            3
+        );
     }
 }
