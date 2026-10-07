@@ -9,7 +9,7 @@ pub mod emit;
 mod form;
 pub mod gatefn_from_netlist;
 pub mod gv2aig;
-mod gv2aig_boundaries;
+pub mod gv2aig_boundaries;
 pub mod gv2block;
 pub mod gv2ir;
 pub mod gv_eval;

@@ -2247,6 +2247,31 @@ fn main() {
                         .long("collapse_load_enable_feedback")
                         .help("Collapse recognized load-enable feedback loops, assuming prior Q is zero (disabled by default)")
                         .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("cone_boundary_file")
+                        .long("cone_boundary_file")
+                        .value_name("PATH")
+                        .help("Extract cones using compact source/sink selectors from a JSON file")
+                        .conflicts_with_all(["cone_sources", "cone_sinks"])
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("cone_sources")
+                        .long("cone_sources")
+                        .value_name("SELECTOR")
+                        .help("Add a compact source selector; repeat for multiple selectors")
+                        .requires("cone_sinks")
+                        .conflicts_with("cone_boundary_file")
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("cone_sinks")
+                        .long("cone_sinks")
+                        .value_name("SELECTOR")
+                        .help("Add a compact sink selector; repeat for multiple selectors")
+                        .conflicts_with("cone_boundary_file")
+                        .action(ArgAction::Append),
                 ),
         )
         .subcommand(
