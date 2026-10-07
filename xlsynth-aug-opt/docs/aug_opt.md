@@ -196,3 +196,10 @@ Constant-choice recognition and construction have their own
 The [integration tests](../tests/) include `aug_opt_*` tests
 for equivalence and mapped quality, including local cost decisions and their
 composition with XLS optimization.
+
+Scalar priority predicates that share a count are rewritten as a group only
+when every live use of the intervening count arithmetic is removed. For example,
+two equality tests exposed by bounded shift expansion can use one-hot bits
+directly. A retained numeric count or shift amount blocks that group; the
+whole-function AND/graph-LE profitability check still applies. Dead count users
+do not block a live group. Decoder sharing rules are unchanged.

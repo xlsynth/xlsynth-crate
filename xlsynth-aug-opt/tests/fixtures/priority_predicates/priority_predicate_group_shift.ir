@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// Origin: published 0.74 k3-cone-0834f231a645628d-43c440ec1525.
+package replay_input
+
+top fn __k3_cone_0834f231a645628d(leaf_5: bits[31] id=279, leaf_13: bits[33] id=280) -> bits[1] {
+  reverse.281: bits[31] = reverse(leaf_5, id=281)
+  one_hot.282: bits[32] = one_hot(reverse.281, lsb_prio=true, id=282)
+  literal.283: bits[1] = literal(value=0, id=283)
+  encode.284: bits[5] = encode(one_hot.282, id=284)
+  concat.285: bits[6] = concat(literal.283, encode.284, id=285)
+  literal.286: bits[6] = literal(value=3, id=286)
+  add.287: bits[6] = add(concat.285, literal.286, id=287)
+  shll.288: bits[33] = shll(leaf_13, add.287, id=288)
+  bit_slice.289: bits[2] = bit_slice(shll.288, start=9, width=2, id=289)
+  literal.290: bits[2] = literal(value=3, id=290)
+  ret eq.291: bits[1] = eq(bit_slice.289, literal.290, id=291)
+}

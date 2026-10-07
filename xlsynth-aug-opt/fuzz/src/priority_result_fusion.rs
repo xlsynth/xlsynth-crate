@@ -75,7 +75,7 @@ impl CoverageReport {
                 .cases
                 .get(*name)
                 .ok_or_else(|| format!("missing case {name}"))?;
-            if matches!(case, 4..=9 | 13 | 15 | 25 | 26 | 30..=33) {
+            if matches!(case, 4..=9 | 13 | 15 | 25 | 26 | 30..=33 | 36) {
                 if coverage.rejection_checks == 0 || coverage.proofs == 0 {
                     return Err(format!(
                         "case {name} lacks a checked rejection and completed proof"
@@ -83,6 +83,30 @@ impl CoverageReport {
                 }
             } else if coverage.forced_proofs == 0 {
                 return Err(format!("case {name} lacks a proved fusion"));
+            }
+        }
+        for name in ["scalar_group", "scalar_group_dead_user"] {
+            if self.cases.get(name).is_none_or(|c| c.real_proofs == 0) {
+                return Err(format!(
+                    "grouped scalar case {name} lacks a proved real-cost fusion"
+                ));
+            }
+        }
+        for feature in [
+            "scalar_group_msb",
+            "scalar_group_lsb",
+            "scalar_group_pir_only",
+            "scalar_group_sandwich_1",
+            "scalar_group_sandwich_3",
+        ] {
+            if self
+                .features
+                .get(feature)
+                .is_none_or(|c| c.real_proofs == 0)
+            {
+                return Err(format!(
+                    "grouped scalar feature {feature} lacks a proved real-cost fusion"
+                ));
             }
         }
         for name in &CASE_NAMES[16..25] {

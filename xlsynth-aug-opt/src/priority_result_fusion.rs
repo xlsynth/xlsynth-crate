@@ -34,6 +34,8 @@
 //! bit; it does not produce a two-bit count. The zero-input ordinal is
 //! evaluated too.
 
+use std::collections::BTreeMap;
+
 use crate::ir_cost::IrCost;
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_match::{self, MatchCtx};
@@ -390,6 +392,43 @@ fn priority_result_cone_is_exclusive(
         .is_some_and(|ret| ret != root && cone[ret.index])
 }
 
+/// Requires all live users of grouped count arithmetic to be replaced together.
+fn predicate_group_is_exclusive(f: &ir::Fn, roots: &[NodeRef], hot: NodeRef) -> bool {
+    let mut live = vec![true; f.nodes.len()];
+    for dead in xlsynth_pir::dce::get_dead_nodes(f) {
+        live[dead.index] = false;
+    }
+    let mut surviving_roots = vec![false; f.nodes.len()];
+    for root in roots {
+        surviving_roots[root.index] = true;
+    }
+    let mut cone = vec![false; f.nodes.len()];
+    let mut stack = roots.to_vec();
+    while let Some(node) = stack.pop() {
+        if node == hot
+            || cone[node.index]
+            || matches!(f.get_node(node).payload, NodePayload::Literal(_))
+        {
+            continue;
+        }
+        cone[node.index] = true;
+        stack.extend(ir_utils::operands(&f.get_node(node).payload));
+    }
+    for (index, node) in f.nodes.iter().enumerate() {
+        if !live[index] || cone[index] {
+            continue;
+        }
+        if ir_utils::operands(&node.payload)
+            .iter()
+            .any(|operand| cone[operand.index] && !surviving_roots[operand.index])
+        {
+            return false;
+        }
+    }
+    !f.ret_node_ref
+        .is_some_and(|ret| cone[ret.index] && !surviving_roots[ret.index])
+}
+
 /// Allocates helper text IDs once so wide wiring maps remain linear in size.
 struct NodeAppender {
     next_text_id: Option<usize>,
@@ -599,22 +638,33 @@ fn wired_predicate(
     }
 }
 
-/// Replaces exclusive count predicates while retaining shared inputs/one-hot
-/// values.
+/// Replaces scalar consumers together only when their shared count arithmetic
+/// has no remaining live users. Whole-function costing still checks loads.
 fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
+    let mut groups = BTreeMap::<usize, Vec<NodeRef>>::new();
+    let dead = xlsynth_pir::dce::get_dead_nodes(f);
+    let mut live = vec![true; f.nodes.len()];
+    for node in dead {
+        live[node.index] = false;
+    }
+    for (index, is_live) in live.into_iter().enumerate() {
+        let root = NodeRef { index };
+        if is_live && let Some((index_expr, _)) = priority_index_predicate(f, root) {
+            groups.entry(index_expr.hot.index).or_default().push(root);
+        }
+    }
     let mut rewrites = 0;
     let mut builder = NodeAppender::new(f);
-    for index in 0..f.nodes.len() {
-        let root = NodeRef { index };
-        let Some((index_expr, predicate)) = priority_index_predicate(f, root) else {
-            continue;
-        };
-        if !priority_result_cone_is_exclusive(f, root, None, index_expr.hot) {
+    for (hot, roots) in groups {
+        if !predicate_group_is_exclusive(f, &roots, NodeRef { index: hot }) {
             continue;
         }
-        let wired = wired_predicate(f, &mut builder, &index_expr, &predicate)?;
-        f.nodes[root.index].payload = f.get_node(wired).payload.clone();
-        rewrites += 1;
+        for root in roots {
+            let (index_expr, predicate) = priority_index_predicate(f, root)?;
+            let wired = wired_predicate(f, &mut builder, &index_expr, &predicate)?;
+            f.nodes[root.index].payload = f.get_node(wired).payload.clone();
+            rewrites += 1;
+        }
     }
     Some(rewrites)
 }
@@ -696,7 +746,7 @@ fn candidate(f: &ir::Fn) -> Option<PriorityResultCandidate> {
 
 /// Installs a strictly profitable basis-IR candidate.
 ///
-/// Unsupported shapes, shared intermediate indices, exhausted IDs, invalid
+/// Unsupported shapes, retained intermediate indices, exhausted IDs, invalid
 /// costs, and cost errors preserve the input. The caller may cost prepared
 /// clones, but preparation never escapes into the returned function.
 pub fn rewrite_with_evaluator(
@@ -1141,6 +1191,31 @@ top fn main(x: bits[32] id=1, p: bits[1] id=2) -> bits[33] {
                 "{input}"
             );
             assert_eq!(rewritten.to_string(), original);
+        }
+    }
+
+    #[test]
+    fn scalar_predicates_rewrite_all_live_count_consumers_together() {
+        for low in [false, true] {
+            let source = scalar_case(8, low, "identity", "or_slice")
+                .replace("-> bits[1]", "-> (bits[1], bits[1])")
+                .replace("ret out:", "out:")
+                .replace(
+                    "\n}",
+                    "\n  one: bits[4] = literal(value=1, id=11)\n  second: bits[1] = eq(count, one, id=12)\n  dead: bits[4] = not(count, id=13)\n  ret both: (bits[1], bits[1]) = tuple(out, second, id=14)\n}",
+                );
+            let package = Parser::new(&source).parse_and_validate_package().unwrap();
+            let mut rewritten = package.get_top_fn().unwrap().clone();
+            assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(2));
+            let rewritten = xlsynth_pir::dce::remove_dead_nodes(&rewritten);
+            assert!(
+                !rewritten
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node.payload, NodePayload::Encode { .. }))
+            );
+            check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
+                .unwrap();
         }
     }
 

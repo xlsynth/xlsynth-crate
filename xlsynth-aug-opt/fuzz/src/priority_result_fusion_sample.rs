@@ -10,7 +10,7 @@ use xlsynth_pir::ir_verify::verify_function;
 use xlsynth_pir::math::ceil_log2;
 use xlsynth_pir::{IrBits, IrValue};
 
-pub const CASE_NAMES: [&str; 35] = [
+pub const CASE_NAMES: [&str; 38] = [
     "decode",
     "one_shift",
     "expanded_concat",
@@ -46,6 +46,9 @@ pub const CASE_NAMES: [&str; 35] = [
     "scalar_signed",
     "scalar_unknown_hot",
     "scalar_zero_input",
+    "scalar_group",
+    "scalar_group_retained",
+    "scalar_group_dead_user",
 ];
 pub const SCALAR_DIRECTIONS: [[&str; 2]; 9] = [
     ["scalar_or_msb", "scalar_or_lsb"],
@@ -717,7 +720,7 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
     }
     // Shared-amount controls always retain the pre-slice intermediate.
     let shared_amount = amount;
-    let output = if family < 3 && case != 32 {
+    let mut output = if family < 3 && case != 32 {
         if flags & 2 != 0 {
             let start = slice_start % width;
             let size = 1 + slice_width % (width - start);
@@ -757,8 +760,40 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
         };
         push_node(&mut f, Type::Bits(1), NodePayload::Binop(op, a, b))
     };
+    if case >= 35 {
+        let k = constant(&mut f, width, n, n + 1, bytes);
+        let second = push_node(
+            &mut f,
+            Type::Bits(1),
+            NodePayload::Binop(Binop::Eq, shared_amount, k),
+        );
+        output = push_node(
+            &mut f,
+            Type::Tuple(vec![Box::new(Type::Bits(1)), Box::new(Type::Bits(1))]),
+            NodePayload::Tuple(vec![output, second]),
+        );
+        if case == 37 {
+            // A stored but unreachable count user must not block the live
+            // group.
+            push_node(&mut f, Type::Bits(cw), NodePayload::Unop(Unop::Not, count));
+        }
+        if case != 36 {
+            features.insert(if flags & 1 == 0 {
+                "scalar_group_msb"
+            } else {
+                "scalar_group_lsb"
+            });
+            features.insert(
+                [
+                    "scalar_group_pir_only",
+                    "scalar_group_sandwich_1",
+                    "scalar_group_sandwich_3",
+                ][pipeline],
+            );
+        }
+    }
     let retained = match case {
-        25 => Some(count),
+        25 | 36 => Some(count),
         26 => Some(shared_amount),
         27 => Some(hot),
         28 => Some(x),
@@ -781,7 +816,7 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
         function: f,
         case,
         pipeline,
-        must_reject: matches!(case, 25 | 26 | 30..=33),
+        must_reject: matches!(case, 25 | 26 | 30..=33 | 36),
         may_decline: false,
         features,
     })

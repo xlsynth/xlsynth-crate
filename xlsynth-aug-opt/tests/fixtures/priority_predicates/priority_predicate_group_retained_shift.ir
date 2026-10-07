@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// Origin: published 0.74 k3-cone-46bf5b189415e452-4d74db2b6b1e.
+package replay_input
+
+top fn __k3_cone_46bf5b189415e452(leaf_5: bits[31] id=2513, leaf_13: bits[33] id=2514, leaf_21: bits[1] id=2515) -> bits[1] {
+  reverse.2516: bits[31] = reverse(leaf_5, id=2516)
+  one_hot.2517: bits[32] = one_hot(reverse.2516, lsb_prio=true, id=2517)
+  literal.2518: bits[1] = literal(value=0, id=2518)
+  encode.2519: bits[5] = encode(one_hot.2517, id=2519)
+  concat.2520: bits[6] = concat(literal.2518, encode.2519, id=2520)
+  literal.2521: bits[6] = literal(value=3, id=2521)
+  add.2522: bits[6] = add(concat.2520, literal.2521, id=2522)
+  shll.2523: bits[33] = shll(leaf_13, add.2522, id=2523)
+  bit_slice.2524: bits[2] = bit_slice(shll.2523, start=8, width=2, id=2524)
+  concat.2525: bits[3] = concat(bit_slice.2524, leaf_21, id=2525)
+  literal.2526: bits[3] = literal(value=4, id=2526)
+  bit_slice.2527: bits[2] = bit_slice(shll.2523, start=9, width=2, id=2527)
+  literal.2528: bits[2] = literal(value=3, id=2528)
+  ugt.2529: bits[1] = ugt(concat.2525, literal.2526, id=2529)
+  eq.2530: bits[1] = eq(bit_slice.2527, literal.2528, id=2530)
+  ret or.2531: bits[1] = or(ugt.2529, eq.2530, id=2531)
+}
