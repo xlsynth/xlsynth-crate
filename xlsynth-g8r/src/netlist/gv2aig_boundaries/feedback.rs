@@ -135,7 +135,7 @@ fn inverter_input(extractor: &BoundaryExtractor<'_>, bit: BitIndex) -> Option<Bi
             let pin_name = extractor
                 .interner
                 .resolve(instance.connections[*connection_index].port)?;
-            let library = extractor.liberty?;
+            let library = extractor.liberty;
             let cell = &library.cells[*extractor.cell_index_by_name.get(type_name)?];
             if !cell.sequential.is_empty() {
                 return None;
@@ -232,7 +232,7 @@ pub(super) fn recognize_direct_hold_mux(
         .interner
         .resolve(instance.connections[connection_index].port)
         .unwrap();
-    let library = extractor.liberty.expect("cell drivers require Liberty");
+    let library = extractor.liberty;
     let cell = &library.cells[extractor.cell_index_by_name[type_name]];
     let [seq] = cell.sequential.as_slice() else {
         return Ok(None);

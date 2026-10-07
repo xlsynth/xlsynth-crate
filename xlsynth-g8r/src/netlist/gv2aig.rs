@@ -44,7 +44,7 @@ pub fn convert_gv2aig_paths(
     let liberty = load_liberty_from_path(liberty_proto_path)?;
     extract_gatefn_all_top_ports(
         &elaborated,
-        Some(&liberty),
+        &liberty,
         opts.collapse_sequential,
         opts.collapse_load_enable_feedback,
     )
