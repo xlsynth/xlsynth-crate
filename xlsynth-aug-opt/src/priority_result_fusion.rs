@@ -72,6 +72,7 @@ enum IndexStep {
 /// Retains each arithmetic width instead of collapsing modular operations.
 struct PriorityIndex {
     hot: NodeRef,
+    encoded: NodeRef,
     encoded_width: usize,
     steps: Vec<IndexStep>,
 }
@@ -117,6 +118,7 @@ fn priority_index(f: &ir::Fn, node: NodeRef) -> Option<PriorityIndex> {
             }
             return Some(PriorityIndex {
                 hot: *hot,
+                encoded: node,
                 encoded_width: width,
                 steps: vec![],
             });
@@ -638,10 +640,16 @@ fn wired_predicate(
     }
 }
 
+/// Scalar consumers of one encoded count, with their surviving one-hot input.
+struct PredicateGroup {
+    hot: NodeRef,
+    roots: Vec<NodeRef>,
+}
+
 /// Replaces scalar consumers together only when their shared count arithmetic
 /// has no remaining live users. Whole-function costing still checks loads.
 fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
-    let mut groups = BTreeMap::<usize, Vec<NodeRef>>::new();
+    let mut groups = BTreeMap::<usize, PredicateGroup>::new();
     let dead = xlsynth_pir::dce::get_dead_nodes(f);
     let mut live = vec![true; f.nodes.len()];
     for node in dead {
@@ -650,16 +658,25 @@ fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
     for (index, is_live) in live.into_iter().enumerate() {
         let root = NodeRef { index };
         if is_live && let Some((index_expr, _)) = priority_index_predicate(f, root) {
-            groups.entry(index_expr.hot.index).or_default().push(root);
+            // Distinct encodes may share a one-hot input without sharing any
+            // count arithmetic that needs to be eliminated together.
+            groups
+                .entry(index_expr.encoded.index)
+                .or_insert_with(|| PredicateGroup {
+                    hot: index_expr.hot,
+                    roots: Vec::new(),
+                })
+                .roots
+                .push(root);
         }
     }
     let mut rewrites = 0;
     let mut builder = NodeAppender::new(f);
-    for (hot, roots) in groups {
-        if !predicate_group_is_exclusive(f, &roots, NodeRef { index: hot }) {
+    for group in groups.into_values() {
+        if !predicate_group_is_exclusive(f, &group.roots, group.hot) {
             continue;
         }
-        for root in roots {
+        for root in group.roots {
             let (index_expr, predicate) = priority_index_predicate(f, root)?;
             let wired = wired_predicate(f, &mut builder, &index_expr, &predicate)?;
             f.nodes[root.index].payload = f.get_node(wired).payload.clone();
@@ -1214,6 +1231,50 @@ top fn main(x: bits[32] id=1, p: bits[1] id=2) -> bits[33] {
                     .iter()
                     .any(|node| matches!(node.payload, NodePayload::Encode { .. }))
             );
+            check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn scalar_predicates_partition_independent_encodes_of_shared_onehot() {
+        for low in [false, true] {
+            let source = format!(
+                r#"package independent_counts
+top fn main(x: bits[8] id=1) -> (bits[4], bits[1], bits[1], bits[1]) {{
+  hot: bits[9] = one_hot(x, lsb_prio={low}, id=2)
+  retained_count: bits[4] = encode(hot, id=3)
+  exclusive_count: bits[4] = encode(hot, id=4)
+  one: bits[4] = literal(value=1, id=5)
+  retained_predicate: bits[1] = eq(retained_count, one, id=6)
+  first: bits[1] = eq(exclusive_count, one, id=7)
+  shifted: bits[4] = add(exclusive_count, one, id=8)
+  second: bits[1] = or_reduce(shifted, id=9)
+  ret result: (bits[4], bits[1], bits[1], bits[1]) = tuple(retained_count, retained_predicate, first, second, id=10)
+}}
+"#
+            );
+            let package = Parser::new(&source).parse_and_validate_package().unwrap();
+            let original = package.get_top_fn().unwrap();
+            let mut rewritten = original.clone();
+            assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(2));
+            let retained = original
+                .nodes
+                .iter()
+                .position(|node| node.text_id == 6)
+                .unwrap();
+            assert_eq!(
+                rewritten.nodes[retained].payload,
+                original.nodes[retained].payload
+            );
+            let rewritten = xlsynth_pir::dce::remove_dead_nodes(&rewritten);
+            let remaining_encodes: Vec<_> = rewritten
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.payload, NodePayload::Encode { .. }))
+                .map(|node| node.text_id)
+                .collect();
+            assert_eq!(remaining_encodes, vec![3]);
             check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
                 .unwrap();
         }
