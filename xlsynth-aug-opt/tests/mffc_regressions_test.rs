@@ -5,12 +5,15 @@ use std::collections::BTreeMap;
 use mffc_corpus::{Expectations, Limits, MappingProfile};
 use xlsynth_aug_opt::run_aug_opt_over_ir_text_with_stats;
 use xlsynth_aug_opt::{AugOptMode, AugOptOptions};
+use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::graph_logical_effort::{
     GraphLogicalEffortOptions, analyze_graph_logical_effort,
 };
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_g8r::check_equivalence::check_equivalence;
+#[cfg(not(feature = "has-bitwuzla"))]
+use xlsynth_g8r::check_equivalence::check_equivalence_via_toolchain;
 use xlsynth_g8r::check_equivalence::validate_same_fn_via_toolchain;
 use xlsynth_g8r::process_ir_path::process_ir_text_with_gatefn;
 use xlsynth_pir::ir;
@@ -42,27 +45,34 @@ fn measure_cost(
     original: &ir::Fn,
     mode: &MappingProfile,
 ) -> Result<MeasuredCost, String> {
-    let mut options = mode.canonical_options.to_process_ir_path_options(
-        Some(&original.name),
-        true,
-        false,
-        false,
-        None,
-    );
+    let (gate_fn, cost) = map_and_measure_cost(text, &original.name, mode)?;
+    validate_same_fn_via_toolchain(original, &gate_fn)?;
+    Ok(cost)
+}
+
+/// Measures mapped costs separately from the chosen equivalence proof boundary.
+fn map_and_measure_cost(
+    text: &str,
+    top: &str,
+    mode: &MappingProfile,
+) -> Result<(GateFn, MeasuredCost), String> {
+    let mut options =
+        mode.canonical_options
+            .to_process_ir_path_options(Some(top), true, false, false, None);
     options.cut_db_rewrite_max_iterations = mode.cut_db_rewrite_max_iterations;
     options.cut_db_rewrite_max_cuts_per_node = mode.cut_db_rewrite_max_cuts_per_node;
     let (gate_fn, _) = process_ir_text_with_gatefn(text, &options)?;
-    validate_same_fn_via_toolchain(original, &gate_fn)?;
     let stats = get_aig_stats(&gate_fn);
     let graph_le_options = GraphLogicalEffortOptions {
         beta1: mode.canonical_options.graph_logical_effort_beta1,
         beta2: mode.canonical_options.graph_logical_effort_beta2,
     };
-    Ok(MeasuredCost {
+    let cost = MeasuredCost {
         and_nodes: stats.and_nodes,
         graph_le: analyze_graph_logical_effort(&gate_fn, &graph_le_options).delay,
         depth: stats.max_depth,
-    })
+    };
+    Ok((gate_fn, cost))
 }
 
 /// Checks absolute bounds so known area/delay tradeoffs remain reviewable.
@@ -340,6 +350,68 @@ fn check_priority_result_corpus(corpus: mffc_corpus::Corpus) {
                     &format!("{context}, {label}"),
                 );
             }
+        }
+    }
+}
+
+/// Keeps corpus exposure and shared-consumer rejection under strict raw costs.
+#[test]
+fn low_bit_nonzero_corpus_respects_equivalence_and_raw_qor_limits() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/low_bit_nonzero");
+    let corpus = mffc_corpus::load_from_dir(&root).unwrap();
+    assert!(!corpus.profile.canonical_options.fraig);
+    assert!(!corpus.profile.canonical_options.reassociation);
+    assert!(!corpus.profile.canonical_options.cut_db_rewrite);
+    for (mode, rounds) in [
+        (AugOptMode::PirOnly, 1),
+        (AugOptMode::Sandwich, 1),
+        (AugOptMode::Sandwich, 3),
+    ] {
+        for case in &corpus.cases {
+            let Expectations::PredicateSimplification {
+                expected_simplifications,
+                pir_limits,
+                sandwich_limits,
+            } = &case.expectations
+            else {
+                panic!("unexpected predicate fixture family");
+            };
+            let context = format!("{} ({mode:?}, rounds={rounds})", case.name);
+            let result = run_aug_opt_over_ir_text_with_stats(
+                &case.text,
+                Some(&case.original.name),
+                AugOptOptions {
+                    enable: true,
+                    mode,
+                    rounds,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+            assert_eq!(
+                result.rewrite_stats.low_bit_nonzero_simplified, *expected_simplifications,
+                "{context}",
+            );
+            #[cfg(feature = "has-bitwuzla")]
+            check_equivalence(&case.text, &result.output_text)
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            #[cfg(not(feature = "has-bitwuzla"))]
+            check_equivalence_via_toolchain(&case.text, &result.output_text)
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            // Prove the changed IR above; g8r lowering is unchanged. Re-proving
+            // a whole FMA multiplier against bit-level gates is
+            // needlessly costly.
+            let (_, cost) =
+                map_and_measure_cost(&result.output_text, &case.original.name, &corpus.profile)
+                    .unwrap_or_else(|error| panic!("{context}: {error}"));
+            eprintln!("{context}: {cost:?}");
+            let limits = if mode == AugOptMode::PirOnly {
+                pir_limits
+            } else {
+                sandwich_limits
+            };
+            assert_within_limits(&cost, limits, corpus.profile.graph_le_tolerance, &context);
         }
     }
 }
