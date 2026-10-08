@@ -69,6 +69,8 @@ pub struct AugOptRewriteStats {
     pub split_adders_recovered: usize,
     /// Priority encode/index/decode roundtrips replaced by one-hot wiring.
     pub priority_results_fused: usize,
+    /// Low-prefix nonzero tests moved before optional negation.
+    pub low_bit_nonzero_simplified: usize,
     pub lsb_of_shll: usize,
     pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
@@ -88,6 +90,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.constant_shift_choices)
             .saturating_add(self.split_adders_recovered)
             .saturating_add(self.priority_results_fused)
+            .saturating_add(self.low_bit_nonzero_simplified)
             .saturating_add(self.lsb_of_shll)
             .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
@@ -114,6 +117,9 @@ impl AugOptRewriteStats {
         self.priority_results_fused = self
             .priority_results_fused
             .saturating_add(other.priority_results_fused);
+        self.low_bit_nonzero_simplified = self
+            .low_bit_nonzero_simplified
+            .saturating_add(other.low_bit_nonzero_simplified);
         self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
         self.eq_shll_slice_literal = self
             .eq_shll_slice_literal
@@ -568,6 +574,10 @@ fn apply_basis_rewrites_to_fn(
                 function_evaluator.estimate(function)
             });
     }
+    stats.low_bit_nonzero_simplified =
+        crate::low_bit_nonzero::rewrite_with_evaluator(&mut cloned, &mut |function| {
+            function_evaluator.estimate(function)
+        });
     let total_rewrites = stats.total().saturating_add(affine_shift_amount);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes

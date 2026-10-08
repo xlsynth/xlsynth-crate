@@ -46,6 +46,11 @@ pub struct Case {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Expectations {
+    PredicateSimplification {
+        expected_simplifications: usize,
+        pir_limits: Limits,
+        sandwich_limits: Limits,
+    },
     Shift {
         require_improvement: bool,
         limits: Limits,
@@ -246,6 +251,14 @@ fn validate_limits(limits: &Limits, tolerance: f64) -> Result<(), String> {
 /// family.
 fn validate_expectations(expectations: &Expectations, tolerance: f64) -> Result<(), String> {
     match expectations {
+        Expectations::PredicateSimplification {
+            pir_limits,
+            sandwich_limits,
+            ..
+        } => {
+            validate_limits(pir_limits, tolerance)?;
+            validate_limits(sandwich_limits, tolerance)
+        }
         Expectations::Shift { limits, .. } => validate_limits(limits, tolerance),
         Expectations::SplitAdder {
             disabled_limits,
