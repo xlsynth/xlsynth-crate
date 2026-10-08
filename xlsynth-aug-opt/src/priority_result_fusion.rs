@@ -395,11 +395,12 @@ fn priority_result_cone_is_exclusive(
 }
 
 /// Requires all live users of grouped count arithmetic to be replaced together.
-fn predicate_group_is_exclusive(f: &ir::Fn, roots: &[NodeRef], hot: NodeRef) -> bool {
-    let mut live = vec![true; f.nodes.len()];
-    for dead in xlsynth_pir::dce::get_dead_nodes(f) {
-        live[dead.index] = false;
-    }
+fn predicate_group_is_exclusive(
+    f: &ir::Fn,
+    roots: &[NodeRef],
+    hot: NodeRef,
+    live: &[bool],
+) -> bool {
     let mut surviving_roots = vec![false; f.nodes.len()];
     for root in roots {
         surviving_roots[root.index] = true;
@@ -655,7 +656,7 @@ fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
     for node in dead {
         live[node.index] = false;
     }
-    for (index, is_live) in live.into_iter().enumerate() {
+    for (index, &is_live) in live.iter().enumerate() {
         let root = NodeRef { index };
         if is_live && let Some((index_expr, _)) = priority_index_predicate(f, root) {
             // Distinct encodes may share a one-hot input without sharing any
@@ -670,12 +671,12 @@ fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
                 .push(root);
         }
     }
+    // Check every group against the original graph before appending nodes or
+    // replacing payloads, so all groups can reuse the same liveness snapshot.
+    groups.retain(|_, group| predicate_group_is_exclusive(f, &group.roots, group.hot, &live));
     let mut rewrites = 0;
     let mut builder = NodeAppender::new(f);
     for group in groups.into_values() {
-        if !predicate_group_is_exclusive(f, &group.roots, group.hot) {
-            continue;
-        }
         for root in group.roots {
             let (index_expr, predicate) = priority_index_predicate(f, root)?;
             let wired = wired_predicate(f, &mut builder, &index_expr, &predicate)?;
@@ -1278,6 +1279,39 @@ top fn main(x: bits[8] id=1) -> (bits[4], bits[1], bits[1], bits[1]) {{
             check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn scalar_predicates_rewrite_multiple_groups_with_surviving_boundaries() {
+        let source = r#"package multiple_groups
+top fn main(x: bits[8] id=1) -> (bits[1], bits[1], bits[4], bits[1]) {
+  hot: bits[9] = one_hot(x, lsb_prio=true, id=2)
+  count: bits[4] = encode(hot, id=3)
+  one: bits[4] = literal(value=1, id=4)
+  first: bits[1] = eq(count, one, id=5)
+  next_hot: bits[2] = one_hot(first, lsb_prio=true, id=6)
+  next_count: bits[1] = encode(next_hot, id=7)
+  zero: bits[1] = literal(value=0, id=8)
+  second: bits[1] = eq(next_count, zero, id=9)
+  retained_count: bits[4] = encode(hot, id=10)
+  retained_predicate: bits[1] = eq(retained_count, one, id=11)
+  dead: bits[1] = not(next_count, id=12)
+  ret result: (bits[1], bits[1], bits[4], bits[1]) = tuple(first, second, retained_count, retained_predicate, id=13)
+}
+"#;
+        let package = Parser::new(source).parse_and_validate_package().unwrap();
+        let mut rewritten = package.get_top_fn().unwrap().clone();
+        assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(2));
+        let rewritten = xlsynth_pir::dce::remove_dead_nodes(&rewritten);
+        let remaining_encodes: Vec<_> = rewritten
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.payload, NodePayload::Encode { .. }))
+            .map(|node| node.text_id)
+            .collect();
+        assert_eq!(remaining_encodes, vec![10]);
+        check_equivalence_via_toolchain(source, &format!("package result\n\ntop {rewritten}"))
+            .unwrap();
     }
 
     #[test]
