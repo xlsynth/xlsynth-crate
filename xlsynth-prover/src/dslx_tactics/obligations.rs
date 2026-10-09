@@ -134,6 +134,11 @@ impl LecObligation {
         self.rhs.uf_map.insert(right.to_string(), uf.to_string());
         self
     }
+
+    pub fn set_next_uf_alias(&mut self, left: &str, right: &str, uf: &str) -> &mut Self {
+        let next_uf = format!("{uf}_{}", self.lhs.uf_map.len() + 1);
+        self.set_uf_alias(left, right, &next_uf)
+    }
 }
 
 impl QcObligation {
@@ -156,9 +161,15 @@ impl QcObligation {
         self
     }
 
-    pub fn set_uf_map(&mut self, map: BTreeMap<String, String>) -> &mut Self {
-        self.uf_map = map;
+    pub fn set_uf_alias(&mut self, left: &str, right: &str, uf: &str) -> &mut Self {
+        self.uf_map.insert(left.to_string(), uf.to_string());
+        self.uf_map.insert(right.to_string(), uf.to_string());
         self
+    }
+
+    pub fn set_next_uf_alias(&mut self, left: &str, right: &str, uf: &str) -> &mut Self {
+        let next_uf = format!("{uf}_{}", self.uf_map.len() + 1);
+        self.set_uf_alias(left, right, &next_uf)
     }
 }
 
