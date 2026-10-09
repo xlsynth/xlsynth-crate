@@ -173,6 +173,27 @@ and graph LE are Pareto-better, keeping local folding, hashing, and DCE.
 Ties, tradeoffs, and cost errors preserve the input. No additional flag is
 needed; `low_bit_nonzero_simplified` reports accepted predicates.
 
+### Contained-range zero/nonzero predicates
+
+For `x: u32`, `x[7+:u1] & (x != u32:0)` becomes `x[7+:u1]`.
+The [rewrite](../src/predicate_implication.rs) uses interval containment:
+a nonzero subrange implies that a containing range is nonzero. It handles
+zero-test duals, inverted AND/OR results, nested slices, and either comparison
+operand order. It does not infer relationships across arithmetic, casts, or
+different source nodes, and declines empty ranges.
+
+The pass runs before arithmetic equality rewriting in each ordinary PIR
+round. It preserves node indices and equivalent values, so existing range
+facts remain valid. Other predicate and numeric consumers remain live.
+Whole-function raw live AND count and graph LE must be Pareto-better; ties,
+tradeoffs, and cost errors leave the function unchanged. No flag is needed.
+
+Clause matching visits shared nodes once and is bounded to 256 graph nodes,
+32 distinct terms, and 64 steps per wrapper traversal. Predicate descriptors and wide
+literal checks are cached for the immutable graph. The
+`predicate_implication_simplified` counter counts initially live changed
+Boolean roots, including roots made dead by a simultaneous ancestor rewrite.
+
 ### Other arithmetic rewrites
 
 - **Sum equal to zero:** `x + y == 0` becomes `y == 0 - x`, exposing a modular

@@ -75,3 +75,11 @@ path = "fuzz_targets/fuzz_low_bit_nonzero.rs"
 test = false
 doc = false
 required-features = ["has-bitwuzla"]
+
+[[bin]]
+name = "fuzz_predicate_implication"
+path = "fuzz_targets/fuzz_predicate_implication.rs"
+required-features = ["has-bitwuzla"]
+test = false
+doc = false
+bench = false
