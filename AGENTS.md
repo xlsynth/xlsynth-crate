@@ -155,6 +155,17 @@ require regeneration.
 
 All tools, and especially the `xlsynth-driver` subcommands, are expected to produce deterministic output. This is critical for test stability and reproducibility. While hash maps (`HashMap`) can be used internally for performance, they must not cause observable run-to-run nondeterminism in any output (e.g., emitted Verilog, SystemVerilog, or other netlists). If the order of items in a map affects output, a stably ordered map (such as `BTreeMap`) or explicit sorting should be used before emitting output.
 
+## IR pass complexity and analysis reuse
+
+When implementing IR passes, consider total work across all candidates, including
+whole-function scans and allocations hidden inside helpers. Prefer computing
+reusable analyses such as liveness and user maps once per unchanged graph
+snapshot and passing them into candidate checks. Where practical, separate
+candidate analysis from mutation. If mutations invalidate an analysis, update or
+recompute it before reuse and document its validity boundary. Avoid introducing
+whole-function work per candidate without a clear justification; use
+representative scaling benchmarks when repeated global work is necessary.
+
 ## Style
 
 Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.

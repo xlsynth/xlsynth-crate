@@ -103,3 +103,8 @@ counts for every iteration. Keep the starting corpus, libFuzzer `-seed`, binary
 revision, logs, and artifact directory. For example, append `-seed=109701 -runs=3000 -max_total_time=300 -max_len=128 -print_final_stats=1` to the fuzz
 command above. The corpus replay example accepts any number of files or
 directories and reports a failing input index and its bytes.
+
+Grouped scalar cases retain two predicates of one count, with both priority
+directions and all three optimizer modes. The audit requires proved real-cost
+acceptance for live groups and groups with a dead count user. Retaining the count
+as an output remains a rejection control, including when other users are eligible.
