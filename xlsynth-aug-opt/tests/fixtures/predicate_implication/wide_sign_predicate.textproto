@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Origin: BVC 0.74.0 k3-cone-0034ffd5b462116d-5afaf34fc843; added license annotation and selected its sole function as top.
+sha256: "a9e32ef76585af3383f299fddf1d4a91e41861926fa5a5a7a75adc3404f8df61"
+predicate_simplification {
+  expected_simplifications: 1
+  pir_limits { and_nodes_max: 2385 graph_le_max: 162.80746629414182 depth_max: 32 }
+  sandwich_limits { and_nodes_max: 2385 graph_le_max: 162.80746629414182 depth_max: 32 }
+}

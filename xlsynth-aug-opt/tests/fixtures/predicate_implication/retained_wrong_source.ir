@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Origin: focused shared-consumer control; the zero test observes another value.
+package wrong_source
+top fn main(x: bits[65] id=1, y: bits[65] id=2) -> (bits[1], bits[1], bits[65]) {
+  bit: bits[1] = bit_slice(x, start=64, width=1, id=3)
+  z: bits[65] = literal(value=0, id=4)
+  nz: bits[1] = ne(y, z, id=5)
+  result: bits[1] = and(bit, nz, id=6)
+  ret out: (bits[1], bits[1], bits[65]) = tuple(result, nz, x, id=7)
+}

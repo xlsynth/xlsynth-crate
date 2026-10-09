@@ -71,6 +71,8 @@ pub struct AugOptRewriteStats {
     pub priority_results_fused: usize,
     /// Low-prefix nonzero tests moved before optional negation.
     pub low_bit_nonzero_simplified: usize,
+    /// Initially live Boolean roots simplified by contained-range predicates.
+    pub predicate_implication_simplified: usize,
     pub lsb_of_shll: usize,
     pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
@@ -91,6 +93,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.split_adders_recovered)
             .saturating_add(self.priority_results_fused)
             .saturating_add(self.low_bit_nonzero_simplified)
+            .saturating_add(self.predicate_implication_simplified)
             .saturating_add(self.lsb_of_shll)
             .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
@@ -117,6 +120,9 @@ impl AugOptRewriteStats {
         self.priority_results_fused = self
             .priority_results_fused
             .saturating_add(other.priority_results_fused);
+        self.predicate_implication_simplified = self
+            .predicate_implication_simplified
+            .saturating_add(other.predicate_implication_simplified);
         self.low_bit_nonzero_simplified = self
             .low_bit_nonzero_simplified
             .saturating_add(other.low_bit_nonzero_simplified);
@@ -537,6 +543,13 @@ fn apply_basis_rewrites_to_fn(
 ) -> Result<(ir::Fn, AugOptRewriteStats, usize), String> {
     let mut cloned = f.clone();
     let mut stats = AugOptRewriteStats::default();
+    // Preserve common-source witnesses before arithmetic equality rewriting.
+    // This pass changes equivalent payloads without renumbering nodes, so the
+    // current round's range facts remain valid.
+    stats.predicate_implication_simplified =
+        crate::predicate_implication::rewrite_with_evaluator(&mut cloned, &mut |function| {
+            function_evaluator.estimate(function)
+        });
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
     let affine_shift_amount = rewrite_affine_shift_amounts(&mut cloned);
     stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);

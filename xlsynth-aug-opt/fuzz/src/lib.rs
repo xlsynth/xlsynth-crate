@@ -16,3 +16,6 @@ pub mod priority_result_fusion_sample;
 
 #[cfg(feature = "has-bitwuzla")]
 pub mod low_bit_nonzero;
+
+#[cfg(feature = "has-bitwuzla")]
+pub mod predicate_implication;

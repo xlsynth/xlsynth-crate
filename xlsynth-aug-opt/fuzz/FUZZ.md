@@ -112,3 +112,17 @@ as an output remains a rejection control, including when other users are eligibl
 ## fuzz_low_bit_nonzero
 
 Focused mutation target for contiguous low-bit nonzero tests through negation or conditional negation. It proves forced candidates and real-cost PIR-only and one/three-round pipelines with Bitwuzla, checks retained numeric consumers, reversed selector arms, decomposed reductions, and rejects offset/gapped slices, bitwise complement, and dead predicates. Cost ties/errors must preserve the input. Inconclusive proofs fail the bounded campaign. The deterministic fuzz-library audit requires actual proved acceptance in every pipeline for the conditional-negation families. Run with sanitizer none; optional XLSYNTH_FUZZ_REPORT_SAMPLES=1 records exact bytes and proved acceptance for mutation-versus-seed auditing.
+
+## fuzz_predicate_implication
+
+Checks structural zero/nonzero containment across scalar AND/OR and inverted
+forms, nested slices, operand orders, shared clauses, and retained numeric and
+predicate consumers. Wrong sources, overlapping/disjoint ranges, mixed polarity,
+nonzero literals, and dead predicates are rejection controls. Each input proves
+both forced rewriting and actual optimizer output with Bitwuzla, checks cost
+tie/error rollback, and reports accepted rewrites only after both proofs pass.
+
+The implication generator limits shared Boolean chains to eight levels because
+the existing priority-result matcher expands deep shared AND DAGs in both
+baseline and candidate pipelines. Deep direct-pass coverage is separate from
+the whole-pipeline campaign; pipeline failures are not counted as proofs.
