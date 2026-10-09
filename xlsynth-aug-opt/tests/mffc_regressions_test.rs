@@ -357,8 +357,25 @@ fn check_priority_result_corpus(corpus: mffc_corpus::Corpus) {
 /// Keeps corpus exposure and shared-consumer rejection under strict raw costs.
 #[test]
 fn low_bit_nonzero_corpus_respects_equivalence_and_raw_qor_limits() {
-    let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/low_bit_nonzero");
+    check_predicate_corpus("low_bit_nonzero", |stats| stats.low_bit_nonzero_simplified);
+}
+
+/// Checks structural implication and its retained-consumer rejection control.
+#[test]
+fn predicate_implication_corpus_respects_equivalence_and_raw_qor_limits() {
+    check_predicate_corpus("predicate_implication", |stats| {
+        stats.predicate_implication_simplified
+    });
+}
+
+/// Reuses the generic predicate fixture schema for each rewrite's own counter.
+fn check_predicate_corpus(
+    directory: &str,
+    count: impl Fn(&xlsynth_aug_opt::AugOptRewriteStats) -> usize,
+) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(directory);
     let corpus = mffc_corpus::load_from_dir(&root).unwrap();
     assert!(!corpus.profile.canonical_options.fraig);
     assert!(!corpus.profile.canonical_options.reassociation);
@@ -390,7 +407,8 @@ fn low_bit_nonzero_corpus_respects_equivalence_and_raw_qor_limits() {
             )
             .unwrap_or_else(|error| panic!("{context}: {error}"));
             assert_eq!(
-                result.rewrite_stats.low_bit_nonzero_simplified, *expected_simplifications,
+                count(&result.rewrite_stats),
+                *expected_simplifications,
                 "{context}",
             );
             #[cfg(feature = "has-bitwuzla")]
