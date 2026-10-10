@@ -3472,7 +3472,16 @@ fn gatify_node(
                 } else {
                     g8_builder.get_false()
                 };
-                out.push(g8_builder.add_mux2(any, idx_bit, sentinel_bit));
+                // Both priority directions return zero index bits when any
+                // is false. Inject only the one-bits of the all-zero sentinel;
+                // masking the index again would add redundant gates.
+                let bit = if g8_builder.is_known_true(sentinel_bit) {
+                    let none = g8_builder.add_not(any);
+                    g8_builder.add_or_binary(none, idx_bit)
+                } else {
+                    g8_builder.union_current_pir_node_id_into_operand(idx_bit)
+                };
+                out.push(bit);
             }
 
             let out_bits = AigBitVector::from_lsb_is_index_0(&out);
@@ -3528,7 +3537,17 @@ fn gatify_node(
                     } else {
                         g8_builder.get_false()
                     };
-                    out.push(g8_builder.add_mux2(any, count_bit, sentinel_bit));
+                    // gatify_clz already masks each count bit with any,
+                    // returning zero when no input
+                    // bit is set. Reapplying the any-mask adds redundant gates.
+                    // Only sentinel one-bits need the all-zero case injected.
+                    let out_bit = if g8_builder.is_known_true(sentinel_bit) {
+                        let none = g8_builder.add_not(any);
+                        g8_builder.add_or_binary(none, count_bit)
+                    } else {
+                        count_bit
+                    };
+                    out.push(out_bit);
                 }
 
                 let out_bits = AigBitVector::from_lsb_is_index_0(&out);

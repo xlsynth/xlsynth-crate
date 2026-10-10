@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
+# proto-message: xlsynth.mffc_regressions.Case
+
+sha256: "d43e55367f048fafec60b1de8397584996966b00104a9c16107530228e841c7e"
+# The corpus profile allows reassociation; raw costs are bounded separately.
+priority_result {
+  expected_fusions: 0
+  disabled_limits { and_nodes_max: 1176 graph_le_max: 108 depth_max: 23 }
+  enabled_limits { and_nodes_max: 1176 graph_le_max: 108 depth_max: 23 }
+}

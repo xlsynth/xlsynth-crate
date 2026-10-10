@@ -2,6 +2,8 @@
 
 pub mod external_yosys;
 pub mod random_block;
+#[cfg(feature = "has-bitwuzla")]
+pub mod sentinel_lowering;
 
 use std::time::Duration;
 
