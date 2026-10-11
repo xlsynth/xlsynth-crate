@@ -958,9 +958,9 @@ a block, register boundaries and its clock are preserved and the block's
 combinational transition logic is lowered into the stored transition function.
 `--top` may name either kind of member.
 
-- By default a text `.g8r` design beginning with `g8r_v2` is sent to **stdout**.
+- By default a text `.g8r` design beginning with `g8r_v3` is sent to **stdout**.
 - Additional artifacts can be emitted with flags:
-  - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v2` format prefix.
+  - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v3` format prefix.
   - `--aiger-out <PATH>` – write a clockless, register-free result as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
@@ -2540,8 +2540,6 @@ clock is metadata and is not an input record field.
       input names.
   - For a design containing registers, exactly one initial-state option:
     - `--initial-state-all-zeros`
-    - `--initial-state-from-g8r-initial-values` – errors and lists the
-      registers if any lack an `initial_value`.
     - `--initial-state-file <IRVALS_PATH>` – exactly one positional tuple in
       G8R register order or named record matching the G8R register names.
 - Optional:
@@ -2565,7 +2563,7 @@ Initialization itself is not a toggle from an unknown prior state.
 ```shell
 xlsynth-driver g8r-eval pipeline.g8r \
   --input-irvals inputs.irvals \
-  --initial-state-from-g8r-initial-values \
+  --initial-state-all-zeros \
   --final-state-irvals final-state.irvals \
   --toggle-output-json toggles.json
 ```

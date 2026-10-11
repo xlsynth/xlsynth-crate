@@ -116,7 +116,6 @@ pub fn lower_block_to_sequential_gate_fn(
             name: register.name,
             q: register.q,
             d: TransitionOutputId::new(register.d_output_index),
-            initial_value: None,
         })
         .collect();
 

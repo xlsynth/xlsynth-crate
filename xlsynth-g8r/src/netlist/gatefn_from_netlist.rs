@@ -1104,7 +1104,6 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
             name: pending.register_name,
             q: pending.q,
             d: d_id,
-            initial_value: None,
         });
     }
     let added_synthetic_output = external_outputs.is_empty() && registers.is_empty();

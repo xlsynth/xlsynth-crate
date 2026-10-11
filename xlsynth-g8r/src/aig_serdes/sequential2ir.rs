@@ -15,8 +15,8 @@ use crate::aig_serdes::gate2ir::gate_fn_to_pir;
 ///
 /// The transition logic is shared with GateFn-to-function lifting. Register
 /// next-state behavior is already encoded in the transition D outputs, so
-/// register writes emitted here are unconditional. An `initial_value` has no
-/// faithful XLS block equivalent without inventing reset behavior.
+/// register writes emitted here are unconditional. Startup state remains
+/// unspecified; reset behavior is preserved in the transition logic.
 pub fn sequential_gate_fn_to_pir_block_package(
     design: &SequentialGateFn,
     package_name: &str,
@@ -24,16 +24,6 @@ pub fn sequential_gate_fn_to_pir_block_package(
     design
         .validate()
         .map_err(|e| format!("sequential2ir: invalid SequentialGateFn: {e}"))?;
-    if let Some(register) = design
-        .registers
-        .iter()
-        .find(|register| register.initial_value.is_some())
-    {
-        return Err(format!(
-            "sequential2ir: register '{}' has an initial value, which cannot be represented as XLS block reset behavior",
-            register.name
-        ));
-    }
 
     let lifted_package = gate_fn_to_pir(
         &design.transition,

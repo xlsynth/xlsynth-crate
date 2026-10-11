@@ -282,7 +282,6 @@ fn add_register_layer(
             name: register_name,
             q,
             d,
-            initial_value: None,
         });
         data_values.push(q_value);
     }
@@ -318,7 +317,6 @@ fn add_register_layer(
             name: register_name,
             q,
             d,
-            initial_value: None,
         });
         *q_value.get_lsb(0)
     });

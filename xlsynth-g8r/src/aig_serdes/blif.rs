@@ -13,8 +13,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use xlsynth_pir::IrBits;
-
 use crate::aig::sequential_gate::{
     canonical_register_d_name, canonical_register_q_name, canonical_transition_name,
     uniquify_transition_port_name,
@@ -46,7 +44,6 @@ struct EmissionRegister {
     name: String,
     q: usize,
     d: usize,
-    initial_value: Option<Vec<bool>>,
 }
 
 #[derive(Debug)]
@@ -91,7 +88,6 @@ struct InferredRegister {
     name: String,
     q_nets: Vec<String>,
     d_nets: Vec<String>,
-    initial_value: Option<IrBits>,
 }
 
 #[derive(Debug)]
@@ -106,7 +102,8 @@ struct InferredLayout {
 ///
 /// Synchronous controls already present in the effective `D` transition logic
 /// are emitted as combinational `.names` equations. A register bit is emitted
-/// as `.latch <D> <Q> re <clock> <initial>`. A declared clock without
+/// as `.latch <D> <Q> re <clock> 2` (unspecified startup). Explicitly
+/// initialized latches are rejected on import. A declared clock without
 /// registers, or a zero-width port, cannot be represented without an
 /// out-of-band annotation.
 pub fn emit_blif(design: &SequentialGateFn) -> Result<String, String> {
@@ -179,11 +176,8 @@ pub fn emit_blif(design: &SequentialGateFn) -> Result<String, String> {
         for bit in 0..q_port.nets.len() {
             writeln!(
                 &mut text,
-                ".latch {} {} re {} {}",
-                d_port.nets[bit],
-                q_port.nets[bit],
-                clock_net,
-                format_initial_bit(register.initial_value.as_deref(), bit)
+                ".latch {} {} re {} 2",
+                d_port.nets[bit], q_port.nets[bit], clock_net
             )
             .unwrap();
         }
@@ -273,7 +267,6 @@ pub fn parse_blif(text: &str) -> Result<SequentialGateFn, String> {
             name: register.name.clone(),
             q: q_id,
             d: d_id,
-            initial_value: register.initial_value.clone(),
         });
     }
     let transition = finish_builder(builder);
@@ -348,11 +341,6 @@ fn make_emission_layout(design: &SequentialGateFn) -> Result<EmissionLayout, Str
             name: register.name.clone(),
             q: register.q.index(),
             d: register.d.index(),
-            initial_value: register.initial_value.as_ref().map(|bits| {
-                (0..bits.get_bit_count())
-                    .map(|bit| bits.get_bit(bit).expect("bit index is in range"))
-                    .collect()
-            }),
         });
     }
 
@@ -798,8 +786,6 @@ fn infer_registers(latches: &[ParsedLatch]) -> Result<Vec<InferredRegister>, Str
         let expected_width = bits.len();
         let mut q_nets = Vec::with_capacity(expected_width);
         let mut d_nets = Vec::with_capacity(expected_width);
-        let mut initial_bits = Vec::with_capacity(expected_width);
-        let mut initialized = None;
         for (expected_bit, (bit, latch)) in bits.into_iter().enumerate() {
             if bit != expected_bit {
                 return Err(format!(
@@ -809,42 +795,17 @@ fn infer_registers(latches: &[ParsedLatch]) -> Result<Vec<InferredRegister>, Str
             }
             q_nets.push(latch.output.clone());
             d_nets.push(latch.input.clone());
-            let bit_value = match latch.initial.as_str() {
-                "0" => Some(false),
-                "1" => Some(true),
-                "2" => None,
-                other => {
-                    return Err(format!(
-                        "BLIF register '{}' bit {} has unsupported initial value '{}'; expected 0, 1, or 2",
-                        name, bit, other
-                    ));
-                }
-            };
-            match (initialized, bit_value) {
-                (None, Some(value)) if initial_bits.is_empty() => {
-                    initialized = Some(true);
-                    initial_bits.push(value);
-                }
-                (None, None) if initial_bits.is_empty() => {
-                    initialized = Some(false);
-                }
-                (Some(true), Some(value)) => initial_bits.push(value),
-                (Some(false), None) => {}
-                _ => {
-                    return Err(format!(
-                        "BLIF register '{}' mixes specified and unspecified initial bits",
-                        name
-                    ));
-                }
+            if latch.initial != "2" {
+                return Err(format!(
+                    "BLIF register '{}' bit {} has unsupported initial value '{}'; expected 2 (unspecified startup)",
+                    name, bit, latch.initial
+                ));
             }
         }
         result.push(InferredRegister {
             name,
             q_nets,
             d_nets,
-            initial_value: initialized.and_then(|is_initialized| {
-                is_initialized.then(|| IrBits::from_lsb_is_0(&initial_bits))
-            }),
         });
     }
     Ok(result)
@@ -1155,14 +1116,6 @@ fn emit_net_list(text: &mut String, directive: &str, nets: &[String]) {
         write!(text, " {}", net).unwrap();
     }
     text.push('\n');
-}
-
-fn format_initial_bit(initial_value: Option<&[bool]>, bit: usize) -> char {
-    match initial_value {
-        None => '2',
-        Some(value) if value[bit] => '1',
-        Some(_) => '0',
-    }
 }
 
 fn model_name(name: &str) -> Result<String, String> {

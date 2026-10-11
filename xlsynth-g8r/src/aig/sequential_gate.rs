@@ -5,8 +5,6 @@
 
 use std::collections::BTreeSet;
 
-use xlsynth_pir::IrBits;
-
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 
 /// Identifies an input of a [`SequentialGateFn::transition`] function.
@@ -49,13 +47,13 @@ pub struct ClockPort {
 /// transition input. Register `D` is the effective next-state value,
 /// represented as a transition output. Synchronous load-enable and reset
 /// behavior is part of that transition logic. Asynchronous reset is not
-/// representable by this type.
+/// representable by this type. Startup state is unspecified; concrete initial
+/// values belong to simulation inputs, not the physical register binding.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RegisterBinding {
     pub name: String,
     pub q: TransitionInputId,
     pub d: TransitionOutputId,
-    pub initial_value: Option<IrBits>,
 }
 
 /// A synchronous design represented as a combinational transition function
@@ -162,7 +160,6 @@ pub fn add_input_registers(
             name: register_name,
             q: old_input_id,
             d: d_id,
-            initial_value: None,
         });
     }
 
@@ -222,7 +219,6 @@ pub fn add_output_registers(
             name: register_name,
             q: q_id,
             d: old_output_id,
-            initial_value: None,
         });
     }
 
@@ -447,17 +443,6 @@ impl SequentialGateFn {
                     register.name,
                     register_width,
                     d.get_bit_count()
-                ));
-            }
-
-            if let Some(initial_value) = &register.initial_value
-                && initial_value.get_bit_count() != register_width
-            {
-                return Err(format!(
-                    "register '{}' initial value has width {} but register width is {}",
-                    register.name,
-                    initial_value.get_bit_count(),
-                    register_width
                 ));
             }
         }

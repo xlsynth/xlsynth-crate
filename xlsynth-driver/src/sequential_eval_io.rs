@@ -138,15 +138,11 @@ fn read_initial_state_file(
 pub(crate) fn resolve_initial_state(
     matches: &ArgMatches,
     design: &SequentialGateFn,
-    allow_declared_initial_values: bool,
     design_kind: &str,
 ) -> Result<SequentialState, String> {
     let all_zeros = matches.get_flag("initial_state_all_zeros");
-    let from_declared =
-        allow_declared_initial_values && matches.get_flag("initial_state_from_g8r_initial_values");
     let state_file = matches.get_one::<String>("initial_state_file");
-    let selected_count =
-        usize::from(all_zeros) + usize::from(from_declared) + usize::from(state_file.is_some());
+    let selected_count = usize::from(all_zeros) + usize::from(state_file.is_some());
 
     if design.registers.is_empty() {
         if selected_count != 0 {
@@ -157,19 +153,13 @@ pub(crate) fn resolve_initial_state(
         return SequentialState::from_register_values(design, vec![]);
     }
     if selected_count != 1 {
-        let options = if allow_declared_initial_values {
-            "--initial-state-all-zeros, --initial-state-from-g8r-initial-values, or --initial-state-file"
-        } else {
-            "--initial-state-all-zeros or --initial-state-file"
-        };
+        let options = "--initial-state-all-zeros or --initial-state-file";
         return Err(format!(
             "a {design_kind} design with registers requires exactly one of {options}"
         ));
     }
     if all_zeros {
         Ok(SequentialState::all_zeros(design))
-    } else if from_declared {
-        SequentialState::from_g8r_initial_values(design)
     } else {
         read_initial_state_file(
             Path::new(state_file.expect("one initial-state option was selected")),

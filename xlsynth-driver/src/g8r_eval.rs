@@ -38,9 +38,7 @@ pub fn handle_g8r_eval(matches: &ArgMatches) -> Result<(), String> {
             inputs.len()
         ));
     }
-    let initial_state = resolve_initial_state(
-        matches, &design, /* allow_declared_initial_values= */ true, "G8R",
-    )?;
+    let initial_state = resolve_initial_state(matches, &design, "G8R")?;
     let trace = simulate(&design, &inputs, initial_state)?;
 
     for outputs in trace.external_outputs() {

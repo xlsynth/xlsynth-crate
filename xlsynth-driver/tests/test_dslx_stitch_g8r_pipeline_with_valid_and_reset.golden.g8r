@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-g8r_v2
+g8r_v3
 name pipe
 clock clk
 inputs 0,1,2,3
 outputs 7,8
 registers 7
-register p0_x q=4 d=0 initial_value=none
-register p0_y q=5 d=1 initial_value=none
-register p0_in_valid q=6 d=2 initial_value=none
-register p1_sum q=7 d=3 initial_value=none
-register p1_in_valid q=8 d=4 initial_value=none
-register p2_output_value q=9 d=5 initial_value=none
-register p2_in_valid q=10 d=6 initial_value=none
+register p0_x q=4 d=0
+register p0_y q=5 d=1
+register p0_in_valid q=6 d=2
+register p1_sum q=7 d=3
+register p1_in_valid q=8 d=4
+register p2_output_value q=9 d=5
+register p2_in_valid q=10 d=6
 transition
 fn pipe__transition(x: bits[2] = [%1, %2], y: bits[2] = [%3, %4], in_valid: bits[1] = [%5], rst: bits[1] = [%6], p0_x__q: bits[2] = [%7, %8], p0_y__q: bits[2] = [%15, %16], p0_in_valid__q: bits[1] = [%23], p1_sum__q: bits[2] = [%34, %35], p1_in_valid__q: bits[1] = [%42], p2_output_value__q: bits[2] = [%44, %45], p2_in_valid__q: bits[1] = [%52]) -> (p0_x__d: bits[2] = [not(%11), not(%14)], p0_y__d: bits[2] = [not(%19), not(%22)], p0_in_valid__d: bits[1] = [%24], p1_sum__d: bits[2] = [not(%38), not(%41)], p1_in_valid__d: bits[1] = [%43], p2_output_value__d: bits[2] = [not(%48), not(%51)], p2_in_valid__d: bits[1] = [%53], output_value: bits[2] = [%44, %45], out_valid: bits[1] = [%52]) {
   %53 = and(p1_in_valid__q[0], not(rst[0]))

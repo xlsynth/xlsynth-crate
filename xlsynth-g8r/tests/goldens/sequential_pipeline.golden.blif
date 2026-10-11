@@ -11,6 +11,6 @@
 1 1
 .names data_input0[1] state_next[1]
 1 1
-.latch state_next[0] state_reg[0] re clk_main 1
-.latch state_next[1] state_reg[1] re clk_main 1
+.latch state_next[0] state_reg[0] re clk_main 2
+.latch state_next[1] state_reg[1] re clk_main 2
 .end

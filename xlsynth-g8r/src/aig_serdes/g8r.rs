@@ -7,16 +7,14 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use xlsynth_pir::IrFormatPreference;
-use xlsynth_pir::{IrBits, IrValue};
 
 use crate::aig::{
     ClockPort, GateFn, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
 };
 use crate::aig_serdes::gate_parser::parse_gate_fn;
 
-const TEXT_HEADER: &str = "g8r_v2";
-const BINARY_HEADER: &[u8] = b"g8rbin_v2\n";
+const TEXT_HEADER: &str = "g8r_v3";
+const BINARY_HEADER: &[u8] = b"g8rbin_v3\n";
 
 /// Emits the canonical human-readable `.g8r` representation of a design.
 pub fn emit_g8r(design: &SequentialGateFn) -> String {
@@ -54,7 +52,7 @@ pub fn encode_g8r_binary(design: &SequentialGateFn) -> Result<Vec<u8>, String> {
 pub fn decode_g8r_binary(bytes: &[u8]) -> Result<SequentialGateFn, String> {
     let body = bytes
         .strip_prefix(BINARY_HEADER)
-        .ok_or_else(|| "unsupported g8rbin header; expected 'g8rbin_v2'".to_string())?;
+        .ok_or_else(|| "unsupported g8rbin header; expected 'g8rbin_v3'".to_string())?;
     let binary: BinarySequentialGateFn = bincode::deserialize(body)
         .map_err(|e| format!("failed to deserialize SequentialGateFn payload: {}", e))?;
     binary.try_into()
@@ -109,15 +107,10 @@ fn emit_sequential_g8r(sequential: &SequentialGateFn) -> String {
     text.push_str(&format!("registers {}\n", sequential.registers.len()));
     for register in &sequential.registers {
         text.push_str(&format!(
-            "register {} q={} d={} initial_value={}\n",
+            "register {} q={} d={}\n",
             register.name,
             register.q.index(),
-            register.d.index(),
-            register
-                .initial_value
-                .as_ref()
-                .map(format_bits)
-                .unwrap_or_else(|| "none".to_string())
+            register.d.index()
         ));
     }
     text.push_str("transition\n");
@@ -278,16 +271,10 @@ fn parse_register(line: &str) -> Result<RegisterBinding, String> {
     }
     let q = TransitionInputId::new(parse_required_usize(&mut fields, "q")?);
     let d = TransitionOutputId::new(parse_required_usize(&mut fields, "d")?);
-    let initial_value = parse_optional_bits(&mut fields, "initial_value")?;
     if let Some(field) = fields.keys().next() {
         return Err(format!("unknown register field '{}'", field));
     }
-    Ok(RegisterBinding {
-        name,
-        q,
-        d,
-        initial_value,
-    })
+    Ok(RegisterBinding { name, q, d })
 }
 
 fn take_required_field<'a>(
@@ -309,30 +296,6 @@ fn parse_required_usize<'a>(
         .map_err(|e| format!("invalid register '{}' value '{}': {}", name, value, e))
 }
 
-fn format_bits(bits: &IrBits) -> String {
-    format!(
-        "bits[{}]:{}",
-        bits.get_bit_count(),
-        bits.to_string_fmt(IrFormatPreference::Hex, false)
-    )
-}
-
-fn parse_optional_bits<'a>(
-    fields: &mut BTreeMap<&'a str, &'a str>,
-    name: &str,
-) -> Result<Option<IrBits>, String> {
-    let value = take_required_field(fields, name)?;
-    if value == "none" {
-        return Ok(None);
-    }
-    let parsed = IrValue::parse_typed(value)
-        .map_err(|e| format!("invalid register '{}' bits value '{}': {}", name, value, e))?;
-    parsed
-        .to_bits()
-        .map(Some)
-        .map_err(|e| format!("register '{}' value is not bits: {}", name, e))
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct BinarySequentialGateFn {
     name: String,
@@ -344,16 +307,10 @@ struct BinarySequentialGateFn {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct BinaryBits {
-    lsb_is_0: Vec<bool>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct BinaryRegisterBinding {
     name: String,
     q: usize,
     d: usize,
-    initial_value: Option<BinaryBits>,
 }
 
 impl From<&SequentialGateFn> for BinarySequentialGateFn {
@@ -379,24 +336,7 @@ impl From<&RegisterBinding> for BinaryRegisterBinding {
             name: value.name.clone(),
             q: value.q.index(),
             d: value.d.index(),
-            initial_value: value.initial_value.as_ref().map(BinaryBits::from),
         }
-    }
-}
-
-impl From<&IrBits> for BinaryBits {
-    fn from(value: &IrBits) -> Self {
-        Self {
-            lsb_is_0: (0..value.get_bit_count())
-                .map(|index| value.get_bit(index).expect("bit index is in range"))
-                .collect(),
-        }
-    }
-}
-
-impl From<BinaryBits> for IrBits {
-    fn from(value: BinaryBits) -> Self {
-        IrBits::from_lsb_is_0(&value.lsb_is_0)
     }
 }
 
@@ -412,7 +352,6 @@ impl TryFrom<BinarySequentialGateFn> for SequentialGateFn {
                 name: register.name,
                 q: TransitionInputId::new(register.q),
                 d: TransitionOutputId::new(register.d),
-                initial_value: register.initial_value.map(IrBits::from),
             })
             .collect();
         SequentialGateFn::new(

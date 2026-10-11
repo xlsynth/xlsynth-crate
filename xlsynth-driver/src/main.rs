@@ -3009,12 +3009,6 @@ fn main() {
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
-                    clap::Arg::new("initial_state_from_g8r_initial_values")
-                        .long("initial-state-from-g8r-initial-values")
-                        .help("Initialize registers from their G8R initial_value fields; error if any are missing")
-                        .action(ArgAction::SetTrue),
-                )
-                .arg(
                     clap::Arg::new("initial_state_file")
                         .long("initial-state-file")
                         .value_name("IRVALS_PATH")
@@ -3046,7 +3040,6 @@ fn main() {
                     clap::ArgGroup::new("g8r_eval_initial_state")
                         .args([
                             "initial_state_all_zeros",
-                            "initial_state_from_g8r_initial_values",
                             "initial_state_file",
                         ])
                         .multiple(false),
