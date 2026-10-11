@@ -98,7 +98,10 @@ pub fn handle_dslx_stitch_g8r_pipeline(matches: &ArgMatches, config: &Option<Too
         report_cli_error_and_exit("stitch error", Some(&error.0), vec![]);
     });
 
-    write_stdout(&emit_g8r(&design));
+    let text = emit_g8r(&design).unwrap_or_else(|error| {
+        report_cli_error_and_exit("could not serialize g8r text", Some(&error), vec![]);
+    });
+    write_stdout(&text);
     if let Some(bin_path) = matches.get_one::<String>("bin_out") {
         let binary = encode_g8r_binary(&design).unwrap_or_else(|error| {
             report_cli_error_and_exit("could not serialize g8r binary", Some(&error), vec![]);

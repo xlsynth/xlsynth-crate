@@ -1,0 +1,19 @@
+g8r_v4
+name dead_nodes
+clock clk
+inputs 0
+outputs 0
+registers 1
+register state q=1 d=1 enable=2 enable_active_low=false
+transition
+fn dead_nodes(data: bits[2] = [%1, %2], q: bits[2] = [%3, %4]) -> (out: bits[2] = [%3, %4], raw_data: bits[2] = [%1, %2], enable: bits[1] = [%6]) {
+  %0 = literal(false)
+  %5 = and(data[0], q[0], tags=[unused])
+  %6 = and(data[1], q[1])
+  %5 provenance=[42]
+  out[0] = %3
+  out[1] = %4
+  raw_data[0] = %1
+  raw_data[1] = %2
+  enable[0] = %6
+}

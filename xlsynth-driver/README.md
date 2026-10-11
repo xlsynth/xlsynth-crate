@@ -958,9 +958,9 @@ a block, register boundaries and its clock are preserved and the block's
 combinational transition logic is lowered into the stored transition function.
 `--top` may name either kind of member.
 
-- By default a text `.g8r` design beginning with `g8r_v3` is sent to **stdout**.
+- By default a text `.g8r` design beginning with `g8r_v4` is sent to **stdout**.
 - Additional artifacts can be emitted with flags:
-  - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v3` format prefix.
+  - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v4` format prefix.
   - `--aiger-out <PATH>` – write a clockless, register-free result as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
@@ -2529,7 +2529,9 @@ Evaluates a native combinational or sequential G8R design (`.g8r` or
 `.g8rbin`) for one or more cycles. One typed IR result is printed per cycle.
 Each input record supplies only the externally visible inputs; register Q
 values are supplied by the selected initial state and prior cycles. The G8R
-clock is metadata and is not an input record field.
+clock is metadata and is not an input record field. Both explicit-control and
+legalized designs can be evaluated; explicit synchronous reset overrides enable,
+and a disabled enable holds state.
 
 - Required:
   - `<G8R_FILE>`
@@ -2549,7 +2551,7 @@ clock is metadata and is not an input record field.
     combinational-logic, external-interface, register-D, clock, and clocked
     register-Q toggle counts, plus output-reachable per-node activity. A
     clocked design may use one cycle; a clockless combinational design still
-    needs two samples.
+    needs two samples. This physical accounting requires a legalized design.
 
 One input record represents one active clock cycle. External outputs are
 observed from the current state, then register D values are committed for the

@@ -251,7 +251,11 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         })
     });
     // Always print the native sequential design representation to stdout.
-    println!("{}", emit_g8r(design));
+    let text = emit_g8r(design).unwrap_or_else(|error| {
+        eprintln!("Failed to serialize g8r design: {error}");
+        std::process::exit(1);
+    });
+    println!("{text}");
     // If --bin-out is given, write the native binary representation.
     if let Some(bin_path) = bin_out {
         let bin = encode_g8r_binary(design).expect("Failed to serialize g8r design");

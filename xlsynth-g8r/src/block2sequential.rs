@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use xlsynth_pir::IrBits;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::ir::{
@@ -11,6 +12,7 @@ use xlsynth_pir::ir::{
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::{get_topological, operands, remap_payload_with};
+use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 use xlsynth_pir::ir_verify;
 
 use crate::aig::sequential_gate::{
@@ -18,8 +20,8 @@ use crate::aig::sequential_gate::{
     uniquify_transition_port_name,
 };
 use crate::aig::{
-    ClockPort, GateFn, Output, RegisterBinding, SequentialGateFn, TransitionInputId,
-    TransitionOutputId,
+    ClockPort, GateFn, Output, RegisterBinding, RegisterControl, SequentialGateFn,
+    SynchronousReset, TransitionInputId, TransitionOutputId,
 };
 use crate::gatify::ir2gate::{GatifyOptions, gatify};
 
@@ -37,16 +39,47 @@ struct RegisterWriteRefs {
     reset: Option<NodeRef>,
 }
 
+/// Raw data/control endpoints and bindings for a block's combinational graph.
 #[derive(Debug)]
-struct PendingRegisterBinding {
-    name: String,
-    q: TransitionInputId,
-    d_output_index: usize,
+struct TransitionFunction {
+    function: ir::Fn,
+    endpoints: Vec<TransitionEndpoint>,
+    registers: Vec<RegisterBinding>,
+    external_input_count: usize,
+    clock: Option<ClockPort>,
 }
 
-/// Parses an XLS IR package and lowers its selected block into a sequential
-/// gate function, rejecting asynchronous reset behavior.
+/// Parses and lowers a block, then legalizes its synchronous register controls.
 pub fn block_ir_to_sequential_gate_fn(
+    block_ir_text: &str,
+    gatify_options: GatifyOptions,
+) -> Result<SequentialGateFn, String> {
+    block_ir_to_sequential_gate_fn_with_controls(block_ir_text, gatify_options)?
+        .legalize_register_controls()
+}
+
+/// Inlines and lowers the selected block, then legalizes register controls.
+pub fn block_package_to_sequential_gate_fn(
+    package: &ir::Package,
+    gatify_options: GatifyOptions,
+) -> Result<SequentialGateFn, String> {
+    block_package_to_sequential_gate_fn_with_controls(package, gatify_options)?
+        .legalize_register_controls()
+}
+
+/// Lowers a flattened block, then legalizes its synchronous register controls.
+pub fn lower_block_to_sequential_gate_fn(
+    block: &Block,
+    gatify_options: GatifyOptions,
+) -> Result<SequentialGateFn, String> {
+    lower_block_to_sequential_gate_fn_with_controls(block, gatify_options)?
+        .legalize_register_controls()
+}
+
+/// Parses an XLS IR package and lowers its selected block into a
+/// sequential gate function with explicit controls, rejecting asynchronous
+/// reset behavior.
+pub fn block_ir_to_sequential_gate_fn_with_controls(
     block_ir_text: &str,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
@@ -54,12 +87,12 @@ pub fn block_ir_to_sequential_gate_fn(
     let package = parser
         .parse_and_validate_package()
         .map_err(|e| format!("parse block IR: {e}"))?;
-    block_package_to_sequential_gate_fn(&package, gatify_options)
+    block_package_to_sequential_gate_fn_with_controls(&package, gatify_options)
 }
 
 /// Lowers the selected block in a PIR package, inlining block instantiations
 /// first.
-pub fn block_package_to_sequential_gate_fn(
+pub fn block_package_to_sequential_gate_fn_with_controls(
     package: &ir::Package,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
@@ -78,12 +111,12 @@ pub fn block_package_to_sequential_gate_fn(
     let block = inlined_package
         .get_top_block()
         .ok_or_else(|| "block2sequential: package has no selected block".to_string())?;
-    lower_block_to_sequential_gate_fn(block, gatify_options)
+    lower_block_to_sequential_gate_fn_with_controls(block, gatify_options)
 }
 
-/// Lowers an already flattened/inlined block into a sequential gate function,
-/// rejecting asynchronous reset behavior.
-pub fn lower_block_to_sequential_gate_fn(
+/// Lowers an already flattened/inlined block into a sequential gate function
+/// with explicit controls, rejecting asynchronous reset behavior.
+pub fn lower_block_to_sequential_gate_fn_with_controls(
     block: &Block,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
@@ -103,33 +136,23 @@ pub fn lower_block_to_sequential_gate_fn(
     ir_verify::verify_package(&validation_package)
         .map_err(|e| format!("block2sequential: block validation failed: {e}"))?;
 
-    let (transition_fn, endpoints, pending_registers, external_input_count, clock) =
-        build_transition_function(block)?;
-    let mut transition = gatify(&transition_fn, gatify_options)
+    let built = build_transition_function(block)?;
+    let mut combinational = gatify(&built.function, gatify_options)
         .map_err(|e| format!("block2sequential: gatify transition function failed: {e}"))?
         .gate_fn;
-    split_transition_outputs(&mut transition, &endpoints)?;
-
-    let registers = pending_registers
-        .into_iter()
-        .map(|register| RegisterBinding {
-            name: register.name,
-            q: register.q,
-            d: TransitionOutputId::new(register.d_output_index),
-        })
-        .collect();
+    split_transition_outputs(&mut combinational, &built.endpoints)?;
 
     SequentialGateFn::new(
         block.name.clone(),
-        transition,
-        (0..external_input_count)
+        combinational,
+        (0..built.external_input_count)
             .map(TransitionInputId::new)
             .collect(),
         (0..block.output_ports().count())
             .map(TransitionOutputId::new)
             .collect(),
-        clock,
-        registers,
+        built.clock,
+        built.registers,
     )
     .map_err(|e| format!("block2sequential: invalid lowered sequential function: {e}"))
 }
@@ -302,18 +325,8 @@ fn get_block<'a>(package: &'a ir::Package, block_name: &str) -> Result<&'a Block
     }
 }
 
-fn build_transition_function(
-    block: &Block,
-) -> Result<
-    (
-        ir::Fn,
-        Vec<TransitionEndpoint>,
-        Vec<PendingRegisterBinding>,
-        usize,
-        Option<ClockPort>,
-    ),
-    String,
-> {
+/// Extracts raw data and explicit control endpoints without introducing muxes.
+fn build_transition_function(block: &Block) -> Result<TransitionFunction, String> {
     let original_outputs = collect_block_outputs(block);
     let register_writes = collect_register_writes(block)?;
     let input_ports = block.input_ports().collect::<Vec<_>>();
@@ -468,7 +481,7 @@ fn build_transition_function(
             .get(&register.name)
             .expect("Q parameter was created for each register");
         let write = register_writes.get(&register.name).copied();
-        let mut d_ref = match write {
+        let d_ref = match write {
             Some(write) => remapped_ref(
                 &old_to_new,
                 write.arg,
@@ -476,26 +489,27 @@ fn build_transition_function(
             )?,
             None => q_ref,
         };
-        if let Some(load_enable) = write.and_then(|write| write.load_enable) {
-            let load_enable_ref = remapped_ref(
+        let enable = if let Some(load_enable) = write.and_then(|write| write.load_enable) {
+            let enable_ref = remapped_ref(
                 &old_to_new,
                 load_enable,
                 &format!("register '{}' load enable", register.name),
             )?;
-            d_ref = push_transition_node(
-                &mut transition,
-                &mut max_text_id,
-                format!("{}__load_enabled_d", register.name),
-                register.ty.clone(),
-                NodePayload::Sel {
-                    selector: load_enable_ref,
-                    cases: vec![q_ref, d_ref],
-                    default: None,
-                },
-            );
-        }
+            Some(RegisterControl {
+                signal: TransitionOutputId::new(push_endpoint(
+                    &mut endpoints,
+                    &mut used_output_names,
+                    format!("{}__enable", register.name),
+                    enable_ref,
+                    Type::Bits(1),
+                )),
+                active_low: false,
+            })
+        } else {
+            None
+        };
 
-        match (
+        let reset = match (
             write.and_then(|write| write.reset),
             register.reset_value.as_ref(),
         ) {
@@ -517,29 +531,21 @@ fn build_transition_function(
                     reset_ref,
                     &format!("register '{}' reset", register.name),
                 )?;
-                let reset_value_ref = push_transition_node(
-                    &mut transition,
-                    &mut max_text_id,
-                    format!("{}__reset_value", register.name),
-                    register.ty.clone(),
-                    NodePayload::Literal(reset_value.clone()),
-                );
-                let cases = if reset_metadata.active_low {
-                    vec![reset_value_ref, d_ref]
-                } else {
-                    vec![d_ref, reset_value_ref]
-                };
-                d_ref = push_transition_node(
-                    &mut transition,
-                    &mut max_text_id,
-                    format!("{}__reset_d", register.name),
-                    register.ty.clone(),
-                    NodePayload::Sel {
-                        selector: reset_ref,
-                        cases,
-                        default: None,
+                let mut bits = Vec::new();
+                flatten_ir_value_to_lsb0_bits_for_type(reset_value, &register.ty, &mut bits)?;
+                Some(SynchronousReset {
+                    control: RegisterControl {
+                        signal: TransitionOutputId::new(push_endpoint(
+                            &mut endpoints,
+                            &mut used_output_names,
+                            format!("{}__reset", register.name),
+                            reset_ref,
+                            Type::Bits(1),
+                        )),
+                        active_low: reset_metadata.active_low,
                     },
-                );
+                    value: IrBits::from_lsb_is_0(&bits),
+                })
             }
             (Some(_), None) => {
                 return Err(format!(
@@ -553,8 +559,8 @@ fn build_transition_function(
                     register.name
                 ));
             }
-            (None, None) => {}
-        }
+            (None, None) => None,
+        };
 
         let d_output_index = push_endpoint(
             &mut endpoints,
@@ -564,10 +570,12 @@ fn build_transition_function(
             register.ty.clone(),
         );
 
-        pending_registers.push(PendingRegisterBinding {
+        pending_registers.push(RegisterBinding {
             name: register.name.clone(),
             q: q_input,
-            d_output_index,
+            d: TransitionOutputId::new(d_output_index),
+            enable,
+            reset,
         });
     }
 
@@ -576,13 +584,13 @@ fn build_transition_function(
     let clock = block.clock_port_name().map(|name| ClockPort {
         name: name.to_string(),
     });
-    Ok((
-        transition,
+    Ok(TransitionFunction {
+        function: transition,
         endpoints,
-        pending_registers,
+        registers: pending_registers,
         external_input_count,
         clock,
-    ))
+    })
 }
 
 fn collect_block_outputs(block: &Block) -> Vec<TransitionEndpoint> {
@@ -642,27 +650,6 @@ fn push_endpoint(
     let index = endpoints.len();
     endpoints.push(TransitionEndpoint { name, node_ref, ty });
     index
-}
-
-fn push_transition_node(
-    transition: &mut ir::Fn,
-    max_text_id: &mut usize,
-    name: String,
-    ty: Type,
-    payload: NodePayload,
-) -> NodeRef {
-    *max_text_id += 1;
-    let node_ref = NodeRef {
-        index: transition.nodes.len(),
-    };
-    transition.nodes.push(ir::Node {
-        text_id: *max_text_id,
-        name: Some(name),
-        ty,
-        payload,
-        pos: None,
-    });
-    node_ref
 }
 
 fn set_transition_return(

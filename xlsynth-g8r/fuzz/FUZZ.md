@@ -106,3 +106,25 @@ Generates gatify-supported PIR directly, including PIR extension operations,
 gatifies it, applies FRAIG and cut-database
 rewriting, then checks provenance IDs on surviving gates. Failures expose
 provenance corruption introduced by gate-level optimization.
+
+## `fuzz_sequential_legalization_equiv`
+
+Generates generic synchronous stateful block IR with optional enables, optional
+resets, feedback, and zero-width values. It lowers to explicit-control
+`SequentialGateFn`, round-trips text or binary serialization, legalizes the
+controls, and evaluates both forms against the independent block interpreter.
+Eight arbitrary common startups and 16 cycles are checked per sample, including
+cycle zero; no reset warm-up is assumed, so unreset state is covered. The target
+checks external outputs and every register's next state, retained metadata,
+serialization fidelity, and legalization idempotence. It catches reset/enable
+priority or polarity errors, incorrect holds or simultaneous updates, bit-order
+mistakes, state loss, and dropped serialized controls. Unlike register-cleanup
+fuzzing, this is exact equivalence, not post-reset equivalence under startup
+don't-care semantics. The deterministic smoke test requires enabled, resettable,
+and unreset register coverage without injecting directed graph patterns.
+
+Run from `xlsynth-g8r` with:
+
+```shell
+cargo fuzz run --sanitizer none fuzz_sequential_legalization_equiv -- -max_total_time=300
+```

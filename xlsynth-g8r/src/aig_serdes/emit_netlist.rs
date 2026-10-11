@@ -527,7 +527,7 @@ pub fn emit_netlist_with_version_and_port_style(
     port_style: NetlistPortStyle,
 ) -> Result<String, String> {
     design
-        .validate()
+        .validate_legalized()
         .map_err(|e| format!("emit_netlist: invalid SequentialGateFn: {e}"))?;
     if let Some(clock) = &design.clock
         && design

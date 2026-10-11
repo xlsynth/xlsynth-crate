@@ -108,7 +108,7 @@ struct InferredLayout {
 /// out-of-band annotation.
 pub fn emit_blif(design: &SequentialGateFn) -> Result<String, String> {
     design
-        .validate()
+        .validate_legalized()
         .map_err(|e| format!("cannot emit BLIF for invalid SequentialGateFn: {}", e))?;
     if design.registers.is_empty() && design.clock.is_some() {
         return Err(format!(
@@ -264,6 +264,8 @@ pub fn parse_blif(text: &str) -> Result<SequentialGateFn, String> {
             operands_for_nets(&register.name, &register.d_nets, &net_to_operand)?,
         );
         registers.push(RegisterBinding {
+            enable: None,
+            reset: None,
             name: register.name.clone(),
             q: q_id,
             d: d_id,

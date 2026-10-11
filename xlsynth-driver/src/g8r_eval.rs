@@ -28,6 +28,9 @@ pub fn handle_g8r_eval(matches: &ArgMatches) -> Result<(), String> {
         .get_one::<String>("g8r_file")
         .expect("g8r_file is required by clap");
     let design = load_sequential_gate_fn_from_path(Path::new(g8r_file))?;
+    if matches.get_one::<String>("toggle_output_json").is_some() {
+        design.validate_legalized()?;
+    }
     let inputs = read_external_inputs(matches, &design)?;
     if matches.get_one::<String>("toggle_output_json").is_some()
         && design.clock.is_none()

@@ -615,7 +615,7 @@ Metrics:
         for (idx, node) in g.gates.iter_mut().enumerate() {
             node.try_add_pir_node_ids(&[u32::try_from(idx + 21).expect("fits in u32")]);
         }
-        let text = emit_g8r(&SequentialGateFn::from_gate_fn(g.clone()));
+        let text = emit_g8r(&SequentialGateFn::from_gate_fn(g.clone())).unwrap();
 
         let file = Builder::new()
             .suffix(".g8r")

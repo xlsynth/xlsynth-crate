@@ -501,7 +501,28 @@ impl GateFn {
     /// the node emission process, which means we need a sweep over the
     /// outputs to negate those explicitly.
     pub fn to_string(&self) -> String {
+        self.to_string_impl(false)
+    }
+
+    /// Emits all stored nodes, including dead logic, for lossless
+    /// serialization.
+    pub fn to_string_including_dead_nodes(&self) -> String {
+        self.to_string_impl(true)
+    }
+
+    /// Shares formatting between the reachable-logic view and complete graph.
+    fn to_string_impl(&self, include_dead_nodes: bool) -> String {
         self.check_invariants_with_debug_assert();
+        let operands = if include_dead_nodes {
+            (0..self.gates.len())
+                .map(|id| AigOperand {
+                    node: AigRef { id },
+                    negated: false,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.post_order_operands(true)
+        };
         let mut s = String::new();
         let input_str = self
             .inputs
@@ -531,7 +552,7 @@ impl GateFn {
             "fn {}({input_str}) -> {output_str} {{\n",
             self.name
         ));
-        for operand in self.post_order_operands(true) {
+        for operand in &operands {
             let aig_ref = operand.node;
             let this_node = self.get(aig_ref);
             match this_node {
@@ -572,7 +593,7 @@ impl GateFn {
                 visible_node_ids.insert(bit.node.id);
             }
         }
-        for operand in self.post_order_operands(true) {
+        for operand in &operands {
             visible_node_ids.insert(operand.node.id);
         }
         for node_id in visible_node_ids {

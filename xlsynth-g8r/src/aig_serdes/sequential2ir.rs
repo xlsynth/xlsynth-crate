@@ -22,7 +22,7 @@ pub fn sequential_gate_fn_to_pir_block_package(
     package_name: &str,
 ) -> Result<Package, String> {
     design
-        .validate()
+        .validate_legalized()
         .map_err(|e| format!("sequential2ir: invalid SequentialGateFn: {e}"))?;
 
     let lifted_package = gate_fn_to_pir(

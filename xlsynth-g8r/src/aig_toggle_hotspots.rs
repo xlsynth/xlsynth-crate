@@ -233,7 +233,7 @@ top fn main(x: bits[2] id=1, y: bits[2] id=2) -> bits[2] {
         .gate_fn;
         let sequential = SequentialGateFn::from_gate_fn(gate_fn.clone());
         std::fs::write(&native_path, encode_g8r_binary(&sequential).unwrap()).unwrap();
-        std::fs::write(&native_text_path, emit_g8r(&sequential)).unwrap();
+        std::fs::write(&native_text_path, emit_g8r(&sequential).unwrap()).unwrap();
         std::fs::write(&aiger_path, emit_aiger(&gate_fn, true).unwrap()).unwrap();
         std::fs::write(
             &binary_aiger_path,

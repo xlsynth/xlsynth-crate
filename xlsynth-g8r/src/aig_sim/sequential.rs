@@ -171,8 +171,10 @@ pub(crate) struct SequentialSettledPhaseInput {
     pub phase: SequentialSettledPhase,
 }
 
-/// Simulates one input record per cycle and commits register D after each
-/// cycle.
+/// Simulates one input record per cycle, evaluating explicit register controls.
+/// Reset overrides enable; absent controls use D directly. Both
+/// explicit-control and legalized designs are supported, with simultaneous
+/// register updates.
 pub fn simulate(
     design: &SequentialGateFn,
     external_inputs: &[Vec<IrBits>],
@@ -198,7 +200,28 @@ pub fn simulate(
         let next_register_values = design
             .registers
             .iter()
-            .map(|register| transition_outputs[register.d.index()].clone())
+            .enumerate()
+            .map(|(index, register)| {
+                if let Some(reset) = &register.reset {
+                    let asserted = transition_outputs[reset.control.signal.index()]
+                        .get_bit(0)
+                        .expect("validated one-bit reset")
+                        != reset.control.active_low;
+                    if asserted {
+                        return reset.value.clone();
+                    }
+                }
+                if let Some(enable) = register.enable {
+                    let asserted = transition_outputs[enable.signal.index()]
+                        .get_bit(0)
+                        .expect("validated one-bit enable")
+                        != enable.active_low;
+                    if !asserted {
+                        return state.values[index].clone();
+                    }
+                }
+                transition_outputs[register.d.index()].clone()
+            })
             .collect::<Vec<_>>();
 
         transition_inputs_trace.push(transition_inputs);
@@ -231,6 +254,7 @@ pub(crate) fn count_sequential_toggle_activity_with_all_node_counts(
     design: &SequentialGateFn,
     trace: &SequentialTrace,
 ) -> Result<SequentialToggleActivityWithAllNodeCounts, String> {
+    design.validate_legalized()?;
     if trace.transition_inputs.is_empty() {
         return Err(format!(
             "toggle stimulus must contain at least one cycle; got {}",
@@ -482,6 +506,7 @@ fn validate_external_inputs(
 }
 
 fn validate_trace_shape(design: &SequentialGateFn, trace: &SequentialTrace) -> Result<(), String> {
+    design.validate_legalized()?;
     let cycle_count = trace.transition_inputs.len();
     for (name, observed) in [
         ("external inputs", trace.external_inputs.len()),
@@ -573,6 +598,8 @@ mod tests {
                 name: "clk".to_string(),
             }),
             vec![RegisterBinding {
+                enable: None,
+                reset: None,
                 name: "acc".to_string(),
                 q: TransitionInputId::new(1),
                 d: TransitionOutputId::new(1),
@@ -598,6 +625,8 @@ mod tests {
                 name: "clk".to_string(),
             }),
             vec![RegisterBinding {
+                enable: None,
+                reset: None,
                 name: "wide".to_string(),
                 q: TransitionInputId::new(0),
                 d: TransitionOutputId::new(1),

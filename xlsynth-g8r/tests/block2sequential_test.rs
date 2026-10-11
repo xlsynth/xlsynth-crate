@@ -3,7 +3,9 @@
 use xlsynth_g8r::aig_serdes::sequential2ir::sequential_gate_fn_to_pir_block_package;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
-use xlsynth_g8r::block2sequential::block_ir_to_sequential_gate_fn;
+use xlsynth_g8r::block2sequential::{
+    block_ir_to_sequential_gate_fn, block_ir_to_sequential_gate_fn_with_controls,
+};
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_pir::IrBits;
 
@@ -132,6 +134,41 @@ top block top(a: bits[2], out: (bits[2], bits[3]), b: bits[3]) {
 }
 
 #[test]
+fn preserves_aggregate_reset_bit_order() {
+    let block_ir = r#"package array_reset
+top block top(clk: clock, rst: bits[1], data: bits[8][2][2], out: bits[8][2][2]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  reg state(bits[8][2][2], reset_value=[[17, 34], [51, 68]])
+  rst: bits[1] = input_port(name=rst, id=1)
+  data: bits[8][2][2] = input_port(name=data, id=2)
+  q: bits[8][2][2] = register_read(register=state, id=3)
+  d: () = register_write(data, register=state, reset=rst, id=4)
+  out: () = output_port(q, name=out, id=5)
+}
+"#;
+    let logical =
+        block_ir_to_sequential_gate_fn_with_controls(block_ir, GatifyOptions::all_opts_disabled())
+            .unwrap();
+    // Arrays put element zero in the least-significant packed slice.
+    let expected = IrBits::make_ubits(32, 0x44332211).unwrap();
+    assert_eq!(logical.registers[0].reset.as_ref().unwrap().value, expected);
+    let legalized = logical.legalize_register_controls().unwrap();
+    let result = gate_sim::eval(
+        &legalized.transition,
+        &[
+            IrBits::bool(true),
+            IrBits::make_ubits(32, 0).unwrap(),
+            IrBits::make_ubits(32, 0xaabbccdd).unwrap(),
+        ],
+        Collect::None,
+    );
+    assert_eq!(
+        result.outputs,
+        vec![IrBits::make_ubits(32, 0xaabbccdd).unwrap(), expected]
+    );
+}
+
+#[test]
 fn output_port_unit_values_remain_usable_by_graph_nodes() {
     let block_ir = r#"package output_unit
 
@@ -168,6 +205,32 @@ top block pipe(clk: clock, rst: bits[1], data: bits[8], le: bits[1], out: bits[8
   out: () = output_port(state_q, name=out, id=7)
 }
 "#;
+
+    let logical =
+        block_ir_to_sequential_gate_fn_with_controls(block_ir, GatifyOptions::all_opts_disabled())
+            .unwrap();
+    let register = &logical.registers[0];
+    assert!(!register.enable.unwrap().active_low);
+    assert!(register.reset.as_ref().unwrap().control.active_low);
+    assert_eq!(
+        register.reset.as_ref().unwrap().value,
+        IrBits::make_ubits(8, 3).unwrap()
+    );
+    let raw = gate_sim::eval(
+        &logical.transition,
+        &[
+            IrBits::bool(false),
+            IrBits::make_ubits(8, 2).unwrap(),
+            IrBits::bool(false),
+            IrBits::make_ubits(8, 5).unwrap(),
+        ],
+        Collect::None,
+    );
+    // The disabled enable and asserted reset have not been applied to data.
+    assert_eq!(
+        raw.outputs[register.d.index()],
+        IrBits::make_ubits(8, 7).unwrap()
+    );
 
     let sequential = lower(block_ir);
 

@@ -63,7 +63,7 @@ pub fn handle_g8r_optimize(matches: &ArgMatches) -> Result<(), String> {
     let design = SequentialGateFn::from_gate_fn(outcome.gate_fn);
 
     if !parse_bool_flag_or(matches, "quiet", false) {
-        write_stdout(&emit_g8r(&design));
+        write_stdout(&emit_g8r(&design)?);
     }
 
     if let Some(path) = matches.get_one::<String>("bin_out") {

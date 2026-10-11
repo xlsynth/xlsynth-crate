@@ -2,6 +2,7 @@
 
 pub mod external_yosys;
 pub mod random_block;
+pub mod sequential_legalization;
 
 use std::time::Duration;
 

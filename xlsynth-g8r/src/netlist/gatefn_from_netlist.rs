@@ -1101,6 +1101,8 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
             AigBitVector::from_bit(d_operand),
         );
         registers.push(RegisterBinding {
+            enable: None,
+            reset: None,
             name: pending.register_name,
             q: pending.q,
             d: d_id,

@@ -32,6 +32,8 @@ fn make_pipeline_design() -> SequentialGateFn {
             name: "clk_main".to_string(),
         }),
         vec![RegisterBinding {
+            enable: None,
+            reset: None,
             name: "state".to_string(),
             q: TransitionInputId::new(1),
             d: TransitionOutputId::new(1),
