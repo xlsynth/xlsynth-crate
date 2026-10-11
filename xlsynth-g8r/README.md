@@ -83,6 +83,63 @@ state use the separate shared
 
 - `docs/g8r_lib_timing_design.md`: why Liberty loading has `Library` (no timing) vs `LibraryWithTimingData` and the observed ASAP7 size/load tradeoffs.
 
+## Sequential transition boundaries and cleanup
+
+`SequentialGateFn` represents a single-clock design as a combinational
+`transition: GateFn` and bindings for external ports and register Q/D ports.
+Synchronous enables and resets are already expressed in next-state logic; this
+representation does not introduce asynchronous reset or multiple clocks.
+
+`aig_serdes::sequential_transition::rebind_sequential_transition` restores the
+packed sequential interface after an ordinary AIGER round trip or external
+combinational optimization. Emit AIGER with symbols and retain every input and
+output bit, in order. Rebinding validates scalar names and counts, restores
+zero-width ports from the original schema, and rejects ambiguous flattened
+names. It preserves register identities and shared output bindings, but does not
+prove that replacement logic is equivalent. No external tool is invoked.
+
+`aig::sequential_cleanup::cleanup_sequential_gate_fn` removes dead, constant,
+and structurally equal/complementary register bits to a fixed point. The result
+contains a new design and reduction statistics; the input is unchanged. It
+preserves all external ports and the clock, compacts surviving packed register
+bits in original LSB order, and removes dead combinational logic. It is not
+retiming or general Boolean/sequential equivalence checking.
+
+Constant and duplicate substitutions propagate through affected fanouts before
+reconstruction, avoiding a full rebuild per stage of a duplicate register chain.
+This does not add an unconditional combinational normalization pass; normal
+structurally hashed lowering and external optimization retain their sharing.
+
+All register startup values are unspecified. Cleanup uses synthesis-don't-care
+semantics: it may replace constant-D state with a constant or merge equal and
+complementary D expressions, restricting possible startup behavior. It must
+preserve effective next-state behavior, including synchronous reset and enable
+logic. Designs must not depend on independent power-up values. This is not
+cycle-zero equivalence for independently sampled source and result state.
+Cleanup is optional: retaining the original design retains all registers.
+
+Cleanup and transition rebinding require `validate_legalized()` and reject
+explicit reset/enable fields. Control-aware cleanup before legalization is a
+separate future pass.
+
+The cleanup fuzzer generates resettable block IR, lowers its reset logic to
+G8R, and compares an independent block evaluator, the original G8R, and cleaned
+G8R after a reset edge. Focused tests cover unreset data masked by resettable
+valid state. Arbitrary partially reset feedback graphs are not yet covered by
+that reset-based oracle.
+
+```rust,ignore
+use xlsynth_g8r::aig::sequential_cleanup::cleanup_sequential_gate_fn;
+use xlsynth_g8r::aig_serdes::sequential_transition::rebind_sequential_transition;
+
+let rebound = rebind_sequential_transition(&original, &optimized_transition)?;
+let cleaned = cleanup_sequential_gate_fn(&rebound)?;
+// Use cleaned.design as the source of both the next transition graph and
+// its register metadata. The old register bindings are no longer applicable.
+```
+
+These APIs require no ABC, Yosys, or Liberty library.
+
 ## External Yosys APIs
 
 `netlist::yosys::YosysToolchain` validates an executable and runs scripts with

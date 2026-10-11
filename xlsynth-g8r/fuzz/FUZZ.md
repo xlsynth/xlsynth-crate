@@ -9,6 +9,31 @@ including flip-flop cells for sequential checks. A full PDK is unnecessary.
 See [Liberty configuration](../../xlsynth-codegen/fuzz/FUZZ.md#liberty-configuration)
 for the shared setup, including an ASAP7 configuration example.
 
+## `fuzz_sequential_cleanup_equiv`
+
+Generates synchronous block IR with reset values on every register and at least
+one observable output, lowers it to
+G8R, and compares an independent block evaluator, original G8R, and cleaned G8R.
+Each sample uses eight independent startup assignments and 16 cycles. Reset is
+asserted across the first clock edge and occasionally later; cleaned outputs are
+compared only after the first edge. Original lowering is checked on every cycle,
+including its register state. Also checks packed interfaces, reduction counts,
+determinism, and idempotence. This catches reset/enable priority errors, unsound
+state substitutions, and reconstruction bugs without requiring a state mapping.
+No solver, external synthesis tool, or PDK is needed. The generator is generic
+within the fully resettable domain; it does not inject special cleanup motifs.
+The smoke sweep requires dead, constant, and duplicate removal to be exercised.
+Reserving an output before constructing the body prevents vacuous output checks
+when generation exhausts its node or entropy budget.
+
+The oracle does not cover arbitrary partially reset feedback graphs. Focused
+unit tests cover unreset data masked by resettable valid state and unreset
+substitutions with corresponding startup assignments.
+
+```sh
+cargo fuzz run --sanitizer none fuzz_sequential_cleanup_equiv -- -max_total_time=300
+```
+
 ## `fuzz_random_block_g8r_equiv`
 
 Directly generates random block IR, lowers supported synchronous blocks to

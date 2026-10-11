@@ -3,6 +3,7 @@
 pub mod direct_g8r;
 pub mod external_yosys;
 pub mod random_block;
+pub mod sequential_cleanup;
 pub mod sequential_legalization;
 pub mod serdes_roundtrip;
 
