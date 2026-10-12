@@ -531,26 +531,29 @@ fn simple_identifier(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Rejects unrepresentable names and collisions in the emitted port namespace.
 fn validate_names(design: &SequentialGateFn) -> Result<(), String> {
-    let names = std::iter::once(design.name.as_str())
-        .chain(
-            design
-                .inputs
-                .iter()
-                .map(|id| design.transition.inputs[id.index()].name.as_str()),
-        )
-        .chain(
-            design
-                .outputs
-                .iter()
-                .map(|id| design.transition.outputs[id.index()].name.as_str()),
-        )
-        .chain(design.clock.iter().map(|c| c.name.as_str()));
-    for name in names {
+    // Module names have their own namespace, and zero-width logical ports are
+    // not emitted. Validate their spelling without reserving a physical port.
+    let names = std::iter::once((design.name.as_str(), false))
+        .chain(design.inputs.iter().map(|id| {
+            let port = &design.transition.inputs[id.index()];
+            (port.name.as_str(), port.get_bit_count() != 0)
+        }))
+        .chain(design.outputs.iter().map(|id| {
+            let port = &design.transition.outputs[id.index()];
+            (port.name.as_str(), port.get_bit_count() != 0)
+        }))
+        .chain(design.clock.iter().map(|c| (c.name.as_str(), true)));
+    let mut physical_ports = BTreeSet::new();
+    for (name, physical_port) in names {
         if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err(format!(
                 "name cannot be represented as a Verilog identifier: {name:?}"
             ));
+        }
+        if physical_port && !physical_ports.insert(name) {
+            return Err(format!("duplicate external port or clock name: {name:?}"));
         }
     }
     Ok(())

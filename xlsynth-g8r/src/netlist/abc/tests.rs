@@ -272,7 +272,7 @@ echo 'module mapped(); endmodule' > mapped.v
 }
 
 #[test]
-fn assembly_escapes_all_reserved_external_port_names() {
+fn assembly_escapes_reserved_external_port_names() {
     for name in [
         "reg",
         "logic",
@@ -283,18 +283,94 @@ fn assembly_escapes_all_reserved_external_port_names() {
         "initial",
         "generate",
         "genvar",
+        "case",
+        "begin",
+        "end",
+        "function",
+        "buf",
     ] {
         let text = format!("module top(\\{name} ); input \\{name} ; endmodule");
         let parsed = read_gv_from_str(&text).unwrap();
         let emitted =
             emit_module_as_netlist_text(&parsed.modules[0], &parsed.nets, &parsed.interner)
                 .unwrap();
+        assert_eq!(
+            emitted,
+            format!("module top(\\{name} );\n  input \\{name} ;\nendmodule\n")
+        );
         let reread = read_gv_from_str(&emitted).unwrap();
         assert_eq!(
             reread.interner.resolve(reread.modules[0].ports[0].name),
             Some(name)
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn mapping_rejects_all_physical_port_name_collisions_before_abc() {
+    let temp = tempfile::tempdir().unwrap();
+    let raw = temp.path().join("cells.lib");
+    std::fs::write(&raw, "library(test) {}").unwrap();
+    let context = AbcMappingContext::new(
+        AbcToolchain::new("/usr/bin/true").unwrap(),
+        &[raw],
+        library(),
+    )
+    .unwrap();
+    // All pairings: input/input, output/output, input/output, and either with
+    // the clock. ABC would fail to emit a netlist if validation let one
+    // through.
+    for first in 0..5 {
+        for second in first + 1..5 {
+            let mut names = ["a", "b", "y", "z", "clk"];
+            names[second] = names[first];
+            let mut b = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
+            let a = b.add_input(names[0].into(), 2);
+            let other = b.add_input(names[1].into(), 2);
+            b.add_output(names[2].into(), a);
+            b.add_output(names[3].into(), other);
+            let mut design = SequentialGateFn::from_gate_fn(b.build());
+            design.clock = Some(ClockPort {
+                name: names[4].into(),
+            });
+            design.validate_legalized().unwrap();
+            for cleanup_registers in [false, true] {
+                let error = context
+                    .map_sequential(
+                        &design,
+                        &AbcMappingOptions {
+                            cleanup_registers,
+                            ..Default::default()
+                        },
+                    )
+                    .err()
+                    .expect("colliding physical ports must be rejected");
+                assert_eq!(
+                    error.to_string(),
+                    format!("duplicate external port or clock name: {:?}", names[first])
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn name_validation_ignores_nonphysical_names_for_uniqueness() {
+    let mut b = GateBuilder::new("a".into(), GateBuilderOptions::no_opt());
+    let zero = b.add_input("a".into(), 0);
+    let a = b.add_input("a".into(), 2);
+    b.add_output("a".into(), zero);
+    b.add_output("y".into(), a);
+    let combo = SequentialGateFn::from_gate_fn(b.build());
+    combo.validate_legalized().unwrap();
+    validate_names(&combo).unwrap();
+
+    let mut registered = design();
+    registered.transition.inputs[1].name = registered.transition.inputs[0].name.clone();
+    registered.name = registered.transition.inputs[0].name.clone();
+    registered.validate_legalized().unwrap();
+    validate_names(&registered).unwrap();
 }
 
 #[cfg(unix)]
@@ -310,8 +386,9 @@ fn zero_width_and_clock_only_designs_need_no_abc_network() {
     )
     .unwrap();
     let mut b = GateBuilder::new("empty".into(), GateBuilderOptions::no_opt());
-    let a = b.add_input("empty_input".into(), 0);
-    b.add_output("empty_output".into(), a);
+    // Zero-width logical ports may share the physical clock's name.
+    let a = b.add_input("clk".into(), 0);
+    b.add_output("clk".into(), a);
     let mut design = SequentialGateFn::from_gate_fn(b.build());
     design.clock = Some(ClockPort { name: "clk".into() });
     let result = context

@@ -10,6 +10,7 @@ use std::fmt::Write as FmtWrite;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 use xlsynth_pir::IrBits;
+use xlsynth_vast::is_system_verilog_keyword;
 
 fn resolve_symbol(
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -49,30 +50,8 @@ fn is_simple_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
-fn is_keyword(s: &str) -> bool {
-    matches!(
-        s,
-        "wire"
-            | "module"
-            | "endmodule"
-            | "input"
-            | "output"
-            | "inout"
-            | "assign"
-            | "reg"
-            | "logic"
-            | "always"
-            | "always_ff"
-            | "always_comb"
-            | "always_latch"
-            | "initial"
-            | "generate"
-            | "genvar"
-    )
-}
-
 fn render_identifier(name: &str) -> String {
-    if is_simple_identifier(name) && !is_keyword(name) {
+    if is_simple_identifier(name) && !is_system_verilog_keyword(name) {
         name.to_string()
     } else {
         format!("\\{} ", name)
@@ -382,6 +361,41 @@ mod tests {
     }
 
     #[test]
+    fn emitter_uses_the_shared_keyword_set_and_preserves_case() {
+        for name in [
+            "case",
+            "begin",
+            "end",
+            "function",
+            "buf",
+            "fork",
+            "alias",
+            "before",
+            "binsof",
+            "checker",
+            "endchecker",
+            "endinterface",
+            "soft",
+            "nettype",
+        ] {
+            assert_eq!(render_identifier(name), format!("\\{name} "));
+        }
+        for name in ["CASE", "Begin", "buf_cell", "nettype_", "_alias"] {
+            assert_eq!(render_identifier(name), name);
+        }
+    }
+
+    #[test]
+    fn emitter_escapes_keywords_in_every_identifier_role() {
+        let source = r#"module \case (\begin , \end );
+            input \begin ; output \end ; wire \function ;
+            assign \end = \function ;
+            \buf \fork (.\input (\begin ), .\output (\function ));
+            endmodule"#;
+        assert_emitted_golden_round_trip(source, include_str!("keyword_identifiers.golden.v"));
+    }
+
+    #[test]
     fn emitter_round_trips_signal_aliases_and_constant_assignments() {
         let source = r#"
 module top(a, y, alias, tied);
@@ -394,15 +408,15 @@ module top(a, y, alias, tied);
   assign tied = 1'b0;
 endmodule
 "#;
-        let expected = r#"module top(a, y, alias, tied);
+        let expected = r#"module top(a, y, \alias , tied);
   input a;
   output y;
-  output alias;
+  output \alias ;
   output tied;
   wire internal;
   assign internal = a;
   assign y = internal;
-  assign alias = y;
+  assign \alias  = y;
   assign tied = 1'b0;
 endmodule
 "#;
