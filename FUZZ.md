@@ -310,11 +310,14 @@ from source.
 
 Builds a random `GateFn`, serializes to text, parses it back, and checks structural equivalence of the original vs parsed `GateFn`.
 
-The shared `FuzzGraph` builder uses a separate fuzzed seed for output wiring.
+The shared `gate_random::generate_gate_design` engine reserves a separate
+fuzzed seed for output wiring. The combinational profile disables registers.
 Its first output selects a generated operation when one exists; additional
 outputs can select any input or operation. This also gives the gate transform
 targets observable generated logic instead of systematically selecting inputs.
 Builder optimizations can still simplify selected operations to inputs or constants.
+All stored nodes, including dead logic, are serialized; parse failures are sample
+failures rather than silently skipped.
 
 Primarily tests:
 
@@ -637,4 +640,87 @@ Run from `xlsynth-g8r` with:
 
 ```shell
 cargo fuzz run --sanitizer none fuzz_sequential_legalization_equiv -- -max_total_time=300
+```
+
+## Shared direct-G8R generation
+
+All direct graph consumers use the library API
+`xlsynth_g8r::gate_random::generate_gate_design` with `RandomGateOptions`.
+The previous general `FuzzGraph` builder and bulk-replacement-only
+`FuzzGateGraph` builder have been removed. Function/block-IR-derived targets
+continue to use the IR generators; they provide complementary lowering coverage.
+
+Profiles control interface counts and packed widths (including zero widths),
+the actual AIG-node budget, Boolean construction operations, folding/hashing,
+optional registers and control polarities, endpoint sharing, and output
+observability. Optional chain, redundant-pair, and fanout distributions are
+disabled by default and explicitly enabled only by the bulk-replacement target.
+Seeded RNG sweeps (independent of libFuzzer guidance) require emitted and live
+coverage of all enabled Boolean operations, varied interface shapes/widths,
+feedback and feedforward state, all reset/enable combinations, both polarities,
+and shared nonempty data/control endpoints. Data wiring samples both whole-port
+reuse and independently selected bits.
+
+Graph entropy is separate from the shared `xlsynth_pir::random_inputs` sampler
+used for concrete inputs and startup state.
+
+Text/AIGER round trips, both gate-transform targets, cut rewriting, dynamic
+hashing/depth, cut replacement, and bulk substitution use the combinational
+profile. Their input schema is now byte-stream graph entropy rather than the
+older derived graph-description structs; old corpus bytes remain usable but
+do not necessarily reconstruct their previous graph. Edit/substitution
+sequences remain target-specific inputs.
+
+## `fuzz_direct_g8r_sequential_equiv`
+
+Directly generates bounded sequential AIGs without an IR lowering step, including
+packed state, feedback, optional resets/enables, both control polarities, shared
+endpoints, constants, dead logic, and zero-width values. It round-trips both
+native formats and compares their metadata and cycle-by-cycle outputs/state,
+then compares the legalized design from the same arbitrary initial values.
+Each sample uses four startups and twelve cycles, including cycle zero, without
+a reset warm-up. It detects lost controls, polarity/priority mistakes, incorrect
+holds or feedback, serialization corruption, and non-idempotent legalization.
+The smoke test checks that state and both polarities actually occur. The block-IR
+legalization target remains separate to provide an independent block oracle.
+
+```shell
+cargo fuzz run --sanitizer none fuzz_direct_g8r_sequential_equiv -- -max_total_time=300
+```
+
+## `fuzz_blif_roundtrip`
+
+Uses the shared direct-G8R generator for both combinational and sequential
+samples, including packed ports/state, feedback, shared endpoints, and optional
+reset/enable controls of either polarity. It legalizes controls into effective-D
+logic before BLIF emission, parses the emitted file, and repeats the round trip.
+Port names/order/widths, register names/order/widths, and the clock must survive.
+Across four arbitrary startup states and twelve cycles, outputs and every
+register's next state must match the explicit-control source and legalized graph
+from cycle zero, with no reset warm-up. The profile excludes zero-width ports
+and registers because plain BLIF cannot represent them, but permits empty
+interfaces. Unexpected emission or parsing failures fail the sample. This
+catches lost aliases, latch/bit ordering errors, polarity mistakes, and lost
+control behavior. A seeded smoke sweep checks combinational, registered,
+controlled, both-polarity, and packed-interface coverage.
+
+```shell
+cargo fuzz run --sanitizer none fuzz_blif_roundtrip -- -max_total_time=300
+```
+
+## `fuzz_gate_fn_aiger_binary_roundtrip`
+
+Uses the same generator without registers to round-trip binary AIGER with and
+without symbol tables. It checks the binary parser and automatic format
+selection, restores packed ports with the original interface schema, and checks
+structural equivalence, deterministic emission, repeated round trips, and
+simulation on sixteen shared mixed-distribution input vectors per symbol mode. Zero-width ports,
+empty interfaces, constants, and dead logic are included. This catches varint
+and literal encoding errors, parser disagreement, lost port grouping, and bit
+ordering mistakes. A seeded smoke sweep verifies that zero-width/packed ports
+and nontrivial logic are exercised. These are valid-graph round trips, not
+malformed-byte parser fuzzing.
+
+```shell
+cargo fuzz run --sanitizer none fuzz_gate_fn_aiger_binary_roundtrip -- -max_total_time=300
 ```

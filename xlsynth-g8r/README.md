@@ -54,6 +54,31 @@ explicitly requested all-zero test state). Native formats are
 `g8r_v4`/`g8rbin_v4` and preserve explicit controls. Older versions and explicit
 BLIF latch initial values are rejected rather than silently discarded.
 
+## Random direct G8R generation
+
+`gate_random::generate_gate_design` accepts the same `EntropySource` interface
+as the PIR generators (`DepletableBytes` for fuzzing or `RngEntropy` for seeded
+sampling). It returns a validated `SequentialGateFn` and its builder policy.
+
+`RandomGateOptions` controls port/register count and width ranges, the actual
+AIG-node budget, AND/OR/XOR/XNOR/mux construction, folding and hashing, constants,
+optional synchronous reset/enable metadata and polarity, endpoint reuse, and
+output observability. Setting `registers: 0..=0` gives the combinational profile;
+use `try_into_gate_fn()` when a consumer needs `GateFn`. Explicit controls remain
+unlegalized. Width ranges starting at zero permit zero-width ports/state.
+
+Structural stress options (chains, redundant pairs, and fanout) are opt-in and
+off by default. The generic generator does not inject target-specific bug
+patterns. It keeps the transition DAG topological, preserves Q/D feedback as
+sequential boundaries, and reserves output-wiring entropy before consuming the
+body stream. Invalid option combinations return errors rather than rejected
+samples. Generated operation statistics report both emitted requests and newly
+created operation roots that remain live. Fixed-seed RNG coverage sweeps check
+operator liveness, interface bounds and widths, feedback, control combinations,
+polarities, and nonempty endpoint aliases. Concrete input values and initial
+state use the separate shared
+`xlsynth_pir::random_inputs` library.
+
 ## Additional docs
 
 - `docs/g8r_lib_timing_design.md`: why Liberty loading has `Library` (no timing) vs `LibraryWithTimingData` and the observed ASAP7 size/load tradeoffs.

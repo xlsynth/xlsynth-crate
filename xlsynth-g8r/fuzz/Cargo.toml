@@ -48,6 +48,24 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_direct_g8r_sequential_equiv"
+path = "fuzz_targets/fuzz_direct_g8r_sequential_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_blif_roundtrip"
+path = "fuzz_targets/fuzz_blif_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_gate_fn_aiger_binary_roundtrip"
+path = "fuzz_targets/fuzz_gate_fn_aiger_binary_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_sequential_legalization_equiv"
 path = "fuzz_targets/fuzz_sequential_legalization_equiv.rs"
 test = false

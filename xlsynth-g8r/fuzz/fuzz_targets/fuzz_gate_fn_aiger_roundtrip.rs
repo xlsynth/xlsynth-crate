@@ -7,14 +7,15 @@ use xlsynth_g8r::aig_serdes::gate2ir::{
     GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
 };
 use xlsynth_g8r::aig_serdes::load_aiger::load_aiger;
+use xlsynth_g8r::gate_random::RandomGateOptions;
 use xlsynth_g8r::test_utils::structurally_equivalent;
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
+use xlsynth_g8r_fuzz::direct_g8r::generate_combinational;
 
-fuzz_target!(|graph: FuzzGraph| {
+fuzz_target!(|graph: &[u8]| {
     let _ = env_logger::builder().is_test(true).try_init();
-    let Some(g) = build_graph(&graph) else {
-        return;
-    };
+    let g = generate_combinational(graph, &RandomGateOptions::default())
+        .expect("valid bounded combinational generator options")
+        .graph;
 
     let aiger = match emit_aiger(&g, true) {
         Ok(t) => t,

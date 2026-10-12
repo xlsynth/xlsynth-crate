@@ -6,32 +6,22 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 
+use xlsynth_g8r::gate_random::RandomGateOptions;
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use xlsynth_g8r::prove_gate_fn_equiv_sat::{
     ValidationError, prove_gate_fn_equiv_with_backend_and_options,
 };
 use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph, fuzz_gate_formal_options};
+use xlsynth_g8r_fuzz::direct_g8r::generate_combinational;
+use xlsynth_g8r_fuzz::fuzz_gate_formal_options;
 
 // Each successful step runs gate-level equivalence checks twice, so bound the
 // transform sequence to keep one fuzz input comfortably short.
 const NUM_STEPS: usize = 8;
 const MAX_TRANSFORM_DRAWS: usize = NUM_STEPS * 32;
 
-fn make_rng(graph: &FuzzGraph) -> StdRng {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[graph.num_inputs]);
-    hasher.update(&[graph.input_width]);
-    hasher.update(&[graph.num_ops]);
-    hasher.update(&[graph.num_outputs]);
-    hasher.update(&[u8::from(graph.use_opt)]);
-    hasher.update(&(graph.ops.len() as u64).to_le_bytes());
-    for op in &graph.ops {
-        hasher.update(&op.lhs.to_le_bytes());
-        hasher.update(&op.rhs.to_le_bytes());
-        hasher.update(&[u8::from(op.lhs_neg), u8::from(op.rhs_neg)]);
-    }
-    StdRng::from_seed(*hasher.finalize().as_bytes())
+fn make_rng(graph: &[u8]) -> StdRng {
+    StdRng::from_seed(*blake3::hash(graph).as_bytes())
 }
 
 /// Proves gate equivalence while allowing configured fuzz timeouts to skip a
@@ -52,17 +42,16 @@ fn prove_with_fuzz_timeout(
     }
 }
 
-fuzz_target!(|graph: FuzzGraph| {
+fuzz_target!(|graph: &[u8]| {
     // Respect `RUST_LOG` so callers can choose quiet or verbose fuzz runs.
     let _ = env_logger::Builder::from_env(env_logger::Env::default())
         .is_test(true)
         .try_init();
 
     // Build an initial GateFn from the fuzzed graph description.
-    let Some(mut cur_g) = build_graph(&graph) else {
-        log::info!("Rejected graph: could not build");
-        return;
-    };
+    let mut cur_g = generate_combinational(graph, &RandomGateOptions::default())
+        .expect("valid bounded combinational generator options")
+        .graph;
 
     let orig_g = cur_g.clone();
 
@@ -72,7 +61,7 @@ fuzz_target!(|graph: FuzzGraph| {
         log::info!("No transforms available – skipping input");
         return;
     }
-    let mut rng = make_rng(&graph);
+    let mut rng = make_rng(graph);
 
     let mut attempts = 0usize;
     for _draw in 0..MAX_TRANSFORM_DRAWS {
@@ -114,7 +103,8 @@ fuzz_target!(|graph: FuzzGraph| {
             return;
         };
 
-        // If the transform is claimed to be always-equivalent, equivalence must hold.
+        // If the transform is claimed to be always-equivalent, equivalence must
+        // hold.
         if t.always_equivalent() && !matches!(cur_next, EquivResult::Proved) {
             log::info!(
                 "ALWAYS-EQUIV transform {} produced inequivalence; panicking",

@@ -18,6 +18,7 @@ pub mod dslx_stitch_pipeline;
 pub mod gate_builder;
 pub mod gate_fn_equiv_report;
 pub mod gate_fn_optimize;
+pub mod gate_random;
 pub mod ir2gate_utils;
 pub mod ir2gates;
 pub mod ir_toggle_hotspots;
