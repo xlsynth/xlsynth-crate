@@ -125,8 +125,15 @@ pub fn emit_blif(design: &SequentialGateFn) -> Result<String, String> {
 
     let mut node_nets = source_node_nets(design, &layout)?;
     for operand in design.transition.post_order_operands(true) {
+        // The traversal distinguishes edge polarities, but BLIF defines each
+        // underlying node once; inversion belongs in its consumers' covers.
+        if node_nets.contains_key(&operand.node.id) {
+            continue;
+        }
         match design.transition.get(operand.node) {
-            AigNode::Input { .. } => {}
+            AigNode::Input { .. } => {
+                // Source nodes already have nets and are skipped above.
+            }
             AigNode::Literal { value, .. } => {
                 let output = logic_node_net(operand.node.id);
                 writeln!(&mut text, ".names {}", output).unwrap();
@@ -333,7 +340,10 @@ fn make_emission_layout(design: &SequentialGateFn) -> Result<EmissionLayout, Str
                 .map(|bit| register_q_net(register.name.as_str(), bit))
                 .collect(),
         });
-        transition_outputs[register.d.index()] = Some(BlifPort {
+        // A D endpoint may also be external or feed another register. Retain
+        // its existing net identity; latch inputs need not use a D-specific
+        // name.
+        transition_outputs[register.d.index()].get_or_insert_with(|| BlifPort {
             name: d.name.clone(),
             nets: (0..d.get_bit_count())
                 .map(|bit| register_d_net(register.name.as_str(), bit))
