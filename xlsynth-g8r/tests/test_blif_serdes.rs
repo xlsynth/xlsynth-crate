@@ -5,12 +5,96 @@ use xlsynth_g8r::aig::{
     TransitionOutputId,
 };
 use xlsynth_g8r::aig_serdes::blif::{emit_blif, emit_gate_fn_blif, parse_blif, parse_gate_fn_blif};
+use xlsynth_g8r::aig_sim::gate_sim::{Collect, eval};
+use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
 use xlsynth_g8r::block2sequential::block_ir_to_sequential_gate_fn;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::test_utils::{
     interesting_ir_roundtrip_cases, load_interesting_ir_roundtrip_case, structurally_equivalent,
 };
+use xlsynth_pir::IrBits;
+
+#[test]
+fn blif_roundtrip_emits_each_node_once_for_both_polarities() {
+    let mut builder = GateBuilder::new("both_polarities".into(), GateBuilderOptions::no_opt());
+    let data = builder.add_input("data".into(), 2);
+    let value = builder.add_and_binary(*data.get_lsb(0), *data.get_lsb(1));
+    builder.add_output(
+        "out".into(),
+        AigBitVector::from_lsb_is_index_0(&[
+            value,
+            value.negate(),
+            builder.get_false(),
+            builder.get_true(),
+        ]),
+    );
+    let original = builder.build();
+    let decoded = parse_gate_fn_blif(&emit_gate_fn_blif(&original).unwrap()).unwrap();
+    for value in 0..4 {
+        let inputs = [IrBits::make_ubits(2, value).unwrap()];
+        assert_eq!(
+            eval(&original, &inputs, Collect::None).outputs,
+            eval(&decoded, &inputs, Collect::None).outputs
+        );
+    }
+}
+
+#[test]
+fn blif_roundtrip_preserves_external_output_shared_by_register_data() {
+    let mut builder = GateBuilder::new("shared_data".into(), GateBuilderOptions::no_opt());
+    let data = builder.add_input("data".into(), 2);
+    builder.add_input("a__q".into(), 2);
+    builder.add_input("b__q".into(), 2);
+    builder.add_output("out".into(), data);
+    let original = SequentialGateFn::new(
+        "shared_data".into(),
+        builder.build(),
+        vec![TransitionInputId::new(0)],
+        vec![TransitionOutputId::new(0)],
+        Some(ClockPort { name: "clk".into() }),
+        ["a", "b"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| RegisterBinding {
+                name: name.into(),
+                q: TransitionInputId::new(index + 1),
+                d: TransitionOutputId::new(0),
+                enable: None,
+                reset: None,
+            })
+            .collect(),
+    )
+    .unwrap();
+    let decoded = parse_blif(&emit_blif(&original).unwrap()).unwrap();
+    let output = &decoded.transition.outputs[decoded.outputs[0].index()];
+    assert_eq!(output.name, "out");
+    assert_eq!(output.get_bit_count(), 2);
+    assert_eq!(
+        decoded
+            .registers
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let initial = vec![
+        IrBits::make_ubits(2, 1).unwrap(),
+        IrBits::make_ubits(2, 2).unwrap(),
+    ];
+    let mut original_state =
+        SequentialState::from_register_values(&original, initial.clone()).unwrap();
+    let mut decoded_state = SequentialState::from_register_values(&decoded, initial).unwrap();
+    for value in 0..4 {
+        let inputs = vec![vec![IrBits::make_ubits(2, value).unwrap()]];
+        let expected = simulate(&original, &inputs, original_state).unwrap();
+        let actual = simulate(&decoded, &inputs, decoded_state).unwrap();
+        assert_eq!(actual.external_outputs(), expected.external_outputs());
+        assert_eq!(actual.final_state(), expected.final_state());
+        original_state = expected.final_state().clone();
+        decoded_state = actual.final_state().clone();
+    }
+}
 
 fn make_pipeline_design() -> SequentialGateFn {
     let mut builder = GateBuilder::new(

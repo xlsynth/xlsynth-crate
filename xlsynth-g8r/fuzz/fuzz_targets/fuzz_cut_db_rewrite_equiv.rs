@@ -7,16 +7,18 @@ use std::sync::OnceLock;
 
 use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
 use xlsynth_g8r::cut_db::loader::CutDb;
+use xlsynth_g8r::gate_random::RandomGateOptions;
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use xlsynth_g8r::prove_gate_fn_equiv_sat::{
     ValidationError, prove_gate_fn_equiv_with_backend_and_options,
 };
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph, fuzz_gate_formal_options};
+use xlsynth_g8r_fuzz::direct_g8r::generate_combinational;
+use xlsynth_g8r_fuzz::fuzz_gate_formal_options;
 
 static CUT_DB_BYTES: &[u8] = include_bytes!("../../data/cut_db_v1.bin");
 static CUT_DB: OnceLock<CutDb> = OnceLock::new();
 
-fuzz_target!(|graph: FuzzGraph| {
+fuzz_target!(|graph: &[u8]| {
     // Enable logs inside fuzz runs for diagnostics when something fails.
     let _ = env_logger::builder()
         .is_test(true)
@@ -25,11 +27,9 @@ fuzz_target!(|graph: FuzzGraph| {
         .filter_level(log::LevelFilter::Warn)
         .try_init();
 
-    let Some(orig_g) = build_graph(&graph) else {
-        // Degenerate/unbuildable graph samples are not informative for rewrite
-        // soundness.
-        return;
-    };
+    let orig_g = generate_combinational(graph, &RandomGateOptions::default())
+        .expect("valid bounded combinational generator options")
+        .graph;
 
     let db = CUT_DB.get_or_init(|| {
         CutDb::load_from_reader(CUT_DB_BYTES).unwrap_or_else(|e| {

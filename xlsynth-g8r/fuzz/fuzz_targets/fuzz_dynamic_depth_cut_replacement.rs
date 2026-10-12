@@ -9,7 +9,8 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::dynamic_depth::DynamicDepthState;
 use xlsynth_g8r::aig::dynamic_structural_hash::DynamicStructuralHash;
 use xlsynth_g8r::aig::{AigNode, AigOperand, AigRef};
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
+use xlsynth_g8r::gate_random::RandomGateOptions;
+use xlsynth_g8r_fuzz::direct_g8r::generate_combinational;
 
 const MAX_STEPS: usize = 32;
 const MAX_CUT_EXPANSIONS: usize = 8;
@@ -18,7 +19,7 @@ const MAX_FRAGMENT_OPS: usize = 8;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct CutReplacementSample {
-    graph: FuzzGraph,
+    graph: Vec<u8>,
     steps: Vec<CutReplacementStep>,
 }
 
@@ -125,11 +126,9 @@ fuzz_target!(|sample: CutReplacementSample| {
         .is_test(true)
         .try_init();
 
-    // Some arbitrary graph descriptions are outside the fuzz graph builder's
-    // supported shape; those are generator misses, not depth-state failures.
-    let Some(g) = build_graph(&sample.graph) else {
-        return;
-    };
+    let g = generate_combinational(&sample.graph, &RandomGateOptions::default())
+        .expect("valid bounded combinational generator options")
+        .graph;
     let mut hash =
         DynamicStructuralHash::new(g).expect("initial dynamic structural hash should build");
     let mut depth =

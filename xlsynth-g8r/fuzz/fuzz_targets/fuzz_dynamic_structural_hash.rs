@@ -6,13 +6,14 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::dynamic_structural_hash::{DynamicStructuralHash, EdgeRef};
 use xlsynth_g8r::aig::{AigNode, AigOperand, AigRef};
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
+use xlsynth_g8r::gate_random::RandomGateOptions;
+use xlsynth_g8r_fuzz::direct_g8r::generate_combinational;
 
 const MAX_STEPS: usize = 128;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct EditSample {
-    graph: FuzzGraph,
+    graph: Vec<u8>,
     ops: Vec<EditOp>,
 }
 
@@ -86,9 +87,9 @@ fuzz_target!(|sample: EditSample| {
 
     // Some arbitrary graph descriptions are outside the fuzz graph builder's
     // supported shape; those are generator misses, not dynamic-hash failures.
-    let Some(g) = build_graph(&sample.graph) else {
-        return;
-    };
+    let g = generate_combinational(&sample.graph, &RandomGateOptions::default())
+        .expect("valid bounded combinational generator options")
+        .graph;
     let mut state = DynamicStructuralHash::new(g).expect("initial dynamic hash should build");
     state
         .check_invariants()
