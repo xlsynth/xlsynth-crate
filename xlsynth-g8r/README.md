@@ -147,6 +147,16 @@ the complete source syntax. The current format requires regeneration from raw
 Liberty for older protos: those artifacts may have silently omitted functional
 attributes. Both binary and textproto loaders check the format discriminator.
 
+Functional interpretation assumes normal powered-on operation. The importer
+intentionally ignores `power_down_function` on pins and sequential groups
+(`ff`, `latch`, and their bank forms): power-off output/state corruption is
+outside this model. This also applies when characterization power data is
+included; including power tables does not enable power-aware functional
+simulation. Other unsupported normal-operation semantics remain rejected.
+Protos previously imported with a `power_down_function` rejection marker must
+be regenerated from source to make those cells usable; the wire format is
+unchanged.
+
 Supported source normalization includes scalar `ff`/`latch`, `ff_bank` and
 `latch_bank`, bundles with explicit member order, shared scalar controls, and
 multi-name pin groups. Banks become per-bit state equations within the same
@@ -182,6 +192,50 @@ libraries are merged. Values are optional, finite, nonnegative, and expressed
 in the library's units; explicit zero is not absence. Fanout is the sum of sink
 `fanout_load` values, not necessarily pin count. These fields preserve scalar
 electrical constraints; timing/resizing consumers must enforce them separately.
+
+## Liberty register mapping
+
+`netlist::register_mapping::RegisterMappingLibrary` builds a reusable FF catalog
+from the normalized Liberty `Library`. It requires no timing tables. Selection
+uses the smallest physical FF area, then prefers no data inversion, followed by
+cell name, output pin, data pin, and control tie-offs for deterministic ties.
+`RegisterCellSelection::FixedCell` requires a named supported cell without
+fallback; unsupported sequential cells have inspectable rejection diagnostics.
+FF area does not include the cost of any required data inverter.
+
+The initial subset is one-bit, positive-edge synchronous FFs. Latches, multi-state
+cells, asynchronous clear/preset cells, gated or ambiguous clocks, `dont_use`
+cells, invalid areas, and malformed pin/state metadata are excluded. Unsupported
+functional semantics flagged by the Liberty importer are also rejected; they
+cannot be enabled by a fixed-cell override. Extra
+scan/enable inputs may be tied only when exhaustive evaluation proves that the
+cell's next state reduces to D or !D for both previous-state values. Search is
+bounded to eight tied inputs. Q and QN are recognized from their Boolean
+functions, not pin names, including explicitly declared complementary state.
+
+`map_registers` returns a `RegisterMappingPlan`: a shared cell binding plus one
+physical FF assignment per logical register bit, in register/LSB order. Port IDs
+refer to the supplied design; mapping does not mutate it or perform register
+cleanup. The selected output connects directly to logical Q. When `invert_data`
+is true, the physical data pin must receive !D; otherwise it receives D. Every
+other input must receive its recorded tie-off, and unused outputs remain open.
+The caller must materialize these connections during combinational mapping and
+netlist assembly; the plan itself is not an emitted netlist.
+
+Mapping requires `validate_legalized()`: call `legalize_register_controls()` to
+fold explicit reset/enable fields into effective D logic first. Power-up state
+remains unspecified. Zero-bit/state-free designs require no FF cell.
+Register sizing, ABC invocation, full netlist reconstruction, and CLI integration
+are intentionally outside this API.
+
+```rust,ignore
+use xlsynth_g8r::netlist::register_mapping::{RegisterCellSelection, RegisterMappingLibrary};
+
+let cells = RegisterMappingLibrary::new(&library)?;
+let legalized = design.legalize_register_controls()?;
+let plan = cells.map_registers(&legalized, &RegisterCellSelection::SmallestArea)?;
+// Or use RegisterCellSelection::FixedCell("DFF".to_string()).
+```
 
 ## External Yosys APIs
 

@@ -108,6 +108,67 @@ fn scan_equations_and_explicit_clock_annotations_roundtrip() {
 }
 
 #[test]
+fn power_down_metadata_does_not_change_powered_on_proto_in_any_payload_mode() {
+    for (kind, controls) in [
+        ("", ""),
+        ("ff", r#"clocked_on: "CLK"; next_state: "D";"#),
+        ("latch", r#"enable: "CLK"; data_in: "D";"#),
+        ("ff_bank", r#"clocked_on: "CLK"; next_state: "D";"#),
+        ("latch_bank", r#"enable: "CLK"; data_in: "D";"#),
+    ] {
+        let source = |power: &str| {
+            let bank = kind.ends_with("_bank");
+            let output = if kind.is_empty() { "D" } else { "IQ" };
+            let pins = if bank {
+                format!(
+                    r#"bundle(D) {{ members(D1,D0); direction: input; }}
+                       bundle(Q) {{ members(Q1,Q0); direction: output; function: "{output}"; {power} }}"#
+                )
+            } else {
+                format!(
+                    r#"pin(D) {{ direction: input; }}
+                       pin(Q) {{ direction: output; function: "{output}"; {power} }}"#
+                )
+            };
+            let sequential = if kind.is_empty() {
+                String::new()
+            } else {
+                let width = if bank { ",2" } else { "" };
+                format!("{kind}(IQ,IQN{width}) {{ {controls} {power} }}")
+            };
+            format!(
+                r#"library(test) {{ cell(CELL) {{
+                    pg_pin(VDD) {{ pg_type: primary_power; }}
+                    pg_pin(VSS) {{ pg_type: primary_ground; }}
+                    pin(CLK) {{ direction: input; }}
+                    {pins}
+                    {sequential}
+                }} }}"#
+            )
+        };
+        for include_timing in [false, true] {
+            for include_power in [false, true] {
+                let payload = LibertyPayloadOptions {
+                    include_timing,
+                    include_power,
+                };
+                let expected = parse(&source(""), payload).unwrap();
+                let actual = roundtrip(
+                    parse(&source(r#"power_down_function: "!VDD + VSS";"#), payload).unwrap(),
+                );
+                assert!(actual.cells[0].unsupported_semantics.is_empty());
+                actual.cells[0].validate_functional_semantics().unwrap();
+                assert_eq!(
+                    library_to_proto(actual).unwrap(),
+                    library_to_proto(expected).unwrap(),
+                    "power-down metadata changed {kind:?} in payload mode {payload:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn unsupported_semantics_survive_all_payload_modes_and_proto_forms() {
     let cases = [
         (
@@ -164,6 +225,30 @@ fn unsupported_semantics_survive_all_payload_modes_and_proto_forms() {
             "ff(IQ, IQN) { clocked_on: \"CLK\"; next_state: \"D\"; future_group() {} }",
             UnsupportedFeature::SequentialGroup,
             "ff(IQ,IQN).future_group()",
+        ),
+        (
+            r#"ff(IQ, IQN) { clocked_on: "CLK"; next_state: "D";
+                power_down_function: "!VDD + VSS"; clocked_on_also: "!CLK"; }"#,
+            UnsupportedFeature::SecondaryClock,
+            "ff(IQ,IQN).clocked_on_also",
+        ),
+        (
+            r#"latch(IQ, IQN) { enable: "G"; data_in: "D";
+                power_down_function: "!VDD + VSS"; enable_also: "G2"; }"#,
+            UnsupportedFeature::SecondaryEnable,
+            "latch(IQ,IQN).enable_also",
+        ),
+        (
+            r#"pin(Q) { direction: output; function: "IQ";
+                power_down_function: "!VDD + VSS"; three_state: "!OE"; }"#,
+            UnsupportedFeature::ThreeState,
+            "pin(Q).three_state",
+        ),
+        (
+            r#"ff(IQ, IQN) { clocked_on: "CLK"; next_state: "D";
+                power_down_function: "!VDD + VSS"; future_control: "C"; }"#,
+            UnsupportedFeature::SequentialAttribute,
+            "ff(IQ,IQN).future_control",
         ),
     ];
     for include_timing in [false, true] {
