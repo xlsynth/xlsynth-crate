@@ -149,6 +149,12 @@ fn find_unsupported(block: &Block, path: &str, issues: &mut Vec<UnsupportedSeman
         match member {
             BlockMember::BlockAttr(attr) => {
                 let feature = match attr.attr_name.as_str() {
+                    "power_down_function" => {
+                        // Consumers assume normal powered-on operation.
+                        // Power-off behavior is outside this model.
+                        // Power tables do not change that assumption.
+                        None
+                    }
                     "three_state" => Some(UnsupportedFeature::ThreeState),
                     "x_function" => Some(UnsupportedFeature::XFunction),
                     "clocked_on_also" => Some(UnsupportedFeature::SecondaryClock),

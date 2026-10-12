@@ -841,6 +841,37 @@ mod tests {
     }
 
     #[test]
+    fn raw_imported_power_down_metadata_does_not_prevent_flop_mapping() {
+        for output in ["IQ", "IQN"] {
+            let library = import_roundtrip(&format!(
+                r#"library(test) {{ cell(DFF) {{
+                    area: 1;
+                    pg_pin(VDD) {{ pg_type: primary_power; }}
+                    pg_pin(VSS) {{ pg_type: primary_ground; }}
+                    pin(D) {{ direction: input; }}
+                    pin(CLK) {{ clock: true; }}
+                    pin(Q) {{ direction: output; function: "{output}";
+                        power_down_function: "!VDD + VSS"; }}
+                    ff(IQ,IQN) {{ clocked_on: "CLK"; next_state: "D";
+                        power_down_function: "!VDD + VSS"; }}
+                }} }}"#
+            ));
+            let catalog = RegisterMappingLibrary::new(&library).unwrap();
+            assert!(catalog.rejected_cells().is_empty());
+            for selection in [
+                RegisterCellSelection::SmallestArea,
+                RegisterCellSelection::FixedCell("DFF".into()),
+            ] {
+                let mapping = catalog.select(&selection).unwrap();
+                assert_eq!(mapping.cell_name, "DFF");
+                assert_eq!(mapping.invert_data, output == "IQN");
+                assert!(mapping.tied_inputs.is_empty());
+                assert_binding_semantics(&library, mapping);
+            }
+        }
+    }
+
+    #[test]
     fn raw_imported_unsupported_behavior_cannot_win_by_area_or_fixed_override() {
         for (extra_pin, seq_extra, output_extra) in [
             ("pin(OE) { direction: input; }", "", "three_state: \"!OE\";"),

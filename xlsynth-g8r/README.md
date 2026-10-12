@@ -147,6 +147,16 @@ the complete source syntax. The current format requires regeneration from raw
 Liberty for older protos: those artifacts may have silently omitted functional
 attributes. Both binary and textproto loaders check the format discriminator.
 
+Functional interpretation assumes normal powered-on operation. The importer
+intentionally ignores `power_down_function` on pins and sequential groups
+(`ff`, `latch`, and their bank forms): power-off output/state corruption is
+outside this model. This also applies when characterization power data is
+included; including power tables does not enable power-aware functional
+simulation. Other unsupported normal-operation semantics remain rejected.
+Protos previously imported with a `power_down_function` rejection marker must
+be regenerated from source to make those cells usable; the wire format is
+unchanged.
+
 Supported source normalization includes scalar `ff`/`latch`, `ff_bank` and
 `latch_bank`, bundles with explicit member order, shared scalar controls, and
 multi-name pin groups. Banks become per-bit state equations within the same
