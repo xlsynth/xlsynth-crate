@@ -302,7 +302,11 @@ fn cycle_eval_fn(block: &Block, state: &[IrValue]) -> CycleEvalFn {
     };
     let mut result = Fn {
         graph,
-        params: block.input_ports().collect(),
+        // Preserve header order while referring to the reordered function nodes.
+        params: block
+            .input_ports()
+            .map(|port| block_to_function[port.index])
+            .collect(),
         ret_ty: Type::nil(),
         ret_node_ref: None,
     };
@@ -328,7 +332,7 @@ fn cycle_eval_fn(block: &Block, state: &[IrValue]) -> CycleEvalFn {
                 node.payload = NodePayload::Nil;
             }
             _ => {
-                // Ordinary combinational nodes retain their original indices.
+                // Ordinary combinational payloads were already remapped above.
             }
         }
     }
@@ -385,8 +389,8 @@ mod tests {
   q: bits[8] = register_read(register=value, id=1)
   a: bits[8] = input_port(name=a, id=2)
   b: bits[8] = input_port(name=b, id=3)
-  sum: bits[8] = add(a, b, id=4)
-  update: () = register_write(sum, register=value, id=5)
+  difference: bits[8] = sub(b, a, id=4)
+  update: () = register_write(difference, register=value, id=5)
   out: () = output_port(q, name=out, id=6)
 }"#;
         let block = Parser::new(source).parse_block().unwrap();
@@ -395,12 +399,23 @@ mod tests {
             IrValue::make_ubits(8, 3).unwrap(),
         ];
         let state = [IrValue::make_ubits(8, 16).unwrap()];
+        let projection = cycle_eval_fn(&block, &state);
+        projection.function.check_pir_layout_invariants().unwrap();
+        assert_eq!(
+            projection
+                .function
+                .param_nodes()
+                .map(|node| node.param_name())
+                .collect::<Vec<_>>(),
+            ["b", "a"]
+        );
         let observed = evaluate_block_cycle_observed(&block, &inputs, &state);
         let (outputs, next_state) = evaluate_block_cycle(&block, &inputs, &state, source);
         assert_eq!(observed.outputs, outputs);
         assert_eq!(outputs, state);
         assert_eq!(observed.next_state, next_state);
-        assert_eq!(next_state, [IrValue::make_ubits(8, 12).unwrap()]);
+        // Subtraction also catches swapped input bindings that addition hides.
+        assert_eq!(next_state, [IrValue::make_ubits(8, 6).unwrap()]);
         assert_eq!(
             observed.node_values[block.get_input_port("a").unwrap().index],
             Some(inputs[1].clone())
