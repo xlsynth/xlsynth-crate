@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::liberty::cell_formula::parse_formula;
+use crate::liberty::import::{ElectricalDefaults, electrical_value, prepare_cell};
 use crate::liberty::liberty_parser::{Block, BlockMember, Value};
 use crate::liberty::model::{
     AxisId, LibraryBuilder, LutTemplateKind, LutVariable, StringId, TimingSense, TimingType,
@@ -44,21 +45,6 @@ impl Default for LibertyPayloadOptions {
     }
 }
 
-fn value_to_f64(value: &crate::liberty::liberty_parser::Value) -> f64 {
-    match value {
-        crate::liberty::liberty_parser::Value::Number(n) => *n,
-        _ => panic!("Expected number for area attribute"),
-    }
-}
-
-fn value_to_string(value: &crate::liberty::liberty_parser::Value) -> String {
-    match value {
-        crate::liberty::liberty_parser::Value::String(s) => s.clone(),
-        crate::liberty::liberty_parser::Value::Identifier(s) => s.clone(),
-        _ => panic!("Expected string or identifier for function attribute"),
-    }
-}
-
 fn value_to_bool(value: &crate::liberty::liberty_parser::Value) -> Option<bool> {
     match value {
         crate::liberty::liberty_parser::Value::Identifier(s) => {
@@ -80,6 +66,8 @@ fn direction_from_str(s: &str) -> i32 {
     match s {
         "input" => PinDirection::Input as i32,
         "output" => PinDirection::Output as i32,
+        "internal" => PinDirection::Internal as i32,
+        "inout" => PinDirection::Inout as i32,
         _ => PinDirection::Invalid as i32,
     }
 }
@@ -1058,9 +1046,10 @@ fn canonicalize_table_references(library: &mut Library) {
     );
 }
 
+/// Extracts scalar state equations after bank/bundle normalization.
 fn extract_sequential_blocks(
     cell_block: &crate::liberty::liberty_parser::Block,
-) -> Vec<Sequential> {
+) -> Result<Vec<Sequential>, String> {
     let mut sequential = Vec::new();
     for cell_member in &cell_block.members {
         let crate::liberty::liberty_parser::BlockMember::SubBlock(sub_block) = cell_member else {
@@ -1070,15 +1059,19 @@ fn extract_sequential_blocks(
             "ff" => SequentialKind::Ff,
             "latch" => SequentialKind::Latch,
             _ => continue,
-        } as i32;
+        };
 
         let state_vars: Vec<String> = sub_block
             .qualifiers
             .iter()
-            .filter_map(qualifier_to_string)
-            .collect();
-        if state_vars.is_empty() {
-            continue;
+            .map(|value| crate::liberty::import::text(value).map(str::to_owned))
+            .collect::<Result<_, _>>()?;
+        if state_vars.is_empty() || state_vars.len() > 2 || state_vars.iter().any(String::is_empty)
+        {
+            return Err(format!(
+                "{} requires one or two nonempty state names",
+                sub_block.block_type
+            ));
         }
 
         let mut next_state = String::new();
@@ -1091,39 +1084,56 @@ fn extract_sequential_blocks(
                 continue;
             };
             if attr.attr_name == "next_state" {
-                next_state = value_to_string(&attr.value);
+                next_state = crate::liberty::import::text(&attr.value)?.to_owned();
             } else if sub_block.block_type == "latch" && attr.attr_name == "data_in" {
-                data_in = value_to_string(&attr.value);
-            } else if sub_block.block_type == "ff" && attr.attr_name == "clear" {
-                clear_expr = value_to_string(&attr.value);
-            } else if sub_block.block_type == "ff" && attr.attr_name == "preset" {
-                preset_expr = value_to_string(&attr.value);
+                data_in = crate::liberty::import::text(&attr.value)?.to_owned();
+            } else if attr.attr_name == "clear" {
+                clear_expr = crate::liberty::import::text(&attr.value)?.to_owned();
+            } else if attr.attr_name == "preset" {
+                preset_expr = crate::liberty::import::text(&attr.value)?.to_owned();
             } else if (sub_block.block_type == "ff" && attr.attr_name == "clocked_on")
                 || (sub_block.block_type == "latch" && attr.attr_name == "enable")
             {
-                clock_expr = value_to_string(&attr.value);
+                clock_expr = crate::liberty::import::text(&attr.value)?.to_owned();
             }
         }
 
-        if next_state.is_empty() && kind == (SequentialKind::Latch as i32) && !data_in.is_empty() {
+        if next_state.is_empty() && kind == SequentialKind::Latch && !data_in.is_empty() {
             next_state = data_in;
         }
 
-        if next_state.is_empty() && clock_expr.is_empty() {
-            continue;
+        match kind {
+            SequentialKind::Ff if next_state.is_empty() || clock_expr.is_empty() => {
+                return Err("ff requires both clocked_on and next_state".into());
+            }
+            SequentialKind::Latch => {
+                if next_state.is_empty() != clock_expr.is_empty() {
+                    return Err("latch requires enable and data_in together".into());
+                }
+                // Set/reset-only latches have no data or enable equation. Keep
+                // their controls and any unsupported-semantics records so one
+                // such cell does not prevent importing the rest of a library.
+                if next_state.is_empty() && clear_expr.is_empty() && preset_expr.is_empty() {
+                    return Err("latch is missing its functional description".into());
+                }
+            }
+            _ => {
+                // Complete FF equations require no further kind-specific
+                // checks.
+            }
         }
 
         sequential.push(Sequential {
             state_var: state_vars[0].clone(),
             next_state,
             clock_expr,
-            kind,
+            kind: kind as i32,
             clear_expr,
             preset_expr,
             complementary_state_var: state_vars.get(1).cloned(),
         });
     }
-    sequential
+    Ok(sequential)
 }
 
 fn block_to_model_cells(
@@ -1133,6 +1143,7 @@ fn block_to_model_cells(
     payload_options: LibertyPayloadOptions,
 ) -> Result<Vec<Cell>, String> {
     let mut cells = Vec::new();
+    let electrical_defaults = ElectricalDefaults::from_library(block)?;
     for member in &block.members {
         let BlockMember::SubBlock(cell_block) = member else {
             continue;
@@ -1145,18 +1156,21 @@ fn block_to_model_cells(
             .first()
             .and_then(qualifier_to_string)
             .unwrap_or_default();
+        let prepared =
+            prepare_cell(cell_block).map_err(|error| format!("cell '{name}': {error}"))?;
+        let cell_block = prepared.block.as_ref();
         let mut area = 0.0;
         let mut threshold_voltage_group_id = 0;
         let mut dont_use = None;
         let mut clocking_pins: HashSet<String> = HashSet::new();
-        let sequential = extract_sequential_blocks(cell_block);
+        let sequential = extract_sequential_blocks(cell_block)?;
 
         // First pass: gather cell-level scalar properties (like area) and any
         // clocking pins referenced by sequential blocks via clock expressions.
         for cell_member in &cell_block.members {
             if let BlockMember::BlockAttr(attr) = cell_member {
                 if attr.attr_name == "area" {
-                    area = value_to_f64(&attr.value);
+                    area = electrical_value(&attr.value, "area")?;
                 } else if attr.attr_name == "threshold_voltage_group" {
                     threshold_voltage_group_id = threshold_voltage_group_interner
                         .intern(value_to_attr_string(&attr.value), None)?;
@@ -1199,7 +1213,8 @@ fn block_to_model_cells(
             if pin_block.block_type != "pin" {
                 continue;
             }
-            let mut direction = PinDirection::Invalid as i32;
+            // Liberty specifies input as the default pin direction.
+            let mut direction = PinDirection::Input as i32;
             let mut function = String::new();
             let pin_name = pin_block
                 .qualifiers
@@ -1210,22 +1225,36 @@ fn block_to_model_cells(
             let mut pin_is_clock_gate_out = false;
             let mut pin_is_clock_gate_enable = false;
             let mut pin_is_clock_gate_test = false;
+            let mut explicit_clock = false;
             let mut timing_arcs = Vec::new();
             let mut internal_power = Vec::new();
             let mut capacitance = None;
             let mut rise_capacitance = None;
             let mut fall_capacitance = None;
             let mut max_capacitance = None;
+            let mut max_transition = None;
+            let mut max_fanout = None;
+            let mut fanout_load = None;
             for pin_member in &pin_block.members {
                 match pin_member {
                     BlockMember::BlockAttr(attr) => {
                         // For an example of these cells see ASAP7 `ICG` cells`.
                         if attr.attr_name == "direction" {
-                            if let Value::Identifier(s) = &attr.value {
-                                direction = direction_from_str(s);
+                            direction =
+                                direction_from_str(crate::liberty::import::text(&attr.value)?);
+                            if direction == PinDirection::Invalid as i32 {
+                                return Err(format!(
+                                    "cell '{name}' pin '{pin_name}' has invalid direction"
+                                ));
                             }
+                        } else if attr.attr_name == "clock" {
+                            explicit_clock = value_to_bool(&attr.value).ok_or_else(|| {
+                                format!(
+                                    "cell '{name}' pin '{pin_name}' has invalid clock attribute"
+                                )
+                            })?;
                         } else if attr.attr_name == "function" {
-                            function = value_to_string(&attr.value);
+                            function = crate::liberty::import::text(&attr.value)?.to_owned();
                         } else if attr.attr_name == "clock_gate_clock_pin" {
                             pin_is_clock_gate_clock = value_to_bool(&attr.value).unwrap_or(false);
                         } else if attr.attr_name == "clock_gate_out_pin" {
@@ -1235,13 +1264,21 @@ fn block_to_model_cells(
                         } else if attr.attr_name == "clock_gate_test_pin" {
                             pin_is_clock_gate_test = value_to_bool(&attr.value).unwrap_or(false);
                         } else if attr.attr_name == "capacitance" {
-                            capacitance = value_to_optional_f64(&attr.value);
+                            capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
                         } else if attr.attr_name == "rise_capacitance" {
-                            rise_capacitance = value_to_optional_f64(&attr.value);
+                            rise_capacitance =
+                                Some(electrical_value(&attr.value, &attr.attr_name)?);
                         } else if attr.attr_name == "fall_capacitance" {
-                            fall_capacitance = value_to_optional_f64(&attr.value);
+                            fall_capacitance =
+                                Some(electrical_value(&attr.value, &attr.attr_name)?);
                         } else if attr.attr_name == "max_capacitance" {
-                            max_capacitance = value_to_optional_f64(&attr.value);
+                            max_capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                        } else if attr.attr_name == "max_transition" {
+                            max_transition = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                        } else if attr.attr_name == "max_fanout" {
+                            max_fanout = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                        } else if attr.attr_name == "fanout_load" {
+                            fanout_load = Some(electrical_value(&attr.value, &attr.attr_name)?);
                         }
                     }
                     BlockMember::SubBlock(sub_block) => {
@@ -1267,7 +1304,8 @@ fn block_to_model_cells(
             if pin_is_clock_gate_test {
                 clock_gate_test_pins.push(pin_name.clone());
             }
-            let is_clocking_pin = clocking_pins.contains(&pin_name) || pin_is_clock_gate_clock;
+            let is_clocking_pin =
+                explicit_clock || clocking_pins.contains(&pin_name) || pin_is_clock_gate_clock;
             timing_arcs.sort_by(|a, b| {
                 a.related_pin
                     .cmp(&b.related_pin)
@@ -1280,7 +1318,7 @@ fn block_to_model_cells(
                     .then(a.when.cmp(&b.when))
                     .then(a.related_pg_pin.cmp(&b.related_pg_pin))
             });
-            pins.push(Pin {
+            let mut pin = Pin {
                 direction,
                 function: builder
                     .intern_string(function)
@@ -1293,9 +1331,14 @@ fn block_to_model_cells(
                 rise_capacitance,
                 fall_capacitance,
                 max_capacitance,
+                max_transition,
+                max_fanout,
+                fanout_load,
                 timing_arcs,
                 internal_power,
-            });
+            };
+            electrical_defaults.apply(&mut pin);
+            pins.push(pin);
         }
         let has_clock_gate_roles = !clock_gate_clock_pins.is_empty()
             || !clock_gate_output_pins.is_empty()
@@ -1339,6 +1382,7 @@ fn block_to_model_cells(
             clock_gate,
             threshold_voltage_group_id,
             dont_use,
+            unsupported_semantics: prepared.unsupported,
         });
     }
     cells.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1501,6 +1545,7 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
     }
 
     for cell in &library.cells {
+        cell.validate_import_metadata()?;
         if cell.threshold_voltage_group_id as usize > library.threshold_voltage_groups.len() {
             return Err(format!(
                 "Cell '{}' threshold_voltage_group_id={} is out of range for {} threshold_voltage_groups",
@@ -3634,6 +3679,7 @@ mod tests {
                 }
                 ff (IQN) {
                     clocked_on : "CLK";
+                    next_state : "D";
                 }
             }
         }
@@ -3681,6 +3727,7 @@ mod tests {
                 }
                 ff (IQN) {
                     clocked_on : "CLK1 | CLK2";
+                    next_state : "D";
                 }
             }
         }

@@ -129,6 +129,14 @@ impl IndexedLibrary {
         let indices = match dir {
             PinDirection::Input => &grouped.input_pins,
             PinDirection::Output => &grouped.output_pins,
+            PinDirection::Internal | PinDirection::Inout => {
+                return Some(
+                    cell.pins
+                        .iter()
+                        .filter(|pin| pin.direction == dir as i32)
+                        .collect(),
+                );
+            }
             PinDirection::Invalid => return None,
         };
 
@@ -380,6 +388,7 @@ mod tests {
             clock_gate: None,
             threshold_voltage_group_id: 0,
             dont_use: None,
+            unsupported_semantics: vec![],
         }];
         builder.lu_table_templates = vec![LuTableTemplate {
             kind: "lu_table_template".to_string().into(),
@@ -566,6 +575,7 @@ mod tests {
             clock_gate: None,
             threshold_voltage_group_id: 0,
             dont_use: None,
+            unsupported_semantics: vec![],
         }];
         let indexed = IndexedLibrary::new(builder.finish());
 
@@ -620,6 +630,7 @@ mod tests {
             clock_gate: None,
             threshold_voltage_group_id: 0,
             dont_use: None,
+            unsupported_semantics: vec![],
         }];
         let indexed = IndexedLibrary::new(builder.finish());
 

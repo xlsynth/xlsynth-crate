@@ -6,7 +6,7 @@ use std::iter::Iterator;
 
 use super::ascii_stream::AsciiStream;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     String(String),
     Number(f64),
@@ -14,19 +14,19 @@ pub enum Value {
     Tuple(Vec<Box<Value>>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BlockAttr {
     pub attr_name: String,
     pub value: Value,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BlockMember {
     BlockAttr(BlockAttr),
     SubBlock(Box<Block>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub block_type: String,
     // Note: blocks can have no qualifiers; e.g. `leakage_power() { ... }`

@@ -6,7 +6,7 @@ use xlsynth_test_helpers::compare_golden_text;
 
 fn make_timing_enabled_inv_nand2_liberty_textproto() -> &'static str {
     r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT capacitance: 0.0 }

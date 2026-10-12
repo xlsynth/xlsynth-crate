@@ -272,7 +272,10 @@ fn build_instance_connectivity(
                     PinDirection::Input => {
                         extend_unique_endpoint(&mut neighbors.loads, (inst_idx, connection.port))
                     }
-                    PinDirection::Invalid => {
+                    PinDirection::Invalid | PinDirection::Internal | PinDirection::Inout => {
+                        // Connectivity inspection conservatively treats
+                        // nonordinary pins as both
+                        // sources and sinks; Boolean consumers reject them.
                         extend_unique_endpoint(&mut neighbors.drivers, (inst_idx, connection.port));
                         extend_unique_endpoint(&mut neighbors.loads, (inst_idx, connection.port));
                     }

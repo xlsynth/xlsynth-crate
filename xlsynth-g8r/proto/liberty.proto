@@ -10,7 +10,8 @@ package liberty;
 message Library {
   // Wire-format discriminator. Old Liberty proto encodings use a message at
   // tag 1, so their incompatible wire type is rejected rather than silently
-  // misdecoded.
+  // misdecoded. This also versions the import contract: earlier encodings
+  // omitted unsupported functional semantics and require source regeneration.
   fixed64 format_magic = 1;
   repeated Cell cells = 2;
   LibraryUnits units = 3;
@@ -42,12 +43,37 @@ message Cell {
   uint32 threshold_voltage_group_id = 6;
   // Native Liberty `dont_use`, before any external filtering policy.
   optional bool dont_use = 7;
+  // Functional source constructs not represented by this model. Consumers
+  // must reject these cells before Boolean mapping or evaluation.
+  repeated UnsupportedSemantics unsupported_semantics = 8;
+}
+
+enum UnsupportedFeature {
+  UNSUPPORTED_FEATURE_UNSPECIFIED = 0;
+  THREE_STATE = 1;
+  X_FUNCTION = 2;
+  SECONDARY_CLOCK = 3;
+  SECONDARY_ENABLE = 4;
+  SIMULTANEOUS_CLEAR_PRESET = 5;
+  STATE_TABLE = 6;
+  INTERNAL_STATE = 7;
+  BUS = 8;
+  SEQUENTIAL_ATTRIBUTE = 9;
+  SEQUENTIAL_GROUP = 10;
+}
+
+message UnsupportedSemantics {
+  UnsupportedFeature feature = 1;
+  // Cell-relative source location, such as pin(Q).three_state.
+  string location = 2;
 }
 
 enum PinDirection {
   INVALID = 0;
   OUTPUT = 1;
   INPUT = 2;
+  INTERNAL = 3;
+  INOUT = 4;
 }
 
 message Pin {
@@ -61,6 +87,12 @@ message Pin {
   optional double max_capacitance = 8;
   repeated TimingArc timing_arcs = 9;
   repeated InternalPower internal_power = 10;
+  // Effective values after source-library/bundle defaults and pin overrides.
+  // Transition uses library time units; fanout is a weighted load, not
+  // necessarily a count of pins. Absence is distinct from an explicit zero.
+  optional double max_transition = 11;
+  optional double max_fanout = 12;
+  optional double fanout_load = 13;
 }
 
 message ClockGate {

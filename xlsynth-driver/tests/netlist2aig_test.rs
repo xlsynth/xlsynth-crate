@@ -11,7 +11,7 @@ use xlsynth_g8r::test_utils::structurally_equivalent;
 use xlsynth_pir::IrBits;
 
 const CONE_TEST_LIBERTY: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT }
@@ -116,7 +116,7 @@ fn assert_success(output: &Output) {
 #[test]
 fn gv2aig_emits_parseable_aiger() {
     let liberty_text = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT }
@@ -160,7 +160,7 @@ endmodule
 #[test]
 fn gv2aig_load_enable_feedback_requires_opt_in() {
     let liberty_text = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "DFFEN"
   pins: { name_string_id: 1 direction: INPUT }
@@ -427,7 +427,7 @@ endmodule
 #[test]
 fn gv2aig_supports_preserved_wiring_assigns() {
     let liberty_text = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }

@@ -649,6 +649,8 @@ fn build_package_from_normalized_netlist(
         let cell = lib_indexed
             .get_cell(cell_name)
             .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty proto", cell_name)))?;
+        cell.validate_functional_semantics()
+            .map_err(|error| anyhow!(error))?;
         if get_clock_gate_passthrough_spec(cell, lib_indexed.library())?.is_some() {
             continue;
         }

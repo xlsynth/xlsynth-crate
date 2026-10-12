@@ -7,7 +7,7 @@ use xlsynth_g8r::netlist::gv2ir::{
 };
 
 const LIBERTY_TEXTPROTO: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }

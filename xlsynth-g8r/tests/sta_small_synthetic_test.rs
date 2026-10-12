@@ -7,7 +7,7 @@ use xlsynth_g8r::netlist::io::read_gv_from_path;
 use xlsynth_g8r::netlist::sta::{StaOptions, analyze_combinational_max_arrival};
 
 const SYNTHETIC_TIMING_LIBRARY: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }

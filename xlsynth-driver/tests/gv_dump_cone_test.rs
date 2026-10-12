@@ -8,7 +8,7 @@ fn gv_dump_cone_basic_csv_output() {
 
     // Minimal Liberty textproto with a single inverter cell.
     let liberty_text = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "INV"
   pins: {
@@ -84,7 +84,7 @@ fn gv_dump_cone_traverses_preserved_wiring_assigns() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
 
     let liberty_text = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "BUF"
   pins: {

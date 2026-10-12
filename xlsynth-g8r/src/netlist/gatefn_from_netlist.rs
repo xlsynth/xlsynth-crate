@@ -207,6 +207,7 @@ pub(crate) fn build_cell_formula_map(
         if !used_cells.contains(&cell.name) {
             continue;
         }
+        cell.validate_functional_semantics()?;
         let collapse_for_cell = collapse_sequential && !override_cells.contains(&cell.name);
         let pin_names: HashSet<String> = cell
             .pins
@@ -1304,7 +1305,9 @@ fn validate_labeled_sequential_eval_module(
                         })?;
                     }
                 }
-                PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+                PinDirection::Invalid | PinDirection::Internal | PinDirection::Inout => {
+                    unreachable!("checked_pin_direction rejects unsupported directions")
+                }
             }
         }
         if connected_output_count == 0 && sequential_spec.is_none() {
@@ -2198,7 +2201,9 @@ fn validate_labeled_eval_module(
                         )
                     })?;
                 }
-                PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+                PinDirection::Invalid | PinDirection::Internal | PinDirection::Inout => {
+                    unreachable!("checked_pin_direction rejects unsupported directions")
+                }
             }
         }
         if connected_output_count == 0 {
@@ -2400,7 +2405,9 @@ fn build_instance_aig_binding(
         let operand = match direction {
             PinDirection::Input => input_operands.get(pin_name),
             PinDirection::Output => output_operands.get(pin_name),
-            PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+            PinDirection::Invalid | PinDirection::Internal | PinDirection::Inout => {
+                unreachable!("checked_pin_direction rejects unsupported directions")
+            }
         }
         .copied()
         .ok_or_else(|| {
@@ -2455,7 +2462,7 @@ fn build_sequential_instance_aig_binding(
             let operand = match direction {
                 PinDirection::Input => input_operands.get(pin_name),
                 PinDirection::Output => output_operands.get(pin_name),
-                PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+                PinDirection::Invalid | PinDirection::Internal | PinDirection::Inout => unreachable!("checked_pin_direction rejects unsupported directions"),
             }
             .copied()
             .ok_or_else(|| {

@@ -4,7 +4,7 @@ use std::process::Command;
 
 fn make_timing_enabled_inv_liberty_textproto() -> &'static str {
     r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
