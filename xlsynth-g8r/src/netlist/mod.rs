@@ -19,6 +19,7 @@ pub mod io;
 pub mod normalized;
 pub mod parse;
 pub mod power;
+pub mod register_mapping;
 pub mod report;
 pub(crate) mod sequential_liberty;
 pub mod sta;
