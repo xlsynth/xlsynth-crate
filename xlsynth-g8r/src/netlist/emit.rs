@@ -52,7 +52,22 @@ fn is_simple_identifier(s: &str) -> bool {
 fn is_keyword(s: &str) -> bool {
     matches!(
         s,
-        "wire" | "module" | "endmodule" | "input" | "output" | "inout" | "assign"
+        "wire"
+            | "module"
+            | "endmodule"
+            | "input"
+            | "output"
+            | "inout"
+            | "assign"
+            | "reg"
+            | "logic"
+            | "always"
+            | "always_ff"
+            | "always_comb"
+            | "always_latch"
+            | "initial"
+            | "generate"
+            | "genvar"
     )
 }
 

@@ -39,6 +39,8 @@ DEFAULT_FUZZ_RUN_ARGS: str = ""
 DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=60"
 DEFAULT_THREADS: int = 4
 DEFAULT_SKIPPED_FUZZ_TARGETS: set[str] = {
+    # Standalone ABC and matching raw/proto libraries require explicit setup.
+    "fuzz_abc_sequential_mapping",
     # Yosys is not always available, including in GitHub CI.
     "fuzz_codegen_yosys_combo",
     "fuzz_codegen_yosys_formal",

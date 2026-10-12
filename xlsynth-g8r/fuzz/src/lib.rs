@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod abc_mapping;
 pub mod direct_g8r;
 pub mod external_yosys;
 pub mod random_block;

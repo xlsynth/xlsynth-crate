@@ -188,6 +188,19 @@ IR matching the artifact, such as the prepared IR written with
 
 ### `lib2proto`: liberty files to proto
 
+Use `--reference-buffer-cell <CELL>` to record a library-specific ordinary
+non-inverting buffer for boundary drive/load defaults (default: unspecified).
+The cell is validated after filtering and must have one input, one output,
+positive input capacitance, and explicit capacitance units. Direct ABC mapping
+uses the reference buffer as its driver and eight times its input capacitance
+as the default output load; explicit mapping constraints override these defaults.
+This is user-selected flow metadata, not a Liberty source attribute. For example:
+
+```shell
+xlsynth-driver lib2proto /path/to/cells.lib \
+  --reference-buffer-cell BUF --output cells.proto
+```
+
 Liberty files can be unwieldy and large in their textual form -- this command reformats the data
 for streamlined querying, e.g. by the `gv2ir` subcommand.
 

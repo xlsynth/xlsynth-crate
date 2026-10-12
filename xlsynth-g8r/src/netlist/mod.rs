@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod abc;
 pub mod assigns_to_gatefn;
 pub mod bench_synth_netlist;
 pub mod bit_ref;

@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use xlsynth_g8r::liberty::CellFilterPolicy;
 use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
+use xlsynth_g8r::liberty::io_defaults::reference_buffer_input_capacitance_ff;
 use xlsynth_g8r::liberty::model::library_to_proto;
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, ThresholdVoltageGroupRule,
@@ -111,6 +112,11 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
             stats.retained_cells,
             stats.removed_cells
         );
+    }
+    if let Some(name) = matches.get_one::<String>("reference_buffer_cell") {
+        library.reference_buffer_cell = Some(name.clone());
+        reference_buffer_input_capacitance_ff(&library)
+            .unwrap_or_else(|e| panic!("Invalid reference buffer: {e}"));
     }
     let proto = library_to_proto(library).expect("Failed to encode Liberty LUT data");
 

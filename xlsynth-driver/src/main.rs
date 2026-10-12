@@ -1964,6 +1964,13 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("reference_buffer_cell")
+                        .long("reference-buffer-cell")
+                        .value_name("CELL")
+                        .help("Select an ordinary buffer for boundary drive/load defaults; validated after cell filtering")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("cell_filter_policy")
                         .long("cell-filter-policy")
                         .value_name("PATH")

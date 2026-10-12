@@ -35,6 +35,12 @@ members = ["."]
 warnings = "deny"
 
 [[bin]]
+name = "fuzz_abc_sequential_mapping"
+path = "fuzz_targets/fuzz_abc_sequential_mapping.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_g8r_evaluation"
 path = "fuzz_targets/fuzz_g8r_evaluation.rs"
 test = false

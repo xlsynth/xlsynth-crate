@@ -5,9 +5,73 @@ use flate2::write::GzEncoder;
 use prost::Message;
 use std::io::Write;
 use std::process::Command;
+use xlsynth_g8r::liberty::load::load_library_from_path;
 use xlsynth_g8r::liberty::model::LIBERTY_FORMAT_MAGIC;
 use xlsynth_g8r::liberty_proto::Library;
+use xlsynth_g8r::netlist::abc::AbcIoConstraints;
 use xlsynth_test_helpers::compare_golden_text;
+
+#[test]
+fn reference_buffer_metadata_roundtrips_and_is_validated_after_filtering() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("cells.lib");
+    let policy = temp.path().join("filter.policy");
+    std::fs::write(
+        &source,
+        r#"library(test) {
+        capacitive_load_unit(1, pf);
+        cell(BUF) { area: 1; pin(A) { direction: input; capacitance: 0.0005; }
+            pin(Y) { direction: output; function: "A"; } }
+        cell(INV) { area: 1; pin(A) { direction: input; capacitance: 0.0005; }
+            pin(Y) { direction: output; function: "!A"; } }
+    }"#,
+    )
+    .unwrap();
+    for extension in ["proto", "textproto"] {
+        let output = temp.path().join(format!("cells.{extension}"));
+        let result = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .args(["lib2proto", "--reference-buffer-cell", "BUF", "--output"])
+            .arg(&output)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let library = load_library_from_path(&output).unwrap();
+        assert_eq!(library.reference_buffer_cell.as_deref(), Some("BUF"));
+        assert_eq!(
+            AbcIoConstraints::from_library(&library)
+                .unwrap()
+                .output_load_ff,
+            4.0
+        );
+    }
+    std::fs::write(&policy, "exclude ^BUF$\n").unwrap();
+    for (name, filtered, expected) in [
+        ("ABSENT", false, "absent from Liberty"),
+        ("INV", false, "non-inverting buffer"),
+        ("BUF", true, "absent from Liberty"),
+    ] {
+        let output = temp.path().join("invalid.proto");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        cmd.args(["lib2proto", "--reference-buffer-cell", name, "--output"])
+            .arg(&output)
+            .arg(&source);
+        if filtered {
+            cmd.arg("--cell-filter-policy").arg(&policy);
+        }
+        let result = cmd.output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(expected));
+        assert!(
+            !output.exists(),
+            "invalid defaults must not write an output artifact"
+        );
+    }
+}
 
 #[test]
 fn lib2proto_records_generation_metadata_and_info_reports_it() {

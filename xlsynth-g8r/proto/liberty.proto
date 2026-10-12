@@ -32,6 +32,10 @@ message Library {
   repeated string interned_strings = 12;
   // Nonzero shape IDs are 1-based references into this list.
   repeated LutShape lut_shapes = 13;
+  // User-selected ordinary buffer for default boundary drive/load modeling.
+  // This is flow metadata, not a Liberty source attribute. Consumers may derive
+  // output load from this cell's input capacitance; explicit constraints win.
+  optional string reference_buffer_cell = 14;
 }
 
 message Cell {
