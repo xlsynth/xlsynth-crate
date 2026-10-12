@@ -904,8 +904,14 @@ fn write_checkpoint(
             let cand_bin_dump = dump_dir.join(format!("cand_iter_{}.g8rbin", iter));
             let original_design = SequentialGateFn::from_gate_fn(original_gfn.clone());
             let candidate_design = SequentialGateFn::from_gate_fn(best_gfn.clone());
-            let _ = std::fs::write(&orig_dump, emit_g8r(&original_design));
-            let _ = std::fs::write(&cand_dump, emit_g8r(&candidate_design));
+            let _ = std::fs::write(
+                &orig_dump,
+                emit_g8r(&original_design).map_err(anyhow::Error::msg)?,
+            );
+            let _ = std::fs::write(
+                &cand_dump,
+                emit_g8r(&candidate_design).map_err(anyhow::Error::msg)?,
+            );
             let _ = std::fs::write(
                 &orig_bin_dump,
                 encode_g8r_binary(&original_design).expect("serializing GateFn should succeed"),
@@ -958,7 +964,10 @@ fn write_checkpoint(
         Some(IrCheckResult::NotEquivalent) => {}
     }
     let best_design = SequentialGateFn::from_gate_fn(best_gfn.clone());
-    if let Err(e) = std::fs::write(g8r_path, emit_g8r(&best_design)) {
+    if let Err(e) = std::fs::write(
+        g8r_path,
+        emit_g8r(&best_design).map_err(anyhow::Error::msg)?,
+    ) {
         eprintln!(
             "[mcmc] Warning: Failed to write {} checkpoint to {}: {:?}",
             context,

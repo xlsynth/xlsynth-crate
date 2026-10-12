@@ -16,6 +16,44 @@ Augmented IR optimization is provided by
 cost estimates. Use `xlsynth_aug_opt::ir2gates_from_ir_text` to optimize before
 mapping; `xlsynth_g8r::ir2gates::Ir2GatesOptions` contains only mapping options.
 
+## Explicit register controls and legalization
+
+`SequentialGateFn` is the single sequential representation. Each
+`RegisterBinding` has raw data (`d`), Q feedback, and optional `enable` and
+`reset` fields. Controls name one-bit transition output ports and can be shared.
+A synchronous reset has a width-matched `IrBits` value and polarity; an enable
+has polarity. Designs use one rising-edge clock. Asynchronous reset is unsupported.
+
+`validate()` accepts both explicit-control and legalized designs, including
+mixed registers. `legalize_register_controls()` returns a design whose D
+endpoints contain all control logic and whose control fields are cleared. Reset
+overrides enable; otherwise enable selects data or Q (hold). Legalization
+preserves every register and behavior from any common starting state, including
+cycle zero. It does not clean up state and is a no-op on already-legalized graphs.
+
+`aig_sim::sequential::simulate` evaluates either form directly. Explicit
+controls are evaluated from the old state before simultaneous register updates.
+Native text/binary serialization preserves both forms, including controls and
+arbitrary-width reset values. Text serialization via `emit_g8r` returns
+`Result<String, String>` and validates the complete metadata. Physical toggle
+accounting, BLIF/RTL emission, and block-IR export require
+`validate_legalized()`: they reject explicit controls rather than silently
+ignoring them.
+
+The existing block-lowering and pipeline-stitching APIs return legalized designs.
+Their `_with_controls` variants retain explicit controls in the same
+`SequentialGateFn` type:
+`block_ir_to_sequential_gate_fn_with_controls`,
+`block_package_to_sequential_gate_fn_with_controls`,
+`lower_block_to_sequential_gate_fn_with_controls`, and
+`stitch_gate_fns_into_pipeline_with_controls`.
+
+Power-up initialization is not stored. A reset value only takes effect at an
+asserted reset edge; simulation requires explicit initial state (including an
+explicitly requested all-zero test state). Native formats are
+`g8r_v4`/`g8rbin_v4` and preserve explicit controls. Older versions and explicit
+BLIF latch initial values are rejected rather than silently discarded.
+
 ## Additional docs
 
 - `docs/g8r_lib_timing_design.md`: why Liberty loading has `Library` (no timing) vs `LibraryWithTimingData` and the observed ASAP7 size/load tradeoffs.

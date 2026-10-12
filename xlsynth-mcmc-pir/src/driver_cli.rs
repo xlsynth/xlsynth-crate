@@ -803,7 +803,8 @@ fn gatify_ir_text_to_artifacts(
     let schema = GateFnInterfaceSchema::from_pir_fn(top_fn)
         .map_err(|e| anyhow::anyhow!("failed to derive gate interface schema: {}", e))?;
     Ok(GatifiedArtifacts {
-        g8r_text: emit_g8r(&SequentialGateFn::from_gate_fn(gate_fn.clone())),
+        g8r_text: emit_g8r(&SequentialGateFn::from_gate_fn(gate_fn.clone()))
+            .map_err(anyhow::Error::msg)?,
         raw_stats,
         gate_fn,
         schema,

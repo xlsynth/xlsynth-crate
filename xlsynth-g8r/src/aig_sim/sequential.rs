@@ -45,33 +45,6 @@ impl SequentialState {
         Ok(Self { values })
     }
 
-    /// Uses initial values declared on every G8R register.
-    pub fn from_g8r_initial_values(design: &SequentialGateFn) -> Result<Self, String> {
-        let missing = design
-            .registers
-            .iter()
-            .filter(|register| register.initial_value.is_none())
-            .map(|register| register.name.clone())
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            return Err(format!(
-                "G8R registers without initial values: {:?}",
-                missing
-            ));
-        }
-        let values = design
-            .registers
-            .iter()
-            .map(|register| {
-                register
-                    .initial_value
-                    .clone()
-                    .expect("missing initial values were rejected")
-            })
-            .collect();
-        Self::from_register_values(design, values)
-    }
-
     /// Constructs an all-zero value for every register.
     pub fn all_zeros(design: &SequentialGateFn) -> Self {
         let values = design
@@ -198,8 +171,10 @@ pub(crate) struct SequentialSettledPhaseInput {
     pub phase: SequentialSettledPhase,
 }
 
-/// Simulates one input record per cycle and commits register D after each
-/// cycle.
+/// Simulates one input record per cycle, evaluating explicit register controls.
+/// Reset overrides enable; absent controls use D directly. Both
+/// explicit-control and legalized designs are supported, with simultaneous
+/// register updates.
 pub fn simulate(
     design: &SequentialGateFn,
     external_inputs: &[Vec<IrBits>],
@@ -225,7 +200,28 @@ pub fn simulate(
         let next_register_values = design
             .registers
             .iter()
-            .map(|register| transition_outputs[register.d.index()].clone())
+            .enumerate()
+            .map(|(index, register)| {
+                if let Some(reset) = &register.reset {
+                    let asserted = transition_outputs[reset.control.signal.index()]
+                        .get_bit(0)
+                        .expect("validated one-bit reset")
+                        != reset.control.active_low;
+                    if asserted {
+                        return reset.value.clone();
+                    }
+                }
+                if let Some(enable) = register.enable {
+                    let asserted = transition_outputs[enable.signal.index()]
+                        .get_bit(0)
+                        .expect("validated one-bit enable")
+                        != enable.active_low;
+                    if !asserted {
+                        return state.values[index].clone();
+                    }
+                }
+                transition_outputs[register.d.index()].clone()
+            })
             .collect::<Vec<_>>();
 
         transition_inputs_trace.push(transition_inputs);
@@ -258,6 +254,7 @@ pub(crate) fn count_sequential_toggle_activity_with_all_node_counts(
     design: &SequentialGateFn,
     trace: &SequentialTrace,
 ) -> Result<SequentialToggleActivityWithAllNodeCounts, String> {
+    design.validate_legalized()?;
     if trace.transition_inputs.is_empty() {
         return Err(format!(
             "toggle stimulus must contain at least one cycle; got {}",
@@ -509,6 +506,7 @@ fn validate_external_inputs(
 }
 
 fn validate_trace_shape(design: &SequentialGateFn, trace: &SequentialTrace) -> Result<(), String> {
+    design.validate_legalized()?;
     let cycle_count = trace.transition_inputs.len();
     for (name, observed) in [
         ("external inputs", trace.external_inputs.len()),
@@ -581,7 +579,7 @@ mod tests {
         IrBits::make_ubits(width, value).unwrap()
     }
 
-    fn accumulator_design(initial_value: Option<IrBits>) -> SequentialGateFn {
+    fn accumulator_design() -> SequentialGateFn {
         let mut builder = GateBuilder::new(
             "accumulator__transition".to_string(),
             GateBuilderOptions::no_opt(),
@@ -600,10 +598,11 @@ mod tests {
                 name: "clk".to_string(),
             }),
             vec![RegisterBinding {
+                enable: None,
+                reset: None,
                 name: "acc".to_string(),
                 q: TransitionInputId::new(1),
                 d: TransitionOutputId::new(1),
-                initial_value,
             }],
         )
         .unwrap()
@@ -626,20 +625,21 @@ mod tests {
                 name: "clk".to_string(),
             }),
             vec![RegisterBinding {
+                enable: None,
+                reset: None,
                 name: "wide".to_string(),
                 q: TransitionInputId::new(0),
                 d: TransitionOutputId::new(1),
-                initial_value: None,
             }],
         )
         .unwrap()
     }
 
     #[test]
-    fn declared_and_explicit_initial_state_are_validated() {
-        let design = accumulator_design(Some(bits(1, 1)));
+    fn explicit_simulation_initial_state_is_validated() {
+        let design = accumulator_design();
         assert_eq!(
-            SequentialState::from_g8r_initial_values(&design)
+            SequentialState::from_register_values(&design, vec![bits(1, 1)])
                 .unwrap()
                 .values(),
             &[bits(1, 1)]
@@ -649,19 +649,15 @@ mod tests {
                 .unwrap_err()
                 .contains("width 2, expected 1")
         );
-
-        let missing = accumulator_design(None);
-        let error = SequentialState::from_g8r_initial_values(&missing).unwrap_err();
-        assert!(error.contains("acc"), "{error}");
     }
 
     #[test]
     fn simulation_emits_current_outputs_then_commits_next_state() {
-        let design = accumulator_design(Some(bits(1, 1)));
+        let design = accumulator_design();
         let trace = simulate(
             &design,
             &[vec![bits(1, 1)], vec![bits(1, 0)]],
-            SequentialState::from_g8r_initial_values(&design).unwrap(),
+            SequentialState::from_register_values(&design, vec![bits(1, 1)]).unwrap(),
         )
         .unwrap();
 
@@ -678,11 +674,11 @@ mod tests {
 
     #[test]
     fn clocked_phase_inputs_are_shared_by_toggle_and_power_accounting() {
-        let design = accumulator_design(Some(bits(1, 1)));
+        let design = accumulator_design();
         let trace = simulate(
             &design,
             &[vec![bits(1, 1)], vec![bits(1, 0)]],
-            SequentialState::from_g8r_initial_values(&design).unwrap(),
+            SequentialState::from_register_values(&design, vec![bits(1, 1)]).unwrap(),
         )
         .unwrap();
 
@@ -733,11 +729,11 @@ mod tests {
 
     #[test]
     fn toggle_activity_separates_logic_interface_and_register_boundaries() {
-        let design = accumulator_design(Some(bits(1, 1)));
+        let design = accumulator_design();
         let trace = simulate(
             &design,
             &[vec![bits(1, 1)], vec![bits(1, 0)]],
-            SequentialState::from_g8r_initial_values(&design).unwrap(),
+            SequentialState::from_register_values(&design, vec![bits(1, 1)]).unwrap(),
         )
         .unwrap();
         let activity = count_sequential_toggle_activity(&design, &trace).unwrap();

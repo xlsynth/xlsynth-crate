@@ -11,7 +11,6 @@ use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::test_utils::{
     interesting_ir_roundtrip_cases, load_interesting_ir_roundtrip_case, structurally_equivalent,
 };
-use xlsynth_pir::IrBits;
 
 fn make_pipeline_design() -> SequentialGateFn {
     let mut builder = GateBuilder::new(
@@ -33,10 +32,11 @@ fn make_pipeline_design() -> SequentialGateFn {
             name: "clk_main".to_string(),
         }),
         vec![RegisterBinding {
+            enable: None,
+            reset: None,
             name: "state".to_string(),
             q: TransitionInputId::new(1),
             d: TransitionOutputId::new(1),
-            initial_value: Some(IrBits::make_ubits(2, 3).unwrap()),
         }],
     )
     .unwrap()
@@ -72,12 +72,12 @@ fn sequential_blif_imports_abc_compact_latches() {
         .replace("state_next[0]", "n12")
         .replace("state_next[1]", "n17")
         .replace(
-            ".latch n12 state_reg[0] re clk_main 1",
-            ".latch n12 state_reg[0] 1",
+            ".latch n12 state_reg[0] re clk_main 2",
+            ".latch n12 state_reg[0] 2",
         )
         .replace(
-            ".latch n17 state_reg[1] re clk_main 1",
-            ".latch n17 state_reg[1] 1",
+            ".latch n17 state_reg[1] re clk_main 2",
+            ".latch n17 state_reg[1] 2",
         );
 
     let parsed = parse_blif(&text).unwrap();
@@ -151,22 +151,29 @@ top block pipe(clk: clock, state__q: bits[1], state__d: bits[1]) {
 }
 
 #[test]
-fn sequential_blif_imports_supported_latch_initial_values() {
-    let design = make_pipeline_design();
-    let cases = [
-        ("0", Some(IrBits::make_ubits(2, 0).unwrap())),
-        ("1", Some(IrBits::make_ubits(2, 3).unwrap())),
-        ("2", None),
-    ];
-    for (initial, expected) in cases {
-        let text = emit_blif(&design)
-            .unwrap()
-            .replace("clk_main 1", &format!("clk_main {initial}"));
-        let parsed = parse_blif(&text).unwrap();
-        assert_eq!(
-            parsed.registers[0].initial_value, expected,
-            "initial value {initial}"
-        );
+fn sequential_blif_rejects_explicit_initial_values() {
+    let text = emit_blif(&make_pipeline_design()).unwrap();
+    for initial in ["0", "1", "3"] {
+        for compact in [false, true] {
+            let original = ".latch state_next[0] state_reg[0] re clk_main 2";
+            let replacement = if compact {
+                format!(".latch state_next[0] state_reg[0] {initial}")
+            } else {
+                format!(".latch state_next[0] state_reg[0] re clk_main {initial}")
+            };
+            let variant = text.replace(original, &replacement);
+            let variant = if compact {
+                variant.replace(" re clk_main", "")
+            } else {
+                variant
+            };
+            assert_eq!(
+                parse_blif(&variant).unwrap_err(),
+                format!(
+                    "BLIF register 'state' bit 0 has unsupported initial value '{initial}'; expected 2 (unspecified startup)"
+                )
+            );
+        }
     }
 }
 
@@ -185,19 +192,15 @@ fn sequential_blif_rejects_unsupported_latch_semantics() {
     let text = emit_blif(&make_pipeline_design()).unwrap();
     let cases = [
         (
-            text.replace("state_reg[0] re clk_main 1", "state_reg[0] re clk_main 3"),
+            text.replace("state_reg[0] re clk_main 2", "state_reg[0] re clk_main 3"),
             "unsupported initial value '3'",
         ),
         (
-            text.replace("state_reg[1] re clk_main 1", "state_reg[1] re clk_main 2"),
-            "mixes specified and unspecified initial bits",
-        ),
-        (
-            text.replace("state_reg[0] re clk_main 1", "state_reg[0] fe clk_main 1"),
+            text.replace("state_reg[0] re clk_main 2", "state_reg[0] fe clk_main 2"),
             "only rising-edge 're' latches are supported",
         ),
         (
-            text.replace("state_reg[1] re clk_main 1", "state_reg[1] re clk_alt 1"),
+            text.replace("state_reg[1] re clk_main 2", "state_reg[1] re clk_alt 1"),
             "does not match inferred clock primary input 'clk_main'",
         ),
     ];
@@ -350,8 +353,8 @@ fn sequential_blif_parser_accepts_inline_comments() {
         )
         .replace("11 1", "11 1 # product term")
         .replace(
-            ".latch state_next[0] state_reg[0] re clk_main 1",
-            ".latch state_next[0] state_reg[0] re clk_main 1 # first register bit",
+            ".latch state_next[0] state_reg[0] re clk_main 2",
+            ".latch state_next[0] state_reg[0] re clk_main 2 # first register bit",
         )
         .replace(".end", ".end # done");
     let parsed = parse_blif(&text).unwrap();

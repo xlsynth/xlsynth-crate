@@ -1,25 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::aig::{
-    ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
-    add_input_registers, add_output_registers,
+    ClockPort, RegisterBinding, RegisterControl, SequentialGateFn, SynchronousReset,
+    TransitionInputId, TransitionOutputId, add_input_registers, add_output_registers,
 };
 use xlsynth_g8r::aig_serdes::g8r::{decode_g8r_binary, emit_g8r, encode_g8r_binary, parse_g8r};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::test_utils::structurally_equivalent;
+use xlsynth_g8r::test_utils::{
+    interesting_ir_roundtrip_cases, load_interesting_ir_roundtrip_case, structurally_equivalent,
+};
 use xlsynth_pir::IrBits;
 
 #[test]
-fn native_wide_initial_values_roundtrip_through_text_and_binary() {
+fn native_wide_registers_roundtrip_through_text_and_binary() {
     for width in [1, 63, 64, 65, 127, 128, 129, 257] {
         let mut builder = GateBuilder::new("wide".to_string(), GateBuilderOptions::opt());
         let state = builder.add_input("state".to_string(), width);
         builder.add_output("next".to_string(), state);
-        let initial = IrBits::from_lsb_is_0(
-            &(0..width)
-                .map(|bit| bit % 3 == 0 || bit == width - 1)
-                .collect::<Vec<_>>(),
-        );
         let design = SequentialGateFn::new(
             "wide".to_string(),
             builder.build(),
@@ -29,15 +26,16 @@ fn native_wide_initial_values_roundtrip_through_text_and_binary() {
                 name: "clk".to_string(),
             }),
             vec![RegisterBinding {
+                enable: None,
+                reset: None,
                 name: "reg".to_string(),
                 q: TransitionInputId::new(0),
                 d: TransitionOutputId::new(0),
-                initial_value: Some(initial),
             }],
         )
         .unwrap();
         for decoded in [
-            parse_g8r(&emit_g8r(&design)).unwrap(),
+            parse_g8r(&emit_g8r(&design).unwrap()).unwrap(),
             decode_g8r_binary(&encode_g8r_binary(&design).unwrap()).unwrap(),
         ] {
             assert_eq!(decoded.registers, design.registers, "width={width}");
@@ -81,18 +79,18 @@ fn native_g8r_stores_combinational_design_as_sequential_gate_fn() {
     )
     .unwrap();
 
-    let text = emit_g8r(&sequential);
-    assert!(text.starts_with("g8r_v2\n"));
+    let text = emit_g8r(&sequential).unwrap();
+    assert!(text.starts_with("g8r_v4\n"));
     let parsed = parse_g8r(&text).unwrap();
     assert_eq!(parsed.name, "transition");
     assert!(parsed.registers.is_empty());
     assert!(structurally_equivalent(&transition, &parsed.transition));
     let binary = encode_g8r_binary(&sequential).unwrap();
-    assert!(binary.starts_with(b"g8rbin_v2\n"));
+    assert!(binary.starts_with(b"g8rbin_v4\n"));
     assert!(decode_g8r_binary(&binary).unwrap().registers.is_empty());
 
     let wrapped = SequentialGateFn::from_gate_fn(transition.clone());
-    let extracted = parse_g8r(&emit_g8r(&wrapped))
+    let extracted = parse_g8r(&emit_g8r(&wrapped).unwrap())
         .unwrap()
         .try_into_gate_fn()
         .unwrap();
@@ -117,25 +115,18 @@ fn register_binds_effective_next_state_transition_output() {
             name: "clk".to_string(),
         }),
         vec![RegisterBinding {
+            enable: None,
+            reset: None,
             name: "state".to_string(),
             q: TransitionInputId::new(1),
             d: TransitionOutputId::new(1),
-            initial_value: Some(IrBits::make_ubits(8, 3).unwrap()),
         }],
     )
     .unwrap();
 
     assert_eq!(sequential.registers[0].name, "state");
-    assert_eq!(
-        sequential.registers[0]
-            .initial_value
-            .as_ref()
-            .unwrap()
-            .get_bit_count(),
-        8
-    );
 
-    let text = emit_g8r(&sequential);
+    let text = emit_g8r(&sequential).unwrap();
     assert!(text.contains("\nclock clk\n"));
     assert!(!text.contains("\nclock posedge "));
     assert!(!text.contains("\nclock negedge "));
@@ -223,10 +214,11 @@ fn registered_sequential_gate_fn_requires_clock() {
         vec![],
         None,
         vec![RegisterBinding {
+            enable: None,
+            reset: None,
             name: "state".to_string(),
             q: TransitionInputId::new(0),
             d: TransitionOutputId::new(0),
-            initial_value: None,
         }],
     )
     .unwrap_err();
@@ -249,10 +241,11 @@ fn register_data_width_must_match_state_width() {
             name: "clk".to_string(),
         }),
         vec![RegisterBinding {
+            enable: None,
+            reset: None,
             name: "state".to_string(),
             q: TransitionInputId::new(0),
             d: TransitionOutputId::new(0),
-            initial_value: None,
         }],
     )
     .unwrap_err();
@@ -317,4 +310,98 @@ fn boundary_register_transform_rejects_another_clock_domain() {
         .unwrap_err(),
         "cannot add boundary registers using clock 'other_clk': design already declares clock 'clk'"
     );
+}
+
+#[test]
+fn native_registered_signature_corpus_roundtrips_and_rejects_legacy_initialization() {
+    for case in interesting_ir_roundtrip_cases() {
+        let design =
+            SequentialGateFn::from_gate_fn(load_interesting_ir_roundtrip_case(case).gate_fn);
+        let design = add_input_registers(&design, ClockPort { name: "clk".into() }).unwrap();
+        let design = add_output_registers(&design, ClockPort { name: "clk".into() }).unwrap();
+        let text = emit_g8r(&design).unwrap();
+        for decoded in [
+            parse_g8r(&text).unwrap(),
+            decode_g8r_binary(&encode_g8r_binary(&design).unwrap()).unwrap(),
+        ] {
+            assert_eq!(decoded.registers, design.registers);
+            assert_eq!(decoded.inputs, design.inputs);
+            assert_eq!(decoded.outputs, design.outputs);
+            assert!(structurally_equivalent(
+                &decoded.transition,
+                &design.transition
+            ));
+        }
+        assert_eq!(
+            parse_g8r(&text.replacen("g8r_v4", "g8r_v2", 1)).unwrap_err(),
+            "unsupported g8r header 'g8r_v2'; expected 'g8r_v4'"
+        );
+        let mut legacy = encode_g8r_binary(&design).unwrap();
+        legacy[b"g8rbin_v".len()] = b'2';
+        assert_eq!(
+            decode_g8r_binary(&legacy).unwrap_err(),
+            "unsupported g8rbin header; expected 'g8rbin_v4'"
+        );
+        for value in ["none", "bits[1]:0", "bits[1]:1"] {
+            let mut lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
+            let line = lines
+                .iter_mut()
+                .find(|line| line.starts_with("register "))
+                .unwrap();
+            line.push_str(&format!(" initial_value={value}"));
+            assert_eq!(
+                parse_g8r(&lines.join("\n")).unwrap_err(),
+                "unknown register field 'initial_value'"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_controls_roundtrip_shared_signature_corpus() {
+    for case in interesting_ir_roundtrip_cases() {
+        let mut design =
+            SequentialGateFn::from_gate_fn(load_interesting_ir_roundtrip_case(case).gate_fn);
+        let clock = ClockPort { name: "clk".into() };
+        design = add_input_registers(&design, clock.clone()).unwrap();
+        design = add_output_registers(&design, clock).unwrap();
+        let control = TransitionOutputId::new(design.transition.outputs.len());
+        design.transition.outputs.push(xlsynth_g8r::aig::Output {
+            name: "control".into(),
+            bit_vector: xlsynth_g8r::aig::AigOperand {
+                node: xlsynth_g8r::aig::AigRef { id: 0 },
+                negated: true,
+            }
+            .into(),
+        });
+        for (index, register) in design.registers.iter_mut().enumerate() {
+            let width = design.transition.inputs[register.q.index()].get_bit_count();
+            register.enable = Some(RegisterControl {
+                signal: control,
+                active_low: index % 2 == 0,
+            });
+            register.reset = Some(SynchronousReset {
+                control: RegisterControl {
+                    signal: control,
+                    active_low: index % 2 != 0,
+                },
+                value: IrBits::from_lsb_fn(width, |bit| bit % 3 == 0),
+            });
+        }
+        design.validate().unwrap();
+        for decoded in [
+            parse_g8r(&emit_g8r(&design).unwrap()).unwrap(),
+            decode_g8r_binary(&encode_g8r_binary(&design).unwrap()).unwrap(),
+        ] {
+            assert_eq!(decoded.registers, design.registers);
+            assert_eq!(decoded.inputs, design.inputs);
+            assert_eq!(decoded.outputs, design.outputs);
+            assert_eq!(decoded.clock, design.clock);
+            assert!(structurally_equivalent(
+                &decoded.transition,
+                &design.transition
+            ));
+            assert_eq!(emit_g8r(&decoded).unwrap(), emit_g8r(&design).unwrap());
+        }
+    }
 }

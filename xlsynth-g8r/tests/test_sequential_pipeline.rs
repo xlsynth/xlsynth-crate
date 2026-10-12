@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_g8r::aig::{ClockPort, SequentialPipelineOptions, stitch_gate_fns_into_pipeline};
+use xlsynth_g8r::aig::{
+    ClockPort, SequentialPipelineOptions, stitch_gate_fns_into_pipeline,
+    stitch_gate_fns_into_pipeline_with_controls,
+};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 
 fn passthrough_stage(
@@ -146,7 +149,7 @@ fn valid_and_reset_add_load_enabled_data_and_valid_state() {
         passthrough_stage("stage0", "data", "sum", 1),
         passthrough_stage("stage1", "sum", "result", 1),
     ];
-    let design = stitch_gate_fns_into_pipeline(
+    let logical = stitch_gate_fns_into_pipeline_with_controls(
         &stages,
         &SequentialPipelineOptions {
             name: "enabled".to_string(),
@@ -162,6 +165,17 @@ fn valid_and_reset_add_load_enabled_data_and_valid_state() {
         },
     )
     .unwrap();
+
+    for (index, register) in logical.registers.iter().enumerate() {
+        if index % 2 == 0 {
+            assert!(register.enable.is_some());
+            assert!(register.reset.is_none());
+        } else {
+            assert!(register.enable.is_none());
+            assert!(register.reset.as_ref().unwrap().value.is_zero());
+        }
+    }
+    let design = logical.legalize_register_controls().unwrap();
 
     let register_names = design
         .registers

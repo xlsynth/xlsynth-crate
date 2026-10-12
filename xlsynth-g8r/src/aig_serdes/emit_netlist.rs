@@ -527,18 +527,8 @@ pub fn emit_netlist_with_version_and_port_style(
     port_style: NetlistPortStyle,
 ) -> Result<String, String> {
     design
-        .validate()
+        .validate_legalized()
         .map_err(|e| format!("emit_netlist: invalid SequentialGateFn: {e}"))?;
-    if let Some(register) = design
-        .registers
-        .iter()
-        .find(|register| register.initial_value.is_some())
-    {
-        return Err(format!(
-            "emit_netlist: register '{}' has an initial value, which RTL emission does not currently represent",
-            register.name
-        ));
-    }
     if let Some(clock) = &design.clock
         && design
             .inputs

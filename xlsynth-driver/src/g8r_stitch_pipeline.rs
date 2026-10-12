@@ -55,7 +55,7 @@ pub fn handle_g8r_stitch_pipeline(matches: &ArgMatches) -> Result<(), String> {
     let design = stitch_gate_fns_into_pipeline(&stage_gate_fns, &options)
         .map_err(|error| format!("could not stitch g8r pipeline: {error}"))?;
 
-    write_stdout(&emit_g8r(&design));
+    write_stdout(&emit_g8r(&design)?);
     if let Some(bin_path) = matches.get_one::<String>("bin_out") {
         let binary = encode_g8r_binary(&design)
             .map_err(|error| format!("could not serialize g8r binary: {error}"))?;

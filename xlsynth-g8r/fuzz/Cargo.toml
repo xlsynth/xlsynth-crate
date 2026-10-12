@@ -48,6 +48,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_sequential_legalization_equiv"
+path = "fuzz_targets/fuzz_sequential_legalization_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_range_analysis_block_soundness"
 path = "fuzz_targets/fuzz_range_analysis_block_soundness.rs"
 test = false

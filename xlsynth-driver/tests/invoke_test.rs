@@ -69,7 +69,7 @@ fn write_aiger_binary_file(
 
 fn write_g8r_file(path: &std::path::Path, gate_fn: &GateFn) {
     let design = SequentialGateFn::from_gate_fn(gate_fn.clone());
-    std::fs::write(path, emit_g8r(&design)).expect("failed to write g8r file");
+    std::fs::write(path, emit_g8r(&design).unwrap()).expect("failed to write g8r file");
 }
 
 fn write_g8r_binary_file(path: &std::path::Path, gate_fn: &GateFn) {
@@ -110,10 +110,11 @@ fn make_pipeline_sequential_design() -> SequentialGateFn {
             name: "clk".to_string(),
         }),
         vec![RegisterBinding {
+            enable: None,
+            reset: None,
             name: "state".to_string(),
             q: TransitionInputId::new(1),
             d: TransitionOutputId::new(1),
-            initial_value: None,
         }],
     )
     .unwrap()
@@ -4896,7 +4897,7 @@ fn test_ir2g8r_emits_all_outputs() {
     // body.
     let stdout = String::from_utf8_lossy(&ir2g8r_output.stdout);
     assert!(
-        stdout.starts_with("g8r_v2\n"),
+        stdout.starts_with("g8r_v4\n"),
         "stdout did not contain the g8r header: {}",
         stdout
     );
@@ -4908,7 +4909,7 @@ fn test_ir2g8r_emits_all_outputs() {
     // Check .g8rbin file exists and is non-empty
     let g8rbin_data = std::fs::read(&g8rbin_path).expect(".g8rbin file not found");
     assert!(!g8rbin_data.is_empty(), ".g8rbin file is empty");
-    assert!(g8rbin_data.starts_with(b"g8rbin_v2\n"));
+    assert!(g8rbin_data.starts_with(b"g8rbin_v4\n"));
     // Check stats JSON file exists and contains expected keys
     let stats_json = std::fs::read_to_string(&stats_path).expect("stats JSON file not found");
     let stats: serde_json::Value =
@@ -4980,7 +4981,7 @@ block pipe(clk: clock, data: bits[1], le: bits[1], out: bits[1]) {
     assert!(
         std::fs::read(&bin_path)
             .unwrap()
-            .starts_with(b"g8rbin_v2\n")
+            .starts_with(b"g8rbin_v4\n")
     );
     let netlist = std::fs::read_to_string(&netlist_path).unwrap();
     assert!(netlist.contains("always_ff @ (posedge clk)"));
@@ -5163,7 +5164,7 @@ fn test_g8r2ir_block_zero_register_design_emits_block() {
 fn test_g8r2ir_block_emits_stored_registers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().join("pipeline.g8r");
-    std::fs::write(&path, emit_g8r(&make_pipeline_sequential_design())).unwrap();
+    std::fs::write(&path, emit_g8r(&make_pipeline_sequential_design()).unwrap()).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("g8r2ir-block")
@@ -5186,7 +5187,7 @@ fn test_g8r2ir_block_emits_stored_registers() {
 fn test_g8r2ir_fn_rejects_stored_registers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().join("pipeline.g8r");
-    std::fs::write(&path, emit_g8r(&make_pipeline_sequential_design())).unwrap();
+    std::fs::write(&path, emit_g8r(&make_pipeline_sequential_design()).unwrap()).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("g8r2ir-fn")
@@ -5204,7 +5205,11 @@ fn test_g8r_blif_cli_roundtrip_preserves_stored_registers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("pipeline.g8r");
     let blif_path = temp_dir.path().join("pipeline.blif");
-    std::fs::write(&g8r_path, emit_g8r(&make_pipeline_sequential_design())).unwrap();
+    std::fs::write(
+        &g8r_path,
+        emit_g8r(&make_pipeline_sequential_design()).unwrap(),
+    )
+    .unwrap();
 
     let blif_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("g8r2blif")
@@ -5238,7 +5243,6 @@ fn test_g8r_blif_cli_roundtrip_preserves_stored_registers() {
     assert_eq!(design.clock.as_ref().unwrap().name, "clk");
     assert_eq!(design.registers.len(), 1);
     assert_eq!(design.registers[0].name, "state");
-    assert!(design.registers[0].initial_value.is_none());
 }
 
 #[test]
@@ -6475,15 +6479,16 @@ fn test_g8r2ugv_add_clk_port_behavior() {
 
 #[test]
 fn test_g8r_eval_sequential_named_inputs_final_state_and_toggles() {
-    let mut design = make_pipeline_sequential_design();
-    design.registers[0].initial_value = Some(IrBits::make_ubits(1, 1).unwrap());
+    let design = make_pipeline_sequential_design();
     design.validate().unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("pipeline.g8r");
     let inputs_path = temp_dir.path().join("inputs.irvals");
+    let initial_state_path = temp_dir.path().join("initial-state.irvals");
+    std::fs::write(&initial_state_path, "{state: bits[1]:1}\n").unwrap();
     let final_state_path = temp_dir.path().join("final-state.irvals");
     let toggles_path = temp_dir.path().join("toggles.json");
-    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+    std::fs::write(&g8r_path, emit_g8r(&design).unwrap()).unwrap();
     std::fs::write(&inputs_path, "{data: bits[1]:0}\n{data: bits[1]:1}\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
@@ -6491,7 +6496,8 @@ fn test_g8r_eval_sequential_named_inputs_final_state_and_toggles() {
         .arg(&g8r_path)
         .arg("--input-irvals")
         .arg(&inputs_path)
-        .arg("--initial-state-from-g8r-initial-values")
+        .arg("--initial-state-file")
+        .arg(&initial_state_path)
         .arg("--final-state-irvals")
         .arg(&final_state_path)
         .arg("--toggle-output-json")
@@ -6602,7 +6608,7 @@ fn test_g8r_eval_requires_complete_initial_state_policy() {
     let design = make_pipeline_sequential_design();
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("pipeline.g8r");
-    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+    std::fs::write(&g8r_path, emit_g8r(&design).unwrap()).unwrap();
 
     let missing_policy = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("g8r-eval")
@@ -6612,21 +6618,6 @@ fn test_g8r_eval_requires_complete_initial_state_policy() {
         .unwrap();
     assert!(!missing_policy.status.success());
     assert!(String::from_utf8_lossy(&missing_policy.stderr).contains("requires exactly one of"));
-
-    let missing_value = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-        .arg("g8r-eval")
-        .arg(&g8r_path)
-        .arg("(bits[1]:0)")
-        .arg("--initial-state-from-g8r-initial-values")
-        .output()
-        .unwrap();
-    assert!(!missing_value.status.success());
-    let stderr = String::from_utf8_lossy(&missing_value.stderr);
-    assert!(
-        stderr.contains("registers without initial values"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("state"), "{stderr}");
 }
 
 #[test]
@@ -6637,7 +6628,7 @@ fn test_g8r_eval_accepts_one_clocked_toggle_cycle() {
     let inputs_path = temp_dir.path().join("inputs.irvals");
     let toggles_path = temp_dir.path().join("toggles.json");
     let final_state_path = temp_dir.path().join("final-state.irvals");
-    std::fs::write(&g8r_path, emit_g8r(&design)).unwrap();
+    std::fs::write(&g8r_path, emit_g8r(&design).unwrap()).unwrap();
     std::fs::write(&inputs_path, "{data: bits[1]:0}\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
@@ -6676,7 +6667,7 @@ fn test_g8r2ugv_emits_stored_sequential_gate_fn_registers() {
     let design = make_pipeline_sequential_design();
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().join("pipeline.g8r");
-    std::fs::write(&path, emit_g8r(&design)).unwrap();
+    std::fs::write(&path, emit_g8r(&design).unwrap()).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("g8r2ugv")
@@ -8248,7 +8239,7 @@ fn test_dslx_stitch_g8r_pipeline_with_valid_and_reset() {
     assert!(
         std::fs::read(&stitched_g8rbin_path)
             .unwrap()
-            .starts_with(b"g8rbin_v2\n")
+            .starts_with(b"g8rbin_v4\n")
     );
     let design = parse_g8r(&text).unwrap();
     let register_names = design
@@ -8274,7 +8265,7 @@ fn test_g8r_stitch_pipeline_rejects_sequential_stage() {
     let sequential_stage_path = temp_dir.path().join("sequential.g8r");
     std::fs::write(
         &sequential_stage_path,
-        emit_g8r(&make_pipeline_sequential_design()),
+        emit_g8r(&make_pipeline_sequential_design()).unwrap(),
     )
     .unwrap();
     let combinational_stage_path = temp_dir.path().join("combinational.g8r");

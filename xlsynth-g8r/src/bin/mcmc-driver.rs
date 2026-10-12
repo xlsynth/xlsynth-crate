@@ -585,7 +585,11 @@ fn main() -> Result<()> {
         output_g8r_path.display()
     );
     let mut f_g8r = fs::File::create(&output_g8r_path)?;
-    f_g8r.write_all(emit_g8r(&SequentialGateFn::from_gate_fn(best_gfn.clone())).as_bytes())?;
+    f_g8r.write_all(
+        emit_g8r(&SequentialGateFn::from_gate_fn(best_gfn.clone()))
+            .map_err(anyhow::Error::msg)?
+            .as_bytes(),
+    )?;
     println!(
         "[mcmc] Successfully wrote output to {}",
         output_g8r_path.display()

@@ -26,7 +26,7 @@ fn g8r_optimize_runs_reassociation_in_isolation() {
     let input_path = temp.path().join("input.g8r");
     let output_path = temp.path().join("output.g8rbin");
     let stats_path = temp.path().join("stats.json");
-    std::fs::write(&input_path, emit_g8r(&linear_and4_design())).expect("write input g8r");
+    std::fs::write(&input_path, emit_g8r(&linear_and4_design()).unwrap()).expect("write input g8r");
 
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("g8r-optimize")
