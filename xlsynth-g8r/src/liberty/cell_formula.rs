@@ -149,6 +149,7 @@ enum Tok {
     Or,
     Xor,
     Not,
+    PostfixNot,
     Const(bool),
 }
 
@@ -184,6 +185,10 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 tokens.push(Tok::Not);
                 chars.next();
             }
+            '\'' => {
+                tokens.push(Tok::PostfixNot);
+                chars.next();
+            }
             '1' => {
                 tokens.push(Tok::Const(true));
                 chars.next();
@@ -195,7 +200,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut ident = String::new();
                 while let Some(&c2) = chars.peek() {
-                    if c2.is_ascii_alphanumeric() || c2 == '_' {
+                    if c2.is_ascii_alphanumeric() || matches!(c2, '_' | '[' | ']') {
                         ident.push(c2);
                         chars.next();
                     } else {
@@ -253,7 +258,12 @@ fn parse_not(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
         let (expr, rest) = parse_not(&tokens[1..])?;
         Ok((Term::Negate(Box::new(expr)), rest))
     } else {
-        parse_atom(tokens)
+        let (mut term, mut rest) = parse_atom(tokens)?;
+        while let Some(Tok::PostfixNot) = rest.first() {
+            term = Term::Negate(Box::new(term));
+            rest = &rest[1..];
+        }
+        Ok((term, rest))
     }
 }
 

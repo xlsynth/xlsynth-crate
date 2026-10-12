@@ -122,6 +122,15 @@ fn cell_binding_if_shape_matches(
     if !cell.name.starts_with(family_prefix) {
         return None;
     }
+    if let Err(error) = cell.validate_functional_semantics() {
+        log::warn!(
+            "skipping {} candidate '{}': {}",
+            family_prefix,
+            cell.name,
+            error
+        );
+        return None;
+    }
     let input_pin_names = input_pin_names(lib, cell);
     let output_pin_names = timed_output_pin_names(lib, cell);
     if input_pin_names.len() != expected_input_count || output_pin_names.len() != 1 {
@@ -480,6 +489,9 @@ pub fn handle_aig_tech_map(matches: &ArgMatches) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message;
+    use xlsynth_g8r::liberty::model::{library_from_proto, library_to_proto};
+    use xlsynth_g8r::liberty::parser::parse_liberty_files;
     use xlsynth_g8r::liberty_model::{LibraryBuilder, Pin, TimingTable};
 
     fn make_pin(
@@ -607,6 +619,76 @@ mod tests {
         let mut library = LibraryBuilder::new();
         library.cells = build_cells(&mut library);
         library.finish()
+    }
+
+    /// Imports complete timing models so rejection is due to functional
+    /// semantics.
+    fn import_structural_candidates(output_attribute: &str, extra_pin: &str) -> Library {
+        let mut source = String::from("library(test) {");
+        for (family, inputs, formula) in [
+            ("INV", vec!["A"], "!A"),
+            ("NAND2", vec!["A", "B"], "!(A * B)"),
+        ] {
+            for safe in [false, true] {
+                let name = if safe {
+                    format!("{family}_SAFE")
+                } else {
+                    family.into()
+                };
+                source.push_str(&format!("cell({name}) {{ area: 1;"));
+                for input in &inputs {
+                    source.push_str(&format!("pin({input}) {{ direction: input; }}"));
+                }
+                if !safe {
+                    source.push_str(extra_pin);
+                }
+                source.push_str(&format!(
+                    r#"pin(Y) {{ direction: output; function: "{formula}";"#
+                ));
+                if !safe {
+                    source.push_str(output_attribute);
+                }
+                for input in &inputs {
+                    source.push_str(&format!(r#"timing() {{ related_pin: "{input}"; timing_type: combinational;
+                        cell_rise(scalar) {{ values("1"); }} cell_fall(scalar) {{ values("1"); }}
+                        rise_transition(scalar) {{ values("0.1"); }} fall_transition(scalar) {{ values("0.1"); }}
+                    }}"#));
+                }
+                source.push_str("} }");
+            }
+        }
+        source.push('}');
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), source).unwrap();
+        let wire = library_to_proto(parse_liberty_files(&[file.path()]).unwrap()).unwrap();
+        library_from_proto(
+            xlsynth_g8r::liberty_proto::Library::decode(wire.encode_to_vec().as_slice()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn structural_selection_rejects_unsupported_imported_semantics() {
+        for (output_attribute, extra_pin) in [
+            (r#"three_state: "A";"#, ""),
+            (r#"x_function: "A";"#, ""),
+            ("", "pin(I) { direction: internal; }"),
+            ("", "pin(IO) { direction: inout; }"),
+        ] {
+            let mut library = import_structural_candidates(output_attribute, extra_pin);
+            for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
+                assert_eq!(select_inv_cell_name(&library, policy).unwrap(), "INV_SAFE");
+                assert_eq!(
+                    select_nand2_cell_name(&library, policy).unwrap(),
+                    "NAND2_SAFE"
+                );
+            }
+            library.cells.retain(|cell| !cell.name.ends_with("_SAFE"));
+            for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
+                assert!(select_inv_cell_name(&library, policy).is_err());
+                assert!(select_nand2_cell_name(&library, policy).is_err());
+            }
+        }
     }
 
     #[test]

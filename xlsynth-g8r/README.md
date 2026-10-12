@@ -140,6 +140,49 @@ let cleaned = cleanup_sequential_gate_fn(&rebound)?;
 
 These APIs require no ABC, Yosys, or Liberty library.
 
+## Liberty import contract
+
+The Liberty proto stores normalized functional and characterization data, not
+the complete source syntax. The current format requires regeneration from raw
+Liberty for older protos: those artifacts may have silently omitted functional
+attributes. Both binary and textproto loaders check the format discriminator.
+
+Supported source normalization includes scalar `ff`/`latch`, `ff_bank` and
+`latch_bank`, bundles with explicit member order, shared scalar controls, and
+multi-name pin groups. Banks become per-bit state equations within the same
+physical cell; cell area is not duplicated. Bundle attributes and timing/power
+groups are inherited by member pins, with scalar member overrides. Overriding
+an inherited timing/power group is currently rejected instead of guessing its
+precedence. Bank mapping/packing is a separate consumer capability.
+Expansion is limited to 4,096 total bank state bits per physical cell, checked
+before allocating the generated names/equations. This resource limit does not
+constrain register widths in G8R designs. FF source descriptions require both
+clock and next-state equations; latches require data and enable together unless
+they are set/reset-only latches. Unsupported set/reset behavior is retained for
+inspection and rejected by functional consumers, not mistaken for an empty cell.
+
+`Cell::validate_functional_semantics()` rejects cells with recorded unsupported
+source behavior, including tristate/X outputs, secondary clocks/enables,
+simultaneous clear/preset behavior, state tables/internal-node descriptions,
+unexpanded buses, and unknown sequential attributes/groups. Unsupported cells
+remain available for inspection; Boolean netlist projection and sequential
+interpretation reject them when used. Internal and bidirectional pin directions
+are preserved but not accepted as ordinary Boolean cells. Malformed supported
+constructs return import errors. This is an explicitly supported subset, not a
+claim to implement all Liberty extensions.
+
+Ordinary scan-flop `next_state` equations are retained. A functional mapper can
+prove a constant-control assignment implements a DFF; test-only `test_cell`
+metadata does not override that model. Scan-chain construction and test-pin
+role metadata are not provided.
+
+Pin capacitances, maximum capacitance/transition/fanout, and fanout loads retain
+effective source-library defaults and explicit pin/bundle overrides before
+libraries are merged. Values are optional, finite, nonnegative, and expressed
+in the library's units; explicit zero is not absence. Fanout is the sum of sink
+`fanout_load` values, not necessarily pin count. These fields preserve scalar
+electrical constraints; timing/resizing consumers must enforce them separately.
+
 ## External Yosys APIs
 
 `netlist::yosys::YosysToolchain` validates an executable and runs scripts with

@@ -37,6 +37,7 @@ pub mod liberty_model {
     };
     pub use crate::liberty_proto::{
         ClockGate, LibraryUnits, PinDirection, PowerTransition, Sequential, SequentialKind,
+        UnsupportedFeature, UnsupportedSemantics,
     };
 }
 pub mod result_proto {

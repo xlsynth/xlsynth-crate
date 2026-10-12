@@ -493,6 +493,88 @@ pub struct Cell {
     pub clock_gate: Option<wire::ClockGate>,
     pub threshold_voltage_group_id: u32,
     pub dont_use: Option<bool>,
+    pub unsupported_semantics: Vec<wire::UnsupportedSemantics>,
+}
+
+impl Cell {
+    /// Validates metadata without requiring this consumer to support the cell.
+    pub(crate) fn validate_import_metadata(&self) -> std::result::Result<(), String> {
+        for issue in &self.unsupported_semantics {
+            if issue.location.is_empty()
+                || wire::UnsupportedFeature::try_from(issue.feature)
+                    .ok()
+                    .is_none_or(|feature| feature == wire::UnsupportedFeature::Unspecified)
+            {
+                return Err(format!(
+                    "cell '{}' has an invalid unsupported-semantics record",
+                    self.name
+                ));
+            }
+        }
+        for pin in &self.pins {
+            if wire::PinDirection::try_from(pin.direction).is_err() {
+                return Err(format!(
+                    "cell '{}' has an unknown pin direction {}",
+                    self.name, pin.direction
+                ));
+            }
+            for (name, value) in [
+                ("capacitance", pin.capacitance),
+                ("rise_capacitance", pin.rise_capacitance),
+                ("fall_capacitance", pin.fall_capacitance),
+                ("max_capacitance", pin.max_capacitance),
+                ("max_transition", pin.max_transition),
+                ("max_fanout", pin.max_fanout),
+                ("fanout_load", pin.fanout_load),
+            ] {
+                if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+                    return Err(format!(
+                        "cell '{}' {name} must be finite and nonnegative",
+                        self.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects cells whose imported behavior cannot safely be used as Boolean
+    /// logic.
+    pub fn validate_functional_semantics(&self) -> std::result::Result<(), String> {
+        if !self.unsupported_semantics.is_empty() {
+            return Err(format!(
+                "cell '{}' has unsupported Liberty semantics: {}",
+                self.name,
+                self.unsupported_semantics
+                    .iter()
+                    .map(|issue| issue.location.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        // Check represented controls too: callers may construct normalized
+        // libraries or protos directly, without going through the raw importer.
+        if self
+            .sequential
+            .iter()
+            .any(|seq| !seq.clear_expr.is_empty() && !seq.preset_expr.is_empty())
+        {
+            return Err(format!(
+                "cell '{}' has unsupported simultaneous clear/preset controls",
+                self.name
+            ));
+        }
+        if self.pins.iter().any(|pin| {
+            pin.direction != wire::PinDirection::Input as i32
+                && pin.direction != wire::PinDirection::Output as i32
+        }) {
+            return Err(format!(
+                "cell '{}' has unsupported pin directions",
+                self.name
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Normalized pin data.
@@ -506,6 +588,9 @@ pub struct Pin {
     pub rise_capacitance: Option<f64>,
     pub fall_capacitance: Option<f64>,
     pub max_capacitance: Option<f64>,
+    pub max_transition: Option<f64>,
+    pub max_fanout: Option<f64>,
+    pub fanout_load: Option<f64>,
     pub timing_arcs: Vec<TimingArc>,
     pub internal_power: Vec<InternalPower>,
 }
@@ -881,7 +966,7 @@ pub fn timing_table_kind_str(value: wire::TimingTableKind) -> &'static str {
 }
 
 /// Wire-format discriminator stored in every serialized Liberty library.
-pub const LIBERTY_FORMAT_MAGIC: u64 = 0x4c49_4256_3350_524f;
+pub const LIBERTY_FORMAT_MAGIC: u64 = 0x4c49_4256_3450_524f;
 
 /// Returns whether a decoded library has the expected wire-format magic.
 pub fn has_valid_header(library: &wire::Library) -> bool {
@@ -1153,6 +1238,10 @@ fn values_to_f32(values: Vec<f64>) -> Result<Vec<f32>> {
 ///
 /// Timing-table kinds not consumed by the deterministic evaluator are omitted.
 pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
+    for cell in &library.cells {
+        cell.validate_import_metadata()
+            .map_err(anyhow::Error::msg)?;
+    }
     let mut axis_frequencies = HashMap::new();
     for template in &library.lu_table_templates {
         record_axis(&template.index_1, &mut axis_frequencies);
@@ -1424,6 +1513,9 @@ pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
                         rise_capacitance: pin.rise_capacitance,
                         fall_capacitance: pin.fall_capacitance,
                         max_capacitance: pin.max_capacitance,
+                        max_transition: pin.max_transition,
+                        max_fanout: pin.max_fanout,
+                        fanout_load: pin.fanout_load,
                         timing_arcs,
                         internal_power,
                     })
@@ -1437,6 +1529,7 @@ pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
                 clock_gate: cell.clock_gate,
                 threshold_voltage_group_id: cell.threshold_voltage_group_id,
                 dont_use: cell.dont_use,
+                unsupported_semantics: cell.unsupported_semantics,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1548,7 +1641,7 @@ fn other_string_id(
 pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
     if !has_valid_header(&library) {
         bail!(
-            "invalid Liberty proto header: magic=0x{:016x}",
+            "invalid Liberty proto header: magic=0x{:016x}; regenerate from source Liberty with the current importer (older protos may omit functional semantics)",
             library.format_magic
         );
     }
@@ -1745,12 +1838,15 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                         rise_capacitance: pin.rise_capacitance,
                         fall_capacitance: pin.fall_capacitance,
                         max_capacitance: pin.max_capacitance,
+                        max_transition: pin.max_transition,
+                        max_fanout: pin.max_fanout,
+                        fanout_load: pin.fanout_load,
                         timing_arcs,
                         internal_power,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(Cell {
+            let cell = Cell {
                 name: cell.name,
                 pins,
                 area: cell.area,
@@ -1758,7 +1854,11 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                 clock_gate: cell.clock_gate,
                 threshold_voltage_group_id: cell.threshold_voltage_group_id,
                 dont_use: cell.dont_use,
-            })
+                unsupported_semantics: cell.unsupported_semantics,
+            };
+            cell.validate_import_metadata()
+                .map_err(anyhow::Error::msg)?;
+            Ok(cell)
         })
         .collect::<Result<Vec<_>>>()?;
 

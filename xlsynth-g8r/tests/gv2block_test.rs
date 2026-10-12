@@ -27,7 +27,7 @@ fn convert_netlist(netlist: &str) -> anyhow::Result<String> {
 }
 
 const LIBERTY_TEXTPROTO: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT }
@@ -439,6 +439,24 @@ top block top_(clk: clock, d: bits[1], rstn: bits[1], q: bits[1]) {
 }
 
 #[test]
+fn gv2block_rejects_dual_async_controls_without_importer_markers() {
+    let liberty = LIBERTY_TEXTPROTO.replace(
+        "clear_expr: \"RST\"",
+        "clear_expr: \"RST\" preset_expr: \"D\"",
+    );
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{liberty}").unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "module top(input d, input rst, input clk, output q); DFFCLR u(.D(d), .RST(rst), .CLK(clk), .Q(q)); endmodule").unwrap();
+    assert_eq!(
+        convert_gv2block_paths(netlist_file.path(), liberty_file.path())
+            .unwrap_err()
+            .to_string(),
+        "cell 'DFFCLR' has unsupported simultaneous clear/preset controls"
+    );
+}
+
+#[test]
 fn test_gv2block_vector_outputs_from_multiple_cells() {
     let netlist = r#"
 module top (a, y);
@@ -834,7 +852,7 @@ top block aliases(u_D: clock, u_Q: bits[1], u_Q_1: bits[1]) {
 #[test]
 fn test_gv2block_uniquifies_aliases_from_ambiguous_instance_pin_boundaries() {
     let liberty = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "X"
   pins: { name_string_id: 1 direction: INPUT }

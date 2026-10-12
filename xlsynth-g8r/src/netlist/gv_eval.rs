@@ -743,8 +743,8 @@ fn cell_pin_direction(direction: PinDirection) -> Result<ToggleDirection, String
     match direction {
         PinDirection::Input => Ok(ToggleDirection::Input),
         PinDirection::Output => Ok(ToggleDirection::Output),
-        PinDirection::Invalid => {
-            Err("invalid standard-cell pin direction cannot be counted by gv-eval".to_string())
+        PinDirection::Invalid | PinDirection::Internal | PinDirection::Inout => {
+            Err("unsupported standard-cell pin direction cannot be counted by gv-eval".to_string())
         }
     }
 }

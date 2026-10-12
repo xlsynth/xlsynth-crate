@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 use xlsynth_test_helpers::compare_golden_text;
 
 const COMBINATIONAL_LIBERTY: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
 nominal_voltage: 1.0
 cells: {
@@ -23,7 +23,7 @@ interned_strings: ["A", "B", "Y", "A & B", "!A"]
 "#;
 
 const SEQUENTIAL_LIBERTY: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -40,7 +40,7 @@ interned_strings: ["D", "CLK", "Q", "IQ"]
 "#;
 
 const SEQUENTIAL_POWER_LIBERTY: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
 nominal_voltage: 1.0
 cells: {
@@ -480,7 +480,7 @@ endmodule
 #[test]
 fn gv_eval_rejects_sequential_cells() {
     let liberty = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }

@@ -31,6 +31,7 @@ pub(crate) fn get_sequential_ff_clock_spec(
     cell: &Cell,
     library: &Library,
 ) -> Result<Option<SequentialClockSpec>, String> {
+    cell.validate_functional_semantics()?;
     let Some(seq) = cell.sequential.first() else {
         return Ok(None);
     };
@@ -160,5 +161,61 @@ fn parse_simple_clock_expr(expr: &str) -> Result<(String, bool), String> {
             "clock expression '{}' is not a simple input or negated input",
             expr
         )),
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use crate::liberty::model::{library_from_proto, library_to_proto};
+    use crate::liberty::parser::parse_liberty_files;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    /// Exercise real importing rather than hand-constructing incomplete cell
+    /// metadata.
+    fn imported(extra_pin: &str, seq_extra: &str, output_extra: &str) -> Library {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"library(test) {{ cell(DFF) {{
+            pin(D) {{ direction: input; }} pin(CLK) {{ clock: true; }}
+            pin(Q) {{ direction: output; function: "IQ"; {output_extra} }}
+            {extra_pin}
+            ff(IQ,IQN) {{ clocked_on: "CLK"; next_state: "D"; {seq_extra} }}
+        }} }}"#
+        )
+        .unwrap();
+        library_from_proto(library_to_proto(parse_liberty_files(&[file.path()]).unwrap()).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn ordinary_ff_survives_import_and_proto_conversion() {
+        let library = imported("", "", "");
+        assert_eq!(
+            get_gv_eval_sequential_cell_spec(&library.cells[0], &library)
+                .unwrap()
+                .unwrap()
+                .clock
+                .pin_name,
+            "CLK"
+        );
+    }
+
+    #[test]
+    fn imported_secondary_clock_and_tristate_cells_are_rejected() {
+        for (extra_pin, seq_extra, output_extra) in [
+            (
+                "pin(CLK2) { direction: input; }",
+                "clocked_on_also: \"CLK2\";",
+                "",
+            ),
+            ("pin(CLK2) { direction: input; clock: true; }", "", ""),
+            ("pin(OE) { direction: input; }", "", "three_state: \"!OE\";"),
+        ] {
+            let library = imported(extra_pin, seq_extra, output_extra);
+            assert!(get_gv_eval_sequential_cell_spec(&library.cells[0], &library).is_err());
+        }
     }
 }

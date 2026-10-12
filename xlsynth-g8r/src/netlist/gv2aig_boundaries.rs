@@ -794,7 +794,7 @@ mod tests {
     use crate::netlist::io::{load_liberty_from_path, read_gv_from_str, select_module};
 
     const LIBERTY: &str = r#"
-format_magic: 5496997758177923663
+format_magic: 5496997758194700879
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
