@@ -77,6 +77,31 @@ default. CI retains its `-max_total_time=5` override and
 campaigns. Optional external-tool targets still require explicit selection and
 their runtime prerequisites.
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_sequential_cleanup_equiv.rs
+
+Generates bounded synchronous block IR with a reset value on every register
+and at least one observable output,
+then lowers the reset/enable logic to G8R and runs register cleanup. For each
+sample, eight independently randomized source/implementation startups are
+simulated for 16 cycles, with reset asserted across the first clock edge and
+occasionally reasserted later. An independent block evaluator checks the original
+G8R on every cycle; cleaned G8R must match all external outputs after the first
+reset edge. Pre-reset implementation outputs are deliberately not compared.
+Registers and ports may be packed or aggregate, and state may contain feedback.
+The target also checks metadata, interface preservation, reduction accounting,
+determinism, and idempotence. It detects changed reset/enable behavior, incorrect
+constant or duplicate substitutions, and broken packed-register reconstruction.
+Graph generation contains no injected cleanup motifs. The first eight bytes seed
+independent evaluation entropy; remaining bytes drive the generic block generator.
+The deterministic smoke sweep checks that its samples exercise dead, constant,
+and duplicate register removal. An output is reserved before body generation so
+exhausting the node/entropy budget cannot make all output comparisons vacuous.
+
+This oracle covers reset-reachable behavior, not arbitrary unreset startup.
+Focused unit tests cover mixed-reset data/valid pipelines and corresponding-state
+checks for unreset constant and duplicate substitutions. Arbitrary partially
+reset feedback graphs remain outside the reset-based fuzz oracle.
+
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
 Generates an upstream-standard acyclic random package directly as PIR, including

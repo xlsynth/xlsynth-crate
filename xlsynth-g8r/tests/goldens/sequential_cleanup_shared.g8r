@@ -1,0 +1,18 @@
+g8r_v4
+name shared
+clock clk
+inputs 0
+outputs 0,1
+registers 2
+register a q=1 d=2
+register b q=2 d=3
+transition
+fn shared(data: bits[2] = [%1, %2], q0: bits[1] = [%3], q1: bits[1] = [%4]) -> (shared_d: bits[2] = [%1, %2], visible: bits[2] = [%3, %4], shared_d__1: bits[1] = [%1], shared_d__2: bits[1] = [%2]) {
+  %0 = literal(false)
+  shared_d[0] = %1
+  shared_d[1] = %2
+  visible[0] = %3
+  visible[1] = %4
+  shared_d__1[0] = %1
+  shared_d__2[0] = %2
+}

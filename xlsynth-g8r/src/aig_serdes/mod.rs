@@ -13,6 +13,7 @@ pub mod load_aiger;
 pub mod load_aiger_auto;
 pub mod load_aiger_binary;
 pub mod sequential2ir;
+pub mod sequential_transition;
 // NOTE: `aig_serdes` is intended for (de)serialization and external textual
 // formats. Gatification/lowering lives under `crate::gatify`. We keep these
 // re-exports as a temporary compatibility shim while call sites migrate.

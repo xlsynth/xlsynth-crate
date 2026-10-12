@@ -18,6 +18,7 @@ pub mod logical_effort;
 pub mod match_and_rewrite;
 pub mod reassociation;
 mod register_controls;
+pub mod sequential_cleanup;
 pub mod sequential_gate;
 pub mod sequential_pipeline;
 pub(crate) mod structural_hash_cons;
