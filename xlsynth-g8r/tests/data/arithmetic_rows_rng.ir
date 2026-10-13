@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Origin: __acm_random__rng_next64, BVC MFFC 05898897e4d549e3.
+// Prepared corpus cone retains the shared narrow sum and modular sign extension.
+package replay_input
+
+top fn __mffc_05898897e4d549e3(leaf_11: bits[32] id=1, leaf_21: bits[32] id=2) -> bits[64] {
+  literal.5: bits[33] = literal(value=8589934591, id=5)
+  ext_nary_add.6: bits[33] = ext_nary_add(leaf_11, literal.5, signed=[false, false], negated=[false, false], id=6)
+  literal.7: bits[30] = literal(value=0, id=7)
+  concat.8: bits[63] = concat(ext_nary_add.6, literal.7, id=8)
+  bit_slice.11: bits[31] = bit_slice(leaf_21, start=1, width=31, id=11)
+  ext_nary_add.14: bits[63] = ext_nary_add(concat.8, ext_nary_add.6, bit_slice.11, signed=[false, true, false], negated=[false, true, false], id=14)
+  bit_slice.15: bits[1] = bit_slice(leaf_21, start=0, width=1, id=15)
+  ret concat.16: bits[64] = concat(ext_nary_add.14, bit_slice.15, id=16)
+}

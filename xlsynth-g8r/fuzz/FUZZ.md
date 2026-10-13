@@ -236,3 +236,10 @@ malformed-byte parser fuzzing.
 ```shell
 cargo fuzz run --sanitizer none fuzz_gate_fn_aiger_binary_roundtrip -- -max_total_time=300
 ```
+
+### `fuzz_arrival_arithmetic_rows`
+
+Focused Bitwuzla equivalence coverage for common add/product arithmetic rows,
+with input-arrival skew, signedness, modular widths, shared/sliced/truncated
+products, and repeated contributions. Checks actual deferred-product hits and
+resolved boundaries. Solver timeouts remain inconclusive.

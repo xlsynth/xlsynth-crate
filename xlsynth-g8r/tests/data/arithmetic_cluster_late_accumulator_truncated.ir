@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Directed arrival-boundary regression: reverse/add chains keep arithmetic inputs late.
+package arrival_properties
+top fn f(a: bits[5] id=1, b: bits[2] id=2, c: bits[8] id=3, d: bits[8] id=4, s: bits[2] id=5) -> bits[8] {
+  v6: bits[8] = reverse(c, id=6)
+  v7: bits[8] = add(v6, c, id=7)
+  v8: bits[8] = reverse(v7, id=8)
+  v9: bits[8] = add(v8, c, id=9)
+  v10: bits[8] = reverse(v9, id=10)
+  v11: bits[8] = add(v10, c, id=11)
+  v12: bits[8] = reverse(v11, id=12)
+  v13: bits[8] = add(v12, c, id=13)
+  v14: bits[8] = reverse(v13, id=14)
+  v15: bits[8] = add(v14, c, id=15)
+  v16: bits[8] = reverse(v15, id=16)
+  v17: bits[8] = add(v16, c, id=17)
+  v18: bits[8] = reverse(v17, id=18)
+  v19: bits[8] = add(v18, c, id=19)
+  v20: bits[8] = reverse(v19, id=20)
+  v21: bits[8] = add(v20, c, id=21)
+  v22: bits[8] = reverse(v21, id=22)
+  v23: bits[8] = add(v22, c, id=23)
+  v24: bits[8] = reverse(v23, id=24)
+  v25: bits[8] = add(v24, c, id=25)
+  v26: bits[8] = reverse(v25, id=26)
+  v27: bits[8] = add(v26, c, id=27)
+  v28: bits[8] = reverse(v27, id=28)
+  v29: bits[8] = add(v28, c, id=29)
+  p: bits[11] = smul(a, b, id=30)
+  ret r: bits[8] = ext_nary_add(p, v29, d, signed=[true, false, false], negated=[false, false, false], arch=kogge_stone, id=31)
+}

@@ -5,10 +5,10 @@
 use crate::aig::gate::{AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gatify::ir2gate::{
-    GateEnv, gatify_add_with_mapping, gatify_sext_or_truncate, gatify_zext_or_truncate,
-    get_pow2_minus1_k, literal_bits_if_bits_node,
+    GateEnv, gatify_add_with_mapping, gatify_arithmetic_cluster, gatify_fused_product_rows,
+    gatify_sext_or_truncate, gatify_zext_or_truncate, get_pow2_minus1_k, literal_bits_if_bits_node,
 };
-use crate::ir2gate_utils::{AdderMapping, array_add_with_carry_out};
+use crate::ir2gate_utils::AdderMapping;
 use std::ops::Range;
 use xlsynth_pir::ir;
 
@@ -777,15 +777,27 @@ fn gatify_dense_ext_nary_add_terms(
         }
     }
 
-    if carry_in.is_none() && get_pow2_minus1_k(&literal_sum).is_some() {
-        let dynamic_sum = array_add_with_carry_out(gb, &lowered_terms, carry_in, adder_mapping).sum;
+    if carry_in.is_none() && !literal_sum.is_zero() && get_pow2_minus1_k(&literal_sum).is_some() {
+        let dynamic_sum = gatify_arithmetic_cluster(
+            gb,
+            lowered_terms,
+            &xlsynth_pir::IrBits::zero(literal_sum.get_bit_count()),
+            carry_in,
+            adder_mapping,
+        );
         return gatify_add_literal_to_dynamic_sum(gb, &dynamic_sum, &literal_sum, adder_mapping);
     }
 
     if !literal_sum.is_zero() {
         lowered_terms.push(gb.add_literal(&literal_sum));
     }
-    array_add_with_carry_out(gb, &lowered_terms, carry_in, adder_mapping).sum
+    gatify_arithmetic_cluster(
+        gb,
+        lowered_terms,
+        &xlsynth_pir::IrBits::zero(literal_sum.get_bit_count()),
+        carry_in,
+        adder_mapping,
+    )
 }
 
 /// Lowers a plain `add` node.
@@ -926,6 +938,24 @@ pub(super) fn gatify_ext_nary_add(
     let mut lowered_terms: Vec<AigBitVector> = Vec::with_capacity(terms.len());
     let mut carry_in: Option<AigOperand> = None;
     for (term, selected_negate) in terms.iter().zip(selected_negates) {
+        if env.product_is_deferred(term.operand) {
+            let rows = gatify_fused_product_rows(f, env, term.operand, output_width, g8_builder);
+            let mut correction = xlsynth_pir::IrBits::zero(output_width);
+            for row in rows {
+                if term.negated {
+                    lowered_terms.push(g8_builder.add_not_vec(&row));
+                    increment_literal_sum_by_one(&mut correction);
+                } else {
+                    lowered_terms.push(row);
+                }
+            }
+            // Keep the modular sign correction with the unresolved rows so
+            // an early resolution includes the complete contribution.
+            if !correction.is_zero() {
+                lowered_terms.push(g8_builder.add_literal(&correction));
+            }
+            continue;
+        }
         if let Some(literal_bits) = literal_bits_if_bits_node(f, term.operand) {
             accumulate_ext_nary_add_literal(
                 &mut literal_sum,
