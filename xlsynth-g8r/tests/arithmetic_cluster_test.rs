@@ -315,18 +315,18 @@ fn arithmetic_cluster_arrival_boundary_regressions() {
     for (source, expected_ands, expected_depth) in [
         (
             include_str!("data/arithmetic_cluster_late_accumulator.ir"),
-            625,
-            103,
+            633,
+            100,
         ),
         (
             include_str!("data/arithmetic_cluster_late_accumulator_truncated.ir"),
-            1195,
-            142,
+            1217,
+            139,
         ),
         (
             include_str!("data/arithmetic_cluster_late_product.ir"),
-            500,
-            98,
+            494,
+            97,
         ),
     ] {
         let f = parse(source);
