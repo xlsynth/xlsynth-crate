@@ -1,14 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared unresolved-row planning for products and canonical additive clusters.
+//! Plan and lower modular arithmetic as shared weighted rows.
 //!
-//! Extraction follows n-ary formation and node compaction, using the final
-//! prepared snapshot's references and use counts. Existing n-ary formation
-//! handles add/sub/negate chains; this read-only plan extracts product leaves.
-//! Shared products and narrow products widened by the sum stay resolved.
-//! Once emitted, product rows and additive rows use the same arrival policy.
-//! Product operands themselves remain ordinary bit vectors: this does not
-//! distribute multiplication over nested arithmetic or absorb bit slices.
+//! Preparation (outside this module) forms add/sub/negate clusters and compacts
+//! IR. Here we mark direct, single-use `umul`/`smul` leaves of a nonzero-width
+//! `ExtNaryAdd` when product_width >= sum_width. Shared products, intervening
+//! slices, and already-truncated products that the sum widens stay resolved.
+//! Multiply operands remain ordinary bit vectors.
+//!
+//! Helpers in `ir2gate.rs` and `ir2gate_arithmetic.rs` emit existing unsigned,
+//! signed, or constant-multiply partial rows and normalize additive terms,
+//! complements, and modular sign corrections to the sum width. They retain
+//! existing literal/carry-in fast paths. Scheduling and compression here are:
+//!
+//! ```text
+//! if exactly two rows and literal == 0:
+//!     return existing_array_adder(rows, carry_in, mapping)
+//! fold wholly constant rows into literal; append it if nonzero
+//! arrival(row) = maximum cached AIG depth of its bits (default 0)
+//! stable-sort rows by arrival
+//! group = []; latest = 0
+//! for row in sorted rows:
+//!     if len(group) >= 2 and
+//!        latest + resolution_depth(width, len(group), mapping) <= arrival(row):
+//!         group = [existing_array_adder(group, carry_in=None, mapping)]
+//!         latest = arrival(group[0])  // cached depth of the emitted result
+//!     group.push(row)
+//!     latest = max(latest, arrival(row))
+//! columns = bits of group at their natural weights
+//! fold constant counts; carry paired identical bits to the next weight
+//! for target in descending Dadda height targets:
+//!     sort each column's stage inputs by cached depth
+//!     while a column exceeds target, use a full adder (>=3 inputs) or half adder
+//!     send outputs to the next stage: sums at this weight, carries at the next
+//! return final_CPA(two rows from columns, carry_in, mapping)
+//! ```
+//!
+//! `resolution_depth` adds 4 per reduction h -> 2*(h/3) + h%3 until h <= 2,
+//! then 3*width (ripple) or 4*ceil(log2(width)) (Brent-Kung/Kogge-Stone).
+//! These are cached-depth estimates, not graph-LE bounds. This greedy policy
+//! does not search alternative mappings or promise optimality; all arithmetic
+//! is modulo 2^width.
 
 use super::{GateEnv, gatify_add_with_mapping};
 use crate::aig::gate::{AigBitVector, AigOperand};
