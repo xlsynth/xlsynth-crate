@@ -922,7 +922,7 @@ top fn main(x: bits[4] id=1) -> bits[4] {
 
     #[test]
     fn expanded_decoder_requires_all_reachable_overflow_bits() {
-        let fixture = include_str!("../tests/fixtures/mffc_regressions/priority_historical.ir");
+        let fixture = include_str!("../tests/fixtures/ir_snippet_qor/priority_historical.ir");
         // This tree tests amount[5] but ignores amount[6]. Changing 32-count
         // to 96-count makes the ignored bit reachable; a true shift would
         // then be zero while this partially guarded tree can produce a bit.

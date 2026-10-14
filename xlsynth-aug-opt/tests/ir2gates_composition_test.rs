@@ -248,7 +248,7 @@ top fn main(value: bits[8] id=1, read_index: bits[2] id=2, shift: bits[3] id=3) 
 /// Enabling the optimizing mapper no longer needs a separate fusion opt-in.
 #[test]
 fn priority_fusion_default_reaches_gate_mapping() {
-    let text = include_str!("fixtures/mffc_regressions/priority_u8.ir");
+    let text = include_str!("fixtures/ir_snippet_qor/priority_u8.ir");
     let options = AugOptOptions {
         enable: true,
         ..Default::default()

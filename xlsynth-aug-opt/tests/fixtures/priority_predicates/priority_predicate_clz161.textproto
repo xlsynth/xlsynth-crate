@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
-# proto-message: xlsynth.mffc_regressions.Case
+# proto-file: xlsynth-aug-opt/tests/ir_snippet_qor/corpus.proto
+# proto-message: xlsynth.ir_snippet_qor.Case
 
 sha256: "07a54b269329b5f7f9558fba545ab9cc9ce1b47fcecd1e4110606cdf283641ca"
 priority_result {
