@@ -29,6 +29,7 @@ fn library() -> Library {
     }"#).unwrap();
     let mut library = parse_liberty_files(&[file.path()]).unwrap();
     library.reference_buffer_cell = Some("BUF".into());
+    library.default_output_load = Some(0.004);
     library
 }
 
@@ -153,7 +154,7 @@ fn script_only_generates_the_library_prologue() {
 }
 
 #[test]
-fn fo8_constraints_are_positive_and_use_femtofarads() {
+fn explicit_library_defaults_are_positive_and_use_femtofarads() {
     let library = library();
     let constraints = AbcIoConstraints::from_library(&library).unwrap();
     assert_eq!(
@@ -207,9 +208,8 @@ fn library_defaults_still_check_abc_name_and_float_limits() {
     }
     for cap in [f64::MAX / 4000.0, f64::MIN_POSITIVE] {
         let mut lib = library();
-        let buffer = lib.cells.iter_mut().find(|c| c.name == "BUF").unwrap();
-        buffer.pins[0].capacitance = Some(cap);
-        assert!(resolve_reference_buffer(&lib).is_ok());
+        lib.default_output_load = Some(cap);
+        assert!(default_output_load_ff(&lib).is_ok());
         assert!(AbcIoConstraints::from_library(&lib).is_err());
     }
 }
@@ -239,7 +239,7 @@ fn missing_defaults_fail_and_explicit_constraints_take_precedence() {
         context.resolve_io_constraints(Some(&explicit)).unwrap(),
         explicit
     );
-    let with_defaults = AbcMappingContext {
+    let mut with_defaults = AbcMappingContext {
         library: self::library(),
         ..context
     };
@@ -255,6 +255,23 @@ fn missing_defaults_fail_and_explicit_constraints_take_precedence() {
             .unwrap()
             .output_load_ff,
         4.0
+    );
+    for load in [None, Some(-1.0), Some(f64::NAN)] {
+        with_defaults.library.default_output_load = load;
+        assert!(with_defaults.resolve_io_constraints(None).is_err());
+        assert_eq!(
+            with_defaults
+                .resolve_io_constraints(Some(&explicit))
+                .unwrap(),
+            explicit
+        );
+    }
+    with_defaults.library.units = None;
+    assert_eq!(
+        with_defaults
+            .resolve_io_constraints(Some(&explicit))
+            .unwrap(),
+        explicit
     );
 }
 

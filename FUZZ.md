@@ -95,9 +95,10 @@ No special optimization motifs are injected into the generic generator.
 This optional target requires `XLSYNTH_ABC_PATH`, comma-separated uncompressed
 `XLSYNTH_LIBERTY_FILES` for ABC, and `XLSYNTH_LIBERTY_PROTO` for native FF mapping
 and evaluation. The libraries must describe matching cells at one corner.
-The proto must select a usable `reference_buffer_cell` (set with
-`lib2proto --reference-buffer-cell CELL`); mapping uses that driver and an
-eight-times-input-capacitance output load, including register-D boundaries.
+The proto must select a usable `reference_buffer_cell` and a positive finite
+`default_output_load` in declared library capacitance units (set with
+`lib2proto --reference-buffer-cell CELL --default-output-load CAPACITANCE`).
+Mapping uses that driver and the explicit load, including register-D boundaries.
 Startup preflight verifies actual mapping; setup failures and unexpected sample
 failures are errors, not successful/skipped samples. Run with
 `cargo fuzz run --sanitizer none fuzz_abc_sequential_mapping -- -max_total_time=300`.

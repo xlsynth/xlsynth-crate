@@ -20,7 +20,9 @@ use crate::aig::gate::{Input, Output};
 use crate::aig::sequential_cleanup::{SequentialCleanupStats, cleanup_sequential_gate_fn};
 use crate::aig::{AigBitVector, GateFn, SequentialGateFn};
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use crate::liberty::io_defaults::{buffer_input_pin, resolve_reference_buffer};
+use crate::liberty::io_defaults::{
+    buffer_input_pin, default_output_load_ff, resolve_reference_buffer,
+};
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::emit::emit_module_as_netlist_text;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
@@ -88,13 +90,12 @@ pub struct AbcIoConstraints {
 }
 
 impl AbcIoConstraints {
-    /// Uses the library's reference buffer and eight times its input
-    /// capacitance.
+    /// Uses the library's independent driver and output-capacitance defaults.
     pub fn from_library(library: &Library) -> Result<Self, String> {
         let buffer = resolve_reference_buffer(library)?;
         let constraints = Self {
-            driving_cell: buffer.cell_name,
-            output_load_ff: 8.0 * buffer.input_capacitance_ff,
+            driving_cell: buffer.to_owned(),
+            output_load_ff: default_output_load_ff(library)?,
         };
         constraints.validate_abc_values()?;
         Ok(constraints)
@@ -133,8 +134,8 @@ pub struct AbcMappingOptions {
     pub register_selection: RegisterCellSelection,
     pub cleanup_registers: bool,
     pub timeout: Duration,
-    /// Explicit override; None requires valid reference-buffer/FO8 library
-    /// defaults. There is no unconstrained mapping mode.
+    /// Explicit override; None requires valid reference-buffer/output-load
+    /// library defaults. There is no unconstrained mapping mode.
     pub io_constraints: Option<AbcIoConstraints>,
 }
 
@@ -308,7 +309,7 @@ impl AbcMappingContext {
         })
     }
 
-    /// Resolves and validates an explicit override or the library's FO8
+    /// Resolves and validates an explicit override or the library's IO
     /// defaults.
     pub fn resolve_io_constraints(
         &self,

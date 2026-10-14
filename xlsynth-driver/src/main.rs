@@ -1967,7 +1967,16 @@ fn main() {
                     Arg::new("reference_buffer_cell")
                         .long("reference-buffer-cell")
                         .value_name("CELL")
-                        .help("Select an ordinary buffer for boundary drive/load defaults; validated after cell filtering")
+                        .help("Select an ordinary buffer for default input driving; validated after cell filtering")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("default_output_load")
+                        .long("default-output-load")
+                        .value_name("CAPACITANCE")
+                        .value_parser(clap::value_parser!(f64))
+                        .allow_hyphen_values(true)
+                        .help("Store a positive finite default output load in the library's capacitance units (default: unspecified)")
                         .action(ArgAction::Set),
                 )
                 .arg(

@@ -267,15 +267,16 @@ port syntax. `emit_verilog()` returns deterministic text without ABC timestamps.
 `AbcMappingOptions` defaults to preserving all registers and a 180-second ABC
 process timeout. Drive/load constraints are required: an explicit
 `AbcIoConstraints` override takes precedence; otherwise the library must specify
-`reference_buffer_cell`. The default driver is that buffer, with output load
-equal to **eight times its input capacitance**, converted to femtofarads (FO8-style
-buffer loading, not inverter FO4 delay). The reference must be a usable ordinary
-non-inverting buffer with positive input capacitance and explicit library units.
-Missing or invalid defaults are errors, never an unconstrained fallback.
+`reference_buffer_cell` and `default_output_load`. The reference must be a usable
+ordinary non-inverting buffer. The independent load is expressed in the library's
+declared capacitance units and converted to femtofarads for ABC; no multiplier is
+applied. Missing, nonpositive, or nonfinite loads and missing/invalid units are
+errors, never an unconstrained or buffer-derived fallback.
 
 Set the optional library metadata when importing with
-`lib2proto --reference-buffer-cell BUF`. There is no cell-name heuristic or
-technology-specific default in code. Older protos without the field remain
+`lib2proto --reference-buffer-cell BUF --default-output-load CAPACITANCE`.
+There is no cell-name heuristic or technology-specific default in code.
+Older protos without these fields remain
 readable and require explicit constraints for ABC mapping. The raw ABC library
 must also contain the selected driver; a missing-driver warning is an error.
 Resolved constraints are returned in the run diagnostics.

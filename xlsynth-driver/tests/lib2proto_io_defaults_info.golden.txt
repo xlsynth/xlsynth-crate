@@ -1,0 +1,17 @@
+Provenance: <unspecified>
+Source files (1):
+  - cells.lib
+Reference buffer: BUF
+Default output load: 0.007 [1pf]
+Cells: 2
+  Combinational: 2
+  Sequential: 0
+  Native dont-use: 0
+LUT templates: 0
+Timing arcs: 0
+Internal-power groups: 0
+Rise power tables: 0
+Fall power tables: 0
+Both-direction power tables: 0
+Unknown-direction power tables: 0
+Nominal voltage: <unspecified>

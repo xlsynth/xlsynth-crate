@@ -32,10 +32,15 @@ message Library {
   repeated string interned_strings = 12;
   // Nonzero shape IDs are 1-based references into this list.
   repeated LutShape lut_shapes = 13;
-  // User-selected ordinary buffer for default boundary drive/load modeling.
-  // This is flow metadata, not a Liberty source attribute. Consumers may derive
-  // output load from this cell's input capacitance; explicit constraints win.
+  // User-selected ordinary buffer for default input driving. This is flow
+  // metadata, not a Liberty source attribute; explicit constraints win.
   optional string reference_buffer_cell = 14;
+  // User-selected default output capacitance, in units.capacitance_unit, just
+  // like pin capacitances. Independent of reference_buffer_cell; no fanout
+  // multiplier is applied. This is flow metadata, not a Liberty source
+  // attribute. Consumers requiring a load must reject missing/nonpositive/
+  // nonfinite defaults or missing/invalid units unless explicitly overridden.
+  optional double default_output_load = 15;
 }
 
 message Cell {
