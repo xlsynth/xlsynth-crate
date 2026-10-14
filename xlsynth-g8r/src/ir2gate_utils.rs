@@ -459,12 +459,13 @@ fn control_arrival_stage_order(amount_gates: &AigBitVector, gb: &GateBuilder) ->
 fn relevant_cone_stats(
     gb: &GateBuilder,
     result: &AigBitVector,
-    relevant_output_bit_count: usize,
+    output_mask: &[bool],
 ) -> AigConeStats {
+    assert_eq!(result.get_bit_count(), output_mask.len());
     let roots = result
         .iter_lsb_to_msb()
-        .take(relevant_output_bit_count)
-        .copied()
+        .zip(output_mask)
+        .filter_map(|(bit, demanded)| demanded.then_some(*bit))
         .collect::<Vec<_>>();
     get_aig_cone_stats(&gb.gates, &roots)
 }
@@ -497,7 +498,7 @@ fn is_strict_pareto_improvement(natural: &AigConeStats, candidate: &AigConeStats
 /// monotonic QoR.
 pub(crate) fn gatify_barrel_shifter_with_forked_stage_order<F>(
     amount_gates: &AigBitVector,
-    relevant_output_bit_count: usize,
+    output_mask: &[bool],
     gb: &mut GateBuilder,
     build: F,
 ) -> AigBitVector
@@ -505,7 +506,7 @@ where
     F: Fn(&[usize], &mut GateBuilder) -> AigBitVector,
 {
     let natural_order = (0..amount_gates.get_bit_count()).collect::<Vec<_>>();
-    if relevant_output_bit_count == 0 {
+    if !output_mask.iter().any(|bit| *bit) {
         return build(&natural_order, gb);
     }
     let candidate_order = control_arrival_stage_order(amount_gates, gb);
@@ -515,12 +516,12 @@ where
 
     let natural_checkpoint = gb.begin_append_checkpoint();
     let natural_result = build(&natural_order, gb);
-    let natural_stats = relevant_cone_stats(gb, &natural_result, relevant_output_bit_count);
+    let natural_stats = relevant_cone_stats(gb, &natural_result, output_mask);
     gb.rollback_append_checkpoint(natural_checkpoint);
 
     let candidate_checkpoint = gb.begin_append_checkpoint();
     let candidate_result = build(&candidate_order, gb);
-    let candidate_stats = relevant_cone_stats(gb, &candidate_result, relevant_output_bit_count);
+    let candidate_stats = relevant_cone_stats(gb, &candidate_result, output_mask);
 
     let select_candidate = is_strict_pareto_improvement(&natural_stats, &candidate_stats);
     log::debug!(
@@ -536,63 +537,85 @@ where
     }
 }
 
-// Implements a stage-based barrel shifter (with logarithmic stages) using 2:1
-// muxes.
+/// Finds the bits needed after each mux stage, working backward from the
+/// demanded outputs. An earlier bit can shift into a demanded later position.
+/// Full masks need no stage masks and retain the original emission order.
+pub(crate) fn barrel_shifter_stage_demands(
+    output_mask: &[bool],
+    direction: Direction,
+    stage_order: &[usize],
+) -> Option<Vec<Vec<bool>>> {
+    if output_mask.iter().all(|bit| *bit) {
+        return None;
+    }
+    let width = output_mask.len();
+    let mut needed = output_mask.to_vec();
+    let mut stages = Vec::with_capacity(stage_order.len());
+    for &stage in stage_order.iter().rev() {
+        stages.push(needed.clone());
+        let shift = 1usize << stage;
+        let mut previous = needed.clone();
+        for (j, &demanded) in needed.iter().enumerate() {
+            if demanded {
+                let source = match direction {
+                    Direction::Left => j.checked_sub(shift),
+                    Direction::Right => j.checked_add(shift).filter(|i| *i < width),
+                };
+                if let Some(source) = source {
+                    previous[source] = true;
+                }
+            }
+        }
+        needed = previous;
+    }
+    stages.reverse();
+    Some(stages)
+}
+
+/// Emits a staged barrel shifter. Undemanded outputs are zero; intermediate
+/// bits needed by later stages are retained, including separate fill inputs.
 pub(crate) fn gatify_barrel_shifter_with_stage_order(
     arg_gates: &AigBitVector,
     amount_gates: &AigBitVector,
     direction: Direction,
     fill: AigOperand,
     stage_order: &[usize],
+    output_mask: &[bool],
     tag_prefix: &str,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
-    // Number of bits in the input vector.
     let bit_count = arg_gates.get_bit_count();
-    // Start with the input vector.
-    let mut current: Vec<AigOperand> = arg_gates.iter_lsb_to_msb().cloned().collect::<Vec<_>>();
-    // Each bit in the shift amount (assumed little-endian) represents a stage.
-    for stage in stage_order {
-        let shift = 1usize << *stage; // 2^stage shift amount for this stage.
-        let control = amount_gates.get_lsb(*stage);
+    assert_eq!(bit_count, output_mask.len());
+    let stage_demands = barrel_shifter_stage_demands(output_mask, direction, stage_order);
+    let mut current: Vec<AigOperand> = arg_gates.iter_lsb_to_msb().copied().collect();
+    for (stage_index, &stage) in stage_order.iter().enumerate() {
+        let shift = 1usize << stage;
+        let control = amount_gates.get_lsb(stage);
         let mut next_stage = Vec::with_capacity(bit_count);
-        match direction {
-            Direction::Right => {
-                // For a right shift:
-                // If control == 1 then output bit at position j becomes
-                // current[j + shift] (if within range), or
-                // false otherwise; if control == 0 then
-                // remain unchanged.
-                for j in 0..bit_count {
-                    let candidate = if j + shift < bit_count {
-                        current[j + shift]
-                    } else {
-                        fill
-                    };
-                    // Mux: if control is true choose candidate (shifted), else
-                    // keep current[j].
-                    let mux = g8_builder.add_mux2(*control, candidate, current[j]);
-                    next_stage.push(mux);
-                }
+        for j in 0..bit_count {
+            if stage_demands
+                .as_ref()
+                .is_some_and(|masks| !masks[stage_index][j])
+            {
+                next_stage.push(g8_builder.get_false());
+                continue;
             }
-            Direction::Left => {
-                // For a left shift:
-                // If control == 1 then output bit at position j becomes
-                // current[j - shift] (if possible), or false if
-                // j < shift; if control == 0 then remain
-                // unchanged.
-                for j in 0..bit_count {
-                    let candidate = if j >= shift { current[j - shift] } else { fill };
-                    // Mux: if control is true choose candidate (shifted), else
-                    // keep current[j].
-                    let mux = g8_builder.add_mux2(*control, candidate, current[j]);
-                    next_stage.push(mux);
-                }
-            }
+            let source = match direction {
+                Direction::Left => j.checked_sub(shift),
+                Direction::Right => j.checked_add(shift).filter(|i| *i < bit_count),
+            };
+            let candidate = source.map_or(fill, |i| current[i]);
+            next_stage.push(g8_builder.add_mux2(*control, candidate, current[j]));
         }
         current = next_stage;
     }
-    for gate in current.iter() {
+    // This also covers a zero-width amount, which has no mux stages.
+    for (bit, &demanded) in current.iter_mut().zip(output_mask) {
+        if !demanded {
+            *bit = g8_builder.get_false();
+        }
+    }
+    for gate in &current {
         let direction_str = if direction == Direction::Left {
             "left"
         } else {
@@ -600,13 +623,33 @@ pub(crate) fn gatify_barrel_shifter_with_stage_order(
         };
         g8_builder.add_tag(
             gate.node,
-            format!(
-                "{}_barrel_shifter_{}_{}_count_output",
-                tag_prefix, direction_str, bit_count
-            ),
-        )
+            format!("{tag_prefix}_barrel_shifter_{direction_str}_{bit_count}_count_output"),
+        );
     }
     AigBitVector::from_lsb_is_index_0(&current)
+}
+
+/// Selects a fill bit on overshift only for demanded outputs.
+pub(crate) fn masked_shift_fill(
+    gb: &mut GateBuilder,
+    overlarge: AigOperand,
+    fill: AigOperand,
+    normal: &AigBitVector,
+    output_mask: &[bool],
+) -> AigBitVector {
+    assert_eq!(normal.get_bit_count(), output_mask.len());
+    let bits = normal
+        .iter_lsb_to_msb()
+        .zip(output_mask)
+        .map(|(bit, demanded)| {
+            if *demanded {
+                gb.add_mux2(overlarge, fill, *bit)
+            } else {
+                gb.get_false()
+            }
+        })
+        .collect::<Vec<_>>();
+    AigBitVector::from_lsb_is_index_0(&bits)
 }
 
 pub fn gatify_barrel_shifter(
@@ -636,6 +679,33 @@ pub(crate) fn gatify_barrel_shifter_with_output_width(
     tag_prefix: &str,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
+    assert!(relevant_output_bit_count <= arg_gates.get_bit_count());
+    let mut output_mask = vec![false; arg_gates.get_bit_count()];
+    output_mask[..relevant_output_bit_count].fill(true);
+    gatify_barrel_shifter_with_output_mask(
+        arg_gates,
+        amount_gates,
+        direction,
+        &output_mask,
+        tag_prefix,
+        gb,
+    )
+}
+
+/// Emits and scores only demanded logical-shift outputs, preserving the full
+/// vector width and filling all other output positions with zero.
+pub(crate) fn gatify_barrel_shifter_with_output_mask(
+    arg_gates: &AigBitVector,
+    amount_gates: &AigBitVector,
+    direction: Direction,
+    output_mask: &[bool],
+    tag_prefix: &str,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    assert_eq!(arg_gates.get_bit_count(), output_mask.len());
+    if !output_mask.iter().any(|bit| *bit) {
+        return AigBitVector::zeros(output_mask.len());
+    }
     let natural_amount_bits = (arg_gates.get_bit_count() as f64).log2().ceil() as usize;
     let amount_can_be_oversize = amount_gates.get_bit_count() > natural_amount_bits;
     // The "amount" value is limited in what it can realistically cause to
@@ -649,10 +719,9 @@ pub(crate) fn gatify_barrel_shifter_with_output_width(
             "since amount can be oversize high bits should be non-empty"
         );
         let overlarge = gb.add_nez(&msbs, ReductionKind::Tree);
-        let zero = AigBitVector::zeros(arg_gates.get_bit_count());
         gatify_barrel_shifter_with_forked_stage_order(
             &lsbs,
-            relevant_output_bit_count,
+            output_mask,
             gb,
             |stage_order, local_gb| {
                 let normal = gatify_barrel_shifter_with_stage_order(
@@ -661,16 +730,23 @@ pub(crate) fn gatify_barrel_shifter_with_output_width(
                     direction,
                     local_gb.get_false(),
                     stage_order,
+                    output_mask,
                     tag_prefix,
                     local_gb,
                 );
-                local_gb.add_mux2_vec(&overlarge, &zero, &normal)
+                masked_shift_fill(
+                    local_gb,
+                    overlarge,
+                    local_gb.get_false(),
+                    &normal,
+                    output_mask,
+                )
             },
         )
     } else {
         gatify_barrel_shifter_with_forked_stage_order(
             amount_gates,
-            relevant_output_bit_count,
+            output_mask,
             gb,
             |stage_order, local_gb| {
                 gatify_barrel_shifter_with_stage_order(
@@ -679,6 +755,7 @@ pub(crate) fn gatify_barrel_shifter_with_output_width(
                     direction,
                     local_gb.get_false(),
                     stage_order,
+                    output_mask,
                     tag_prefix,
                     local_gb,
                 )
@@ -1180,6 +1257,137 @@ mod tests {
     use test_case::test_case;
     use xlsynth_pir::IrBits;
 
+    #[test]
+    fn demanded_shift_masks_preserve_internal_dependencies() {
+        // Deterministic property sweep includes holes, empty/full masks, widths
+        // beyond machine integers, both directions, and reversed stage order.
+        for width in [1usize, 3, 8, 9, 29, 65, 129] {
+            for direction in [Direction::Left, Direction::Right] {
+                for fold in [false, true] {
+                    for hash in [false, true] {
+                        let k = xlsynth_pir::math::ceil_log2(width.max(2));
+                        for pattern in 0..4 {
+                            let mask = (0..width)
+                                .map(|i| match pattern {
+                                    0 => false,
+                                    1 => true,
+                                    2 => i % 3 == 1,
+                                    _ => i > 0 && i + 1 < width,
+                                })
+                                .collect::<Vec<_>>();
+                            for reverse in [false, true] {
+                                let mut order = (0..k).collect::<Vec<_>>();
+                                if reverse {
+                                    order.reverse();
+                                }
+                                let mut gb = GateBuilder::new(
+                                    "masked_shift".into(),
+                                    GateBuilderOptions { fold, hash },
+                                );
+                                let data = gb.add_input("x".into(), width);
+                                let amount = gb.add_input("amount".into(), k);
+                                let result = gatify_barrel_shifter_with_stage_order(
+                                    &data,
+                                    &amount,
+                                    direction,
+                                    gb.get_false(),
+                                    &order,
+                                    &mask,
+                                    "test",
+                                    &mut gb,
+                                );
+                                gb.add_output("result".into(), result);
+                                let f = gb.build();
+                                for shift in 0..(1usize << k) {
+                                    let bits = (0..width)
+                                        .map(|i| (i * 13 + shift * 7) % 11 < 5)
+                                        .collect::<Vec<_>>();
+                                    let expected = (0..width)
+                                        .map(|j| {
+                                            let source = match direction {
+                                                Direction::Left => j.checked_sub(shift),
+                                                Direction::Right => {
+                                                    j.checked_add(shift).filter(|i| *i < width)
+                                                }
+                                            };
+                                            mask[j] && source.is_some_and(|i| bits[i])
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let actual = gate_sim::eval(
+                                        &f,
+                                        &[
+                                            IrBits::from_lsb_is_0(&bits),
+                                            IrBits::make_ubits(k, shift as u64).unwrap(),
+                                        ],
+                                        gate_sim::Collect::None,
+                                    );
+                                    assert_eq!(
+                                        actual.outputs,
+                                        vec![IrBits::from_lsb_is_0(&expected)],
+                                        "width={width} direction={direction:?} mask={pattern} reverse={reverse} shift={shift}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn demanded_shift_without_stages_masks_inputs_and_prunes_muxes() {
+        let mut gb = GateBuilder::new(
+            "zero_amount".into(),
+            GateBuilderOptions {
+                fold: false,
+                hash: false,
+            },
+        );
+        let data = gb.add_input("x".into(), 9);
+        let mask = [false, true, false, false, true, false, false, false, false];
+        let result = gatify_barrel_shifter_with_output_mask(
+            &data,
+            &AigBitVector::zeros(0),
+            Direction::Left,
+            &mask,
+            "test",
+            &mut gb,
+        );
+        for (i, bit) in result.iter_lsb_to_msb().enumerate() {
+            assert_eq!(
+                *bit,
+                if mask[i] {
+                    *data.get_lsb(i)
+                } else {
+                    gb.get_false()
+                }
+            );
+        }
+        let amount = gb.add_input("amount".into(), 4);
+        let checkpoint = gb.begin_append_checkpoint();
+        let before = gb.gates.len();
+        gatify_barrel_shifter_with_output_mask(
+            &data,
+            &amount,
+            Direction::Left,
+            &[true; 9],
+            "full",
+            &mut gb,
+        );
+        let full = gb.gates.len() - before;
+        gb.rollback_append_checkpoint(checkpoint);
+        gatify_barrel_shifter_with_output_mask(
+            &data,
+            &amount,
+            Direction::Left,
+            &mask,
+            "partial",
+            &mut gb,
+        );
+        assert!(gb.gates.len() - before < full);
+    }
+
     fn add_test_barrel_shifter(
         gb: &mut GateBuilder,
         data: &AigBitVector,
@@ -1194,6 +1402,7 @@ mod tests {
                 direction,
                 gb.get_false(),
                 stage_order,
+                &vec![true; data.get_bit_count()],
                 "test",
                 gb,
             ),
