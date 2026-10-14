@@ -79,8 +79,10 @@ their runtime prerequisites.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
 
-Uses the shared resettable block-IR generator, lowers to G8R, and maps through
-standalone ABC plus native FF selection and complete flat netlist assembly.
+Uses the shared resettable block-IR generator, lowers to G8R with explicit reset
+and enable controls, and maps through standalone ABC plus native FF selection
+and complete flat netlist assembly. Mapping must legalize the controls; the
+reference simulation evaluates the unlegalized source directly.
 Both register-cleanup settings are checked on every sample. The original and
 mapped designs receive independently sampled startup states and shared concrete
 input vectors; outputs must agree over 24 cycles after the first reset edge,

@@ -50,22 +50,32 @@ fn reference_buffer_metadata_roundtrips_and_is_validated_after_filtering() {
         );
     }
     std::fs::write(&policy, "exclude ^BUF$\n").unwrap();
-    for (name, filtered, expected) in [
-        ("ABSENT", false, "absent from Liberty"),
-        ("INV", false, "non-inverting buffer"),
-        ("BUF", true, "absent from Liberty"),
+    for (name, filtered, golden) in [
+        (
+            "ABSENT",
+            false,
+            "tests/lib2proto_reference_absent.golden.txt",
+        ),
+        (
+            "INV",
+            false,
+            "tests/lib2proto_reference_inverter.golden.txt",
+        ),
+        ("BUF", true, "tests/lib2proto_reference_filtered.golden.txt"),
     ] {
         let output = temp.path().join("invalid.proto");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
         cmd.args(["lib2proto", "--reference-buffer-cell", name, "--output"])
             .arg(&output)
-            .arg(&source);
+            .arg(&source)
+            .env("NO_COLOR", "1")
+            .env_remove("RUST_LOG");
         if filtered {
             cmd.arg("--cell-filter-policy").arg(&policy);
         }
         let result = cmd.output().unwrap();
-        assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains(expected));
+        assert_eq!(result.status.code(), Some(1));
+        compare_golden_text(&String::from_utf8(result.stderr).unwrap(), golden);
         assert!(
             !output.exists(),
             "invalid defaults must not write an output artifact"

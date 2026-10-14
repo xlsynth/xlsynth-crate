@@ -20,7 +20,7 @@ use crate::aig::gate::{Input, Output};
 use crate::aig::sequential_cleanup::{SequentialCleanupStats, cleanup_sequential_gate_fn};
 use crate::aig::{AigBitVector, GateFn, SequentialGateFn};
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use crate::liberty::io_defaults::{buffer_input_pin, reference_buffer_input_capacitance_ff};
+use crate::liberty::io_defaults::{buffer_input_pin, resolve_reference_buffer};
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::emit::emit_module_as_netlist_text;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
@@ -91,17 +91,24 @@ impl AbcIoConstraints {
     /// Uses the library's reference buffer and eight times its input
     /// capacitance.
     pub fn from_library(library: &Library) -> Result<Self, String> {
-        let output_load_ff = 8.0 * reference_buffer_input_capacitance_ff(library)?;
+        let buffer = resolve_reference_buffer(library)?;
         let constraints = Self {
-            driving_cell: library.reference_buffer_cell.clone().unwrap(),
-            output_load_ff,
+            driving_cell: buffer.cell_name,
+            output_load_ff: 8.0 * buffer.input_capacitance_ff,
         };
-        constraints.validate(library)?;
+        constraints.validate_abc_values()?;
         Ok(constraints)
     }
 
     /// Rejects constraints ABC cannot safely interpret, including zero load.
     fn validate(&self, library: &Library) -> Result<(), String> {
+        self.validate_abc_values()?;
+        buffer_input_pin(library, &self.driving_cell)?;
+        Ok(())
+    }
+
+    /// Checks ABC's textual/numeric limits without repeating library lookup.
+    fn validate_abc_values(&self) -> Result<(), String> {
         // ABC stores load as a float; underflow to zero disables its override.
         let load = self.output_load_ff as f32;
         if !simple_identifier(&self.driving_cell) || !load.is_finite() || load <= 0.0 {
@@ -109,7 +116,6 @@ impl AbcIoConstraints {
                 "ABC needs a simple driving-cell name and a positive finite output load".into(),
             );
         }
-        buffer_input_pin(library, &self.driving_cell)?;
         Ok(())
     }
 
@@ -155,6 +161,31 @@ pub struct AbcRunDiagnostics {
     pub io_constraints: Option<AbcIoConstraints>,
     pub stdout: String,
     pub stderr: String,
+}
+
+impl AbcRunDiagnostics {
+    /// Keeps invocation details when a successful process yields unusable GV.
+    fn failure(&self, error: impl std::fmt::Display) -> ToolError {
+        ToolError::failure(error.to_string()).with_context(format!(
+            r#"ABC executable: {}
+ABC version: {}
+ABC Liberty files: {:?}
+ABC IO constraints: {:?}
+ABC program:
+{}
+ABC stdout:
+{}
+ABC stderr:
+{}"#,
+            self.executable.display(),
+            self.version,
+            self.raw_liberty_files,
+            self.io_constraints,
+            self.script,
+            self.stdout,
+            self.stderr,
+        ))
+    }
 }
 
 /// Complete, flat gate-level netlist and the native metadata used to assemble
@@ -259,14 +290,15 @@ impl AbcMappingContext {
         let boundary = Boundary::new(&design, &registers);
         let (mut netlist, diagnostics) =
             self.map_transition(&boundary.graph, options, &constraints)?;
-        validate_mapped_cells(&netlist, &self.library)?;
-        assemble(&mut netlist, &design, &registers, &boundary)?;
+        validate_mapped_cells(&netlist, &self.library).map_err(|e| diagnostics.failure(e))?;
+        assemble(&mut netlist, &design, &registers, &boundary)
+            .map_err(|e| diagnostics.failure(e))?;
         // Reparse emitted GV to exercise its syntax/form contract before
         // return.
         let text =
             emit_module_as_netlist_text(&netlist.modules[0], &netlist.nets, &netlist.interner)
-                .map_err(|e| e.to_string())?;
-        let netlist = read_gv_from_str(&text).map_err(|e| e.to_string())?;
+                .map_err(|e| diagnostics.failure(e))?;
+        let netlist = read_gv_from_str(&text).map_err(|e| diagnostics.failure(e))?;
         Ok(AbcMappedDesign {
             netlist,
             design,
@@ -362,25 +394,16 @@ impl AbcMappingContext {
         // 0.
         for output in [&diagnostics.stdout, &diagnostics.stderr] {
             if output.contains("Cannot find the default PI driving cell") {
-                return Err(format!(
-                    "ABC could not use driving cell '{}':\n{}\n{}",
-                    constraints.driving_cell, diagnostics.stdout, diagnostics.stderr
-                )
-                .into());
+                return Err(diagnostics.failure(format!(
+                    "ABC could not use driving cell '{}'",
+                    constraints.driving_cell
+                )));
             }
         }
-        let mapped = std::fs::read_to_string(directory.path().join("mapped.v")).map_err(|e| {
-            ToolError::failure(format!(
-                "ABC did not produce mapped.v: {e}\n{}\n{}",
-                diagnostics.stdout, diagnostics.stderr
-            ))
-        })?;
-        let parsed = read_gv_from_str(&mapped).map_err(|e| {
-            format!(
-                "invalid ABC netlist: {e}\n{}\n{}",
-                diagnostics.stdout, diagnostics.stderr
-            )
-        })?;
+        let mapped = std::fs::read_to_string(directory.path().join("mapped.v"))
+            .map_err(|e| diagnostics.failure(format!("ABC did not produce mapped.v: {e}")))?;
+        let parsed = read_gv_from_str(&mapped)
+            .map_err(|e| diagnostics.failure(format!("invalid ABC netlist: {e}")))?;
         Ok((parsed, diagnostics))
     }
 }

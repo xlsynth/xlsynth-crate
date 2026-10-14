@@ -49,9 +49,15 @@ pub fn buffer_input_pin<'a>(library: &'a Library, name: &str) -> Result<&'a Pin,
     Ok(input)
 }
 
-/// Resolves reference-buffer capacitance in fF, rejecting absent/invalid
-/// defaults.
-pub fn reference_buffer_input_capacitance_ff(library: &Library) -> Result<f64, String> {
+/// A validated library reference buffer and its input capacitance in fF.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReferenceBuffer {
+    pub cell_name: String,
+    pub input_capacitance_ff: f64,
+}
+
+/// Resolves the reference buffer once, rejecting absent/invalid defaults.
+pub fn resolve_reference_buffer(library: &Library) -> Result<ReferenceBuffer, String> {
     let name = library.reference_buffer_cell.as_deref().ok_or(
         "Liberty has no reference_buffer_cell; specify explicit drive/load constraints or select a reference buffer during import",
     )?;
@@ -69,7 +75,10 @@ pub fn reference_buffer_input_capacitance_ff(library: &Library) -> Result<f64, S
             "reference buffer '{name}' needs positive finite input capacitance"
         ));
     }
-    Ok(result)
+    Ok(ReferenceBuffer {
+        cell_name: name.to_owned(),
+        input_capacitance_ff: result,
+    })
 }
 
 /// Converts an explicitly scaled Liberty capacitance unit to femtofarads.
@@ -121,7 +130,13 @@ mod tests {
     fn reference_buffer_survives_wire_roundtrip_and_converts_units() {
         let lib = library_from_proto(library_to_proto(library()).unwrap()).unwrap();
         assert_eq!(lib.reference_buffer_cell.as_deref(), Some("BUF"));
-        assert_eq!(reference_buffer_input_capacitance_ff(&lib).unwrap(), 0.5);
+        assert_eq!(
+            resolve_reference_buffer(&lib).unwrap(),
+            ReferenceBuffer {
+                cell_name: "BUF".into(),
+                input_capacitance_ff: 0.5,
+            }
+        );
         for (unit, expected) in [
             ("1ff", 1.0),
             (" 0.001 pF ", 1.0),
@@ -143,7 +158,7 @@ mod tests {
         for name in [None, Some(""), Some("ABSENT"), Some("INV"), Some("DFF")] {
             let mut lib = library();
             lib.reference_buffer_cell = name.map(str::to_owned);
-            assert!(reference_buffer_input_capacitance_ff(&lib).is_err());
+            assert!(resolve_reference_buffer(&lib).is_err());
         }
         for cap in [
             None,
@@ -154,17 +169,17 @@ mod tests {
         ] {
             let mut lib = library();
             lib.cells[1].pins[0].capacitance = cap;
-            assert!(reference_buffer_input_capacitance_ff(&lib).is_err());
+            assert!(resolve_reference_buffer(&lib).is_err());
         }
         for unit in ["", "pf", "0pf", "-1pf", "NaNpf", "infpf", "1ps"] {
             assert!(capacitance_unit_in_ff(unit).is_err());
         }
         let mut lib = library();
         lib.cells[1].dont_use = Some(true);
-        assert!(reference_buffer_input_capacitance_ff(&lib).is_err());
+        assert!(resolve_reference_buffer(&lib).is_err());
         lib.cells[1].dont_use = None;
         let extra = lib.cells[1].pins[0].clone();
         lib.cells[1].pins.push(extra);
-        assert!(reference_buffer_input_capacitance_ff(&lib).is_err());
+        assert!(resolve_reference_buffer(&lib).is_err());
     }
 }

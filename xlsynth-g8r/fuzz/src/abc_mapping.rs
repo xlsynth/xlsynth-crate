@@ -13,7 +13,7 @@ use xlsynth_g8r::aig::{
 };
 use xlsynth_g8r::aig_serdes::g8r::emit_g8r;
 use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
-use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
+use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn_with_controls;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::liberty::load::load_library_from_path;
 use xlsynth_g8r::netlist::abc::{AbcMappingContext, AbcMappingOptions, AbcToolchain};
@@ -111,9 +111,13 @@ pub fn check(data: &[u8]) {
     .expect("bounded block generator options are valid");
     let block = generated.package.get_top_block().unwrap();
     let reset = block.reset.as_ref().expect("resettable generation profile");
-    let original =
-        block_package_to_sequential_gate_fn(&generated.package, GatifyOptions::all_opts_enabled())
-            .unwrap();
+    let original = block_package_to_sequential_gate_fn_with_controls(
+        &generated.package,
+        GatifyOptions::all_opts_enabled(),
+    )
+    .unwrap();
+    assert!(!original.registers.is_empty());
+    assert!(original.registers.iter().all(|r| r.reset.is_some()));
     let source = emit_g8r(&original).unwrap();
     for cleanup_registers in [false, true] {
         let mapped = context
@@ -126,6 +130,7 @@ pub fn check(data: &[u8]) {
                 },
             )
             .unwrap_or_else(|error| panic!("ABC mapping failed: {error}\n{source}"));
+        mapped.design.validate_legalized().unwrap();
         let gv = mapped.emit_verilog().unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), &gv).unwrap();

@@ -13,6 +13,8 @@ use crate::liberty::parser::parse_liberty_files;
 use crate::netlist::gv_eval::{GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use xlsynth_test_helpers::compare_golden_text;
 
 fn library() -> Library {
     let file = tempfile::NamedTempFile::new().unwrap();
@@ -194,6 +196,24 @@ fn fo8_constraints_are_positive_and_use_femtofarads() {
     }
 }
 
+#[test]
+fn library_defaults_still_check_abc_name_and_float_limits() {
+    for name in ["BUF\nquit", "BUF;quit"] {
+        let mut lib = library();
+        lib.cells.iter_mut().find(|c| c.name == "BUF").unwrap().name = name.into();
+        lib.reference_buffer_cell = Some(name.into());
+        assert!(resolve_reference_buffer(&lib).is_ok());
+        assert!(AbcIoConstraints::from_library(&lib).is_err());
+    }
+    for cap in [f64::MAX / 4000.0, f64::MIN_POSITIVE] {
+        let mut lib = library();
+        let buffer = lib.cells.iter_mut().find(|c| c.name == "BUF").unwrap();
+        buffer.pins[0].capacitance = Some(cap);
+        assert!(resolve_reference_buffer(&lib).is_ok());
+        assert!(AbcIoConstraints::from_library(&lib).is_err());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn missing_defaults_fail_and_explicit_constraints_take_precedence() {
@@ -268,6 +288,63 @@ echo 'module mapped(); endmodule' > mapped.v
             .to_string()
             .contains("ABC could not use driving cell 'BUF'"),
         "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn post_abc_validation_and_assembly_errors_preserve_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("fake abc");
+    let raw = temp.path().join("raw.lib");
+    std::fs::write(&raw, "library(raw) {}").unwrap();
+    let mut errors = Vec::new();
+    for (label, netlist) in [
+        (
+            "unknown cell",
+            "module mapped(a,y); input a; output y; UNKNOWN c(.A(a),.Y(y)); endmodule",
+        ),
+        (
+            "unknown pin",
+            "module mapped(a,y); input a; output y; INV c(.BAD(a),.Y(y)); endmodule",
+        ),
+        ("boundary mismatch", "module mapped(); endmodule"),
+    ] {
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+if [ "$2" = "-c" ]; then echo 'test ABC'; exit 0; fi
+echo 'mapping stdout'
+echo 'mapping stderr' >&2
+printf '%s\n' '{netlist}' > mapped.v
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let context =
+            AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[&raw], library())
+                .unwrap();
+        let error = context
+            .map_sequential(&design(), &Default::default())
+            .err()
+            .expect("invalid ABC output must be rejected");
+        assert!(!error.is_resource_failure());
+        // Normalize only the temporary paths and separately tested script.
+        let message = error
+            .to_string()
+            .replace(
+                temp.path().canonicalize().unwrap().to_str().unwrap(),
+                "<workdir>",
+            )
+            .replace(temp.path().to_str().unwrap(), "<workdir>")
+            .replace(ABC_SPEED_SCRIPT, "<speed-script>\n");
+        errors.push(format!("{label}:\n{message}"));
+    }
+    compare_golden_text(
+        &errors.join("\n"),
+        "src/netlist/abc/failure_diagnostics.golden.txt",
     );
 }
 
