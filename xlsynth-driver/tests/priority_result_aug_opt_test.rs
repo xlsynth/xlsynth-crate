@@ -9,13 +9,13 @@ fn aug_opt_priority_fusion_defaults_on_and_preserves_external_amount_sharing() {
     for (source, activates) in [
         (
             include_str!(
-                "../../xlsynth-aug-opt/tests/fixtures/mffc_regressions/priority_historical.ir"
+                "../../xlsynth-aug-opt/tests/fixtures/ir_snippet_qor/priority_historical.ir"
             ),
             true,
         ),
         (
             include_str!(
-                "../../xlsynth-aug-opt/tests/fixtures/mffc_regressions/priority_shared_amount63.ir"
+                "../../xlsynth-aug-opt/tests/fixtures/ir_snippet_qor/priority_shared_amount63.ir"
             ),
             false,
         ),
@@ -59,7 +59,7 @@ fn dslx_and_codegen_commands_default_priority_fusion_on() {
     let ir_path = dir.path().join("priority.ir");
     std::fs::write(
         &ir_path,
-        include_str!("../../xlsynth-aug-opt/tests/fixtures/mffc_regressions/priority_u8.ir"),
+        include_str!("../../xlsynth-aug-opt/tests/fixtures/ir_snippet_qor/priority_u8.ir"),
     )
     .unwrap();
     let dslx_path = dir.path().join("priority.x");

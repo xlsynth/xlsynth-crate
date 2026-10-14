@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
-# proto-message: xlsynth.mffc_regressions.MappingProfile
+# proto-file: xlsynth-aug-opt/tests/ir_snippet_qor/corpus.proto
+# proto-message: xlsynth.ir_snippet_qor.MappingProfile
 
 canonical_options {
   fold: true

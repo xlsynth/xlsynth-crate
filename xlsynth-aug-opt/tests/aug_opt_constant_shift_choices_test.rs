@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use mffc_corpus::{Case, Expectations};
+use ir_snippet_qor::{Case, Expectations};
 use serde_json::json;
 use xlsynth_aug_opt::constant_shift_choices::{
     ConstantShiftChoiceLimits, ShiftChoiceCostGraph, constant_shift_choice_candidate,
@@ -30,7 +30,7 @@ use xlsynth_pir::{
 
 const GRAPH_LE_TOLERANCE: f64 = 1.0e-6;
 
-pub mod mffc_corpus;
+pub mod ir_snippet_qor;
 
 struct Fixture {
     name: String,
@@ -194,7 +194,8 @@ impl ShiftChoiceCostEvaluator for EqualCostEvaluator {
     }
 }
 
-/// Exercises encoded shift choices and the fixed MFFC corpus with one profile.
+/// Exercises encoded shift choices and the fixed IR snippet corpus with one
+/// profile.
 fn fixtures(cases: Vec<Case>) -> Vec<Fixture> {
     let mut fixtures = Vec::new();
     for op in ["shll", "shrl"] {
@@ -433,7 +434,7 @@ struct ComparisonSummary {
 /// Compares costed aug-opt and unconditional projection through normal mapping.
 #[test]
 fn compare_costed_aug_opt_shift_choice_pipelines() {
-    let corpus = mffc_corpus::load().unwrap();
+    let corpus = ir_snippet_qor::load().unwrap();
     let profile = &corpus.profile;
     let graph_le_options = GraphLogicalEffortOptions {
         beta1: profile.canonical_options.graph_logical_effort_beta1,

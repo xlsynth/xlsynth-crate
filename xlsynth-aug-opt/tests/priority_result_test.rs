@@ -4,8 +4,8 @@ use xlsynth_aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text_with_s
 use xlsynth_g8r::check_equivalence::check_equivalence_via_toolchain;
 use xlsynth_pir::ir_parser::Parser;
 
-const PRIORITY8: &str = include_str!("fixtures/mffc_regressions/priority_u8.ir");
-const ZERO: &str = include_str!("fixtures/mffc_regressions/priority_zero.ir");
+const PRIORITY8: &str = include_str!("fixtures/ir_snippet_qor/priority_u8.ir");
+const ZERO: &str = include_str!("fixtures/ir_snippet_qor/priority_zero.ir");
 
 #[test]
 fn priority_fusion_defaults_on_when_aug_opt_is_enabled() {
@@ -76,7 +76,7 @@ fn disabled_aug_opt_is_an_exact_passthrough_even_with_priority_fusion_requested(
 fn sandwich_counts_initial_fusion_once_and_zero_rounds_skips_it() {
     for text in [
         PRIORITY8,
-        include_str!("fixtures/mffc_regressions/priority_shared_hot63.ir"),
+        include_str!("fixtures/ir_snippet_qor/priority_shared_hot63.ir"),
     ] {
         let package = Parser::new(text).parse_and_validate_package().unwrap();
         let top = &package.get_top_fn().unwrap().name;
