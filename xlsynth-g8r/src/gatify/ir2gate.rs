@@ -32,6 +32,9 @@ use crate::ir2gate_utils::{
 
 use crate::gate_builder::ReductionKind;
 
+mod arithmetic_cluster;
+use arithmetic_cluster::ArithmeticClusterPlan;
+pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
 mod region;
 pub use region::{IrRegion, gatify_region};
 
@@ -187,6 +190,7 @@ enum UseCounts {
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
     use_counts: UseCounts,
+    arithmetic_cluster_plan: ArithmeticClusterPlan,
 }
 
 impl GateEnv {
@@ -204,6 +208,7 @@ impl GateEnv {
         Self {
             ir_to_g8: HashMap::new(),
             use_counts: UseCounts::Function(use_counts),
+            arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
         }
     }
 
@@ -222,6 +227,7 @@ impl GateEnv {
         Self {
             ir_to_g8: HashMap::new(),
             use_counts: UseCounts::Region(use_counts),
+            arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
         }
     }
 
@@ -232,6 +238,12 @@ impl GateEnv {
             UseCounts::Region(counts) => counts.get(&ir_node_ref).copied().unwrap_or(0),
         };
         count == 1
+    }
+
+    /// Returns whether this product is emitted as rows at its sole sum
+    /// consumer.
+    pub(super) fn product_is_deferred(&self, ir_node_ref: ir::NodeRef) -> bool {
+        self.arithmetic_cluster_plan.contains_product(ir_node_ref)
     }
 
     fn contains(&self, ir_node_ref: ir::NodeRef) -> bool {
@@ -1462,19 +1474,18 @@ fn usize_as_aig_bits(value: usize, bit_count: usize, gb: &mut GateBuilder) -> Ai
     AigBitVector::from_lsb_is_index_0(&bits)
 }
 
-fn gatify_umul_const_via_csd(
+fn gatify_umul_const_partial_products(
     multiplicand_bits: &AigBitVector,
     constant_bits: &IrBits,
     output_bit_count: usize,
-    mul_adder_mapping: AdderMapping,
     gb: &mut GateBuilder,
-) -> AigBitVector {
+) -> Vec<AigBitVector> {
     if output_bit_count == 0 {
-        return AigBitVector::zeros(0);
+        return Vec::new();
     }
     let terms = decompose_umul_const_terms(constant_bits, output_bit_count);
     if terms.is_empty() {
-        return AigBitVector::zeros(output_bit_count);
+        return Vec::new();
     }
 
     let mut operands: Vec<AigBitVector> = Vec::with_capacity(terms.len() + 1);
@@ -1492,7 +1503,66 @@ fn gatify_umul_const_via_csd(
     if neg_term_count != 0 {
         operands.push(usize_as_aig_bits(neg_term_count, output_bit_count, gb));
     }
-    array_add_with_carry_out(gb, &operands, None, mul_adder_mapping).sum
+    operands
+}
+
+fn gatify_umul_const_via_csd(
+    multiplicand_bits: &AigBitVector,
+    constant_bits: &IrBits,
+    output_bit_count: usize,
+    mul_adder_mapping: AdderMapping,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    let rows =
+        gatify_umul_const_partial_products(multiplicand_bits, constant_bits, output_bit_count, gb);
+    if rows.is_empty() {
+        return AigBitVector::zeros(output_bit_count);
+    }
+    array_add_with_carry_out(gb, &rows, None, mul_adder_mapping).sum
+}
+
+/// Emits one product's existing partial rows without its final adder.
+pub(super) fn gatify_fused_product_rows(
+    f: &ir::Fn,
+    env: &GateEnv,
+    product: ir::NodeRef,
+    output_width: usize,
+    gb: &mut GateBuilder,
+) -> Vec<AigBitVector> {
+    let ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) =
+        f.get_node(product).payload
+    else {
+        unreachable!("fusion plan contains only multiplication nodes")
+    };
+    assert!(f.get_node(product).ty.bit_count() >= output_width);
+    if op == ir::Binop::Umul {
+        if let Some((multiplicand, constant)) = normalize_umul_literal_rhs(f, lhs, rhs) {
+            let bits = env
+                .get_bit_vector(multiplicand)
+                .expect("product input present");
+            return gatify_umul_const_partial_products(&bits, &constant, output_width, gb);
+        }
+    }
+    let mut lhs = env.get_bit_vector(lhs).expect("product lhs present");
+    let mut rhs = env.get_bit_vector(rhs).expect("product rhs present");
+    if op == ir::Binop::Smul {
+        let width = lhs.get_bit_count();
+        if width > 0
+            && rhs.get_bit_count() == width
+            && output_width > width
+            && output_width <= 2 * width
+        {
+            return gatify_smul_baugh_wooley_partial_products(&lhs, &rhs, output_width, gb);
+        }
+        lhs = gatify_sext_or_truncate(gb, 0, output_width, &lhs);
+        rhs = gatify_sext_or_truncate(gb, 0, output_width, &rhs);
+    }
+    let (multiplicand, multiplier) = if rhs.get_bit_count() <= lhs.get_bit_count() {
+        (&lhs, &rhs)
+    } else {
+        (&rhs, &lhs)
+    };
+    gatify_umul_partial_products(multiplicand, multiplier, output_width, gb)
 }
 
 fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
@@ -4300,6 +4370,12 @@ fn gatify_internal(
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
+    // Preparation has finished compacting nodes. Plan against this unchanged
+    // snapshot, reusing the environment's consumer counts.
+    if options.enable_rewrite_nary_add {
+        env.arithmetic_cluster_plan = ArithmeticClusterPlan::extract(f, env);
+    }
+
     // First we place all the inputs into the G8 structure and environment.
     for &param_ref in &f.params {
         let param = f.get_node(param_ref);
@@ -4321,6 +4397,11 @@ fn gatify_internal(
     }
 
     for node_ref in ir_utils::get_topological(f) {
+        if env.product_is_deferred(node_ref) {
+            // Its only consumer takes partial rows, so do not emit a product
+            // CPA or an internal lowering-map entry that would require one.
+            continue;
+        }
         let node = &f.get_node(node_ref);
         log::debug!(
             "Gatifying node {:?} type: {:?} payload: {:?}",
@@ -4403,6 +4484,8 @@ pub struct GatifyOptions {
     pub range_info: Option<Arc<IrRangeInfo>>,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
+    /// Canonicalizes additive chains and fuses single-use products into their
+    /// carry-save accumulation when no intervening widening is required.
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
     pub enable_rewrite_normalize_left: bool,
@@ -4463,6 +4546,8 @@ pub type IrToGateMap = HashMap<ir::NodeRef, AigBitVector>;
 #[derive(Debug)]
 pub struct GatifyOutput {
     pub gate_fn: GateFn,
+    /// Resolved IR values retained during lowering. Internal products consumed
+    /// in carry-save form have no resolved bit vector and are omitted.
     pub lowering_map: IrToGateMap,
 }
 

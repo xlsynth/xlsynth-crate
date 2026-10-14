@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// From google/xls xls/examples/dot_product.x at 17f5c7a22148462b26c294eb61106689d2f5e548,
+// dot_product_fixed instantiated at s8 and N=2 from its published unit tests.
+package published_dot_s8_n2
+
+
+top fn __published_dot_s8_n2__main(a: bits[8][2] id=17, b: bits[8][2] id=18) -> bits[8] {
+  literal.48: bits[1] = literal(value=0, id=48)
+  literal.49: bits[1] = literal(value=1, id=49)
+  array_index.50: bits[8] = array_index(a, indices=[literal.48], assumed_in_bounds=true, id=50)
+  array_index.51: bits[8] = array_index(b, indices=[literal.48], assumed_in_bounds=true, id=51)
+  array_index.52: bits[8] = array_index(a, indices=[literal.49], assumed_in_bounds=true, id=52)
+  array_index.53: bits[8] = array_index(b, indices=[literal.49], assumed_in_bounds=true, id=53)
+  partial_product: bits[8] = smul(array_index.50, array_index.51, id=54)
+  partial_product__1: bits[8] = smul(array_index.52, array_index.53, id=55)
+  ret add.56: bits[8] = add(partial_product, partial_product__1, id=56)
+}
