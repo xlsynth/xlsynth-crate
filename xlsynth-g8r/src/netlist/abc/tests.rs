@@ -205,74 +205,139 @@ fn library_defaults_still_check_abc_name_and_float_limits() {
         lib.reference_buffer_cell = Some(name.into());
         assert!(resolve_reference_buffer(&lib).is_ok());
         assert!(AbcIoConstraints::from_library(&lib).is_err());
+        assert!(AbcMappingOptions::from_library(&lib).is_err());
     }
     for cap in [f64::MAX / 4000.0, f64::MIN_POSITIVE] {
         let mut lib = library();
         lib.default_output_load = Some(cap);
         assert!(default_output_load_ff(&lib).is_ok());
         assert!(AbcIoConstraints::from_library(&lib).is_err());
+        assert!(AbcMappingOptions::from_library(&lib).is_err());
     }
+}
+
+#[test]
+fn options_resolve_library_defaults_at_construction() {
+    let mut library = library();
+    let options = AbcMappingOptions::from_library(&library).unwrap();
+    assert_eq!(
+        options.register_selection,
+        RegisterCellSelection::SmallestArea
+    );
+    assert!(!options.cleanup_registers);
+    assert_eq!(options.timeout, Duration::from_secs(180));
+    assert_eq!(
+        options.io_constraints,
+        AbcIoConstraints {
+            driving_cell: "BUF".into(),
+            output_load_ff: 4.0,
+        }
+    );
+    for load in [None, Some(-1.0), Some(f64::NAN)] {
+        library.default_output_load = load;
+        assert!(AbcMappingOptions::from_library(&library).is_err());
+    }
+    library.default_output_load = Some(0.004);
+    library.units = None;
+    assert!(AbcMappingOptions::from_library(&library).is_err());
+    library = self::library();
+    library.reference_buffer_cell = None;
+    assert!(AbcMappingOptions::from_library(&library).is_err());
+    library.reference_buffer_cell = Some("INV".into());
+    assert!(AbcMappingOptions::from_library(&library).is_err());
+    // The resolved options are independent of later library metadata changes.
+    options.io_constraints.validate(&library).unwrap();
+    assert_eq!(options.io_constraints.output_load_ff, 4.0);
 }
 
 #[cfg(unix)]
 #[test]
-fn missing_defaults_fail_and_explicit_constraints_take_precedence() {
+fn explicit_options_map_without_usable_library_defaults() {
     let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("fake abc");
+    std::fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$2" = "-c" ]; then exit 0; fi
+test "$(cat timing.constr)" = "set_driving_cell BUF
+set_load 20" || exit 3
+echo 'module mapped(i0,o0); input i0; output o0; assign o0=i0; endmodule' > mapped.v
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let raw = temp.path().join("cells.lib");
     std::fs::write(&raw, "library(test) {}").unwrap();
-    let mut library = library();
-    library.reference_buffer_cell = None;
-    let context =
-        AbcMappingContext::new(AbcToolchain::new("/usr/bin/true").unwrap(), &[raw], library)
-            .unwrap();
-    assert!(context.resolve_io_constraints(None).is_err());
-    let error = context
-        .map_sequential(&design(), &Default::default())
-        .err()
-        .unwrap();
-    assert!(error.to_string().contains("reference_buffer_cell"));
+    let mut context =
+        AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
+    let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
+    let input = builder.add_input("a".into(), 1);
+    builder.add_output("y".into(), input);
+    let design = SequentialGateFn::from_gate_fn(builder.build());
     let explicit = AbcIoConstraints {
         driving_cell: "BUF".into(),
         output_load_ff: 20.0,
     };
+    let options = AbcMappingOptions::new(explicit.clone());
     assert_eq!(
-        context.resolve_io_constraints(Some(&explicit)).unwrap(),
-        explicit
+        options.register_selection,
+        RegisterCellSelection::SmallestArea
     );
-    let mut with_defaults = AbcMappingContext {
-        library: self::library(),
-        ..context
-    };
-    assert_eq!(
-        with_defaults
-            .resolve_io_constraints(Some(&explicit))
-            .unwrap(),
-        explicit
-    );
-    assert_eq!(
-        with_defaults
-            .resolve_io_constraints(None)
-            .unwrap()
-            .output_load_ff,
-        4.0
-    );
-    for load in [None, Some(-1.0), Some(f64::NAN)] {
-        with_defaults.library.default_output_load = load;
-        assert!(with_defaults.resolve_io_constraints(None).is_err());
-        assert_eq!(
-            with_defaults
-                .resolve_io_constraints(Some(&explicit))
-                .unwrap(),
-            explicit
-        );
+    assert!(!options.cleanup_registers);
+    assert_eq!(options.timeout, Duration::from_secs(180));
+    for load in [Some(0.004), None, Some(-1.0), Some(f64::NAN)] {
+        context.library.default_output_load = load;
+        let result = context.map_sequential(&design, &options).unwrap();
+        assert_eq!(result.diagnostics.io_constraints.as_ref(), Some(&explicit));
     }
-    with_defaults.library.units = None;
-    assert_eq!(
-        with_defaults
-            .resolve_io_constraints(Some(&explicit))
-            .unwrap(),
-        explicit
-    );
+    context.library.reference_buffer_cell = None;
+    context.library.units = None;
+    let result = context.map_sequential(&design, &options).unwrap();
+    assert_eq!(result.diagnostics.io_constraints.as_ref(), Some(&explicit));
+
+    // A caller can also change already-resolved options before mapping.
+    let mut overridden = AbcMappingOptions::from_library(&library()).unwrap();
+    overridden.io_constraints = explicit;
+    context.map_sequential(&design, &overridden).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn mapping_validates_explicit_and_modified_constraints() {
+    let temp = tempfile::tempdir().unwrap();
+    let raw = temp.path().join("cells.lib");
+    std::fs::write(&raw, "library(test) {}").unwrap();
+    let context = AbcMappingContext::new(
+        AbcToolchain::new("/usr/bin/true").unwrap(),
+        &[raw],
+        library(),
+    )
+    .unwrap();
+    for constraints in [
+        AbcIoConstraints {
+            driving_cell: "INV".into(),
+            output_load_ff: 4.0,
+        },
+        AbcIoConstraints {
+            driving_cell: "BUF".into(),
+            output_load_ff: 0.0,
+        },
+    ] {
+        let expected = constraints.validate(context.library()).unwrap_err();
+        let explicit = AbcMappingOptions::new(constraints.clone());
+        let mut modified = AbcMappingOptions::from_library(context.library()).unwrap();
+        modified.io_constraints = constraints;
+        for options in [explicit, modified] {
+            assert_eq!(
+                context
+                    .map_sequential(&design(), &options)
+                    .err()
+                    .expect("invalid explicit constraints must be rejected before ABC runs")
+                    .to_string(),
+                expected
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -297,7 +362,10 @@ echo 'module mapped(); endmodule' > mapped.v
     let context =
         AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
     let error = context
-        .map_sequential(&design(), &Default::default())
+        .map_sequential(
+            &design(),
+            &AbcMappingOptions::from_library(context.library()).unwrap(),
+        )
         .err()
         .unwrap();
     assert!(
@@ -344,7 +412,10 @@ printf '%s\n' '{netlist}' > mapped.v
             AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[&raw], library())
                 .unwrap();
         let error = context
-            .map_sequential(&design(), &Default::default())
+            .map_sequential(
+                &design(),
+                &AbcMappingOptions::from_library(context.library()).unwrap(),
+            )
             .err()
             .expect("invalid ABC output must be rejected");
         assert!(!error.is_resource_failure());
@@ -435,7 +506,7 @@ fn mapping_rejects_all_physical_port_name_collisions_before_abc() {
                         &design,
                         &AbcMappingOptions {
                             cleanup_registers,
-                            ..Default::default()
+                            ..AbcMappingOptions::from_library(context.library()).unwrap()
                         },
                     )
                     .err()
@@ -486,7 +557,10 @@ fn zero_width_and_clock_only_designs_need_no_abc_network() {
     let mut design = SequentialGateFn::from_gate_fn(b.build());
     design.clock = Some(ClockPort { name: "clk".into() });
     let result = context
-        .map_sequential(&design, &Default::default())
+        .map_sequential(
+            &design,
+            &AbcMappingOptions::from_library(context.library()).unwrap(),
+        )
         .unwrap();
     assert!(result.diagnostics.script.is_empty());
     assert_eq!(result.design.transition.inputs[0].get_bit_count(), 0);
@@ -508,7 +582,10 @@ fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
         AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
     assert!(
         context
-            .map_sequential(&design(), &Default::default())
+            .map_sequential(
+                &design(),
+                &AbcMappingOptions::from_library(context.library()).unwrap()
+            )
             .is_err()
     );
     std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").unwrap();
@@ -517,7 +594,7 @@ fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
             &design(),
             &AbcMappingOptions {
                 timeout: Duration::from_millis(30),
-                ..Default::default()
+                ..AbcMappingOptions::from_library(context.library()).unwrap()
             },
         )
         .err()

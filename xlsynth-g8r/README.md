@@ -264,14 +264,20 @@ D/external-output bindings keep their original polarity. Zero-width ports are
 retained in `AbcMappedDesign::design` and omitted from GV, which has no zero-width
 port syntax. `emit_verilog()` returns deterministic text without ABC timestamps.
 
-`AbcMappingOptions` defaults to preserving all registers and a 180-second ABC
-process timeout. Drive/load constraints are required: an explicit
-`AbcIoConstraints` override takes precedence; otherwise the library must specify
-`reference_buffer_cell` and `default_output_load`. The reference must be a usable
-ordinary non-inverting buffer. The independent load is expressed in the library's
-declared capacitance units and converted to femtofarads for ABC; no multiplier is
-applied. Missing, nonpositive, or nonfinite loads and missing/invalid units are
-errors, never an unconstrained or buffer-derived fallback.
+`AbcMappingOptions` requires explicit `io_constraints` and has no `Default`
+implementation. `AbcMappingOptions::from_library(&library)` resolves and validates
+the library's `reference_buffer_cell` and `default_output_load` at construction.
+Alternatively, `AbcMappingOptions::new(constraints)` uses caller-supplied
+`AbcIoConstraints`, without requiring library defaults. Both constructors select
+the smallest-area FF, preserve all registers, and use a 180-second ABC timeout.
+Callers can modify these options before mapping; the mapper validates the
+constraints against its library rather than resolving defaults again.
+The reference must be a usable ordinary non-inverting buffer. The library's
+independent default load is expressed in its declared capacitance units and
+converted to femtofarads for ABC; caller-supplied `output_load_ff` is already in
+femtofarads. No multiplier is applied. Missing, nonpositive, or nonfinite default
+loads and missing/invalid units are constructor errors, never an unconstrained
+or buffer-derived fallback.
 
 Set the optional library metadata when importing with
 `lib2proto --reference-buffer-cell BUF --default-output-load CAPACITANCE`.
@@ -293,7 +299,8 @@ use xlsynth_g8r::netlist::abc::{AbcMappingContext, AbcMappingOptions, AbcToolcha
 
 let toolchain = AbcToolchain::new("/path/to/abc")?;
 let context = AbcMappingContext::new(toolchain, &["/path/to/cells.lib"], liberty)?;
-let mapped = context.map_sequential(&design, &AbcMappingOptions::default())?;
+let options = AbcMappingOptions::from_library(context.library())?;
+let mapped = context.map_sequential(&design, &options)?;
 let verilog = mapped.emit_verilog()?;
 ```
 

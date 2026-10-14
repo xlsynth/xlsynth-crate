@@ -134,19 +134,27 @@ pub struct AbcMappingOptions {
     pub register_selection: RegisterCellSelection,
     pub cleanup_registers: bool,
     pub timeout: Duration,
-    /// Explicit override; None requires valid reference-buffer/output-load
-    /// library defaults. There is no unconstrained mapping mode.
-    pub io_constraints: Option<AbcIoConstraints>,
+    /// Required electrical boundary conditions, validated against the mapping
+    /// library before ABC runs. There is no unconstrained mapping mode.
+    pub io_constraints: AbcIoConstraints,
 }
 
-impl Default for AbcMappingOptions {
-    fn default() -> Self {
+impl AbcMappingOptions {
+    /// Uses explicit constraints with area-first FF selection, no register
+    /// cleanup, and a 180-second timeout. Mapping validates the constraints.
+    pub fn new(io_constraints: AbcIoConstraints) -> Self {
         Self {
             register_selection: RegisterCellSelection::SmallestArea,
             cleanup_registers: false,
             timeout: Duration::from_secs(180),
-            io_constraints: None,
+            io_constraints,
         }
+    }
+
+    /// Resolves the library's reference buffer and output load into explicit
+    /// constraints, rejecting missing or invalid defaults.
+    pub fn from_library(library: &Library) -> Result<Self, String> {
+        Ok(Self::new(AbcIoConstraints::from_library(library)?))
     }
 }
 
@@ -284,13 +292,12 @@ impl AbcMappingContext {
         if options.timeout.is_zero() {
             return Err("ABC timeout must be positive".into());
         }
-        let constraints = self.resolve_io_constraints(options.io_constraints.as_ref())?;
+        options.io_constraints.validate(&self.library)?;
         let registers = self
             .registers
             .map_registers(&design, &options.register_selection)?;
         let boundary = Boundary::new(&design, &registers);
-        let (mut netlist, diagnostics) =
-            self.map_transition(&boundary.graph, options, &constraints)?;
+        let (mut netlist, diagnostics) = self.map_transition(&boundary.graph, options)?;
         validate_mapped_cells(&netlist, &self.library).map_err(|e| diagnostics.failure(e))?;
         assemble(&mut netlist, &design, &registers, &boundary)
             .map_err(|e| diagnostics.failure(e))?;
@@ -309,26 +316,12 @@ impl AbcMappingContext {
         })
     }
 
-    /// Resolves and validates an explicit override or the library's IO
-    /// defaults.
-    pub fn resolve_io_constraints(
-        &self,
-        explicit: Option<&AbcIoConstraints>,
-    ) -> Result<AbcIoConstraints, String> {
-        if let Some(constraints) = explicit {
-            constraints.validate(&self.library)?;
-            Ok(constraints.clone())
-        } else {
-            AbcIoConstraints::from_library(&self.library)
-        }
-    }
-
     fn map_transition(
         &self,
         graph: &GateFn,
         options: &AbcMappingOptions,
-        constraints: &AbcIoConstraints,
     ) -> Result<(ParsedNetlist, AbcRunDiagnostics), ToolError> {
+        let constraints = &options.io_constraints;
         let mut diagnostics = AbcRunDiagnostics {
             executable: self.toolchain.path.clone(),
             version: self.toolchain.version.clone(),

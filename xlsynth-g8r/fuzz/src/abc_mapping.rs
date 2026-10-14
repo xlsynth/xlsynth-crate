@@ -63,8 +63,10 @@ pub fn preflight() -> Result<(), String> {
         &SequentialGateFn::from_gate_fn(builder.build()),
         ClockPort { name: "clk".into() },
     )?;
-    context()?
-        .map_sequential(&design, &Default::default())
+    let context = context()?;
+    let options = AbcMappingOptions::from_library(context.library())?;
+    context
+        .map_sequential(&design, &options)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -119,16 +121,13 @@ pub fn check(data: &[u8]) {
     assert!(!original.registers.is_empty());
     assert!(original.registers.iter().all(|r| r.reset.is_some()));
     let source = emit_g8r(&original).unwrap();
+    let mut options = AbcMappingOptions::from_library(context.library())
+        .expect("library defaults were validated during ABC preflight");
+    options.timeout = Duration::from_secs(30);
     for cleanup_registers in [false, true] {
+        options.cleanup_registers = cleanup_registers;
         let mapped = context
-            .map_sequential(
-                &original,
-                &AbcMappingOptions {
-                    cleanup_registers,
-                    timeout: Duration::from_secs(30),
-                    ..Default::default()
-                },
-            )
+            .map_sequential(&original, &options)
             .unwrap_or_else(|error| panic!("ABC mapping failed: {error}\n{source}"));
         mapped.design.validate_legalized().unwrap();
         let gv = mapped.emit_verilog().unwrap();
