@@ -6,7 +6,11 @@ ABC Liberty files: ["<workdir>/raw.lib"]
 ABC IO constraints: Some(AbcIoConstraints { driving_cell: "BUF", output_load_ff: 4.0 })
 ABC program:
 read_lib library_0.lib
+read_aiger transition.aig
+strash
+read_constr timing.constr
 <speed-script>
+write_verilog mapped.v
 
 ABC stdout:
 mapping stdout
@@ -22,7 +26,11 @@ ABC Liberty files: ["<workdir>/raw.lib"]
 ABC IO constraints: Some(AbcIoConstraints { driving_cell: "BUF", output_load_ff: 4.0 })
 ABC program:
 read_lib library_0.lib
+read_aiger transition.aig
+strash
+read_constr timing.constr
 <speed-script>
+write_verilog mapped.v
 
 ABC stdout:
 mapping stdout
@@ -38,7 +46,11 @@ ABC Liberty files: ["<workdir>/raw.lib"]
 ABC IO constraints: Some(AbcIoConstraints { driving_cell: "BUF", output_load_ff: 4.0 })
 ABC program:
 read_lib library_0.lib
+read_aiger transition.aig
+strash
+read_constr timing.constr
 <speed-script>
+write_verilog mapped.v
 
 ABC stdout:
 mapping stdout

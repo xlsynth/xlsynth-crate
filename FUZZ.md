@@ -91,6 +91,9 @@ gate-level evaluator, exercising physical FF polarity/tie-offs, packed ports,
 constants, aliases, and reset/enable legalization. Separate directed tests cover
 zero-width logical ports, which are preserved natively and omitted from physical GV.
 No special optimization motifs are injected into the generic generator.
+The configured `abc_mapping::tests::configured_abc_mapping_smoke` unit test
+also runs this equivalence oracle with a shorter custom mapping script; the
+fuzz target itself uses the default speed script.
 
 This optional target requires `XLSYNTH_ABC_PATH`, comma-separated uncompressed
 `XLSYNTH_LIBERTY_FILES` for ABC, and `XLSYNTH_LIBERTY_PROTO` for native FF mapping

@@ -13,8 +13,10 @@ use crate::liberty::parser::parse_liberty_files;
 use crate::netlist::gv_eval::{GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
 use xlsynth_test_helpers::compare_golden_text;
+
+/// Short alternative flow with a trailing comment to exercise script framing.
+const CUSTOM_PASSES: &str = "&get -n; &dch; &nf; &put\n# caller-selected passes";
 
 fn library() -> Library {
     let file = tempfile::NamedTempFile::new().unwrap();
@@ -137,7 +139,7 @@ fn mismatched_cells_pins_and_interfaces_are_rejected() {
 }
 
 #[test]
-fn script_only_generates_the_library_prologue() {
+fn scripts_keep_library_input_constraint_and_output_handling_fixed() {
     for (count, expected) in [
         (1, "read_lib library_0.lib\n"),
         (2, "read_lib library_0.lib library_1.lib\n"),
@@ -146,11 +148,29 @@ fn script_only_generates_the_library_prologue() {
             "read_lib library_0.lib library_1.lib\nread_lib -m library_2.lib\n",
         ),
     ] {
-        assert_eq!(
-            mapping_script(count).strip_suffix(ABC_SPEED_SCRIPT),
-            Some(expected)
-        );
+        for passes in [ABC_SPEED_SCRIPT, CUSTOM_PASSES] {
+            let script = mapping_script(count, passes);
+            assert_eq!(
+                script.strip_prefix(expected).unwrap(),
+                format!(
+                    "read_aiger transition.aig\nstrash\nread_constr timing.constr\n{}\nwrite_verilog mapped.v\n",
+                    passes.trim_end_matches('\n'),
+                )
+            );
+        }
     }
+    compare_golden_text(
+        &mapping_script(3, ABC_SPEED_SCRIPT),
+        "src/netlist/abc/default_script.golden.txt",
+    );
+    compare_golden_text(
+        &mapping_script(3, CUSTOM_PASSES),
+        "src/netlist/abc/custom_script.golden.txt",
+    );
+    assert_eq!(
+        mapping_script(3, CUSTOM_PASSES),
+        mapping_script(3, &format!("{CUSTOM_PASSES}\n")),
+    );
 }
 
 #[test]
@@ -226,6 +246,7 @@ fn options_resolve_library_defaults_at_construction() {
     );
     assert!(!options.cleanup_registers);
     assert_eq!(options.timeout, Duration::from_secs(180));
+    assert_eq!(options.script, ABC_SPEED_SCRIPT);
     assert_eq!(
         options.io_constraints,
         AbcIoConstraints {
@@ -285,6 +306,7 @@ echo 'module mapped(i0,o0); input i0; output o0; assign o0=i0; endmodule' > mapp
     );
     assert!(!options.cleanup_registers);
     assert_eq!(options.timeout, Duration::from_secs(180));
+    assert_eq!(options.script, ABC_SPEED_SCRIPT);
     for load in [Some(0.004), None, Some(-1.0), Some(f64::NAN)] {
         context.library.default_output_load = load;
         let result = context.map_sequential(&design, &options).unwrap();
@@ -373,6 +395,54 @@ echo 'module mapped(); endmodule' > mapped.v
             .to_string()
             .contains("ABC could not use driving cell 'BUF'"),
         "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mapping_invokes_the_override_and_records_the_complete_script() {
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("fake abc");
+    std::fs::write(
+        &executable,
+        format!(
+            r#"#!/bin/sh
+if [ "$2" = "-c" ]; then exit 0; fi
+test "$1" = '-s' && test "$2" = '-f' && test "$3" = 'map.abc' || exit 2
+cat <<'EXPECTED' | cmp - map.abc || exit 3
+{}EXPECTED
+test -s transition.aig || exit 4
+test "$(cat timing.constr)" = "set_driving_cell BUF
+set_load 4" || exit 5
+echo 'module mapped(i0,o0); input i0; output o0; assign o0=i0; endmodule' > mapped.v
+"#,
+            include_str!("custom_script.golden.txt")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let raw = temp.path().join("cells.lib");
+    std::fs::write(&raw, "library(test) {}").unwrap();
+    let context = AbcMappingContext::new(
+        AbcToolchain::new(&executable).unwrap(),
+        &[&raw, &raw, &raw],
+        library(),
+    )
+    .unwrap();
+    let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".into(), 1);
+    builder.add_output("y".into(), a);
+    let design = SequentialGateFn::from_gate_fn(builder.build());
+    let mut options = AbcMappingOptions::from_library(context.library()).unwrap();
+    options.script = CUSTOM_PASSES.to_owned();
+    let result = context.map_sequential(&design, &options).unwrap();
+    compare_golden_text(
+        &result.diagnostics.script,
+        "src/netlist/abc/custom_script.golden.txt",
+    );
+    assert_eq!(
+        result.diagnostics.io_constraints,
+        Some(options.io_constraints)
     );
 }
 

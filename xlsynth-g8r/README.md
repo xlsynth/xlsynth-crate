@@ -287,8 +287,18 @@ readable and require explicit constraints for ABC mapping. The raw ABC library
 must also contain the selected driver; a missing-driver warning is an error.
 Resolved constraints are returned in the run diagnostics.
 
-The speed flow is a literal `ABC_SPEED_SCRIPT` string constant; only the raw
-library-loading prologue is generated. Every invocation reads `timing.constr`.
+`AbcMappingOptions::script` contains the optimization/mapping passes and defaults
+to the literal `ABC_SPEED_SCRIPT` string constant. To experiment with another
+flow, replace this string, for example with `"&get -n; &dch; &nf; &put"`.
+The wrapper always supplies raw-library loading, `read_aiger transition.aig`,
+`strash`, and `read_constr timing.constr` before the passes, and
+`write_verilog mapped.v` afterward. The default complete command sequence is
+unchanged. Custom passes must leave a mapped network in ABC's main workspace
+(use `&put` after GIA commands), preserve the combinational boundary, and omit
+library/constraint/design IO commands. This is trusted ABC code, not a sandbox;
+the wrapper does not parse or restrict the supplied commands. The full composed
+script is captured in diagnostics. There is no CLI script flag yet.
+
 ABC's legacy constraints are global: **the same output load also applies to
 register-D boundaries**, rather than the actual selected flop pin capacitance.
 This first version does not claim per-register launch/capture timing constraints

@@ -1,0 +1,8 @@
+read_lib library_0.lib library_1.lib
+read_lib -m library_2.lib
+read_aiger transition.aig
+strash
+read_constr timing.constr
+&get -n; &dch; &nf; &put
+# caller-selected passes
+write_verilog mapped.v

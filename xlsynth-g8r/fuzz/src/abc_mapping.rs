@@ -16,7 +16,9 @@ use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn_with_controls;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::liberty::load::load_library_from_path;
-use xlsynth_g8r::netlist::abc::{AbcMappingContext, AbcMappingOptions, AbcToolchain};
+use xlsynth_g8r::netlist::abc::{
+    ABC_SPEED_SCRIPT, AbcMappingContext, AbcMappingOptions, AbcToolchain,
+};
 use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty,
 };
@@ -83,6 +85,11 @@ fn random_state(design: &SequentialGateFn, rng: &mut StdRng) -> SequentialState 
 
 /// Checks both cleanup settings against original G8R for reset and data cycles.
 pub fn check(data: &[u8]) {
+    check_with_script(data, ABC_SPEED_SCRIPT);
+}
+
+/// Shares the equivalence oracle with the custom-script integration smoke test.
+fn check_with_script(data: &[u8], script: &str) {
     let context = context().expect("ABC preflight must run first");
     let mut rng = StdRng::from_seed(*blake3::hash(data).as_bytes());
     let generated = generate_block_package(
@@ -124,6 +131,7 @@ pub fn check(data: &[u8]) {
     let mut options = AbcMappingOptions::from_library(context.library())
         .expect("library defaults were validated during ABC preflight");
     options.timeout = Duration::from_secs(30);
+    options.script = script.to_owned();
     for cleanup_registers in [false, true] {
         options.cleanup_registers = cleanup_registers;
         let mapped = context
@@ -257,6 +265,7 @@ mod tests {
             let mut data = vec![0; length];
             rng.fill_bytes(&mut data);
             check(&data);
+            check_with_script(&data, "&get -n; &dch; &nf; &put");
         }
     }
 }

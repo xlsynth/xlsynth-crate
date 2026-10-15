@@ -137,17 +137,25 @@ pub struct AbcMappingOptions {
     /// Required electrical boundary conditions, validated against the mapping
     /// library before ABC runs. There is no unconstrained mapping mode.
     pub io_constraints: AbcIoConstraints,
+    /// Optimization/mapping passes, defaulting to `ABC_SPEED_SCRIPT`. Starts
+    /// with a strashed network and must leave a mapped network in ABC's main
+    /// workspace (`&put` after GIA commands). The wrapper supplies library,
+    /// input, and constraint loading and final Verilog export; do not include
+    /// those commands here. This is trusted ABC code, not a sandboxed DSL.
+    pub script: String,
 }
 
 impl AbcMappingOptions {
     /// Uses explicit constraints with area-first FF selection, no register
-    /// cleanup, and a 180-second timeout. Mapping validates the constraints.
+    /// cleanup, the default speed script, and a 180-second timeout. Mapping
+    /// validates the constraints.
     pub fn new(io_constraints: AbcIoConstraints) -> Self {
         Self {
             register_selection: RegisterCellSelection::SmallestArea,
             cleanup_registers: false,
             timeout: Duration::from_secs(180),
             io_constraints,
+            script: ABC_SPEED_SCRIPT.to_owned(),
         }
     }
 
@@ -361,7 +369,7 @@ impl AbcMappingContext {
             constraints.to_abc_text(),
         )
         .map_err(|e| e.to_string())?;
-        diagnostics.script = mapping_script(self.raw_liberty_files.len());
+        diagnostics.script = mapping_script(self.raw_liberty_files.len(), &options.script);
         std::fs::write(directory.path().join("map.abc"), &diagnostics.script)
             .map_err(|e| e.to_string())?;
         let result = run_with_timeout_detailed(
@@ -416,14 +424,10 @@ fn stage_library(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
-/// Default speed flow, including intermediate mapping and final
-/// buffering/sizing. Filenames are fixed within a private working directory.
-/// Only library loading is generated dynamically; the optimization sequence is
-/// intentionally literal.
-pub const ABC_SPEED_SCRIPT: &str = r#"read_aiger transition.aig
-strash
-read_constr timing.constr
-&get -n
+/// Default optimization/mapping passes, including intermediate mapping and
+/// final buffering/sizing. The wrapper loads libraries, a strashed input
+/// network, and constraints before these commands and exports Verilog after.
+pub const ABC_SPEED_SCRIPT: &str = r#"&get -n
 &st
 &dch
 &nf
@@ -458,11 +462,11 @@ topo
 stime -c
 upsize -c
 dnsize -c
-write_verilog mapped.v
 "#;
 
-/// Prepends staged library loading to the literal default ABC script.
-fn mapping_script(libraries: usize) -> String {
+/// Wraps caller-supplied passes with fixed library, input, constraint, and
+/// output handling. The complete script is retained in run diagnostics.
+fn mapping_script(libraries: usize, passes: &str) -> String {
     let first = libraries.min(2);
     let mut script = format!(
         "read_lib {}\n",
@@ -474,7 +478,13 @@ fn mapping_script(libraries: usize) -> String {
     for i in first..libraries {
         writeln!(script, "read_lib -m library_{i}.lib").unwrap();
     }
-    script.push_str(ABC_SPEED_SCRIPT);
+    script.push_str("read_aiger transition.aig\nstrash\nread_constr timing.constr\n");
+    script.push_str(passes);
+    // A final comment or command without a newline must not absorb the export.
+    if !passes.ends_with('\n') {
+        script.push('\n');
+    }
+    script.push_str("write_verilog mapped.v\n");
     script
 }
 
