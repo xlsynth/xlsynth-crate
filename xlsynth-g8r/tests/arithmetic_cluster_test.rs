@@ -139,6 +139,57 @@ fn arithmetic_cluster_small_formal_equivalence() {
     }
 }
 
+/// Sliced products stay resolved even when their unused high bits are omitted
+/// from the lowering map.
+#[test]
+fn arithmetic_cluster_sliced_product_boundaries() {
+    let mut rng = StdRng::seed_from_u64(0x510e_2026);
+    for product_width in [10, 12] {
+        let f = parse(&format!(
+            r#"package sliced_product
+ top fn f(a: bits[2] id=1, b: bits[2] id=2, c: bits[10] id=3, d: bits[10] id=4) -> bits[10] {{
+  p: bits[{product_width}] = umul(a, b, id=5)
+  s: bits[10] = bit_slice(p, start=0, width=10, id=6)
+  ret r: bits[10] = ext_nary_add(s, c, d, signed=[false, false, false], negated=[false, false, false], id=7)
+ }}"#
+        ));
+        let mapped = gatify_prepared_fn(
+            &f,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                track_pir_node_ids: true,
+                enable_rewrite_nary_add: true,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap();
+        let product = NodeRef {
+            index: f.nodes.iter().position(|n| n.text_id == 5).unwrap(),
+        };
+        let slice = NodeRef {
+            index: f.nodes.iter().position(|n| n.text_id == 6).unwrap(),
+        };
+        assert_eq!(
+            mapped.lowering_map.contains_key(&product),
+            product_width == 10
+        );
+        assert!(mapped.lowering_map.contains_key(&slice));
+        assert!(mapped.gate_fn.gates.iter().any(|gate| {
+            matches!(gate, AigNode::And2 { .. }) && gate.get_pir_node_ids().contains(&5)
+        }));
+        check_samples(&f, 128, &mut rng, true);
+        #[cfg(feature = "has-bitwuzla")]
+        xlsynth_g8r::check_equivalence::validate_same_fn_with_solver(
+            &f,
+            &mapped.gate_fn,
+            xlsynth_prover::prover::SolverChoice::Bitwuzla,
+            None,
+        )
+        .unwrap();
+    }
+}
+
 #[test]
 fn arithmetic_cluster_multiplicity_boundaries_and_provenance() {
     let f = cluster(3, 3, 6, 6, false, false, "brent_kung");

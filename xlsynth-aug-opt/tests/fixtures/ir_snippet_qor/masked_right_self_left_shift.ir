@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package synthetic
+
+// DSLX expression:
+//   {
+//     let n0 = z & x;
+//     let n1 = n0 >> y;
+//     let n2 = n1 << n1;
+//     let n3 = n2 & x;
+//     (n3 | n1) ^ y
+//   }
+top fn main(x: bits[8] id=10, y: bits[8] id=11, z: bits[8] id=12) -> bits[8] {
+  n0: bits[8] = and(z, x, id=13)
+  n1: bits[8] = shrl(n0, y, id=14)
+  n2: bits[8] = shll(n1, n1, id=15)
+  n3: bits[8] = and(n2, x, id=16)
+  n4: bits[8] = or(n3, n1, id=17)
+  ret result: bits[8] = xor(n4, y, id=18)
+}

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# proto-file: xlsynth-aug-opt/tests/ir_snippet_qor/corpus.proto
+# proto-message: xlsynth.ir_snippet_qor.Case
+
+sha256: "5f612cce38c1c6c86b6360246c78eec701a1de6b55188962a1f21a1a04dc0f33"
+pipeline {
+  fixed_limits { and_nodes_max: 215 graph_le_max: 66.11373344107453 depth_max: 14 }
+  pir_only_limits { and_nodes_max: 215 graph_le_max: 66.11373344107453 depth_max: 14 }
+  sandwich_limits { and_nodes_max: 215 graph_le_max: 66.11373344107453 depth_max: 14 }
+}

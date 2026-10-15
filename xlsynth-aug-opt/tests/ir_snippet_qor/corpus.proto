@@ -33,6 +33,13 @@ message PriorityResultExpectations {
   required Limits enabled_limits = 3;
 }
 
+// Generic snippets bound fixed IR and both one-round optimization pipelines.
+message PipelineExpectations {
+  required Limits fixed_limits = 1;
+  required Limits pir_only_limits = 2;
+  required Limits sandwich_limits = 3;
+}
+
 // The filename supplies the case name; the paired IR supplies its top function.
 message Case {
   required string sha256 = 1;
@@ -40,6 +47,7 @@ message Case {
     ShiftExpectations shift = 2;
     SplitAdderExpectations split_adder = 3;
     PriorityResultExpectations priority_result = 4;
+    PipelineExpectations pipeline = 5;
   }
 }
 

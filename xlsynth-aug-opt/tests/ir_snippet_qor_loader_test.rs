@@ -38,6 +38,12 @@ const PRIORITY_RESULT: &str = r#"priority_result {
   enabled_limits { and_nodes_max: 0 graph_le_max: 0 depth_max: 0 }
 }"#;
 
+const PIPELINE: &str = r#"pipeline {
+  fixed_limits { and_nodes_max: 0 graph_le_max: 0 depth_max: 0 }
+  pir_only_limits { and_nodes_max: 1 graph_le_max: 1 depth_max: 1 }
+  sandwich_limits { and_nodes_max: 2 graph_le_max: 2 depth_max: 2 }
+}"#;
+
 /// Creates an isolated corpus using the same profile as the checked-in
 /// fixtures.
 fn corpus_directory() -> Result<TempDir, std::io::Error> {
@@ -209,6 +215,47 @@ fn priority_expectations_preserve_presence_and_integer_precision() -> Result<(),
             INPUT,
             &PRIORITY_RESULT.replace(omitted, ""),
         )?;
+        assert!(ir_snippet_qor::load_from_dir(directory.path()).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn pipeline_expectations_require_and_validate_each_limit() -> Result<(), Box<dyn Error>> {
+    let directory = corpus_directory()?;
+    write_case(directory.path(), "sample", INPUT, PIPELINE)?;
+    let corpus = ir_snippet_qor::load_from_dir(directory.path())?;
+    let Expectations::Pipeline {
+        fixed_limits,
+        pir_only_limits,
+        sandwich_limits,
+    } = &corpus.cases[0].expectations
+    else {
+        panic!("expected pipeline expectations");
+    };
+    for (limits, expected) in [fixed_limits, pir_only_limits, sandwich_limits]
+        .into_iter()
+        .zip(0..=2)
+    {
+        assert_eq!(limits.and_nodes_max, expected);
+        assert_eq!(limits.graph_le_max, expected as f64);
+        assert_eq!(limits.depth_max, expected);
+    }
+    for (field, value) in [
+        ("fixed_limits", 0),
+        ("pir_only_limits", 1),
+        ("sandwich_limits", 2),
+    ] {
+        let line = PIPELINE.lines().find(|line| line.contains(field)).unwrap();
+        let missing = PIPELINE.replace(line, "");
+        write_case(directory.path(), "sample", INPUT, &missing)?;
+        assert!(ir_snippet_qor::load_from_dir(directory.path()).is_err());
+        let negative = PIPELINE.replacen(
+            line,
+            &line.replace(&format!("graph_le_max: {value}"), "graph_le_max: -1"),
+            1,
+        );
+        write_case(directory.path(), "sample", INPUT, &negative)?;
         assert!(ir_snippet_qor::load_from_dir(directory.path()).is_err());
     }
     Ok(())

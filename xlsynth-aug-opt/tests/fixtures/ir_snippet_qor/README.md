@@ -26,6 +26,14 @@ round and one/three complete sandwich rounds. They check expected fusion counts
 the same pinned profile's area, graph-LE, and depth bounds. Origin information
 is a comment in the IR; there is no separate provenance format or validation.
 
+Generic pipeline cases map the fixed IR and one round each of PIR-only aug-opt
+and the libxls/aug-opt sandwich. They check equivalence and bound the area,
+graph-LE, and depth of each pipeline independently, allowing area/delay
+tradeoffs without requiring a particular rewrite to fire.
+
+The synthetic pipeline cases come from independently generated bit-vector
+programs, some of which were reduced.
+
 Run from the workspace root with the solver/toolchain environment configured:
 
 ```sh
