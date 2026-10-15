@@ -1,0 +1,11 @@
+--output-load-ff 0
+xlsynth-driver: g8r2gv: ABC needs a simple driving-cell name and a positive finite output load
+
+--output-load-ff NaN
+xlsynth-driver: g8r2gv: ABC needs a simple driving-cell name and a positive finite output load
+
+--driving-cell INV
+xlsynth-driver: g8r2gv: 'INV' must implement a non-inverting buffer
+
+--flop-inputs
+xlsynth-driver: g8r2gv: --add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used.

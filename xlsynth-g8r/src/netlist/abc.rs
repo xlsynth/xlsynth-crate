@@ -80,7 +80,7 @@ impl AbcToolchain {
 }
 
 /// ABC's legacy global drive/load constraints, not per-register STA bounds.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct AbcIoConstraints {
     /// A usable ordinary non-inverting buffer in both raw and normalized
     /// Liberty.
@@ -167,7 +167,7 @@ impl AbcMappingOptions {
 }
 
 /// Captured invocation details. Libraries never print tool diagnostics.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct AbcRunDiagnostics {
     pub executable: PathBuf,
     pub version: String,

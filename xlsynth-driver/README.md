@@ -1148,6 +1148,68 @@ Example:
 xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
 ```
 
+### `g8r2gv`: G8R to mapped gate-level Verilog
+
+Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level Verilog netlist
+on **stdout**, using standalone ABC for combinational logic and native physical
+flip-flop mapping. Supports combinational and sequential designs, including
+explicit synchronous reset/enable controls (legalized before mapping). No Yosys
+is invoked. ABC buffers and resizes combinational cells; FFs are not resized.
+
+- `--liberty <PATH>` – required raw, uncompressed Liberty file for ABC. Repeat
+  this flag for split libraries, in loading order. The first one or two files
+  must together supply a usable combinational library, including buffers and
+  inverters; remaining files are merged with `read_lib -m`.
+- `--liberty-proto <PATH>` – required matching normalized library for native FF
+  mapping and IO defaults; accepts binary/text proto, optionally gzip-compressed.
+  Raw/proto functional and timing consistency is the caller's responsibility.
+- `--abc-path <PATH>` – ABC executable; defaults to `XLSYNTH_ABC_PATH`, then
+  `abc` on PATH.
+- `--abc-script <PATH>` – override the default speed flow's optimization/mapping
+  passes. The wrapper supplies library/input/constraint loading and final
+  Verilog export. The trusted script must preserve the combinational boundary
+  and leave a mapped network in ABC's main workspace (`&put` after GIA commands).
+- `--driving-cell <CELL>` – override the proto's `reference_buffer_cell`.
+- `--output-load-ff <FF>` – override the output load **in femtofarads**. Otherwise
+  use the proto's `default_output_load`, converted from library capacitance units.
+  Each override is independent; missing/invalid defaults are errors only when
+  needed. The resolved driver/load must be valid. There is no unconstrained mode.
+- `--timeout-seconds <SECONDS>` – positive ABC mapping timeout; default `180`.
+- `--cleanup-registers` – opt in to native register cleanup; default is to
+  preserve registers.
+- `--register-cell <CELL>` – require a supported FF cell instead of selecting
+  the smallest-area compatible one. All bits initially use the selected cell.
+- `--add-clk-port <NAME>` – declare a clock for a clockless design or check the
+  stored clock's name.
+- `--flop-inputs`, `--flop-outputs` – add boundary-register layers; require a
+  stored clock or `--add-clk-port`.
+- `--module-name <NAME>` – override the emitted module name.
+- `--diagnostics-out <PATH>` – write successful-run JSON diagnostics, including
+  the executable/version, raw Liberty paths, resolved constraints, full ABC
+  script, stdout, and stderr. Failures are reported on stderr.
+
+ABC uses global driver/load constraints, including at register Q/D boundaries;
+these are not per-register clock-to-Q/setup constraints or actual D-pin loads.
+Use `gv-stats` with a matching timing-enabled proto for final registered timing.
+Zero-width ports remain in the native design but are omitted from Verilog.
+
+```bash
+xlsynth-driver ir2g8r pipeline.ir --top main > pipeline.g8r
+xlsynth-driver g8r2gv pipeline.g8r \
+  --liberty /path/to/buffers.lib --liberty /path/to/logic.lib \
+  --liberty /path/to/registers.lib \
+  --liberty-proto /path/to/cells.proto \
+  --diagnostics-out mapping.json > mapped.gv
+xlsynth-driver gv-stats --netlist mapped.gv \
+  --liberty_proto /path/to/cells.timing.proto \
+  --primary_input_transition 0.01 --module_output_load 4
+```
+
+The `gv-stats` transition and load values above are examples in the timing
+library's native units; choose values consistent with the mapping constraints.
+For combinational input, add `--add-clk-port clk --flop-inputs --flop-outputs`
+to `g8r2gv` to create a registered wrapper.
+
 ### `g8r2ugv`: SequentialGateFn to UGV
 
 Converts a `.g8r` (text) or `.g8rbin` (binary) `SequentialGateFn` design to a
