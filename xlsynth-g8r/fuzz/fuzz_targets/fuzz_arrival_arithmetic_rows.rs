@@ -13,6 +13,17 @@ use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
 use xlsynth_prover::solver::bitwuzla::Bitwuzla;
 
+/// Shapes of arithmetic inputs and product boundaries exercised by the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArithmeticScenario {
+    AddOnly,
+    SingleUseProduct,
+    SingleUseConstantProduct,
+    SharedProduct,
+    SlicedProduct,
+    NarrowProduct,
+}
+
 // Focused generation reaches both add-only rows and deferred product rows.
 // Shared, sliced and previously truncated products remain resolved boundaries.
 fuzz_target!(|data: &[u8]| {
@@ -20,8 +31,16 @@ fuzz_target!(|data: &[u8]| {
     let byte = |i: usize| data.get(i).copied().unwrap_or(0) as usize;
     let width = 1 + byte(0) % 12;
     let input_width = 1 + byte(1) % 8;
-    let mode = byte(2) % 6;
-    let product_width = if mode == 5 {
+    let scenario = match byte(2) % 6 {
+        0 => ArithmeticScenario::AddOnly,
+        1 => ArithmeticScenario::SingleUseProduct,
+        2 => ArithmeticScenario::SingleUseConstantProduct,
+        3 => ArithmeticScenario::SharedProduct,
+        4 => ArithmeticScenario::SlicedProduct,
+        // The remainder is 5 after reducing modulo 6.
+        _ => ArithmeticScenario::NarrowProduct,
+    };
+    let product_width = if scenario == ArithmeticScenario::NarrowProduct {
         width.saturating_sub(1).max(1)
     } else {
         width + byte(3) % 3
@@ -40,7 +59,11 @@ fuzz_target!(|data: &[u8]| {
         ),
         format!(
             " p: bits[{product_width}] = {multiply}(a, {}, id=6)",
-            if mode == 2 { "k" } else { "b" }
+            if scenario == ArithmeticScenario::SingleUseConstantProduct {
+                "k"
+            } else {
+                "b"
+            }
         ),
     ];
     let mut id = 7;
@@ -55,8 +78,8 @@ fuzz_target!(|data: &[u8]| {
         late = format!("v{id}");
         id += 1;
     }
-    let slice_id = (mode == 4).then_some(id);
-    let product_term = if mode == 4 {
+    let slice_id = (scenario == ArithmeticScenario::SlicedProduct).then_some(id);
+    let product_term = if scenario == ArithmeticScenario::SlicedProduct {
         body.push(format!(
             " slice: bits[{width}] = bit_slice(p, start=0, width={width}, id={id})"
         ));
@@ -66,13 +89,18 @@ fuzz_target!(|data: &[u8]| {
         "p"
     };
     let mut terms = vec![
-        if mode == 0 { "c" } else { product_term }.to_string(),
+        if scenario == ArithmeticScenario::AddOnly {
+            "c"
+        } else {
+            product_term
+        }
+        .to_string(),
         late,
         "d".to_string(),
     ];
     for i in 3..count {
         terms.push(
-            if mode == 3 && i == 3 {
+            if scenario == ArithmeticScenario::SharedProduct && i == 3 {
                 "p"
             } else {
                 if byte(9 + i) & 1 == 0 { "c" } else { "d" }
@@ -81,7 +109,7 @@ fuzz_target!(|data: &[u8]| {
         );
     }
     // Force an actual shared-product negative control, even for count == 3.
-    if mode == 3 {
+    if scenario == ArithmeticScenario::SharedProduct {
         terms.push("p".to_string());
     }
     let signed: Vec<_> = (0..terms.len())
@@ -116,18 +144,23 @@ fuzz_target!(|data: &[u8]| {
     let product = NodeRef {
         index: source.nodes.iter().position(|n| n.text_id == 6).unwrap(),
     };
-    if mode == 1 || mode == 2 || (mode == 5 && product_width >= width) {
-        assert!(
-            !mapped.lowering_map.contains_key(&product),
-            "expected actual deferred-product hit: {text}"
-        );
-    } else if mode == 3
-        || (mode == 4 && product_width == width)
-        || (mode == 5 && product_width < width)
-    {
-        assert!(
+    let expected_product_entry = match scenario {
+        // The product is unused in the add-only case.
+        ArithmeticScenario::AddOnly => None,
+        ArithmeticScenario::SingleUseProduct | ArithmeticScenario::SingleUseConstantProduct => {
+            Some(false)
+        }
+        ArithmeticScenario::SharedProduct => Some(true),
+        // A partially demanded product is omitted even when it is resolved.
+        ArithmeticScenario::SlicedProduct => (product_width == width).then_some(true),
+        // A one-bit sum cannot produce a narrower product.
+        ArithmeticScenario::NarrowProduct => Some(product_width < width),
+    };
+    if let Some(expected) = expected_product_entry {
+        assert_eq!(
             mapped.lowering_map.contains_key(&product),
-            "expected resolved boundary: {text}"
+            expected,
+            "unexpected product lowering-map entry for {scenario:?}: {text}"
         );
     }
     if let Some(slice_id) = slice_id {
