@@ -18,7 +18,7 @@ use xlsynth_pir::IrBits;
 
 use crate::aig::gate::{Input, Output};
 use crate::aig::sequential_cleanup::{SequentialCleanupStats, cleanup_sequential_gate_fn};
-use crate::aig::{AigBitVector, GateFn, SequentialGateFn};
+use crate::aig::{AigBitVector, AigNode, AigOperand, GateFn, SequentialGateFn};
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use crate::liberty::io_defaults::{
     buffer_input_pin, default_output_load_ff, resolve_reference_buffer,
@@ -80,7 +80,7 @@ impl AbcToolchain {
 }
 
 /// ABC's legacy global drive/load constraints, not per-register STA bounds.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct AbcIoConstraints {
     /// A usable ordinary non-inverting buffer in both raw and normalized
     /// Liberty.
@@ -166,8 +166,9 @@ impl AbcMappingOptions {
     }
 }
 
-/// Captured invocation details. Libraries never print tool diagnostics.
-#[derive(Clone, Debug, Default)]
+/// Captured invocation details. Serialization includes only stable metadata;
+/// volatile raw logs remain available to callers and error reporting.
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct AbcRunDiagnostics {
     pub executable: PathBuf,
     pub version: String,
@@ -176,7 +177,11 @@ pub struct AbcRunDiagnostics {
     /// Resolved constraints, including library-derived defaults, for
     /// reproducibility.
     pub io_constraints: Option<AbcIoConstraints>,
+    /// Raw tool output, intentionally excluded from deterministic metadata.
+    #[serde(skip_serializing)]
     pub stdout: String,
+    /// Raw tool errors, intentionally excluded from deterministic metadata.
+    #[serde(skip_serializing)]
     pub stderr: String,
 }
 
@@ -488,12 +493,27 @@ fn mapping_script(libraries: usize, passes: &str) -> String {
     script
 }
 
-/// Scalar ABC interface; physical D outputs are distinct from external outputs.
+/// A boundary endpoint either aliases an input net or consumes mapped logic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BoundarySignal {
+    Direct(String),
+    Mapped(String),
+}
+
+impl BoundarySignal {
+    fn port_name(&self) -> &str {
+        match self {
+            Self::Direct(name) | Self::Mapped(name) => name,
+        }
+    }
+}
+
+/// Scalar ABC interface with direct wires kept outside ABC's output buffering.
 struct Boundary {
     graph: GateFn,
     inputs: BTreeMap<(usize, usize), String>,
-    external_outputs: Vec<Vec<String>>,
-    register_data: Vec<String>,
+    external_outputs: Vec<Vec<BoundarySignal>>,
+    register_data: Vec<BoundarySignal>,
 }
 
 impl Boundary {
@@ -502,7 +522,27 @@ impl Boundary {
         graph.name = "mapped".into();
         graph.inputs.clear();
         graph.outputs.clear();
+        let mut phases = vec![false; graph.gates.len()];
+        for bit in &plan.bits {
+            let q = design.transition.inputs[bit.q.index()]
+                .bit_vector
+                .get_lsb(bit.bit_index);
+            phases[q.node.id] = bit.output_inverted;
+        }
+        let rephase = |mut operand: AigOperand| {
+            operand.negated ^= phases[operand.node.id];
+            operand
+        };
+        // Rewrite every use, including feedback, while the input nodes now
+        // denote physical FF outputs. No explicit inverter nodes are needed.
+        for gate in &mut graph.gates {
+            if let AigNode::And2 { a, b, .. } = gate {
+                *a = rephase(*a);
+                *b = rephase(*b);
+            }
+        }
         let mut inputs = BTreeMap::new();
+        let mut input_nodes = BTreeMap::new();
         for (id, input) in design.transition.inputs.iter().enumerate() {
             for (bit, operand) in input.bit_vector.iter_lsb_to_msb().enumerate() {
                 let name = format!("i{}", graph.inputs.len());
@@ -510,6 +550,7 @@ impl Boundary {
                     name: name.clone(),
                     bit_vector: AigBitVector::from_bit(*operand),
                 });
+                input_nodes.insert(operand.node.id, name.clone());
                 inputs.insert((id, bit), name);
             }
         }
@@ -520,17 +561,26 @@ impl Boundary {
                 .bit_vector
                 .iter_lsb_to_msb()
             {
-                names.push(add_boundary_output(&mut graph, *operand));
+                names.push(add_boundary_signal(
+                    &mut graph,
+                    rephase(*operand),
+                    &input_nodes,
+                ));
             }
             external_outputs.push(names);
         }
         let mut register_data = Vec::new();
         for bit in &plan.bits {
-            let mut operand = *design.transition.outputs[bit.d.index()]
-                .bit_vector
-                .get_lsb(bit.bit_index);
-            operand.negated ^= plan.cell.as_ref().unwrap().invert_data;
-            register_data.push(add_boundary_output(&mut graph, operand));
+            let mut operand = rephase(
+                *design.transition.outputs[bit.d.index()]
+                    .bit_vector
+                    .get_lsb(bit.bit_index),
+            );
+            // Physical D = logical D XOR cell polarity XOR state phase.
+            // `rephase` above expresses logical D using physical state inputs.
+            operand.negated ^=
+                plan.cells[bit.cell_index].inverts_data_to_output ^ bit.output_inverted;
+            register_data.push(add_boundary_signal(&mut graph, operand, &input_nodes));
         }
         Self {
             graph,
@@ -541,13 +591,24 @@ impl Boundary {
     }
 }
 
-fn add_boundary_output(graph: &mut GateFn, operand: crate::aig::AigOperand) -> String {
+fn add_boundary_signal(
+    graph: &mut GateFn,
+    operand: AigOperand,
+    input_nodes: &BTreeMap<usize, String>,
+) -> BoundarySignal {
+    if !operand.negated {
+        if let Some(input) = input_nodes.get(&operand.node.id) {
+            // This connection needs no mapped cell. Exporting it as an ABC PO
+            // would let the global output load introduce an unnecessary buffer.
+            return BoundarySignal::Direct(input.clone());
+        }
+    }
     let name = format!("o{}", graph.outputs.len());
     graph.outputs.push(Output {
         name: name.clone(),
         bit_vector: AigBitVector::from_bit(operand),
     });
-    name
+    BoundarySignal::Mapped(name)
 }
 
 fn simple_identifier(name: &str) -> bool {
@@ -726,7 +787,7 @@ fn assemble(
                 add_alias(
                     parsed,
                     bit_ref(net, bit, output.get_bit_count()),
-                    NetRef::Simple(ports[&boundary.external_outputs[index][bit]].1),
+                    NetRef::Simple(ports[boundary.external_outputs[index][bit].port_name()].1),
                 );
             }
         }
@@ -737,41 +798,40 @@ fn assemble(
         .map(|clock| add_port(parsed, &clock.name, 1, PortDirection::Input))
         .transpose()?
         .flatten();
-    if let Some(cell) = &plan.cell {
-        for (index, bit) in plan.bits.iter().enumerate() {
-            let mut connections = vec![
-                (
-                    parsed.interner.get_or_intern(&cell.clock_pin),
-                    NetRef::Simple(clock.ok_or("mapped FF has no clock")?),
-                ),
-                (
-                    parsed.interner.get_or_intern(&cell.data_pin),
-                    NetRef::Simple(ports[&boundary.register_data[index]].1),
-                ),
-                (
-                    parsed.interner.get_or_intern(&cell.output_pin),
-                    NetRef::Simple(ports[&boundary.inputs[&(bit.q.index(), bit.bit_index)]].1),
-                ),
-            ];
-            for (pin, value) in &cell.tied_inputs {
-                connections.push((
-                    parsed.interner.get_or_intern(pin),
-                    NetRef::Literal(IrBits::from_lsb_is_0(&[*value])),
-                ));
-            }
-            for pin in &cell.unused_outputs {
-                connections.push((parsed.interner.get_or_intern(pin), NetRef::Unconnected));
-            }
-            parsed.modules[0].instances.push(NetlistInstance {
-                type_name: parsed.interner.get_or_intern(&cell.cell_name),
-                instance_name: parsed
-                    .interner
-                    .get_or_intern(fresh_name(&mut used, format!("__reg_{index}"))),
-                connections,
-                inst_lineno: 0,
-                inst_colno: 0,
-            });
+    for (index, bit) in plan.bits.iter().enumerate() {
+        let cell = &plan.cells[bit.cell_index];
+        let mut connections = vec![
+            (
+                parsed.interner.get_or_intern(&cell.clock_pin),
+                NetRef::Simple(clock.ok_or("mapped FF has no clock")?),
+            ),
+            (
+                parsed.interner.get_or_intern(&cell.data_pin),
+                NetRef::Simple(ports[boundary.register_data[index].port_name()].1),
+            ),
+            (
+                parsed.interner.get_or_intern(&cell.output_pin),
+                NetRef::Simple(ports[&boundary.inputs[&(bit.q.index(), bit.bit_index)]].1),
+            ),
+        ];
+        for (pin, value) in &cell.tied_inputs {
+            connections.push((
+                parsed.interner.get_or_intern(pin),
+                NetRef::Literal(IrBits::from_lsb_is_0(&[*value])),
+            ));
         }
+        for pin in &cell.unused_outputs {
+            connections.push((parsed.interner.get_or_intern(pin), NetRef::Unconnected));
+        }
+        parsed.modules[0].instances.push(NetlistInstance {
+            type_name: parsed.interner.get_or_intern(&cell.cell_name),
+            instance_name: parsed
+                .interner
+                .get_or_intern(fresh_name(&mut used, format!("__reg_{index}"))),
+            connections,
+            inst_lineno: 0,
+            inst_colno: 0,
+        });
     }
     parsed.modules[0].net_index_range = 0..parsed.nets.len();
     Ok(())

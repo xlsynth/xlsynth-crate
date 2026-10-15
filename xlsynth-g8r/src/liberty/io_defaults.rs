@@ -57,15 +57,22 @@ pub fn resolve_reference_buffer(library: &Library) -> Result<&str, String> {
     Ok(name)
 }
 
-/// Converts the explicit library output-load default to fF, without a
-/// multiplier.
-pub fn default_output_load_ff(library: &Library) -> Result<f64, String> {
+/// Returns the positive, finite output-load default in library capacitance
+/// units, matching the library's pin capacitances and timing-table axes.
+pub fn default_output_load(library: &Library) -> Result<f64, String> {
     let capacitance = library.default_output_load.ok_or(
         "Liberty has no default_output_load; specify explicit drive/load constraints or set the default during import",
     )?;
     if !capacitance.is_finite() || capacitance <= 0.0 {
         return Err("default_output_load must be positive and finite".into());
     }
+    Ok(capacitance)
+}
+
+/// Converts the explicit library output-load default to fF, without a
+/// multiplier.
+pub fn default_output_load_ff(library: &Library) -> Result<f64, String> {
+    let capacitance = default_output_load(library)?;
     let units = library
         .units
         .as_ref()
@@ -129,6 +136,7 @@ mod tests {
         assert_eq!(lib.reference_buffer_cell.as_deref(), Some("BUF"));
         assert_eq!(resolve_reference_buffer(&lib).unwrap(), "BUF");
         assert_eq!(lib.default_output_load, Some(0.004));
+        assert_eq!(default_output_load(&lib).unwrap(), 0.004);
         assert_eq!(default_output_load_ff(&lib).unwrap(), 4.0);
         for (unit, expected) in [
             ("1ff", 1.0),
@@ -140,6 +148,7 @@ mod tests {
             let mut scaled = library();
             scaled.default_output_load = Some(2.0);
             scaled.units.as_mut().unwrap().capacitance_unit = unit.into();
+            assert_eq!(default_output_load(&scaled).unwrap(), 2.0);
             assert_eq!(default_output_load_ff(&scaled).unwrap(), 2.0 * expected);
         }
         let mut wire = library_to_proto(lib).unwrap();
@@ -207,5 +216,23 @@ mod tests {
         lib.default_output_load = Some(f64::MIN_POSITIVE);
         lib.units.as_mut().unwrap().capacitance_unit = "1e-20ff".into();
         assert!(default_output_load_ff(&lib).is_err());
+    }
+
+    #[test]
+    fn native_output_load_validates_without_requiring_a_driver_or_unit_conversion() {
+        let mut lib = library();
+        lib.reference_buffer_cell = None;
+        lib.units = None;
+        assert_eq!(default_output_load(&lib).unwrap(), 0.004);
+        for cap in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            lib.default_output_load = cap;
+            assert!(default_output_load(&lib).is_err());
+        }
     }
 }

@@ -1,0 +1,12 @@
+{
+  "executable": "<abc>",
+  "io_constraints": {
+    "driving_cell": "BUF",
+    "output_load_ff": 7.0
+  },
+  "raw_liberty_files": [
+    "<liberty>"
+  ],
+  "script": "read_lib library_0.lib\nread_aiger transition.aig\nstrash\nread_constr timing.constr\n&get -n; &nf; &put\n# no trailing newline\nwrite_verilog mapped.v\n",
+  "version": "fake ABC"
+}

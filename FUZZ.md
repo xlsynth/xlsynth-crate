@@ -82,13 +82,17 @@ their runtime prerequisites.
 Uses the shared resettable block-IR generator, lowers to G8R with explicit reset
 and enable controls, and maps through standalone ABC plus native FF selection
 and complete flat netlist assembly. Mapping must legalize the controls; the
-reference simulation evaluates the unlegalized source directly.
+reference simulation evaluates the unlegalized source directly. Independently
+sampled optional input/output register layers cover unreset pipeline boundaries.
 Both register-cleanup settings are checked on every sample. The original and
 mapped designs receive independently sampled startup states and shared concrete
-input vectors; outputs must agree over 24 cycles after the first reset edge,
-including later reset reassertions. The final emitted GV is loaded through the
+input vectors; outputs must agree after reset has propagated through the optional
+boundary layers, including later reset reassertions in a 24-cycle run.
+The final emitted GV is loaded through the
 gate-level evaluator, exercising physical FF polarity/tie-offs, packed ports,
-constants, aliases, and reset/enable legalization. Separate directed tests cover
+constants, aliases, and reset/enable legalization. An independent connectivity
+oracle follows wire aliases (not buffers) and checks that direct input-to-D and
+Q-to-output connections survive mapping. Separate directed tests cover
 zero-width logical ports, which are preserved natively and omitted from physical GV.
 No special optimization motifs are injected into the generic generator.
 The configured `abc_mapping::tests::configured_abc_mapping_smoke` unit test
@@ -101,8 +105,10 @@ and evaluation. The libraries must describe matching cells at one corner.
 The proto must select a usable `reference_buffer_cell` and a positive finite
 `default_output_load` in declared library capacitance units (set with
 `lib2proto --reference-buffer-cell CELL --default-output-load CAPACITANCE`).
-Mapping uses that driver and the explicit load, including register-D boundaries.
-Startup preflight verifies actual mapping; setup failures and unexpected sample
+Mapping uses that driver and the explicit load on mapped logic outputs; direct
+connections bypass ABC. Startup preflight requires a non-inverting FF for a
+direct one-register identity and verifies actual combinational mapping;
+setup failures and unexpected sample
 failures are errors, not successful/skipped samples. Run with
 `cargo fuzz run --sanitizer none fuzz_abc_sequential_mapping -- -max_total_time=300`.
 

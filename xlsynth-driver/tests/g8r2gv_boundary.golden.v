@@ -1,0 +1,23 @@
+module mapped_top(a, y, clk);
+  input [1:0] a;
+  output [1:0] y;
+  input clk;
+  wire __abc_n0;
+  wire __abc_n1;
+  wire __abc_n2;
+  wire __abc_n3;
+  wire __abc_n4;
+  wire __abc_n5;
+  wire __abc_n6;
+  wire __abc_n7;
+  assign __abc_n6 = 1'b0;
+  assign __abc_n7 = 1'b0;
+  assign __abc_n2 = a[0];
+  assign __abc_n3 = a[1];
+  assign y[0] = __abc_n4;
+  assign y[1] = __abc_n5;
+  DFFN __reg_0 (.CLK(clk), .D(__abc_n2), .QN(__abc_n0));
+  DFFN __reg_1 (.CLK(clk), .D(__abc_n3), .QN(__abc_n1));
+  DFFN __reg_2 (.CLK(clk), .D(__abc_n6), .QN(__abc_n4));
+  DFFN __reg_3 (.CLK(clk), .D(__abc_n7), .QN(__abc_n5));
+endmodule

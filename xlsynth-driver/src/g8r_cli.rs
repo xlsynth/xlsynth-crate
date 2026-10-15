@@ -1,13 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use std::path::Path;
 use xlsynth_g8r::aig::cut_db_rewrite::CutDbRewriteMode;
+use xlsynth_g8r::aig::{ClockPort, SequentialGateFn, add_input_registers, add_output_registers};
+use xlsynth_g8r::aig_serdes::g8r::load_sequential_gate_fn_from_path;
 use xlsynth_g8r::gate_fn_optimize::GateFnOptimizeOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, DEFAULT_MAX_FRAIG_SIM_SAMPLES};
 use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 use xlsynth_g8r::prove_gate_fn_equiv_sat::DEFAULT_CADICAL_TERMINATE_LIMIT;
+
+/// Loads a netlist input and applies the shared clock, boundary-flop, and name
+/// flags.
+pub(crate) fn load_netlist_design(matches: &ArgMatches) -> Result<SequentialGateFn, String> {
+    let path = matches.get_one::<String>("g8r_input_file").unwrap();
+    let mut design = load_sequential_gate_fn_from_path(Path::new(path))?;
+    if let Some(name) = matches.get_one::<String>("add-clk-port") {
+        let requested = ClockPort { name: name.clone() };
+        match &design.clock {
+            Some(existing) if existing != &requested => {
+                return Err(format!(
+                    "--add-clk-port '{}' does not match the stored design clock '{}'",
+                    requested.name, existing.name
+                ));
+            }
+            Some(_) => {
+                // The existing clock already has the requested name.
+            }
+            None => design.clock = Some(requested),
+        }
+    }
+    if matches.get_flag("flop-inputs") || matches.get_flag("flop-outputs") {
+        let clock = design.clock.clone().ok_or_else(|| {
+            "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
+                .to_string()
+        })?;
+        if matches.get_flag("flop-inputs") {
+            design = add_input_registers(&design, clock.clone())?;
+        }
+        if matches.get_flag("flop-outputs") {
+            design = add_output_registers(&design, clock)?;
+        }
+    }
+    if let Some(name) = matches.get_one::<String>("module-name") {
+        design.name = name.clone();
+    }
+    Ok(design)
+}
 
 fn parse_adder_mapping(value: Option<&str>) -> AdderMapping {
     match value {

@@ -66,6 +66,7 @@ mod flag_defaults;
 mod fn_eval;
 mod fn_type_arg;
 mod g8r2blif;
+mod g8r2gv;
 mod g8r2ir_block;
 mod g8r2ir_fn;
 mod g8r2ugv;
@@ -2613,9 +2614,8 @@ fn main() {
                     Arg::new("module_output_load")
                         .long("module_output_load")
                         .value_name("VALUE")
-                        .default_value("0.0")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Additional load capacitance added to module outputs")
+                        .help("Additional module-output load in library capacitance units; defaults to the Liberty proto's default_output_load (explicit 0 disables external load)")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2708,6 +2708,7 @@ fn main() {
                         .action(ArgAction::SetTrue),
                 ),
         )
+        .subcommand(g8r2gv::command())
         .subcommand(
             clap::Command::new("g8r2ugv")
                 .about("Converts a .g8r or .g8rbin sequential design to a .ugv netlist on stdout, emitting stored registers and optionally adding boundary registers.")
@@ -4269,6 +4270,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("gv-dump-cone", subm)) => {
             gv_dump_cone::handle_gv_dump_cone(subm);
+        }
+        Some(("g8r2gv", subm)) => {
+            if let Err(e) = g8r2gv::handle(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r2gv"), vec![]);
+            }
         }
         Some(("g8r2ugv", subm)) => {
             if let Err(e) = g8r2ugv::handle_g8r2ugv(subm) {
