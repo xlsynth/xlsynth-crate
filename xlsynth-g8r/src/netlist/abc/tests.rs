@@ -69,7 +69,7 @@ fn physical_d_polarity_does_not_invert_shared_external_output() {
         .unwrap()
         .map_registers(&design, &RegisterCellSelection::SmallestArea)
         .unwrap();
-    assert!(plan.cells[0].invert_data);
+    assert!(plan.cells[0].inverts_data_to_output);
     let boundary = Boundary::new(&design, &plan);
     let values = [true, false, false, true].map(|v| IrBits::from_lsb_is_0(&[v]));
     let outputs = gate_sim::eval(&boundary.graph, &values, gate_sim::Collect::None).outputs;
@@ -208,7 +208,7 @@ fn mixed_boundaries_choose_per_bit_cells_and_rephase_every_state_use() {
         for (index, bit) in plan.bits.iter().enumerate() {
             assert_eq!(
                 value(&boundary.register_data[index])
-                    ^ plan.cells[bit.cell_index].invert_data
+                    ^ plan.cells[bit.cell_index].inverts_data_to_output
                     ^ bit.output_inverted,
                 expected[0].get_bit(index).unwrap()
             );

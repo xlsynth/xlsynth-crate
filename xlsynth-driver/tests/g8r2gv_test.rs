@@ -51,6 +51,8 @@ if [ "$2" = "-c" ]; then echo 'fake ABC'; exit 0; fi
 test "$1" = '-s' && test "$2" = '-f' && test "$3" = 'map.abc' || exit 2
 test -s transition.aig && test -s timing.constr && test -f library_0.lib || exit 3
 read -r magic m inputs l outputs a < transition.aig
+printf '%s' "${XLSYNTH_TEST_ABC_STDOUT-}"
+printf '%s' "${XLSYNTH_TEST_ABC_STDERR-}" >&2
 exec > mapped.v
 printf 'module mapped('
 sep=''
@@ -159,6 +161,8 @@ fn boundary_registers_script_constraints_and_diagnostics() {
     let script = dir.path().join("passes.abc");
     std::fs::write(&script, "&get -n; &nf; &put\n# no trailing newline").unwrap();
     let diagnostics = dir.path().join("diagnostics.json");
+    let abc_stdout = dir.path().join("abc.stdout");
+    let abc_stderr = dir.path().join("abc.stderr");
     let mut cmd = command(dir.path(), &input);
     cmd.args([
         "--add-clk-port",
@@ -175,7 +179,13 @@ fn boundary_registers_script_constraints_and_diagnostics() {
     .arg("--abc-script")
     .arg(&script)
     .arg("--diagnostics-out")
-    .arg(&diagnostics);
+    .arg(&diagnostics)
+    .arg("--abc-stdout-out")
+    .arg(&abc_stdout)
+    .arg("--abc-stderr-out")
+    .arg(&abc_stderr)
+    .env("XLSYNTH_TEST_ABC_STDOUT", "elapsed: 0.01s\n")
+    .env("XLSYNTH_TEST_ABC_STDERR", "peak memory: 100\n");
     let result = cmd.output().unwrap();
     assert!(
         result.status.success(),
@@ -187,7 +197,38 @@ fn boundary_registers_script_constraints_and_diagnostics() {
         &String::from_utf8(result.stdout.clone()).unwrap(),
         "tests/g8r2gv_boundary.golden.v",
     );
-    assert_eq!(result.stdout, cmd.output().unwrap().stdout);
+    assert_eq!(
+        std::fs::read_to_string(&abc_stdout).unwrap(),
+        "elapsed: 0.01s\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&abc_stderr).unwrap(),
+        "peak memory: 100\n"
+    );
+    let first_diagnostics = std::fs::read(&diagnostics).unwrap();
+    // Raw tool logs may vary between otherwise identical invocations. Neither
+    // the netlist nor the diagnostics JSON should change with them.
+    let repeated = cmd
+        .env("XLSYNTH_TEST_ABC_STDOUT", "elapsed: 0.02s\n")
+        .env("XLSYNTH_TEST_ABC_STDERR", "peak memory: 200\n")
+        .output()
+        .unwrap();
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(repeated.stderr.is_empty());
+    assert_eq!(result.stdout, repeated.stdout);
+    assert_eq!(first_diagnostics, std::fs::read(&diagnostics).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(&abc_stdout).unwrap(),
+        "elapsed: 0.02s\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&abc_stderr).unwrap(),
+        "peak memory: 200\n"
+    );
     let mut json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&diagnostics).unwrap()).unwrap();
     json["executable"] = "<abc>".into();
@@ -199,7 +240,7 @@ fn boundary_registers_script_constraints_and_diagnostics() {
 }
 
 #[test]
-fn explicit_controls_cleanup_and_clock_validation() {
+fn explicit_controls_and_clock_validation() {
     let design = block_ir_to_sequential_gate_fn_with_controls(
         r#"package controls
 top block top(clk: clock, rst: bits[1], data: bits[2], en: bits[1], out: bits[2]) {
@@ -220,20 +261,14 @@ top block top(clk: clock, rst: bits[1], data: bits[2], en: bits[1], out: bits[2]
     fixture(dir.path()).unwrap();
     let input = dir.path().join("input.g8rbin");
     std::fs::write(&input, encode_g8r_binary(&design).unwrap()).unwrap();
-    for cleanup in [false, true] {
-        let mut cmd = command(dir.path(), &input);
-        if cleanup {
-            cmd.arg("--cleanup-registers");
-        }
-        let result = cmd.output().unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let parsed = read_gv_from_str(&String::from_utf8(result.stdout).unwrap()).unwrap();
-        assert_eq!(parsed.modules[0].instances.len(), 2);
-    }
+    let result = command(dir.path(), &input).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let parsed = read_gv_from_str(&String::from_utf8(result.stdout).unwrap()).unwrap();
+    assert_eq!(parsed.modules[0].instances.len(), 2);
     let rejected = command(dir.path(), &input)
         .args(["--add-clk-port", "other"])
         .output()
@@ -244,6 +279,58 @@ top block top(clk: clock, rst: bits[1], data: bits[2], en: bits[1], out: bits[2]
         String::from_utf8(rejected.stderr).unwrap(),
         "xlsynth-driver: g8r2gv: --add-clk-port 'other' does not match the stored design clock 'clk'\n"
     );
+}
+
+#[test]
+fn cleanup_registers_is_opt_in_and_merges_duplicate_state() {
+    let design = block_ir_to_sequential_gate_fn_with_controls(
+        r#"package duplicates
+top block top(clk: clock, data: bits[1], out: bits[2]) {
+  reg first(bits[1])
+  reg second(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  q0: bits[1] = register_read(register=first, id=2)
+  q1: bits[1] = register_read(register=second, id=3)
+  d0: () = register_write(data, register=first, id=4)
+  d1: () = register_write(data, register=second, id=5)
+  value: bits[2] = concat(q0, q1, id=6)
+  out: () = output_port(value, name=out, id=7)
+}
+"#,
+        GatifyOptions::all_opts_disabled(),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path()).unwrap();
+    let input = dir.path().join("input.g8r");
+    std::fs::write(&input, emit_g8r(&design).unwrap()).unwrap();
+    for (cleanup, expected_registers) in [(false, 2), (true, 1)] {
+        let mut cmd = command(dir.path(), &input);
+        if cleanup {
+            cmd.arg("--cleanup-registers");
+        }
+        let result = cmd.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stderr.is_empty());
+        let parsed = read_gv_from_str(&String::from_utf8(result.stdout).unwrap()).unwrap();
+        let module = &parsed.modules[0];
+        // This design is all wires and registers, so no combinational cell can
+        // hide a missing cleanup or an accidental polarity-repair inverter.
+        assert_eq!(module.instances.len(), expected_registers);
+        for instance in &module.instances {
+            assert_eq!(parsed.interner.resolve(instance.type_name), Some("DFF"));
+        }
+        let output = module
+            .ports
+            .iter()
+            .find(|p| parsed.interner.resolve(p.name) == Some("out"))
+            .unwrap();
+        assert_eq!(output.width, Some((1, 0)));
+    }
 }
 
 #[test]

@@ -428,6 +428,104 @@ lut_shapes: { template_id: 1 index_1_id: 1 dimensions: 2 }
 }
 
 #[test]
+fn gv_stats_output_load_affects_direct_flop_outputs_not_internal_d_pin_loads() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("mapped.gv"),
+        r#"module top(input a, input clk, output y);
+  wire q;
+  DFF r0(.D(a), .CLK(clk), .Q(q));
+  DFF r1(.D(q), .CLK(clk), .Q(y));
+endmodule
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("lib.textproto"),
+        r#"
+format_magic: 5496997758194700879
+default_output_load: 0.005
+units: { time_unit: "1ps" capacitance_unit: "1pf" }
+cells: {
+  name: "DFF"
+  area: 1.0
+  pins: {
+    name_string_id: 1 direction: INPUT capacitance: 0.002
+    timing_arcs: {
+      related_pin_string_id: 2
+      timing_type: TIMING_TYPE_SETUP_RISING
+      tables: { kind: TIMING_TABLE_KIND_RISE_CONSTRAINT shape_id: 2 values: 0.25 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_CONSTRAINT shape_id: 2 values: 0.25 }
+    }
+  }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true capacitance: 0.0 }
+  pins: {
+    name_string_id: 3 direction: OUTPUT function_string_id: 4
+    timing_arcs: {
+      related_pin_string_id: 2
+      timing_sense: TIMING_SENSE_NON_UNATE
+      timing_type: TIMING_TYPE_RISING_EDGE
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: [1.0, 9.0] }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: [1.0, 9.0] }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 2 values: 0.1 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 2 values: 0.1 }
+    }
+  }
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+  }
+}
+interned_strings: ["D", "CLK", "Q", "IQ"]
+lut_axes: { values: [0.001, 0.009] }
+lu_table_templates: {
+  kind: LUT_TEMPLATE_KIND_TIMING
+  name: "load"
+  variable_1: LUT_VARIABLE_TOTAL_OUTPUT_NET_CAPACITANCE
+  index_1_id: 1
+}
+lut_shapes: { template_id: 1 index_1_id: 1 dimensions: 2 }
+lut_shapes: {}
+"#,
+    )
+    .unwrap();
+    for (args, expected_load, expected_output_delay) in [
+        (vec![], 0.005, 5.0),
+        (vec!["--module_output_load", "0"], 0.0, 1.0),
+        (vec!["--module_output_load", "0.009"], 0.009, 9.0),
+    ] {
+        let output = run_stats(directory.path(), &args).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join("stats.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["module_output_load"], expected_load);
+        // r1 drives the module load directly. r0 always drives just r1.D's
+        // 0.002 pF, so its clock-to-Q remains 2 ps regardless of that load.
+        for (field, expected) in [
+            ("max_register_to_output_delay", expected_output_delay),
+            ("max_register_to_register_delay", 2.25),
+            ("max_input_to_register_delay", 0.25),
+        ] {
+            assert!(
+                (report[field].as_f64().unwrap() - expected).abs() < 1e-9,
+                "{field}: {report}"
+            );
+        }
+        let internal = &report["max_register_to_register_delay_breakdown"];
+        assert!((internal["clock_to_output_delay"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(internal["setup_delay"], 0.25);
+        assert_eq!(internal["combinational_delay"], 0.0);
+    }
+}
+
+#[test]
 fn gv_stats_missing_or_invalid_defaults_require_an_explicit_override() {
     let directory = write_fixture();
     let base =

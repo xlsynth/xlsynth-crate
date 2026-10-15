@@ -166,7 +166,8 @@ impl AbcMappingOptions {
     }
 }
 
-/// Captured invocation details. Libraries never print tool diagnostics.
+/// Captured invocation details. Serialization includes only stable metadata;
+/// volatile raw logs remain available to callers and error reporting.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct AbcRunDiagnostics {
     pub executable: PathBuf,
@@ -176,7 +177,11 @@ pub struct AbcRunDiagnostics {
     /// Resolved constraints, including library-derived defaults, for
     /// reproducibility.
     pub io_constraints: Option<AbcIoConstraints>,
+    /// Raw tool output, intentionally excluded from deterministic metadata.
+    #[serde(skip_serializing)]
     pub stdout: String,
+    /// Raw tool errors, intentionally excluded from deterministic metadata.
+    #[serde(skip_serializing)]
     pub stderr: String,
 }
 
@@ -571,7 +576,10 @@ impl Boundary {
                     .bit_vector
                     .get_lsb(bit.bit_index),
             );
-            operand.negated ^= plan.cells[bit.cell_index].invert_data ^ bit.output_inverted;
+            // Physical D = logical D XOR cell polarity XOR state phase.
+            // `rephase` above expresses logical D using physical state inputs.
+            operand.negated ^=
+                plan.cells[bit.cell_index].inverts_data_to_output ^ bit.output_inverted;
             register_data.push(add_boundary_signal(&mut graph, operand, &input_nodes));
         }
         Self {

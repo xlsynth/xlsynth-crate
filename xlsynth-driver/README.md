@@ -1192,9 +1192,13 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 - `--flop-inputs`, `--flop-outputs` – add boundary-register layers; require a
   stored clock or `--add-clk-port`.
 - `--module-name <NAME>` – override the emitted module name.
-- `--diagnostics-out <PATH>` – write successful-run JSON diagnostics, including
-  the executable/version, raw Liberty paths, resolved constraints, full ABC
-  script, stdout, and stderr. Failures are reported on stderr.
+- `--diagnostics-out <PATH>` – write deterministic successful-run JSON metadata,
+  including the executable/version, raw Liberty paths, resolved constraints, and
+  full ABC script, but excluding raw tool logs. Failures are reported on stderr.
+- `--abc-stdout-out <PATH>`, `--abc-stderr-out <PATH>` – optionally save ABC's
+  raw stdout/stderr after successful mapping. Unlike the metadata, these logs
+  can contain nondeterministic timings and memory usage. They are never mixed
+  into the emitted netlist.
 
 ABC uses global driver/load constraints, including at register Q/D boundaries;
 these are not per-register clock-to-Q/setup constraints or actual D-pin loads.

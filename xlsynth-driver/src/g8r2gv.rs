@@ -43,7 +43,11 @@ pub fn command() -> Command {
             .help("Add output boundary registers; requires a stored clock or --add-clk-port"))
         .arg(Arg::new("module-name").long("module-name").value_name("NAME").help("Override the output module name"))
         .arg(Arg::new("diagnostics-out").long("diagnostics-out").value_name("PATH")
-            .help("Write successful-run diagnostics as JSON, including resolved constraints, the composed ABC script and captured output"))
+            .help("Write deterministic successful-run metadata as JSON, including resolved constraints and the composed ABC script; excludes raw tool logs"))
+        .arg(Arg::new("abc-stdout-out").long("abc-stdout-out").value_name("PATH")
+            .help("Write raw ABC mapping stdout on success; may contain nondeterministic timing and progress output"))
+        .arg(Arg::new("abc-stderr-out").long("abc-stderr-out").value_name("PATH")
+            .help("Write raw ABC mapping stderr on success; may contain nondeterministic tool output"))
 }
 
 /// Loads inputs, resolves independent IO overrides, and emits the mapped
@@ -95,6 +99,14 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         let json = serde_json::to_string_pretty(&mapped.diagnostics).map_err(|e| e.to_string())?;
         std::fs::write(path, format!("{json}\n"))
             .map_err(|e| format!("writing ABC diagnostics '{path}': {e}"))?;
+    }
+    for (flag, log) in [
+        ("abc-stdout-out", &mapped.diagnostics.stdout),
+        ("abc-stderr-out", &mapped.diagnostics.stderr),
+    ] {
+        if let Some(path) = matches.get_one::<String>(flag) {
+            std::fs::write(path, log).map_err(|e| format!("writing --{flag} '{path}': {e}"))?;
+        }
     }
     print!("{verilog}");
     Ok(())

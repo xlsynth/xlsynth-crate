@@ -3,7 +3,7 @@
 //! Deterministic, area-first mapping of logical state to Liberty flip-flops.
 //!
 //! This produces register binding plans, not a complete netlist. Combinational
-//! mapping, materializing data inversions, and final module assembly belong to
+//! mapping, applying state/data polarity, and final module assembly belong to
 //! the caller. No register cleanup or timing-driven sizing is performed here.
 
 use std::cmp::Ordering;
@@ -36,7 +36,7 @@ pub enum RegisterCellSelection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisterCellMapping {
     pub cell_name: String,
-    /// Physical FF area only; excludes any required data inverter.
+    /// Physical FF area only; excludes any required polarity compensation.
     pub area: f64,
     pub clock_pin: String,
     pub data_pin: String,
@@ -44,8 +44,9 @@ pub struct RegisterCellMapping {
     /// bit.
     pub output_pin: String,
     /// The selected physical output captures `!D` when true, otherwise `D`.
-    /// This accounts for both the next-state expression and output function.
-    pub invert_data: bool,
+    /// This intrinsic polarity accounts for both the next-state expression and
+    /// output function; it does not say whether to invert the D connection.
+    pub inverts_data_to_output: bool,
     /// Every other non-clock input is driven to this verified constant value.
     pub tied_inputs: BTreeMap<String, bool>,
     /// Other outputs are left unconnected, not tied to constants.
@@ -63,7 +64,9 @@ pub struct RegisterBitMapping {
     pub d: TransitionOutputId,
     /// Index into the owning plan's deduplicated cell assignments.
     pub cell_index: usize,
-    /// The physical output equals logical Q XOR this phase bit.
+    /// The physical output equals logical Q XOR this phase bit. The physical D
+    /// input must therefore equal logical D XOR this phase XOR the selected
+    /// cell's `inverts_data_to_output`, after rephasing logical state uses.
     pub output_inverted: bool,
 }
 
@@ -120,8 +123,9 @@ impl RegisterMappingLibrary {
         Ok(Self { cells, rejected })
     }
 
-    /// Returns usable mappings, ordered by area, no required data inversion,
-    /// cell name, output pin, data pin, and finally tie-off values.
+    /// Returns usable mappings, ordered by area, non-inverting D-to-output
+    /// polarity, cell name, output pin, data pin, and finally tie-off
+    /// values.
     pub fn cells(&self) -> &[RegisterCellMapping] {
         &self.cells
     }
@@ -167,8 +171,8 @@ impl RegisterMappingLibrary {
         }
     }
 
-    /// Maps every logical register bit without modifying or simplifying the
-    /// design.
+    /// Selects each bit's smallest compatible FF and state phase, preserving
+    /// direct module/register wires without modifying the logical design.
     ///
     /// Requires legalized controls: synchronous reset/enable behavior must
     /// already be expressed in D. Power-up state remains unspecified.
@@ -204,7 +208,7 @@ impl RegisterMappingLibrary {
         let mut cells = Vec::new();
         // Only two selection classes are needed. Cache their plan indices so
         // selecting thousands of bits does not repeatedly scan the catalog.
-        let mut selected = [None; 2];
+        let mut cell_indices_by_requirement = [None; 2];
         let mut bits = Vec::new();
         for register in &design.registers {
             let width = design.transition.inputs[register.q.index()].get_bit_count();
@@ -218,23 +222,16 @@ impl RegisterMappingLibrary {
                 let direct_input = !d.negated && primary_inputs.contains(&d.node.id);
                 let needs_noninverting = direct_input && direct_outputs.contains(&q.node.id);
                 let slot = usize::from(needs_noninverting);
-                let cell_index = if let Some(index) = selected[slot] {
+                let cell_index = if let Some(index) = cell_indices_by_requirement[slot] {
                     index
                 } else {
-                    let default = self.select(selection)?;
-                    let cell = if needs_noninverting && default.invert_data {
-                        self.cells.iter().find(|cell| {
-                            !cell.invert_data && match selection {
-                                RegisterCellSelection::SmallestArea => true,
-                                RegisterCellSelection::FixedCell(name) => cell.cell_name == *name,
-                            }
-                        }).ok_or_else(|| format!(
-                            "register '{}[{bit_index}]' directly connects a module input to a module output; no compatible non-inverting FF for {selection:?}",
-                            register.name
-                        ))?
-                    } else {
-                        default
-                    };
+                    let cell = self.select_compatible(selection, needs_noninverting).map_err(|error| {
+                        if needs_noninverting {
+                            format!("register '{}[{bit_index}]' directly connects a module input to a module output; {error}", register.name)
+                        } else {
+                            error
+                        }
+                    })?;
                     let index =
                         if let Some(index) = cells.iter().position(|existing| existing == cell) {
                             index
@@ -242,7 +239,7 @@ impl RegisterMappingLibrary {
                             cells.push(cell.clone());
                             cells.len() - 1
                         };
-                    selected[slot] = Some(index);
+                    cell_indices_by_requirement[slot] = Some(index);
                     index
                 };
                 bits.push(RegisterBitMapping {
@@ -251,7 +248,7 @@ impl RegisterMappingLibrary {
                     q: register.q,
                     d: register.d,
                     cell_index,
-                    output_inverted: direct_input && cells[cell_index].invert_data,
+                    output_inverted: direct_input && cells[cell_index].inverts_data_to_output,
                 });
             }
         }
@@ -261,13 +258,36 @@ impl RegisterMappingLibrary {
             bits,
         })
     }
+
+    /// Applies a boundary's polarity requirement without relaxing fixed-cell
+    /// selection. Catalog order already supplies stable minimum-area ranking.
+    fn select_compatible(
+        &self,
+        selection: &RegisterCellSelection,
+        needs_noninverting: bool,
+    ) -> Result<&RegisterCellMapping, String> {
+        let default = self.select(selection)?;
+        if !needs_noninverting || !default.inverts_data_to_output {
+            return Ok(default);
+        }
+        self.cells
+            .iter()
+            .find(|cell| {
+                !cell.inverts_data_to_output
+                    && match selection {
+                        RegisterCellSelection::SmallestArea => true,
+                        RegisterCellSelection::FixedCell(name) => cell.cell_name == *name,
+                    }
+            })
+            .ok_or_else(|| format!("no compatible non-inverting FF for {selection:?}"))
+    }
 }
 
 /// Stable selection independent of Liberty cell/pin declaration order.
 fn compare_mappings(a: &RegisterCellMapping, b: &RegisterCellMapping) -> Ordering {
     a.area
         .total_cmp(&b.area)
-        .then_with(|| a.invert_data.cmp(&b.invert_data))
+        .then_with(|| a.inverts_data_to_output.cmp(&b.inverts_data_to_output))
         .then_with(|| a.cell_name.cmp(&b.cell_name))
         .then_with(|| a.output_pin.cmp(&b.output_pin))
         .then_with(|| a.data_pin.cmp(&b.data_pin))
@@ -396,7 +416,7 @@ fn map_cell(cell: &Cell, library: &Library) -> Result<RegisterCellMapping, Strin
                     clock_pin: spec.clock.pin_name.clone(),
                     data_pin: data_pin.clone(),
                     output_pin: (*output_pin).clone(),
-                    invert_data: data_inverted ^ output_inverted,
+                    inverts_data_to_output: data_inverted ^ output_inverted,
                     tied_inputs: ties.clone(),
                     unused_outputs: outputs
                         .iter()
@@ -567,7 +587,10 @@ mod tests {
                     .map(|(k, v)| (k.clone(), *v))
                     .collect::<HashMap<_, _>>();
                 values.insert(binding.clock_pin.clone(), true);
-                values.insert(binding.data_pin.clone(), data ^ binding.invert_data);
+                values.insert(
+                    binding.data_pin.clone(),
+                    data ^ binding.inverts_data_to_output,
+                );
                 values.insert(seq.state_var.clone(), old_state);
                 if let Some(complement) = &seq.complementary_state_var {
                     values.insert(complement.clone(), !old_state);
@@ -613,7 +636,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(cell.data_pin, "payload");
                 assert_eq!(cell.output_pin, "result");
-                assert_eq!(cell.invert_data, data_inverted ^ output_inverted);
+                assert_eq!(cell.inverts_data_to_output, data_inverted ^ output_inverted);
                 assert!(cell.tied_inputs.is_empty());
                 assert_binding_semantics(&library, cell);
             }
@@ -631,12 +654,12 @@ mod tests {
         let catalog = RegisterMappingLibrary::new(&library).unwrap();
         let default = catalog.select(&RegisterCellSelection::default()).unwrap();
         assert_eq!(default.cell_name, "DFFN_X1");
-        assert!(default.invert_data);
+        assert!(default.inverts_data_to_output);
         let fixed = catalog
             .select(&RegisterCellSelection::FixedCell("DFF_X2".into()))
             .unwrap();
         assert_eq!(fixed.cell_name, "DFF_X2");
-        assert!(!fixed.invert_data);
+        assert!(!fixed.inverts_data_to_output);
         assert_eq!(
             catalog
                 .select(&RegisterCellSelection::FixedCell("missing".into()))
@@ -666,7 +689,7 @@ mod tests {
             .select(&RegisterCellSelection::FixedCell("DFF_B".into()))
             .unwrap();
         assert_eq!(dual.output_pin, "QN");
-        assert!(!dual.invert_data);
+        assert!(!dual.inverts_data_to_output);
         assert_eq!(dual.unused_outputs, ["Q"]);
         for cell in expected.cells() {
             assert_binding_semantics(&library, cell);
@@ -802,7 +825,7 @@ mod tests {
                         for data in [false, true] {
                             let pin_value = |name| {
                                 if binding.data_pin == name {
-                                    data ^ binding.invert_data
+                                    data ^ binding.inverts_data_to_output
                                 } else {
                                     binding.tied_inputs[name]
                                 }
@@ -843,7 +866,7 @@ mod tests {
         assert_eq!(binding.data_pin, "D");
         assert_eq!(binding.tied_inputs.len(), MAX_CONTROL_PINS);
         assert!(binding.tied_inputs.values().all(|value| *value));
-        assert!(binding.invert_data);
+        assert!(binding.inverts_data_to_output);
         assert_binding_semantics(&library, binding);
     }
 
@@ -868,7 +891,7 @@ mod tests {
         let cell = catalog
             .select(&RegisterCellSelection::SmallestArea)
             .unwrap();
-        assert!(cell.invert_data);
+        assert!(cell.inverts_data_to_output);
         assert_binding_semantics(&library, cell);
     }
 
@@ -927,7 +950,7 @@ mod tests {
             ] {
                 let mapping = catalog.select(&selection).unwrap();
                 assert_eq!(mapping.cell_name, "DFF");
-                assert_eq!(mapping.invert_data, output == "IQN");
+                assert_eq!(mapping.inverts_data_to_output, output == "IQN");
                 assert!(mapping.tied_inputs.is_empty());
                 assert_binding_semantics(&library, mapping);
             }
@@ -1260,7 +1283,7 @@ mod tests {
                     &RegisterCellSelection::default()
                 )
                 .unwrap_err(),
-            "Liberty has no supported positive-edge flip-flop"
+            "register 'p0_out[0]' directly connects a module input to a module output; Liberty has no supported positive-edge flip-flop"
         );
     }
 
@@ -1356,7 +1379,10 @@ mod tests {
                 values.insert(seq.state_var.clone(), state);
                 values.insert(seq.complementary_state_var.clone().unwrap(), !state);
                 values.insert(binding.clock_pin.clone(), true);
-                values.insert(binding.data_pin.clone(), data ^ binding.invert_data);
+                values.insert(
+                    binding.data_pin.clone(),
+                    data ^ binding.inverts_data_to_output,
+                );
                 values
             };
             for initial in 0..8 {

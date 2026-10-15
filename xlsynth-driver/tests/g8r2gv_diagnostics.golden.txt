@@ -8,7 +8,5 @@
     "<liberty>"
   ],
   "script": "read_lib library_0.lib\nread_aiger transition.aig\nstrash\nread_constr timing.constr\n&get -n; &nf; &put\n# no trailing newline\nwrite_verilog mapped.v\n",
-  "stderr": "",
-  "stdout": "",
   "version": "fake ABC"
 }

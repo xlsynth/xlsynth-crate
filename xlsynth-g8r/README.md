@@ -197,11 +197,12 @@ electrical constraints; timing/resizing consumers must enforce them separately.
 
 `netlist::register_mapping::RegisterMappingLibrary` builds a reusable FF catalog
 from the normalized Liberty `Library`. It requires no timing tables. Selection
-uses the smallest physical FF area, then prefers no data inversion, followed by
-cell name, output pin, data pin, and control tie-offs for deterministic ties.
+uses the smallest physical FF area, then prefers non-inverting D-to-output
+polarity, followed by cell name, output pin, data pin, and control tie-offs for
+deterministic ties.
 `RegisterCellSelection::FixedCell` requires a named supported cell without
 fallback; unsupported sequential cells have inspectable rejection diagnostics.
-FF area does not include the cost of any required data inverter.
+FF area does not include any polarity-compensation logic.
 
 The initial subset is one-bit, positive-edge synchronous FFs. Latches, multi-state
 cells, asynchronous clear/preset cells, gated or ambiguous clocks, `dont_use`
@@ -213,14 +214,25 @@ cell's next state reduces to D or !D for both previous-state values. Search is
 bounded to eight tied inputs. Q and QN are recognized from their Boolean
 functions, not pin names, including explicitly declared complementary state.
 
-`map_registers` returns a `RegisterMappingPlan`: a shared cell binding plus one
-physical FF assignment per logical register bit, in register/LSB order. Port IDs
-refer to the supplied design; mapping does not mutate it or perform register
-cleanup. The selected output connects directly to logical Q. When `invert_data`
-is true, the physical data pin must receive !D; otherwise it receives D. Every
-other input must receive its recorded tie-off, and unused outputs remain open.
-The caller must materialize these connections during combinational mapping and
-netlist assembly; the plan itself is not an emitted netlist.
+`map_registers` returns a `RegisterMappingPlan`: deduplicated cell bindings in
+`cells` plus one physical FF assignment per logical register bit, in register/LSB
+order. Each bit selects a binding with `cell_index`. Port IDs refer to the supplied
+design; mapping does not mutate it or perform register cleanup.
+
+The binding's `inverts_data_to_output` records the cell's intrinsic polarity:
+whether its selected physical output captures !D rather than D. The bit's
+`output_inverted` records its chosen state phase: physical Q equals logical Q XOR
+that phase. Physical D must equal logical D XOR the state phase XOR the cell's
+intrinsic polarity, after rephasing logical state uses. The clock pin receives
+the design clock; remaining input pins receive their recorded tie-offs, and
+unused outputs remain open. The caller materializes these connections during
+combinational mapping and netlist assembly; the plan itself is not an emitted
+netlist.
+
+Selection preserves direct module-input-to-D and Q-to-module-output wires. A bit
+on both boundaries therefore requires a non-inverting cell. Each bit uses the
+smallest compatible cell; a fixed-cell request that cannot preserve both wires
+is rejected rather than silently replaced.
 
 Mapping requires `validate_legalized()`: call `legalize_register_controls()` to
 fold explicit reset/enable fields into effective D logic first. Power-up state
