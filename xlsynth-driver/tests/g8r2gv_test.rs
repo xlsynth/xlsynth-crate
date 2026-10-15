@@ -8,10 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use prost::Message;
-use xlsynth_g8r::aig::{
-    ClockPort, GateBuilder, GateBuilderOptions, SequentialGateFn, add_input_registers,
-    add_output_registers,
-};
+use xlsynth_g8r::aig::{AigBitVector, GateBuilder, GateBuilderOptions, SequentialGateFn};
 use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary};
 use xlsynth_g8r::block2sequential::block_ir_to_sequential_gate_fn_with_controls;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
@@ -23,7 +20,7 @@ use xlsynth_g8r::test_utils::{interesting_ir_roundtrip_cases, load_interesting_i
 use xlsynth_test_helpers::compare_golden_text;
 
 /// Configures a fake ABC with the correct scalar interface, not a logic oracle.
-fn fixture(dir: &Path, design: &SequentialGateFn) -> anyhow::Result<Library> {
+fn fixture(dir: &Path) -> anyhow::Result<Library> {
     let raw = dir.join("cells.lib");
     std::fs::write(
         &raw,
@@ -46,49 +43,28 @@ fn fixture(dir: &Path, design: &SequentialGateFn) -> anyhow::Result<Library> {
     library.default_output_load = Some(0.004);
     let library = library_to_proto(library)?;
     std::fs::write(dir.join("cells.proto"), library.encode_to_vec())?;
-    let design = design
-        .legalize_register_controls()
-        .map_err(anyhow::Error::msg)?;
-    let ni: usize = design
-        .transition
-        .inputs
-        .iter()
-        .map(|p| p.get_bit_count())
-        .sum();
-    let no: usize = design
-        .outputs
-        .iter()
-        .map(|id| design.transition.outputs[id.index()].get_bit_count())
-        .sum::<usize>()
-        + design
-            .registers
-            .iter()
-            .map(|r| design.transition.inputs[r.q.index()].get_bit_count())
-            .sum::<usize>();
-    let ports = (0..ni)
-        .map(|i| format!("i{i}"))
-        .chain((0..no).map(|i| format!("o{i}")))
-        .collect::<Vec<_>>();
-    let mut gv = format!("module mapped({});\n", ports.join(","));
-    for i in 0..ni {
-        writeln!(gv, "input i{i};")?;
-    }
-    for i in 0..no {
-        writeln!(gv, "output o{i}; assign o{i}=1'b0;")?;
-    }
-    gv.push_str("endmodule\n");
     let abc = dir.join("fake abc");
     std::fs::write(
         &abc,
-        format!(
-            r#"#!/bin/sh
+        r#"#!/bin/sh
 if [ "$2" = "-c" ]; then echo 'fake ABC'; exit 0; fi
 test "$1" = '-s' && test "$2" = '-f' && test "$3" = 'map.abc' || exit 2
 test -s transition.aig && test -s timing.constr && test -f library_0.lib || exit 3
-cat <<'NETLIST' > mapped.v
-{gv}NETLIST
-"#
-        ),
+read -r magic m inputs l outputs a < transition.aig
+exec > mapped.v
+printf 'module mapped('
+sep=''
+i=0
+while [ "$i" -lt "$inputs" ]; do printf '%si%s' "$sep" "$i"; sep=','; i=$((i+1)); done
+i=0
+while [ "$i" -lt "$outputs" ]; do printf '%so%s' "$sep" "$i"; sep=','; i=$((i+1)); done
+printf ');\n'
+i=0
+while [ "$i" -lt "$inputs" ]; do printf 'input i%s;\n' "$i"; i=$((i+1)); done
+i=0
+while [ "$i" -lt "$outputs" ]; do printf "output o%s; assign o%s=1'b0;\n" "$i" "$i"; i=$((i+1)); done
+printf 'endmodule\n'
+"#,
     )?;
     std::fs::set_permissions(&abc, std::fs::Permissions::from_mode(0o755))?;
     Ok(library)
@@ -117,7 +93,7 @@ fn shared_signatures_accept_both_serializations_and_preserve_ports() {
         let design =
             SequentialGateFn::from_gate_fn(load_interesting_ir_roundtrip_case(case).gate_fn);
         let dir = tempfile::tempdir().unwrap();
-        fixture(dir.path(), &design).unwrap();
+        fixture(dir.path()).unwrap();
         let mut results = Vec::new();
         for (extension, bytes) in [
             ("g8r", emit_g8r(&design).unwrap().into_bytes()),
@@ -170,13 +146,14 @@ fn shared_signatures_accept_both_serializations_and_preserve_ports() {
 fn boundary_registers_script_constraints_and_diagnostics() {
     let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
     let a = builder.add_input("a".into(), 2);
-    builder.add_output("y".into(), a);
+    let and = builder.add_and_binary(*a.get_lsb(0), *a.get_lsb(1));
+    builder.add_output(
+        "y".into(),
+        AigBitVector::from_lsb_is_index_0(&[and, and.negate()]),
+    );
     let design = SequentialGateFn::from_gate_fn(builder.build());
-    let clock = ClockPort { name: "clk".into() };
-    let wrapped =
-        add_output_registers(&add_input_registers(&design, clock.clone()).unwrap(), clock).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    fixture(dir.path(), &wrapped).unwrap();
+    fixture(dir.path()).unwrap();
     let input = dir.path().join("input.g8r");
     std::fs::write(&input, emit_g8r(&design).unwrap()).unwrap();
     let script = dir.path().join("passes.abc");
@@ -240,7 +217,7 @@ top block top(clk: clock, rst: bits[1], data: bits[2], en: bits[1], out: bits[2]
     )
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    fixture(dir.path(), &design).unwrap();
+    fixture(dir.path()).unwrap();
     let input = dir.path().join("input.g8rbin");
     std::fs::write(&input, encode_g8r_binary(&design).unwrap()).unwrap();
     for cleanup in [false, true] {
@@ -276,7 +253,7 @@ fn defaults_resolve_independently_and_invalid_options_fail_cleanly() {
     builder.add_output("y".into(), a);
     let design = SequentialGateFn::from_gate_fn(builder.build());
     let dir = tempfile::tempdir().unwrap();
-    let library = fixture(dir.path(), &design).unwrap();
+    let library = fixture(dir.path()).unwrap();
     let input = dir.path().join("input.g8r");
     std::fs::write(&input, emit_g8r(&design).unwrap()).unwrap();
     for (missing_driver, missing_load, flags) in [

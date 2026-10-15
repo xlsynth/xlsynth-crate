@@ -28,6 +28,9 @@ fn library() -> Library {
         cell(DFFN) { area: 1; pin(D) { direction: input; } pin(CLK) { clock: true; }
             pin(QN) { direction: output; function: "IQN"; }
             ff(IQ,IQN) { clocked_on: "CLK"; next_state: "D"; } }
+        cell(DFF) { area: 2; pin(D) { direction: input; } pin(CLK) { clock: true; }
+            pin(Q) { direction: output; function: "IQ"; }
+            ff(IQ,IQN) { clocked_on: "CLK"; next_state: "D"; } }
     }"#).unwrap();
     let mut library = parse_liberty_files(&[file.path()]).unwrap();
     library.reference_buffer_cell = Some("BUF".into());
@@ -61,21 +64,228 @@ fn design() -> SequentialGateFn {
 
 #[test]
 fn physical_d_polarity_does_not_invert_shared_external_output() {
-    let design = design();
+    let design = design_with_logic();
     let plan = RegisterMappingLibrary::new(&library())
         .unwrap()
         .map_registers(&design, &RegisterCellSelection::SmallestArea)
         .unwrap();
-    assert!(plan.cell.as_ref().unwrap().invert_data);
+    assert!(plan.cells[0].invert_data);
     let boundary = Boundary::new(&design, &plan);
     let values = [true, false, false, true].map(|v| IrBits::from_lsb_is_0(&[v]));
     let outputs = gate_sim::eval(&boundary.graph, &values, gate_sim::Collect::None).outputs;
-    let expected = [true, false, false, true, false, true].map(|v| IrBits::from_lsb_is_0(&[v]));
+    let expected = [false, true].map(|v| IrBits::from_lsb_is_0(&[v]));
     assert_eq!(outputs, expected);
+    assert_eq!(
+        boundary.register_data,
+        [
+            BoundarySignal::Direct("i0".into()),
+            BoundarySignal::Direct("i1".into())
+        ]
+    );
+}
+
+/// Keeps actual logic in the transition graph for external-process tests.
+fn design_with_logic() -> SequentialGateFn {
+    let mut design = design();
+    design.transition.outputs[0].bit_vector = AigBitVector::from_lsb_is_index_0(
+        &design.transition.outputs[0]
+            .bit_vector
+            .iter_lsb_to_msb()
+            .map(|b| b.negate())
+            .collect::<Vec<_>>(),
+    );
+    design
 }
 
 #[test]
-fn assembly_is_flat_and_preserves_packed_ports_and_inverted_state() {
+fn mixed_boundaries_choose_per_bit_cells_and_rephase_every_state_use() {
+    let mut builder = GateBuilder::new("mixed".into(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".into(), 2);
+    let q = builder.add_input("q".into(), 4);
+    let shared = builder.add_and_binary(*q.get_lsb(0), *q.get_lsb(1));
+    let feedback = builder.add_and_binary(*q.get_lsb(3), *q.get_lsb(1));
+    builder.add_output(
+        "d".into(),
+        AigBitVector::from_lsb_is_index_0(&[*a.get_lsb(0), *a.get_lsb(1), shared, feedback]),
+    );
+    builder.add_output(
+        "y".into(),
+        AigBitVector::from_lsb_is_index_0(&[
+            *q.get_lsb(0),
+            *q.get_lsb(2),
+            *q.get_lsb(0),
+            q.get_lsb(1).negate(),
+            feedback,
+        ]),
+    );
+    let design = SequentialGateFn::new(
+        "mixed".into(),
+        builder.build(),
+        vec![TransitionInputId::new(0)],
+        vec![TransitionOutputId::new(1)],
+        Some(ClockPort { name: "clk".into() }),
+        vec![RegisterBinding {
+            name: "r".into(),
+            q: TransitionInputId::new(1),
+            d: TransitionOutputId::new(0),
+            enable: None,
+            reset: None,
+        }],
+    )
+    .unwrap();
+    let plan = RegisterMappingLibrary::new(&library())
+        .unwrap()
+        .map_registers(&design, &RegisterCellSelection::SmallestArea)
+        .unwrap();
+    assert_eq!(
+        plan.bits
+            .iter()
+            .map(|bit| (
+                plan.cells[bit.cell_index].cell_name.as_str(),
+                bit.output_inverted,
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("DFF", false),
+            ("DFFN", true),
+            ("DFFN", false),
+            ("DFFN", false)
+        ]
+    );
+    let boundary = Boundary::new(&design, &plan);
+    assert_eq!(
+        &boundary.register_data[..2],
+        &[
+            BoundarySignal::Direct("i0".into()),
+            BoundarySignal::Direct("i1".into())
+        ]
+    );
+    assert_eq!(
+        boundary.external_outputs[0][0],
+        BoundarySignal::Direct("i2".into())
+    );
+    assert_eq!(
+        boundary.external_outputs[0][1],
+        BoundarySignal::Direct("i4".into())
+    );
+    assert_eq!(
+        boundary.external_outputs[0][2],
+        BoundarySignal::Direct("i2".into())
+    );
+    // Exhaust all states/inputs and compare transition and external outputs.
+    // This catches missing phase changes on shared fanout and feedback edges.
+    for assignment in 0..64 {
+        let source = [
+            IrBits::make_ubits(2, assignment & 3).unwrap(),
+            IrBits::make_ubits(4, assignment >> 2).unwrap(),
+        ];
+        let expected = gate_sim::eval(&design.transition, &source, gate_sim::Collect::None).outputs;
+        let physical = (0..6)
+            .map(|index| IrBits::from_lsb_is_0(&[(assignment & (1 << index) != 0) ^ (index == 3)]))
+            .collect::<Vec<_>>();
+        let actual = gate_sim::eval(&boundary.graph, &physical, gate_sim::Collect::None).outputs;
+        let value = |signal: &BoundarySignal| {
+            let values = match signal {
+                BoundarySignal::Direct(name) => {
+                    &physical[boundary
+                        .graph
+                        .inputs
+                        .iter()
+                        .position(|p| &p.name == name)
+                        .unwrap()]
+                }
+                BoundarySignal::Mapped(name) => {
+                    &actual[boundary
+                        .graph
+                        .outputs
+                        .iter()
+                        .position(|p| &p.name == name)
+                        .unwrap()]
+                }
+            };
+            values.get_bit(0).unwrap()
+        };
+        for (index, bit) in plan.bits.iter().enumerate() {
+            assert_eq!(
+                value(&boundary.register_data[index])
+                    ^ plan.cells[bit.cell_index].invert_data
+                    ^ bit.output_inverted,
+                expected[0].get_bit(index).unwrap()
+            );
+        }
+        for (index, signal) in boundary.external_outputs[0].iter().enumerate() {
+            assert_eq!(value(signal), expected[1].get_bit(index).unwrap());
+        }
+    }
+}
+
+#[test]
+fn both_boundaries_reject_inverting_only_libraries_and_fixed_cells() {
+    let mut lib = library();
+    let catalog = RegisterMappingLibrary::new(&lib).unwrap();
+    let expected = "register 'r[0]' directly connects a module input to a module output; no compatible non-inverting FF for FixedCell(\"DFFN\")";
+    assert_eq!(
+        catalog
+            .map_registers(&design(), &RegisterCellSelection::FixedCell("DFFN".into()))
+            .unwrap_err(),
+        expected
+    );
+    lib.cells.retain(|cell| cell.name != "DFF");
+    let catalog = RegisterMappingLibrary::new(&lib).unwrap();
+    assert_eq!(
+        catalog
+            .map_registers(&design(), &RegisterCellSelection::SmallestArea)
+            .unwrap_err(),
+        "register 'r[0]' directly connects a module input to a module output; no compatible non-inverting FF for SmallestArea"
+    );
+    // An inverted next-state function does not impose the direct-input
+    // invariant.
+    assert!(
+        catalog
+            .map_registers(&design_with_logic(), &RegisterCellSelection::SmallestArea)
+            .is_ok()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_identity_maps_without_invoking_abc_or_adding_cells() {
+    let temp = tempfile::tempdir().unwrap();
+    let raw = temp.path().join("cells.lib");
+    std::fs::write(&raw, "library(test) {}").unwrap();
+    // This executable cannot emit a mapped netlist, so success proves that
+    // the wire-only design never invokes ABC's mapping script.
+    let context = AbcMappingContext::new(
+        AbcToolchain::new("/usr/bin/true").unwrap(),
+        &[raw],
+        library(),
+    )
+    .unwrap();
+    let mut builder = GateBuilder::new("identity".into(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".into(), 1);
+    builder.add_output("y".into(), a);
+    let design = crate::aig::add_output_registers(
+        &SequentialGateFn::from_gate_fn(builder.build()),
+        ClockPort { name: "clk".into() },
+    )
+    .unwrap();
+    let result = context
+        .map_sequential(
+            &design,
+            &AbcMappingOptions::from_library(context.library()).unwrap(),
+        )
+        .unwrap();
+    assert!(result.diagnostics.script.is_empty());
+    assert_eq!(result.netlist.modules[0].instances.len(), 1);
+    assert_eq!(result.registers.cells[0].cell_name, "DFF");
+    compare_golden_text(
+        &result.emit_verilog().unwrap(),
+        "src/netlist/abc/direct_identity.golden.v",
+    );
+}
+
+#[test]
+fn assembly_is_flat_and_preserves_direct_packed_register_boundaries() {
     let design = design();
     let library = library();
     let plan = RegisterMappingLibrary::new(&library)
@@ -84,17 +294,15 @@ fn assembly_is_flat_and_preserves_packed_ports_and_inverted_state() {
         .unwrap();
     let boundary = Boundary::new(&design, &plan);
     let mut parsed = read_gv_from_str(
-        r#"module mapped(i0,i1,i2,i3,o0,o1,o2,o3,o4,o5);
-        input i0,i1,i2,i3; output o0,o1,o2,o3,o4,o5;
-        assign o0=i0; assign o1=i1; assign o2=i2; assign o3=i3;
-        INV g0(.A(i0),.Y(o4)); INV g1(.A(i1),.Y(o5)); endmodule"#,
+        r#"module mapped(i0,i1,i2,i3);
+        input i0,i1,i2,i3; endmodule"#,
     )
     .unwrap();
     validate_mapped_cells(&parsed, &library).unwrap();
     assemble(&mut parsed, &design, &plan, &boundary).unwrap();
     let text =
         emit_module_as_netlist_text(&parsed.modules[0], &parsed.nets, &parsed.interner).unwrap();
-    assert_eq!(text, include_str!("assembly.golden.v"));
+    compare_golden_text(&text, "src/netlist/abc/assembly.golden.v");
     let file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(file.path(), text).unwrap();
     let mapped = load_labeled_sequential_netlist_aig_with_liberty(
@@ -108,10 +316,10 @@ fn assembly_is_flat_and_preserves_packed_ports_and_inverted_state() {
     .unwrap();
     let stimulus = [0, 1, 3, 2, 0].map(|v| vec![IrBits::make_ubits(2, v).unwrap()]);
     let original = simulate(&design, &stimulus, SequentialState::all_zeros(&design)).unwrap();
-    // The selected QN output represents logical state; physical IQ starts at 1.
+    // The both-boundaries case uses a non-inverting FF and unchanged state.
     let initial = SequentialState::from_register_values(
         &mapped.sequential_gate_fn,
-        vec![IrBits::make_ubits(1, 1).unwrap(); 2],
+        vec![IrBits::make_ubits(1, 0).unwrap(); 2],
     )
     .unwrap();
     let after = mapped.simulate_bits(&stimulus, initial).unwrap();
@@ -282,7 +490,7 @@ fn explicit_options_map_without_usable_library_defaults() {
 if [ "$2" = "-c" ]; then exit 0; fi
 test "$(cat timing.constr)" = "set_driving_cell BUF
 set_load 20" || exit 3
-echo 'module mapped(i0,o0); input i0; output o0; assign o0=i0; endmodule' > mapped.v
+echo 'module mapped(i0,o0); input i0; output o0; INV c(.A(i0),.Y(o0)); endmodule' > mapped.v
 "#,
     )
     .unwrap();
@@ -293,7 +501,10 @@ echo 'module mapped(i0,o0); input i0; output o0; assign o0=i0; endmodule' > mapp
         AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
     let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
     let input = builder.add_input("a".into(), 1);
-    builder.add_output("y".into(), input);
+    builder.add_output(
+        "y".into(),
+        AigBitVector::from_bit(input.get_lsb(0).negate()),
+    );
     let design = SequentialGateFn::from_gate_fn(builder.build());
     let explicit = AbcIoConstraints {
         driving_cell: "BUF".into(),
@@ -385,7 +596,7 @@ echo 'module mapped(); endmodule' > mapped.v
         AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
     let error = context
         .map_sequential(
-            &design(),
+            &design_with_logic(),
             &AbcMappingOptions::from_library(context.library()).unwrap(),
         )
         .err()
@@ -414,7 +625,7 @@ cat <<'EXPECTED' | cmp - map.abc || exit 3
 test -s transition.aig || exit 4
 test "$(cat timing.constr)" = "set_driving_cell BUF
 set_load 4" || exit 5
-echo 'module mapped(i0,o0); input i0; output o0; assign o0=i0; endmodule' > mapped.v
+echo 'module mapped(i0,o0); input i0; output o0; INV c(.A(i0),.Y(o0)); endmodule' > mapped.v
 "#,
             include_str!("custom_script.golden.txt")
         ),
@@ -431,7 +642,7 @@ echo 'module mapped(i0,o0); input i0; output o0; assign o0=i0; endmodule' > mapp
     .unwrap();
     let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
     let a = builder.add_input("a".into(), 1);
-    builder.add_output("y".into(), a);
+    builder.add_output("y".into(), AigBitVector::from_bit(a.get_lsb(0).negate()));
     let design = SequentialGateFn::from_gate_fn(builder.build());
     let mut options = AbcMappingOptions::from_library(context.library()).unwrap();
     options.script = CUSTOM_PASSES.to_owned();
@@ -483,7 +694,7 @@ printf '%s\n' '{netlist}' > mapped.v
                 .unwrap();
         let error = context
             .map_sequential(
-                &design(),
+                &design_with_logic(),
                 &AbcMappingOptions::from_library(context.library()).unwrap(),
             )
             .err()
@@ -653,7 +864,7 @@ fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
     assert!(
         context
             .map_sequential(
-                &design(),
+                &design_with_logic(),
                 &AbcMappingOptions::from_library(context.library()).unwrap()
             )
             .is_err()
@@ -661,7 +872,7 @@ fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
     std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").unwrap();
     let error = context
         .map_sequential(
-            &design(),
+            &design_with_logic(),
             &AbcMappingOptions {
                 timeout: Duration::from_millis(30),
                 ..AbcMappingOptions::from_library(context.library()).unwrap()

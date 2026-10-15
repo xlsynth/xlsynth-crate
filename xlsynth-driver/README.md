@@ -1156,6 +1156,14 @@ flip-flop mapping. Supports combinational and sequential designs, including
 explicit synchronous reset/enable controls (legalized before mapping). No Yosys
 is invoked. ABC buffers and resizes combinational cells; FFs are not resized.
 
+Existing direct input-to-register and register-to-output connections remain
+wires, without added buffers or inverters. FFs are selected per bit by minimum
+compatible Liberty area. Polarity compensation is absorbed into the interior
+logic: downstream of input-facing registers and upstream of output-facing
+registers. A register directly connecting both a module input and output needs
+a non-inverting D-to-output implementation; mapping fails if none is available.
+Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
+
 - `--liberty <PATH>` – required raw, uncompressed Liberty file for ABC. Repeat
   this flag for split libraries, in loading order. The first one or two files
   must together supply a usable combinational library, including buffers and
@@ -1178,7 +1186,8 @@ is invoked. ABC buffers and resizes combinational cells; FFs are not resized.
 - `--cleanup-registers` – opt in to native register cleanup; default is to
   preserve registers.
 - `--register-cell <CELL>` – require a supported FF cell instead of selecting
-  the smallest-area compatible one. All bits initially use the selected cell.
+  the smallest-area compatible one. The cell must preserve every direct boundary
+  connection; an incompatible forced cell is rejected rather than substituted.
 - `--add-clk-port <NAME>` – declare a clock for a clockless design or check the
   stored clock's name.
 - `--flop-inputs`, `--flop-outputs` – add boundary-register layers; require a

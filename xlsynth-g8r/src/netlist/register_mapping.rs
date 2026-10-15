@@ -25,14 +25,14 @@ const MAX_CONTROL_PINS: usize = 8;
 /// Selects the smallest supported physical FF, or fixes its cell name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RegisterCellSelection {
-    /// Minimize FF area, using stable tie-breaks and no timing assumptions.
+    /// Minimize compatible FF area, preserving direct module/register wires.
     #[default]
     SmallestArea,
     /// Require this cell; unsupported requests fail rather than falling back.
     FixedCell(String),
 }
 
-/// A verified single-bit FF implementation of logical `Q_next = D`.
+/// A verified single-bit FF pin assignment, including its D-to-output polarity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisterCellMapping {
     pub cell_name: String,
@@ -40,10 +40,11 @@ pub struct RegisterCellMapping {
     pub area: f64,
     pub clock_pin: String,
     pub data_pin: String,
-    /// Connect this output directly to logical Q, regardless of its pin name.
+    /// Selected physical output; its logical phase is recorded per register
+    /// bit.
     pub output_pin: String,
-    /// Physical data receives `!D` when true, otherwise `D`. This accounts for
-    /// both next-state and output polarity; no restoring Q inverter is needed.
+    /// The selected physical output captures `!D` when true, otherwise `D`.
+    /// This accounts for both the next-state expression and output function.
     pub invert_data: bool,
     /// Every other non-clock input is driven to this verified constant value.
     pub tied_inputs: BTreeMap<String, bool>,
@@ -60,14 +61,18 @@ pub struct RegisterBitMapping {
     pub bit_index: usize,
     pub q: TransitionInputId,
     pub d: TransitionOutputId,
+    /// Index into the owning plan's deduplicated cell assignments.
+    pub cell_index: usize,
+    /// The physical output equals logical Q XOR this phase bit.
+    pub output_inverted: bool,
 }
 
 /// Register-only mapping plan tied to the supplied sequential interface.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisterMappingPlan {
     pub clock: Option<ClockPort>,
-    /// All physical bits use the selected cell. None for a state-free design.
-    pub cell: Option<RegisterCellMapping>,
+    /// Cell assignments in first-use order; empty for a state-free design.
+    pub cells: Vec<RegisterCellMapping>,
     /// Original register order, then LSB-first bit order. No state is removed.
     pub bits: Vec<RegisterBitMapping>,
 }
@@ -175,26 +180,84 @@ impl RegisterMappingLibrary {
         selection: &RegisterCellSelection,
     ) -> Result<RegisterMappingPlan, String> {
         design.validate_legalized()?;
+        let primary_inputs = design
+            .inputs
+            .iter()
+            .flat_map(|id| {
+                design.transition.inputs[id.index()]
+                    .bit_vector
+                    .iter_lsb_to_msb()
+            })
+            .map(|bit| bit.node.id)
+            .collect::<BTreeSet<_>>();
+        let direct_outputs = design
+            .outputs
+            .iter()
+            .flat_map(|id| {
+                design.transition.outputs[id.index()]
+                    .bit_vector
+                    .iter_lsb_to_msb()
+            })
+            .filter(|bit| !bit.negated)
+            .map(|bit| bit.node.id)
+            .collect::<BTreeSet<_>>();
+        let mut cells = Vec::new();
+        // Only two selection classes are needed. Cache their plan indices so
+        // selecting thousands of bits does not repeatedly scan the catalog.
+        let mut selected = [None; 2];
         let mut bits = Vec::new();
         for register in &design.registers {
             let width = design.transition.inputs[register.q.index()].get_bit_count();
             for bit_index in 0..width {
+                let q = design.transition.inputs[register.q.index()]
+                    .bit_vector
+                    .get_lsb(bit_index);
+                let d = design.transition.outputs[register.d.index()]
+                    .bit_vector
+                    .get_lsb(bit_index);
+                let direct_input = !d.negated && primary_inputs.contains(&d.node.id);
+                let needs_noninverting = direct_input && direct_outputs.contains(&q.node.id);
+                let slot = usize::from(needs_noninverting);
+                let cell_index = if let Some(index) = selected[slot] {
+                    index
+                } else {
+                    let default = self.select(selection)?;
+                    let cell = if needs_noninverting && default.invert_data {
+                        self.cells.iter().find(|cell| {
+                            !cell.invert_data && match selection {
+                                RegisterCellSelection::SmallestArea => true,
+                                RegisterCellSelection::FixedCell(name) => cell.cell_name == *name,
+                            }
+                        }).ok_or_else(|| format!(
+                            "register '{}[{bit_index}]' directly connects a module input to a module output; no compatible non-inverting FF for {selection:?}",
+                            register.name
+                        ))?
+                    } else {
+                        default
+                    };
+                    let index =
+                        if let Some(index) = cells.iter().position(|existing| existing == cell) {
+                            index
+                        } else {
+                            cells.push(cell.clone());
+                            cells.len() - 1
+                        };
+                    selected[slot] = Some(index);
+                    index
+                };
                 bits.push(RegisterBitMapping {
                     register_name: register.name.clone(),
                     bit_index,
                     q: register.q,
                     d: register.d,
+                    cell_index,
+                    output_inverted: direct_input && cells[cell_index].invert_data,
                 });
             }
         }
-        let cell = if bits.is_empty() {
-            None
-        } else {
-            Some(self.select(selection)?.clone())
-        };
         Ok(RegisterMappingPlan {
             clock: design.clock.clone(),
-            cell,
+            cells,
             bits,
         })
     }
@@ -1057,7 +1120,7 @@ mod tests {
                 .map_registers(&design, &RegisterCellSelection::default())
                 .unwrap();
             assert_eq!(plan.clock, design.clock);
-            assert_eq!(plan.cell.is_some(), width != 0);
+            assert_eq!(!plan.cells.is_empty(), width != 0);
             assert_eq!(plan.bits.len(), width);
             for (bit, mapping) in plan.bits.iter().enumerate() {
                 assert_eq!(mapping.bit_index, bit);
@@ -1119,6 +1182,8 @@ mod tests {
                     bit_index,
                     q: TransitionInputId::new(q),
                     d: TransitionOutputId::new(0),
+                    cell_index: 0,
+                    output_inverted: false,
                 })
             })
             .collect::<Vec<_>>();
@@ -1164,7 +1229,7 @@ mod tests {
                         .map_registers(&legalized, &RegisterCellSelection::default())
                         .unwrap();
                     assert_eq!(plan.bits.len(), width);
-                    assert_eq!(plan.cell.is_some(), width != 0);
+                    assert_eq!(!plan.cells.is_empty(), width != 0);
                 }
             }
         }
@@ -1184,7 +1249,7 @@ mod tests {
             plan,
             RegisterMappingPlan {
                 clock: None,
-                cell: None,
+                cells: vec![],
                 bits: vec![]
             }
         );
@@ -1273,7 +1338,7 @@ mod tests {
                     &RegisterCellSelection::FixedCell(cell.name.clone()),
                 )
                 .unwrap();
-            let binding = plan.cell.as_ref().unwrap();
+            let binding = &plan.cells[0];
             let seq = &cell.sequential[0];
             let next = parse_formula(&seq.next_state).unwrap();
             let output_pin = cell
