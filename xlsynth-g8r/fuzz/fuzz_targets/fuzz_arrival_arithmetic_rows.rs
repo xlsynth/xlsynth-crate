@@ -55,6 +55,7 @@ fuzz_target!(|data: &[u8]| {
         late = format!("v{id}");
         id += 1;
     }
+    let slice_id = (mode == 4).then_some(id);
     let product_term = if mode == 4 {
         body.push(format!(
             " slice: bits[{width}] = bit_slice(p, start=0, width={width}, id={id})"
@@ -115,15 +116,34 @@ fuzz_target!(|data: &[u8]| {
     let product = NodeRef {
         index: source.nodes.iter().position(|n| n.text_id == 6).unwrap(),
     };
-    if mode == 1 || mode == 2 {
+    if mode == 1 || mode == 2 || (mode == 5 && product_width >= width) {
         assert!(
             !mapped.lowering_map.contains_key(&product),
             "expected actual deferred-product hit: {text}"
         );
-    } else if mode == 3 || mode == 4 || (mode == 5 && product_width < width) {
+    } else if mode == 3
+        || (mode == 4 && product_width == width)
+        || (mode == 5 && product_width < width)
+    {
         assert!(
             mapped.lowering_map.contains_key(&product),
             "expected resolved boundary: {text}"
+        );
+    }
+    if let Some(slice_id) = slice_id {
+        let slice = NodeRef {
+            index: source
+                .nodes
+                .iter()
+                .position(|n| n.text_id == slice_id)
+                .unwrap(),
+        };
+        // The slice is fully demanded, but the product is omitted from the
+        // public lowering map when its upper bits are not demanded. Lowering
+        // the slice still requires the intervening product to be resolved.
+        assert!(
+            mapped.lowering_map.contains_key(&slice),
+            "expected resolved product slice: {text}"
         );
     }
     let lifted = gate2ir::gate_fn_to_pir(&mapped.gate_fn, "f", &source.get_type()).unwrap();
