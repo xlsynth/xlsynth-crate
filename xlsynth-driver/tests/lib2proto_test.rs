@@ -5,9 +5,160 @@ use flate2::write::GzEncoder;
 use prost::Message;
 use std::io::Write;
 use std::process::Command;
+use xlsynth_g8r::liberty::load::load_library_from_path;
 use xlsynth_g8r::liberty::model::LIBERTY_FORMAT_MAGIC;
 use xlsynth_g8r::liberty_proto::Library;
+use xlsynth_g8r::netlist::abc::AbcIoConstraints;
 use xlsynth_test_helpers::compare_golden_text;
+
+#[test]
+fn reference_buffer_metadata_roundtrips_and_is_validated_after_filtering() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("cells.lib");
+    let policy = temp.path().join("filter.policy");
+    std::fs::write(
+        &source,
+        r#"library(test) {
+        capacitive_load_unit(1, pf);
+        cell(BUF) { area: 1; pin(A) { direction: input; capacitance: 0.0005; }
+            pin(Y) { direction: output; function: "A"; } }
+        cell(INV) { area: 1; pin(A) { direction: input; capacitance: 0.0005; }
+            pin(Y) { direction: output; function: "!A"; } }
+    }"#,
+    )
+    .unwrap();
+    for extension in ["proto", "textproto"] {
+        let output = temp.path().join(format!("cells.{extension}"));
+        let result = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .args([
+                "lib2proto",
+                "--reference-buffer-cell",
+                "BUF",
+                "--default-output-load",
+                "0.007",
+                "--output",
+            ])
+            .arg(&output)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let library = load_library_from_path(&output).unwrap();
+        assert_eq!(library.reference_buffer_cell.as_deref(), Some("BUF"));
+        assert_eq!(library.default_output_load, Some(0.007));
+        assert_eq!(
+            AbcIoConstraints::from_library(&library)
+                .unwrap()
+                .output_load_ff,
+            7.0
+        );
+        let info = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("liberty-proto-info")
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(info.status.success());
+        // Binary/text encodings have distinct stored-file size and hash, but
+        // must report identical metadata with the load's explicit units.
+        let text = String::from_utf8(info.stdout).unwrap();
+        let metadata = text.lines().skip(2).collect::<Vec<_>>().join("\n") + "\n";
+        compare_golden_text(&metadata, "tests/lib2proto_io_defaults_info.golden.txt");
+    }
+    std::fs::write(&policy, "exclude ^BUF$\n").unwrap();
+    for (name, filtered, golden) in [
+        (
+            "ABSENT",
+            false,
+            "tests/lib2proto_reference_absent.golden.txt",
+        ),
+        (
+            "INV",
+            false,
+            "tests/lib2proto_reference_inverter.golden.txt",
+        ),
+        ("BUF", true, "tests/lib2proto_reference_filtered.golden.txt"),
+    ] {
+        let output = temp.path().join("invalid.proto");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        cmd.args(["lib2proto", "--reference-buffer-cell", name, "--output"])
+            .arg(&output)
+            .arg(&source)
+            .env("NO_COLOR", "1")
+            .env_remove("RUST_LOG");
+        if filtered {
+            cmd.arg("--cell-filter-policy").arg(&policy);
+        }
+        let result = cmd.output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        compare_golden_text(&String::from_utf8(result.stderr).unwrap(), golden);
+        assert!(
+            !output.exists(),
+            "invalid defaults must not write an output artifact"
+        );
+    }
+}
+
+#[test]
+fn default_output_load_is_optional_independent_and_validated() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("cells.lib");
+    let output = temp.path().join("cells.proto");
+    for (units, load, expected_error) in [
+        (
+            "capacitive_load_unit(1, pf);",
+            "0",
+            Some("default_output_load must be positive and finite"),
+        ),
+        (
+            "capacitive_load_unit(1, pf);",
+            "-1",
+            Some("default_output_load must be positive and finite"),
+        ),
+        (
+            "capacitive_load_unit(1, pf);",
+            "NaN",
+            Some("default_output_load must be positive and finite"),
+        ),
+        (
+            "capacitive_load_unit(1, pf);",
+            "inf",
+            Some("default_output_load must be positive and finite"),
+        ),
+        ("", "0.007", Some("Liberty has no capacitance units")),
+        ("capacitive_load_unit(1, ff);", "7", None),
+    ] {
+        std::fs::write(&source, format!("library(test) {{ {units} }}")).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .args(["lib2proto", "--default-output-load", load, "--output"])
+            .arg(&output)
+            .arg(&source)
+            .env("NO_COLOR", "1")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        if let Some(error) = expected_error {
+            assert_eq!(result.status.code(), Some(1));
+            assert_eq!(
+                String::from_utf8(result.stderr).unwrap(),
+                format!("xlsynth-driver: lib2proto: Invalid default output load: {error}\n")
+            );
+            assert!(!output.exists());
+        } else {
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let library = load_library_from_path(&output).unwrap();
+            assert_eq!(library.default_output_load, Some(7.0));
+            assert_eq!(library.reference_buffer_cell, None);
+        }
+    }
+}
 
 #[test]
 fn lib2proto_records_generation_metadata_and_info_reports_it() {
@@ -88,6 +239,7 @@ library (test) {
     assert_eq!(minimal.provenance, provenance);
     assert_eq!(minimal.source_files, vec!["test.lib"]);
     assert_eq!(minimal.nominal_voltage, None);
+    assert_eq!(minimal.default_output_load, None);
     assert!(minimal.lu_table_templates.is_empty());
     assert!(minimal.cells[0].pins[0].internal_power.is_empty());
     assert!(minimal.cells[0].pins[1].timing_arcs.is_empty());

@@ -88,6 +88,10 @@ pub struct Library {
     pub nominal_voltage: Option<f64>,
     pub provenance: String,
     pub source_files: Vec<String>,
+    /// Optional user-selected buffer for default input driving.
+    pub reference_buffer_cell: Option<String>,
+    /// Optional default output capacitance in the library's capacitance units.
+    pub default_output_load: Option<f64>,
     pub(crate) strings: Vec<Box<str>>,
     pub(crate) lut_axes: Vec<Box<[f64]>>,
     pub(crate) lut_shapes: Vec<LutShape>,
@@ -1545,6 +1549,8 @@ pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
         nominal_voltage: library.nominal_voltage,
         provenance: library.provenance,
         source_files: library.source_files,
+        reference_buffer_cell: library.reference_buffer_cell,
+        default_output_load: library.default_output_load,
         lut_axes,
         interned_strings,
         lut_shapes,
@@ -1872,6 +1878,8 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
         nominal_voltage: library.nominal_voltage,
         provenance: library.provenance,
         source_files: library.source_files,
+        reference_buffer_cell: library.reference_buffer_cell,
+        default_output_load: library.default_output_load,
         strings,
         lut_axes: axes,
         lut_shapes: shapes,

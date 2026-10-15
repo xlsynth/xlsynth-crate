@@ -188,6 +188,22 @@ IR matching the artifact, such as the prepared IR written with
 
 ### `lib2proto`: liberty files to proto
 
+Use `--reference-buffer-cell <CELL>` to record a library-specific ordinary
+non-inverting buffer for default input driving (default: unspecified).
+The cell is validated after filtering and must have one input and one output.
+Use `--default-output-load <CAPACITANCE>` to record an independent positive finite
+output load in the library's declared capacitance units (default: unspecified).
+Missing/invalid capacitance units are rejected when setting the load. Direct ABC
+mapping uses these defaults unless explicit mapping constraints are supplied;
+there is no buffer-capacitance multiplier or implicit load fallback. These are
+user-selected flow metadata, not Liberty source attributes. For a library with
+`capacitive_load_unit (1, pf)`, this example records a 5 fF load:
+
+```shell
+xlsynth-driver lib2proto /path/to/cells.lib \
+  --reference-buffer-cell BUF --default-output-load 0.005 --output cells.proto
+```
+
 Liberty files can be unwieldy and large in their textual form -- this command reformats the data
 for streamlined querying, e.g. by the `gv2ir` subcommand.
 
@@ -303,6 +319,8 @@ xlsynth-driver liberty-proto-info /path/to/asap7.proto.gz
 The report includes file size and SHA-256, provenance, source files, total,
 combinational, sequential, and native `dont_use` cell counts, LUT templates,
 timing arcs, internal-power groups and tables, and nominal voltage.
+When present, it also reports the reference input buffer and default output
+load with the library's capacitance units.
 
 All `xlsynth-driver` subcommands that consume a Liberty proto accept `.proto`,
 `.textproto`, `.proto.gz`, and `.textproto.gz`. `lib2proto` itself emits

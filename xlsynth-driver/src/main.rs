@@ -1964,6 +1964,22 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("reference_buffer_cell")
+                        .long("reference-buffer-cell")
+                        .value_name("CELL")
+                        .help("Select an ordinary buffer for default input driving; validated after cell filtering")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("default_output_load")
+                        .long("default-output-load")
+                        .value_name("CAPACITANCE")
+                        .value_parser(clap::value_parser!(f64))
+                        .allow_hyphen_values(true)
+                        .help("Store a positive finite default output load in the library's capacitance units (default: unspecified)")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("cell_filter_policy")
                         .long("cell-filter-policy")
                         .value_name("PATH")
@@ -4196,7 +4212,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
             dslx2pipeline_eco::handle_dslx2pipeline_eco(subm, &config);
         }
         Some(("lib2proto", subm)) => {
-            lib2proto::handle_lib2proto(subm);
+            if let Err(error) = lib2proto::handle_lib2proto(subm) {
+                report_cli_error_and_exit(&error, Some("lib2proto"), vec![]);
+            }
         }
         Some(("liberty-proto-info", subm)) => {
             if let Err(e) = liberty_proto_info::handle_liberty_proto_info(subm) {

@@ -1,0 +1,1 @@
+xlsynth-driver: lib2proto: Invalid reference buffer: 'INV' must implement a non-inverting buffer

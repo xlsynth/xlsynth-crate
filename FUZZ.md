@@ -55,7 +55,7 @@ use identical flags. Fuzz manifests align solver forwarding
 where applicable, but different transitive feature sets may still require
 separate compiled variants. Unknown features are errors. Targets whose
 `required-features` are not enabled are reported as excluded, as are the existing
-default-excluded Yosys targets.
+default-excluded external ABC and Yosys targets.
 
 The optional `--target-dir` changes the shared build output directory. Relative
 paths are resolved from the invoking directory. Target names must be unique
@@ -76,6 +76,35 @@ default. CI retains its `-max_total_time=5` override and
 60-second per-input watchdog. These smoke runs do not replace longer fuzz
 campaigns. Optional external-tool targets still require explicit selection and
 their runtime prerequisites.
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
+
+Uses the shared resettable block-IR generator, lowers to G8R with explicit reset
+and enable controls, and maps through standalone ABC plus native FF selection
+and complete flat netlist assembly. Mapping must legalize the controls; the
+reference simulation evaluates the unlegalized source directly.
+Both register-cleanup settings are checked on every sample. The original and
+mapped designs receive independently sampled startup states and shared concrete
+input vectors; outputs must agree over 24 cycles after the first reset edge,
+including later reset reassertions. The final emitted GV is loaded through the
+gate-level evaluator, exercising physical FF polarity/tie-offs, packed ports,
+constants, aliases, and reset/enable legalization. Separate directed tests cover
+zero-width logical ports, which are preserved natively and omitted from physical GV.
+No special optimization motifs are injected into the generic generator.
+The configured `abc_mapping::tests::configured_abc_mapping_smoke` unit test
+also runs this equivalence oracle with a shorter custom mapping script; the
+fuzz target itself uses the default speed script.
+
+This optional target requires `XLSYNTH_ABC_PATH`, comma-separated uncompressed
+`XLSYNTH_LIBERTY_FILES` for ABC, and `XLSYNTH_LIBERTY_PROTO` for native FF mapping
+and evaluation. The libraries must describe matching cells at one corner.
+The proto must select a usable `reference_buffer_cell` and a positive finite
+`default_output_load` in declared library capacitance units (set with
+`lib2proto --reference-buffer-cell CELL --default-output-load CAPACITANCE`).
+Mapping uses that driver and the explicit load, including register-D boundaries.
+Startup preflight verifies actual mapping; setup failures and unexpected sample
+failures are errors, not successful/skipped samples. Run with
+`cargo fuzz run --sanitizer none fuzz_abc_sequential_mapping -- -max_total_time=300`.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_sequential_cleanup_equiv.rs
 

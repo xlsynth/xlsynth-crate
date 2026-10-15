@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use xlsynth_g8r::liberty::CellFilterPolicy;
 use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
+use xlsynth_g8r::liberty::io_defaults::{default_output_load_ff, resolve_reference_buffer};
 use xlsynth_g8r::liberty::model::library_to_proto;
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, ThresholdVoltageGroupRule,
@@ -57,7 +58,8 @@ fn parse_vt_group_rule(raw: &str) -> Result<ThresholdVoltageGroupRule, String> {
     })
 }
 
-pub fn handle_lib2proto(matches: &clap::ArgMatches) {
+/// Imports Liberty and writes a binary or text proto, reporting user errors.
+pub fn handle_lib2proto(matches: &clap::ArgMatches) -> Result<(), String> {
     let liberty_files: Vec<_> = matches
         .get_many::<String>("liberty_files")
         .unwrap()
@@ -71,8 +73,7 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
                 .map(|value| parse_vt_group_rule(value))
                 .collect::<Result<Vec<_>, _>>()
         })
-        .transpose()
-        .unwrap_or_else(|e| panic!("{e}"))
+        .transpose()?
         .unwrap_or_default();
 
     let payload_options = LibertyPayloadOptions {
@@ -84,7 +85,7 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
         &vt_group_rules,
         payload_options,
     )
-    .expect("Failed to parse Liberty files");
+    .map_err(|e| format!("Failed to parse Liberty files: {e}"))?;
     library.provenance = matches
         .get_one::<String>("provenance")
         .cloned()
@@ -101,7 +102,7 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
         .collect();
     if let Some(policy_path) = matches.get_one::<String>("cell_filter_policy") {
         let policy = CellFilterPolicy::from_path(Path::new(policy_path))
-            .unwrap_or_else(|e| panic!("Failed to load cell-filter policy: {e:#}"));
+            .map_err(|e| format!("Failed to load cell-filter policy: {e:#}"))?;
         let stats = policy.apply(&mut library);
         log::info!(
             "Applied {} cell-filter rules: input={} native_dont_use={} retained={} removed={}",
@@ -112,27 +113,41 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
             stats.removed_cells
         );
     }
-    let proto = library_to_proto(library).expect("Failed to encode Liberty LUT data");
+    if let Some(name) = matches.get_one::<String>("reference_buffer_cell") {
+        library.reference_buffer_cell = Some(name.clone());
+        resolve_reference_buffer(&library).map_err(|e| format!("Invalid reference buffer: {e}"))?;
+    }
+    if let Some(load) = matches.get_one::<f64>("default_output_load") {
+        library.default_output_load = Some(*load);
+        default_output_load_ff(&library)
+            .map_err(|e| format!("Invalid default output load: {e}"))?;
+    }
+    let proto =
+        library_to_proto(library).map_err(|e| format!("Failed to encode Liberty LUT data: {e}"))?;
 
     if output.ends_with(".proto") {
-        let mut f = File::create(output).expect("Failed to create output file");
+        let mut f =
+            File::create(output).map_err(|e| format!("Failed to create output file: {e}"))?;
         log::info!("Encoding proto...");
         let bytes = proto.encode_to_vec();
         log::info!("Writing proto...");
-        f.write_all(&bytes).expect("Failed to write proto");
+        f.write_all(&bytes)
+            .map_err(|e| format!("Failed to write proto: {e}"))?;
     } else if output.ends_with(".textproto") {
         log::info!("Encoding proto...");
         let encoded = proto.encode_to_vec();
         let text = liberty_proto_bytes_to_pretty_textproto(&encoded)
-            .expect("Failed to format Liberty textproto");
+            .map_err(|e| format!("Failed to format Liberty textproto: {e}"))?;
         log::info!("Writing textproto...");
-        let mut f = File::create(output).expect("Failed to create output file");
+        let mut f =
+            File::create(output).map_err(|e| format!("Failed to create output file: {e}"))?;
         f.write_all(text.as_bytes())
-            .expect("Failed to write textproto");
+            .map_err(|e| format!("Failed to write textproto: {e}"))?;
     } else {
-        panic!(
+        return Err(format!(
             "Output must end with .proto or .textproto; got {:?}",
             output
-        );
+        ));
     }
+    Ok(())
 }

@@ -4,9 +4,10 @@ use prost_reflect::{DescriptorPool, DynamicMessage, text_format::FormatOptions};
 
 /// Embedded compiled descriptor set for the Liberty wire schema.
 ///
-/// This descriptor is checked in under `proto/liberty.bin` so that crates
-/// depending on xlsynth-g8r only need prost/prost-reflect at build time,
-/// not protoc/prost-build.
+/// The checked-in `proto/liberty.bin` supplies runtime reflection/textproto
+/// support. Building xlsynth-g8r still requires protoc/prost-build to generate
+/// Rust message types in build.rs; schema edits must also update this
+/// descriptor.
 pub const LIBERTY_DESCRIPTOR: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/proto/liberty.bin"));
 

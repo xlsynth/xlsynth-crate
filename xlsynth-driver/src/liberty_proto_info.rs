@@ -28,6 +28,15 @@ pub fn handle_liberty_proto_info(matches: &clap::ArgMatches) -> Result<(), Strin
     for source_file in &info.source_files {
         println!("  - {source_file}");
     }
+    if let Some(name) = &info.reference_buffer_cell {
+        println!("Reference buffer: {name}");
+    }
+    if let Some(load) = info.default_output_load {
+        println!(
+            "Default output load: {load} [{}]",
+            info.capacitance_unit.as_deref().unwrap_or("<unspecified>")
+        );
+    }
     println!("Cells: {}", info.cells);
     println!("  Combinational: {}", info.combinational_cells);
     println!("  Sequential: {}", info.sequential_cells);

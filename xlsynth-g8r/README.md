@@ -237,6 +237,87 @@ let plan = cells.map_registers(&legalized, &RegisterCellSelection::SmallestArea)
 // Or use RegisterCellSelection::FixedCell("DFF".to_string()).
 ```
 
+## Direct ABC sequential mapping
+
+`netlist::abc::AbcMappingContext` maps a `SequentialGateFn` to a complete flat
+gate-level netlist without invoking Yosys. It legalizes explicit reset/enable
+controls, optionally runs native register cleanup, selects physical FFs, and
+sends only combinational transition logic to standalone ABC. The established
+`abc-speed` script performs optimization, mapping, buffering, and resizing of
+that combinational logic. Registers stay outside ABC; there is no retiming or
+register sizing.
+
+Supply **raw, uncompressed Liberty files** to ABC and a **separate normalized
+Liberty model/proto** for native FF mapping and evaluation. No proto-to-Liberty
+conversion occurs. For split libraries, the first one or two files must form a
+usable combinational library (including inversion/buffering); additional files
+are merged using `read_lib -m`. The returned diagnostics record the executable,
+version, source paths, exact script, and captured output. Emitted cell/pin names
+are checked against the normalized library, but matching names do not establish
+functional/timing identity between the two inputs. Callers must use matching
+libraries and filtering policies.
+
+The mapper uses opaque scalar ABC port names, then restores the original packed
+external interface and assembles FF clock/data/output connections and verified
+tie-offs. Physical D inversions are separate mapping outputs, so shared logical
+D/external-output bindings keep their original polarity. Zero-width ports are
+retained in `AbcMappedDesign::design` and omitted from GV, which has no zero-width
+port syntax. `emit_verilog()` returns deterministic text without ABC timestamps.
+
+`AbcMappingOptions` requires explicit `io_constraints` and has no `Default`
+implementation. `AbcMappingOptions::from_library(&library)` resolves and validates
+the library's `reference_buffer_cell` and `default_output_load` at construction.
+Alternatively, `AbcMappingOptions::new(constraints)` uses caller-supplied
+`AbcIoConstraints`, without requiring library defaults. Both constructors select
+the smallest-area FF, preserve all registers, and use a 180-second ABC timeout.
+Callers can modify these options before mapping; the mapper validates the
+constraints against its library rather than resolving defaults again.
+The reference must be a usable ordinary non-inverting buffer. The library's
+independent default load is expressed in its declared capacitance units and
+converted to femtofarads for ABC; caller-supplied `output_load_ff` is already in
+femtofarads. No multiplier is applied. Missing, nonpositive, or nonfinite default
+loads and missing/invalid units are constructor errors, never an unconstrained
+or buffer-derived fallback.
+
+Set the optional library metadata when importing with
+`lib2proto --reference-buffer-cell BUF --default-output-load CAPACITANCE`.
+There is no cell-name heuristic or technology-specific default in code.
+Older protos without these fields remain
+readable and require explicit constraints for ABC mapping. The raw ABC library
+must also contain the selected driver; a missing-driver warning is an error.
+Resolved constraints are returned in the run diagnostics.
+
+`AbcMappingOptions::script` contains the optimization/mapping passes and defaults
+to the literal `ABC_SPEED_SCRIPT` string constant. To experiment with another
+flow, replace this string, for example with `"&get -n; &dch; &nf; &put"`.
+The wrapper always supplies raw-library loading, `read_aiger transition.aig`,
+`strash`, and `read_constr timing.constr` before the passes, and
+`write_verilog mapped.v` afterward. The default complete command sequence is
+unchanged. Custom passes must leave a mapped network in ABC's main workspace
+(use `&put` after GIA commands), preserve the combinational boundary, and omit
+library/constraint/design IO commands. This is trusted ABC code, not a sandbox;
+the wrapper does not parse or restrict the supplied commands. The full composed
+script is captured in diagnostics. There is no CLI script flag yet.
+
+ABC's legacy constraints are global: **the same output load also applies to
+register-D boundaries**, rather than the actual selected flop pin capacitance.
+This first version does not claim per-register launch/capture timing constraints
+or a numeric PI-slew interface. Register-boundary STA remains a separate analysis.
+
+```rust,ignore
+use xlsynth_g8r::netlist::abc::{AbcMappingContext, AbcMappingOptions, AbcToolchain};
+
+let toolchain = AbcToolchain::new("/path/to/abc")?;
+let context = AbcMappingContext::new(toolchain, &["/path/to/cells.lib"], liberty)?;
+let options = AbcMappingOptions::from_library(context.library())?;
+let mapped = context.map_sequential(&design, &options)?;
+let verilog = mapped.emit_verilog()?;
+```
+
+`AbcToolchain::from_env()` uses `XLSYNTH_ABC_PATH` or `abc` on PATH. The API is
+library-only; it does not add a driver command. See `FUZZ.md` for the opt-in
+end-to-end mapping campaign and its raw/proto library environment variables.
+
 ## External Yosys APIs
 
 `netlist::yosys::YosysToolchain` validates an executable and runs scripts with

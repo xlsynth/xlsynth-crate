@@ -1,0 +1,41 @@
+read_lib library_0.lib library_1.lib
+read_lib -m library_2.lib
+read_aiger transition.aig
+strash
+read_constr timing.constr
+&get -n
+&st
+&dch
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&put
+buffer -c
+topo
+stime -c
+upsize -c
+dnsize -c
+write_verilog mapped.v
