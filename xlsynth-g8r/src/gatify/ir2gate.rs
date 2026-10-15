@@ -22,17 +22,19 @@ use xlsynth_pir::known_bits::KnownBits;
 use xlsynth_prover::prover::SolverChoice;
 
 use crate::ir2gate_utils::{
-    AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
-    gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
-    gatify_barrel_shifter_with_forked_stage_order, gatify_barrel_shifter_with_output_width,
-    gatify_barrel_shifter_with_stage_order, gatify_indexed_select_mux_tree_exact,
-    gatify_indexed_select_mux_tree_pad_last_if_type_fits, gatify_mask_low, gatify_one_hot,
-    gatify_one_hot_select, gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
+    AdderMapping, Direction, array_add_with_carry_out, barrel_shifter_stage_demands,
+    gatify_add_brent_kung, gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
+    gatify_barrel_shifter_with_forked_stage_order, gatify_barrel_shifter_with_output_mask,
+    gatify_barrel_shifter_with_output_width, gatify_barrel_shifter_with_stage_order,
+    gatify_indexed_select_mux_tree_exact, gatify_indexed_select_mux_tree_pad_last_if_type_fits,
+    gatify_mask_low, gatify_one_hot, gatify_one_hot_select, gatify_one_hot_with_nonzero_flag,
+    gatify_prio_encode, masked_shift_fill,
 };
 
 use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
+mod demanded_bits;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
 mod region;
@@ -190,6 +192,8 @@ enum UseCounts {
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
     use_counts: UseCounts,
+    /// Absent for standalone node lowering, where every target bit is required.
+    demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
 }
 
@@ -208,6 +212,7 @@ impl GateEnv {
         Self {
             ir_to_g8: HashMap::new(),
             use_counts: UseCounts::Function(use_counts),
+            demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
         }
     }
@@ -227,7 +232,19 @@ impl GateEnv {
         Self {
             ir_to_g8: HashMap::new(),
             use_counts: UseCounts::Region(use_counts),
+            demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
+        }
+    }
+
+    /// Returns the mask for a shift in this lowering boundary.
+    fn output_mask(&self, node: ir::NodeRef, width: usize) -> Vec<bool> {
+        match &self.demanded_bits {
+            None => vec![true; width],
+            Some(demands) => demands
+                .get(&node)
+                .cloned()
+                .unwrap_or_else(|| vec![false; width]),
         }
     }
 
@@ -3002,19 +3019,29 @@ fn gatify_arithmetic_right_barrel_shifter(
     arg_bits: &AigBitVector,
     amount_bits: &AigBitVector,
     stage_order: &[usize],
+    output_mask: &[bool],
     tag_prefix: &str,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
     let bit_count = arg_bits.get_bit_count();
+    assert_eq!(bit_count, output_mask.len());
+    let stage_demands = barrel_shifter_stage_demands(output_mask, Direction::Right, stage_order);
     assert!(bit_count > 0, "shra requires non-zero-width operands");
 
     let sign = *arg_bits.get_msb(0);
     let mut current: Vec<AigOperand> = arg_bits.iter_lsb_to_msb().cloned().collect();
-    for stage in stage_order {
+    for (stage_index, stage) in stage_order.iter().enumerate() {
         let shift = 1usize << *stage;
         let control = amount_bits.get_lsb(*stage);
         let mut next_stage = Vec::with_capacity(bit_count);
         for j in 0..bit_count {
+            if stage_demands
+                .as_ref()
+                .is_some_and(|masks| !masks[stage_index][j])
+            {
+                next_stage.push(gb.get_false());
+                continue;
+            }
             let candidate = if j + shift < bit_count {
                 current[j + shift]
             } else {
@@ -3025,6 +3052,11 @@ fn gatify_arithmetic_right_barrel_shifter(
         current = next_stage;
     }
 
+    for (bit, &demanded) in current.iter_mut().zip(output_mask) {
+        if !demanded {
+            *bit = gb.get_false();
+        }
+    }
     for gate in current.iter() {
         gb.add_tag(
             gate.node,
@@ -3043,8 +3075,13 @@ fn gatify_shra(
     text_id: usize,
     range_info: Option<&Arc<IrRangeInfo>>,
     amount_text_id: usize,
+    output_mask: &[bool],
 ) -> AigBitVector {
     let w = arg_bits.get_bit_count();
+    assert_eq!(w, output_mask.len());
+    if !output_mask.iter().any(|bit| *bit) {
+        return AigBitVector::zeros(w);
+    }
     assert!(w > 0, "shra requires non-zero-width operands");
 
     // Effective shift bits needed to represent [0..w-1]. When w<=1, shifting is
@@ -3098,43 +3135,58 @@ fn gatify_shra(
     let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
     let tag_prefix = format!("shra_ext_{}", text_id);
 
-    gatify_barrel_shifter_with_forked_stage_order(&amt_lo, w, gb, |stage_order, local_gb| {
-        let arith = if use_sign_fill {
-            // Low shift amounts in [w, next_power_of_two(w)) naturally
-            // produce all sign bits through the staged sign-fill shifter,
-            // so only high amount bits need a separate out-of-bounds mux.
-            gatify_arithmetic_right_barrel_shifter(
-                arg_bits,
-                &amt_lo,
-                stage_order,
-                &tag_prefix,
-                local_gb,
-            )
-        } else {
-            // For power-of-two widths or too-narrow amount fields, the
-            // former sign-extend-then-logical-shift shape remains slightly
-            // smaller after AIG folding because there is no low-field
-            // saturation case to remove.
-            let shifted = gatify_barrel_shifter_with_stage_order(
-                &arg_ext,
-                &amt_lo,
-                Direction::Right,
-                local_gb.get_false(),
-                stage_order,
-                &tag_prefix,
-                local_gb,
-            );
-            shifted.get_lsb_slice(0, w)
-        };
+    // Preserve the existing full-demand sign-extension shape. Partial masks
+    // additionally prune the unreturned upper half of this logical shifter.
+    let extended_mask = if output_mask.iter().all(|bit| *bit) {
+        vec![true; 2 * w]
+    } else {
+        let mut mask = output_mask.to_vec();
+        mask.resize(2 * w, false);
+        mask
+    };
+    gatify_barrel_shifter_with_forked_stage_order(
+        &amt_lo,
+        output_mask,
+        gb,
+        |stage_order, local_gb| {
+            let arith = if use_sign_fill {
+                // Low shift amounts in [w, next_power_of_two(w)) naturally
+                // produce all sign bits through the staged sign-fill shifter,
+                // so only high amount bits need a separate out-of-bounds mux.
+                gatify_arithmetic_right_barrel_shifter(
+                    arg_bits,
+                    &amt_lo,
+                    stage_order,
+                    output_mask,
+                    &tag_prefix,
+                    local_gb,
+                )
+            } else {
+                // For power-of-two widths or too-narrow amount fields, the
+                // former sign-extend-then-logical-shift shape remains slightly
+                // smaller after AIG folding because there is no low-field
+                // saturation case to remove.
+                let shifted = gatify_barrel_shifter_with_stage_order(
+                    &arg_ext,
+                    &amt_lo,
+                    Direction::Right,
+                    local_gb.get_false(),
+                    stage_order,
+                    &extended_mask,
+                    &tag_prefix,
+                    local_gb,
+                );
+                shifted.get_lsb_slice(0, w)
+            };
 
-        // Saturating/oob rule: shift >= w => all sign bits.
-        if local_gb.is_known_false(oob) {
-            arith
-        } else {
-            let all_sign = local_gb.replicate(sign, w);
-            local_gb.add_mux2_vec(&oob, &all_sign, &arith)
-        }
-    })
+            // Saturating/oob rule: shift >= w => all sign bits.
+            if local_gb.is_known_false(oob) {
+                arith
+            } else {
+                masked_shift_fill(local_gb, oob, sign, &arith, output_mask)
+            }
+        },
+    )
 }
 
 fn flatten_literal_to_bits(
@@ -4063,10 +4115,11 @@ fn gatify_node(
                 arg_gates.get_bit_count(),
                 &amount_gates,
             );
-            let result_gates = gatify_barrel_shifter(
+            let result_gates = gatify_barrel_shifter_with_output_mask(
                 &arg_gates,
                 &amount_gates,
                 Direction::Right,
+                &env.output_mask(node_ref, node.ty.bit_count()),
                 &format!("shrl_{}", node.text_id),
                 g8_builder,
             );
@@ -4094,6 +4147,7 @@ fn gatify_node(
                 node.text_id,
                 options.range_info.as_ref(),
                 amount_text_id,
+                &env.output_mask(node_ref, node.ty.bit_count()),
             );
             env.add(node_ref, GateOrVec::BitVector(result));
         }
@@ -4110,10 +4164,11 @@ fn gatify_node(
                 arg_gates.get_bit_count(),
                 &amount_gates,
             );
-            let result_gates = gatify_barrel_shifter(
+            let result_gates = gatify_barrel_shifter_with_output_mask(
                 &arg_gates,
                 &amount_gates,
                 Direction::Left,
+                &env.output_mask(node_ref, node.ty.bit_count()),
                 &format!("shll_{}", node.text_id),
                 g8_builder,
             );
@@ -4366,6 +4421,7 @@ fn gatify_internal(
     env: &mut GateEnv,
     options: &GatifyOptions,
     provenance_by_node: Option<&HashMap<ir::NodeRef, Option<u32>>>,
+    topological: &[ir::NodeRef],
 ) -> Result<(), String> {
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
@@ -4396,7 +4452,7 @@ fn gatify_internal(
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
     }
 
-    for node_ref in ir_utils::get_topological(f) {
+    for &node_ref in topological {
         if env.product_is_deferred(node_ref) {
             // Its only consumer takes partial rows, so do not emit a product
             // CPA or an internal lowering-map entry that would require one.
@@ -4547,7 +4603,8 @@ pub type IrToGateMap = HashMap<ir::NodeRef, AigBitVector>;
 pub struct GatifyOutput {
     pub gate_fn: GateFn,
     /// Resolved IR values retained during lowering. Internal products consumed
-    /// in carry-save form have no resolved bit vector and are omitted.
+    /// in carry-save form and values with undemanded bits are omitted.
+    /// Undemanded bits may be zero placeholders, not valid intermediate values.
     pub lowering_map: IrToGateMap,
 }
 
@@ -4580,6 +4637,9 @@ fn gatify_lower_prepared_fn(
         },
     );
     let mut env = GateEnv::new(f);
+    let topological = ir_utils::get_topological(f);
+    let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
+    env.demanded_bits = Some(demanded_bits::analyze(f, &topological, &outputs));
     let provenance_by_node = if options.track_pir_node_ids {
         orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original))
     } else {
@@ -4591,6 +4651,7 @@ fn gatify_lower_prepared_fn(
         &mut env,
         options,
         provenance_by_node.as_ref(),
+        &topological,
     )?;
     let gate_fn = g8_builder.build();
     log::debug!(
@@ -4600,6 +4661,17 @@ fn gatify_lower_prepared_fn(
 
     let mut lowering_map: IrToGateMap = HashMap::new();
     for (node_ref, gate_or_vec) in env.ir_to_g8.into_iter() {
+        // A partial value (including wiring downstream of a pruned shift) must
+        // not be used to prove facts about the original IR's unused bits.
+        if !env
+            .demanded_bits
+            .as_ref()
+            .unwrap()
+            .get(&node_ref)
+            .is_some_and(|mask| mask.iter().all(|bit| *bit))
+        {
+            continue;
+        }
         let bit_vector = match gate_or_vec {
             GateOrVec::BitVector(bv) => bv,
             GateOrVec::Gate(gate_ref) => AigBitVector::from_bit(gate_ref),
