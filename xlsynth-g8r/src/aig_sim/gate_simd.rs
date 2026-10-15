@@ -9,7 +9,7 @@
 //! All computations therefore boil down to bit-wise operations on these
 //! 256-bit vectors.
 
-use crate::aig::gate::{AigNode, GateFn};
+use crate::aig::gate::{AigNode, AigRef, GateFn};
 use core::simd::u64x4;
 use std::ops::{BitAnd, Not};
 use xlsynth_pir::IrBits;
@@ -244,10 +244,22 @@ fn debug_assert_dense_topological_order(gate_fn: &GateFn, live_nodes: &[bool]) {
 /// behavior for unvisited nodes.
 pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> {
     let mut env: Vec<Vec256> = vec![Vec256::zero(); gate_fn.gates.len()];
-    seed_input_values(gate_fn, inputs, &mut env);
+    let order = gate_fn.post_order_refs();
+    eval_node_values_in_order_into(gate_fn, inputs, &order, &mut env);
+    env
+}
+
+/// Evaluates one chunk using a previously computed traversal and node storage.
+fn eval_node_values_in_order_into(
+    gate_fn: &GateFn,
+    inputs: &[Vec256],
+    order: &[AigRef],
+    env: &mut [Vec256],
+) {
+    seed_input_values(gate_fn, inputs, env);
 
     // Evaluate gates in topological order.
-    for aig_ref in gate_fn.post_order_refs() {
+    for &aig_ref in order {
         match gate_fn.get(aig_ref) {
             AigNode::Input { .. } => {
                 // Already seeded above.
@@ -262,8 +274,6 @@ pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> 
             }
         }
     }
-
-    env
 }
 
 /// Evaluates output-reachable nodes in dense node-id order into `env`.
@@ -325,7 +335,13 @@ pub fn eval_live_node_values_dense_into(
 pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
     let env = eval_all_node_values(gate_fn, inputs);
 
-    // Collect outputs.
+    GateSimdResult {
+        outputs: collect_outputs(gate_fn, &env),
+    }
+}
+
+/// Collects packed output values from an evaluated node environment.
+fn collect_outputs(gate_fn: &GateFn, env: &[Vec256]) -> Vec<Vec256> {
     let mut outputs: Vec<Vec256> = Vec::new();
     for output in &gate_fn.outputs {
         for bit in output.bit_vector.iter_lsb_to_msb() {
@@ -334,7 +350,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
         }
     }
 
-    GateSimdResult { outputs }
+    outputs
 }
 
 fn unpack_output_chunk(
@@ -379,11 +395,19 @@ pub fn eval_ordered_batch(
 ) -> Result<Vec<Vec<IrBits>>, String> {
     validate_ordered_batch_inputs(gate_fn, batch_inputs)?;
     let mut batch_outputs = Vec::with_capacity(batch_inputs.len());
+    if batch_inputs.is_empty() {
+        return Ok(batch_outputs);
+    }
+    // The graph is immutable for this call; every chunk uses the same
+    // traversal.
+    let order = gate_fn.post_order_refs();
+    let mut env = vec![Vec256::zero(); gate_fn.gates.len()];
     for (chunk_index, chunk) in batch_inputs.chunks(256).enumerate() {
         let chunk_start = chunk_index * 256;
         let packed_inputs =
             pack_ordered_input_chunk(gate_fn, batch_inputs, chunk_start, chunk.len());
-        let flat_outputs = eval(gate_fn, &packed_inputs).outputs;
+        eval_node_values_in_order_into(gate_fn, &packed_inputs, &order, &mut env);
+        let flat_outputs = collect_outputs(gate_fn, &env);
         batch_outputs.extend(unpack_output_chunk(gate_fn, &flat_outputs, chunk.len()));
     }
     Ok(batch_outputs)
@@ -590,5 +614,45 @@ mod tests {
             .map(|sample| gate_sim::eval(&gate_fn, sample, Collect::None).outputs)
             .collect::<Vec<Vec<IrBits>>>();
         assert_eq!(simd_outputs, scalar_outputs);
+    }
+
+    #[test]
+    fn test_ordered_batch_reuses_storage_across_mixed_width_chunks() {
+        let mut builder = GateBuilder::new("mixed_widths".into(), GateBuilderOptions::no_opt());
+        let widths = [0, 1, 2, 65, 129];
+        for (i, width) in widths.iter().copied().enumerate() {
+            let a = builder.add_input(format!("a{i}"), width);
+            let b = builder.add_input(format!("b{i}"), width);
+            let and = builder.add_and_vec(&a, &b);
+            let inverted = builder.add_not_vec(&and);
+            builder.add_output(format!("out{i}"), inverted);
+        }
+        let one = builder.add_literal(&IrBits::make_ubits(1, 1).unwrap());
+        builder.add_output("constant".into(), one);
+        let gate_fn = builder.build();
+        let mut rng = StdRng::seed_from_u64(42);
+        let batch = (0..513)
+            .map(|_| {
+                widths
+                    .iter()
+                    .flat_map(|&width| [width, width])
+                    .map(|width| {
+                        IrBits::from_lsb_is_0(
+                            &(0..width).map(|_| rng.r#gen()).collect::<Vec<bool>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected = batch
+            .iter()
+            .map(|row| gate_sim::eval(&gate_fn, row, Collect::None).outputs)
+            .collect::<Vec<_>>();
+        for n in [0, 1, 2, 255, 256, 257, 511, 512, 513] {
+            assert_eq!(
+                eval_ordered_batch(&gate_fn, &batch[..n]).unwrap(),
+                expected[..n]
+            );
+        }
     }
 }

@@ -433,7 +433,7 @@ impl LabeledNetlistAig {
 
     fn lower_arg_tuple(&self, args: &IrValue) -> Result<Vec<IrBits>, String> {
         let elements = args
-            .get_elements()
+            .as_elements()
             .map_err(|e| format!("argument value is not a tuple: {e}"))?;
         let inputs = elements
             .iter()
