@@ -75,6 +75,62 @@ fn assert_within_limits(cost: &MeasuredCost, limits: &Limits, tolerance: f64, co
     );
 }
 
+/// Checks generic snippets across fixed and optimized mapping pipelines.
+#[test]
+fn pipeline_corpus_respects_equivalence_and_qor_limits() {
+    let corpus = ir_snippet_qor::load().unwrap();
+    assert!(
+        corpus
+            .cases
+            .iter()
+            .any(|case| matches!(case.expectations, Expectations::Pipeline { .. }))
+    );
+    for case in &corpus.cases {
+        let Expectations::Pipeline {
+            fixed_limits,
+            pir_only_limits,
+            sandwich_limits,
+        } = &case.expectations
+        else {
+            // Rewrite-specific cases are exercised by their own comparisons.
+            continue;
+        };
+        let pir_only = run_aug_opt_over_ir_text_with_stats(
+            &case.text,
+            Some(&case.original.name),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{} (PIR-only): {error}", case.name));
+        let sandwich = run_aug_opt_over_ir_text_with_stats(
+            &case.text,
+            Some(&case.original.name),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::Sandwich,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{} (sandwich): {error}", case.name));
+        for (label, text, limits) in [
+            ("fixed", case.text.as_str(), fixed_limits),
+            ("PIR-only", pir_only.output_text.as_str(), pir_only_limits),
+            ("sandwich", sandwich.output_text.as_str(), sandwich_limits),
+        ] {
+            let context = format!("{} ({label})", case.name);
+            let cost = measure_cost(text, &case.original, &corpus.profile)
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            eprintln!("{context}: {cost:?}");
+            assert_within_limits(&cost, limits, corpus.profile.graph_le_tolerance, &context);
+        }
+    }
+}
+
 /// Checks fixed IR and aug-opt under one pinned mapping profile.
 #[test]
 fn shift_corpus_respects_equivalence_and_qor_limits() {

@@ -60,6 +60,11 @@ pub enum Expectations {
         disabled_limits: Limits,
         enabled_limits: Limits,
     },
+    Pipeline {
+        fixed_limits: Limits,
+        pir_only_limits: Limits,
+        sandwich_limits: Limits,
+    },
 }
 
 /// Allows improvements while bounding mapped area, logical effort, and depth.
@@ -259,6 +264,15 @@ fn validate_expectations(expectations: &Expectations, tolerance: f64) -> Result<
         } => {
             validate_limits(disabled_limits, tolerance)?;
             validate_limits(enabled_limits, tolerance)
+        }
+        Expectations::Pipeline {
+            fixed_limits,
+            pir_only_limits,
+            sandwich_limits,
+        } => {
+            validate_limits(fixed_limits, tolerance)?;
+            validate_limits(pir_only_limits, tolerance)?;
+            validate_limits(sandwich_limits, tolerance)
         }
     }
 }

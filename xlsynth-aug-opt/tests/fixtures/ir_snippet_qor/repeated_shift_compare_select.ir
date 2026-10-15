@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package synthetic
+
+// DSLX expression:
+//   {
+//     let n1 = z << x;
+//     let n2 = n1 << x;
+//     let n4 = n2 << n2;
+//     let n5 = n4 - z;
+//     let n6 = if n5 < n2 { x } else { n5 };
+//     (n6 - n2) + n1
+//   }
+top fn main(x: bits[4] id=14, z: bits[4] id=15) -> bits[4] {
+  n1: bits[4] = shll(z, x, id=18)
+  n2: bits[4] = shll(n1, x, id=19)
+  n4: bits[4] = shll(n2, n2, id=21)
+  n5: bits[4] = sub(n4, z, id=22)
+  c6: bits[1] = ult(n5, n2, id=23)
+  n6: bits[4] = sel(c6, cases=[n5, x], id=24)
+  n7: bits[4] = sub(n6, n2, id=25)
+  ret result: bits[4] = add(n7, n1, id=26)
+}
