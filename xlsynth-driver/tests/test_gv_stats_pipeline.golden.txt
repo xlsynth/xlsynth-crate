@@ -1,7 +1,7 @@
 module: top
 time_unit: 1ps
 primary_input_transition: 0.010000
-module_output_load: 0.000000
+module_output_load: 0.004000
 cell_area: 11.000000
 max_delay: n/a
 max_input_to_register_delay: 1.250000

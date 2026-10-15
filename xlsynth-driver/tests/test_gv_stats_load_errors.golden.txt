@@ -1,0 +1,10 @@
+missing:
+gv-stats error: Liberty has no default_output_load; specify explicit drive/load constraints or set the default during import; pass --module_output_load explicitly (0 for no external load)
+zero:
+gv-stats error: default_output_load must be positive and finite; pass --module_output_load explicitly (0 for no external load)
+negative:
+gv-stats error: default_output_load must be positive and finite; pass --module_output_load explicitly (0 for no external load)
+nan:
+gv-stats error: default_output_load must be positive and finite; pass --module_output_load explicitly (0 for no external load)
+infinite:
+gv-stats error: default_output_load must be positive and finite; pass --module_output_load explicitly (0 for no external load)

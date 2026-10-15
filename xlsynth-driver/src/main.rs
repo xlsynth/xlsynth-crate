@@ -2614,9 +2614,8 @@ fn main() {
                     Arg::new("module_output_load")
                         .long("module_output_load")
                         .value_name("VALUE")
-                        .default_value("0.0")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Additional load capacitance added to module outputs")
+                        .help("Additional module-output load in library capacitance units; defaults to the Liberty proto's default_output_load (explicit 0 disables external load)")
                         .action(ArgAction::Set),
                 )
                 .arg(

@@ -2,6 +2,7 @@
 
 use clap::ArgMatches;
 use std::path::Path;
+use xlsynth_g8r::liberty::io_defaults::default_output_load;
 use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, read_gv_from_path};
 use xlsynth_g8r::netlist::report::{NetlistReport, build_netlist_report, select_module};
 use xlsynth_g8r::netlist::sta::StaOptions;
@@ -199,9 +200,6 @@ pub fn handle_gv_stats(matches: &ArgMatches) {
     let primary_input_transition = *matches
         .get_one::<f64>("primary_input_transition")
         .expect("primary_input_transition has default");
-    let module_output_load = *matches
-        .get_one::<f64>("module_output_load")
-        .expect("module_output_load has default");
     let json_out = matches.get_one::<String>("json_out");
 
     let parsed = read_gv_from_path(netlist_path).unwrap_or_else(|e| {
@@ -226,6 +224,17 @@ pub fn handle_gv_stats(matches: &ArgMatches) {
         );
         std::process::exit(1)
     });
+    let module_output_load = matches
+        .get_one::<f64>("module_output_load")
+        .copied()
+        .map(Ok)
+        .unwrap_or_else(|| default_output_load(&liberty))
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{SUBCOMMAND} error: {e}; pass --module_output_load explicitly (0 for no external load)"
+            );
+            std::process::exit(1)
+        });
     let report = build_netlist_report(
         module,
         parsed.nets.as_slice(),

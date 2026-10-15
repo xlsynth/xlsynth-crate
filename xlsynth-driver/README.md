@@ -906,8 +906,7 @@ Text and JSON output include `timing_query_diagnostic_counts`. Below-minimum cla
 xlsynth-driver gv-stats \
   --netlist my_design.mapped.gv \
   --liberty_proto ~/timing-enabled.liberty.proto \
-  --primary_input_transition 0.01 \
-  --module_output_load 0.0
+  --primary_input_transition 0.01
 ```
 
 Key flags:
@@ -916,7 +915,7 @@ Key flags:
 - `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
 - `--primary_input_transition <VALUE>`: source transition for primary inputs (default: `0.01`).
-- `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
+- `--module_output_load <VALUE>`: extra load capacitance added to each module output bit, in the library's capacitance units. Defaults to the Liberty proto's positive, finite `default_output_load`; if that default is missing or invalid, an explicit override is required. An explicit `0` disables external output load. Internal sink-pin capacitances are still counted.
 - `--json_out <PATH>`: optional JSON report output path.
 
 ### `gv-read-stats`: netlist statistics
