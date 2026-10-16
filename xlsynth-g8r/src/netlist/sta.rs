@@ -3495,6 +3495,7 @@ fn is_strictly_increasing(values: &[f64]) -> bool {
         .all(|w| w.first().copied().unwrap_or(0.0) < w.get(1).copied().unwrap_or(0.0))
 }
 
+/// Brackets a finite query in a validated, strictly increasing table axis.
 fn bracket_axis(axis: &[f64], query: f64) -> (usize, usize, f64) {
     debug_assert!(!axis.is_empty());
     if axis.len() == 1 {
@@ -3521,20 +3522,16 @@ fn bracket_axis(axis: &[f64], query: f64) -> (usize, usize, f64) {
         return (lo, hi, (query - axis[lo]) / denom);
     }
 
-    for idx in 0..last {
-        let lo = axis[idx];
-        let hi = axis[idx + 1];
-        if query >= lo && query <= hi {
-            let denom = hi - lo;
-            if denom.abs() < f64::EPSILON {
-                return (idx, idx, 0.0);
-            }
-            let t = (query - lo) / denom;
-            return (idx, idx + 1, t);
-        }
+    let lo = axis[1..]
+        .iter()
+        .position(|point| query <= *point)
+        .expect("interior query in a validated increasing axis");
+    let hi = lo + 1;
+    let denom = axis[hi] - axis[lo];
+    if denom.abs() < f64::EPSILON {
+        return (lo, lo, 0.0);
     }
-
-    (last, last, 0.0)
+    (lo, hi, (query - axis[lo]) / denom)
 }
 
 fn resolve_symbol(
@@ -4011,6 +4008,47 @@ mod tests {
         }
         assert_eq!(evaluation.tables.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn axis_bracketing_matches_linear_search_at_knots_and_small_intervals() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xb7ac);
+        for scale in [1e-20, 1e-6, 1.0, 1e6] {
+            for length in 1..=64 {
+                let mut sum = 0.0;
+                let axis: Vec<_> = (0..length)
+                    .map(|_| {
+                        sum += f64::from(rng.gen_range(1..=100)) * scale;
+                        sum
+                    })
+                    .collect();
+                let queries = std::iter::once(axis[0] - scale)
+                    .chain(std::iter::once(axis[length - 1] + scale))
+                    .chain(axis.iter().copied())
+                    .chain(axis.windows(2).map(|w| (w[0] + w[1]) / 2.0));
+                for query in queries {
+                    let expected = if length == 1 {
+                        (0, 0, 0.0)
+                    } else {
+                        let lo = axis
+                            .windows(2)
+                            .position(|w| query <= w[1])
+                            .unwrap_or(length - 2);
+                        let hi = lo + 1;
+                        let denominator = axis[hi] - axis[lo];
+                        if denominator.abs() < f64::EPSILON {
+                            let point = if query >= axis[length - 1] { hi } else { lo };
+                            (point, point, 0.0)
+                        } else {
+                            (lo, hi, (query - axis[lo]) / denominator)
+                        }
+                    };
+                    let actual = bracket_axis(&axis, query);
+                    assert_eq!((actual.0, actual.1), (expected.0, expected.1));
+                    assert_eq!(actual.2.to_bits(), expected.2.to_bits());
+                }
+            }
+        }
     }
 
     #[test]
