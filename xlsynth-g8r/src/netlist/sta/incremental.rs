@@ -14,7 +14,7 @@ use super::{
     resolve_timing_sources, validate_constraint_tables_once,
 };
 use crate::liberty::Library;
-use crate::liberty_model::{PinDirection, TimingArc};
+use crate::liberty_model::{Pin, PinDirection, TimingArc};
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
@@ -819,10 +819,17 @@ impl<'a> IncrementalSta<'a> {
     /// substitution.
     fn electrical_violations(&self, i: usize) -> Vec<f64> {
         let cell = &self.lib.library.cells[self.cells[i]];
-        let mut pins: Vec<_> = cell.pins.iter().collect();
+        let mut pins: SmallVec<[&Pin; 8]> = cell.pins.iter().collect();
         pins.sort_by_key(|p| self.lib.library.resolve_string(&p.name));
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(pins.len() * 3);
         for pin in pins {
+            if pin.max_capacitance.is_none()
+                && pin.max_transition.is_none()
+                && pin.max_fanout.is_none()
+            {
+                values.extend([0.0; 3]);
+                continue;
+            }
             let sources = self.instances[i]
                 .pins
                 .get(self.lib.library.resolve_string(&pin.name));

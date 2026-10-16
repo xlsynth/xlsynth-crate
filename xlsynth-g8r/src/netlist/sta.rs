@@ -452,10 +452,11 @@ impl StaReport {
     }
 }
 
+/// Validated library names and pin indexes for immutable timing queries.
 struct StaLibraryIndex<'a> {
     library: &'a crate::liberty_model::Library,
     cell_by_name: HashMap<String, usize>,
-    pin_by_cell: Vec<HashMap<String, usize>>,
+    pin_by_cell: Vec<HashMap<&'a str, usize>>,
 }
 
 impl<'a> StaLibraryIndex<'a> {
@@ -472,7 +473,7 @@ impl<'a> StaLibraryIndex<'a> {
             let mut pin_map = HashMap::new();
             for (pin_idx, pin) in cell.pins.iter().enumerate() {
                 let pin_name = library.resolve_string(&pin.name);
-                if pin_map.insert(pin_name.to_string(), pin_idx).is_some() {
+                if pin_map.insert(pin_name, pin_idx).is_some() {
                     return Err(anyhow!(
                         "library cell '{}' defines pin '{}' more than once; duplicate pin names are unsupported in basic STA",
                         cell.name,
@@ -3727,7 +3728,7 @@ mod tests {
     }
 
     #[test]
-    fn bilinear_fast_path_matches_corner_enumeration_bit_for_bit() {
+    fn interpolation_fast_paths_match_corner_enumeration_bit_for_bit() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1a7e);
         for trial in 0..10_000 {
             let rank = trial % 4;
@@ -3751,7 +3752,12 @@ mod tests {
             let bounds = std::array::from_fn(|axis| {
                 let lo = rng.gen_range(0..dimensions[axis]);
                 let hi = (lo + 1).min(dimensions[axis] - 1);
-                (lo, hi, rng.gen_range(-2.0..3.0))
+                let t = match rng.gen_range(0..5) {
+                    0 => 0.0,
+                    1 => 1.0,
+                    _ => rng.gen_range(-2.0..3.0),
+                };
+                (lo, hi, t)
             });
             assert_eq!(
                 interpolate_prepared_table(&values, strides, rank, bounds).to_bits(),
@@ -6903,6 +6909,46 @@ endmodule
                 .to_string()
                 .contains("propagated arrival must be finite")
         );
+    }
+
+    #[test]
+    fn pin_lookup_preserves_declaration_indices_and_handles_missing_names() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        for count in [0, 1, 2, 5, 32] {
+            let pins = (0..count)
+                .rev()
+                .map(|i| {
+                    test_pin(
+                        &mut builder,
+                        &format!("P{i}"),
+                        PinDirection::Input,
+                        "",
+                        vec![],
+                    )
+                })
+                .collect();
+            builder.cells.push(Cell {
+                name: format!("CELL{count}"),
+                pins,
+                ..Default::default()
+            });
+        }
+        let library = builder.finish();
+        let index = StaLibraryIndex::new(&library)?;
+        for (cell_idx, cell) in library.cells.iter().enumerate() {
+            for (pin_idx, pin) in cell.pins.iter().enumerate() {
+                let name = library.resolve_string(&pin.name);
+                assert_eq!(index.pin_index(cell_idx, name), Some(pin_idx));
+                assert!(std::ptr::eq(index.pin(cell_idx, name).unwrap(), pin));
+            }
+            for missing in ["", "A", "P", "P99", "Z"] {
+                assert!(index.pin_index(cell_idx, missing).is_none());
+                assert!(index.pin(cell_idx, missing).is_none());
+            }
+        }
+        assert!(index.pin_index(library.cells.len(), "P0").is_none());
+        assert!(index.pin(library.cells.len(), "P0").is_none());
+        Ok(())
     }
 
     #[test]
