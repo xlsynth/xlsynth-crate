@@ -653,6 +653,10 @@ all four boundary timing limits, recomputed area, area limits, unchanged
 connectivity, and trial/work budgets.
 Round counts, candidate limits, work budgets, and register resizing are varied,
 including disabled phases and frozen register cells.
+The library also varies optional capacitance, slew and fanout limits, including
+clock-pin slew limits and input fanout weights, while retaining unconstrained
+samples. This exercises electrical rejection and rollback as limits appear or
+disappear across functionally equivalent cell sizes.
 The resizer's independent full-STA checks also expose stale incremental timing
 or rollback state. The generator uses nonconstant, unfolded expressions to
 satisfy the structural mapper's literal-free contract. It generates ordinary

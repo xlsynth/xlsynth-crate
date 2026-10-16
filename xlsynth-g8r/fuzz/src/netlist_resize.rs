@@ -6,13 +6,17 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::sync::OnceLock;
 
+use anyhow::Result;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use tempfile::NamedTempFile;
 use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
 use xlsynth_g8r::gate_random::{RandomGateBuilderMode, RandomGateOptions, generate_gate_design};
 use xlsynth_g8r::liberty::Library;
+use xlsynth_g8r::liberty::model::{library_from_proto, library_to_proto};
 use xlsynth_g8r::liberty::parser::parse_liberty_files;
+use xlsynth_g8r::liberty_model::PinDirection;
+use xlsynth_g8r::liberty_proto::Library as LibertyProto;
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_labeled_sequential_netlist_aig;
 use xlsynth_g8r::netlist::parse::{
     Net, NetIndex, NetRef, NetlistInstance, NetlistPort, PortDirection,
@@ -28,8 +32,8 @@ use xlsynth_pir::random_inputs::generate_mixed_irbits_with_rng;
 
 /// Small, asymmetric, slew/load-sensitive cell families; no external PDK or
 /// synthesis executable is needed to reproduce a failure.
-fn library() -> &'static Library {
-    static LIBRARY: OnceLock<Library> = OnceLock::new();
+fn library_proto() -> &'static LibertyProto {
+    static LIBRARY: OnceLock<LibertyProto> = OnceLock::new();
     LIBRARY.get_or_init(|| {
         let mut text = String::from(
             r#"library(test) {
@@ -112,8 +116,30 @@ fn library() -> &'static Library {
         text.push('}');
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(text.as_bytes()).unwrap();
-        parse_liberty_files(&[file.path()]).unwrap()
+        library_to_proto(parse_liberty_files(&[file.path()]).unwrap()).unwrap()
     })
+}
+
+/// Varies optional electrical limits without changing any Boolean functions or
+/// timing tables. Some samples retain the fully unconstrained library.
+fn library_with_random_electrical_limits(rng: &mut StdRng) -> Result<Library> {
+    let mut library = library_from_proto(library_proto().clone())?;
+    if rng.gen_bool(0.5) {
+        let limits = [None, None, None, Some(0.0), Some(0.25), Some(2.0), Some(16.0)];
+        let weights = [None, Some(0.0), Some(0.5), Some(1.0), Some(2.0)];
+        for cell in &mut library.cells {
+            for pin in &mut cell.pins {
+                pin.max_transition = limits[rng.gen_range(0..limits.len())];
+                if pin.direction == PinDirection::Output as i32 {
+                    pin.max_capacitance = limits[rng.gen_range(0..limits.len())];
+                    pin.max_fanout = limits[rng.gen_range(0..limits.len())];
+                } else if pin.direction == PinDirection::Input as i32 {
+                    pin.fanout_load = weights[rng.gen_range(0..weights.len())];
+                }
+            }
+        }
+    }
+    Ok(library)
 }
 
 /// Matches the structural mapper's scalarized port names.
@@ -253,8 +279,9 @@ pub fn check(data: &[u8]) -> ResizeReport {
     )
     .unwrap();
     let mut mapped = map_design(&sample.design);
-    let library = library();
     let mut rng = StdRng::from_seed(*blake3::hash(data).as_bytes());
+    let varied_library = library_with_random_electrical_limits(&mut rng).unwrap();
+    let library = &varied_library;
     for instance in &mut mapped.module.instances {
         let name = mapped.interner.resolve(instance.type_name).unwrap();
         let kind = name.split_once("_X").unwrap().0;
@@ -434,6 +461,56 @@ pub fn check(data: &[u8]) -> ResizeReport {
 mod tests {
     use super::*;
     use rand::RngCore;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn random_library_covers_optional_electrical_limits_and_pin_roles() -> Result<()> {
+        let mut rng = StdRng::seed_from_u64(0xe1ec);
+        let mut modes = BTreeSet::new();
+        let mut features = BTreeSet::new();
+        for _ in 0..64 {
+            let library = library_with_random_electrical_limits(&mut rng)?;
+            let mut constrained = false;
+            for cell in &library.cells {
+                for pin in &cell.pins {
+                    for (value, name) in [
+                        (pin.max_capacitance, "capacitance"),
+                        (pin.max_fanout, "fanout"),
+                        (pin.fanout_load, "fanout weight"),
+                    ] {
+                        if value.is_some() {
+                            features.insert(name);
+                            constrained = true;
+                        }
+                    }
+                    if pin.max_transition.is_some() {
+                        features.insert(if pin.is_clocking_pin {
+                            "clock slew"
+                        } else if pin.direction == PinDirection::Input as i32 {
+                            "input slew"
+                        } else {
+                            "output slew"
+                        });
+                        constrained = true;
+                    }
+                }
+            }
+            modes.insert(constrained);
+        }
+        assert_eq!(modes, BTreeSet::from([false, true]));
+        assert_eq!(
+            features,
+            BTreeSet::from([
+                "capacitance",
+                "fanout",
+                "fanout weight",
+                "clock slew",
+                "input slew",
+                "output slew"
+            ])
+        );
+        Ok(())
+    }
 
     #[test]
     fn seeded_shared_generator_resize_smoke() {
