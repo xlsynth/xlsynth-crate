@@ -253,20 +253,12 @@ impl EdgeTimingSet {
         if self
             .values
             .iter()
-            .any(|existing| existing.timing == candidate.timing)
-        {
-            return;
-        }
-
-        if self
-            .values
-            .iter()
-            .any(|existing| edge_timing_dominates(existing.timing, candidate.timing))
+            .any(|existing| edge_timing_covers(existing.timing, candidate.timing))
         {
             return;
         }
         self.values
-            .retain(|existing| !edge_timing_dominates(candidate.timing, existing.timing));
+            .retain(|existing| !edge_timing_covers(candidate.timing, existing.timing));
 
         self.values.push(candidate);
         self.values.sort_by(|lhs, rhs| {
@@ -348,9 +340,9 @@ impl SignalTimingSet {
     }
 }
 
-fn edge_timing_dominates(lhs: EdgeTiming, rhs: EdgeTiming) -> bool {
-    (lhs.arrival >= rhs.arrival && lhs.transition >= rhs.transition)
-        && (lhs.arrival > rhs.arrival || lhs.transition > rhs.transition)
+/// Includes equality so insertion keeps the first equal-timing path payload.
+fn edge_timing_covers(lhs: EdgeTiming, rhs: EdgeTiming) -> bool {
+    lhs.arrival >= rhs.arrival && lhs.transition >= rhs.transition
 }
 
 fn parse_trace_env_flag(value: &str) -> bool {
@@ -3830,6 +3822,74 @@ mod tests {
             let mut table = TimingTable::default();
             table.kind = kind.as_wire();
             assert_eq!(table.kind_str(), kind.as_raw());
+        }
+    }
+
+    #[test]
+    fn equal_timing_frontier_entries_keep_the_first_path_and_signed_zero() {
+        let a = EdgeTimingCandidate::from_register_launch(EdgeTiming {
+            arrival: -0.0,
+            transition: 1.0,
+        });
+        let b = EdgeTimingCandidate::from_timing(EdgeTiming {
+            arrival: 0.0,
+            transition: 1.0,
+        });
+        for (first, second) in [(a, b), (b, a)] {
+            let mut set = EdgeTimingSet::default();
+            set.insert(first);
+            set.insert(second);
+            assert_eq!(set.values.as_slice(), &[first]);
+            assert_eq!(
+                set.values[0].timing.arrival.to_bits(),
+                first.timing.arrival.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn timing_frontier_matches_pairwise_pareto_filter_and_keeps_first_equal_path() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xf70a);
+        for _ in 0..16 {
+            let mut all: Vec<EdgeTimingCandidate> = Vec::new();
+            let mut actual = EdgeTimingSet::default();
+            for step in 0..128 {
+                let timing = EdgeTiming {
+                    arrival: f64::from(rng.gen_range(-5..=20)),
+                    transition: f64::from(rng.gen_range(0..=20)),
+                };
+                // Equal timing can carry different path provenance. Preserve
+                // the first payload, not whichever duplicate was most recent.
+                let candidate = if step % 2 == 0 {
+                    EdgeTimingCandidate::from_register_launch(timing)
+                } else {
+                    EdgeTimingCandidate::from_timing(timing)
+                };
+                if !all.iter().any(|old| old.timing == timing) {
+                    all.push(candidate);
+                }
+                let mut expected: Vec<_> = all
+                    .iter()
+                    .copied()
+                    .filter(|point| {
+                        !all.iter().any(|other| {
+                            let a = other.timing;
+                            let b = point.timing;
+                            a.arrival >= b.arrival
+                                && a.transition >= b.transition
+                                && (a.arrival > b.arrival || a.transition > b.transition)
+                        })
+                    })
+                    .collect();
+                expected.sort_by(|a, b| {
+                    a.timing
+                        .arrival
+                        .total_cmp(&b.timing.arrival)
+                        .then(a.timing.transition.total_cmp(&b.timing.transition))
+                });
+                actual.insert(candidate);
+                assert_eq!(actual.values.as_slice(), expected.as_slice());
+            }
         }
     }
 
