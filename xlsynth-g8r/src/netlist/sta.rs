@@ -1368,11 +1368,9 @@ fn evaluate_instance_outputs(
                 unsupported_arc.timing_type_str(lib.library)
             ));
         }
-        let combinational_arcs: SmallVec<[&TimingArc; 4]> = pin
-            .timing_arcs
-            .iter()
-            .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
-            .collect();
+        // Every arc passed the combinational check above; use the borrowed
+        // slice instead of classifying and copying the references again.
+        let combinational_arcs = &pin.timing_arcs;
         let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
             Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
             Some(PinBitSource::Literal(_) | PinBitSource::Unknown) => {
@@ -1419,7 +1417,7 @@ fn evaluate_instance_outputs(
             lib.library,
             cell_name,
             pin_name,
-            combinational_arcs.as_slice(),
+            combinational_arcs,
             evaluation,
         )?;
         let output_load = output_bit_idx
@@ -1427,7 +1425,7 @@ fn evaluate_instance_outputs(
             .unwrap_or_default();
         let mut accumulated: Option<SignalTimingSet> = None;
 
-        for arc in &combinational_arcs {
+        for arc in combinational_arcs {
             let arc_context = format_args!(
                 "cell '{}' output pin '{}' timing arc related_pin '{}'",
                 cell_name,
@@ -2054,17 +2052,17 @@ pub fn validate_output_pin_for_basic_sta(
             unsupported_arc.timing_type_str(library)
         ));
     }
-    let combinational_arcs: SmallVec<[&TimingArc; 4]> = pin.timing_arcs.iter().collect();
+    let combinational_arcs = &pin.timing_arcs;
     let mut evaluation = TimingEvaluationContext::new(library);
     validate_timing_tables_once(
         library,
         cell_name,
         pin_name,
-        combinational_arcs.as_slice(),
+        combinational_arcs,
         &mut evaluation,
     )?;
 
-    for arc in &combinational_arcs {
+    for arc in combinational_arcs {
         let timing_type = StaTimingType::from_arc(arc, library);
         let context = format!(
             "cell '{}' output pin '{}' related_pin '{}'",
@@ -2085,7 +2083,7 @@ pub fn validate_output_pin_for_basic_sta(
     for required_pin in required_related_pins {
         let mut has_rise = false;
         let mut has_fall = false;
-        for arc in &combinational_arcs {
+        for arc in combinational_arcs {
             if !split_related_pin_names(library.resolve_string(&arc.related_pin))
                 .any(|related_pin| related_pin == required_pin)
             {
@@ -2531,7 +2529,7 @@ fn evaluate_register_launch_output_set(
         library,
         cell_name,
         library.resolve_string(&pin.name),
-        launch_arcs.as_slice(),
+        launch_arcs.iter().copied(),
         evaluation,
     )?;
 
@@ -2909,16 +2907,16 @@ fn validate_timing_table_payload(
 }
 
 /// Validates all delay/slew tables in each arc at most once during an STA run.
-fn validate_timing_tables_once(
+fn validate_timing_tables_once<'arc>(
     library: &crate::liberty_model::Library,
     cell_name: &str,
     pin_name: &str,
-    arcs: &[&TimingArc],
+    arcs: impl IntoIterator<Item = &'arc TimingArc>,
     evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
     debug_assert!(std::ptr::eq(library, evaluation.library));
     for arc in arcs {
-        let key = *arc as *const TimingArc;
+        let key = arc as *const TimingArc;
         if evaluation.validated_delay_slew_arcs.contains(&key) {
             continue;
         }
@@ -3674,7 +3672,7 @@ mod tests {
         let library = builder.finish();
         let mut validated = TimingEvaluationContext::new(&library);
         for _ in 0..2 {
-            validate_timing_tables_once(&library, "CELL", "Y", &[&arc], &mut validated)?;
+            validate_timing_tables_once(&library, "CELL", "Y", [&arc], &mut validated)?;
             let error =
                 validate_constraint_tables_once(&library, "CELL", "Y", &[&arc], &mut validated)
                     .expect_err("failed validation must fail on every attempt");
