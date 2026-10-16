@@ -72,24 +72,21 @@ where
     let mut best_delay = -1.0_f64;
     let mut best_state: Option<(AigRef, State)> = None;
 
-    // dominance function
+    // Compare states only at the same path length. A higher-scoring prefix does
+    // not necessarily remain higher-scoring after a common high-fanout suffix
+    // when the path lengths differ.
     fn dominates(o: &State, c: &State) -> bool {
-        let (of, on, op) = (o.log_f, o.n as f64, o.p);
-        let (cf, cn, cp) = (c.log_f, c.n as f64, c.p);
-        let left = on <= of && cn <= cf;
-        let right = on >= of && cn >= cf;
-        if left {
-            return on <= cn && of >= cf && op >= cp;
-        }
-        if right {
-            return on >= cn && of >= cf && op >= cp;
-        }
-        false
+        o.n == c.n && o.log_f >= c.log_f && o.p >= c.p
     }
 
     for &u in topo.iter() {
         // initialize the frontier
         if S.get(&u).map_or(true, |v| v.is_empty()) {
+            if matches!(gate_nodes[u.id], AigNode::And2 { .. }) {
+                // Every incoming state was pruned. This internal node must not
+                // become an artificial zero-length path source.
+                continue;
+            }
             S.insert(
                 u,
                 vec![State {
@@ -129,9 +126,7 @@ where
                     // local Pareto pruning
                     let mut keep = true;
                     for o in out.iter() {
-                        if dominates(o, &cand)
-                            || (o.n == cand_n && o.log_f >= cand_log_f && o.p >= cand_p)
-                        {
+                        if dominates(o, &cand) {
                             keep = false;
                             break;
                         }
