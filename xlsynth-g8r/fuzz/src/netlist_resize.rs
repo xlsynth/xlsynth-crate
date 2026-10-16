@@ -282,9 +282,13 @@ pub fn check(data: &[u8]) -> ResizeReport {
             module_output_load: [0.0, 0.1, 1.0, 10.0][rng.gen_range(0..4)],
         },
         max_area_growth: [0.0, 0.02, 0.5][rng.gen_range(0..3)],
+        max_upsize_rounds: rng.gen_range(0..=8),
+        max_downsize_rounds: rng.gen_range(0..=8),
+        max_candidate_sites: rng.gen_range(1..=64),
+        max_cell_candidates: rng.gen_range(1..=8),
         max_trials: rng.gen_range(0..=128),
         max_propagated_instances: rng.gen_range(0..=4096),
-        ..ResizeOptions::default()
+        resize_registers: rng.gen_bool(0.5),
     };
     let report = resize_netlist(
         &mut mapped.module,
@@ -294,6 +298,26 @@ pub fn check(data: &[u8]) -> ResizeReport {
         &options,
     )
     .unwrap();
+    let mut structure = mapped.module.clone();
+    for (instance, before) in structure.instances.iter_mut().zip(&original.instances) {
+        instance.type_name = before.type_name;
+    }
+    assert_eq!(structure, original);
+    let actual_area: f64 = mapped
+        .module
+        .instances
+        .iter()
+        .map(|instance| {
+            let name = mapped.interner.resolve(instance.type_name).unwrap();
+            library
+                .cells
+                .iter()
+                .find(|cell| cell.name == name)
+                .unwrap()
+                .area
+        })
+        .sum();
+    assert_eq!(report.final_area, actual_area);
     for (initial, upsized, final_delay) in [
         (
             report.initial_delay.input_to_output,
@@ -320,6 +344,19 @@ pub fn check(data: &[u8]) -> ResizeReport {
         assert!(upsized <= initial + 1e-9);
     }
     assert!(report.final_area <= report.initial_area * (1.0 + options.max_area_growth) + 1e-9);
+    if !options.resize_registers {
+        assert_eq!(
+            report.upsize.register_changes + report.downsize.register_changes,
+            0
+        );
+        for (before, after) in original.instances.iter().zip(&mapped.module.instances) {
+            let name = mapped.interner.resolve(before.type_name).unwrap();
+            let cell = library.cells.iter().find(|cell| cell.name == name).unwrap();
+            if !cell.sequential.is_empty() {
+                assert_eq!(before.type_name, after.type_name);
+            }
+        }
+    }
     assert!(report.upsize.trials + report.downsize.trials <= options.max_trials);
     assert!(
         report.upsize.propagated_instances + report.downsize.propagated_instances

@@ -649,7 +649,10 @@ graphs, lowers them structurally into a small slew/load-sensitive Liberty
 library, randomizes initial cell strengths, and runs bounded resizing. It compares
 cycle simulation of the original G8R graph, mapped netlist, and resized netlist
 from the same randomized initial state. It also checks deterministic output,
-all four boundary timing limits, area limits, and trial/work budgets.
+all four boundary timing limits, recomputed area, area limits, unchanged
+connectivity, and trial/work budgets.
+Round counts, candidate limits, work budgets, and register resizing are varied,
+including disabled phases and frozen register cells.
 The resizer's independent full-STA checks also expose stale incremental timing
 or rollback state. The generator uses nonconstant, unfolded expressions to
 satisfy the structural mapper's literal-free contract. It generates ordinary
