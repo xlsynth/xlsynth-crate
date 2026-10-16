@@ -3232,6 +3232,52 @@ fn evaluate_table_with_query_and_diagnostics(
         bounds[axis_idx] = bracket_axis(axis, axis_query);
     }
 
+    let result = interpolate_prepared_table(&prepared.values, prepared.strides, rank, bounds);
+    if !result.is_finite() {
+        return Err(anyhow!(
+            "{context}: timing table evaluation produced non-finite result {}",
+            result
+        ));
+    }
+    prepared.last_interpolation = Some(CachedInterpolation {
+        coordinates,
+        value: result,
+    });
+    Ok(result)
+}
+
+/// Specializes ordinary 2D tables without changing corner accumulation order.
+#[inline]
+fn interpolate_prepared_table(
+    values: &[f32],
+    strides: [usize; 3],
+    rank: usize,
+    bounds: [(usize, usize, f64); 3],
+) -> f64 {
+    if rank != 2 || bounds[0].0 == bounds[0].1 || bounds[1].0 == bounds[1].1 {
+        return interpolate_table_corners(values, strides, rank, bounds);
+    }
+    let (lo0, hi0, t0) = bounds[0];
+    let (lo1, hi1, t1) = bounds[1];
+    let lo0 = lo0 * strides[0];
+    let hi0 = hi0 * strides[0];
+    let lo1 = lo1 * strides[1];
+    let hi1 = hi1 * strides[1];
+    let mut result = 0.0;
+    result += (1.0 - t0) * (1.0 - t1) * f64::from(values[lo0 + lo1]);
+    result += t0 * (1.0 - t1) * f64::from(values[hi0 + lo1]);
+    result += (1.0 - t0) * t1 * f64::from(values[lo0 + hi1]);
+    result += t0 * t1 * f64::from(values[hi0 + hi1]);
+    result
+}
+
+/// Enumerates corners for scalar, 1D, degenerate-axis, and 3D tables.
+fn interpolate_table_corners(
+    values: &[f32],
+    strides: [usize; 3],
+    rank: usize,
+    bounds: [(usize, usize, f64); 3],
+) -> f64 {
     let mut indices = [0usize; 3];
     let mut varying_axes = [(0usize, 0usize, 0usize, 0.0); 3];
     let mut varying_count = 0;
@@ -3262,23 +3308,13 @@ fn evaluate_table_with_query_and_diagnostics(
         // supplies in-range coordinates for every interpolation corner.
         let linear = indices[..rank]
             .iter()
-            .zip(prepared.strides)
+            .zip(strides)
             .map(|(index, stride)| index * stride)
             .sum::<usize>();
-        let value = f64::from(prepared.values[linear]);
+        let value = f64::from(values[linear]);
         result += weight * value;
     }
-    if !result.is_finite() {
-        return Err(anyhow!(
-            "{context}: timing table evaluation produced non-finite result {}",
-            result
-        ));
-    }
-    prepared.last_interpolation = Some(CachedInterpolation {
-        coordinates,
-        value: result,
-    });
-    Ok(result)
+    result
 }
 
 fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
@@ -3524,6 +3560,8 @@ mod tests {
     use crate::liberty_model::{Cell, LibraryBuilder, Pin, TimingArc, TimingTable};
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
 
     /// Records diagnostic rendering without allocating on successful queries.
     struct CountingContext<'a>(&'a std::cell::Cell<usize>);
@@ -3685,6 +3723,41 @@ mod tests {
         )?;
         assert_eq!(report.worst_output_arrival, 8.0);
         Ok(())
+    }
+
+    #[test]
+    fn bilinear_fast_path_matches_corner_enumeration_bit_for_bit() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1a7e);
+        for trial in 0..10_000 {
+            let rank = trial % 4;
+            let dimensions: [usize; 3] =
+                std::array::from_fn(|axis| if axis < rank { rng.gen_range(1..=5) } else { 1 });
+            let mut strides = [0; 3];
+            let mut count = 1;
+            for axis in (0..rank).rev() {
+                strides[axis] = count;
+                count *= dimensions[axis];
+            }
+            let values: Vec<f32> = (0..count)
+                .map(|_| {
+                    if trial % 10 == 0 {
+                        -0.0
+                    } else {
+                        rng.gen_range(-100.0..100.0)
+                    }
+                })
+                .collect();
+            let bounds = std::array::from_fn(|axis| {
+                let lo = rng.gen_range(0..dimensions[axis]);
+                let hi = (lo + 1).min(dimensions[axis] - 1);
+                (lo, hi, rng.gen_range(-2.0..3.0))
+            });
+            assert_eq!(
+                interpolate_prepared_table(&values, strides, rank, bounds).to_bits(),
+                interpolate_table_corners(&values, strides, rank, bounds).to_bits(),
+                "trial {trial}: rank={rank}, dimensions={dimensions:?}, bounds={bounds:?}",
+            );
+        }
     }
 
     #[test]
