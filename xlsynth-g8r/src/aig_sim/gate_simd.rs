@@ -374,10 +374,9 @@ fn unpack_output_chunk(
         let mut flat_output_index = 0usize;
         for output in &gate_fn.outputs {
             let output_width = output.get_bit_count();
-            let bits_lsb_first = (0..output_width)
-                .map(|bit_index| flat_outputs[flat_output_index + bit_index].get_lane(lane))
-                .collect::<Vec<bool>>();
-            sample_outputs.push(IrBits::from_lsb_is_0(&bits_lsb_first));
+            sample_outputs.push(IrBits::from_lsb_fn(output_width, |bit_index| {
+                flat_outputs[flat_output_index + bit_index].get_lane(lane)
+            }));
             flat_output_index += output_width;
         }
         chunk_outputs.push(sample_outputs);

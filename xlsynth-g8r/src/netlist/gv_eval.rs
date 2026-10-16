@@ -306,7 +306,7 @@ impl LabeledNetlistAig {
     pub fn evaluate_ir_value(&self, args: &IrValue) -> Result<IrValue, String> {
         let inputs = self.lower_arg_tuple(args)?;
         let outputs = self.evaluate_bits(&inputs)?;
-        Ok(outputs_to_ir_value(&outputs))
+        Ok(outputs_to_ir_value(outputs))
     }
 
     /// Evaluates ordered typed IR tuples, using SIMD evaluation for batches.
@@ -320,10 +320,7 @@ impl LabeledNetlistAig {
         } else {
             gate_simd::eval_ordered_batch(&self.gate_fn, &batch_inputs)?
         };
-        Ok(batch_outputs
-            .iter()
-            .map(|outputs| outputs_to_ir_value(outputs))
-            .collect())
+        Ok(batch_outputs.into_iter().map(outputs_to_ir_value).collect())
     }
 
     /// Counts source-labeled toggles across consecutive typed IR tuples.
@@ -435,24 +432,21 @@ impl LabeledNetlistAig {
         let elements = args
             .as_elements()
             .map_err(|e| format!("argument value is not a tuple: {e}"))?;
-        let inputs = elements
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                value.to_bits().map_err(|e| {
-                    let input_name = self
-                        .gate_fn
-                        .inputs
-                        .get(index)
-                        .map(|input| input.name.as_str())
-                        .unwrap_or("<extra>");
-                    format!(
-                        "argument {} for input '{}' is not bits-typed: {}",
-                        index, input_name, e
-                    )
-                })
-            })
-            .collect::<Result<Vec<IrBits>, String>>()?;
+        let mut inputs = Vec::with_capacity(elements.len());
+        for (index, value) in elements.iter().enumerate() {
+            inputs.push(value.to_bits().map_err(|e| {
+                let input_name = self
+                    .gate_fn
+                    .inputs
+                    .get(index)
+                    .map(|input| input.name.as_str())
+                    .unwrap_or("<extra>");
+                format!(
+                    "argument {} for input '{}' is not bits-typed: {}",
+                    index, input_name, e
+                )
+            })?);
+        }
         self.validate_input_bits(&inputs)?;
         Ok(inputs)
     }
@@ -881,15 +875,17 @@ fn sum_instance_pin_toggles(
         .sum()
 }
 
-fn outputs_to_ir_value(outputs: &[IrBits]) -> IrValue {
+/// Reconstructs an IR value by moving the already-owned output bits.
+fn outputs_to_ir_value(mut outputs: Vec<IrBits>) -> IrValue {
     if outputs.len() == 1 {
-        IrValue::from_bits(&outputs[0])
+        IrValue::Bits(outputs.remove(0))
     } else {
-        IrValue::make_tuple(
-            &outputs
-                .iter()
-                .map(IrValue::from_bits)
-                .collect::<Vec<IrValue>>(),
+        IrValue::Tuple(
+            outputs
+                .into_iter()
+                .map(IrValue::Bits)
+                .collect::<Vec<_>>()
+                .into(),
         )
     }
 }
