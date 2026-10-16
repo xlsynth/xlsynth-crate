@@ -41,7 +41,7 @@ impl Default for ResizeOptions {
             max_area_growth: 0.02,
             max_upsize_rounds: 4,
             max_downsize_rounds: 2,
-            max_candidate_sites: 128,
+            max_candidate_sites: 64,
             max_cell_candidates: 8,
             max_trials: 1536,
             max_propagated_instances: 150_000,
