@@ -160,6 +160,11 @@ fn logical_effort_matches_enumeration_on_small_dags() {
             let a = if rng.gen_bool(0.5) { gb.add_not(a) } else { a };
             available.push(gb.add_and_binary(a, b));
         }
+        // Attach outputs before build(); each case selects its own roots below.
+        gb.add_output(
+            "result".into(),
+            AigBitVector::from_lsb_is_index_0(&available),
+        );
         let original = gb.build();
         for selection in 0..4 {
             let roots = (0..selection)
@@ -195,6 +200,11 @@ fn logical_effort_matches_enumeration_on_all_tiny_dags() {
         for &(a, b) in &edges {
             available.push(gb.add_and_binary(available[a], available[b]));
         }
+        // Attach outputs before build(); each case selects its own roots below.
+        gb.add_output(
+            "result".into(),
+            AigBitVector::from_lsb_is_index_0(&available),
+        );
         let original = gb.build();
         for mask in 0..(1 << edges.len()) {
             let roots = (0..edges.len())
