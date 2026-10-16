@@ -285,6 +285,41 @@ fn unaffordable_cells_do_not_hide_area_neutral_timing_candidates() -> Result<()>
 }
 
 #[test]
+fn unaffordable_alternatives_do_not_consume_per_cell_candidate_limit() -> Result<()> {
+    let mut library = library()?;
+    // The nearest area alternative is too expensive; the farther alternative
+    // is both cheaper and faster. The limit should count only feasible cells.
+    for cell in &mut library.cells {
+        match cell.name.as_str() {
+            "BUF1" => cell.area = 2.0,
+            "BUF2" => cell.area = 2.5,
+            "BUF4" => cell.area = 0.5,
+            _ => {
+                // Other families are not used by this netlist.
+            }
+        }
+    }
+    let mut parsed =
+        read_gv_from_str("module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule")?;
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_area_growth: 0.0,
+            max_cell_candidates: 1,
+            max_upsize_rounds: 1,
+            max_downsize_rounds: 0,
+            ..options()
+        },
+    )?;
+    assert_eq!(report.upsize.trials, 1);
+    assert_eq!(report.upsize.accepted, 1);
+    assert_eq!(report.final_area, 0.5);
+    assert!(report.final_delay.input_to_output < report.initial_delay.input_to_output);
+    Ok(())
+}
+
+#[test]
 fn cells_without_alternatives_do_not_hide_resizable_fanin() -> Result<()> {
     let mut library = library()?;
     for cell in &mut library.cells {

@@ -279,6 +279,8 @@ pub fn resize_netlist(
                 candidates.retain(|c| {
                     *c != current
                         && (phase == 0 || library.cells[*c].area < library.cells[current].area)
+                        && area - library.cells[current].area + library.cells[*c].area
+                            <= area_limit + 1e-12
                 });
                 // Nearby strengths first in timing search; largest savings
                 // first in recovery. Names break ties
@@ -299,9 +301,6 @@ pub fn resize_netlist(
                     }
                     let new_area =
                         area - library.cells[sta.cells[i]].area + library.cells[cell].area;
-                    if new_area > area_limit + 1e-12 {
-                        continue;
-                    }
                     let old_score = sta.score();
                     // Recovery only uses the hard timing checkpoint, not the
                     // near-critical endpoint tie-break.
