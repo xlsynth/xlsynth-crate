@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::liberty::model::{LibraryBuilder, TimingType};
 use crate::liberty::parser::parse_liberty_files;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
 use rand::{Rng, SeedableRng};
@@ -406,6 +407,147 @@ fn resizes_launch_and_capture_without_boundary_inverters() -> Result<()> {
             .map(|i| i.connections.clone())
             .collect::<Vec<_>>()
     );
+    Ok(())
+}
+
+#[test]
+fn inverted_and_falling_edge_registers_keep_their_semantic_families() -> Result<()> {
+    for inverted in [false, true] {
+        for falling_edge in [false, true] {
+            let mut builder = LibraryBuilder::from_library(library()?);
+            let inverted_function = builder.intern_string("IQN")?;
+            let launch_type = TimingType::from_raw_in(&mut builder, "falling_edge")?;
+            let setup_type = TimingType::from_raw_in(&mut builder, "setup_falling")?;
+            for cell in &mut builder.library_mut().cells {
+                if cell.sequential.is_empty() {
+                    continue;
+                }
+                if falling_edge {
+                    cell.sequential[0].clock_expr = "!CLK".to_owned();
+                }
+                for pin in &mut cell.pins {
+                    let output = pin.direction == PinDirection::Output as i32;
+                    if inverted && output {
+                        pin.function = inverted_function;
+                    }
+                    if falling_edge {
+                        for arc in &mut pin.timing_arcs {
+                            arc.timing_type = if output {
+                                launch_type.clone()
+                            } else {
+                                setup_type.clone()
+                            };
+                        }
+                    }
+                }
+            }
+            let library = builder.finish();
+            let mut parsed = read_gv_from_str(
+                r#"module m(input clk, input d, output q);
+                wire a,b;
+                DFF1 launch(.CLK(clk),.D(d),.Q(a));
+                BUF1 comb(.A(a),.Y(b));
+                DFF1 capture(.CLK(clk),.D(b),.Q(q));
+                endmodule"#,
+            )?;
+            let original = parsed.modules[0].clone();
+            let report = resize(&mut parsed, &library, &options())?;
+            assert!(report.upsize.register_changes > 0);
+            assert!(
+                report.final_delay.register_to_register < report.initial_delay.register_to_register
+            );
+            assert!(report.final_delay.within(report.initial_delay));
+            for (before, after) in original.instances.iter().zip(&parsed.modules[0].instances) {
+                assert_eq!(before.connections, after.connections);
+                assert_eq!(before.instance_name, after.instance_name);
+                let before_name = parsed.interner.resolve(before.type_name).unwrap();
+                let after_name = parsed.interner.resolve(after.type_name).unwrap();
+                let before_cell = library
+                    .cells
+                    .iter()
+                    .find(|c| c.name == before_name)
+                    .unwrap();
+                let after_cell = library.cells.iter().find(|c| c.name == after_name).unwrap();
+                assert_eq!(
+                    cell_signature(before_cell, &library),
+                    cell_signature(after_cell, &library)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let inverted_function = builder.intern_string("IQN")?;
+    let inverted_name = builder.intern_string("QN")?;
+    for cell in &mut builder.library_mut().cells {
+        if !cell.sequential.is_empty() {
+            let mut inverted = cell
+                .pins
+                .iter()
+                .find(|pin| pin.direction == PinDirection::Output as i32)
+                .unwrap()
+                .clone();
+            inverted.name = inverted_name;
+            inverted.function = inverted_function;
+            cell.pins.push(inverted);
+            if cell.name == "DFF4" {
+                cell.pins.reverse();
+            }
+        }
+    }
+    let library = builder.finish();
+    let mut parsed = read_gv_from_str(
+        r#"module m(input clk, input d, output [2:0] y);
+        wire a,an,b;
+        DFF1 launch(.CLK(clk),.D(d),.Q(a),.QN(an));
+        BUF1 positive(.A(a),.Y(b));
+        INV1 negative(.A(an),.Y(y[2]));
+        DFF1 capture(.CLK(clk),.D(b),.Q(y[0]),.QN(y[1]));
+        endmodule"#,
+    )?;
+    let larger = library
+        .cells
+        .iter()
+        .position(|cell| cell.name == "DFF4")
+        .unwrap();
+    let original = parsed.modules[0].clone();
+    let mut sta = IncrementalSta::new(
+        &original,
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        options().timing,
+    )?;
+    let initial = sta.score();
+    for instance in [0, 3] {
+        let before = sta.score();
+        assert!(!sta.trial(instance, larger, usize::MAX, None, |_| false)?);
+        assert_eq!(sta.score(), before);
+        assert!(sta.trial(instance, larger, usize::MAX, None, |_| true)?);
+        let mut changed = original.clone();
+        let mut interner = parsed.interner.clone();
+        for (instance, cell) in changed.instances.iter_mut().zip(&sta.cells) {
+            instance.type_name = interner.get_or_intern(&library.cells[*cell].name);
+        }
+        verify_timing(
+            sta.score(),
+            measure_boundary_delays(
+                &changed,
+                &parsed.nets,
+                &interner,
+                &library,
+                options().timing,
+            )?,
+        )?;
+    }
+    assert!(sta.score().register_to_register < initial.register_to_register);
+    let report = resize(&mut parsed, &library, &options())?;
+    assert!(report.upsize.register_changes > 0);
+    assert!(report.final_delay.within(report.initial_delay));
     Ok(())
 }
 
