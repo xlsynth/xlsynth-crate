@@ -56,13 +56,14 @@
 //! 6. Report the maximum rise/fall arrival observed at module outputs.
 
 use crate::liberty::Library;
-use crate::liberty::cell_formula::parse_formula;
+use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
@@ -83,7 +84,11 @@ struct PreparedTimingTable {
 }
 
 impl PreparedTimingTable {
-    fn new(library: &Library, table: &TimingTable, context: &str) -> Result<Self> {
+    fn new(
+        library: &Library,
+        table: &TimingTable,
+        context: &(impl std::fmt::Display + ?Sized),
+    ) -> Result<Self> {
         validate_timing_table_structure(library, table, context)?;
         let array = TimingTableArrayView::from_timing_table(library, table)?;
         let layout = timing_table_layout(library, table, context)?;
@@ -117,13 +122,14 @@ impl PreparedTimingTable {
     }
 }
 
-/// Per-analysis table cache and counters. The library borrow prevents mutation
-/// of pooled shapes/values while cached interpolation data is in use.
+/// Per-analysis parsed formulas, prepared timing tables and counters. The
+/// library borrow prevents mutation while cached data is in use.
 struct TimingEvaluationContext<'a> {
     library: &'a Library,
     // Values live in the borrowed library, so their address is stable. Shape
     // and kind distinguish views with different axes or envelope semantics.
     tables: HashMap<(usize, u32, i32), PreparedTimingTable>,
+    when_formulas: HashMap<String, Term>,
     diagnostics: TimingQueryDiagnosticCounts,
 }
 
@@ -132,6 +138,7 @@ impl<'a> TimingEvaluationContext<'a> {
         Self {
             library,
             tables: HashMap::new(),
+            when_formulas: HashMap::new(),
             diagnostics: TimingQueryDiagnosticCounts::default(),
         }
     }
@@ -189,9 +196,11 @@ impl EdgeTimingCandidate {
     }
 }
 
+/// A timing frontier usually contains one edge after envelope reduction;
+/// inline storage avoids allocating the common case without limiting width.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct EdgeTimingSet {
-    values: Vec<EdgeTimingCandidate>,
+    values: SmallVec<[EdgeTimingCandidate; 1]>,
 }
 
 impl EdgeTimingSet {
@@ -1281,8 +1290,16 @@ fn evaluate_instance_outputs(
     } = inputs;
     let cell_name = &lib.library.cells[cell_idx].name;
     let instance = &normalized.instances[inst_idx];
-    let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")?;
-    let mut local_output_timing_sets: HashMap<String, SignalTimingSet> = HashMap::new();
+    let instance_name = interner.resolve(instance.instance_name).ok_or_else(|| {
+        anyhow!(
+            "could not resolve instance name symbol {:?}",
+            instance.instance_name
+        )
+    })?;
+    // Only multi-output cells need local timing for output-to-output arcs.
+    // Borrow library pin names instead of allocating them for each query.
+    let mut local_output_timing_sets: Option<HashMap<&str, SignalTimingSet>> =
+        (output_pin_order.len() > 1).then(HashMap::new);
     for pin_idx in output_pin_order {
         let pin = &lib.library.cells[cell_idx].pins[*pin_idx];
         let pin_name = lib.library.resolve_string(&pin.name);
@@ -1304,7 +1321,7 @@ fn evaluate_instance_outputs(
                     output_load,
                     validated_timing_tables,
                     evaluation,
-                    &format!(
+                    &format_args!(
                         "{}.{} (instance '{}') clock-to-output",
                         cell_name, pin_name, instance_name
                     ),
@@ -1337,9 +1354,11 @@ fn evaluate_instance_outputs(
             }
             None => None,
         };
-        let output_net_name = output_bit_idx
-            .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
-            .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name));
+        let output_net_name = || {
+            output_bit_idx
+                .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
+                .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name))
+        };
         if combinational_arcs.is_empty() {
             if let Some(constant_value) =
                 constant_output_function_value(lib.library, cell_name, pin)?
@@ -1347,7 +1366,11 @@ fn evaluate_instance_outputs(
                 sta_trace(|| {
                     format!(
                         "inst={} cell={} out_pin={} out_net={} constant_source={}",
-                        instance_name, cell_name, pin_name, output_net_name, constant_value,
+                        instance_name,
+                        cell_name,
+                        pin_name,
+                        output_net_name(),
+                        constant_value,
                     )
                 });
                 store_output_timing_set(
@@ -1379,13 +1402,13 @@ fn evaluate_instance_outputs(
         let mut accumulated: Option<SignalTimingSet> = None;
 
         for arc in &combinational_arcs {
-            let arc_context = format!(
+            let arc_context = format_args!(
                 "cell '{}' output pin '{}' timing arc related_pin '{}'",
                 cell_name,
                 pin_name,
                 lib.library.resolve_string(&arc.related_pin)
             );
-            if !arc_when_may_apply(lib.library, arc, known_pin_values, arc_context.as_str())? {
+            if !arc_when_may_apply(lib.library, arc, known_pin_values, evaluation, &arc_context)? {
                 sta_trace(|| {
                     format!(
                         "inst={} cell={} out_pin={} when={} skipped=true",
@@ -1408,9 +1431,14 @@ fn evaluate_instance_outputs(
                         related_pin_name
                     )
                 })?;
-                let mut related_timing_sets: Vec<(&SignalTimingSet, String)> = Vec::new();
+                let mut related_timing_sets: SmallVec<
+                    [(&SignalTimingSet, Option<PinBitSource>); 1],
+                > = SmallVec::new();
                 if related_pin.direction == PinDirection::Output as i32 {
-                    let Some(timing) = local_output_timing_sets.get(related_pin_name) else {
+                    let Some(timing) = local_output_timing_sets
+                        .as_ref()
+                        .and_then(|outputs| outputs.get(related_pin_name))
+                    else {
                         if register_boundaries {
                             continue;
                         }
@@ -1423,19 +1451,11 @@ fn evaluate_instance_outputs(
                             instance_name
                         ));
                     };
-                    let related_net_name = inst_pin_map
+                    let related_source = inst_pin_map
                         .get(related_pin_name)
                         .and_then(|sources| sources.first())
-                        .and_then(|source| match source {
-                            PinBitSource::Bit(related_bit_idx) => {
-                                Some(normalized.render_bit(*related_bit_idx, nets, interner))
-                            }
-                            PinBitSource::Literal(_) | PinBitSource::Unknown => None,
-                        })
-                        .unwrap_or_else(|| {
-                            format!("<unconnected {}.{}>", instance_name, related_pin_name)
-                        });
-                    related_timing_sets.push((timing, related_net_name));
+                        .copied();
+                    related_timing_sets.push((timing, related_source));
                 } else {
                     let related_sources =
                             inst_pin_map.get(related_pin_name).ok_or_else(|| {
@@ -1457,7 +1477,7 @@ fn evaluate_instance_outputs(
                         ));
                     }
                     for related_source in related_sources {
-                        let (input_timing_set, related_net_name) = match related_source {
+                        let input_timing_set = match related_source {
                             PinBitSource::Bit(related_bit_idx) => {
                                 let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
                                 else {
@@ -1472,29 +1492,22 @@ fn evaluate_instance_outputs(
                                         related_pin_name
                                     ));
                                 };
-                                (
-                                    timing,
-                                    normalized.render_bit(*related_bit_idx, nets, interner),
-                                )
+                                timing
                             }
                             PinBitSource::Literal(_) | PinBitSource::Unknown
                                 if register_boundaries =>
                             {
                                 continue;
                             }
-                            PinBitSource::Literal(value) => (
-                                literal_source_timing_set,
-                                if *value { "1'b1" } else { "1'b0" }.to_string(),
-                            ),
-                            PinBitSource::Unknown => {
-                                (literal_source_timing_set, "1'bx".to_string())
+                            PinBitSource::Literal(_) | PinBitSource::Unknown => {
+                                literal_source_timing_set
                             }
                         };
-                        related_timing_sets.push((input_timing_set, related_net_name));
+                        related_timing_sets.push((input_timing_set, Some(*related_source)));
                     }
                 }
-                for (input_timing_set, related_net_name) in related_timing_sets {
-                    let context = format!(
+                for (input_timing_set, related_source) in related_timing_sets {
+                    let context = format_args!(
                         "{}.{} (instance '{}') related_pin '{}'",
                         cell_name, pin_name, instance_name, related_pin_name
                     );
@@ -1507,12 +1520,22 @@ fn evaluate_instance_outputs(
                         &context,
                     )?;
                     sta_trace(|| {
+                        let related_net_name = match related_source {
+                            Some(PinBitSource::Bit(bit)) => {
+                                normalized.render_bit(bit, nets, interner)
+                            }
+                            Some(PinBitSource::Literal(value)) => {
+                                if value { "1'b1" } else { "1'b0" }.to_string()
+                            }
+                            Some(PinBitSource::Unknown) => "1'bx".to_string(),
+                            None => format!("<unconnected {}.{}>", instance_name, related_pin_name),
+                        };
                         format!(
                             "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
                             instance_name,
                             cell_name,
                             pin_name,
-                            output_net_name,
+                            output_net_name(),
                             related_pin_name,
                             related_net_name,
                             if lib.library.resolve_string(&arc.when).is_empty() {
@@ -1556,7 +1579,7 @@ fn evaluate_instance_outputs(
                 instance_name,
                 cell_name,
                 pin_name,
-                output_net_name,
+                output_net_name(),
                 format_edge_timing_set(&out_timing_set.rise),
                 format_edge_timing_set(&out_timing_set.fall),
                 format_optional_edge_timing(out_timing_set.rise.max_arrival_edge()),
@@ -1576,7 +1599,10 @@ fn evaluate_instance_outputs(
     Ok(())
 }
 
-fn effective_input_capacitance_by_edge(pin: &Pin, context: &str) -> Result<EdgeLoadCapacitance> {
+fn effective_input_capacitance_by_edge(
+    pin: &Pin,
+    context: &(impl std::fmt::Display + ?Sized),
+) -> Result<EdgeLoadCapacitance> {
     // max_capacitance is a design-rule limit, not nominal pin capacitance.
     // Prefer edge-specific capacitance when provided; fall back to nominal.
     let capacitance = EdgeLoadCapacitance {
@@ -1826,14 +1852,16 @@ fn constant_output_function_value(
 }
 
 /// Stores one instance-output timing set for local and net-level propagation.
-fn store_output_timing_set(
-    local_output_timing_sets: &mut HashMap<String, SignalTimingSet>,
+fn store_output_timing_set<'a>(
+    local_output_timing_sets: &mut Option<HashMap<&'a str, SignalTimingSet>>,
     bit_timing_sets: &mut [Option<SignalTimingSet>],
-    pin_name: &str,
+    pin_name: &'a str,
     output_bit_idx: Option<usize>,
     out_timing_set: SignalTimingSet,
 ) {
-    local_output_timing_sets.insert(pin_name.to_string(), out_timing_set.clone());
+    if let Some(outputs) = local_output_timing_sets {
+        outputs.insert(pin_name, out_timing_set.clone());
+    }
     if let Some(output_bit_idx) = output_bit_idx {
         bit_timing_sets[output_bit_idx] = Some(match bit_timing_sets[output_bit_idx].as_ref() {
             Some(prev) => prev.clone().merge(&out_timing_set),
@@ -2224,15 +2252,23 @@ fn arc_when_may_apply(
     library: &crate::liberty_model::Library,
     arc: &TimingArc,
     known_pin_values: &HashMap<String, bool>,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<bool> {
     let when_text = library.resolve_string(&arc.when);
     if when_text.is_empty() {
         return Ok(true);
     }
+    if let Some(when) = evaluation.when_formulas.get(when_text) {
+        return Ok(when.evaluate_partial(known_pin_values) != Some(false));
+    }
     let when = parse_formula(when_text)
         .map_err(|e| anyhow!("{context}: could not parse when='{}': {}", when_text, e))?;
-    Ok(when.evaluate_partial(known_pin_values) != Some(false))
+    // Cache the syntax, not its value: instances with identical predicates
+    // may have different constant inputs.
+    let applicable = when.evaluate_partial(known_pin_values) != Some(false);
+    evaluation.when_formulas.insert(when_text.to_string(), when);
+    Ok(applicable)
 }
 
 #[cfg(test)]
@@ -2241,7 +2277,7 @@ fn evaluate_arc(
     arc: &TimingArc,
     input_timing: SignalTiming,
     output_load: f64,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTiming> {
     let mut evaluation = TimingEvaluationContext::new(library);
     let set = evaluate_arc_set(
@@ -2266,7 +2302,7 @@ fn evaluate_arc_set(
     input_timing: &SignalTimingSet,
     output_load: EdgeLoadCapacitance,
     evaluation: &mut TimingEvaluationContext<'_>,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTimingSet> {
     let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
     let timing_sense = StaTimingSense::from_raw(arc.timing_sense_str(library));
@@ -2334,7 +2370,7 @@ fn evaluate_output_edge_set(
     source_edges: &EdgeTimingSet,
     output_load: f64,
     evaluation: &mut TimingEvaluationContext<'_>,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
     delay_kind: StaTimingTableKind,
     slew_kind: StaTimingTableKind,
 ) -> Result<EdgeTimingSet> {
@@ -2347,7 +2383,7 @@ fn evaluate_output_edge_set(
             source_edge.timing.transition,
             output_load,
             evaluation,
-            &format!("{context} {}", delay_kind.as_raw()),
+            &format_args!("{context} {}", delay_kind.as_raw()),
         )?;
         // Characterized transition values may contain small negative artifacts;
         // physical transition is bounded below by zero.
@@ -2357,7 +2393,7 @@ fn evaluate_output_edge_set(
             source_edge.timing.transition,
             output_load,
             evaluation,
-            &format!("{context} {}", slew_kind.as_raw()),
+            &format_args!("{context} {}", slew_kind.as_raw()),
         )?
         .max(0.0);
         let arrival = source_edge.timing.arrival + delay;
@@ -2401,7 +2437,7 @@ fn evaluate_register_launch_output_set(
     output_load: EdgeLoadCapacitance,
     validated_tables: &mut HashSet<*const TimingTable>,
     evaluation: &mut TimingEvaluationContext<'_>,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTimingSet> {
     let launch_arcs: Vec<&TimingArc> = pin
         .timing_arcs
@@ -2423,7 +2459,7 @@ fn evaluate_register_launch_output_set(
 
     let mut output = SignalTimingSet::default();
     for arc in launch_arcs {
-        if !arc_when_may_apply(library, arc, known_pin_values, context)? {
+        if !arc_when_may_apply(library, arc, known_pin_values, evaluation, context)? {
             continue;
         }
         if let Some((delay, transition)) = find_optional_delay_slew_tables(
@@ -2438,7 +2474,7 @@ fn evaluate_register_launch_output_set(
                 delay,
                 query,
                 evaluation,
-                &format!("{context} {}", StaTimingTableKind::CellRise.as_raw()),
+                &format_args!("{context} {}", StaTimingTableKind::CellRise.as_raw()),
             )?;
             output
                 .rise
@@ -2449,7 +2485,7 @@ fn evaluate_register_launch_output_set(
                         transition,
                         query,
                         evaluation,
-                        &format!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
+                        &format_args!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
                     )?
                     .max(0.0),
                 }));
@@ -2466,7 +2502,7 @@ fn evaluate_register_launch_output_set(
                 delay,
                 query,
                 evaluation,
-                &format!("{context} {}", StaTimingTableKind::CellFall.as_raw()),
+                &format_args!("{context} {}", StaTimingTableKind::CellFall.as_raw()),
             )?;
             output
                 .fall
@@ -2477,7 +2513,7 @@ fn evaluate_register_launch_output_set(
                         transition,
                         query,
                         evaluation,
-                        &format!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
+                        &format_args!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
                     )?
                     .max(0.0),
                 }));
@@ -2505,11 +2541,11 @@ fn evaluate_register_setup_capture_arrival(
     known_pin_values: &HashMap<String, bool>,
     data_timing: &SignalTimingSet,
     evaluation: &mut TimingEvaluationContext<'_>,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<Option<RegisterCaptureTimingCandidate>> {
     let mut worst_timing: Option<RegisterCaptureTimingCandidate> = None;
     for arc in setup_arcs {
-        if !arc_when_may_apply(library, arc, known_pin_values, context)? {
+        if !arc_when_may_apply(library, arc, known_pin_values, evaluation, context)? {
             continue;
         }
         if let Some(table) =
@@ -2521,7 +2557,7 @@ fn evaluate_register_setup_capture_arrival(
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
                     evaluation,
-                    &format!("{context} {}", StaTimingTableKind::RiseConstraint.as_raw()),
+                    &format_args!("{context} {}", StaTimingTableKind::RiseConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
                 if !capture_arrival.is_finite() {
@@ -2548,7 +2584,7 @@ fn evaluate_register_setup_capture_arrival(
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
                     evaluation,
-                    &format!("{context} {}", StaTimingTableKind::FallConstraint.as_raw()),
+                    &format_args!("{context} {}", StaTimingTableKind::FallConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
                 if !capture_arrival.is_finite() {
@@ -2627,7 +2663,7 @@ fn choose_worse_edge_timing_candidate_by_arrival(
 fn find_optional_unique_table<'a>(
     arc: &'a TimingArc,
     kind: StaTimingTableKind,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<Option<&'a TimingTable>> {
     let mut matches = arc
         .tables
@@ -2646,7 +2682,7 @@ fn find_optional_unique_table<'a>(
 fn find_unique_table<'a>(
     arc: &'a TimingArc,
     kind: StaTimingTableKind,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<&'a TimingTable> {
     find_optional_unique_table(arc, kind, context)?
         .ok_or_else(|| anyhow!("{context}: missing '{}' timing table", kind.as_raw()))
@@ -2656,7 +2692,7 @@ fn find_optional_delay_slew_tables<'a>(
     arc: &'a TimingArc,
     delay_kind: StaTimingTableKind,
     slew_kind: StaTimingTableKind,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<Option<(&'a TimingTable, &'a TimingTable)>> {
     let delay = find_optional_unique_table(arc, delay_kind, context)?;
     let slew = find_optional_unique_table(arc, slew_kind, context)?;
@@ -2687,7 +2723,7 @@ struct TimingTableLayout<'a> {
 fn timing_table_layout<'a>(
     library: &'a crate::liberty_model::Library,
     table: &'a TimingTable,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<TimingTableLayout<'a>> {
     let shape = library.timing_table_shape(table);
     let template: Option<&LuTableTemplate> = if shape.template_id == 0 {
@@ -2735,7 +2771,7 @@ fn timing_table_layout<'a>(
 fn validate_timing_table_structure(
     library: &crate::liberty_model::Library,
     table: &TimingTable,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<()> {
     let array = TimingTableArrayView::from_timing_table(library, table)
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
@@ -2789,7 +2825,7 @@ fn validate_timing_table_structure(
 fn validate_timing_table_payload(
     library: &crate::liberty_model::Library,
     table: &TimingTable,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<()> {
     validate_timing_table_structure(library, table, context)
 }
@@ -2926,7 +2962,7 @@ fn evaluate_table(
     table: &TimingTable,
     input_transition: f64,
     output_load: f64,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     let mut evaluation = TimingEvaluationContext::new(library);
     evaluate_table_with_diagnostics(
@@ -2945,7 +2981,7 @@ fn evaluate_table_with_diagnostics(
     input_transition: f64,
     output_load: f64,
     evaluation: &mut TimingEvaluationContext<'_>,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     evaluate_table_with_query_and_diagnostics(
         library,
@@ -2961,7 +2997,7 @@ fn evaluate_table_with_query_and_diagnostics(
     table: &TimingTable,
     query: TimingTableQuery,
     evaluation: &mut TimingEvaluationContext<'_>,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     validate_non_negative_finite(query.input_transition, "input transition query", context)?;
     validate_non_negative_finite(query.output_load, "output load query", context)?;
@@ -3165,7 +3201,7 @@ fn evaluate_table_corner_value(
     array: &TimingTableArrayView<'_>,
     table: &TimingTable,
     indices: &[usize],
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     if !uses_monotone_upper_envelope(table) || indices.is_empty() {
         return array
@@ -3200,7 +3236,11 @@ fn evaluate_table_corner_value(
     Ok(maximum)
 }
 
-fn validate_non_negative_finite(value: f64, what: &str, context: &str) -> Result<()> {
+fn validate_non_negative_finite(
+    value: f64,
+    what: &str,
+    context: &(impl std::fmt::Display + ?Sized),
+) -> Result<()> {
     if !value.is_finite() {
         return Err(anyhow!("{context}: {what} must be finite; got {}", value));
     }
@@ -3235,7 +3275,11 @@ fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> boo
     true
 }
 
-fn validate_effective_axes(dimensions: &[u32], axes: [&[f64]; 3], context: &str) -> Result<()> {
+fn validate_effective_axes(
+    dimensions: &[u32],
+    axes: [&[f64]; 3],
+    context: &(impl std::fmt::Display + ?Sized),
+) -> Result<()> {
     if !axes_are_contiguous(axes[0], axes[1], axes[2]) {
         return Err(anyhow!(
             "{context}: timing table has non-contiguous effective axes (index_1={}, index_2={}, index_3={})",
@@ -3280,7 +3324,7 @@ fn axis_query_value(
     axis_idx: usize,
     input_transition: f64,
     output_load: f64,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     axis_query_value_with_query(
         variable_name,
@@ -3296,7 +3340,7 @@ fn axis_query_value_with_query(
     axis_variable: AxisVariable,
     axis_idx: usize,
     query: TimingTableQuery,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     match axis_variable {
         AxisVariable::Unspecified => match axis_idx {
@@ -3383,6 +3427,97 @@ mod tests {
     use crate::liberty_model::{Cell, LibraryBuilder, Pin, TimingArc, TimingTable};
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
+
+    /// Records diagnostic rendering without allocating on successful queries.
+    struct CountingContext<'a>(&'a std::cell::Cell<usize>);
+
+    impl std::fmt::Display for CountingContext<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.set(self.0.get() + 1);
+            f.write_str("timing query")
+        }
+    }
+
+    #[test]
+    fn timing_query_renders_context_only_on_error() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let table = builder.add_timing_table_f64(
+            crate::liberty_proto::TimingTableKind::CellRise,
+            0,
+            vec![0.0, 1.0],
+            vec![],
+            vec![],
+            vec![1.0, 2.0],
+            vec![2],
+            "",
+        )?;
+        let library = builder.finish();
+        let formats = std::cell::Cell::new(0);
+        let context = CountingContext(&formats);
+        assert_eq!(evaluate_table(&library, &table, 0.5, 0.0, &context)?, 1.5);
+        assert_eq!(formats.get(), 0);
+        assert!(evaluate_table(&library, &table, f64::NAN, 0.0, &context).is_err());
+        assert_eq!(formats.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn cached_when_syntax_uses_each_instances_constant_values() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "EN & !B",
+            vec![],
+        );
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for (en, b, expected) in [
+            (None, None, true),
+            (Some(false), None, false),
+            (Some(true), Some(false), true),
+            (Some(true), Some(true), false),
+            (None, None, true),
+        ] {
+            let known = [("EN", en), ("B", b)]
+                .into_iter()
+                .filter_map(|(name, value)| value.map(|value| (name.to_string(), value)))
+                .collect();
+            assert_eq!(
+                arc_when_may_apply(&library, &arc, &known, &mut evaluation, "test")?,
+                expected
+            );
+            assert_eq!(evaluation.when_formulas.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inline_timing_frontier_spills_without_truncation() {
+        let mut set = EdgeTimingSet::default();
+        for i in (0..32).rev() {
+            set.insert(EdgeTimingCandidate::from_timing(EdgeTiming {
+                arrival: f64::from(i),
+                transition: f64::from(32 - i),
+            }));
+        }
+        assert_eq!(set.values.len(), 32);
+        for (i, edge) in set.iter().enumerate() {
+            assert_eq!(edge.timing.arrival, i as f64);
+            assert_eq!(edge.timing.transition, (32 - i) as f64);
+        }
+        collapse_edge_timing_set_to_envelope(&mut set);
+        assert_eq!(set.values.len(), 1);
+        assert_eq!(
+            set.values[0].timing,
+            EdgeTiming {
+                arrival: 31.0,
+                transition: 32.0
+            }
+        );
+    }
 
     #[test]
     fn prepared_envelopes_match_reference_for_scalar_and_multidimensional_tables() -> Result<()> {
