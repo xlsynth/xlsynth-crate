@@ -299,14 +299,16 @@ pub fn resize_netlist(
                         continue;
                     }
                     let old_score = sta.score();
-                    let old_secondary = sta.secondary(objective);
+                    // Recovery only uses the hard timing checkpoint, not the
+                    // near-critical endpoint tie-break.
+                    let old_secondary = (phase == 0).then(|| sta.secondary(objective));
                     trials += 1;
                     phase_stats.trials += 1;
                     let acceptable = |timing: &IncrementalSta<'_>| {
                         let score = timing.score();
-                        if phase == 1 {
+                        let Some(old_secondary) = old_secondary else {
                             return score.within(upsized_delay);
-                        }
+                        };
                         let secondary = timing.secondary(objective);
                         let old_delay = old_score.values()[objective];
                         let new_delay = score.values()[objective];
