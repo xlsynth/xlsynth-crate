@@ -58,7 +58,7 @@
 use crate::liberty::Library;
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::timing_table::TimingTableArrayView;
-use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
+use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, StringId, TimingArc, TimingTable};
 use crate::liberty_proto::{TimingSense as WireTimingSense, TimingType as WireTimingType};
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
@@ -156,9 +156,9 @@ struct TimingEvaluationContext<'a> {
     // Values live in the borrowed library, so their address is stable. Shape
     // and kind distinguish views with different axes or envelope semantics.
     // These caches use only library-owned numeric identities, not external
-    // string keys. Formula/name maps retain the standard randomized hasher.
+    // string keys. Name maps retain the standard randomized hasher.
     tables: FxHashMap<(usize, u32, i32), PreparedTimingTable>,
-    when_formulas: HashMap<String, PreparedWhen>,
+    when_formulas: FxHashMap<StringId, PreparedWhen>,
     validated_delay_slew_arcs: FxHashSet<*const TimingArc>,
     validated_setup_arcs: FxHashSet<*const TimingArc>,
     diagnostics: TimingQueryDiagnosticCounts,
@@ -169,7 +169,7 @@ impl<'a> TimingEvaluationContext<'a> {
         Self {
             library,
             tables: FxHashMap::default(),
-            when_formulas: HashMap::new(),
+            when_formulas: FxHashMap::default(),
             validated_delay_slew_arcs: FxHashSet::default(),
             validated_setup_arcs: FxHashSet::default(),
             diagnostics: TimingQueryDiagnosticCounts::default(),
@@ -564,7 +564,7 @@ pub fn analyze_register_boundary_max_arrival(
     launch_primary_inputs: bool,
     launch_register_instances: &[usize],
 ) -> Result<StaReport> {
-    let launch_register_instances: HashSet<usize> =
+    let launch_register_instances: FxHashSet<usize> =
         launch_register_instances.iter().copied().collect();
     analyze_max_arrival_proto_with_mode(
         module,
@@ -595,11 +595,12 @@ pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> 
         })
 }
 
+/// Launch-source policy for combinational or register-boundary timing.
 enum StaAnalysisMode<'a> {
     CombinationalOnly,
     RegisterBoundaries {
         launch_primary_inputs: bool,
-        launch_register_instances: &'a HashSet<usize>,
+        launch_register_instances: &'a FxHashSet<usize>,
     },
 }
 
@@ -943,7 +944,9 @@ fn analyze_max_arrival_proto_with_mode(
 
     let mut successors: Vec<Vec<usize>> = vec![Vec::new(); instance_count];
     let mut indegree: Vec<usize> = vec![0; instance_count];
-    let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
+    // Only internal numeric identities are hashed, and the set is never
+    // iterated: successor order still follows the normalized netlist.
+    let mut seen_edges: FxHashSet<(usize, usize)> = FxHashSet::default();
     for (bit_idx, drivers) in bit_drivers.iter().enumerate() {
         let has_assign_source = assign_sources[bit_idx].is_some();
         if is_module_input[bit_idx] && (!drivers.is_empty() || has_assign_source) {
@@ -995,7 +998,7 @@ fn analyze_max_arrival_proto_with_mode(
             })?;
             let pin_cap = effective_input_capacitance_by_edge(
                 pin,
-                &format!(
+                &format_args!(
                     "load pin '{}.{}'",
                     instance_cell_names[load.inst_idx], load.pin_name
                 ),
@@ -1206,16 +1209,13 @@ fn analyze_max_arrival_proto_with_mode(
                         &instance_known_pin_values[inst_idx],
                         timing_set,
                         &mut evaluation,
-                        &format!(
+                        &format_args!(
                             "{}.{} (instance '{}') setup",
                             instance_cell_names[inst_idx],
                             pin_name,
-                            resolve_symbol(
-                                interner,
-                                normalized.instances[inst_idx].instance_name,
-                                "instance name"
-                            )
-                            .unwrap_or_else(|_| "<unknown>".to_string())
+                            interner
+                                .resolve(normalized.instances[inst_idx].instance_name)
+                                .unwrap_or("<unknown>")
                         ),
                     )?
                     else {
@@ -2313,11 +2313,12 @@ fn arc_when_may_apply(
     evaluation: &mut TimingEvaluationContext<'_>,
     context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<bool> {
+    debug_assert!(std::ptr::eq(library, evaluation.library));
     let when_text = library.resolve_string(&arc.when);
     if when_text.is_empty() {
         return Ok(true);
     }
-    if let Some(when) = evaluation.when_formulas.get(when_text) {
+    if let Some(when) = evaluation.when_formulas.get(&arc.when) {
         return Ok(if known_pin_values.is_empty() {
             when.without_constants
         } else {
@@ -2335,7 +2336,7 @@ fn arc_when_may_apply(
         when.evaluate_partial(&HashMap::new()) != Some(false)
     };
     evaluation.when_formulas.insert(
-        when_text.to_string(),
+        arc.when,
         PreparedWhen {
             formula: when,
             without_constants,
@@ -2929,7 +2930,7 @@ fn validate_timing_tables_once<'arc>(
             validate_timing_table_payload(
                 library,
                 table,
-                &format!(
+                &format_args!(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
                     cell_name,
                     pin_name,
@@ -2972,7 +2973,7 @@ fn validate_constraint_tables_once(
             validate_timing_table_structure(
                 library,
                 table,
-                &format!(
+                &format_args!(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
                     cell_name,
                     pin_name,
@@ -3616,6 +3617,69 @@ mod tests {
                 expected
             );
             assert_eq!(evaluation.when_formulas.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn when_cache_distinguishes_predicates_and_does_not_cache_parse_errors() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let cases = [
+            ("", [true, true, true]),
+            ("0", [false, false, false]),
+            ("1", [true, true, true]),
+            ("EN", [true, false, true]),
+            ("!EN", [true, true, false]),
+            ("EN", [true, false, true]),
+        ];
+        let arcs: Vec<_> = cases
+            .iter()
+            .map(|(predicate, _)| {
+                test_arc(
+                    &mut builder,
+                    "A",
+                    "positive_unate",
+                    "combinational",
+                    predicate,
+                    vec![],
+                )
+            })
+            .collect();
+        let invalid = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "EN &",
+            vec![],
+        );
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for _ in 0..2 {
+            for (binding, value) in [None, Some(false), Some(true)].into_iter().enumerate() {
+                let known = value
+                    .into_iter()
+                    .map(|value| ("EN".to_string(), value))
+                    .collect();
+                for (arc, (_, expected)) in arcs.iter().zip(cases) {
+                    assert_eq!(
+                        arc_when_may_apply(&library, arc, &known, &mut evaluation, "test")?,
+                        expected[binding]
+                    );
+                }
+                assert_eq!(evaluation.when_formulas.len(), 4);
+                assert!(
+                    arc_when_may_apply(
+                        &library,
+                        &invalid,
+                        &known,
+                        &mut evaluation,
+                        "invalid predicate"
+                    )
+                    .is_err()
+                );
+                assert_eq!(evaluation.when_formulas.len(), 4);
+            }
         }
         Ok(())
     }
@@ -7012,7 +7076,7 @@ endmodule
     #[test]
     fn pin_lookup_preserves_declaration_indices_and_handles_missing_names() -> Result<()> {
         let mut builder = LibraryBuilder::new();
-        for count in [0, 1, 2, 5, 32] {
+        for count in [0, 1, 2, 5, 8, 9, 32] {
             let pins = (0..count)
                 .rev()
                 .map(|i| {
