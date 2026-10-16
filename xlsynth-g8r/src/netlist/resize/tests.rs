@@ -803,6 +803,61 @@ fn electrical_limit_cannot_be_exchanged_for_timing_gain() -> Result<()> {
 }
 
 #[test]
+fn resizing_clock_drivers_preserves_clock_pin_transition_limits() -> Result<()> {
+    let mut library = library()?;
+    let ff = library.cells.iter().position(|c| c.name == "DFF1").unwrap();
+    library.cells[ff]
+        .pins
+        .iter_mut()
+        .find(|pin| pin.is_clocking_pin)
+        .unwrap()
+        .max_transition = Some(0.5);
+    let parsed = read_gv_from_str(
+        r#"module m(input clk, input d, output q); wire c;
+        BUF4 driver(.A(clk),.Y(c));
+        DFF1 ff(.CLK(c),.D(d),.Q(q)); endmodule"#,
+    )?;
+    let mut sta = IncrementalSta::new(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        options().timing,
+    )?;
+    let before = sta.score();
+    let cells = sta.cells.clone();
+    let weak = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
+    assert!(!sta.trial(0, weak, usize::MAX, None, |_| true)?);
+    assert_eq!(sta.score(), before);
+    assert_eq!(sta.cells, cells);
+    Ok(())
+}
+
+#[test]
+fn clock_annotations_do_not_cut_combinational_timing_dependencies() -> Result<()> {
+    let mut library = library()?;
+    for cell in &mut library.cells {
+        if cell.name.starts_with("BUF") {
+            cell.pins
+                .iter_mut()
+                .find(|pin| pin.direction == PinDirection::Input as i32)
+                .unwrap()
+                .is_clocking_pin = true;
+        }
+    }
+    // Deliberately store the consumer before its driver: a pin annotation
+    // must not replace the cell's actual combinational timing dependencies.
+    let mut parsed = read_gv_from_str(
+        r#"module m(input a, output y); wire n;
+        BUF1 consumer(.A(n),.Y(y)); BUF1 driver(.A(a),.Y(n)); endmodule"#,
+    )?;
+    let report = resize(&mut parsed, &library, &options())?;
+    assert!(report.final_delay.input_to_output < report.initial_delay.input_to_output);
+    assert!(report.upsize.accepted > 0);
+    Ok(())
+}
+
+#[test]
 fn resizing_a_consumer_preserves_its_drivers_electrical_limits() -> Result<()> {
     for limit in ["capacitance", "fanout"] {
         let mut library = library()?;

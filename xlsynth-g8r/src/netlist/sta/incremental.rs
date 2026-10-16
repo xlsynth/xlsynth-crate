@@ -374,15 +374,16 @@ impl<'a> IncrementalSta<'a> {
                     if let Some(value) = constants[*bit] {
                         inst.known.insert(name.clone(), value);
                     }
-                    if !pin.is_clocking_pin {
-                        consumers[*bit].push(i);
-                        if !inst.sequential
-                            && let Some(driver) = drivers[*bit]
-                            && driver != i
-                            && successors[driver].insert(i)
-                        {
-                            indegree[i] += 1;
-                        }
+                    // Clock pins still impose electrical limits. Only a
+                    // sequential cell cuts arrival propagation; a clock pin
+                    // annotation on a combinational cell does not.
+                    consumers[*bit].push(i);
+                    if !inst.sequential
+                        && let Some(driver) = drivers[*bit]
+                        && driver != i
+                        && successors[driver].insert(i)
+                    {
+                        indegree[i] += 1;
                     }
                 }
             }
@@ -746,7 +747,9 @@ impl<'a> IncrementalSta<'a> {
         let mut inputs = Vec::new();
         for (pin, sources) in &self.instances[i].pins {
             let pin = self.lib.pin(self.cells[i], pin).expect("validated pin");
-            if pin.direction != PinDirection::Input as i32 || pin.is_clocking_pin {
+            if pin.direction != PinDirection::Input as i32
+                || (self.instances[i].sequential && pin.is_clocking_pin)
+            {
                 continue;
             }
             for source in sources {
