@@ -147,14 +147,16 @@ impl PreparedTimingTable {
     }
 }
 
-/// Per-analysis parsed formulas, prepared timing tables and counters. The
-/// library borrow prevents mutation while cached data is in use.
+/// Per-analysis parsed formulas, validated arcs, prepared tables and counters.
+/// The library borrow keeps arc identities and contents immutable while cached.
 struct TimingEvaluationContext<'a> {
     library: &'a Library,
     // Values live in the borrowed library, so their address is stable. Shape
     // and kind distinguish views with different axes or envelope semantics.
     tables: HashMap<(usize, u32, i32), PreparedTimingTable>,
     when_formulas: HashMap<String, PreparedWhen>,
+    validated_delay_slew_arcs: HashSet<*const TimingArc>,
+    validated_setup_arcs: HashSet<*const TimingArc>,
     diagnostics: TimingQueryDiagnosticCounts,
 }
 
@@ -164,6 +166,8 @@ impl<'a> TimingEvaluationContext<'a> {
             library,
             tables: HashMap::new(),
             when_formulas: HashMap::new(),
+            validated_delay_slew_arcs: HashSet::new(),
+            validated_setup_arcs: HashSet::new(),
             diagnostics: TimingQueryDiagnosticCounts::default(),
         }
     }
@@ -1064,7 +1068,6 @@ fn analyze_max_arrival_proto_with_mode(
 
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
-    let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
     let mut evaluation = TimingEvaluationContext::new(library);
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
@@ -1094,7 +1097,6 @@ fn analyze_max_arrival_proto_with_mode(
             &bit_load_capacitance,
             &mut bit_timing_sets,
             &literal_source_timing_set,
-            &mut validated_timing_tables,
             &mut evaluation,
         )?;
 
@@ -1189,7 +1191,7 @@ fn analyze_max_arrival_proto_with_mode(
                     &instance_cell_names[inst_idx],
                     pin_name,
                     setup_arcs.as_slice(),
-                    &mut validated_timing_tables,
+                    &mut evaluation,
                 )?;
                 let Some(sources) = pin_sources.get(pin_name) else {
                     continue;
@@ -1296,7 +1298,6 @@ fn evaluate_instance_outputs(
     bit_load_capacitance: &[EdgeLoadCapacitance],
     bit_timing_sets: &mut [Option<SignalTimingSet>],
     literal_source_timing_set: &SignalTimingSet,
-    validated_timing_tables: &mut HashSet<*const TimingTable>,
     evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
     let InstanceTimingInputs {
@@ -1344,7 +1345,6 @@ fn evaluate_instance_outputs(
                     pin,
                     known_pin_values,
                     output_load,
-                    validated_timing_tables,
                     evaluation,
                     &format_args!(
                         "{}.{} (instance '{}') clock-to-output",
@@ -1419,7 +1419,7 @@ fn evaluate_instance_outputs(
             cell_name,
             pin_name,
             combinational_arcs.as_slice(),
-            validated_timing_tables,
+            evaluation,
         )?;
         let output_load = output_bit_idx
             .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
@@ -2016,13 +2016,13 @@ pub fn validate_output_pin_for_basic_sta(
         ));
     }
     let combinational_arcs: Vec<&TimingArc> = pin.timing_arcs.iter().collect();
-    let mut validated_tables = HashSet::new();
+    let mut evaluation = TimingEvaluationContext::new(library);
     validate_timing_tables_once(
         library,
         cell_name,
         pin_name,
         combinational_arcs.as_slice(),
-        &mut validated_tables,
+        &mut evaluation,
     )?;
 
     for arc in &combinational_arcs {
@@ -2475,7 +2475,6 @@ fn evaluate_register_launch_output_set(
     pin: &Pin,
     known_pin_values: &HashMap<String, bool>,
     output_load: EdgeLoadCapacitance,
-    validated_tables: &mut HashSet<*const TimingTable>,
     evaluation: &mut TimingEvaluationContext<'_>,
     context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTimingSet> {
@@ -2494,7 +2493,7 @@ fn evaluate_register_launch_output_set(
         cell_name,
         library.resolve_string(&pin.name),
         launch_arcs.as_slice(),
-        validated_tables,
+        evaluation,
     )?;
 
     let mut output = SignalTimingSet::default();
@@ -2870,15 +2869,20 @@ fn validate_timing_table_payload(
     validate_timing_table_structure(library, table, context)
 }
 
-/// Validates each queried delay/slew table at most once during an STA run.
+/// Validates all delay/slew tables in each arc at most once during an STA run.
 fn validate_timing_tables_once(
     library: &crate::liberty_model::Library,
     cell_name: &str,
     pin_name: &str,
     arcs: &[&TimingArc],
-    validated_tables: &mut HashSet<*const TimingTable>,
+    evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
+    debug_assert!(std::ptr::eq(library, evaluation.library));
     for arc in arcs {
+        let key = *arc as *const TimingArc;
+        if evaluation.validated_delay_slew_arcs.contains(&key) {
+            continue;
+        }
         for table in &arc.tables {
             if !matches!(
                 LibertyTableKind::from_raw(table.kind_str()),
@@ -2887,9 +2891,6 @@ fn validate_timing_tables_once(
                     | LibertyTableKind::RiseTransition
                     | LibertyTableKind::FallTransition
             ) {
-                continue;
-            }
-            if !validated_tables.insert(table as *const TimingTable) {
                 continue;
             }
             validate_timing_table_payload(
@@ -2904,6 +2905,8 @@ fn validate_timing_tables_once(
                 ),
             )?;
         }
+        // A failed attempt must never suppress validation on a later trial.
+        evaluation.validated_delay_slew_arcs.insert(key);
     }
     Ok(())
 }
@@ -2918,17 +2921,19 @@ fn validate_constraint_tables_once(
     cell_name: &str,
     pin_name: &str,
     arcs: &[&TimingArc],
-    validated_tables: &mut HashSet<*const TimingTable>,
+    evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
+    debug_assert!(std::ptr::eq(library, evaluation.library));
     for arc in arcs {
+        let key = *arc as *const TimingArc;
+        if evaluation.validated_setup_arcs.contains(&key) {
+            continue;
+        }
         for table in &arc.tables {
             if !matches!(
                 LibertyTableKind::from_raw(table.kind_str()),
                 LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
             ) {
-                continue;
-            }
-            if !validated_tables.insert(table as *const TimingTable) {
                 continue;
             }
             validate_timing_table_structure(
@@ -2943,6 +2948,7 @@ fn validate_constraint_tables_once(
                 ),
             )?;
         }
+        evaluation.validated_setup_arcs.insert(key);
     }
     Ok(())
 }
@@ -3571,6 +3577,34 @@ mod tests {
                     expected
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_constraint_validation_is_not_cached_as_success() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let delay = scalar_table(&mut builder, "cell_rise", 1.0);
+        let constraint = scalar_table(&mut builder, "rise_constraint", f64::NAN);
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            vec![delay, constraint],
+        );
+        let library = builder.finish();
+        let mut validated = TimingEvaluationContext::new(&library);
+        for _ in 0..2 {
+            validate_timing_tables_once(&library, "CELL", "Y", &[&arc], &mut validated)?;
+            let error =
+                validate_constraint_tables_once(&library, "CELL", "Y", &[&arc], &mut validated)
+                    .expect_err("failed validation must fail on every attempt");
+            assert_eq!(
+                error.to_string(),
+                "cell 'CELL' pin 'Y' related_pin 'A' table 'rise_constraint': timing table contains non-finite value NaN"
+            );
         }
         Ok(())
     }

@@ -14,7 +14,7 @@ use super::{
     resolve_timing_sources, validate_constraint_tables_once,
 };
 use crate::liberty::Library;
-use crate::liberty_model::{PinDirection, TimingTable};
+use crate::liberty_model::PinDirection;
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
@@ -238,7 +238,6 @@ pub(crate) struct IncrementalSta<'a> {
     capture_endpoint: Vec<Option<usize>>,
     scores: [EndpointScores; 4],
     electrical: Vec<Vec<f64>>,
-    validated: HashSet<*const TimingTable>,
     evaluation: TimingEvaluationContext<'a>,
     registered: bool,
     literal: SignalTimingSet,
@@ -497,7 +496,6 @@ impl<'a> IncrementalSta<'a> {
             capture_endpoint,
             scores: std::array::from_fn(|_| EndpointScores::default()),
             electrical,
-            validated: HashSet::new(),
             evaluation: TimingEvaluationContext::new(library),
             registered,
             literal,
@@ -571,7 +569,6 @@ impl<'a> IncrementalSta<'a> {
                 &self.capacitances,
                 &mut self.timing[mode],
                 &self.literal,
-                &mut self.validated,
                 &mut self.evaluation,
             )?;
         }
@@ -617,7 +614,7 @@ impl<'a> IncrementalSta<'a> {
                             &cell.name,
                             name,
                             &arcs,
-                            &mut self.validated,
+                            &mut self.evaluation,
                         )?;
                         if let Some(sources) = self.instances[i].pins.get(name) {
                             for source in sources {
