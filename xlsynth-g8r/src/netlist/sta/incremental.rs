@@ -696,8 +696,14 @@ impl<'a> IncrementalSta<'a> {
     /// Visits near-critical fanin by cumulative arrival deficit, once per
     /// round. This is only a search-order heuristic: asymmetric pin arcs
     /// and load/slew effects are accounted for by accurate candidate
-    /// evaluation afterward.
-    pub fn critical_instances(&self, objective: usize, limit: usize) -> Vec<usize> {
+    /// evaluation afterward. Fixed cells are traversed but do not consume
+    /// the limit of selectable candidates.
+    pub fn critical_instances(
+        &self,
+        objective: usize,
+        limit: usize,
+        eligible: impl Fn(usize) -> bool,
+    ) -> Vec<usize> {
         let mut queue = BTreeSet::new();
         let worst = self.score().values()[objective];
         for key in self.scores[objective]
@@ -725,9 +731,11 @@ impl<'a> IncrementalSta<'a> {
             if !seen.insert(i) {
                 continue;
             }
-            result.push(i);
-            if result.len() >= limit {
-                break;
+            if eligible(i) {
+                result.push(i);
+                if result.len() >= limit {
+                    break;
+                }
             }
             // A launch register's D cone belongs to another timing path.
             // Capture-register fanin is seeded separately above.

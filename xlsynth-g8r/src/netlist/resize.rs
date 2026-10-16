@@ -229,7 +229,11 @@ pub fn resize_netlist(
         };
         for _ in 0..rounds {
             let mut sites = if phase == 0 {
-                sta.critical_instances(objective, options.max_candidate_sites)
+                sta.critical_instances(objective, options.max_candidate_sites, |i| {
+                    let current = sta.cells[i];
+                    (options.resize_registers || !sta.is_register(i))
+                        && families.alternatives[current].iter().any(|c| *c != current)
+                })
             } else {
                 let priorities = sta
                     .recovery_headroom(upsized_delay)

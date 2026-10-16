@@ -199,6 +199,67 @@ fn improves_more_than_thirty_two_equally_critical_outputs() -> Result<()> {
 }
 
 #[test]
+fn fixed_capture_registers_do_not_consume_timing_candidate_slots() -> Result<()> {
+    let mut library = library()?;
+    // Isolate candidate coverage from the area/delay merit guard.
+    for cell in &mut library.cells {
+        cell.area = 1.0;
+    }
+    let mut parsed = read_gv_from_str(
+        r#"module m(input clk, input d, output q);
+        wire a,b;
+        DFF1 capture(.CLK(clk),.D(b),.Q(q));
+        DFF1 launch(.CLK(clk),.D(d),.Q(a));
+        BUF1 comb(.A(a),.Y(b));
+        endmodule"#,
+    )?;
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            resize_registers: false,
+            max_candidate_sites: 1,
+            max_upsize_rounds: 1,
+            max_downsize_rounds: 0,
+            ..options()
+        },
+    )?;
+    assert_eq!(report.upsize.register_changes, 0);
+    assert!(report.final_delay.register_to_register < report.initial_delay.register_to_register);
+    Ok(())
+}
+
+#[test]
+fn cells_without_alternatives_do_not_hide_resizable_fanin() -> Result<()> {
+    let mut library = library()?;
+    for cell in &mut library.cells {
+        cell.area = 1.0;
+        if cell.name == "BUF2" || cell.name == "BUF4" {
+            cell.dont_use = Some(true);
+        }
+    }
+    let mut parsed = read_gv_from_str(
+        r#"module m(input a, output y);
+        wire b;
+        BUF1 fixed(.A(b),.Y(y));
+        INV1 resizable(.A(a),.Y(b));
+        endmodule"#,
+    )?;
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_candidate_sites: 1,
+            max_upsize_rounds: 1,
+            max_downsize_rounds: 0,
+            ..options()
+        },
+    )?;
+    assert!(report.final_delay.input_to_output < report.initial_delay.input_to_output);
+    Ok(())
+}
+
+#[test]
 fn resizes_launch_and_capture_without_boundary_inverters() -> Result<()> {
     let library = library()?;
     let mut parsed = read_gv_from_str(
@@ -244,10 +305,10 @@ fn critical_candidates_do_not_cross_launch_register_data_boundaries() -> Result<
         options().timing,
     )?;
     assert_eq!(sta.objective(), 3);
-    let mut candidates = sta.critical_instances(3, usize::MAX);
+    let mut candidates = sta.critical_instances(3, usize::MAX, |_| true);
     candidates.sort_unstable();
     assert_eq!(candidates, vec![1, 2, 3]);
-    assert_eq!(sta.critical_instances(2, usize::MAX), vec![3]);
+    assert_eq!(sta.critical_instances(2, usize::MAX, |_| true), vec![3]);
     Ok(())
 }
 
