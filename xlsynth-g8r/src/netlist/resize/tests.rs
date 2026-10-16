@@ -1081,6 +1081,50 @@ fn electrical_limit_cannot_be_exchanged_for_timing_gain() -> Result<()> {
 }
 
 #[test]
+fn clearing_electrical_limits_does_not_keep_stale_violation_allowances() -> Result<()> {
+    for limit in ["capacitance", "transition", "fanout"] {
+        let mut library = library()?;
+        let small = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
+        let medium = library.cells.iter().position(|c| c.name == "BUF2").unwrap();
+        let large = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
+        for (cell, value) in [(large, 0.1), (medium, 100.0)] {
+            let output = library.cells[cell]
+                .pins
+                .iter_mut()
+                .find(|pin| pin.direction == PinDirection::Output as i32)
+                .unwrap();
+            match limit {
+                "capacitance" => output.max_capacitance = Some(value),
+                "transition" => output.max_transition = Some(value),
+                "fanout" => output.max_fanout = Some(value),
+                _ => unreachable!(),
+            }
+        }
+        let parsed = read_gv_from_str(
+            "module m(input a, output y); wire b; BUF4 p(.A(a),.Y(b)); BUF1 q(.A(b),.Y(y)); endmodule",
+        )?;
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        // The input already violates a limit. Once a legal substitution clears
+        // it, neither removing nor adding constraints may resurrect that
+        // allowance, even when the violating cell would improve delay.
+        for replacement in [small, medium, small] {
+            assert!(sta.trial(0, replacement, usize::MAX, None, |_| true)?);
+            let before = sta.score();
+            assert!(!sta.trial(0, large, usize::MAX, None, |_| true)?, "{limit}");
+            assert_eq!(sta.cells[0], replacement);
+            assert_eq!(sta.score(), before);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn resizing_clock_drivers_preserves_clock_pin_transition_limits() -> Result<()> {
     let mut library = library()?;
     let ff = library.cells.iter().position(|c| c.name == "DFF1").unwrap();

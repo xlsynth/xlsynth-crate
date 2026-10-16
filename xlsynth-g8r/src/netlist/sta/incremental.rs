@@ -813,9 +813,16 @@ impl<'a> IncrementalSta<'a> {
 
     /// Reports componentwise violations in stable pin-name order. Existing
     /// violations may remain but cannot be worsened by an accepted
-    /// substitution.
+    /// substitution. Unconstrained cells use an empty zero-violation vector.
     fn electrical_violations(&self, i: usize) -> Vec<f64> {
         let cell = &self.lib.library.cells[self.cells[i]];
+        if cell.pins.iter().all(|pin| {
+            pin.max_capacitance.is_none()
+                && pin.max_transition.is_none()
+                && pin.max_fanout.is_none()
+        }) {
+            return Vec::new();
+        }
         let mut pins: SmallVec<[&Pin; 8]> = cell.pins.iter().collect();
         pins.sort_by_key(|p| self.lib.library.resolve_string(&p.name));
         let mut values = Vec::with_capacity(pins.len() * 3);
@@ -1015,11 +1022,11 @@ impl<'a> IncrementalSta<'a> {
             let mut violations = Vec::new();
             for inst in affected {
                 let new = self.electrical_violations(inst);
-                if new
+                let old = self.electrical[inst]
                     .iter()
-                    .zip(&self.electrical[inst])
-                    .any(|(a, b)| *a > *b + 1e-9)
-                {
+                    .copied()
+                    .chain(std::iter::repeat(0.0));
+                if new.iter().zip(old).any(|(a, b)| *a > b + 1e-9) {
                     return Ok(false);
                 }
                 violations.push((inst, new));
