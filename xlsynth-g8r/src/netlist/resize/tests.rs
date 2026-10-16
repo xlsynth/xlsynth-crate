@@ -252,6 +252,39 @@ fn fixed_capture_registers_do_not_consume_timing_candidate_slots() -> Result<()>
 }
 
 #[test]
+fn unaffordable_cells_do_not_hide_area_neutral_timing_candidates() -> Result<()> {
+    let mut library = library()?;
+    for cell in &mut library.cells {
+        if cell.name.starts_with("BUF") {
+            cell.area = 1.0;
+        }
+    }
+    let mut parsed = read_gv_from_str(
+        r#"module m(input clk, input d, output q);
+        wire a,b;
+        DFF1 capture(.CLK(clk),.D(b),.Q(q));
+        DFF1 launch(.CLK(clk),.D(d),.Q(a));
+        BUF1 comb(.A(a),.Y(b));
+        endmodule"#,
+    )?;
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_area_growth: 0.0,
+            max_candidate_sites: 1,
+            max_upsize_rounds: 1,
+            max_downsize_rounds: 0,
+            ..options()
+        },
+    )?;
+    assert_eq!(report.upsize.register_changes, 0);
+    assert_eq!(report.final_area, report.initial_area);
+    assert!(report.final_delay.register_to_register < report.initial_delay.register_to_register);
+    Ok(())
+}
+
+#[test]
 fn cells_without_alternatives_do_not_hide_resizable_fanin() -> Result<()> {
     let mut library = library()?;
     for cell in &mut library.cells {

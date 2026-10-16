@@ -232,7 +232,11 @@ pub fn resize_netlist(
                 sta.critical_instances(objective, options.max_candidate_sites, |i| {
                     let current = sta.cells[i];
                     (options.resize_registers || !sta.is_register(i))
-                        && families.alternatives[current].iter().any(|c| *c != current)
+                        && families.alternatives[current].iter().any(|c| {
+                            *c != current
+                                && area - library.cells[current].area + library.cells[*c].area
+                                    <= area_limit + 1e-12
+                        })
                 })
             } else {
                 let priorities = sta

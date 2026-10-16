@@ -692,8 +692,8 @@ impl<'a> IncrementalSta<'a> {
     /// Visits near-critical fanin by cumulative arrival deficit, once per
     /// round. This is only a search-order heuristic: asymmetric pin arcs
     /// and load/slew effects are accounted for by accurate candidate
-    /// evaluation afterward. Fixed cells are traversed but do not consume
-    /// the limit of selectable candidates.
+    /// evaluation afterward. Ineligible cells are traversed but do not
+    /// consume the limit of selectable candidates.
     pub fn critical_instances(
         &self,
         objective: usize,
