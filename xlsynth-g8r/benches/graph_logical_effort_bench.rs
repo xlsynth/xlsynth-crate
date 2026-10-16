@@ -19,6 +19,7 @@ use xlsynth_g8r::aig::graph_logical_effort::{
     analyze_graph_logical_effort, score_graph_logical_effort,
 };
 use xlsynth_g8r::aig::{AigBitVector, AigNode, GateFn};
+use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_toggle_hotspots::load_aig_artifact;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::ir2gates::{Ir2GatesOptions, ir2gates_from_ir_text};
@@ -47,6 +48,8 @@ struct Args {
     aig: Option<PathBuf>,
     #[arg(long, default_value_t = 5)]
     repeat: usize,
+    #[arg(long, default_value_t = 1)]
+    warmup: usize,
     #[arg(long, default_value_t = 1.0)]
     beta1: f64,
     #[arg(long, default_value_t = 0.0)]
@@ -146,36 +149,50 @@ fn measure(args: Args) {
         beta1: args.beta1,
         beta2: args.beta2,
     };
+    // Match optimizer use: consume delay and destroy the full result within
+    // the timed region. Collect counters and validate the witness separately.
+    let score = || {
+        if args.score_only {
+            score_graph_logical_effort(black_box(&graph), black_box(&options)).delay
+        } else {
+            analyze_graph_logical_effort(black_box(&graph), black_box(&options)).delay
+        }
+    };
+    for _ in 0..args.warmup {
+        black_box(score());
+    }
     let mut samples_ns = Vec::new();
-    let mut previous: Option<Measurement> = None;
+    let mut previous = None;
     for _ in 0..args.repeat {
         let start = Instant::now();
-        let result = if args.score_only {
-            let score = score_graph_logical_effort(black_box(&graph), black_box(&options));
-            samples_ns.push(start.elapsed().as_nanos());
-            assert_eq!(score.stats.traceback_records, 0);
-            Measurement {
-                delay: score.delay,
-                path: None,
-                stats: score.stats,
-            }
-        } else {
-            let analysis = analyze_graph_logical_effort(black_box(&graph), black_box(&options));
-            samples_ns.push(start.elapsed().as_nanos());
-            check_path(&graph, &options, &analysis);
-            Measurement {
-                delay: analysis.delay,
-                path: Some(analysis.path.iter().map(|node| node.id).collect()),
-                stats: analysis.stats,
-            }
-        };
-        if let Some(previous) = &previous {
-            assert_eq!(result.delay, previous.delay);
-            assert_eq!(result.path, previous.path);
+        let delay = black_box(score());
+        samples_ns.push(start.elapsed().as_nanos());
+        if let Some(previous) = previous {
+            assert_eq!(delay, previous);
         }
-        previous = Some(result);
+        previous = Some(delay);
     }
-    let result = previous.unwrap();
+    let result = if args.score_only {
+        let score = score_graph_logical_effort(&graph, &options);
+        assert_eq!(score.stats.traceback_records, 0);
+        Measurement {
+            delay: score.delay,
+            path: None,
+            stats: score.stats,
+        }
+    } else {
+        let analysis = analyze_graph_logical_effort(&graph, &options);
+        check_path(&graph, &options, &analysis);
+        Measurement {
+            delay: analysis.delay,
+            path: Some(analysis.path.iter().map(|node| node.id).collect()),
+            stats: analysis.stats,
+        }
+    };
+    assert_eq!(Some(result.delay), previous);
+    let graph_hash = blake3::hash(&emit_aiger_binary(&graph, false).unwrap())
+        .to_hex()
+        .to_string();
     println!(
         "{}",
         serde_json::json!({
@@ -183,7 +200,8 @@ fn measure(args: Args) {
             "aig": args.aig, "and_count": and_count(&graph),
             "beta1": args.beta1, "beta2": args.beta2, "samples_ns": samples_ns,
             "delay": result.delay, "path": result.path, "score_only": args.score_only,
-            "stats": result.stats,
+            "stats": result.stats, "warmup": args.warmup,
+            "aiger_blake3": graph_hash,
         })
     );
 }
@@ -202,7 +220,7 @@ fn main() {
         beta1: 1.0,
         beta2: 0.0,
     };
-    for size in [128, 256, 512, 1024, 2048] {
+    for size in [128, 512, 2048, 8192, 32768] {
         let graph = fibonacci_graph(size);
         group.bench_with_input(BenchmarkId::new("fibonacci", size), &graph, |b, graph| {
             b.iter(|| analyze_graph_logical_effort(black_box(graph), black_box(&options)));

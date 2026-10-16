@@ -9,7 +9,15 @@ use xlsynth_g8r::aig::graph_logical_effort::{
 };
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 
-const LOAD_MODELS: [(f64, f64); 5] = [(1.0, 0.0), (1.0, 1.0), (0.5, 0.1), (0.1, 0.0), (0.0, 1.0)];
+const LOAD_MODELS: [(f64, f64); 7] = [
+    (1.0, 0.0),
+    (1.0, 1.0),
+    (0.5, 0.1),
+    (0.1, 0.0),
+    (0.0, 1.0),
+    (0.0, 0.0),
+    (-1.0, 1.0),
+];
 
 /// Counts input edges, including both pins of an AND with repeated operands.
 fn fanouts(graph: &GateFn) -> Vec<usize> {
@@ -243,7 +251,7 @@ fn logical_effort_matches_enumeration_on_all_tiny_dags() {
             }
         }
     }
-    assert_eq!(comparisons, 37_265);
+    assert_eq!(comparisons, 52_171);
 }
 
 /// Disables simplification so every step really adds the reconvergent AND.
@@ -281,20 +289,129 @@ fn reconvergent_chain_matches_path_enumeration() {
 }
 
 #[test]
-fn reconvergent_chain_indexes_lengths_and_releases_numeric_frontiers() {
-    let size = 128;
+fn reconvergent_chain_hulls_and_traceback_scale_linearly() {
+    for size in [128, 512, 2048, 8192] {
+        let graph = fibonacci_graph(size);
+        for (beta1, beta2) in LOAD_MODELS {
+            let options = GraphLogicalEffortOptions { beta1, beta2 };
+            let result = analyze_graph_logical_effort(&graph, &options);
+            let score = score_graph_logical_effort(&graph, &options);
+            assert_eq!(result.delay, score.delay);
+            assert_eq!(result.stats.candidates, score.stats.candidates);
+            assert_eq!(score.stats.traceback_records, 0);
+            assert!(result.stats.max_frontier_len <= 3);
+            assert!(result.stats.candidates <= 4 * size);
+            assert!(result.stats.total_frontier_states <= 2 * size + 3);
+            assert!(result.stats.peak_frontier_slots <= 7);
+            assert!(result.stats.traceback_records <= 2 * size + 3);
+        }
+    }
+}
+
+#[test]
+fn finite_extreme_loads_and_mixed_sign_coefficients_preserve_witnesses() {
+    let graph = fibonacci_graph(12);
+    for beta1 in [f64::from_bits(1), 1e-300, 1e-100, 1e100, 1e300] {
+        let options = GraphLogicalEffortOptions { beta1, beta2: 0.0 };
+        let result = analyze_graph_logical_effort(&graph, &options);
+        let score = score_graph_logical_effort(&graph, &options);
+        assert_eq!(score.delay, result.delay);
+        assert!(result.delay.is_finite());
+        let counts = fanouts(&graph);
+        let mut log_f = 0.0;
+        for edge in result.path.windows(2) {
+            assert!(graph.gates[edge[1].id].args().any(|arg| arg == edge[0]));
+            log_f += (4.0_f64 / 3.0).ln() + (beta1 * counts[edge[0].id] as f64).ln();
+        }
+        let n = (result.path.len() - 1) as f64;
+        let witness_delay = n * (log_f / n).exp() + 2.0 * n;
+        assert!((witness_delay - result.delay).abs() <= 1e-11 * result.delay);
+    }
+    for (beta1, beta2) in [(2.0, -0.1), (-0.1, 1.0), (0.75, 0.0)] {
+        assert_exact_analysis(&graph, &GraphLogicalEffortOptions { beta1, beta2 });
+    }
+}
+
+#[test]
+fn zero_effort_keeps_the_longest_path_and_its_witness() {
+    for size in [1, 2, 12, 20] {
+        let graph = fibonacci_graph(size);
+        for (beta1, beta2) in [(0.0, 0.0), (2.0, -1.0), (-1.0, 1.0)] {
+            assert_exact_analysis(&graph, &GraphLogicalEffortOptions { beta1, beta2 });
+        }
+        let result = analyze_graph_logical_effort(
+            &graph,
+            &GraphLogicalEffortOptions {
+                beta1: 0.0,
+                beta2: 0.0,
+            },
+        );
+        assert_eq!(result.delay, 2.0 * size as f64);
+        assert_eq!(result.path.len(), size + 1);
+        assert_eq!(result.stats.max_frontier_len, 1);
+    }
+}
+
+#[test]
+fn overflowing_final_delay_still_has_a_witness() {
+    let graph = fibonacci_graph(64);
     let result = analyze_graph_logical_effort(
-        &fibonacci_graph(size),
+        &graph,
         &GraphLogicalEffortOptions {
-            beta1: 1.0,
+            beta1: 1e307,
             beta2: 0.0,
         },
     );
-    // Constant p=2*n leaves one Pareto state per length, so each extension
-    // needs at most two comparisons regardless of the number of lengths.
-    assert!(result.stats.dominance_comparisons <= 2 * result.stats.candidates);
-    assert!(result.stats.peak_frontier_slots < 8 * size);
-    // Traceback remains quadratic; don't confuse released numeric slots with
-    // a linear bound on total memory.
-    assert!(result.stats.traceback_records > size * size / 8);
+    assert_eq!(result.delay, f64::INFINITY);
+    assert!(result.path.len() > 2);
+    for edge in result.path.windows(2) {
+        assert!(graph.gates[edge[1].id].args().any(|arg| arg == edge[0]));
+    }
+}
+
+#[test]
+#[should_panic(expected = "finite nonnegative pin loads")]
+fn nonfinite_pin_load_is_rejected() {
+    score_graph_logical_effort(
+        &fibonacci_graph(1),
+        &GraphLogicalEffortOptions {
+            beta1: f64::INFINITY,
+            beta2: 0.0,
+        },
+    );
+}
+
+#[test]
+fn finite_and_zero_effort_paths_compete_by_delay() {
+    for depth in [1, 8] {
+        let mut gb = GateBuilder::new("mixed_zero".into(), GateBuilderOptions::no_opt());
+        let x = gb.add_input("x".into(), depth + 3);
+        // Both pins and both users keep the short path's loads positive for
+        // beta=(-1,1); every edge in the long branch has a zero-load source.
+        let short = gb.add_and_binary(*x.get_lsb(0), *x.get_lsb(0));
+        let mut long = *x.get_lsb(1);
+        for i in 0..depth {
+            long = gb.add_and_binary(long, *x.get_lsb(i + 2));
+        }
+        let result = gb.add_and_binary(short, long);
+        let side = gb.add_and_binary(short, *x.get_lsb(depth + 2));
+        gb.add_output(
+            "result".into(),
+            AigBitVector::from_lsb_is_index_0(&[result, side]),
+        );
+        let graph = gb.build();
+        let options = GraphLogicalEffortOptions {
+            beta1: -1.0,
+            beta2: 1.0,
+        };
+        assert_exact_analysis(&graph, &options);
+        let analysis = analyze_graph_logical_effort(&graph, &options);
+        if depth == 8 {
+            assert_eq!(analysis.delay, 18.0);
+            assert_eq!(analysis.path.len(), 10);
+        } else {
+            assert!((analysis.delay - 28.0 / 3.0).abs() < 1e-9);
+            assert_eq!(analysis.path.len(), 3);
+        }
+    }
 }
