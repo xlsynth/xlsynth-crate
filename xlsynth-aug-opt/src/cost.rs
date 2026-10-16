@@ -5,7 +5,7 @@
 use xlsynth_g8r::aig::dce::dce;
 use xlsynth_g8r::aig::gate::{AigNode, GateFn};
 use xlsynth_g8r::aig::graph_logical_effort::{
-    GraphLogicalEffortOptions, analyze_graph_logical_effort,
+    GraphLogicalEffortOptions, score_graph_logical_effort,
 };
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, IrRegion, gatify_prepared_fn, gatify_region};
@@ -79,7 +79,7 @@ fn measure_gate_cost(
         // The analyzer uses -1 when no logic gates remain.
         0.0
     } else {
-        analyze_graph_logical_effort(gate_fn, graph_le_options).delay
+        score_graph_logical_effort(gate_fn, graph_le_options).delay
     };
     if !delay.is_finite() || delay < 0.0 {
         return Err("gate cost requires finite nonnegative graph logical effort".to_string());

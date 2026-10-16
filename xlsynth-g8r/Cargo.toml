@@ -33,6 +33,7 @@ cadical = "0.1.16"
 z3 = { version = "0.12", optional = true }
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
+num-bigint = "0.4"
 prost = "0.14.4"
 prost-types = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["text-format"] }
@@ -129,4 +130,8 @@ harness = false
 
 [[bench]]
 name = "dynamic_depth_bench"
+harness = false
+
+[[bench]]
+name = "graph_logical_effort_bench"
 harness = false

@@ -10,7 +10,7 @@ use clap::ArgMatches;
 use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::graph_logical_effort::{
-    GraphLogicalEffortOptions, analyze_graph_logical_effort,
+    GraphLogicalEffortOptions, score_graph_logical_effort,
 };
 use xlsynth_g8r::aig::logical_effort::{self, compute_logical_effort_min_delay};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
@@ -77,7 +77,7 @@ pub fn handle_aig_stats(matches: &ArgMatches, _config: &Option<ToolchainConfig>)
         compute_logical_effort_min_delay(&gate_fn, &logical_effort::Options::default());
     let graph_logical_effort_worst_case_delay = if compute_graph_logical_effort {
         Some(
-            analyze_graph_logical_effort(
+            score_graph_logical_effort(
                 &gate_fn,
                 &GraphLogicalEffortOptions {
                     beta1: graph_logical_effort_beta1,
