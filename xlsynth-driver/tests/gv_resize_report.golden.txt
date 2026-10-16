@@ -24,13 +24,15 @@
     "trials": 2,
     "accepted": 1,
     "register_changes": 0,
-    "propagated_instances": 2
+    "propagated_instances": 2,
+    "stop_reason": "no_improvement"
   },
   "downsize": {
     "trials": 1,
     "accepted": 0,
     "register_changes": 0,
-    "propagated_instances": 1
+    "propagated_instances": 1,
+    "stop_reason": "no_improvement"
   },
   "budget_exhausted": false
 }

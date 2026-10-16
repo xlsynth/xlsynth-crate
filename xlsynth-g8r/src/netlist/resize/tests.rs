@@ -117,6 +117,203 @@ fn resize(
 }
 
 #[test]
+fn cell_families_share_ordered_alternatives_including_dont_use_sources() -> Result<()> {
+    let mut library = library()?;
+    let small = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
+    let medium = library.cells.iter().position(|c| c.name == "BUF2").unwrap();
+    let large = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
+    library.cells[medium].dont_use = Some(true);
+    let families = CellFamilies::new(&library);
+    assert_eq!(families.alternatives(small), &[small, large]);
+    assert!(std::ptr::eq(
+        families.alternatives(small),
+        families.alternatives(medium)
+    ));
+    assert!(std::ptr::eq(
+        families.alternatives(small),
+        families.alternatives(large)
+    ));
+    Ok(())
+}
+
+#[test]
+fn packed_signatures_cover_more_than_one_truth_word() -> Result<()> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let mut cell = builder
+        .cells
+        .iter()
+        .find(|c| c.name == "AND1")
+        .unwrap()
+        .clone();
+    let input = cell
+        .pins
+        .iter()
+        .find(|p| p.direction == PinDirection::Input as i32)
+        .unwrap()
+        .clone();
+    for name in ["C", "D", "E", "F", "G"] {
+        let mut pin = input.clone();
+        pin.name = builder.intern_string(name)?;
+        cell.pins.push(pin);
+    }
+    let output = cell
+        .pins
+        .iter()
+        .position(|p| p.direction == PinDirection::Output as i32)
+        .unwrap();
+    cell.pins[output].function = builder.intern_string("A & B & C & D & E & F & G")?;
+    let equivalent = builder.intern_string("G & F & E & D & C & B & A")?;
+    let different = builder.intern_string("A & B & C & D & E & F & !G")?;
+    let library = builder.finish();
+    let original = cell_signature(&cell, &library).unwrap();
+    assert_eq!(
+        original.pins.iter().find(|p| p.name == "Y").unwrap().truth,
+        Some(vec![0, 1 << 63])
+    );
+    cell.pins[output].function = equivalent;
+    assert_eq!(cell_signature(&cell, &library).unwrap(), original);
+    cell.pins[output].function = different;
+    assert_ne!(cell_signature(&cell, &library).unwrap(), original);
+    cell.pins.reverse();
+    assert_ne!(cell_signature(&cell, &library).unwrap(), original);
+    Ok(())
+}
+
+#[test]
+fn family_and_search_order_do_not_depend_on_library_or_pin_order() -> Result<()> {
+    let mut library = library()?;
+    let source = "module m(input a, output y); wire n; BUF1 first(.A(a),.Y(n)); BUF1 second(.A(n),.Y(y)); endmodule";
+    let mut before = read_gv_from_str(source)?;
+    let before_report = resize(&mut before, &library, &options())?;
+    library.cells.reverse();
+    for cell in &mut library.cells {
+        cell.pins.reverse();
+    }
+    let mut after = read_gv_from_str(source)?;
+    let after_report = resize(&mut after, &library, &options())?;
+    let before_cells: Vec<_> = before.modules[0]
+        .instances
+        .iter()
+        .map(|i| before.interner.resolve(i.type_name).unwrap())
+        .collect();
+    let after_cells: Vec<_> = after.modules[0]
+        .instances
+        .iter()
+        .map(|i| after.interner.resolve(i.type_name).unwrap())
+        .collect();
+    assert_eq!(before_cells, after_cells);
+    assert_eq!(
+        serde_json::to_value(before_report)?,
+        serde_json::to_value(after_report)?
+    );
+    Ok(())
+}
+
+#[test]
+fn phase_stop_reasons_distinguish_reservation_from_overall_work_limits() -> Result<()> {
+    let library = library()?;
+    // An unobserved minimum-sized cell has no timing or recovery candidates.
+    let source =
+        "module m(input a, output y); wire unused; BUF1 b(.A(a),.Y(unused)); assign y=a; endmodule";
+    // An observed cell has a useful timing alternative. Zero-sized reserved
+    // shares can stop that phase without consuming the overall work budget.
+    let timed = "module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule";
+    for (
+        max_trials,
+        max_propagated_instances,
+        max_upsize_rounds,
+        max_downsize_rounds,
+        expected_timing,
+        expected_area,
+        exhausted,
+    ) in [
+        (
+            6,
+            1000,
+            0,
+            0,
+            ResizeStopReason::Disabled,
+            ResizeStopReason::Disabled,
+            false,
+        ),
+        (
+            0,
+            1000,
+            1,
+            0,
+            ResizeStopReason::TrialLimit,
+            ResizeStopReason::Disabled,
+            true,
+        ),
+        (
+            6,
+            0,
+            1,
+            0,
+            ResizeStopReason::PropagationLimit,
+            ResizeStopReason::Disabled,
+            true,
+        ),
+        (
+            2,
+            1000,
+            1,
+            1,
+            ResizeStopReason::TrialLimit,
+            ResizeStopReason::NoImprovement,
+            false,
+        ),
+        (
+            6,
+            2,
+            1,
+            1,
+            ResizeStopReason::PropagationLimit,
+            ResizeStopReason::NoImprovement,
+            false,
+        ),
+        (
+            3,
+            1000,
+            1,
+            0,
+            ResizeStopReason::RoundLimit,
+            ResizeStopReason::Disabled,
+            false,
+        ),
+    ] {
+        let mut parsed = read_gv_from_str(timed)?;
+        let report = resize(
+            &mut parsed,
+            &library,
+            &ResizeOptions {
+                max_trials,
+                max_propagated_instances,
+                max_upsize_rounds,
+                max_downsize_rounds,
+                ..options()
+            },
+        )?;
+        assert_eq!(report.upsize.stop_reason, expected_timing);
+        assert_eq!(report.downsize.stop_reason, expected_area);
+        assert_eq!(report.budget_exhausted, exhausted);
+    }
+    let mut parsed = read_gv_from_str(source)?;
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_trials: 6,
+            ..options()
+        },
+    )?;
+    assert_eq!(report.upsize.stop_reason, ResizeStopReason::NoImprovement);
+    assert_eq!(report.downsize.stop_reason, ResizeStopReason::NoImprovement);
+    assert!(!report.budget_exhausted);
+    Ok(())
+}
+
+#[test]
 fn timing_then_area_preserves_wires_and_polarity() -> Result<()> {
     let library = library()?;
     let mut parsed = read_gv_from_str(
@@ -558,9 +755,15 @@ fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
     let initial = sta.score();
     for instance in [0, 3] {
         let before = sta.score();
-        assert!(!sta.trial(instance, larger, usize::MAX, None, |_| false)?);
+        assert_eq!(
+            sta.trial(instance, larger, usize::MAX, None, |_| false)?,
+            TrialOutcome::Rejected
+        );
         assert_eq!(sta.score(), before);
-        assert!(sta.trial(instance, larger, usize::MAX, None, |_| true)?);
+        assert_eq!(
+            sta.trial(instance, larger, usize::MAX, None, |_| true)?,
+            TrialOutcome::Accepted
+        );
         let mut changed = original.clone();
         let mut interner = parsed.interner.clone();
         for (instance, cell) in changed.instances.iter_mut().zip(&sta.cells) {
@@ -651,11 +854,11 @@ fn dont_use_and_semantic_mismatches_are_not_substituted() -> Result<()> {
     }
     let families = CellFamilies::new(&library);
     let idx = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
-    assert_eq!(families.alternatives[idx], vec![idx]);
+    assert_eq!(families.alternatives(idx), &[idx]);
     let dff = library.cells.iter().position(|c| c.name == "DFF2").unwrap();
     library.cells[dff].sequential[0].clock_expr = "!CLK".to_string();
     let families = CellFamilies::new(&library);
-    assert_eq!(families.alternatives[dff], vec![dff]);
+    assert_eq!(families.alternatives(dff), &[dff]);
     Ok(())
 }
 
@@ -698,7 +901,7 @@ fn random_substitution_sequences_match_full_timing_and_rollback() -> Result<()> 
     )?;
     for iteration in 0..250 {
         let i = rng.gen_range(0..sta.cells.len());
-        let alternatives = &families.alternatives[sta.cells[i]];
+        let alternatives = families.alternatives(sta.cells[i]);
         let replacement = alternatives[rng.gen_range(0..alternatives.len())];
         let accept = iteration % 3 != 0;
         let old = sta.score();
@@ -712,7 +915,7 @@ fn random_substitution_sequences_match_full_timing_and_rollback() -> Result<()> 
         assert_eq!(committed, expected);
         assert_eq!(sta.score(), full_propagation.score());
         assert_eq!(sta.cells, full_propagation.cells);
-        if !committed {
+        if committed != TrialOutcome::Accepted {
             assert_eq!(sta.score(), old);
             assert_eq!(sta.cells, old_cells);
         }
@@ -762,9 +965,15 @@ fn multi_output_resizing_updates_both_cones_and_restores_rejected_trials() -> Re
             options().timing,
         )?;
         let before = sta.score();
-        assert!(!sta.trial(0, larger, usize::MAX, None, |_| false)?);
+        assert_eq!(
+            sta.trial(0, larger, usize::MAX, None, |_| false)?,
+            TrialOutcome::Rejected
+        );
         assert_eq!(sta.score(), before);
-        assert!(sta.trial(0, larger, usize::MAX, None, |_| true)?);
+        assert_eq!(
+            sta.trial(0, larger, usize::MAX, None, |_| true)?,
+            TrialOutcome::Accepted
+        );
         let mut changed = parsed.modules[0].clone();
         let mut interner = parsed.interner.clone();
         changed.instances[0].type_name = interner.get_or_intern("DUAL4");
@@ -802,8 +1011,8 @@ fn multi_output_families_compare_every_output_function() -> Result<()> {
         .position(|c| c.name == "DUAL4")
         .unwrap();
     assert_eq!(
-        CellFamilies::new(&library).alternatives[small],
-        vec![small, medium, large]
+        CellFamilies::new(&library).alternatives(small),
+        &[small, medium, large]
     );
     let positive = library.cells[large]
         .pins
@@ -818,10 +1027,10 @@ fn multi_output_families_compare_every_output_function() -> Result<()> {
         .unwrap();
     library.cells[large].pins[negative].function = positive;
     assert_eq!(
-        CellFamilies::new(&library).alternatives[small],
-        vec![small, medium]
+        CellFamilies::new(&library).alternatives(small),
+        &[small, medium]
     );
-    assert_eq!(CellFamilies::new(&library).alternatives[large], vec![large]);
+    assert_eq!(CellFamilies::new(&library).alternatives(large), &[large]);
     Ok(())
 }
 
@@ -896,16 +1105,24 @@ fn rejection_and_budget_rollback_restore_exact_timing() -> Result<()> {
     let original_score = sta.score();
     let original_cells = sta.cells.clone();
     let larger = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
-    assert!(!sta.trial(1, larger, usize::MAX, None, |_| false)?);
+    assert_eq!(
+        sta.trial(1, larger, usize::MAX, None, |_| false)?,
+        TrialOutcome::Rejected
+    );
     assert_eq!(sta.score(), original_score);
     assert_eq!(sta.cells, original_cells);
-    let budget = sta.propagated + 1;
-    assert!(!sta.trial(1, larger, budget, None, |_| true)?);
-    assert!(sta.budget_exhausted);
+    let budget = sta.propagated_instances() + 1;
+    assert_eq!(
+        sta.trial(1, larger, budget, None, |_| true)?,
+        TrialOutcome::PropagationLimit
+    );
     assert_eq!(sta.score(), original_score);
     assert_eq!(sta.cells, original_cells);
     // A subsequent trial must not inherit any rejected or aborted work.
-    assert!(sta.trial(1, larger, usize::MAX, None, |_| true)?);
+    assert_eq!(
+        sta.trial(1, larger, usize::MAX, None, |_| true)?,
+        TrialOutcome::Accepted
+    );
     let mut module = parsed.modules[0].clone();
     let mut interner = parsed.interner.clone();
     module.instances[1].type_name = interner.get_or_intern("BUF4");
@@ -949,18 +1166,23 @@ fn settled_output_violation_rejects_before_propagating_unrelated_logic() -> Resu
             .iter()
             .position(|cell| cell.name == if register_launch { "DFF1" } else { "BUF1" })
             .unwrap();
-        assert!(!sta.trial(0, weak, usize::MAX, None, |timing| {
-            timing.score().within(before)
-        })?);
-        let full_work = sta.propagated;
+        assert_eq!(
+            sta.trial(0, weak, usize::MAX, None, |timing| {
+                timing.score().within(before)
+            })?,
+            TrialOutcome::Rejected
+        );
+        let full_work = sta.propagated_instances();
         assert!(full_work > 1);
-        assert!(!sta.trial(0, weak, usize::MAX, Some(before), |timing| {
-            timing.score().within(before)
-        })?);
-        assert!(sta.propagated - full_work < full_work);
+        assert_eq!(
+            sta.trial(0, weak, usize::MAX, Some(before), |timing| {
+                timing.score().within(before)
+            })?,
+            TrialOutcome::Rejected
+        );
+        assert!(sta.propagated_instances() - full_work < full_work);
         assert_eq!(sta.score(), before);
         assert_eq!(sta.cells, original);
-        assert!(!sta.budget_exhausted);
     }
     Ok(())
 }
@@ -992,18 +1214,23 @@ fn capture_limit_rejection_precedes_final_acceptance_and_restores_timing() -> Re
             .iter()
             .position(|cell| cell.name == if register_launch { "DFF1" } else { "BUF1" })
             .unwrap();
-        assert!(!sta.trial(0, weak, usize::MAX, None, |timing| {
-            timing.score().within(before)
-        })?);
+        assert_eq!(
+            sta.trial(0, weak, usize::MAX, None, |timing| {
+                timing.score().within(before)
+            })?,
+            TrialOutcome::Rejected
+        );
         let mut accepted_called = false;
-        assert!(!sta.trial(0, weak, usize::MAX, Some(before), |_| {
-            accepted_called = true;
-            true
-        })?);
+        assert_eq!(
+            sta.trial(0, weak, usize::MAX, Some(before), |_| {
+                accepted_called = true;
+                true
+            })?,
+            TrialOutcome::Rejected
+        );
         assert!(!accepted_called);
         assert_eq!(sta.score(), before);
         assert_eq!(sta.cells, cells);
-        assert!(!sta.budget_exhausted);
     }
     Ok(())
 }
@@ -1033,7 +1260,10 @@ fn failed_candidate_restores_upstream_load_and_timing() -> Result<()> {
     assert!(sta.trial(1, bad, usize::MAX, None, |_| true).is_err());
     assert_eq!(sta.score(), before);
     let good = library.cells.iter().position(|c| c.name == "BUF2").unwrap();
-    assert!(sta.trial(1, good, usize::MAX, None, |_| true)?);
+    assert_eq!(
+        sta.trial(1, good, usize::MAX, None, |_| true)?,
+        TrialOutcome::Accepted
+    );
     let mut module = parsed.modules[0].clone();
     let mut interner = parsed.interner.clone();
     module.instances[1].type_name = interner.get_or_intern("BUF2");
@@ -1071,8 +1301,9 @@ fn electrical_limit_cannot_be_exchanged_for_timing_gain() -> Result<()> {
             options().timing,
         )?;
         let before = sta.score();
-        assert!(
-            !sta.trial(0, larger, usize::MAX, None, |_| true)?,
+        assert_eq!(
+            sta.trial(0, larger, usize::MAX, None, |_| true)?,
+            TrialOutcome::Rejected,
             "{limit}"
         );
         assert_eq!(sta.score(), before);
@@ -1114,9 +1345,16 @@ fn clearing_electrical_limits_does_not_keep_stale_violation_allowances() -> Resu
         // it, neither removing nor adding constraints may resurrect that
         // allowance, even when the violating cell would improve delay.
         for replacement in [small, medium, small] {
-            assert!(sta.trial(0, replacement, usize::MAX, None, |_| true)?);
+            assert_eq!(
+                sta.trial(0, replacement, usize::MAX, None, |_| true)?,
+                TrialOutcome::Accepted
+            );
             let before = sta.score();
-            assert!(!sta.trial(0, large, usize::MAX, None, |_| true)?, "{limit}");
+            assert_eq!(
+                sta.trial(0, large, usize::MAX, None, |_| true)?,
+                TrialOutcome::Rejected,
+                "{limit}"
+            );
             assert_eq!(sta.cells[0], replacement);
             assert_eq!(sta.score(), before);
         }
@@ -1149,7 +1387,10 @@ fn resizing_clock_drivers_preserves_clock_pin_transition_limits() -> Result<()> 
     let before = sta.score();
     let cells = sta.cells.clone();
     let weak = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
-    assert!(!sta.trial(0, weak, usize::MAX, None, |_| true)?);
+    assert_eq!(
+        sta.trial(0, weak, usize::MAX, None, |_| true)?,
+        TrialOutcome::Rejected
+    );
     assert_eq!(sta.score(), before);
     assert_eq!(sta.cells, cells);
     Ok(())
@@ -1215,10 +1456,17 @@ fn resizing_a_consumer_preserves_its_drivers_electrical_limits() -> Result<()> {
             options().timing,
         )?;
         let before = sta.score();
-        assert!(!sta.trial(1, large, usize::MAX, None, |_| true)?, "{limit}");
+        assert_eq!(
+            sta.trial(1, large, usize::MAX, None, |_| true)?,
+            TrialOutcome::Rejected,
+            "{limit}"
+        );
         assert_eq!(sta.score(), before);
         assert_eq!(sta.cells, vec![small, small]);
-        assert!(sta.trial(0, large, usize::MAX, None, |_| true)?);
+        assert_eq!(
+            sta.trial(0, large, usize::MAX, None, |_| true)?,
+            TrialOutcome::Accepted
+        );
     }
     Ok(())
 }
@@ -1255,7 +1503,10 @@ fn resizing_a_driver_preserves_combinational_and_capture_pin_slew_limits() -> Re
         let before = sta.score();
         let cells_before = sta.cells.clone();
         let replacement = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
-        assert!(!sta.trial(0, replacement, usize::MAX, None, |_| true)?);
+        assert_eq!(
+            sta.trial(0, replacement, usize::MAX, None, |_| true)?,
+            TrialOutcome::Rejected
+        );
         assert_eq!(sta.score(), before);
         assert_eq!(sta.cells, cells_before);
     }

@@ -24,6 +24,21 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
 
+pub(crate) const TIMING_COMPARISON_TOLERANCE: f64 = 1e-9;
+pub(crate) const STA_VERIFICATION_TOLERANCE: f64 = 1e-7;
+const ELECTRICAL_COMPARISON_TOLERANCE: f64 = 1e-9;
+const NEAR_CRITICAL_ENDPOINT_LIMIT: usize = 32;
+const NEAR_CRITICAL_WINDOW_FRACTION: f64 = 0.05;
+
+/// Transaction result; rejected and work-limited trials both restore the
+/// incumbent, but only the latter stops the caller's current search phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrialOutcome {
+    Accepted,
+    Rejected,
+    PropagationLimit,
+}
+
 /// Measures all four launch/capture classes independently with full `gv-stats`
 /// STA, avoiding a separate signoff timing implementation in the optimizer.
 pub fn measure_boundary_delays(
@@ -94,7 +109,7 @@ impl BoundaryDelays {
         self.values()
             .into_iter()
             .zip(limits.values())
-            .all(|(x, limit)| x <= limit + 1e-9)
+            .all(|(x, limit)| x <= limit + TIMING_COMPARISON_TOLERANCE)
     }
 }
 
@@ -177,7 +192,8 @@ pub(crate) struct TimingTieBreak {
 impl TimingTieBreak {
     pub fn improves(self, old: Self) -> bool {
         self.worst_count < old.worst_count
-            || (self.worst_count == old.worst_count && self.near_sum < old.near_sum - 1e-9)
+            || (self.worst_count == old.worst_count
+                && self.near_sum < old.near_sum - TIMING_COMPARISON_TOLERANCE)
     }
 
     /// Returns a dimensionless progress ratio for area-efficiency ranking.
@@ -242,8 +258,7 @@ pub(crate) struct IncrementalSta<'a> {
     evaluation: TimingEvaluationContext<'a>,
     registered: bool,
     literal: SignalTimingSet,
-    pub propagated: usize,
-    pub budget_exhausted: bool,
+    propagated: usize,
 }
 
 impl<'a> IncrementalSta<'a> {
@@ -502,7 +517,6 @@ impl<'a> IncrementalSta<'a> {
             registered,
             literal,
             propagated: 0,
-            budget_exhausted: false,
         };
         for bit in 0..n {
             sta.capacitances[bit] = sta.compute_load(bit)?;
@@ -518,7 +532,7 @@ impl<'a> IncrementalSta<'a> {
             sta.electrical[i] = sta.electrical_violations(i);
         }
         for (computed, expected) in sta.score().values().into_iter().zip(reference.values()) {
-            if (computed - expected).abs() > 1e-7 {
+            if (computed - expected).abs() > STA_VERIFICATION_TOLERANCE {
                 return Err(anyhow!(
                     "incremental/full STA preparation mismatch: {computed} versus {expected}"
                 ));
@@ -681,12 +695,23 @@ impl<'a> IncrementalSta<'a> {
         let scores = &self.scores[objective];
         TimingTieBreak {
             worst_count: scores.worst_count,
-            near_sum: scores.values.iter().rev().take(32).map(|key| key.0).sum(),
+            near_sum: scores
+                .values
+                .iter()
+                .rev()
+                .take(NEAR_CRITICAL_ENDPOINT_LIMIT)
+                .map(|key| key.0)
+                .sum(),
         }
     }
 
     pub fn is_register(&self, i: usize) -> bool {
         self.instances[i].sequential
+    }
+
+    /// Cumulative propagation work, including rejected and interrupted trials.
+    pub fn propagated_instances(&self) -> usize {
+        self.propagated
     }
 
     /// Visits near-critical fanin by cumulative arrival deficit, once per
@@ -706,8 +731,8 @@ impl<'a> IncrementalSta<'a> {
             .values
             .iter()
             .rev()
-            .take(32)
-            .filter(|k| k.0 >= worst - worst.abs() * 0.05)
+            .take(NEAR_CRITICAL_ENDPOINT_LIMIT)
+            .filter(|k| k.0 >= worst - worst.abs() * NEAR_CRITICAL_WINDOW_FRACTION)
         {
             match self.endpoints[key.1] {
                 Endpoint::Output(bit) => {
@@ -897,12 +922,12 @@ impl<'a> IncrementalSta<'a> {
         budget: usize,
         limits: Option<BoundaryDelays>,
         accept: impl FnOnce(&Self) -> bool,
-    ) -> Result<bool> {
+    ) -> Result<TrialOutcome> {
         let old_cell = self.cells[i];
         let old_order = self.orders[i].clone();
         let mut undo = Undo::default();
         self.cells[i] = cell;
-        let result = (|| -> Result<bool> {
+        let result = (|| -> Result<TrialOutcome> {
             self.orders[i] = if self.instances[i].sequential {
                 self.lib.library.cells[cell]
                     .pins
@@ -954,8 +979,7 @@ impl<'a> IncrementalSta<'a> {
             }
             while let Some((_, inst)) = queue.pop_first() {
                 if self.propagated >= budget {
-                    self.budget_exhausted = true;
-                    return Ok(false);
+                    return Ok(TrialOutcome::PropagationLimit);
                 }
                 self.propagated += 1;
                 let start = undo.bits.len();
@@ -984,9 +1008,10 @@ impl<'a> IncrementalSta<'a> {
                             if let Some(arrival) = timing[*bit]
                                 .as_ref()
                                 .and_then(SignalTimingSet::worst_arrival_candidate)
-                                && arrival.timing.arrival > limits.values()[mode * 2] + 1e-9
+                                && arrival.timing.arrival
+                                    > limits.values()[mode * 2] + TIMING_COMPARISON_TOLERANCE
                             {
-                                return Ok(false);
+                                return Ok(TrialOutcome::Rejected);
                             }
                         }
                     }
@@ -1006,13 +1031,14 @@ impl<'a> IncrementalSta<'a> {
                         usize::from(matches!(self.endpoints[endpoint], Endpoint::Capture(_)));
                     if value.iter().enumerate().any(|(mode, arrival)| {
                         arrival.is_some_and(|arrival| {
-                            arrival > limits.values()[mode * 2 + capture] + 1e-9
+                            arrival
+                                > limits.values()[mode * 2 + capture] + TIMING_COMPARISON_TOLERANCE
                         })
                     }) {
                         // All input propagation has settled. Stop at the first
                         // failing endpoint instead of evaluating unrelated
                         // captures and updating scores for a rejected trial.
-                        return Ok(false);
+                        return Ok(TrialOutcome::Rejected);
                     }
                 }
                 undo.endpoints
@@ -1026,20 +1052,24 @@ impl<'a> IncrementalSta<'a> {
                     .iter()
                     .copied()
                     .chain(std::iter::repeat(0.0));
-                if new.iter().zip(old).any(|(a, b)| *a > b + 1e-9) {
-                    return Ok(false);
+                if new
+                    .iter()
+                    .zip(old)
+                    .any(|(a, b)| *a > b + ELECTRICAL_COMPARISON_TOLERANCE)
+                {
+                    return Ok(TrialOutcome::Rejected);
                 }
                 violations.push((inst, new));
             }
             if !accept(self) {
-                return Ok(false);
+                return Ok(TrialOutcome::Rejected);
             }
             for (inst, new) in violations {
                 self.electrical[inst] = new;
             }
-            Ok(true)
+            Ok(TrialOutcome::Accepted)
         })();
-        if !matches!(result, Ok(true)) {
+        if !matches!(result, Ok(TrialOutcome::Accepted)) {
             self.cells[i] = old_cell;
             self.orders[i] = old_order;
             for (bit, values) in undo.bits.into_iter().rev() {

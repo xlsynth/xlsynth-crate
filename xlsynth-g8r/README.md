@@ -360,6 +360,15 @@ these are work bounds rather than a wall-clock deadline or a local-optimality
 guarantee. The default area allowance is 2% of the original input area and never
 compounds across moves. `ResizeReport` records initial, upsized, and final area and
 boundary delays, accepted moves (including FF changes), work, and budget exhaustion.
+Each phase reports `stop_reason`: `disabled`, `no_improvement`, `round_limit`,
+`trial_limit`, or `propagation_limit`. `no_improvement` refers only to the bounded
+candidate search, not proof of local optimality. The timing phase reserves two
+thirds of the shared work for recovery when recovery is enabled. Hitting that
+phase reservation is distinct from `budget_exhausted`, which is true only when
+a work-limited phase reaches an overall trial or propagation limit.
+The existing `upsize`/`downsize` report fields and round-option names refer to the
+timing-search/area-recovery phases respectively; timing search may move in either
+size direction.
 Set `resize_registers: false` to freeze FFs. Library callers supply `StaOptions`
 explicitly when they want a particular IO model; the `gv-resize` CLI defaults its
 output load from the library's `default_output_load` metadata.

@@ -1181,7 +1181,15 @@ cutoffs.
   for area recovery when both phases are enabled.
 - `--no-register-resize`: leave FF cells fixed; default permits resizing.
 - `--report-json <PATH>`: deterministic before/after boundary timing, cell area,
-  accepted moves, propagation counts, and budget-exhaustion status.
+  accepted moves, propagation counts, per-phase stopping reasons, and overall
+  budget-exhaustion status. Phase reasons are `disabled`, `no_improvement`,
+  `round_limit`, `trial_limit`, and `propagation_limit`. Hitting only the timing
+  phase's reserved work share does not set the overall `budget_exhausted` flag.
+
+Search defaults come from the library's `ResizeOptions`. The historical
+`upsize`/`downsize` report fields mean timing search and area recovery;
+`no_improvement` means no improvement among the bounded candidates tried,
+not a local-optimality guarantee.
 
 ```bash
 xlsynth-driver gv-resize --netlist mapped.gv \
