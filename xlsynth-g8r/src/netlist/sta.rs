@@ -1746,6 +1746,17 @@ enum StaTimingTableKind {
 }
 
 impl StaTimingTableKind {
+    fn as_wire(self) -> crate::liberty_proto::TimingTableKind {
+        match self {
+            Self::CellRise => crate::liberty_proto::TimingTableKind::CellRise,
+            Self::CellFall => crate::liberty_proto::TimingTableKind::CellFall,
+            Self::RiseTransition => crate::liberty_proto::TimingTableKind::RiseTransition,
+            Self::FallTransition => crate::liberty_proto::TimingTableKind::FallTransition,
+            Self::RiseConstraint => crate::liberty_proto::TimingTableKind::RiseConstraint,
+            Self::FallConstraint => crate::liberty_proto::TimingTableKind::FallConstraint,
+        }
+    }
+
     fn as_raw(self) -> &'static str {
         match self {
             Self::CellRise => "cell_rise",
@@ -2707,7 +2718,7 @@ fn find_optional_unique_table<'a>(
     let mut matches = arc
         .tables
         .iter()
-        .filter(|table| table.kind_str() == kind.as_raw());
+        .filter(|table| table.kind == kind.as_wire());
     let first = matches.next();
     if matches.next().is_some() {
         return Err(anyhow!(
@@ -3646,6 +3657,22 @@ mod tests {
         )?;
         assert_eq!(report.worst_output_arrival, 8.0);
         Ok(())
+    }
+
+    #[test]
+    fn typed_timing_table_selectors_match_diagnostic_names() {
+        for kind in [
+            StaTimingTableKind::CellRise,
+            StaTimingTableKind::CellFall,
+            StaTimingTableKind::RiseTransition,
+            StaTimingTableKind::FallTransition,
+            StaTimingTableKind::RiseConstraint,
+            StaTimingTableKind::FallConstraint,
+        ] {
+            let mut table = TimingTable::default();
+            table.kind = kind.as_wire();
+            assert_eq!(table.kind_str(), kind.as_raw());
+        }
     }
 
     #[test]
