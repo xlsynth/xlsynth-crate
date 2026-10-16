@@ -580,6 +580,89 @@ fn electrical_limit_cannot_be_exchanged_for_timing_gain() -> Result<()> {
 }
 
 #[test]
+fn resizing_a_consumer_preserves_its_drivers_electrical_limits() -> Result<()> {
+    for limit in ["capacitance", "fanout"] {
+        let mut library = library()?;
+        let small = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
+        let large = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
+        let output = library.cells[small]
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .unwrap();
+        if limit == "capacitance" {
+            output.max_capacitance = Some(0.3);
+        } else {
+            output.max_fanout = Some(1.5);
+            let input = library.cells[large]
+                .pins
+                .iter_mut()
+                .find(|pin| pin.direction == PinDirection::Input as i32)
+                .unwrap();
+            // A weighted fanout change must be checked even when the load
+            // capacitance is unchanged and no driver retiming is needed.
+            input.capacitance = Some(0.2);
+            input.fanout_load = Some(2.0);
+        }
+        let parsed = read_gv_from_str(
+            "module m(input a, output y); wire b; BUF1 p(.A(a),.Y(b)); BUF1 q(.A(b),.Y(y)); endmodule",
+        )?;
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        let before = sta.score();
+        assert!(!sta.trial(1, large, usize::MAX, |_| true)?, "{limit}");
+        assert_eq!(sta.score(), before);
+        assert_eq!(sta.cells, vec![small, small]);
+        assert!(sta.trial(0, large, usize::MAX, |_| true)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn resizing_a_driver_preserves_combinational_and_capture_pin_slew_limits() -> Result<()> {
+    for capture in [false, true] {
+        let mut library = library()?;
+        let consumer_name = if capture { "DFF1" } else { "BUF1" };
+        let consumer = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == consumer_name)
+            .unwrap();
+        library.cells[consumer]
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
+            .unwrap()
+            .max_transition = Some(0.5);
+        let text = if capture {
+            "module m(input clk, input a, output y); wire b; BUF4 p(.A(a),.Y(b)); DFF1 q(.CLK(clk),.D(b),.Q(y)); endmodule"
+        } else {
+            "module m(input a, output y); wire b; BUF4 p(.A(a),.Y(b)); BUF1 q(.A(b),.Y(y)); endmodule"
+        };
+        let parsed = read_gv_from_str(text)?;
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        let before = sta.score();
+        let cells_before = sta.cells.clone();
+        let replacement = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
+        assert!(!sta.trial(0, replacement, usize::MAX, |_| true)?);
+        assert_eq!(sta.score(), before);
+        assert_eq!(sta.cells, cells_before);
+    }
+    Ok(())
+}
+
+#[test]
 fn budget_sweeps_preserve_timing_and_area_guards() -> Result<()> {
     let library = library()?;
     for max_propagated_instances in [0, 1, 10, 100, 1000] {
