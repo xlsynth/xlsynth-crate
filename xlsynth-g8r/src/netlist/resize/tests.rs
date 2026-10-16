@@ -688,6 +688,49 @@ fn settled_output_violation_rejects_before_propagating_unrelated_logic() -> Resu
 }
 
 #[test]
+fn capture_limit_rejection_precedes_final_acceptance_and_restores_timing() -> Result<()> {
+    let library = library()?;
+    for register_launch in [false, true] {
+        let root = if register_launch {
+            "DFF4 launch(.CLK(clk),.D(d),.Q(n));"
+        } else {
+            "BUF4 launch(.A(d),.Y(n));"
+        };
+        let parsed = read_gv_from_str(&format!(
+            "module m(input clk, input d, output q); wire n; {root}
+             DFF1 capture(.CLK(clk),.D(n),.Q(q)); endmodule"
+        ))?;
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        let before = sta.score();
+        let cells = sta.cells.clone();
+        let weak = library
+            .cells
+            .iter()
+            .position(|cell| cell.name == if register_launch { "DFF1" } else { "BUF1" })
+            .unwrap();
+        assert!(!sta.trial(0, weak, usize::MAX, None, |timing| {
+            timing.score().within(before)
+        })?);
+        let mut accepted_called = false;
+        assert!(!sta.trial(0, weak, usize::MAX, Some(before), |_| {
+            accepted_called = true;
+            true
+        })?);
+        assert!(!accepted_called);
+        assert_eq!(sta.score(), before);
+        assert_eq!(sta.cells, cells);
+        assert!(!sta.budget_exhausted);
+    }
+    Ok(())
+}
+
+#[test]
 fn failed_candidate_restores_upstream_load_and_timing() -> Result<()> {
     let mut library = library()?;
     let bad = library.cells.iter().position(|c| c.name == "BUF4").unwrap();

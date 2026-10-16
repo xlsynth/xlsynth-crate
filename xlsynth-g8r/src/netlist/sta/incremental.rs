@@ -874,7 +874,8 @@ impl<'a> IncrementalSta<'a> {
     /// Trials one prevalidated equivalent cell; only the acceptance closure can
     /// commit it. Errors, rejection and budget exhaustion restore the
     /// incumbent. Optional boundary limits allow early rejection at settled
-    /// module outputs; the acceptance closure still checks complete timing.
+    /// module outputs and during endpoint updates; the acceptance closure
+    /// still checks complete timing before any substitution is committed.
     pub fn trial(
         &mut self,
         i: usize,
@@ -985,9 +986,23 @@ impl<'a> IncrementalSta<'a> {
                 }
             }
             for endpoint in endpoints {
+                let value = self.compute_endpoint(endpoint)?;
+                if let Some(limits) = limits {
+                    let capture =
+                        usize::from(matches!(self.endpoints[endpoint], Endpoint::Capture(_)));
+                    if value.iter().enumerate().any(|(mode, arrival)| {
+                        arrival.is_some_and(|arrival| {
+                            arrival > limits.values()[mode * 2 + capture] + 1e-9
+                        })
+                    }) {
+                        // All input propagation has settled. Stop at the first
+                        // failing endpoint instead of evaluating unrelated
+                        // captures and updating scores for a rejected trial.
+                        return Ok(false);
+                    }
+                }
                 undo.endpoints
                     .push((endpoint, self.endpoint_values[endpoint]));
-                let value = self.compute_endpoint(endpoint)?;
                 self.set_endpoint(endpoint, value);
             }
             let mut violations = Vec::new();
