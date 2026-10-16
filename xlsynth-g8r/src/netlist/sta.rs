@@ -63,6 +63,7 @@ use crate::liberty_proto::{TimingSense as WireTimingSense, TimingType as WireTim
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
@@ -154,10 +155,12 @@ struct TimingEvaluationContext<'a> {
     library: &'a Library,
     // Values live in the borrowed library, so their address is stable. Shape
     // and kind distinguish views with different axes or envelope semantics.
-    tables: HashMap<(usize, u32, i32), PreparedTimingTable>,
+    // These caches use only library-owned numeric identities, not external
+    // string keys. Formula/name maps retain the standard randomized hasher.
+    tables: FxHashMap<(usize, u32, i32), PreparedTimingTable>,
     when_formulas: HashMap<String, PreparedWhen>,
-    validated_delay_slew_arcs: HashSet<*const TimingArc>,
-    validated_setup_arcs: HashSet<*const TimingArc>,
+    validated_delay_slew_arcs: FxHashSet<*const TimingArc>,
+    validated_setup_arcs: FxHashSet<*const TimingArc>,
     diagnostics: TimingQueryDiagnosticCounts,
 }
 
@@ -165,10 +168,10 @@ impl<'a> TimingEvaluationContext<'a> {
     fn new(library: &'a Library) -> Self {
         Self {
             library,
-            tables: HashMap::new(),
+            tables: FxHashMap::default(),
             when_formulas: HashMap::new(),
-            validated_delay_slew_arcs: HashSet::new(),
-            validated_setup_arcs: HashSet::new(),
+            validated_delay_slew_arcs: FxHashSet::default(),
+            validated_setup_arcs: FxHashSet::default(),
             diagnostics: TimingQueryDiagnosticCounts::default(),
         }
     }
