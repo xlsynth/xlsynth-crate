@@ -16,7 +16,7 @@ fn library() -> Result<Library> {
         lu_table_template(setup) { variable_1: constrained_pin_transition; index_1("0,10"); }
     "#,
     );
-    for kind in ["BUF", "INV", "DFF", "AND"] {
+    for kind in ["BUF", "INV", "DFF", "AND", "DUAL"] {
         for size in [1, 2, 4] {
             let d = 1.0 / f64::from(size);
             let cap = f64::from(size) * 0.2;
@@ -59,7 +59,29 @@ fn library() -> Result<Library> {
                 }
                 text.push('}');
             }
-            text.push_str("}}");
+            text.push('}');
+            if kind == "DUAL" {
+                text.push_str(
+                    r#"pin(YN) { direction: output; function: "!A";
+                    timing() { related_pin: "A"; timing_sense: negative_unate;"#,
+                );
+                for name in [
+                    "cell_rise",
+                    "cell_fall",
+                    "rise_transition",
+                    "fall_transition",
+                ] {
+                    text.push_str(&format!(
+                        r#"{name}(delay) {{ values("{},{}", "{},{}"); }}"#,
+                        d * 2.0,
+                        d * 42.0,
+                        d * 2.0 + 2.0,
+                        d * 42.0 + 2.0
+                    ));
+                }
+                text.push_str("}}");
+            }
+            text.push('}');
         }
     }
     text.push('}');
@@ -416,6 +438,97 @@ fn random_substitution_sequences_match_full_timing_and_rollback() -> Result<()> 
         )?;
         verify_timing(sta.score(), full)?;
     }
+    Ok(())
+}
+
+#[test]
+fn multi_output_resizing_updates_both_cones_and_restores_rejected_trials() -> Result<()> {
+    let mut library = library()?;
+    // Opposite storage orders must not swap the positive and negative output.
+    let larger = library
+        .cells
+        .iter()
+        .position(|c| c.name == "DUAL4")
+        .unwrap();
+    library.cells[larger].pins.reverse();
+    // Different downstream strengths make each output cone critical in turn.
+    for inverter in ["INV1", "INV2"] {
+        let parsed = read_gv_from_str(&format!(
+            r#"module m(input a, output y, output z);
+        wire p,n;
+        DUAL1 dual(.A(a),.Y(p),.YN(n));
+        BUF1 positive(.A(p),.Y(y));
+        {inverter} negative(.A(n),.Y(z));
+        endmodule"#,
+        ))?;
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        let before = sta.score();
+        assert!(!sta.trial(0, larger, usize::MAX, |_| false)?);
+        assert_eq!(sta.score(), before);
+        assert!(sta.trial(0, larger, usize::MAX, |_| true)?);
+        let mut changed = parsed.modules[0].clone();
+        let mut interner = parsed.interner.clone();
+        changed.instances[0].type_name = interner.get_or_intern("DUAL4");
+        verify_timing(
+            sta.score(),
+            measure_boundary_delays(
+                &changed,
+                &parsed.nets,
+                &interner,
+                &library,
+                options().timing,
+            )?,
+        )?;
+        assert!(sta.score().input_to_output < before.input_to_output);
+    }
+    Ok(())
+}
+
+#[test]
+fn multi_output_families_compare_every_output_function() -> Result<()> {
+    let mut library = library()?;
+    let small = library
+        .cells
+        .iter()
+        .position(|c| c.name == "DUAL1")
+        .unwrap();
+    let medium = library
+        .cells
+        .iter()
+        .position(|c| c.name == "DUAL2")
+        .unwrap();
+    let large = library
+        .cells
+        .iter()
+        .position(|c| c.name == "DUAL4")
+        .unwrap();
+    assert_eq!(
+        CellFamilies::new(&library).alternatives[small],
+        vec![small, medium, large]
+    );
+    let positive = library.cells[large]
+        .pins
+        .iter()
+        .find(|pin| library.resolve_string(&pin.name) == "Y")
+        .unwrap()
+        .function;
+    let negative = library.cells[large]
+        .pins
+        .iter()
+        .position(|pin| library.resolve_string(&pin.name) == "YN")
+        .unwrap();
+    library.cells[large].pins[negative].function = positive;
+    assert_eq!(
+        CellFamilies::new(&library).alternatives[small],
+        vec![small, medium]
+    );
+    assert_eq!(CellFamilies::new(&library).alternatives[large], vec![large]);
     Ok(())
 }
 
