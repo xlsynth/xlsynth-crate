@@ -457,11 +457,11 @@ impl<'a> IncrementalSta<'a> {
             if inst.sequential {
                 capture_endpoint[i] = Some(endpoints.len());
                 for (name, sources) in &inst.pins {
-                    if lib
-                        .pin(cells[i], name)
-                        .expect("validated pin")
-                        .is_clocking_pin
-                    {
+                    let pin = lib.pin(cells[i], name).expect("validated pin");
+                    // Q timing does not affect this register's setup checks.
+                    // Resizing the register itself marks its capture endpoint
+                    // explicitly in trial(), regardless of changed inputs.
+                    if pin.direction != PinDirection::Input as i32 || pin.is_clocking_pin {
                         continue;
                     }
                     for source in sources {
