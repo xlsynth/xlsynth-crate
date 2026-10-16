@@ -91,7 +91,7 @@ struct PreparedWhen {
 /// Query-invariant table geometry and monotone delay/slew values, prepared
 /// once per immutable Liberty table rather than at every interpolation.
 struct PreparedTimingTable {
-    dimensions: Vec<u32>,
+    rank: usize,
     strides: [usize; 3],
     axes: [Vec<f64>; 3],
     variables: [String; 3],
@@ -110,7 +110,7 @@ impl PreparedTimingTable {
         validate_timing_table_structure(library, table, context)?;
         let array = TimingTableArrayView::from_timing_table(library, table)?;
         let layout = timing_table_layout(library, table, context)?;
-        let dimensions = array.dimensions().to_vec();
+        let dimensions = array.dimensions();
         let mut values = array.values().to_vec();
         let mut strides = [0; 3];
         let mut stride = 1;
@@ -134,7 +134,7 @@ impl PreparedTimingTable {
             }
         }
         Ok(Self {
-            dimensions,
+            rank: dimensions.len(),
             strides,
             axes: std::array::from_fn(|i| layout.axes[i].to_vec()),
             variables: std::array::from_fn(|i| layout.variables[i].to_string()),
@@ -3110,12 +3110,8 @@ fn evaluate_table_with_query_and_diagnostics(
             entry.insert(PreparedTimingTable::new(library, table, context)?)
         }
     };
-    let layout = TimingTableLayout {
-        axes: std::array::from_fn(|i| prepared.axes[i].as_slice()),
-        variables: std::array::from_fn(|i| prepared.variables[i].as_str()),
-    };
     let diagnostics = &mut evaluation.diagnostics;
-    let rank = prepared.dimensions.len();
+    let rank = prepared.rank;
     if rank == 0 {
         return Ok(f64::from(prepared.values[0]));
     }
@@ -3128,10 +3124,10 @@ fn evaluate_table_with_query_and_diagnostics(
     let mut above_max_axis_count = 0usize;
 
     for axis_idx in 0..rank {
-        let axis = layout.axes[axis_idx];
+        let axis = &prepared.axes[axis_idx];
         let axis_variable = prepared.axis_kinds[axis_idx];
         let raw_axis_query = axis_query_value_with_query(
-            layout.variables[axis_idx],
+            &prepared.variables[axis_idx],
             axis_variable,
             axis_idx,
             query,
@@ -3188,7 +3184,7 @@ fn evaluate_table_with_query_and_diagnostics(
     }
 
     for (axis_idx, raw_axis_query) in axis_queries.into_iter().take(rank).enumerate() {
-        let axis = layout.axes[axis_idx];
+        let axis = &prepared.axes[axis_idx];
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
         let mut axis_query = raw_axis_query;
@@ -3198,7 +3194,7 @@ fn evaluate_table_with_query_and_diagnostics(
                     "table_query_clamped_below_min context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
                     context,
                     axis_idx + 1,
-                    layout.variables[axis_idx],
+                    prepared.variables[axis_idx],
                     raw_axis_query,
                     axis_lo,
                     axis_hi,
@@ -3218,7 +3214,7 @@ fn evaluate_table_with_query_and_diagnostics(
                     action,
                     context,
                     axis_idx + 1,
-                    layout.variables[axis_idx],
+                    prepared.variables[axis_idx],
                     raw_axis_query,
                     axis_lo,
                     axis_hi,
