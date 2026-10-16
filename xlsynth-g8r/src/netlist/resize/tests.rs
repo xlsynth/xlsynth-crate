@@ -487,25 +487,34 @@ fn failed_candidate_restores_upstream_load_and_timing() -> Result<()> {
 
 #[test]
 fn electrical_limit_cannot_be_exchanged_for_timing_gain() -> Result<()> {
-    let mut library = library()?;
-    let larger = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
-    library.cells[larger]
-        .pins
-        .iter_mut()
-        .find(|pin| pin.direction == PinDirection::Output as i32)
-        .unwrap()
-        .max_capacitance = Some(0.1);
-    let parsed = read_gv_from_str("module m(input a, output y); BUF1 p(.A(a),.Y(y)); endmodule")?;
-    let mut sta = IncrementalSta::new(
-        &parsed.modules[0],
-        &parsed.nets,
-        &parsed.interner,
-        &library,
-        options().timing,
-    )?;
-    let before = sta.score();
-    assert!(!sta.trial(0, larger, usize::MAX, |_| true)?);
-    assert_eq!(sta.score(), before);
+    for limit in ["capacitance", "transition", "fanout"] {
+        let mut library = library()?;
+        let larger = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
+        let output = library.cells[larger]
+            .pins
+            .iter_mut()
+            .find(|pin| pin.direction == PinDirection::Output as i32)
+            .unwrap();
+        match limit {
+            "capacitance" => output.max_capacitance = Some(0.1),
+            "transition" => output.max_transition = Some(0.1),
+            "fanout" => output.max_fanout = Some(0.5),
+            _ => unreachable!(),
+        }
+        let parsed = read_gv_from_str(
+            "module m(input a, output y); wire b; BUF1 p(.A(a),.Y(b)); BUF1 q(.A(b),.Y(y)); endmodule",
+        )?;
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        let before = sta.score();
+        assert!(!sta.trial(0, larger, usize::MAX, |_| true)?, "{limit}");
+        assert_eq!(sta.score(), before);
+    }
     Ok(())
 }
 

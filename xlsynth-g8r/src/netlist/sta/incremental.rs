@@ -833,21 +833,25 @@ impl<'a> IncrementalSta<'a> {
             if let Some(bit) = bit {
                 if pin.direction == PinDirection::Output as i32 {
                     cap = self.capacitances[bit].rise.max(self.capacitances[bit].fall);
-                    fanout = self.loads[bit]
-                        .iter()
-                        .map(|(load, name)| {
-                            self.lib
-                                .pin(self.cells[*load], name)
-                                .expect("validated pin")
-                                .fanout_load
-                                .unwrap_or(1.0)
-                        })
-                        .sum();
+                    if pin.max_fanout.is_some() {
+                        fanout = self.loads[bit]
+                            .iter()
+                            .map(|(load, name)| {
+                                self.lib
+                                    .pin(self.cells[*load], name)
+                                    .expect("validated pin")
+                                    .fanout_load
+                                    .unwrap_or(1.0)
+                            })
+                            .sum();
+                    }
                 }
-                for timing in &self.timing {
-                    if let Some(t) = &timing[bit] {
-                        for edge in t.rise.iter().chain(t.fall.iter()) {
-                            transition = transition.max(edge.timing.transition);
+                if pin.max_transition.is_some() {
+                    for timing in &self.timing {
+                        if let Some(t) = &timing[bit] {
+                            for edge in t.rise.iter().chain(t.fall.iter()) {
+                                transition = transition.max(edge.timing.transition);
+                            }
                         }
                     }
                 }

@@ -72,15 +72,31 @@ use string_interner::{StringInterner, backend::StringBackend};
 
 pub(crate) mod incremental;
 
+/// Last exact interpolation for one immutable table, after resolving axis
+/// semantics. Diagnostics are still counted separately for every query.
+#[derive(Clone, Copy)]
+struct CachedInterpolation {
+    coordinates: [u64; 3],
+    value: f64,
+}
+
+/// Parsed conditional arc and its applicability without known constant pins.
+struct PreparedWhen {
+    formula: Term,
+    without_constants: bool,
+}
+
 /// Query-invariant table geometry and monotone delay/slew values, prepared
 /// once per immutable Liberty table rather than at every interpolation.
 struct PreparedTimingTable {
     dimensions: Vec<u32>,
+    strides: [usize; 3],
     axes: [Vec<f64>; 3],
     variables: [String; 3],
     axis_kinds: [AxisVariable; 3],
     values: Vec<f32>,
     is_setup: bool,
+    last_interpolation: Option<CachedInterpolation>,
 }
 
 impl PreparedTimingTable {
@@ -94,6 +110,13 @@ impl PreparedTimingTable {
         let layout = timing_table_layout(library, table, context)?;
         let dimensions = array.dimensions().to_vec();
         let mut values = array.values().to_vec();
+        let mut strides = [0; 3];
+        let mut stride = 1;
+        for (axis, dimension) in dimensions.iter().enumerate().rev() {
+            strides[axis] = stride;
+            // Structure validation already checked the complete product.
+            stride *= *dimension as usize;
+        }
         if uses_monotone_upper_envelope(table) {
             // A prefix maximum along each coordinate produces exactly the
             // maximum over the lower orthant used by the scalar reference.
@@ -110,6 +133,7 @@ impl PreparedTimingTable {
         }
         Ok(Self {
             dimensions,
+            strides,
             axes: std::array::from_fn(|i| layout.axes[i].to_vec()),
             variables: std::array::from_fn(|i| layout.variables[i].to_string()),
             axis_kinds: std::array::from_fn(|i| AxisVariable::from_raw(layout.variables[i])),
@@ -118,6 +142,7 @@ impl PreparedTimingTable {
                 LibertyTableKind::from_raw(table.kind_str()),
                 LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
             ),
+            last_interpolation: None,
         })
     }
 }
@@ -129,7 +154,7 @@ struct TimingEvaluationContext<'a> {
     // Values live in the borrowed library, so their address is stable. Shape
     // and kind distinguish views with different axes or envelope semantics.
     tables: HashMap<(usize, u32, i32), PreparedTimingTable>,
-    when_formulas: HashMap<String, Term>,
+    when_formulas: HashMap<String, PreparedWhen>,
     diagnostics: TimingQueryDiagnosticCounts,
 }
 
@@ -2260,14 +2285,29 @@ fn arc_when_may_apply(
         return Ok(true);
     }
     if let Some(when) = evaluation.when_formulas.get(when_text) {
-        return Ok(when.evaluate_partial(known_pin_values) != Some(false));
+        return Ok(if known_pin_values.is_empty() {
+            when.without_constants
+        } else {
+            when.formula.evaluate_partial(known_pin_values) != Some(false)
+        });
     }
     let when = parse_formula(when_text)
         .map_err(|e| anyhow!("{context}: could not parse when='{}': {}", when_text, e))?;
-    // Cache the syntax, not its value: instances with identical predicates
-    // may have different constant inputs.
     let applicable = when.evaluate_partial(known_pin_values) != Some(false);
-    evaluation.when_formulas.insert(when_text.to_string(), when);
+    // Only the empty-binding result is instance-independent. All nonempty
+    // bindings must still evaluate the formula with this instance's constants.
+    let without_constants = if known_pin_values.is_empty() {
+        applicable
+    } else {
+        when.evaluate_partial(&HashMap::new()) != Some(false)
+    };
+    evaluation.when_formulas.insert(
+        when_text.to_string(),
+        PreparedWhen {
+            formula: when,
+            without_constants,
+        },
+    );
     Ok(applicable)
 }
 
@@ -3023,25 +3063,18 @@ fn evaluate_table_with_query_and_diagnostics(
             entry.insert(PreparedTimingTable::new(library, table, context)?)
         }
     };
-    let array = TimingTableArrayView::from_parts(&prepared.dimensions, &prepared.values)?;
     let layout = TimingTableLayout {
         axes: std::array::from_fn(|i| prepared.axes[i].as_slice()),
         variables: std::array::from_fn(|i| prepared.variables[i].as_str()),
     };
     let diagnostics = &mut evaluation.diagnostics;
-    let rank = array.rank();
+    let rank = prepared.dimensions.len();
     if rank == 0 {
-        return array
-            .get(&[])
-            .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
+        return Ok(f64::from(prepared.values[0]));
     }
     // Liberty timing tables have at most three axes. Keeping interpolation
     // scratch on the stack avoids several allocations for every arc query.
-    if rank > 3 {
-        return Err(anyhow!(
-            "{context}: timing tables with rank {rank} are unsupported"
-        ));
-    }
+    debug_assert!(rank <= 3);
     let mut bounds = [(0usize, 0usize, 0.0); 3];
     let mut axis_queries = [0.0; 3];
     let is_setup = prepared.is_setup;
@@ -3095,6 +3128,16 @@ fn evaluate_table_with_query_and_diagnostics(
         diagnostics.delay_slew_single_above_max_extrapolation_count += 1;
     } else if above_max_axis_count > 1 {
         diagnostics.delay_slew_multiple_above_max_clamp_count += 1;
+    }
+
+    let coordinates = axis_queries.map(f64::to_bits);
+    // Keep every diagnostic and trace event, including queries at distinct
+    // instances whose timing happens to match. No quantization is involved.
+    if !sta_trace_enabled()
+        && let Some(cached) = prepared.last_interpolation
+        && cached.coordinates == coordinates
+    {
+        return Ok(cached.value);
     }
 
     for (axis_idx, raw_axis_query) in axis_queries.into_iter().take(rank).enumerate() {
@@ -3170,9 +3213,14 @@ fn evaluate_table_with_query_and_diagnostics(
                 weight *= 1.0 - *t;
             }
         }
-        let value = array
-            .get(&indices[..rank])
-            .expect("validated interpolation corner");
+        // Geometry is validated once when preparing the table; bracketing
+        // supplies in-range coordinates for every interpolation corner.
+        let linear = indices[..rank]
+            .iter()
+            .zip(prepared.strides)
+            .map(|(index, stride)| index * stride)
+            .sum::<usize>();
+        let value = f64::from(prepared.values[linear]);
         result += weight * value;
     }
     if !result.is_finite() {
@@ -3181,6 +3229,10 @@ fn evaluate_table_with_query_and_diagnostics(
             result
         ));
     }
+    prepared.last_interpolation = Some(CachedInterpolation {
+        coordinates,
+        value: result,
+    });
     Ok(result)
 }
 
@@ -3495,6 +3547,35 @@ mod tests {
     }
 
     #[test]
+    fn constant_when_predicates_remain_constant_with_and_without_bindings() -> Result<()> {
+        for (predicate, expected) in [("0", false), ("1", true)] {
+            let mut builder = LibraryBuilder::new();
+            let arc = test_arc(
+                &mut builder,
+                "A",
+                "positive_unate",
+                "combinational",
+                predicate,
+                vec![],
+            );
+            let library = builder.finish();
+            let mut evaluation = TimingEvaluationContext::new(&library);
+            for known in [
+                HashMap::from([("A".to_string(), true)]),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::from([("A".to_string(), false)]),
+            ] {
+                assert_eq!(
+                    arc_when_may_apply(&library, &arc, &known, &mut evaluation, "test")?,
+                    expected
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn inline_timing_frontier_spills_without_truncation() {
         let mut set = EdgeTimingSet::default();
         for i in (0..32).rev() {
@@ -3563,6 +3644,14 @@ mod tests {
                     let reference =
                         evaluate_table_corner_value(&raw, &table, &indices, "reference")?;
                     assert_eq!(f64::from(prepared.values[flat]), reference);
+                    assert_eq!(
+                        indices
+                            .iter()
+                            .zip(prepared.strides)
+                            .map(|(index, stride)| index * stride)
+                            .sum::<usize>(),
+                        flat
+                    );
                 }
                 let mut setup_table = table.clone();
                 setup_table.kind = crate::liberty_proto::TimingTableKind::RiseConstraint;
@@ -3603,6 +3692,57 @@ mod tests {
             }
         }
         assert_eq!(evaluation.tables.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_interpolation_preserves_query_diagnostics_and_rejects_nan() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let table = builder.add_timing_table_f64(
+            crate::liberty_proto::TimingTableKind::CellRise,
+            0,
+            vec![1.0, 2.0],
+            vec![1.0, 2.0],
+            vec![],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![2, 2],
+            "",
+        )?;
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for (slew, load, expected) in [(0.0, 3.0, 3.0), (3.0, 3.0, 4.0)] {
+            for _ in 0..4 {
+                let result = evaluate_table_with_diagnostics(
+                    &library,
+                    &table,
+                    slew,
+                    load,
+                    &mut evaluation,
+                    "repeated",
+                )?;
+                assert_eq!(result, expected);
+            }
+        }
+        assert_eq!(
+            evaluation.diagnostics,
+            TimingQueryDiagnosticCounts {
+                delay_slew_below_min_clamp_count: 4,
+                delay_slew_single_above_max_extrapolation_count: 4,
+                delay_slew_multiple_above_max_clamp_count: 4,
+                ..TimingQueryDiagnosticCounts::default()
+            }
+        );
+        assert!(
+            evaluate_table_with_diagnostics(
+                &library,
+                &table,
+                f64::NAN,
+                3.0,
+                &mut evaluation,
+                "invalid",
+            )
+            .is_err()
+        );
         Ok(())
     }
 
