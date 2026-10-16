@@ -1147,6 +1147,48 @@ Example:
 xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
 ```
 
+### `gv-resize`: Native timing-driven cell resizing
+
+Resizes a flat mapped GV module, including compatible flip-flops, and writes
+the resulting GV to stdout. A bounded timing-improvement phase is followed by
+area recovery against the timing checkpoint reached by that phase. Connectivity,
+register polarity, and direct module/register wires are unchanged. No buffers
+are inserted or removed. Independent full STA verifies the final result using
+the same model as `gv-stats`: Liberty max-delay/setup timing with ideal clocks,
+not hold, placement, wire-delay or clock-tree signoff.
+
+- `--netlist <PATH>`: required mapped GV input, optionally gzip-compressed.
+- `--liberty_proto <PATH>`: required matching timing-enabled Liberty proto.
+- `--module_name <NAME>`: selected module; optional for a single-module file.
+- `--primary_input_transition <VALUE>`: input slew in library time units;
+  default `0.01`. This is a fixed slew, not ABC's virtual driving-cell model.
+- `--module_output_load <VALUE>`: output capacitance in library units;
+  defaults to the proto's `default_output_load`. Explicit `0` is supported.
+- `--max-area-growth <FRACTION>`: noncompounding growth relative to input area;
+  default `0.02` (2%).
+- `--max-trials <COUNT>`: total substitution trials; default `1024`.
+- `--max-propagated-instances <COUNT>`: total trial propagation work; default
+  `100000`. Exhaustion rolls back the unfinished trial and keeps verified work.
+- `--upsize-rounds <COUNT>`, `--downsize-rounds <COUNT>`: default `4` and `2`;
+  `0` disables that phase. Half the trial/propagation budget is reserved for
+  area recovery when both phases are enabled.
+- `--no-register-resize`: leave FF cells fixed; default permits resizing.
+- `--trial-arrival-tolerance <TIME>`, `--trial-slew-tolerance <TIME>`: optional
+  speculative propagation cutoffs in library time units; default `0` (disabled).
+  Every approximate trial is rolled back, and promising substitutions are
+  re-evaluated accurately before committing. Nonzero values can miss useful
+  candidates; they never authorize accepting approximate timing as final.
+- `--report-json <PATH>`: deterministic before/after boundary timing, cell area,
+  accepted moves, propagation counts, and budget-exhaustion status.
+
+```bash
+xlsynth-driver gv-resize --netlist mapped.gv \
+  --liberty_proto /path/to/cells.timing.proto \
+  --report-json resize.json > resized.gv
+xlsynth-driver gv-stats --netlist resized.gv \
+  --liberty_proto /path/to/cells.timing.proto
+```
+
 ### `g8r2gv`: G8R to mapped gate-level Verilog
 
 Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level Verilog netlist

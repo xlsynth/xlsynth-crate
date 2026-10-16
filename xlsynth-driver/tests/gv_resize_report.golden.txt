@@ -1,0 +1,42 @@
+{
+  "initial_area": 1.0,
+  "upsized_area": 2.0,
+  "final_area": 2.0,
+  "initial_delay": {
+    "input_to_output": 2.0,
+    "input_to_register": 0.0,
+    "register_to_output": 0.0,
+    "register_to_register": 0.0
+  },
+  "upsized_delay": {
+    "input_to_output": 1.0,
+    "input_to_register": 0.0,
+    "register_to_output": 0.0,
+    "register_to_register": 0.0
+  },
+  "final_delay": {
+    "input_to_output": 1.0,
+    "input_to_register": 0.0,
+    "register_to_output": 0.0,
+    "register_to_register": 0.0
+  },
+  "upsize": {
+    "trials": 2,
+    "accepted": 1,
+    "register_changes": 0,
+    "propagated_instances": 2,
+    "screened_out": 0,
+    "exact_trials": 2,
+    "prediction_rejections": 0
+  },
+  "downsize": {
+    "trials": 1,
+    "accepted": 0,
+    "register_changes": 0,
+    "propagated_instances": 1,
+    "screened_out": 0,
+    "exact_trials": 1,
+    "prediction_rejections": 0
+  },
+  "budget_exhausted": false
+}

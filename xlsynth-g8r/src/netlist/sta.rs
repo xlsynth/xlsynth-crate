@@ -69,6 +69,8 @@ use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
+pub(crate) mod incremental;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
     pub arrival: f64,
@@ -974,304 +976,27 @@ fn analyze_max_arrival_proto_with_mode(
     while let Some(inst_idx) = queue.pop_front() {
         processed += 1;
 
-        let cell_idx = instance_cell_indices[inst_idx];
-        let cell_name = &instance_cell_names[inst_idx];
-        let inst_pin_map = &instance_pin_sources[inst_idx];
-        let known_pin_values = &instance_known_pin_values[inst_idx];
-        let instance = &normalized.instances[inst_idx];
-        let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")
-            .unwrap_or_else(|_| "<unknown>".to_string());
-
-        let mut local_output_timing_sets: HashMap<String, SignalTimingSet> = HashMap::new();
-        for pin_idx in &instance_output_pin_orders[inst_idx] {
-            let pin = &lib.library.cells[cell_idx].pins[*pin_idx];
-            let pin_name = lib.library.resolve_string(&pin.name);
-            let output_sources = inst_pin_map.get(pin_name);
-            if analysis_mode.uses_register_boundaries() && instance_is_sequential[inst_idx] {
-                if analysis_mode.launches_register(inst_idx) {
-                    let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
-                        Some(PinBitSource::Bit(output_bit_idx)) => *output_bit_idx,
-                        Some(PinBitSource::Literal(_) | PinBitSource::Unknown) | None => {
-                            unreachable!("connected sequential output pins have net bit sources")
-                        }
-                    };
-                    let output_load = bit_load_capacitance[output_bit_idx];
-                    bit_timing_sets[output_bit_idx] = Some(evaluate_register_launch_output_set(
-                        lib.library,
-                        cell_name,
-                        pin,
-                        known_pin_values,
-                        output_load,
-                        &mut validated_timing_tables,
-                        &mut timing_query_diagnostic_counts,
-                        &format!(
-                            "{}.{} (instance '{}') clock-to-output",
-                            cell_name, pin_name, instance_name
-                        ),
-                    )?);
-                }
-                continue;
-            }
-            if let Some(unsupported_arc) = pin.timing_arcs.iter().find(|arc| {
-                !StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-            }) {
-                return Err(anyhow!(
-                    "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
-                    instance_name,
-                    cell_name,
-                    pin_name,
-                    unsupported_arc.timing_type_str(lib.library)
-                ));
-            }
-            let combinational_arcs: Vec<&TimingArc> = pin
-                .timing_arcs
-                .iter()
-                .filter(|arc| {
-                    StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-                })
-                .collect();
-            let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
-                Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
-                Some(PinBitSource::Literal(_) | PinBitSource::Unknown) => {
-                    unreachable!("connected output pins have net bit sources")
-                }
-                None => None,
-            };
-            let output_net_name = output_bit_idx
-                .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
-                .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name));
-            if combinational_arcs.is_empty() {
-                if let Some(constant_value) =
-                    constant_output_function_value(lib.library, cell_name, pin)?
-                {
-                    sta_trace(|| {
-                        format!(
-                            "inst={} cell={} out_pin={} out_net={} constant_source={}",
-                            instance_name, cell_name, pin_name, output_net_name, constant_value,
-                        )
-                    });
-                    store_output_timing_set(
-                        &mut local_output_timing_sets,
-                        &mut bit_timing_sets,
-                        pin_name,
-                        output_bit_idx,
-                        literal_source_timing_set.clone(),
-                    );
-                    continue;
-                }
-                return Err(anyhow!(
-                    "basic STA only supports combinational or constant-source output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs and no constant function",
-                    instance_name,
-                    cell_name,
-                    pin_name
-                ));
-            }
-            validate_timing_tables_once(
-                lib.library,
-                cell_name,
-                pin_name,
-                combinational_arcs.as_slice(),
-                &mut validated_timing_tables,
-            )?;
-            let output_load = output_bit_idx
-                .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
-                .unwrap_or_default();
-            let mut accumulated: Option<SignalTimingSet> = None;
-
-            for arc in &combinational_arcs {
-                let arc_context = format!(
-                    "cell '{}' output pin '{}' timing arc related_pin '{}'",
-                    cell_name,
-                    pin_name,
-                    lib.library.resolve_string(&arc.related_pin)
-                );
-                if !arc_when_may_apply(lib.library, arc, known_pin_values, arc_context.as_str())? {
-                    sta_trace(|| {
-                        format!(
-                            "inst={} cell={} out_pin={} when={} skipped=true",
-                            instance_name,
-                            cell_name,
-                            pin_name,
-                            lib.library.resolve_string(&arc.when),
-                        )
-                    });
-                    continue;
-                }
-                for related_pin_name in
-                    split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
-                {
-                    let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
-                            anyhow!(
-                                "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
-                                cell_name,
-                                pin_name,
-                                related_pin_name
-                            )
-                        })?;
-                    let mut related_timing_sets: Vec<(&SignalTimingSet, String)> = Vec::new();
-                    if related_pin.direction == PinDirection::Output as i32 {
-                        let Some(timing) = local_output_timing_sets.get(related_pin_name) else {
-                            if analysis_mode.uses_register_boundaries() {
-                                continue;
-                            }
-                            return Err(anyhow!(
-                                "missing intra-cell source timing for output pin '{}.{}' feeding '{}.{}' in instance '{}'",
-                                cell_name,
-                                related_pin_name,
-                                cell_name,
-                                pin_name,
-                                instance_name
-                            ));
-                        };
-                        let related_net_name = inst_pin_map
-                            .get(related_pin_name)
-                            .and_then(|sources| sources.first())
-                            .and_then(|source| match source {
-                                PinBitSource::Bit(related_bit_idx) => {
-                                    Some(normalized.render_bit(*related_bit_idx, nets, interner))
-                                }
-                                PinBitSource::Literal(_) | PinBitSource::Unknown => None,
-                            })
-                            .unwrap_or_else(|| {
-                                format!("<unconnected {}.{}>", instance_name, related_pin_name)
-                            });
-                        related_timing_sets.push((timing, related_net_name));
-                    } else {
-                        let related_sources =
-                                inst_pin_map.get(related_pin_name).ok_or_else(|| {
-                                    anyhow!(
-                                        "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
-                                        instance_name,
-                                        cell_name,
-                                        pin_name,
-                                        related_pin_name
-                                    )
-                                })?;
-                        if related_sources.is_empty() {
-                            return Err(anyhow!(
-                                "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
-                                instance_name,
-                                cell_name,
-                                pin_name,
-                                related_pin_name
-                            ));
-                        }
-                        for related_source in related_sources {
-                            let (input_timing_set, related_net_name) = match related_source {
-                                PinBitSource::Bit(related_bit_idx) => {
-                                    let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
-                                    else {
-                                        if analysis_mode.uses_register_boundaries() {
-                                            continue;
-                                        }
-                                        return Err(anyhow!(
-                                            "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
-                                            normalized.render_bit(*related_bit_idx, nets, interner),
-                                            cell_name,
-                                            pin_name,
-                                            related_pin_name
-                                        ));
-                                    };
-                                    (
-                                        timing,
-                                        normalized.render_bit(*related_bit_idx, nets, interner),
-                                    )
-                                }
-                                PinBitSource::Literal(_) | PinBitSource::Unknown
-                                    if analysis_mode.uses_register_boundaries() =>
-                                {
-                                    continue;
-                                }
-                                PinBitSource::Literal(value) => (
-                                    &literal_source_timing_set,
-                                    if *value { "1'b1" } else { "1'b0" }.to_string(),
-                                ),
-                                PinBitSource::Unknown => {
-                                    (&literal_source_timing_set, "1'bx".to_string())
-                                }
-                            };
-                            related_timing_sets.push((input_timing_set, related_net_name));
-                        }
-                    }
-                    for (input_timing_set, related_net_name) in related_timing_sets {
-                        let context = format!(
-                            "{}.{} (instance '{}') related_pin '{}'",
-                            cell_name, pin_name, instance_name, related_pin_name
-                        );
-                        let candidate = evaluate_arc_set(
-                            lib.library,
-                            arc,
-                            input_timing_set,
-                            output_load,
-                            &mut timing_query_diagnostic_counts,
-                            &context,
-                        )?;
-                        sta_trace(|| {
-                            format!(
-                                "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
-                                instance_name,
-                                cell_name,
-                                pin_name,
-                                output_net_name,
-                                related_pin_name,
-                                related_net_name,
-                                if lib.library.resolve_string(&arc.when).is_empty() {
-                                    "<empty>"
-                                } else {
-                                    lib.library.resolve_string(&arc.when)
-                                },
-                                arc.timing_sense_str(lib.library),
-                                arc.timing_type_str(lib.library),
-                                format_edge_timing_set(&candidate.rise),
-                                format_edge_timing_set(&candidate.fall),
-                                format_optional_edge_timing(candidate.rise.max_arrival_edge()),
-                                format_optional_edge_timing(candidate.fall.max_arrival_edge()),
-                            )
-                        });
-                        accumulated = Some(match accumulated {
-                            Some(prev) => prev.merge(&candidate),
-                            None => candidate,
-                        });
-                    }
-                }
-            }
-
-            let Some(mut out_timing_set) = accumulated else {
-                if analysis_mode.uses_register_boundaries() {
-                    continue;
-                }
-                return Err(anyhow!(
-                    "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
-                    instance_name,
-                    cell_name,
-                    pin_name
-                ));
-            };
-            // Use a conservative per-edge envelope: max arrival and max
-            // transition may come from different source candidates.
-            collapse_signal_timing_set_to_envelope(&mut out_timing_set);
-            sta_trace(|| {
-                format!(
-                    "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
-                    instance_name,
-                    cell_name,
-                    pin_name,
-                    output_net_name,
-                    format_edge_timing_set(&out_timing_set.rise),
-                    format_edge_timing_set(&out_timing_set.fall),
-                    format_optional_edge_timing(out_timing_set.rise.max_arrival_edge()),
-                    format_optional_edge_timing(out_timing_set.fall.max_arrival_edge()),
-                )
-            });
-
-            store_output_timing_set(
-                &mut local_output_timing_sets,
-                &mut bit_timing_sets,
-                pin_name,
-                output_bit_idx,
-                out_timing_set,
-            );
-        }
+        evaluate_instance_outputs(
+            InstanceTimingInputs {
+                lib: &lib,
+                cell_idx: instance_cell_indices[inst_idx],
+                inst_pin_map: &instance_pin_sources[inst_idx],
+                known_pin_values: &instance_known_pin_values[inst_idx],
+                output_pin_order: &instance_output_pin_orders[inst_idx],
+                normalized: &normalized,
+                nets,
+                interner,
+                inst_idx,
+                register_boundaries: analysis_mode.uses_register_boundaries(),
+                is_sequential: instance_is_sequential[inst_idx],
+                launch_register: analysis_mode.launches_register(inst_idx),
+            },
+            &bit_load_capacitance,
+            &mut bit_timing_sets,
+            &literal_source_timing_set,
+            &mut validated_timing_tables,
+            &mut timing_query_diagnostic_counts,
+        )?;
 
         for succ in &successors[inst_idx] {
             instance_levels[*succ] = instance_levels[*succ].max(instance_levels[inst_idx] + 1);
@@ -1448,6 +1173,343 @@ fn analyze_max_arrival_proto_with_mode(
         cell_levels,
     })
 }
+
+/// Immutable connectivity and cell metadata for the shared timing kernel.
+struct InstanceTimingInputs<'a, 'lib> {
+    lib: &'a StaLibraryIndex<'lib>,
+    cell_idx: usize,
+    inst_pin_map: &'a HashMap<String, Vec<PinBitSource>>,
+    known_pin_values: &'a HashMap<String, bool>,
+    output_pin_order: &'a [usize],
+    normalized: &'a NormalizedNetlistModule<'a>,
+    nets: &'a [Net],
+    interner: &'a StringInterner<StringBackend<SymbolU32>>,
+    inst_idx: usize,
+    register_boundaries: bool,
+    is_sequential: bool,
+    launch_register: bool,
+}
+
+/// Evaluates one instance using the same kernel in full and incremental STA.
+fn evaluate_instance_outputs(
+    inputs: InstanceTimingInputs<'_, '_>,
+    bit_load_capacitance: &[EdgeLoadCapacitance],
+    bit_timing_sets: &mut [Option<SignalTimingSet>],
+    literal_source_timing_set: &SignalTimingSet,
+    validated_timing_tables: &mut HashSet<*const TimingTable>,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+) -> Result<()> {
+    let InstanceTimingInputs {
+        lib,
+        cell_idx,
+        inst_pin_map,
+        known_pin_values,
+        output_pin_order,
+        normalized,
+        nets,
+        interner,
+        inst_idx,
+        register_boundaries,
+        is_sequential,
+        launch_register,
+    } = inputs;
+    let cell_name = &lib.library.cells[cell_idx].name;
+    let instance = &normalized.instances[inst_idx];
+    let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")?;
+    let mut local_output_timing_sets: HashMap<String, SignalTimingSet> = HashMap::new();
+    for pin_idx in output_pin_order {
+        let pin = &lib.library.cells[cell_idx].pins[*pin_idx];
+        let pin_name = lib.library.resolve_string(&pin.name);
+        let output_sources = inst_pin_map.get(pin_name);
+        if register_boundaries && is_sequential {
+            if launch_register {
+                let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
+                    Some(PinBitSource::Bit(output_bit_idx)) => *output_bit_idx,
+                    Some(PinBitSource::Literal(_) | PinBitSource::Unknown) | None => {
+                        unreachable!("connected sequential output pins have net bit sources")
+                    }
+                };
+                let output_load = bit_load_capacitance[output_bit_idx];
+                bit_timing_sets[output_bit_idx] = Some(evaluate_register_launch_output_set(
+                    lib.library,
+                    cell_name,
+                    pin,
+                    known_pin_values,
+                    output_load,
+                    validated_timing_tables,
+                    timing_query_diagnostic_counts,
+                    &format!(
+                        "{}.{} (instance '{}') clock-to-output",
+                        cell_name, pin_name, instance_name
+                    ),
+                )?);
+            }
+            continue;
+        }
+        if let Some(unsupported_arc) = pin.timing_arcs.iter().find(|arc| {
+            !StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
+        }) {
+            return Err(anyhow!(
+                "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
+                instance_name,
+                cell_name,
+                pin_name,
+                unsupported_arc.timing_type_str(lib.library)
+            ));
+        }
+        let combinational_arcs: Vec<&TimingArc> = pin
+            .timing_arcs
+            .iter()
+            .filter(|arc| {
+                StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
+            })
+            .collect();
+        let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
+            Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
+            Some(PinBitSource::Literal(_) | PinBitSource::Unknown) => {
+                unreachable!("connected output pins have net bit sources")
+            }
+            None => None,
+        };
+        let output_net_name = output_bit_idx
+            .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
+            .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name));
+        if combinational_arcs.is_empty() {
+            if let Some(constant_value) =
+                constant_output_function_value(lib.library, cell_name, pin)?
+            {
+                sta_trace(|| {
+                    format!(
+                        "inst={} cell={} out_pin={} out_net={} constant_source={}",
+                        instance_name, cell_name, pin_name, output_net_name, constant_value,
+                    )
+                });
+                store_output_timing_set(
+                    &mut local_output_timing_sets,
+                    bit_timing_sets,
+                    pin_name,
+                    output_bit_idx,
+                    literal_source_timing_set.clone(),
+                );
+                continue;
+            }
+            return Err(anyhow!(
+                "basic STA only supports combinational or constant-source output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs and no constant function",
+                instance_name,
+                cell_name,
+                pin_name
+            ));
+        }
+        validate_timing_tables_once(
+            lib.library,
+            cell_name,
+            pin_name,
+            combinational_arcs.as_slice(),
+            validated_timing_tables,
+        )?;
+        let output_load = output_bit_idx
+            .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
+            .unwrap_or_default();
+        let mut accumulated: Option<SignalTimingSet> = None;
+
+        for arc in &combinational_arcs {
+            let arc_context = format!(
+                "cell '{}' output pin '{}' timing arc related_pin '{}'",
+                cell_name,
+                pin_name,
+                lib.library.resolve_string(&arc.related_pin)
+            );
+            if !arc_when_may_apply(lib.library, arc, known_pin_values, arc_context.as_str())? {
+                sta_trace(|| {
+                    format!(
+                        "inst={} cell={} out_pin={} when={} skipped=true",
+                        instance_name,
+                        cell_name,
+                        pin_name,
+                        lib.library.resolve_string(&arc.when),
+                    )
+                });
+                continue;
+            }
+            for related_pin_name in
+                split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
+            {
+                let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
+                    anyhow!(
+                        "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                        cell_name,
+                        pin_name,
+                        related_pin_name
+                    )
+                })?;
+                let mut related_timing_sets: Vec<(&SignalTimingSet, String)> = Vec::new();
+                if related_pin.direction == PinDirection::Output as i32 {
+                    let Some(timing) = local_output_timing_sets.get(related_pin_name) else {
+                        if register_boundaries {
+                            continue;
+                        }
+                        return Err(anyhow!(
+                            "missing intra-cell source timing for output pin '{}.{}' feeding '{}.{}' in instance '{}'",
+                            cell_name,
+                            related_pin_name,
+                            cell_name,
+                            pin_name,
+                            instance_name
+                        ));
+                    };
+                    let related_net_name = inst_pin_map
+                        .get(related_pin_name)
+                        .and_then(|sources| sources.first())
+                        .and_then(|source| match source {
+                            PinBitSource::Bit(related_bit_idx) => {
+                                Some(normalized.render_bit(*related_bit_idx, nets, interner))
+                            }
+                            PinBitSource::Literal(_) | PinBitSource::Unknown => None,
+                        })
+                        .unwrap_or_else(|| {
+                            format!("<unconnected {}.{}>", instance_name, related_pin_name)
+                        });
+                    related_timing_sets.push((timing, related_net_name));
+                } else {
+                    let related_sources =
+                            inst_pin_map.get(related_pin_name).ok_or_else(|| {
+                                anyhow!(
+                                    "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
+                                    instance_name,
+                                    cell_name,
+                                    pin_name,
+                                    related_pin_name
+                                )
+                            })?;
+                    if related_sources.is_empty() {
+                        return Err(anyhow!(
+                            "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
+                            instance_name,
+                            cell_name,
+                            pin_name,
+                            related_pin_name
+                        ));
+                    }
+                    for related_source in related_sources {
+                        let (input_timing_set, related_net_name) = match related_source {
+                            PinBitSource::Bit(related_bit_idx) => {
+                                let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
+                                else {
+                                    if register_boundaries {
+                                        continue;
+                                    }
+                                    return Err(anyhow!(
+                                        "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
+                                        normalized.render_bit(*related_bit_idx, nets, interner),
+                                        cell_name,
+                                        pin_name,
+                                        related_pin_name
+                                    ));
+                                };
+                                (
+                                    timing,
+                                    normalized.render_bit(*related_bit_idx, nets, interner),
+                                )
+                            }
+                            PinBitSource::Literal(_) | PinBitSource::Unknown
+                                if register_boundaries =>
+                            {
+                                continue;
+                            }
+                            PinBitSource::Literal(value) => (
+                                literal_source_timing_set,
+                                if *value { "1'b1" } else { "1'b0" }.to_string(),
+                            ),
+                            PinBitSource::Unknown => {
+                                (literal_source_timing_set, "1'bx".to_string())
+                            }
+                        };
+                        related_timing_sets.push((input_timing_set, related_net_name));
+                    }
+                }
+                for (input_timing_set, related_net_name) in related_timing_sets {
+                    let context = format!(
+                        "{}.{} (instance '{}') related_pin '{}'",
+                        cell_name, pin_name, instance_name, related_pin_name
+                    );
+                    let candidate = evaluate_arc_set(
+                        lib.library,
+                        arc,
+                        input_timing_set,
+                        output_load,
+                        timing_query_diagnostic_counts,
+                        &context,
+                    )?;
+                    sta_trace(|| {
+                        format!(
+                            "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
+                            instance_name,
+                            cell_name,
+                            pin_name,
+                            output_net_name,
+                            related_pin_name,
+                            related_net_name,
+                            if lib.library.resolve_string(&arc.when).is_empty() {
+                                "<empty>"
+                            } else {
+                                lib.library.resolve_string(&arc.when)
+                            },
+                            arc.timing_sense_str(lib.library),
+                            arc.timing_type_str(lib.library),
+                            format_edge_timing_set(&candidate.rise),
+                            format_edge_timing_set(&candidate.fall),
+                            format_optional_edge_timing(candidate.rise.max_arrival_edge()),
+                            format_optional_edge_timing(candidate.fall.max_arrival_edge()),
+                        )
+                    });
+                    accumulated = Some(match accumulated {
+                        Some(prev) => prev.merge(&candidate),
+                        None => candidate,
+                    });
+                }
+            }
+        }
+
+        let Some(mut out_timing_set) = accumulated else {
+            if register_boundaries {
+                continue;
+            }
+            return Err(anyhow!(
+                "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
+                instance_name,
+                cell_name,
+                pin_name
+            ));
+        };
+        // Use a conservative per-edge envelope: max arrival and max
+        // transition may come from different source candidates.
+        collapse_signal_timing_set_to_envelope(&mut out_timing_set);
+        sta_trace(|| {
+            format!(
+                "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
+                instance_name,
+                cell_name,
+                pin_name,
+                output_net_name,
+                format_edge_timing_set(&out_timing_set.rise),
+                format_edge_timing_set(&out_timing_set.fall),
+                format_optional_edge_timing(out_timing_set.rise.max_arrival_edge()),
+                format_optional_edge_timing(out_timing_set.fall.max_arrival_edge()),
+            )
+        });
+
+        store_output_timing_set(
+            &mut local_output_timing_sets,
+            bit_timing_sets,
+            pin_name,
+            output_bit_idx,
+            out_timing_set,
+        );
+    }
+
+    Ok(())
+}
+
 fn effective_input_capacitance_by_edge(pin: &Pin, context: &str) -> Result<EdgeLoadCapacitance> {
     // max_capacitance is a design-rule limit, not nominal pin capacitance.
     // Prefer edge-specific capacitance when provided; fall back to nominal.
