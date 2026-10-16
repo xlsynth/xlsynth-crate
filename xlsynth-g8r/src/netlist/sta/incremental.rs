@@ -14,11 +14,12 @@ use super::{
     resolve_timing_sources, validate_constraint_tables_once,
 };
 use crate::liberty::Library;
-use crate::liberty_model::PinDirection;
+use crate::liberty_model::{PinDirection, TimingArc};
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
@@ -598,7 +599,7 @@ impl<'a> IncrementalSta<'a> {
                         .filter(|p| p.direction == PinDirection::Input as i32 && !p.is_clocking_pin)
                     {
                         let name = self.lib.library.resolve_string(&pin.name);
-                        let arcs: Vec<_> = pin
+                        let arcs: SmallVec<[&TimingArc; 4]> = pin
                             .timing_arcs
                             .iter()
                             .filter(|arc| {

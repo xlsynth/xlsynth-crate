@@ -1176,7 +1176,7 @@ fn analyze_max_arrival_proto_with_mode(
                 .filter(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
             {
                 let pin_name = lib.library.resolve_string(&pin.name);
-                let setup_arcs: Vec<&TimingArc> = pin
+                let setup_arcs: SmallVec<[&TimingArc; 4]> = pin
                     .timing_arcs
                     .iter()
                     .filter(|arc| {
@@ -1365,7 +1365,7 @@ fn evaluate_instance_outputs(
                 unsupported_arc.timing_type_str(lib.library)
             ));
         }
-        let combinational_arcs: Vec<&TimingArc> = pin
+        let combinational_arcs: SmallVec<[&TimingArc; 4]> = pin
             .timing_arcs
             .iter()
             .filter(|arc| {
@@ -2015,7 +2015,7 @@ pub fn validate_output_pin_for_basic_sta(
             unsupported_arc.timing_type_str(library)
         ));
     }
-    let combinational_arcs: Vec<&TimingArc> = pin.timing_arcs.iter().collect();
+    let combinational_arcs: SmallVec<[&TimingArc; 4]> = pin.timing_arcs.iter().collect();
     let mut evaluation = TimingEvaluationContext::new(library);
     validate_timing_tables_once(
         library,
@@ -2478,7 +2478,7 @@ fn evaluate_register_launch_output_set(
     evaluation: &mut TimingEvaluationContext<'_>,
     context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTimingSet> {
-    let launch_arcs: Vec<&TimingArc> = pin
+    let launch_arcs: SmallVec<[&TimingArc; 4]> = pin
         .timing_arcs
         .iter()
         .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(library)).is_clock_to_output())
@@ -3606,6 +3606,45 @@ mod tests {
                 "cell 'CELL' pin 'Y' related_pin 'A' table 'rise_constraint': timing table contains non-finite value NaN"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn all_parallel_arcs_contribute_beyond_inline_storage() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let arcs = (1..=8)
+            .map(|delay| {
+                scalar_arc(
+                    &mut builder,
+                    "A",
+                    "positive_unate",
+                    "combinational",
+                    "",
+                    f64::from(delay),
+                    f64::from(delay),
+                    1.0,
+                    1.0,
+                )
+            })
+            .collect();
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "A", arcs);
+        builder.cells.push(Cell {
+            name: "BUF".to_string(),
+            pins: vec![input, output],
+            ..Default::default()
+        });
+        let library = builder.finish();
+        let (module, nets, interner) =
+            parse_single_module("module m(input a, output y); BUF b(.A(a),.Y(y)); endmodule");
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+        )?;
+        assert_eq!(report.worst_output_arrival, 8.0);
         Ok(())
     }
 
