@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::netlist::gv_eval::LabeledNetlistAig;
 use xlsynth_pir::{IrBits, IrValue};
@@ -12,9 +13,20 @@ fn inverter_model(widths: &[usize]) -> LabeledNetlistAig {
         let inverted = builder.add_not_vec(&input);
         builder.add_output(format!("out{i}"), inverted);
     }
+    // GateBuilder intentionally rejects outputless graphs in debug builds.
+    let gate_fn = if widths.is_empty() {
+        GateFn {
+            name: "conversion".into(),
+            inputs: vec![],
+            outputs: vec![],
+            gates: vec![],
+        }
+    } else {
+        builder.build()
+    };
     LabeledNetlistAig {
         module_name: "conversion".into(),
-        gate_fn: builder.build(),
+        gate_fn,
         module_ports: vec![],
         module_boundaries: vec![],
         instances: vec![],
