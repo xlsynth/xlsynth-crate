@@ -354,10 +354,17 @@ pub fn resize_netlist(
         budget_exhausted |= sta.budget_exhausted || (rounds > 0 && trials >= phase_trials);
         if phase == 0 {
             upsized_delay = sta.score();
+            // Re-anchor the accumulator at phase boundaries; subtracting and
+            // adding cell areas can otherwise accumulate cancellation error.
+            area = sta.cells.iter().map(|i| library.cells[*i].area).sum();
             upsized_area = area;
         }
     }
     let incremental_delay = sta.score();
+    let final_area: f64 = sta.cells.iter().map(|i| library.cells[*i].area).sum();
+    if !final_area.is_finite() || final_area > area_limit + 1e-12 {
+        return Err(anyhow!("final resizing exceeds the area allowance"));
+    }
     let cells = sta.cells.clone();
     drop(sta);
     let mut candidate = module.clone();
@@ -376,7 +383,7 @@ pub fn resize_netlist(
     Ok(ResizeReport {
         initial_area,
         upsized_area,
-        final_area: area,
+        final_area,
         initial_delay,
         upsized_delay,
         final_delay,

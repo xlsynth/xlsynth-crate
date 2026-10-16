@@ -170,6 +170,40 @@ fn negative_arrival_paths_remain_eligible_for_area_neutral_timing_improvement() 
 }
 
 #[test]
+fn final_area_is_recomputed_without_incremental_cancellation() -> Result<()> {
+    let mut library = library()?;
+    for cell in &mut library.cells {
+        match cell.name.as_str() {
+            "BUF1" => cell.area = 1e16,
+            "BUF2" => cell.area = 1.0,
+            _ => cell.dont_use = Some(true),
+        }
+    }
+    for timing_phase in [true, false] {
+        let mut parsed = read_gv_from_str(
+            "module m(input a, output y, output z); BUF1 b(.A(a),.Y(y)); INV1 i(.A(a),.Y(z)); endmodule",
+        )?;
+        let report = resize(
+            &mut parsed,
+            &library,
+            &ResizeOptions {
+                max_upsize_rounds: usize::from(timing_phase),
+                max_downsize_rounds: usize::from(!timing_phase),
+                ..options()
+            },
+        )?;
+        assert_eq!(report.upsize.accepted + report.downsize.accepted, 1);
+        if timing_phase {
+            assert_eq!(report.upsized_area, 2.0);
+        }
+        // Subtracting the large initial buffer area loses the unchanged
+        // inverter in an incremental total. Both final cells have area one.
+        assert_eq!(report.final_area, 2.0);
+    }
+    Ok(())
+}
+
+#[test]
 fn downsize_uses_fixed_worst_endpoint_limit() -> Result<()> {
     let library = library()?;
     let mut parsed = read_gv_from_str(
