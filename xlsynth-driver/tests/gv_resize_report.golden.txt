@@ -24,19 +24,13 @@
     "trials": 2,
     "accepted": 1,
     "register_changes": 0,
-    "propagated_instances": 2,
-    "screened_out": 0,
-    "exact_trials": 2,
-    "prediction_rejections": 0
+    "propagated_instances": 2
   },
   "downsize": {
     "trials": 1,
     "accepted": 0,
     "register_changes": 0,
-    "propagated_instances": 1,
-    "screened_out": 0,
-    "exact_trials": 1,
-    "prediction_rejections": 0
+    "propagated_instances": 1
   },
   "budget_exhausted": false
 }

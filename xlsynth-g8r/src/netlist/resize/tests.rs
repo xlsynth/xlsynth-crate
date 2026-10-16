@@ -119,6 +119,35 @@ fn timing_then_area_preserves_wires_and_polarity() -> Result<()> {
 }
 
 #[test]
+fn negative_arrival_paths_remain_eligible_for_area_neutral_timing_improvement() -> Result<()> {
+    let mut text = String::from("library(test) {");
+    for (name, delay) in [("BUF1", -1), ("BUF2", -2)] {
+        text.push_str(&format!(
+            r#"cell({name}) {{ area: 1;
+            pin(A) {{ direction: input; capacitance: 1; }}
+            pin(Y) {{ direction: output; function: "A";
+                timing() {{ related_pin: "A"; timing_sense: positive_unate;
+                    cell_rise(scalar) {{ values("{delay}"); }}
+                    cell_fall(scalar) {{ values("{delay}"); }}
+                    rise_transition(scalar) {{ values("1"); }}
+                    fall_transition(scalar) {{ values("1"); }}
+                }} }} }}"#
+        ));
+    }
+    text.push('}');
+    let mut file = NamedTempFile::new()?;
+    file.write_all(text.as_bytes())?;
+    let library = parse_liberty_files(&[file.path()]).map_err(anyhow::Error::msg)?;
+    let mut parsed =
+        read_gv_from_str("module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule")?;
+    let report = resize(&mut parsed, &library, &options())?;
+    assert_eq!(report.initial_delay.input_to_output, -1.0);
+    assert_eq!(report.final_delay.input_to_output, -2.0);
+    assert_eq!(report.final_area, report.initial_area);
+    Ok(())
+}
+
+#[test]
 fn downsize_uses_fixed_worst_endpoint_limit() -> Result<()> {
     let library = library()?;
     let mut parsed = read_gv_from_str(
@@ -132,6 +161,40 @@ fn downsize_uses_fixed_worst_endpoint_limit() -> Result<()> {
     assert!(report.final_area < report.initial_area);
     assert!(report.final_delay.within(report.initial_delay));
     assert!(report.downsize.accepted > 0);
+    Ok(())
+}
+
+#[test]
+fn recovery_headroom_distinguishes_independent_critical_and_noncritical_cones() -> Result<()> {
+    let library = library()?;
+    let parsed = read_gv_from_str(
+        "module m(input a, output y, output z); BUF1 slow(.A(a),.Y(y)); BUF4 fast(.A(a),.Y(z)); endmodule",
+    )?;
+    let sta = IncrementalSta::new(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        options().timing,
+    )?;
+    let margins = sta.recovery_headroom(sta.score());
+    assert_eq!(margins[0], 0.0);
+    assert!(margins[1] > 0.0);
+    Ok(())
+}
+
+#[test]
+fn improves_more_than_thirty_two_equally_critical_outputs() -> Result<()> {
+    let library = library()?;
+    let mut text = String::from("module m(input a, output [63:0] y);\n");
+    for i in 0..64 {
+        text.push_str(&format!("BUF1 b{i}(.A(a), .Y(y[{i}]));\n"));
+    }
+    text.push_str("endmodule\n");
+    let mut parsed = read_gv_from_str(&text)?;
+    let report = resize(&mut parsed, &library, &options())?;
+    assert!(report.upsize.accepted >= 64);
+    assert!(report.final_delay.input_to_output < report.initial_delay.input_to_output);
     Ok(())
 }
 
@@ -158,6 +221,33 @@ fn resizes_launch_and_capture_without_boundary_inverters() -> Result<()> {
             .map(|i| i.connections.clone())
             .collect::<Vec<_>>()
     );
+    Ok(())
+}
+
+#[test]
+fn critical_candidates_do_not_cross_launch_register_data_boundaries() -> Result<()> {
+    let library = library()?;
+    let parsed = read_gv_from_str(
+        r#"module m(input clk, input d, output q);
+        wire a,b,c;
+        BUF1 before_launch(.A(d),.Y(a));
+        DFF1 launch(.CLK(clk),.D(a),.Q(b));
+        BUF1 comb(.A(b),.Y(c));
+        DFF1 capture(.CLK(clk),.D(c),.Q(q));
+        endmodule"#,
+    )?;
+    let sta = IncrementalSta::new(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        options().timing,
+    )?;
+    assert_eq!(sta.objective(), 3);
+    let mut candidates = sta.critical_instances(3, usize::MAX);
+    candidates.sort_unstable();
+    assert_eq!(candidates, vec![1, 2, 3]);
+    assert_eq!(sta.critical_instances(2, usize::MAX), vec![3]);
     Ok(())
 }
 
@@ -313,10 +403,7 @@ fn invalid_options_leave_the_netlist_unchanged() -> Result<()> {
             ..options()
         },
         ResizeOptions {
-            trial_tolerance: TrialTolerance {
-                arrival: f64::NAN,
-                slew: 0.0,
-            },
+            max_cell_candidates: 0,
             ..options()
         },
     ] {
@@ -327,7 +414,7 @@ fn invalid_options_leave_the_netlist_unchanged() -> Result<()> {
 }
 
 #[test]
-fn approximate_screening_cannot_commit_and_budget_rollback_is_exact() -> Result<()> {
+fn rejection_and_budget_rollback_restore_exact_timing() -> Result<()> {
     let library = library()?;
     let parsed = read_gv_from_str(
         "module m(input a, output y); wire b,c; BUF1 p(.A(a),.Y(b)); BUF1 q(.A(b),.Y(c)); BUF1 r(.A(c),.Y(y)); endmodule",
@@ -342,16 +429,7 @@ fn approximate_screening_cannot_commit_and_budget_rollback_is_exact() -> Result<
     let original_score = sta.score();
     let original_cells = sta.cells.clone();
     let larger = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
-    assert!(!sta.trial_with_tolerance(
-        1,
-        larger,
-        usize::MAX,
-        TrialTolerance {
-            arrival: 100.0,
-            slew: 100.0
-        },
-        |_| true
-    )?);
+    assert!(!sta.trial(1, larger, usize::MAX, |_| false)?);
     assert_eq!(sta.score(), original_score);
     assert_eq!(sta.cells, original_cells);
     let budget = sta.propagated + 1;
@@ -359,7 +437,7 @@ fn approximate_screening_cannot_commit_and_budget_rollback_is_exact() -> Result<
     assert!(sta.budget_exhausted);
     assert_eq!(sta.score(), original_score);
     assert_eq!(sta.cells, original_cells);
-    // A subsequent accurate trial must not inherit any skipped or aborted work.
+    // A subsequent trial must not inherit any rejected or aborted work.
     assert!(sta.trial(1, larger, usize::MAX, |_| true)?);
     let mut module = parsed.modules[0].clone();
     let mut interner = parsed.interner.clone();
@@ -432,17 +510,14 @@ fn electrical_limit_cannot_be_exchanged_for_timing_gain() -> Result<()> {
 }
 
 #[test]
-fn approximation_sweeps_preserve_accurate_commit_and_area_guards() -> Result<()> {
+fn budget_sweeps_preserve_timing_and_area_guards() -> Result<()> {
     let library = library()?;
-    for tolerance in [0.0, 0.01, 0.05, 0.1, 100.0] {
+    for max_propagated_instances in [0, 1, 10, 100, 1000] {
         let mut parsed = read_gv_from_str(
             "module m(input clk, input d, output q); wire a,b; DFF1 launch(.CLK(clk),.D(d),.Q(a)); BUF1 comb(.A(a),.Y(b)); DFF1 capture(.CLK(clk),.D(b),.Q(q)); endmodule",
         )?;
         let options = ResizeOptions {
-            trial_tolerance: TrialTolerance {
-                arrival: tolerance,
-                slew: tolerance,
-            },
+            max_propagated_instances,
             ..options()
         };
         let report = resize(&mut parsed, &library, &options)?;

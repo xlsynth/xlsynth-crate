@@ -7,7 +7,7 @@ use xlsynth_g8r::liberty::io_defaults::default_output_load;
 use xlsynth_g8r::liberty::load::load_library_with_timing_data_from_path;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::{read_gv_from_path, select_module};
-use xlsynth_g8r::netlist::resize::{ResizeOptions, TrialTolerance, resize_netlist};
+use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
 use xlsynth_g8r::netlist::sta::StaOptions;
 
 /// Exposes bounded native resizing independently of the mapping frontend.
@@ -20,13 +20,11 @@ pub fn command() -> Command {
         .arg(Arg::new("primary_input_transition").long("primary_input_transition").default_value("0.01").value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("module_output_load").long("module_output_load").value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("max-area-growth").long("max-area-growth").default_value("0.02").value_parser(clap::value_parser!(f64)))
-        .arg(Arg::new("max-trials").long("max-trials").default_value("1024").value_parser(clap::value_parser!(usize)))
-        .arg(Arg::new("max-propagated-instances").long("max-propagated-instances").default_value("100000").value_parser(clap::value_parser!(usize)))
+        .arg(Arg::new("max-trials").long("max-trials").default_value("1536").value_parser(clap::value_parser!(usize)))
+        .arg(Arg::new("max-propagated-instances").long("max-propagated-instances").default_value("150000").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("upsize-rounds").long("upsize-rounds").default_value("4").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("downsize-rounds").long("downsize-rounds").default_value("2").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("no-register-resize").long("no-register-resize").action(ArgAction::SetTrue))
-        .arg(Arg::new("trial-arrival-tolerance").long("trial-arrival-tolerance").default_value("0").value_parser(clap::value_parser!(f64)))
-        .arg(Arg::new("trial-slew-tolerance").long("trial-slew-tolerance").default_value("0").value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("report-json").long("report-json").help("Write deterministic before/after timing, area and search-work statistics"))
 }
 
@@ -61,10 +59,6 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         max_upsize_rounds: *matches.get_one::<usize>("upsize-rounds").unwrap(),
         max_downsize_rounds: *matches.get_one::<usize>("downsize-rounds").unwrap(),
         resize_registers: !matches.get_flag("no-register-resize"),
-        trial_tolerance: TrialTolerance {
-            arrival: *matches.get_one::<f64>("trial-arrival-tolerance").unwrap(),
-            slew: *matches.get_one::<f64>("trial-slew-tolerance").unwrap(),
-        },
         ..ResizeOptions::default()
     };
     let report = resize_netlist(

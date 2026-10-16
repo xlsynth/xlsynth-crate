@@ -20,7 +20,7 @@ use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
 
 /// Measures all four launch/capture classes independently with full `gv-stats`
@@ -69,46 +69,6 @@ pub fn measure_boundary_delays(
     })
 }
 
-/// Absolute propagation tolerances in library time units, used only in
-/// speculative screening. Zero selects accurate propagation.
-#[derive(Clone, Copy, Debug, Default, Serialize)]
-pub struct TrialTolerance {
-    pub arrival: f64,
-    pub slew: f64,
-}
-
-impl TrialTolerance {
-    pub(crate) fn enabled(self) -> bool {
-        self.arrival > 0.0 || self.slew > 0.0
-    }
-
-    /// Changing frontier cardinality always propagates. Comparisons retain
-    /// paired arrival/slew candidates, rather than comparing independent
-    /// maxima.
-    fn close(self, old: &Option<SignalTimingSet>, new: &Option<SignalTimingSet>) -> bool {
-        if !self.enabled() {
-            return old == new;
-        }
-        match (old, new) {
-            (None, None) => true,
-            (Some(a), Some(b)) => {
-                [&a.rise, &a.fall]
-                    .into_iter()
-                    .zip([&b.rise, &b.fall])
-                    .all(|(a, b)| {
-                        a.values.len() == b.values.len()
-                            && a.values.iter().zip(&b.values).all(|(a, b)| {
-                                (a.timing.arrival - b.timing.arrival).abs() <= self.arrival
-                                    && (a.timing.transition - b.timing.transition).abs()
-                                        <= self.slew
-                            })
-                    })
-            }
-            _ => false,
-        }
-    }
-}
-
 /// Timing objectives, ordered PI->PO, PI->register, register->PO,
 /// register->register.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
@@ -137,23 +97,98 @@ impl BoundaryDelays {
     }
 }
 
-/// Stable total ordering for endpoint scores; all evaluated times are finite.
+/// Stable total ordering for timing scores and search priorities.
 #[derive(Clone, Copy, Debug)]
-struct EndpointKey(f64, usize);
-impl PartialEq for EndpointKey {
+struct RankedIndex(f64, usize);
+impl PartialEq for RankedIndex {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
-impl Eq for EndpointKey {}
-impl PartialOrd for EndpointKey {
+impl Eq for RankedIndex {}
+impl PartialOrd for RankedIndex {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl Ord for EndpointKey {
+impl Ord for RankedIndex {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.total_cmp(&other.0).then(self.1.cmp(&other.1))
+    }
+}
+
+/// Ordered endpoint arrivals with an incrementally maintained count of ties at
+/// the maximum. A bounded endpoint sum alone cannot see progress when more
+/// endpoints share the maximum than fit in that sum.
+#[derive(Default)]
+struct EndpointScores {
+    values: BTreeSet<RankedIndex>,
+    worst_count: usize,
+}
+
+impl EndpointScores {
+    fn worst(&self) -> Option<f64> {
+        self.values.last().map(|key| key.0)
+    }
+
+    /// Updates a single endpoint. Only removing the last current maximum
+    /// requires counting the newly exposed maximum bucket; other updates are
+    /// logarithmic and do not scan unaffected endpoints.
+    fn replace(&mut self, endpoint: usize, old: Option<f64>, new: Option<f64>) {
+        if old.map(f64::to_bits) == new.map(f64::to_bits) {
+            return;
+        }
+        let previous = self.worst();
+        if let Some(old) = old {
+            let removed = self.values.remove(&RankedIndex(old, endpoint));
+            debug_assert!(removed);
+        }
+        if let Some(new) = new {
+            self.values.insert(RankedIndex(new, endpoint));
+        }
+        let current = self.worst();
+        if current == previous {
+            self.worst_count += usize::from(new.is_some() && new == current);
+            self.worst_count -= usize::from(old.is_some() && old == previous);
+        } else {
+            self.worst_count = match (previous, current) {
+                (_, None) => 0,
+                (Some(before), Some(after)) if after < before => self
+                    .values
+                    .iter()
+                    .rev()
+                    .take_while(|key| key.0 == after)
+                    .count(),
+                _ => 1,
+            };
+        }
+    }
+}
+
+/// Lexicographic progress below the worst delay: first reduce the number of
+/// equally critical endpoints, then improve a bounded near-critical sum.
+#[derive(Clone, Copy)]
+pub(crate) struct TimingTieBreak {
+    worst_count: usize,
+    near_sum: f64,
+}
+
+impl TimingTieBreak {
+    pub fn improves(self, old: Self) -> bool {
+        self.worst_count < old.worst_count
+            || (self.worst_count == old.worst_count && self.near_sum < old.near_sum - 1e-9)
+    }
+
+    /// Returns a dimensionless progress ratio for area-efficiency ranking.
+    /// A nonpositive baseline cannot justify paying additional area.
+    pub fn relative_to(self, old: Self) -> f64 {
+        if self.worst_count < old.worst_count {
+            self.worst_count as f64 / old.worst_count as f64
+        } else if old.near_sum > 0.0 {
+            self.near_sum / old.near_sum
+        } else {
+            1.0
+        }
     }
 }
 
@@ -201,7 +236,7 @@ pub(crate) struct IncrementalSta<'a> {
     endpoint_values: Vec<[Option<f64>; 2]>,
     endpoints_by_bit: Vec<Vec<usize>>,
     capture_endpoint: Vec<Option<usize>>,
-    scores: [BTreeSet<EndpointKey>; 4],
+    scores: [EndpointScores; 4],
     electrical: Vec<Vec<f64>>,
     validated: HashSet<*const TimingTable>,
     evaluation: TimingEvaluationContext<'a>,
@@ -460,7 +495,7 @@ impl<'a> IncrementalSta<'a> {
             endpoint_values,
             endpoints_by_bit,
             capture_endpoint,
-            scores: std::array::from_fn(|_| BTreeSet::new()),
+            scores: std::array::from_fn(|_| EndpointScores::default()),
             electrical,
             validated: HashSet::new(),
             evaluation: TimingEvaluationContext::new(library),
@@ -617,18 +652,13 @@ impl<'a> IncrementalSta<'a> {
         let capture = usize::from(matches!(self.endpoints[endpoint], Endpoint::Capture(_)));
         for (mode, value) in values.iter().enumerate() {
             let scores = &mut self.scores[mode * 2 + capture];
-            if let Some(old) = self.endpoint_values[endpoint][mode] {
-                scores.remove(&EndpointKey(old, endpoint));
-            }
-            if let Some(value) = value {
-                scores.insert(EndpointKey(*value, endpoint));
-            }
+            scores.replace(endpoint, self.endpoint_values[endpoint][mode], *value);
         }
         self.endpoint_values[endpoint] = values;
     }
 
     pub fn score(&self) -> BoundaryDelays {
-        let v: [f64; 4] = std::array::from_fn(|i| self.scores[i].last().map_or(0.0, |key| key.0));
+        let v: [f64; 4] = std::array::from_fn(|i| self.scores[i].worst().unwrap_or(0.0));
         BoundaryDelays {
             input_to_output: v[0],
             input_to_register: v[1],
@@ -640,51 +670,58 @@ impl<'a> IncrementalSta<'a> {
     /// Prioritizes register-to-register timing when present, otherwise worst
     /// IO.
     pub fn objective(&self) -> usize {
-        if !self.scores[3].is_empty() {
+        if self.scores[3].worst().is_some() {
             3
         } else {
             (0..4)
+                .filter(|i| self.scores[*i].worst().is_some())
                 .max_by(|a, b| self.score().values()[*a].total_cmp(&self.score().values()[*b]))
-                .unwrap()
+                .unwrap_or(0)
         }
     }
 
-    /// Breaks worst-delay ties using a bounded set of endpoint arrivals.
-    pub fn secondary(&self, objective: usize) -> f64 {
-        self.scores[objective]
-            .iter()
-            .rev()
-            .take(32)
-            .map(|key| key.0)
-            .sum()
+    /// Breaks delay ties without losing progress on large critical plateaus.
+    pub fn secondary(&self, objective: usize) -> TimingTieBreak {
+        let scores = &self.scores[objective];
+        TimingTieBreak {
+            worst_count: scores.worst_count,
+            near_sum: scores.values.iter().rev().take(32).map(|key| key.0).sum(),
+        }
     }
 
     pub fn is_register(&self, i: usize) -> bool {
         self.instances[i].sequential
     }
 
-    /// Visits near-critical endpoints and their fanin, once per search round.
+    /// Visits near-critical fanin by cumulative arrival deficit, once per
+    /// round. This is only a search-order heuristic: asymmetric pin arcs
+    /// and load/slew effects are accounted for by accurate candidate
+    /// evaluation afterward.
     pub fn critical_instances(&self, objective: usize, limit: usize) -> Vec<usize> {
-        let mut queue = VecDeque::new();
+        let mut queue = BTreeSet::new();
         let worst = self.score().values()[objective];
         for key in self.scores[objective]
+            .values
             .iter()
             .rev()
             .take(32)
-            .filter(|k| k.0 >= worst * 0.95)
+            .filter(|k| k.0 >= worst - worst.abs() * 0.05)
         {
             match self.endpoints[key.1] {
                 Endpoint::Output(bit) => {
                     if let Some(i) = self.drivers[bit] {
-                        queue.push_back(i);
+                        queue.insert(RankedIndex(worst - key.0, i));
                     }
                 }
-                Endpoint::Capture(i) => queue.push_back(i),
+                Endpoint::Capture(i) => {
+                    queue.insert(RankedIndex(worst - key.0, i));
+                    queue.extend(self.fanin_priorities(i, objective / 2, worst - key.0));
+                }
             }
         }
         let mut seen = HashSet::new();
         let mut result = Vec::new();
-        while let Some(i) = queue.pop_front() {
+        while let Some(RankedIndex(deficit, i)) = queue.pop_first() {
             if !seen.insert(i) {
                 continue;
             }
@@ -692,26 +729,81 @@ impl<'a> IncrementalSta<'a> {
             if result.len() >= limit {
                 break;
             }
-            let mut inputs = Vec::new();
-            for (pin, sources) in &self.instances[i].pins {
-                let pin = self.lib.pin(self.cells[i], pin).expect("validated pin");
-                if pin.direction != PinDirection::Input as i32 || pin.is_clocking_pin {
-                    continue;
+            // A launch register's D cone belongs to another timing path.
+            // Capture-register fanin is seeded separately above.
+            if !self.instances[i].sequential {
+                queue.extend(self.fanin_priorities(i, objective / 2, deficit));
+            }
+        }
+        result
+    }
+
+    /// Ranks data-input drivers by arrival deficit in one launch class.
+    fn fanin_priorities(&self, i: usize, mode: usize, deficit: f64) -> Vec<RankedIndex> {
+        let mut inputs = Vec::new();
+        for (pin, sources) in &self.instances[i].pins {
+            let pin = self.lib.pin(self.cells[i], pin).expect("validated pin");
+            if pin.direction != PinDirection::Input as i32 || pin.is_clocking_pin {
+                continue;
+            }
+            for source in sources {
+                if let BitSource::Bit(bit) = source
+                    && let Some(driver) = self.drivers[*bit]
+                    && let Some(arrival) = self.timing[mode][*bit]
+                        .as_ref()
+                        .and_then(SignalTimingSet::worst_arrival_candidate)
+                {
+                    inputs.push((arrival.timing.arrival, driver));
                 }
-                for source in sources {
-                    if let BitSource::Bit(bit) = source
-                        && let Some(driver) = self.drivers[*bit]
-                    {
-                        let arrival = self.timing[objective / 2][*bit]
-                            .as_ref()
-                            .and_then(SignalTimingSet::worst_arrival_candidate)
-                            .map_or(0.0, |t| t.timing.arrival);
-                        inputs.push((arrival, driver));
+            }
+        }
+        let latest = inputs
+            .iter()
+            .map(|(arrival, _)| *arrival)
+            .fold(0.0, f64::max);
+        inputs
+            .into_iter()
+            .map(|(arrival, driver)| RankedIndex(deficit + (latest - arrival).max(0.0), driver))
+            .collect()
+    }
+
+    /// Estimates per-cell headroom once per recovery round, across all timing
+    /// boundaries. This is an ordering heuristic, not a timing constraint:
+    /// exact trials still account for pin arcs, slew and upstream load changes.
+    pub fn recovery_headroom(&self, limits: BoundaryDelays) -> Vec<f64> {
+        let mut result = vec![f64::INFINITY; self.instances.len()];
+        for mode in 0..if self.registered { 2 } else { 1 } {
+            let mut margins = vec![f64::INFINITY; self.instances.len()];
+            for (endpoint, values) in self.endpoints.iter().zip(&self.endpoint_values) {
+                let Some(arrival) = values[mode] else {
+                    continue;
+                };
+                let capture = usize::from(matches!(endpoint, Endpoint::Capture(_)));
+                let margin = (limits.values()[mode * 2 + capture] - arrival).max(0.0);
+                match *endpoint {
+                    Endpoint::Output(bit) => {
+                        if let Some(i) = self.drivers[bit] {
+                            margins[i] = margins[i].min(margin);
+                        }
+                    }
+                    Endpoint::Capture(i) => {
+                        margins[i] = margins[i].min(margin);
+                        for RankedIndex(value, driver) in self.fanin_priorities(i, mode, margin) {
+                            margins[driver] = margins[driver].min(value);
+                        }
                     }
                 }
             }
-            inputs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-            queue.extend(inputs.into_iter().map(|(_, i)| i));
+            for i in self.topological.iter().rev().copied() {
+                if !self.instances[i].sequential && margins[i].is_finite() {
+                    for RankedIndex(value, driver) in self.fanin_priorities(i, mode, margins[i]) {
+                        margins[driver] = margins[driver].min(value);
+                    }
+                }
+            }
+            for (result, margin) in result.iter_mut().zip(margins) {
+                *result = result.min(margin);
+            }
         }
         result
     }
@@ -780,20 +872,6 @@ impl<'a> IncrementalSta<'a> {
         i: usize,
         cell: usize,
         budget: usize,
-        accept: impl FnOnce(&Self) -> bool,
-    ) -> Result<bool> {
-        self.trial_with_tolerance(i, cell, budget, TrialTolerance::default(), accept)
-    }
-
-    /// Approximate trials always roll back, even if the observer returns true.
-    /// A promising trial must be repeated accurately before it can be
-    /// committed.
-    pub fn trial_with_tolerance(
-        &mut self,
-        i: usize,
-        cell: usize,
-        budget: usize,
-        tolerance: TrialTolerance,
         accept: impl FnOnce(&Self) -> bool,
     ) -> Result<bool> {
         let old_cell = self.cells[i];
@@ -870,11 +948,9 @@ impl<'a> IncrementalSta<'a> {
                         continue;
                     }
                     endpoints.extend(self.endpoints_by_bit[*bit].iter().copied());
-                    let propagate = !(tolerance.close(&old[0], &self.timing[0][*bit])
-                        && tolerance.close(&old[1], &self.timing[1][*bit]));
                     for consumer in &self.consumers[*bit] {
                         affected.insert(*consumer);
-                        if propagate && !self.instances[*consumer].sequential {
+                        if !self.instances[*consumer].sequential {
                             queue.insert((self.positions[*consumer], *consumer));
                         }
                     }
@@ -898,7 +974,7 @@ impl<'a> IncrementalSta<'a> {
                 }
                 violations.push((inst, new));
             }
-            if !accept(self) || tolerance.enabled() {
+            if !accept(self) {
                 return Ok(false);
             }
             for (inst, new) in violations {
@@ -920,5 +996,61 @@ impl<'a> IncrementalSta<'a> {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    #[test]
+    fn endpoint_maximum_counts_match_rescanning_through_replacement_and_rollback() {
+        let mut scores = EndpointScores::default();
+        let mut values = [None; 64];
+        let candidates = [
+            None,
+            Some(-2.0),
+            Some(-0.0),
+            Some(0.0),
+            Some(1.0),
+            Some(2.0),
+        ];
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xc017);
+        for _ in 0..10_000 {
+            let endpoint = rng.gen_range(0..values.len());
+            let old = values[endpoint];
+            let new = candidates[rng.gen_range(0..candidates.len())];
+            scores.replace(endpoint, old, new);
+            values[endpoint] = new;
+            let expected = values.iter().copied().flatten().max_by(f64::total_cmp);
+            assert_eq!(scores.worst().map(f64::to_bits), expected.map(f64::to_bits));
+            assert_eq!(
+                scores.worst_count,
+                values
+                    .iter()
+                    .filter(|v| v.is_some() && **v == expected)
+                    .count()
+            );
+            if rng.gen_bool(0.5) {
+                scores.replace(endpoint, new, old);
+                values[endpoint] = old;
+                let expected = values.iter().copied().flatten().max_by(f64::total_cmp);
+                assert_eq!(scores.worst().map(f64::to_bits), expected.map(f64::to_bits));
+                assert_eq!(
+                    scores.worst_count,
+                    values
+                        .iter()
+                        .filter(|v| v.is_some() && **v == expected)
+                        .count()
+                );
+            }
+        }
+        for (endpoint, old) in values.into_iter().enumerate() {
+            scores.replace(endpoint, old, None);
+        }
+        assert_eq!(scores.worst(), None);
+        assert_eq!(scores.worst_count, 0);
     }
 }

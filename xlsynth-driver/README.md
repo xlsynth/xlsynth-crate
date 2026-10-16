@@ -1157,6 +1157,13 @@ are inserted or removed. Independent full STA verifies the final result using
 the same model as `gv-stats`: Liberty max-delay/setup timing with ideal clocks,
 not hold, placement, wire-delay or clock-tree signoff.
 
+The timing phase prioritizes near-critical paths and can change either cell
+strength direction. Area-growing moves must improve an area-delay-squared merit
+as well as pass the fixed area/timing limits. Area recovery prioritizes potential
+savings with estimated timing headroom; every acceptance uses exact incremental
+timing. Unchanged arrival/slew frontiers stop propagation, with no approximate
+cutoffs.
+
 - `--netlist <PATH>`: required mapped GV input, optionally gzip-compressed.
 - `--liberty_proto <PATH>`: required matching timing-enabled Liberty proto.
 - `--module_name <NAME>`: selected module; optional for a single-module file.
@@ -1166,18 +1173,13 @@ not hold, placement, wire-delay or clock-tree signoff.
   defaults to the proto's `default_output_load`. Explicit `0` is supported.
 - `--max-area-growth <FRACTION>`: noncompounding growth relative to input area;
   default `0.02` (2%).
-- `--max-trials <COUNT>`: total substitution trials; default `1024`.
+- `--max-trials <COUNT>`: total substitution trials; default `1536`.
 - `--max-propagated-instances <COUNT>`: total trial propagation work; default
-  `100000`. Exhaustion rolls back the unfinished trial and keeps verified work.
+  `150000`. Exhaustion rolls back the unfinished trial and keeps verified work.
 - `--upsize-rounds <COUNT>`, `--downsize-rounds <COUNT>`: default `4` and `2`;
-  `0` disables that phase. Half the trial/propagation budget is reserved for
-  area recovery when both phases are enabled.
+  `0` disables that phase. Two thirds of the trial/propagation budget is reserved
+  for area recovery when both phases are enabled.
 - `--no-register-resize`: leave FF cells fixed; default permits resizing.
-- `--trial-arrival-tolerance <TIME>`, `--trial-slew-tolerance <TIME>`: optional
-  speculative propagation cutoffs in library time units; default `0` (disabled).
-  Every approximate trial is rolled back, and promising substitutions are
-  re-evaluated accurately before committing. Nonzero values can miss useful
-  candidates; they never authorize accepting approximate timing as final.
 - `--report-json <PATH>`: deterministic before/after boundary timing, cell area,
   accepted moves, propagation counts, and budget-exhaustion status.
 

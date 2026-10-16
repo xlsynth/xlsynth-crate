@@ -17,9 +17,7 @@ use crate::liberty_model::{Cell, PinDirection};
 use crate::netlist::parse::{Net, NetlistModule};
 use crate::netlist::sta::StaOptions;
 use crate::netlist::sta::incremental::IncrementalSta;
-pub use crate::netlist::sta::incremental::{
-    BoundaryDelays, TrialTolerance, measure_boundary_delays,
-};
+pub use crate::netlist::sta::incremental::{BoundaryDelays, measure_boundary_delays};
 
 /// Deterministic search limits. The area allowance is relative to the input,
 /// never compounded across accepted moves. All timing limits use Liberty units.
@@ -34,9 +32,6 @@ pub struct ResizeOptions {
     pub max_trials: usize,
     pub max_propagated_instances: usize,
     pub resize_registers: bool,
-    /// Approximate candidate screening only; commits and final verification
-    /// always use accurate timing. Both thresholds default to zero (disabled).
-    pub trial_tolerance: TrialTolerance,
 }
 
 impl Default for ResizeOptions {
@@ -48,10 +43,9 @@ impl Default for ResizeOptions {
             max_downsize_rounds: 2,
             max_candidate_sites: 128,
             max_cell_candidates: 8,
-            max_trials: 1024,
-            max_propagated_instances: 100_000,
+            max_trials: 1536,
+            max_propagated_instances: 150_000,
             resize_registers: true,
-            trial_tolerance: TrialTolerance::default(),
         }
     }
 }
@@ -63,9 +57,6 @@ pub struct ResizePhaseStats {
     pub accepted: usize,
     pub register_changes: usize,
     pub propagated_instances: usize,
-    pub screened_out: usize,
-    pub exact_trials: usize,
-    pub prediction_rejections: usize,
 }
 
 /// Verified before/after QoR and bounded search work; original netlist is kept
@@ -179,8 +170,11 @@ fn cell_signature(cell: &Cell, library: &Library) -> Option<Vec<String>> {
 }
 
 /// Resizes compatible combinational cells and FFs without changing any wires.
-/// Upsizing never worsens a boundary class; downsizing preserves the timing
-/// checkpoint reached by upsizing. No hold/physical timing guarantee is made.
+/// The timing phase prioritizes near-critical paths and prices area-growing
+/// moves by an area-delay-squared merit, without worsening any boundary class.
+/// Recovery orders candidates by potential area savings and estimated timing
+/// headroom, but accepts them only against the exact timing checkpoint. No
+/// hold/physical timing guarantee is made.
 pub fn resize_netlist(
     module: &mut NetlistModule,
     nets: &[Net],
@@ -190,15 +184,6 @@ pub fn resize_netlist(
 ) -> Result<ResizeReport> {
     if !options.max_area_growth.is_finite() || options.max_area_growth < 0.0 {
         return Err(anyhow!("max_area_growth must be finite and nonnegative"));
-    }
-    if [
-        options.trial_tolerance.arrival,
-        options.trial_tolerance.slew,
-    ]
-    .into_iter()
-    .any(|v| !v.is_finite() || v < 0.0)
-    {
-        return Err(anyhow!("trial tolerances must be finite and nonnegative"));
     }
     if options.max_candidate_sites == 0 || options.max_cell_candidates == 0 {
         return Err(anyhow!("candidate limits must be positive"));
@@ -223,16 +208,16 @@ pub fn resize_netlist(
     let mut budget_exhausted = false;
     for (phase, phase_stats) in stats.iter_mut().enumerate() {
         let start_work = sta.propagated;
-        // Reserve half the trials/work for the final area phase. The total
-        // allowance remains shared; unused timing work is available to
-        // recovery.
+        // Reserve two thirds of the trials/work for the final area phase. The
+        // total allowance remains shared; unused timing work is
+        // available to recovery.
         let phase_trials = if phase == 0 && options.max_downsize_rounds > 0 {
-            options.max_trials / 2
+            options.max_trials / 3
         } else {
             options.max_trials
         };
         let phase_work = if phase == 0 && options.max_downsize_rounds > 0 {
-            options.max_propagated_instances / 2
+            options.max_propagated_instances / 3
         } else {
             options.max_propagated_instances
         };
@@ -246,11 +231,31 @@ pub fn resize_netlist(
             let mut sites = if phase == 0 {
                 sta.critical_instances(objective, options.max_candidate_sites)
             } else {
+                let priorities = sta
+                    .recovery_headroom(upsized_delay)
+                    .into_iter()
+                    .zip(&sta.cells)
+                    .map(|(headroom, cell)| {
+                        let area = library.cells[*cell].area;
+                        let savings = families.alternatives[*cell]
+                            .first()
+                            .map_or(0.0, |smallest| area - library.cells[*smallest].area);
+                        if savings > 0.0 {
+                            headroom * savings
+                        } else {
+                            -1.0
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 let mut sites: Vec<_> = (0..sta.cells.len()).collect();
                 sites.sort_by(|a, b| {
-                    library.cells[sta.cells[*b]]
-                        .area
-                        .total_cmp(&library.cells[sta.cells[*a]].area)
+                    priorities[*b]
+                        .total_cmp(&priorities[*a])
+                        .then_with(|| {
+                            library.cells[sta.cells[*b]]
+                                .area
+                                .total_cmp(&library.cells[sta.cells[*a]].area)
+                        })
                         .then(a.cmp(b))
                 });
                 sites
@@ -298,34 +303,30 @@ pub fn resize_netlist(
                         if phase == 1 {
                             return score.within(upsized_delay);
                         }
+                        let secondary = timing.secondary(objective);
+                        let old_delay = old_score.values()[objective];
+                        let new_delay = score.values()[objective];
+                        // Price area with an area-delay-squared merit while
+                        // retaining the hard timing and area limits. Break
+                        // worst-delay ties using the near-critical sum.
+                        let delay_ratio = if old_delay <= 0.0 {
+                            // Negative characterized delays are supported by
+                            // STA, but do not define a positive merit ratio.
+                            1.0
+                        } else if new_delay < old_delay - 1e-9 {
+                            new_delay / old_delay
+                        } else {
+                            secondary.relative_to(old_secondary)
+                        };
+                        let worthwhile = new_area <= area || delay_ratio < (area / new_area).sqrt();
                         score.within(initial_delay)
                             && score.within(old_score)
+                            && worthwhile
                             && (score.values()[objective] < old_score.values()[objective] - 1e-9
                                 || (score.values()[objective] <= old_score.values()[objective]
-                                    && timing.secondary(objective) < old_secondary - 1e-9))
+                                    && secondary.improves(old_secondary)))
                     };
-                    if options.trial_tolerance.enabled() {
-                        let mut promising = false;
-                        sta.trial_with_tolerance(
-                            i,
-                            cell,
-                            phase_work,
-                            options.trial_tolerance,
-                            |timing| {
-                                promising = acceptable(timing);
-                                false
-                            },
-                        )?;
-                        if !promising || sta.budget_exhausted {
-                            phase_stats.screened_out += 1;
-                            continue;
-                        }
-                    }
-                    phase_stats.exact_trials += 1;
                     let committed = sta.trial(i, cell, phase_work, acceptable)?;
-                    if options.trial_tolerance.enabled() && !committed {
-                        phase_stats.prediction_rejections += 1;
-                    }
                     if committed {
                         phase_stats.accepted += 1;
                         phase_stats.register_changes += usize::from(sta.is_register(i));
