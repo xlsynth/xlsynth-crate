@@ -743,8 +743,8 @@ impl<'a> IncrementalSta<'a> {
     }
 
     /// Ranks data-input drivers by arrival deficit in one launch class.
-    fn fanin_priorities(&self, i: usize, mode: usize, deficit: f64) -> Vec<RankedIndex> {
-        let mut inputs = Vec::new();
+    fn fanin_priorities(&self, i: usize, mode: usize, deficit: f64) -> SmallVec<[RankedIndex; 4]> {
+        let mut inputs: SmallVec<[RankedIndex; 4]> = SmallVec::new();
         for (pin, sources) in &self.instances[i].pins {
             let pin = self.lib.pin(self.cells[i], pin).expect("validated pin");
             if pin.direction != PinDirection::Input as i32
@@ -759,18 +759,15 @@ impl<'a> IncrementalSta<'a> {
                         .as_ref()
                         .and_then(SignalTimingSet::worst_arrival_candidate)
                 {
-                    inputs.push((arrival.timing.arrival, driver));
+                    inputs.push(RankedIndex(arrival.timing.arrival, driver));
                 }
             }
         }
-        let latest = inputs
-            .iter()
-            .map(|(arrival, _)| *arrival)
-            .fold(0.0, f64::max);
+        let latest = inputs.iter().map(|input| input.0).fold(0.0, f64::max);
+        for input in &mut inputs {
+            input.0 = deficit + (latest - input.0).max(0.0);
+        }
         inputs
-            .into_iter()
-            .map(|(arrival, driver)| RankedIndex(deficit + (latest - arrival).max(0.0), driver))
-            .collect()
     }
 
     /// Estimates per-cell headroom once per recovery round, across all timing

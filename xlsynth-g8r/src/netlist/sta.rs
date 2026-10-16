@@ -447,22 +447,22 @@ impl StaReport {
 /// Validated library names and pin indexes for immutable timing queries.
 struct StaLibraryIndex<'a> {
     library: &'a crate::liberty_model::Library,
-    cell_by_name: HashMap<String, usize>,
+    cell_by_name: HashMap<&'a str, usize>,
     pin_by_cell: Vec<HashMap<&'a str, usize>>,
 }
 
 impl<'a> StaLibraryIndex<'a> {
     fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
-        let mut cell_by_name = HashMap::new();
+        let mut cell_by_name = HashMap::with_capacity(library.cells.len());
         let mut pin_by_cell = Vec::with_capacity(library.cells.len());
         for (cell_idx, cell) in library.cells.iter().enumerate() {
-            if cell_by_name.insert(cell.name.clone(), cell_idx).is_some() {
+            if cell_by_name.insert(cell.name.as_str(), cell_idx).is_some() {
                 return Err(anyhow!(
                     "library defines cell '{}' more than once; duplicate cell names are unsupported in basic STA",
                     cell.name
                 ));
             }
-            let mut pin_map = HashMap::new();
+            let mut pin_map = HashMap::with_capacity(cell.pins.len());
             for (pin_idx, pin) in cell.pins.iter().enumerate() {
                 let pin_name = library.resolve_string(&pin.name);
                 if pin_map.insert(pin_name, pin_idx).is_some() {

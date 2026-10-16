@@ -156,7 +156,9 @@ fn cell_signature(cell: &Cell, library: &Library) -> Option<Vec<String>> {
         let mut truth = String::with_capacity(1 << variables.len());
         for value in 0..1usize << variables.len() {
             for (bit, name) in variables.iter().enumerate() {
-                assignment.insert(name.clone(), value & (1 << bit) != 0);
+                *assignment
+                    .get_mut(name)
+                    .expect("signature variable binding") = value & (1 << bit) != 0;
             }
             truth.push(if formula.evaluate_partial(&assignment)? {
                 '1'
