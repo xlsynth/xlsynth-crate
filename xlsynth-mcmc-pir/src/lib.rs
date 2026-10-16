@@ -34,7 +34,7 @@ use xlsynth::IrPackage;
 use xlsynth_g8r::aig::get_summary_stats;
 use xlsynth_g8r::aig::get_summary_stats::AigStats;
 use xlsynth_g8r::aig::graph_logical_effort::GraphLogicalEffortOptions;
-use xlsynth_g8r::aig::graph_logical_effort::analyze_graph_logical_effort;
+use xlsynth_g8r::aig::graph_logical_effort::score_graph_logical_effort;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_serdes::gate2ir::{
     GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
@@ -1061,7 +1061,7 @@ fn compute_g8r_stats_for_pir_fn_impl(
     let gate_fn = artifacts.gate_fn;
     let stats = artifacts.stats;
     let g8r_le_graph_milli = if compute_graph_logical_effort {
-        let graph_le = analyze_graph_logical_effort(
+        let graph_le = score_graph_logical_effort(
             &gate_fn,
             &GraphLogicalEffortOptions {
                 beta1: canonical_g8r_options.graph_logical_effort_beta1,
@@ -1249,7 +1249,7 @@ pub(crate) fn postprocess_gate_fn_for_artifact(
     let loaded = postprocess_gate_fn_with_external_program(gate_fn, schema, g8r_evaluation_mode)?;
     let stats = get_summary_stats::get_aig_stats(&loaded.gate_fn);
     let graph_logical_effort_worst_case_delay = compute_graph_logical_effort.then(|| {
-        analyze_graph_logical_effort(
+        score_graph_logical_effort(
             &loaded.gate_fn,
             &GraphLogicalEffortOptions {
                 beta1: canonical_g8r_options.graph_logical_effort_beta1,
@@ -1277,7 +1277,7 @@ fn compute_post_stats_for_gate_fn(
 ) -> Result<G8rPostStats> {
     let stats = get_summary_stats::get_aig_stats(gate_fn);
     let le_graph_milli = if compute_graph_logical_effort {
-        let graph_le = analyze_graph_logical_effort(
+        let graph_le = score_graph_logical_effort(
             gate_fn,
             &GraphLogicalEffortOptions {
                 beta1: canonical_g8r_options.graph_logical_effort_beta1,

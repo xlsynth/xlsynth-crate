@@ -130,3 +130,7 @@ harness = false
 [[bench]]
 name = "dynamic_depth_bench"
 harness = false
+
+[[bench]]
+name = "graph_logical_effort_bench"
+harness = false

@@ -16,7 +16,7 @@ use crate::aig::find_structures;
 use crate::aig::fraig::FraigPassStat;
 use crate::aig::gate;
 use crate::aig::get_summary_stats::get_gate_depth;
-use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
+use crate::aig::graph_logical_effort::{self, score_graph_logical_effort};
 use crate::aig::logical_effort;
 use crate::aig::logical_effort::compute_logical_effort_min_delay;
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
@@ -767,7 +767,7 @@ pub fn process_ir_text_with_gatefn(
     };
 
     let graph_logical_effort_worst_case_delay = if options.compute_graph_logical_effort {
-        let graph_logical_effort_analysis = analyze_graph_logical_effort(
+        let graph_logical_effort_analysis = score_graph_logical_effort(
             &gate_fn,
             &graph_logical_effort::GraphLogicalEffortOptions {
                 beta1: options.graph_logical_effort_beta1,

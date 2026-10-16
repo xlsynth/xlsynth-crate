@@ -5,7 +5,7 @@ use rand::{Rng, SeedableRng};
 use xlsynth_g8r::aig::dce::dce;
 use xlsynth_g8r::aig::gate::{AigBitVector, AigNode, GateFn, Output};
 use xlsynth_g8r::aig::graph_logical_effort::{
-    GraphLogicalEffortOptions, analyze_graph_logical_effort,
+    GraphLogicalEffortOptions, analyze_graph_logical_effort, score_graph_logical_effort,
 };
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 
@@ -54,6 +54,14 @@ fn enumerate_delay(graph: &GateFn, options: &GraphLogicalEffortOptions) -> f64 {
 fn assert_exact_analysis(graph: &GateFn, options: &GraphLogicalEffortOptions) {
     let expected = enumerate_delay(graph, options);
     let actual = analyze_graph_logical_effort(graph, options);
+    let score = score_graph_logical_effort(graph, options);
+    assert_eq!(score.delay, actual.delay);
+    assert_eq!(score.stats.traceback_records, 0);
+    assert_eq!(score.stats.candidates, actual.stats.candidates);
+    assert_eq!(
+        score.stats.dominance_comparisons,
+        actual.stats.dominance_comparisons
+    );
     assert!(
         (actual.delay - expected).abs() < 1e-9,
         "reported={} enumerated={expected}",
@@ -236,4 +244,57 @@ fn logical_effort_matches_enumeration_on_all_tiny_dags() {
         }
     }
     assert_eq!(comparisons, 37_265);
+}
+
+/// Disables simplification so every step really adds the reconvergent AND.
+fn fibonacci_graph(size: usize) -> GateFn {
+    let mut gb = GateBuilder::new("fibonacci".into(), GateBuilderOptions::no_opt());
+    let x = gb.add_input("x".into(), 2);
+    let mut a = *x.get_lsb(0);
+    let mut b = *x.get_lsb(1);
+    for _ in 0..size {
+        let next = gb.add_and_binary(a, b);
+        a = b;
+        b = next;
+    }
+    gb.add_output("result".into(), AigBitVector::from_lsb_is_index_0(&[b]));
+    let graph = gb.build();
+    assert_eq!(
+        graph
+            .gates
+            .iter()
+            .filter(|node| matches!(node, AigNode::And2 { .. }))
+            .count(),
+        size
+    );
+    graph
+}
+
+#[test]
+fn reconvergent_chain_matches_path_enumeration() {
+    for size in 1..=20 {
+        let graph = fibonacci_graph(size);
+        for (beta1, beta2) in LOAD_MODELS {
+            assert_exact_analysis(&graph, &GraphLogicalEffortOptions { beta1, beta2 });
+        }
+    }
+}
+
+#[test]
+fn reconvergent_chain_indexes_lengths_and_releases_numeric_frontiers() {
+    let size = 128;
+    let result = analyze_graph_logical_effort(
+        &fibonacci_graph(size),
+        &GraphLogicalEffortOptions {
+            beta1: 1.0,
+            beta2: 0.0,
+        },
+    );
+    // Constant p=2*n leaves one Pareto state per length, so each extension
+    // needs at most two comparisons regardless of the number of lengths.
+    assert!(result.stats.dominance_comparisons <= 2 * result.stats.candidates);
+    assert!(result.stats.peak_frontier_slots < 8 * size);
+    // Traceback remains quadratic; don't confuse released numeric slots with
+    // a linear bound on total memory.
+    assert!(result.stats.traceback_records > size * size / 8);
 }
