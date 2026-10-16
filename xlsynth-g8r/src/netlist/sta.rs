@@ -71,6 +71,72 @@ use string_interner::{StringInterner, backend::StringBackend};
 
 pub(crate) mod incremental;
 
+/// Query-invariant table geometry and monotone delay/slew values, prepared
+/// once per immutable Liberty table rather than at every interpolation.
+struct PreparedTimingTable {
+    dimensions: Vec<u32>,
+    axes: [Vec<f64>; 3],
+    variables: [String; 3],
+    axis_kinds: [AxisVariable; 3],
+    values: Vec<f32>,
+    is_setup: bool,
+}
+
+impl PreparedTimingTable {
+    fn new(library: &Library, table: &TimingTable, context: &str) -> Result<Self> {
+        validate_timing_table_structure(library, table, context)?;
+        let array = TimingTableArrayView::from_timing_table(library, table)?;
+        let layout = timing_table_layout(library, table, context)?;
+        let dimensions = array.dimensions().to_vec();
+        let mut values = array.values().to_vec();
+        if uses_monotone_upper_envelope(table) {
+            // A prefix maximum along each coordinate produces exactly the
+            // maximum over the lower orthant used by the scalar reference.
+            let mut stride = 1;
+            for dimension in dimensions.iter().rev().copied() {
+                let dimension = dimension as usize;
+                for i in 0..values.len() {
+                    if (i / stride) % dimension != 0 {
+                        values[i] = values[i].max(values[i - stride]);
+                    }
+                }
+                stride *= dimension;
+            }
+        }
+        Ok(Self {
+            dimensions,
+            axes: std::array::from_fn(|i| layout.axes[i].to_vec()),
+            variables: std::array::from_fn(|i| layout.variables[i].to_string()),
+            axis_kinds: std::array::from_fn(|i| AxisVariable::from_raw(layout.variables[i])),
+            values,
+            is_setup: matches!(
+                LibertyTableKind::from_raw(table.kind_str()),
+                LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
+            ),
+        })
+    }
+}
+
+/// Per-analysis table cache and counters. The library borrow prevents mutation
+/// of pooled shapes/values while cached interpolation data is in use.
+struct TimingEvaluationContext<'a> {
+    library: &'a Library,
+    // Values live in the borrowed library, so their address is stable. Shape
+    // and kind distinguish views with different axes or envelope semantics.
+    tables: HashMap<(usize, u32, i32), PreparedTimingTable>,
+    diagnostics: TimingQueryDiagnosticCounts,
+}
+
+impl<'a> TimingEvaluationContext<'a> {
+    fn new(library: &'a Library) -> Self {
+        Self {
+            library,
+            tables: HashMap::new(),
+            diagnostics: TimingQueryDiagnosticCounts::default(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
     pub arrival: f64,
@@ -965,7 +1031,7 @@ fn analyze_max_arrival_proto_with_mode(
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
     let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
-    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    let mut evaluation = TimingEvaluationContext::new(library);
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
             queue.push_back(idx);
@@ -995,7 +1061,7 @@ fn analyze_max_arrival_proto_with_mode(
             &mut bit_timing_sets,
             &literal_source_timing_set,
             &mut validated_timing_tables,
-            &mut timing_query_diagnostic_counts,
+            &mut evaluation,
         )?;
 
         for succ in &successors[inst_idx] {
@@ -1106,7 +1172,7 @@ fn analyze_max_arrival_proto_with_mode(
                         setup_arcs.as_slice(),
                         &instance_known_pin_values[inst_idx],
                         timing_set,
-                        &mut timing_query_diagnostic_counts,
+                        &mut evaluation,
                         &format!(
                             "{}.{} (instance '{}') setup",
                             instance_cell_names[inst_idx],
@@ -1169,7 +1235,7 @@ fn analyze_max_arrival_proto_with_mode(
             .and_then(|timing| timing.register_path_breakdown),
         register_input_arrivals,
         register_input_breakdowns,
-        timing_query_diagnostic_counts,
+        timing_query_diagnostic_counts: evaluation.diagnostics,
         cell_levels,
     })
 }
@@ -1197,7 +1263,7 @@ fn evaluate_instance_outputs(
     bit_timing_sets: &mut [Option<SignalTimingSet>],
     literal_source_timing_set: &SignalTimingSet,
     validated_timing_tables: &mut HashSet<*const TimingTable>,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
     let InstanceTimingInputs {
         lib,
@@ -1237,7 +1303,7 @@ fn evaluate_instance_outputs(
                     known_pin_values,
                     output_load,
                     validated_timing_tables,
-                    timing_query_diagnostic_counts,
+                    evaluation,
                     &format!(
                         "{}.{} (instance '{}') clock-to-output",
                         cell_name, pin_name, instance_name
@@ -1437,7 +1503,7 @@ fn evaluate_instance_outputs(
                         arc,
                         input_timing_set,
                         output_load,
-                        timing_query_diagnostic_counts,
+                        evaluation,
                         &context,
                     )?;
                     sta_trace(|| {
@@ -2177,7 +2243,7 @@ fn evaluate_arc(
     output_load: f64,
     context: &str,
 ) -> Result<SignalTiming> {
-    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    let mut evaluation = TimingEvaluationContext::new(library);
     let set = evaluate_arc_set(
         library,
         arc,
@@ -2186,7 +2252,7 @@ fn evaluate_arc(
             rise: output_load,
             fall: output_load,
         },
-        &mut timing_query_diagnostic_counts,
+        &mut evaluation,
         context,
     )?;
     set.as_report_signal_timing().ok_or_else(|| {
@@ -2199,7 +2265,7 @@ fn evaluate_arc_set(
     arc: &TimingArc,
     input_timing: &SignalTimingSet,
     output_load: EdgeLoadCapacitance,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    evaluation: &mut TimingEvaluationContext<'_>,
     context: &str,
 ) -> Result<SignalTimingSet> {
     let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
@@ -2237,7 +2303,7 @@ fn evaluate_arc_set(
             rise_transition,
             source_edges(true)?,
             output_load.rise,
-            timing_query_diagnostic_counts,
+            evaluation,
             context,
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -2252,7 +2318,7 @@ fn evaluate_arc_set(
             fall_transition,
             source_edges(false)?,
             output_load.fall,
-            timing_query_diagnostic_counts,
+            evaluation,
             context,
             StaTimingTableKind::CellFall,
             StaTimingTableKind::FallTransition,
@@ -2267,7 +2333,7 @@ fn evaluate_output_edge_set(
     slew_table: &TimingTable,
     source_edges: &EdgeTimingSet,
     output_load: f64,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    evaluation: &mut TimingEvaluationContext<'_>,
     context: &str,
     delay_kind: StaTimingTableKind,
     slew_kind: StaTimingTableKind,
@@ -2280,7 +2346,7 @@ fn evaluate_output_edge_set(
             delay_table,
             source_edge.timing.transition,
             output_load,
-            timing_query_diagnostic_counts,
+            evaluation,
             &format!("{context} {}", delay_kind.as_raw()),
         )?;
         // Characterized transition values may contain small negative artifacts;
@@ -2290,7 +2356,7 @@ fn evaluate_output_edge_set(
             slew_table,
             source_edge.timing.transition,
             output_load,
-            timing_query_diagnostic_counts,
+            evaluation,
             &format!("{context} {}", slew_kind.as_raw()),
         )?
         .max(0.0);
@@ -2334,7 +2400,7 @@ fn evaluate_register_launch_output_set(
     known_pin_values: &HashMap<String, bool>,
     output_load: EdgeLoadCapacitance,
     validated_tables: &mut HashSet<*const TimingTable>,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    evaluation: &mut TimingEvaluationContext<'_>,
     context: &str,
 ) -> Result<SignalTimingSet> {
     let launch_arcs: Vec<&TimingArc> = pin
@@ -2371,7 +2437,7 @@ fn evaluate_register_launch_output_set(
                 library,
                 delay,
                 query,
-                timing_query_diagnostic_counts,
+                evaluation,
                 &format!("{context} {}", StaTimingTableKind::CellRise.as_raw()),
             )?;
             output
@@ -2382,7 +2448,7 @@ fn evaluate_register_launch_output_set(
                         library,
                         transition,
                         query,
-                        timing_query_diagnostic_counts,
+                        evaluation,
                         &format!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
                     )?
                     .max(0.0),
@@ -2399,7 +2465,7 @@ fn evaluate_register_launch_output_set(
                 library,
                 delay,
                 query,
-                timing_query_diagnostic_counts,
+                evaluation,
                 &format!("{context} {}", StaTimingTableKind::CellFall.as_raw()),
             )?;
             output
@@ -2410,7 +2476,7 @@ fn evaluate_register_launch_output_set(
                         library,
                         transition,
                         query,
-                        timing_query_diagnostic_counts,
+                        evaluation,
                         &format!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
                     )?
                     .max(0.0),
@@ -2438,7 +2504,7 @@ fn evaluate_register_setup_capture_arrival(
     setup_arcs: &[&TimingArc],
     known_pin_values: &HashMap<String, bool>,
     data_timing: &SignalTimingSet,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    evaluation: &mut TimingEvaluationContext<'_>,
     context: &str,
 ) -> Result<Option<RegisterCaptureTimingCandidate>> {
     let mut worst_timing: Option<RegisterCaptureTimingCandidate> = None;
@@ -2454,7 +2520,7 @@ fn evaluate_register_setup_capture_arrival(
                     library,
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
-                    timing_query_diagnostic_counts,
+                    evaluation,
                     &format!("{context} {}", StaTimingTableKind::RiseConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
@@ -2481,7 +2547,7 @@ fn evaluate_register_setup_capture_arrival(
                     library,
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
-                    timing_query_diagnostic_counts,
+                    evaluation,
                     &format!("{context} {}", StaTimingTableKind::FallConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
@@ -2862,13 +2928,13 @@ fn evaluate_table(
     output_load: f64,
     context: &str,
 ) -> Result<f64> {
-    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    let mut evaluation = TimingEvaluationContext::new(library);
     evaluate_table_with_diagnostics(
         library,
         table,
         input_transition,
         output_load,
-        &mut timing_query_diagnostic_counts,
+        &mut evaluation,
         context,
     )
 }
@@ -2878,14 +2944,14 @@ fn evaluate_table_with_diagnostics(
     table: &TimingTable,
     input_transition: f64,
     output_load: f64,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    evaluation: &mut TimingEvaluationContext<'_>,
     context: &str,
 ) -> Result<f64> {
     evaluate_table_with_query_and_diagnostics(
         library,
         table,
         TimingTableQuery::combinational(input_transition, output_load),
-        timing_query_diagnostic_counts,
+        evaluation,
         context,
     )
 }
@@ -2894,7 +2960,7 @@ fn evaluate_table_with_query_and_diagnostics(
     library: &crate::liberty_model::Library,
     table: &TimingTable,
     query: TimingTableQuery,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    evaluation: &mut TimingEvaluationContext<'_>,
     context: &str,
 ) -> Result<f64> {
     validate_non_negative_finite(query.input_transition, "input transition query", context)?;
@@ -2909,28 +2975,52 @@ fn evaluate_table_with_query_and_diagnostics(
         "related pin transition query",
         context,
     )?;
-    let array = TimingTableArrayView::from_timing_table(library, table)
-        .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
-    let layout = timing_table_layout(library, table, context)?;
+    debug_assert!(std::ptr::eq(library, evaluation.library));
+    let key = (
+        library.timing_table_values(table).as_ptr() as usize,
+        table.shape_id(),
+        table.kind as i32,
+    );
+    let prepared = match evaluation.tables.entry(key) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(PreparedTimingTable::new(library, table, context)?)
+        }
+    };
+    let array = TimingTableArrayView::from_parts(&prepared.dimensions, &prepared.values)?;
+    let layout = TimingTableLayout {
+        axes: std::array::from_fn(|i| prepared.axes[i].as_slice()),
+        variables: std::array::from_fn(|i| prepared.variables[i].as_str()),
+    };
+    let diagnostics = &mut evaluation.diagnostics;
     let rank = array.rank();
     if rank == 0 {
         return array
             .get(&[])
             .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
     }
-    let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
-    let mut axis_queries: Vec<f64> = Vec::with_capacity(rank);
-    let is_setup = matches!(
-        LibertyTableKind::from_raw(table.kind_str()),
-        LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
-    );
+    // Liberty timing tables have at most three axes. Keeping interpolation
+    // scratch on the stack avoids several allocations for every arc query.
+    if rank > 3 {
+        return Err(anyhow!(
+            "{context}: timing tables with rank {rank} are unsupported"
+        ));
+    }
+    let mut bounds = [(0usize, 0usize, 0.0); 3];
+    let mut axis_queries = [0.0; 3];
+    let is_setup = prepared.is_setup;
     let mut above_max_axis_count = 0usize;
 
     for axis_idx in 0..rank {
         let axis = layout.axes[axis_idx];
-        let axis_variable = AxisVariable::from_raw(layout.variables[axis_idx]);
-        let raw_axis_query =
-            axis_query_value_with_query(layout.variables[axis_idx], axis_idx, query, context)?;
+        let axis_variable = prepared.axis_kinds[axis_idx];
+        let raw_axis_query = axis_query_value_with_query(
+            layout.variables[axis_idx],
+            axis_variable,
+            axis_idx,
+            query,
+            context,
+        )?;
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
         let selects_minimum_characterized_coordinate = match query.minimum_characterized_axis {
@@ -2952,26 +3042,26 @@ fn evaluate_table_with_query_and_diagnostics(
         };
         if axis_query < axis_lo {
             if is_setup {
-                timing_query_diagnostic_counts.setup_below_min_clamp_count += 1;
+                diagnostics.setup_below_min_clamp_count += 1;
             } else {
-                timing_query_diagnostic_counts.delay_slew_below_min_clamp_count += 1;
+                diagnostics.delay_slew_below_min_clamp_count += 1;
             }
         } else if axis_query > axis_hi {
             above_max_axis_count += 1;
         }
-        axis_queries.push(axis_query);
+        axis_queries[axis_idx] = axis_query;
     }
 
     let extrapolate_single_delay_slew_axis = !is_setup && above_max_axis_count == 1;
     if is_setup {
-        timing_query_diagnostic_counts.setup_above_max_clamp_count += above_max_axis_count;
+        diagnostics.setup_above_max_clamp_count += above_max_axis_count;
     } else if above_max_axis_count == 1 {
-        timing_query_diagnostic_counts.delay_slew_single_above_max_extrapolation_count += 1;
+        diagnostics.delay_slew_single_above_max_extrapolation_count += 1;
     } else if above_max_axis_count > 1 {
-        timing_query_diagnostic_counts.delay_slew_multiple_above_max_clamp_count += 1;
+        diagnostics.delay_slew_multiple_above_max_clamp_count += 1;
     }
 
-    for (axis_idx, raw_axis_query) in axis_queries.into_iter().enumerate() {
+    for (axis_idx, raw_axis_query) in axis_queries.into_iter().take(rank).enumerate() {
         let axis = layout.axes[axis_idx];
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
@@ -3015,20 +3105,23 @@ fn evaluate_table_with_query_and_diagnostics(
         if !extrapolate_single_delay_slew_axis || axis_query <= axis_hi {
             axis_query = axis_query.min(axis_hi);
         }
-        bounds.push(bracket_axis(axis, axis_query));
+        bounds[axis_idx] = bracket_axis(axis, axis_query);
     }
 
-    let mut indices = vec![0usize; rank];
-    let mut varying_axes: Vec<(usize, usize, usize, f64)> = Vec::with_capacity(rank);
-    for (axis_idx, (lo, hi, t)) in bounds.iter().copied().enumerate() {
+    let mut indices = [0usize; 3];
+    let mut varying_axes = [(0usize, 0usize, 0usize, 0.0); 3];
+    let mut varying_count = 0;
+    for (axis_idx, (lo, hi, t)) in bounds.into_iter().take(rank).enumerate() {
         if lo == hi {
             indices[axis_idx] = lo;
         } else {
-            varying_axes.push((axis_idx, lo, hi, t));
+            varying_axes[varying_count] = (axis_idx, lo, hi, t);
+            varying_count += 1;
         }
     }
 
-    let corner_count = 1usize << varying_axes.len();
+    let varying_axes = &varying_axes[..varying_count];
+    let corner_count = 1usize << varying_count;
     let mut result = 0.0;
     for corner in 0..corner_count {
         let mut weight = 1.0;
@@ -3041,7 +3134,9 @@ fn evaluate_table_with_query_and_diagnostics(
                 weight *= 1.0 - *t;
             }
         }
-        let value = evaluate_table_corner_value(&array, table, indices.as_slice(), context)?;
+        let value = array
+            .get(&indices[..rank])
+            .expect("validated interpolation corner");
         result += weight * value;
     }
     if !result.is_finite() {
@@ -3065,6 +3160,7 @@ fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
 
 /// Evaluates one characterized point after conservatively repairing delay/slew
 /// values: a point is at least as large as any predecessor along its axes.
+#[cfg(test)]
 fn evaluate_table_corner_value(
     array: &TimingTableArrayView<'_>,
     table: &TimingTable,
@@ -3077,11 +3173,12 @@ fn evaluate_table_corner_value(
             .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices));
     }
 
-    let mut cursor = vec![0usize; indices.len()];
+    let mut cursor = [0usize; 3];
+    let cursor = &mut cursor[..indices.len()];
     let mut maximum = f64::NEG_INFINITY;
     loop {
         let value = array
-            .get(cursor.as_slice())
+            .get(cursor)
             .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", cursor))?;
         maximum = maximum.max(value);
 
@@ -3187,6 +3284,7 @@ fn axis_query_value(
 ) -> Result<f64> {
     axis_query_value_with_query(
         variable_name,
+        AxisVariable::from_raw(variable_name),
         axis_idx,
         TimingTableQuery::combinational(input_transition, output_load),
         context,
@@ -3195,11 +3293,12 @@ fn axis_query_value(
 
 fn axis_query_value_with_query(
     variable_name: &str,
+    axis_variable: AxisVariable,
     axis_idx: usize,
     query: TimingTableQuery,
     context: &str,
 ) -> Result<f64> {
-    match AxisVariable::from_raw(variable_name) {
+    match axis_variable {
         AxisVariable::Unspecified => match axis_idx {
             0 => Ok(query.input_transition),
             1 => Ok(query.output_load),
@@ -3284,6 +3383,93 @@ mod tests {
     use crate::liberty_model::{Cell, LibraryBuilder, Pin, TimingArc, TimingTable};
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
+
+    #[test]
+    fn prepared_envelopes_match_reference_for_scalar_and_multidimensional_tables() -> Result<()> {
+        for dimensions in [
+            vec![],
+            vec![1],
+            vec![4],
+            vec![1, 3],
+            vec![3, 2],
+            vec![2, 1, 3],
+            vec![3, 2, 4],
+        ] {
+            let count = dimensions.iter().copied().product::<u32>() as usize;
+            for seed in 0..12 {
+                let axes: [Vec<f64>; 3] = std::array::from_fn(|axis| {
+                    dimensions
+                        .get(axis)
+                        .map_or_else(Vec::new, |d| (0..*d).map(f64::from).collect())
+                });
+                let mut builder = LibraryBuilder::new();
+                let table = builder.add_timing_table_f64(
+                    crate::liberty_proto::TimingTableKind::CellRise,
+                    0,
+                    axes[0].clone(),
+                    axes[1].clone(),
+                    axes[2].clone(),
+                    (0..count)
+                        .map(|i| ((i * 97 + seed * 23) % 113) as f64 - 10.0)
+                        .collect(),
+                    dimensions.clone(),
+                    "",
+                )?;
+                let library = builder.finish();
+                let raw = TimingTableArrayView::from_timing_table(&library, &table)?;
+                let prepared = PreparedTimingTable::new(&library, &table, "prepared")?;
+                for flat in 0..count {
+                    let mut remaining = flat;
+                    let mut indices = vec![0; dimensions.len()];
+                    for axis in (0..dimensions.len()).rev() {
+                        indices[axis] = remaining % dimensions[axis] as usize;
+                        remaining /= dimensions[axis] as usize;
+                    }
+                    let reference =
+                        evaluate_table_corner_value(&raw, &table, &indices, "reference")?;
+                    assert_eq!(f64::from(prepared.values[flat]), reference);
+                }
+                let mut setup_table = table.clone();
+                setup_table.kind = crate::liberty_proto::TimingTableKind::RiseConstraint;
+                let setup = PreparedTimingTable::new(&library, &setup_table, "setup")?;
+                assert_eq!(setup.values, raw.values());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cache_distinguishes_table_kinds_sharing_value_storage() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let delay = builder.add_timing_table_f64(
+            crate::liberty_proto::TimingTableKind::CellRise,
+            0,
+            vec![0.0, 1.0],
+            vec![],
+            vec![],
+            vec![3.0, 1.0],
+            vec![2],
+            "",
+        )?;
+        let mut setup = delay.clone();
+        setup.kind = crate::liberty_proto::TimingTableKind::RiseConstraint;
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for _ in 0..3 {
+            for (table, expected) in [(&delay, 3.0), (&setup, 1.0)] {
+                let value = evaluate_table_with_query_and_diagnostics(
+                    &library,
+                    table,
+                    TimingTableQuery::combinational(1.0, 0.0),
+                    &mut evaluation,
+                    "shared",
+                )?;
+                assert_eq!(value, expected);
+            }
+        }
+        assert_eq!(evaluation.tables.len(), 2);
+        Ok(())
+    }
 
     fn parse_single_module(
         src: &str,
@@ -3491,7 +3677,7 @@ mod tests {
             vec![2, 2],
         );
         let lib = builder.finish();
-        let mut counts = TimingQueryDiagnosticCounts::default();
+        let mut counts = TimingEvaluationContext::new(&lib);
 
         assert_close(
             evaluate_table_with_query_and_diagnostics(
@@ -3534,7 +3720,7 @@ mod tests {
             .expect("setup table evaluation"),
             1.0,
         );
-        assert_eq!(counts, TimingQueryDiagnosticCounts::default());
+        assert_eq!(counts.diagnostics, TimingQueryDiagnosticCounts::default());
     }
 
     #[test]
@@ -5840,7 +6026,7 @@ endmodule
             vec![2, 2],
         );
         let lib = builder.finish();
-        let mut counts = TimingQueryDiagnosticCounts::default();
+        let mut counts = TimingEvaluationContext::new(&lib);
 
         assert_close(
             evaluate_table_with_query_and_diagnostics(
@@ -5938,7 +6124,7 @@ endmodule
         );
 
         assert_eq!(
-            counts,
+            counts.diagnostics,
             TimingQueryDiagnosticCounts {
                 delay_slew_below_min_clamp_count: 2,
                 delay_slew_single_above_max_extrapolation_count: 1,
@@ -6138,7 +6324,7 @@ endmodule
         let delay_table = scalar_table(&mut builder, "cell_rise", 1.0);
         let slew_table = scalar_table(&mut builder, "rise_transition", -0.1);
         let lib = builder.finish();
-        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+        let mut evaluation = TimingEvaluationContext::new(&lib);
 
         let output = evaluate_output_edge_set(
             &lib,
@@ -6146,7 +6332,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
-            &mut timing_query_diagnostic_counts,
+            &mut evaluation,
             "negative_transition",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -6171,7 +6357,7 @@ endmodule
         let delay_table = scalar_table(&mut builder, "cell_rise", 0.0);
         let slew_table = scalar_table(&mut builder, "rise_transition", 0.1);
         let lib = builder.finish();
-        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+        let mut evaluation = TimingEvaluationContext::new(&lib);
 
         let error = evaluate_output_edge_set(
             &lib,
@@ -6179,7 +6365,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
-            &mut timing_query_diagnostic_counts,
+            &mut evaluation,
             "overflow_arrival",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,

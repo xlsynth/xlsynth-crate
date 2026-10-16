@@ -6,7 +6,7 @@
 use super::{
     EdgeLoadCapacitance, EdgeTiming, InstanceTimingInputs, PinBitSource, ResolvedTimingSource,
     SignalTiming, SignalTimingSet, StaLibraryIndex, StaOptions, StaTimingType,
-    TimingQueryDiagnosticCounts, analyze_assign_sources, analyze_combinational_max_arrival,
+    TimingEvaluationContext, analyze_assign_sources, analyze_combinational_max_arrival,
     analyze_register_boundary_max_arrival, canonicalize_pin_bit_source,
     combinational_output_pin_evaluation_order, constant_output_function_value,
     effective_input_capacitance_by_edge, evaluate_instance_outputs,
@@ -204,7 +204,7 @@ pub(crate) struct IncrementalSta<'a> {
     scores: [BTreeSet<EndpointKey>; 4],
     electrical: Vec<Vec<f64>>,
     validated: HashSet<*const TimingTable>,
-    diagnostics: TimingQueryDiagnosticCounts,
+    evaluation: TimingEvaluationContext<'a>,
     registered: bool,
     literal: SignalTimingSet,
     pub propagated: usize,
@@ -463,7 +463,7 @@ impl<'a> IncrementalSta<'a> {
             scores: std::array::from_fn(|_| BTreeSet::new()),
             electrical,
             validated: HashSet::new(),
-            diagnostics: TimingQueryDiagnosticCounts::default(),
+            evaluation: TimingEvaluationContext::new(library),
             registered,
             literal,
             propagated: 0,
@@ -537,7 +537,7 @@ impl<'a> IncrementalSta<'a> {
                 &mut self.timing[mode],
                 &self.literal,
                 &mut self.validated,
-                &mut self.diagnostics,
+                &mut self.evaluation,
             )?;
         }
         Ok(())
@@ -593,7 +593,7 @@ impl<'a> IncrementalSta<'a> {
                                         &arcs,
                                         &self.instances[i].known,
                                         timing,
-                                        &mut self.diagnostics,
+                                        &mut self.evaluation,
                                         name,
                                     )?
                                 {
