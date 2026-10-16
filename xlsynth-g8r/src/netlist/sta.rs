@@ -59,6 +59,7 @@ use crate::liberty::Library;
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
+use crate::liberty_proto::{TimingSense as WireTimingSense, TimingType as WireTimingType};
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
@@ -727,9 +728,11 @@ fn analyze_max_arrival_proto_with_mode(
                 .iter()
                 .filter(|pin| pin.direction == PinDirection::Output as i32)
             {
-                for arc in output_pin.timing_arcs.iter().filter(|arc| {
-                    StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-                }) {
+                for arc in output_pin
+                    .timing_arcs
+                    .iter()
+                    .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
+                {
                     for related_pin_name in
                         split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
                     {
@@ -1179,9 +1182,7 @@ fn analyze_max_arrival_proto_with_mode(
                 let setup_arcs: SmallVec<[&TimingArc; 4]> = pin
                     .timing_arcs
                     .iter()
-                    .filter(|arc| {
-                        StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_setup()
-                    })
+                    .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_setup())
                     .collect();
                 if setup_arcs.is_empty() {
                     continue;
@@ -1354,9 +1355,11 @@ fn evaluate_instance_outputs(
             }
             continue;
         }
-        if let Some(unsupported_arc) = pin.timing_arcs.iter().find(|arc| {
-            !StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-        }) {
+        if let Some(unsupported_arc) = pin
+            .timing_arcs
+            .iter()
+            .find(|arc| !StaTimingType::from_arc(arc, lib.library).is_combinational())
+        {
             return Err(anyhow!(
                 "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
                 instance_name,
@@ -1368,9 +1371,7 @@ fn evaluate_instance_outputs(
         let combinational_arcs: SmallVec<[&TimingArc; 4]> = pin
             .timing_arcs
             .iter()
-            .filter(|arc| {
-                StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-            })
+            .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
             .collect();
         let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
             Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
@@ -1673,6 +1674,22 @@ enum StaTimingType {
 }
 
 impl StaTimingType {
+    /// Classifies normalized enums directly, preserving unknown-string
+    /// fallback.
+    fn from_arc(arc: &TimingArc, library: &Library) -> Self {
+        match arc.timing_type.wire_value() {
+            WireTimingType::Unspecified | WireTimingType::Combinational => Self::Combinational,
+            WireTimingType::CombinationalRise => Self::CombinationalRise,
+            WireTimingType::CombinationalFall => Self::CombinationalFall,
+            WireTimingType::RisingEdge => Self::RisingEdge,
+            WireTimingType::FallingEdge => Self::FallingEdge,
+            WireTimingType::SetupRising => Self::SetupRising,
+            WireTimingType::SetupFalling => Self::SetupFalling,
+            WireTimingType::Other => Self::from_raw(arc.timing_type_str(library)),
+            _ => Self::Other,
+        }
+    }
+
     fn from_raw(raw: &str) -> Self {
         match raw {
             "" | "combinational" => Self::Combinational,
@@ -1720,6 +1737,17 @@ enum StaTimingSense {
 }
 
 impl StaTimingSense {
+    /// Uses typed metadata for ordinary arcs without discarding fallback text.
+    fn from_arc(arc: &TimingArc, library: &Library) -> Self {
+        match arc.timing_sense.wire_value() {
+            WireTimingSense::Unspecified => Self::Unspecified,
+            WireTimingSense::PositiveUnate => Self::PositiveUnate,
+            WireTimingSense::NegativeUnate => Self::NegativeUnate,
+            WireTimingSense::NonUnate => Self::NonUnate,
+            WireTimingSense::Other => Self::from_raw(arc.timing_sense_str(library)),
+        }
+    }
+
     fn from_raw(raw: &str) -> Self {
         match raw {
             "" => Self::Unspecified,
@@ -1959,7 +1987,7 @@ fn visit_combinational_output_pin(
     for arc in pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational())
+        .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
     {
         for related_pin_name in
             split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
@@ -2017,7 +2045,7 @@ pub fn validate_output_pin_for_basic_sta(
     if let Some(unsupported_arc) = pin
         .timing_arcs
         .iter()
-        .find(|arc| !StaTimingType::from_raw(arc.timing_type_str(library)).is_combinational())
+        .find(|arc| !StaTimingType::from_arc(arc, library).is_combinational())
     {
         return Err(anyhow!(
             "cell '{}' output pin '{}' has unsupported timing type '{}'",
@@ -2037,7 +2065,7 @@ pub fn validate_output_pin_for_basic_sta(
     )?;
 
     for arc in &combinational_arcs {
-        let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
+        let timing_type = StaTimingType::from_arc(arc, library);
         let context = format!(
             "cell '{}' output pin '{}' related_pin '{}'",
             cell_name,
@@ -2063,7 +2091,7 @@ pub fn validate_output_pin_for_basic_sta(
             {
                 continue;
             }
-            let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
+            let timing_type = StaTimingType::from_arc(arc, library);
             has_rise |= timing_type.produces_rise();
             has_fall |= timing_type.produces_fall();
         }
@@ -2355,8 +2383,8 @@ fn evaluate_arc_set(
     evaluation: &mut TimingEvaluationContext<'_>,
     context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTimingSet> {
-    let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
-    let timing_sense = StaTimingSense::from_raw(arc.timing_sense_str(library));
+    let timing_type = StaTimingType::from_arc(arc, library);
+    let timing_sense = StaTimingSense::from_arc(arc, library);
     let all_inputs = if timing_sense.may_use_either_input_edge() {
         let mut combined = input_timing.rise.clone();
         combined.extend_from(&input_timing.fall);
@@ -2492,7 +2520,7 @@ fn evaluate_register_launch_output_set(
     let launch_arcs: SmallVec<[&TimingArc; 4]> = pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(library)).is_clock_to_output())
+        .filter(|arc| StaTimingType::from_arc(arc, library).is_clock_to_output())
         .collect();
     if launch_arcs.is_empty() {
         return Err(anyhow!(
@@ -3656,6 +3684,56 @@ mod tests {
             StaOptions::default(),
         )?;
         assert_eq!(report.worst_output_arrival, 8.0);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_timing_types_preserve_text_classification() -> Result<()> {
+        for value in 0..=WireTimingType::Other as i32 {
+            let kind = WireTimingType::try_from(value)?;
+            let raw = match kind {
+                WireTimingType::Unspecified => String::new(),
+                WireTimingType::Other => "unrecognized_type".to_string(),
+                _ => kind
+                    .as_str_name()
+                    .strip_prefix("TIMING_TYPE_")
+                    .unwrap()
+                    .to_ascii_lowercase(),
+            };
+            let mut builder = LibraryBuilder::new();
+            let arc = builder.add_timing_arc("A", "positive_unate", &raw, "", vec![])?;
+            let library = builder.finish();
+            assert_eq!(arc.timing_type.wire_value(), kind);
+            assert_eq!(
+                StaTimingType::from_arc(&arc, &library),
+                StaTimingType::from_raw(&raw)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn typed_timing_senses_preserve_text_classification() -> Result<()> {
+        for value in 0..=WireTimingSense::Other as i32 {
+            let kind = WireTimingSense::try_from(value)?;
+            let raw = match kind {
+                WireTimingSense::Unspecified => String::new(),
+                WireTimingSense::Other => "unrecognized_sense".to_string(),
+                _ => kind
+                    .as_str_name()
+                    .strip_prefix("TIMING_SENSE_")
+                    .unwrap()
+                    .to_ascii_lowercase(),
+            };
+            let mut builder = LibraryBuilder::new();
+            let arc = builder.add_timing_arc("A", &raw, "combinational", "", vec![])?;
+            let library = builder.finish();
+            assert_eq!(arc.timing_sense.wire_value(), kind);
+            assert_eq!(
+                StaTimingSense::from_arc(&arc, &library),
+                StaTimingSense::from_raw(&raw)
+            );
+        }
         Ok(())
     }
 

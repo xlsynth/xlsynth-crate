@@ -602,10 +602,7 @@ impl<'a> IncrementalSta<'a> {
                         let arcs: SmallVec<[&TimingArc; 4]> = pin
                             .timing_arcs
                             .iter()
-                            .filter(|arc| {
-                                StaTimingType::from_raw(arc.timing_type_str(self.lib.library))
-                                    .is_setup()
-                            })
+                            .filter(|arc| StaTimingType::from_arc(arc, self.lib.library).is_setup())
                             .collect();
                         if arcs.is_empty() {
                             continue;
