@@ -330,7 +330,8 @@ pub fn resize_netlist(
                                 || (score.values()[objective] <= old_score.values()[objective]
                                     && secondary.improves(old_secondary)))
                     };
-                    let committed = sta.trial(i, cell, phase_work, acceptable)?;
+                    let limits = if phase == 0 { old_score } else { upsized_delay };
+                    let committed = sta.trial(i, cell, phase_work, Some(limits), acceptable)?;
                     if committed {
                         phase_stats.accepted += 1;
                         phase_stats.register_changes += usize::from(sta.is_register(i));

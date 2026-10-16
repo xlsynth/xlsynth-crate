@@ -876,12 +876,14 @@ impl<'a> IncrementalSta<'a> {
 
     /// Trials one prevalidated equivalent cell; only the acceptance closure can
     /// commit it. Errors, rejection and budget exhaustion restore the
-    /// incumbent.
+    /// incumbent. Optional boundary limits allow early rejection at settled
+    /// module outputs; the acceptance closure still checks complete timing.
     pub fn trial(
         &mut self,
         i: usize,
         cell: usize,
         budget: usize,
+        limits: Option<BoundaryDelays>,
         accept: impl FnOnce(&Self) -> bool,
     ) -> Result<bool> {
         let old_cell = self.cells[i];
@@ -956,6 +958,25 @@ impl<'a> IncrementalSta<'a> {
                 for (bit, old) in &undo.bits[start..] {
                     if old[0] == self.timing[0][*bit] && old[1] == self.timing[1][*bit] {
                         continue;
+                    }
+                    if let Some(limits) = limits
+                        && self.endpoints_by_bit[*bit].iter().any(|endpoint| {
+                            matches!(self.endpoints[*endpoint], Endpoint::Output(_))
+                        })
+                    {
+                        // Topological propagation has settled this output:
+                        // later work cannot repair its timing. Capture setup
+                        // constraints can depend on other pending inputs and
+                        // remain part of the complete endpoint update below.
+                        for (mode, timing) in self.timing.iter().enumerate() {
+                            if let Some(arrival) = timing[*bit]
+                                .as_ref()
+                                .and_then(SignalTimingSet::worst_arrival_candidate)
+                                && arrival.timing.arrival > limits.values()[mode * 2] + 1e-9
+                            {
+                                return Ok(false);
+                            }
+                        }
                     }
                     endpoints.extend(self.endpoints_by_bit[*bit].iter().copied());
                     for consumer in &self.consumers[*bit] {
