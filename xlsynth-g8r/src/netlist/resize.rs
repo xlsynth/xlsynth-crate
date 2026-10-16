@@ -257,7 +257,12 @@ pub fn resize_netlist(
                         }
                     })
                     .collect::<Vec<_>>();
-                let mut sites: Vec<_> = (0..sta.cells.len()).collect();
+                // Cells without a cheaper equivalent cannot contribute to
+                // recovery. Keep zero-headroom candidates: changing size can
+                // preserve or even improve their timing.
+                let mut sites: Vec<_> = (0..sta.cells.len())
+                    .filter(|i| priorities[*i] >= 0.0)
+                    .collect();
                 sites.sort_by(|a, b| {
                     priorities[*b]
                         .total_cmp(&priorities[*a])

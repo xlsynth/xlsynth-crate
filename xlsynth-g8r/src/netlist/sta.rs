@@ -449,12 +449,14 @@ struct StaLibraryIndex<'a> {
     library: &'a crate::liberty_model::Library,
     cell_by_name: HashMap<&'a str, usize>,
     pin_by_cell: Vec<HashMap<&'a str, usize>>,
+    related_pin_names: FxHashMap<StringId, SmallVec<[&'a str; 1]>>,
 }
 
 impl<'a> StaLibraryIndex<'a> {
     fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
         let mut cell_by_name = HashMap::with_capacity(library.cells.len());
         let mut pin_by_cell = Vec::with_capacity(library.cells.len());
+        let mut related_pin_names = FxHashMap::default();
         for (cell_idx, cell) in library.cells.iter().enumerate() {
             if cell_by_name.insert(cell.name.as_str(), cell_idx).is_some() {
                 return Err(anyhow!(
@@ -472,6 +474,11 @@ impl<'a> StaLibraryIndex<'a> {
                         pin_name
                     ));
                 }
+                for arc in &pin.timing_arcs {
+                    related_pin_names.entry(arc.related_pin).or_insert_with(|| {
+                        split_related_pin_names(library.resolve_string(&arc.related_pin)).collect()
+                    });
+                }
             }
             pin_by_cell.push(pin_map);
         }
@@ -479,6 +486,7 @@ impl<'a> StaLibraryIndex<'a> {
             library,
             cell_by_name,
             pin_by_cell,
+            related_pin_names,
         })
     }
 
@@ -493,6 +501,11 @@ impl<'a> StaLibraryIndex<'a> {
 
     fn pin_index(&self, cell_idx: usize, pin_name: &str) -> Option<usize> {
         self.pin_by_cell.get(cell_idx)?.get(pin_name).copied()
+    }
+
+    /// Borrows the parsed related-pin names of an arc in this indexed library.
+    fn related_pin_names(&self, related_pin: StringId) -> &[&'a str] {
+        &self.related_pin_names[&related_pin]
     }
 }
 
@@ -730,9 +743,7 @@ fn analyze_max_arrival_proto_with_mode(
                     .iter()
                     .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
                 {
-                    for related_pin_name in
-                        split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
-                    {
+                    for &related_pin_name in lib.related_pin_names(arc.related_pin) {
                         let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
                             anyhow!(
                                 "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
@@ -1440,9 +1451,7 @@ fn evaluate_instance_outputs(
                 });
                 continue;
             }
-            for related_pin_name in
-                split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
-            {
+            for &related_pin_name in lib.related_pin_names(arc.related_pin) {
                 let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
                     anyhow!(
                         "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
@@ -1983,9 +1992,7 @@ fn visit_combinational_output_pin(
         .iter()
         .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
     {
-        for related_pin_name in
-            split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
-        {
+        for &related_pin_name in lib.related_pin_names(arc.related_pin) {
             let related_pin_idx = lib.pin_index(cell_idx, related_pin_name).ok_or_else(|| {
                 anyhow!(
                     "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
@@ -3554,6 +3561,49 @@ mod tests {
     use crate::netlist::parse::{Parser, TokenScanner};
     use rand::{Rng, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
+
+    #[test]
+    fn related_pin_cache_preserves_whitespace_order_and_duplicates() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let cases: &[(&str, &[&str])] = &[
+            ("", &[]),
+            ("A", &["A"]),
+            ("A B", &["A", "B"]),
+            (
+                " \tA\nB\rA\u{b}\u{c}α\u{2003}ξ ",
+                &["A", "B", "A", "α", "ξ"],
+            ),
+            ("A", &["A"]),
+        ];
+        let arcs: Vec<_> = cases
+            .iter()
+            .map(|(names, _)| {
+                test_arc(
+                    &mut builder,
+                    names,
+                    "positive_unate",
+                    "combinational",
+                    "",
+                    vec![],
+                )
+            })
+            .collect();
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", arcs);
+        builder.cells.push(Cell {
+            name: "TEST".into(),
+            pins: vec![output],
+            ..Default::default()
+        });
+        let library = builder.finish();
+        let index = StaLibraryIndex::new(&library)?;
+        assert_eq!(index.related_pin_names.len(), 4);
+        for _ in 0..2 {
+            for (arc, (_, expected)) in library.cells[0].pins[0].timing_arcs.iter().zip(cases) {
+                assert_eq!(index.related_pin_names(arc.related_pin), *expected);
+            }
+        }
+        Ok(())
+    }
 
     /// Records diagnostic rendering without allocating on successful queries.
     struct CountingContext<'a>(&'a std::cell::Cell<usize>);

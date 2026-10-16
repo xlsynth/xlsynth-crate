@@ -241,6 +241,39 @@ fn recovery_headroom_distinguishes_independent_critical_and_noncritical_cones() 
 }
 
 #[test]
+fn recovery_keeps_zero_headroom_candidates_with_identical_timing() -> Result<()> {
+    let mut library = library()?;
+    let pins = library
+        .cells
+        .iter()
+        .find(|cell| cell.name == "BUF4")
+        .unwrap()
+        .pins
+        .clone();
+    library
+        .cells
+        .iter_mut()
+        .find(|cell| cell.name == "BUF1")
+        .unwrap()
+        .pins = pins;
+    let mut parsed =
+        read_gv_from_str("module m(input a, output y); BUF4 b(.A(a),.Y(y)); endmodule")?;
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_upsize_rounds: 0,
+            ..options()
+        },
+    )?;
+    assert_eq!(report.initial_area, 4.0);
+    assert_eq!(report.final_area, 1.0);
+    assert_eq!(report.final_delay, report.initial_delay);
+    assert_eq!(report.downsize.accepted, 1);
+    Ok(())
+}
+
+#[test]
 fn improves_more_than_thirty_two_equally_critical_outputs() -> Result<()> {
     let library = library()?;
     let mut text = String::from("module m(input a, output [63:0] y);\n");
@@ -545,6 +578,7 @@ fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
         )?;
     }
     assert!(sta.score().register_to_register < initial.register_to_register);
+    drop(sta);
     let report = resize(&mut parsed, &library, &options())?;
     assert!(report.upsize.register_changes > 0);
     assert!(report.final_delay.within(report.initial_delay));
