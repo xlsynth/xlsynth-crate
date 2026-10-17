@@ -682,8 +682,8 @@ fn is_nand2_formula(term: &Term, input_pin_names: &[String]) -> bool {
         || *term == expected_demorgan_ba
 }
 
-/// Accepts functionally matching cells that are eligible for mapping.
-fn cell_binding_if_shape_matches(
+/// Recognizes a functional cell before checking its sizing-policy coverage.
+fn cell_binding_without_policy_coverage(
     lib: &Library,
     cell: &Cell,
     family_prefix: &str,
@@ -704,10 +704,7 @@ fn cell_binding_if_shape_matches(
     {
         return None;
     }
-    if let Err(error) = cell
-        .validate_functional_semantics()
-        .and_then(|()| cell.validate_mapping_policy_coverage())
-    {
+    if let Err(error) = cell.validate_functional_semantics() {
         log::warn!(
             "skipping {} candidate '{}': {}",
             family_prefix,
@@ -745,6 +742,44 @@ fn cell_binding_if_shape_matches(
         input_pin_names,
         output_pin_name: output_pin_name.clone(),
     })
+}
+
+/// Accepts functionally matching cells with known sizing-policy coverage.
+fn cell_binding_if_shape_matches(
+    lib: &Library,
+    cell: &Cell,
+    family_prefix: &str,
+    expected_input_count: usize,
+) -> Option<SelectedCellBinding> {
+    let binding =
+        cell_binding_without_policy_coverage(lib, cell, family_prefix, expected_input_count)?;
+    if let Err(error) = cell.validate_mapping_policy_coverage() {
+        log::warn!(
+            "skipping {} candidate '{}': {}",
+            family_prefix,
+            cell.name,
+            error
+        );
+        return None;
+    }
+    Some(binding)
+}
+
+/// Explains a missing candidate when matching cells have unknown policy
+/// coverage.
+fn missing_policy_coverage_error(
+    lib: &Library,
+    family_prefix: &str,
+    expected_input_count: usize,
+) -> Option<String> {
+    lib.cells
+        .iter()
+        .filter(|cell| {
+            cell_binding_without_policy_coverage(lib, cell, family_prefix, expected_input_count)
+                .is_some()
+        })
+        .filter_map(|cell| cell.validate_mapping_policy_coverage().err())
+        .min()
 }
 
 /// Checks whether a cell is an eligible inverter.
@@ -925,10 +960,9 @@ fn select_inv_cell(
         .filter(|c| is_inv_candidate(lib, c))
         .collect();
     let Some(name) = best_cell_name(lib, candidates.as_slice(), "INV", policy)? else {
-        return Err(
-            "could not find an eligible INV candidate with one input pin, one output pin, and an inverter function"
-                .to_string(),
-        );
+        return Err(missing_policy_coverage_error(lib, "INV", 1).unwrap_or_else(|| {
+            "could not find an eligible INV candidate with one input pin, one output pin, and an inverter function".to_string()
+        }));
     };
     selected_binding_for_name(lib, name, "INV", 1)
 }
@@ -944,10 +978,9 @@ fn select_nand2_cell(
         .filter(|c| is_nand2_candidate(lib, c))
         .collect();
     let Some(name) = best_cell_name(lib, candidates.as_slice(), "NAND2", policy)? else {
-        return Err(
-            "could not find an eligible NAND2 candidate with two input pins, one output pin, and a NAND2 function"
-                .to_string(),
-        );
+        return Err(missing_policy_coverage_error(lib, "NAND2", 2).unwrap_or_else(|| {
+            "could not find an eligible NAND2 candidate with two input pins, one output pin, and a NAND2 function".to_string()
+        }));
     };
     selected_binding_for_name(lib, name, "NAND2", 2)
 }
@@ -1492,8 +1525,14 @@ mod selection_tests {
 
         lib.cells.retain(|cell| !cell.name.ends_with("x2"));
         for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
-            assert!(select_inv_cell_name(&lib, policy).is_err());
-            assert!(select_nand2_cell_name(&lib, policy).is_err());
+            assert_eq!(
+                select_inv_cell_name(&lib, policy).unwrap_err(),
+                "could not find an eligible INV candidate with one input pin, one output pin, and an inverter function"
+            );
+            assert_eq!(
+                select_nand2_cell_name(&lib, policy).unwrap_err(),
+                "could not find an eligible NAND2 candidate with two input pins, one output pin, and a NAND2 function"
+            );
         }
     }
 
@@ -1513,8 +1552,14 @@ mod selection_tests {
                 && cell.validate_mapping_policy_coverage().is_err()
         }));
         for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
-            assert!(select_inv_cell_name(&legacy, policy).is_err());
-            assert!(select_nand2_cell_name(&legacy, policy).is_err());
+            assert_eq!(
+                select_inv_cell_name(&legacy, policy).unwrap_err(),
+                "cell 'INV' has unknown use_for_size_only source coverage; regenerate from source Liberty before mapping"
+            );
+            assert_eq!(
+                select_nand2_cell_name(&legacy, policy).unwrap_err(),
+                "cell 'NAND2' has unknown use_for_size_only source coverage; regenerate from source Liberty before mapping"
+            );
         }
 
         let mut mixed = make_library_with_cells(|library| {

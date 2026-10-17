@@ -62,6 +62,8 @@ pub struct AreaMappingLibrary {
     cells: Vec<Cell>,
     matches: BTreeMap<(usize, u64), Vec<Binding>>,
     inv: Option<usize>,
+    /// A potentially usable cell excluded because its sizing policy is unknown.
+    missing_policy_coverage: Option<String>,
     pub excluded_cells: Vec<String>,
 }
 
@@ -104,6 +106,7 @@ impl AreaMappingLibrary {
         let mut cells: Vec<Cell> = Vec::new();
         let mut matches: BTreeMap<(usize, u64), Vec<Binding>> = BTreeMap::new();
         let mut excluded_cells = Vec::new();
+        let mut missing_policy_coverage = None;
         let mut names = BTreeSet::new();
         let mut sorted = lib.cells.iter().collect::<Vec<_>>();
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -132,7 +135,6 @@ impl AreaMappingLibrary {
                 || !cell.sequential.is_empty()
                 || cell.clock_gate.is_some()
                 || cell.validate_functional_semantics().is_err()
-                || cell.validate_mapping_policy_coverage().is_err()
                 || outputs.len() != 1
                 || pins.is_empty()
                 || pins.len() > MAX_INPUTS
@@ -142,6 +144,22 @@ impl AreaMappingLibrary {
                             .contains(&p.direction)
                 })
             {
+                excluded_cells.push(cell.name.clone());
+                continue;
+            }
+            if let Err(error) = cell.validate_mapping_policy_coverage() {
+                // Remember only otherwise plausible cells; excluded legacy
+                // sequential or malformed cells do not explain a missing cover.
+                let mut names = BTreeSet::new();
+                let valid_pins = cell.pins.iter().all(|pin| {
+                    let name = lib.resolve_string(&pin.name);
+                    !name.is_empty() && names.insert(name)
+                });
+                let valid_function = parse_formula(lib.resolve_string(&outputs[0].function))
+                    .is_ok_and(|term| term.inputs().iter().all(|p| pins.contains(p)));
+                if valid_pins && valid_function && cell.area.is_finite() && cell.area > 0.0 {
+                    missing_policy_coverage.get_or_insert(error);
+                }
                 excluded_cells.push(cell.name.clone());
                 continue;
             }
@@ -232,8 +250,20 @@ impl AreaMappingLibrary {
             cells,
             matches,
             inv,
+            missing_policy_coverage,
             excluded_cells,
         })
+    }
+
+    /// Adds a recovery hint when unknown sizing policy excluded library cells.
+    fn explain_missing_cover(&self, error: anyhow::Error) -> anyhow::Error {
+        match (&self.missing_policy_coverage, self.cells.is_empty()) {
+            (Some(reason), true) => error.context(reason.clone()),
+            (Some(reason), false) => error.context(format!(
+                "some library cells were excluded from area mapping: {reason}"
+            )),
+            (None, _) => error,
+        }
     }
 }
 
@@ -763,19 +793,21 @@ impl<'a> Emitter<'a> {
                     } else if let Some(NetRef::Literal(bits)) = self.signals.get(&op.negate()) {
                         values.push(literal(!bits.get_bit(0).expect("one-bit constant")));
                     } else {
-                        ensure!(
-                            !self.cover.boundary[id]
-                                || self.cover.lib.inv.is_some()
-                                || !self.signals.contains_key(&op.negate()),
-                            "node {id} requires both polarities but the library has no inverter"
-                        );
+                        if self.cover.boundary[id]
+                            && self.cover.lib.inv.is_none()
+                            && self.signals.contains_key(&op.negate())
+                        {
+                            return Err(self.cover.lib.explain_missing_cover(anyhow!(
+                                "node {id} requires both polarities but the library has no inverter"
+                            )));
+                        }
                         let plan = self.cover.plans[id][usize::from(op.negated)]
                             .clone()
                             .ok_or_else(|| {
-                                anyhow!(
+                                self.cover.lib.explain_missing_cover(anyhow!(
                                     "no cover for demanded node {id} polarity {}; library may lack a required cell",
                                     usize::from(op.negated)
-                                )
+                                ))
                             })?;
                         work.push(EmitStep::Plan { root: id, plan });
                     }
@@ -1425,6 +1457,21 @@ mod tests {
             cell.validate_functional_semantics().is_ok()
                 && cell.validate_mapping_policy_coverage().is_err()
         }));
+        let index = AreaMappingLibrary::new(&legacy).unwrap();
+        let (mut b, x) = builder();
+        let and = b.add_and_binary(x[0], x[1]);
+        b.add_output("and_out".into(), and.into());
+        let error = map_gatefn_to_area_netlist(&b.build(), &index).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cell 'LEGACY_AND' has unknown use_for_size_only source coverage; regenerate from source Liberty before mapping"
+        );
+
+        // Wiring alone requires no cells, even with unknown legacy policies.
+        let (mut b, x) = builder();
+        b.add_output("wire_out".into(), x[0].into());
+        assert!(map_gatefn_to_area_netlist(&b.build(), &index).is_ok());
+
         let mut mixed = library(&[
             ("AND2_SAFE", &["A", "B"], "A*B", 2.0),
             ("INV_SAFE", &["A"], "!A", 2.0),
@@ -1442,6 +1489,30 @@ mod tests {
         assert_eq!(
             mapped.stats.cells_by_type,
             BTreeMap::from([("AND2_SAFE".into(), 1), ("INV_SAFE".into(), 1)])
+        );
+    }
+
+    #[test]
+    fn mixed_library_missing_cover_mentions_unknown_legacy_sizing_policy() {
+        let legacy = library(&[("INV_LEGACY", &["A"], "!A", 1.0)]);
+        let mut wire = library_to_proto(legacy).unwrap();
+        wire.format_magic = crate::liberty::model::LIBERTY_FORMAT_MAGIC_V5;
+        let legacy = library_from_proto(wire).unwrap();
+        let mut mixed = library(&[("AND2_SAFE", &["A", "B"], "A*B", 1.0)]);
+        mixed.append_cells_and_luts(legacy).unwrap();
+        let index = AreaMappingLibrary::new(&mixed).unwrap();
+        assert_eq!(index.excluded_cells, vec!["INV_LEGACY"]);
+
+        let (mut b, x) = builder();
+        b.add_output("not_out".into(), x[0].negate().into());
+        let error = map_gatefn_to_area_netlist(&b.build(), &index).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "some library cells were excluded from area mapping: cell 'INV_LEGACY' has unknown use_for_size_only source coverage; regenerate from source Liberty before mapping"
+        );
+        assert_eq!(
+            error.root_cause().to_string(),
+            "node 1 requires both polarities but the library has no inverter"
         );
     }
     #[test]

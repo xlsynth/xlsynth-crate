@@ -311,6 +311,61 @@ library (test) {
     }
 }
 
+#[test]
+fn nand2_mapping_accepts_missing_input_arc_but_sta_reports_it() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let aig_path = temp_dir.path().join("in.aag");
+    let liberty_path = temp_dir.path().join("lib.textproto");
+    let netlist_path = temp_dir.path().join("mapped.gv");
+    let nand_b_arc = r#"
+    timing_arcs: {
+      related_pin_string_id: 4
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 2.1 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.5 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.6 }
+    }"#;
+    let timed_lib = make_timing_enabled_inv_nand2_liberty_textproto();
+    assert_eq!(timed_lib.matches(nand_b_arc).count(), 1);
+    std::fs::write(&liberty_path, timed_lib.replace(nand_b_arc, ""))
+        .expect("write partially characterized library");
+    std::fs::write(&aig_path, make_two_input_and_aig()).expect("write aiger");
+
+    let map_output = Command::new(driver)
+        .arg("aig-tech-map")
+        .arg(&aig_path)
+        .arg("--liberty_proto")
+        .arg(&liberty_path)
+        .arg("--netlist_out")
+        .arg(&netlist_path)
+        .output()
+        .expect("aig-tech-map invocation should run");
+    assert!(
+        map_output.status.success(),
+        "aig-tech-map failed: {}",
+        String::from_utf8_lossy(&map_output.stderr)
+    );
+
+    let sta_output = Command::new(driver)
+        .arg("gv-sta")
+        .arg("--netlist")
+        .arg(&netlist_path)
+        .arg("--liberty_proto")
+        .arg(&liberty_path)
+        .output()
+        .expect("gv-sta invocation should run");
+    assert!(!sta_output.status.success());
+    let stderr = String::from_utf8_lossy(&sta_output.stderr);
+    assert!(
+        stderr.contains("NAND2") && stderr.contains("B"),
+        "expected an error identifying the missing NAND2 B arc, got: {}",
+        stderr
+    );
+}
+
 /// Checks emitted cells by exhaustive simulation and, when enabled, explicit
 /// Bitwuzla CLI proof.
 fn assert_mapping_equivalent(aig: &GateFn, text: &str, aig_path: &Path, liberty_path: &Path) {

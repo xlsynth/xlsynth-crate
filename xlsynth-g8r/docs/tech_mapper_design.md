@@ -47,8 +47,9 @@ These policies do not change the mapped topology. They only choose which
 concrete cell names appear in the output netlist. Drive strength is inferred
 from cell names; neither policy compares timing data. Mapping does not require
 timing data. Later STA requires a timing-enabled proto, but its current model may
-not diagnose missing arcs for some functional inputs. Verify timing coverage
-for the selected cells before relying on its delay results.
+not diagnose all missing or incomplete timing arcs. Verify timing coverage for
+the selected cells before relying on its delay results; the `gv-sta` section of
+the driver README describes the current checks.
 
 If a library does not provide VT ordering metadata, all matching cells are
 treated as unordered and selection still remains deterministic. If a candidate
