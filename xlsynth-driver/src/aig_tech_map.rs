@@ -334,7 +334,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 mapped.stats.cell_area, mapped.stats.inverter_count, mapped.stats.duplicated_ands
             );
             let report = serde_json::json!({
-                "mapper": "g8r-tm", "stats": mapped.stats,
+                "mapper": "area", "stats": mapped.stats,
                 "excluded_cells": library.excluded_cells
             });
             (mapped.netlist, report, summary)

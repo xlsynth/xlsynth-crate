@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Area-only cell covering of a fixed AIG with the `g8r-tm` mapper.
+//! Area-only cell covering of a fixed AIG.
 //!
 //! Cuts stop at every live fanout > 1, including output uses. A shared node has
 //! one locally selected base polarity; all opposite uses share one inverter.

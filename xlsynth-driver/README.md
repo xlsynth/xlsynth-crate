@@ -855,7 +855,7 @@ xlsynth-driver aig-tech-map my_design.aag \
   --netlist_out my_design.mapped.gv
 ```
 
-The `area` strategy (g8r-tm) matches combinational cells by function and area,
+The `area` strategy matches combinational cells by function and area,
 using both polarities and input-pin permutations on cuts of at most five inputs.
 It keeps the AIG fixed, without choices or graph rewriting. Shared AND nodes
 are mandatory cut boundaries, and opposite polarity demands share an inverter.
