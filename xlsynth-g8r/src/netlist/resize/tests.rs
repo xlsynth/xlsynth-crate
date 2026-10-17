@@ -210,17 +210,16 @@ fn family_and_search_order_do_not_depend_on_library_or_pin_order() -> Result<()>
 }
 
 #[test]
-fn phase_stop_reasons_distinguish_reservation_from_overall_work_limits() -> Result<()> {
+fn phase_stop_reasons_report_independent_work_limits() -> Result<()> {
     let library = library()?;
     // An unobserved minimum-sized cell has no timing or recovery candidates.
     let source =
         "module m(input a, output y); wire unused; BUF1 b(.A(a),.Y(unused)); assign y=a; endmodule";
-    // An observed cell has a useful timing alternative. Zero-sized reserved
-    // shares can stop that phase without consuming the overall work budget.
+    // An observed cell has a useful timing alternative. Exhausting timing's
+    // allowance must leave the independent recovery allowance available.
     let timed = "module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule";
     for (
-        max_trials,
-        max_propagated_instances,
+        timing_budget,
         max_upsize_rounds,
         max_downsize_rounds,
         expected_timing,
@@ -228,7 +227,6 @@ fn phase_stop_reasons_distinguish_reservation_from_overall_work_limits() -> Resu
         exhausted,
     ) in [
         (
-            6,
             1000,
             0,
             0,
@@ -237,16 +235,6 @@ fn phase_stop_reasons_distinguish_reservation_from_overall_work_limits() -> Resu
             false,
         ),
         (
-            0,
-            1000,
-            1,
-            0,
-            ResizeStopReason::TrialLimit,
-            ResizeStopReason::Disabled,
-            true,
-        ),
-        (
-            6,
             0,
             1,
             0,
@@ -255,25 +243,14 @@ fn phase_stop_reasons_distinguish_reservation_from_overall_work_limits() -> Resu
             true,
         ),
         (
-            2,
-            1000,
-            1,
-            1,
-            ResizeStopReason::TrialLimit,
-            ResizeStopReason::NoImprovement,
-            false,
-        ),
-        (
-            6,
-            2,
+            0,
             1,
             1,
             ResizeStopReason::PropagationLimit,
             ResizeStopReason::NoImprovement,
-            false,
+            true,
         ),
         (
-            3,
             1000,
             1,
             0,
@@ -287,8 +264,8 @@ fn phase_stop_reasons_distinguish_reservation_from_overall_work_limits() -> Resu
             &mut parsed,
             &library,
             &ResizeOptions {
-                max_trials,
-                max_propagated_instances,
+                timing_evaluation_budget: Some(timing_budget),
+                recovery_evaluation_budget: Some(1000),
                 max_upsize_rounds,
                 max_downsize_rounds,
                 ..options()
@@ -299,17 +276,107 @@ fn phase_stop_reasons_distinguish_reservation_from_overall_work_limits() -> Resu
         assert_eq!(report.budget_exhausted, exhausted);
     }
     let mut parsed = read_gv_from_str(source)?;
+    let report = resize(&mut parsed, &library, &options())?;
+    assert_eq!(report.upsize.stop_reason, ResizeStopReason::NoImprovement);
+    assert_eq!(report.downsize.stop_reason, ResizeStopReason::NoImprovement);
+    assert!(!report.budget_exhausted);
+    Ok(())
+}
+
+#[test]
+fn default_work_limits_scale_with_instances_and_saturate() {
+    for (instances, sites, timing, recovery) in [
+        (0, 64, 50_000, 100_000),
+        (12_500, 64, 50_000, 100_000),
+        (12_501, 64, 50_004, 100_008),
+        (32_768, 64, 131_072, 262_144),
+        (32_769, 65, 131_076, 262_152),
+        (usize::MAX, usize::MAX.div_ceil(512), usize::MAX, usize::MAX),
+    ] {
+        assert_eq!(
+            ResizeOptions::default().work_limits(instances),
+            ResizeWorkLimits {
+                timing_candidate_sites: sites,
+                timing_evaluations: timing,
+                recovery_evaluations: recovery,
+            }
+        );
+    }
+    let options = ResizeOptions {
+        max_candidate_sites: Some(7),
+        timing_evaluation_budget: Some(0),
+        recovery_evaluation_budget: Some(11),
+        ..ResizeOptions::default()
+    };
+    assert_eq!(
+        options.work_limits(usize::MAX),
+        ResizeWorkLimits {
+            timing_candidate_sites: 7,
+            timing_evaluations: 0,
+            recovery_evaluations: 11,
+        }
+    );
+    let limits = ResizeOptions::default().work_limits(0);
+    assert_eq!(SearchPhase::Timing.work_limit(limits, 17), 50_017);
+    assert_eq!(SearchPhase::AreaRecovery.work_limit(limits, 17), 100_017);
+    assert_eq!(
+        SearchPhase::AreaRecovery.work_limit(limits, usize::MAX),
+        usize::MAX
+    );
+}
+
+#[test]
+fn phase_budgets_do_not_reset_per_round_or_borrow_from_each_other() -> Result<()> {
+    let library = library()?;
+    let mut parsed =
+        read_gv_from_str("module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule")?;
     let report = resize(
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_trials: 6,
+            timing_evaluation_budget: Some(1),
+            recovery_evaluation_budget: Some(1),
             ..options()
         },
     )?;
-    assert_eq!(report.upsize.stop_reason, ResizeStopReason::NoImprovement);
-    assert_eq!(report.downsize.stop_reason, ResizeStopReason::NoImprovement);
-    assert!(!report.budget_exhausted);
+    // Timing accepts one substitution, then stops in the next round rather
+    // than refreshing its allowance. Recovery can still evaluate a candidate.
+    assert_eq!(report.upsize.accepted, 1);
+    assert_eq!(report.upsize.propagated_instances, 1);
+    assert_eq!(
+        report.upsize.stop_reason,
+        ResizeStopReason::PropagationLimit
+    );
+    assert_eq!(report.downsize.propagated_instances, 1);
+    assert!(report.budget_exhausted);
+
+    // Unobserved buffers can shrink freely, but recovery cannot borrow unused
+    // timing work or reset its allowance after accepting a substitution.
+    let mut parsed = read_gv_from_str(
+        r#"module m(input a, output y);
+        wire unused0, unused1;
+        BUF4 b0(.A(a),.Y(unused0));
+        BUF4 b1(.A(a),.Y(unused1));
+        assign y=a;
+        endmodule"#,
+    )?;
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_upsize_rounds: 0,
+            timing_evaluation_budget: Some(1000),
+            recovery_evaluation_budget: Some(1),
+            ..options()
+        },
+    )?;
+    assert_eq!(report.downsize.accepted, 1);
+    assert_eq!(report.downsize.propagated_instances, 1);
+    assert_eq!(
+        report.downsize.stop_reason,
+        ResizeStopReason::PropagationLimit
+    );
+    assert!(report.budget_exhausted);
     Ok(())
 }
 
@@ -505,7 +572,7 @@ fn fixed_capture_registers_do_not_consume_timing_candidate_slots() -> Result<()>
         &library,
         &ResizeOptions {
             resize_registers: false,
-            max_candidate_sites: 1,
+            max_candidate_sites: Some(1),
             max_upsize_rounds: 1,
             max_downsize_rounds: 0,
             ..options()
@@ -537,7 +604,7 @@ fn unaffordable_cells_do_not_hide_area_neutral_timing_candidates() -> Result<()>
         &library,
         &ResizeOptions {
             max_area_growth: 0.0,
-            max_candidate_sites: 1,
+            max_candidate_sites: Some(1),
             max_upsize_rounds: 1,
             max_downsize_rounds: 0,
             ..options()
@@ -604,7 +671,7 @@ fn cells_without_alternatives_do_not_hide_resizable_fanin() -> Result<()> {
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_candidate_sites: 1,
+            max_candidate_sites: Some(1),
             max_upsize_rounds: 1,
             max_downsize_rounds: 0,
             ..options()
@@ -825,7 +892,8 @@ fn zero_budget_is_identity_and_area_limit_does_not_compound() -> Result<()> {
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_propagated_instances: 0,
+            timing_evaluation_budget: Some(0),
+            recovery_evaluation_budget: Some(0),
             ..options()
         },
     )?;
@@ -1075,7 +1143,7 @@ fn invalid_options_leave_the_netlist_unchanged() -> Result<()> {
             ..options()
         },
         ResizeOptions {
-            max_candidate_sites: 0,
+            max_candidate_sites: Some(0),
             ..options()
         },
         ResizeOptions {
@@ -1652,18 +1720,21 @@ fn resizing_a_driver_preserves_combinational_and_capture_pin_slew_limits() -> Re
 #[test]
 fn budget_sweeps_preserve_timing_and_area_guards() -> Result<()> {
     let library = library()?;
-    for max_propagated_instances in [0, 1, 10, 100, 1000] {
+    for budget in [0, 1, 10, 100, 1000] {
         let mut parsed = read_gv_from_str(
             "module m(input clk, input d, output q); wire a,b; DFF1 launch(.CLK(clk),.D(d),.Q(a)); BUF1 comb(.A(a),.Y(b)); DFF1 capture(.CLK(clk),.D(b),.Q(q)); endmodule",
         )?;
         let options = ResizeOptions {
-            max_propagated_instances,
+            timing_evaluation_budget: Some(budget),
+            recovery_evaluation_budget: Some(budget),
             ..options()
         };
         let report = resize(&mut parsed, &library, &options)?;
         assert!(report.final_delay.within(report.initial_delay));
         assert!(report.final_delay.within(report.upsized_delay));
         assert!(report.final_area <= report.initial_area * (1.0 + options.max_area_growth));
+        assert!(report.upsize.propagated_instances <= budget);
+        assert!(report.downsize.propagated_instances <= budget);
     }
     Ok(())
 }

@@ -23,7 +23,6 @@ use crate::netlist::sta::incremental::{
 };
 
 const AREA_COMPARISON_TOLERANCE: f64 = 1e-12;
-const TIMING_PHASE_BUDGET_DIVISOR: usize = 3;
 const MAX_SIGNATURE_VARIABLES: usize = 10;
 
 /// Deterministic search limits. The area allowance is relative to the input,
@@ -36,16 +35,23 @@ pub struct ResizeOptions {
     pub max_upsize_rounds: usize,
     /// Area-recovery rounds against the timing-search checkpoint.
     pub max_downsize_rounds: usize,
-    /// Selectable sites per timing-search round; recovery uses the work limits.
-    pub max_candidate_sites: usize,
+    /// Timing sites per round; None uses max(64, ceil(instance_count / 512)).
+    /// Recovery has no site cap and uses its evaluation budget instead.
+    pub max_candidate_sites: Option<usize>,
+    /// Alternative cell sizes tried per candidate site in each round.
     pub max_cell_candidates: usize,
-    pub max_trials: usize,
-    pub max_propagated_instances: usize,
+    /// Instance timing evaluations across all timing rounds; None uses
+    /// max(50_000, 4 * instance_count). Explicit zero allows no evaluation
+    /// work.
+    pub timing_evaluation_budget: Option<usize>,
+    /// Instance timing evaluations across all recovery rounds; None uses
+    /// max(100_000, 8 * instance_count). Independent of unused timing work.
+    pub recovery_evaluation_budget: Option<usize>,
     pub resize_registers: bool,
 }
 
-/// Why a phase stopped. Work limits are cumulative, but the timing phase may
-/// stop at its reserved share while leaving work available for area recovery.
+/// Why a phase stopped. Each phase has an independent evaluation budget shared
+/// across its rounds; work in one phase cannot exhaust the other phase.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResizeStopReason {
@@ -53,14 +59,7 @@ pub enum ResizeStopReason {
     Disabled,
     NoImprovement,
     RoundLimit,
-    TrialLimit,
     PropagationLimit,
-}
-
-impl ResizeStopReason {
-    fn is_work_limit(self) -> bool {
-        matches!(self, Self::TrialLimit | Self::PropagationLimit)
-    }
 }
 
 impl Default for ResizeOptions {
@@ -70,11 +69,39 @@ impl Default for ResizeOptions {
             max_area_growth: 0.02,
             max_upsize_rounds: 4,
             max_downsize_rounds: 2,
-            max_candidate_sites: 64,
+            max_candidate_sites: None,
             max_cell_candidates: 8,
-            max_trials: 1536,
-            max_propagated_instances: 150_000,
+            timing_evaluation_budget: None,
+            recovery_evaluation_budget: None,
             resize_registers: true,
+        }
+    }
+}
+
+/// Effective graph-scaled search limits, including explicit caller overrides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ResizeWorkLimits {
+    /// Candidate sites per timing round; recovery has no site cap.
+    pub timing_candidate_sites: usize,
+    /// Instance timing evaluations across all timing rounds.
+    pub timing_evaluations: usize,
+    /// Instance timing evaluations across all area-recovery rounds.
+    pub recovery_evaluations: usize,
+}
+
+impl ResizeOptions {
+    /// Resolves budgets once for the input instance count, including registers.
+    pub fn work_limits(&self, instances: usize) -> ResizeWorkLimits {
+        ResizeWorkLimits {
+            timing_candidate_sites: self
+                .max_candidate_sites
+                .unwrap_or_else(|| instances.div_ceil(512).max(64)),
+            timing_evaluations: self
+                .timing_evaluation_budget
+                .unwrap_or_else(|| instances.saturating_mul(4).max(50_000)),
+            recovery_evaluations: self
+                .recovery_evaluation_budget
+                .unwrap_or_else(|| instances.saturating_mul(8).max(100_000)),
         }
     }
 }
@@ -101,8 +128,8 @@ pub struct ResizeReport {
     pub final_delay: BoundaryDelays,
     pub upsize: ResizePhaseStats,
     pub downsize: ResizePhaseStats,
-    /// A phase stopped on work and reached an overall trial/propagation limit.
-    /// A timing-phase reservation alone does not exhaust the overall budget.
+    pub work_limits: ResizeWorkLimits,
+    /// At least one phase stopped because its evaluation budget was exhausted.
     pub budget_exhausted: bool,
 }
 
@@ -288,12 +315,6 @@ enum SearchPhase {
     AreaRecovery,
 }
 
-/// Cumulative work ceilings; unused timing work remains available to recovery.
-struct WorkLimits {
-    trials: usize,
-    propagated_instances: usize,
-}
-
 impl SearchPhase {
     fn rounds(self, options: &ResizeOptions) -> usize {
         match self {
@@ -302,16 +323,13 @@ impl SearchPhase {
         }
     }
 
-    fn work_limits(self, options: &ResizeOptions) -> WorkLimits {
-        // Reserve two thirds for recovery only when that phase is enabled.
-        let divisor = match self {
-            Self::Timing if options.max_downsize_rounds > 0 => TIMING_PHASE_BUDGET_DIVISOR,
-            _ => 1,
+    /// Converts this phase's allowance to the STA's cumulative work ceiling.
+    fn work_limit(self, limits: ResizeWorkLimits, start_work: usize) -> usize {
+        let allowance = match self {
+            Self::Timing => limits.timing_evaluations,
+            Self::AreaRecovery => limits.recovery_evaluations,
         };
-        WorkLimits {
-            trials: options.max_trials / divisor,
-            propagated_instances: options.max_propagated_instances / divisor,
-        }
+        start_work.saturating_add(allowance)
     }
 }
 
@@ -325,15 +343,17 @@ struct ResizeSearch<'a> {
     timing_checkpoint: BoundaryDelays,
     area: f64,
     area_limit: f64,
-    trials: usize,
+    work_limits: ResizeWorkLimits,
 }
 
 impl ResizeSearch<'_> {
     /// Selects timing sites or ranks recoverable area once per unchanged round.
     fn candidate_sites(&self, phase: SearchPhase, sta: &IncrementalSta<'_>) -> Vec<usize> {
         let mut sites = match phase {
-            SearchPhase::Timing => {
-                sta.critical_instances(self.objective, self.options.max_candidate_sites, |i| {
+            SearchPhase::Timing => sta.critical_instances(
+                self.objective,
+                self.work_limits.timing_candidate_sites,
+                |i| {
                     let current = sta.cells[i];
                     (self.options.resize_registers || !sta.is_register(i))
                         && self.families.alternatives(current).iter().any(|c| {
@@ -342,8 +362,8 @@ impl ResizeSearch<'_> {
                                     + self.library.cells[*c].area
                                     <= self.area_limit + AREA_COMPARISON_TOLERANCE
                         })
-                })
-            }
+                },
+            ),
             SearchPhase::AreaRecovery => {
                 let priorities = sta
                     .recovery_headroom(self.timing_checkpoint)
@@ -456,17 +476,15 @@ impl ResizeSearch<'_> {
             return Ok(stats);
         }
         stats.stop_reason = ResizeStopReason::RoundLimit;
-        let limits = phase.work_limits(self.options);
         let start_work = sta.propagated_instances();
+        // Anchor once per phase, not per round. Recovery starts with its own
+        // full allowance regardless of how much work timing consumed.
+        let work_limit = phase.work_limit(self.work_limits, start_work);
         let mut timing_candidates = Vec::new();
         'rounds: for _ in 0..rounds {
             let sites = self.candidate_sites(phase, sta);
             let mut accepted = 0;
             for i in sites {
-                if self.trials >= limits.trials {
-                    stats.stop_reason = ResizeStopReason::TrialLimit;
-                    break 'rounds;
-                }
                 let current = sta.cells[i];
                 let area = self.area;
                 let area_limit = self.area_limit;
@@ -506,15 +524,10 @@ impl ResizeSearch<'_> {
                     .filter(allowed)
                     .take(self.options.max_cell_candidates)
                 {
-                    if self.trials >= limits.trials {
-                        stats.stop_reason = ResizeStopReason::TrialLimit;
-                        break 'rounds;
-                    }
                     let new_area =
                         self.area - library.cells[sta.cells[i]].area + library.cells[cell].area;
-                    self.trials += 1;
                     stats.trials += 1;
-                    match self.trial(phase, sta, i, cell, limits.propagated_instances, new_area) {
+                    match self.trial(phase, sta, i, cell, work_limit, new_area) {
                         Ok(TrialOutcome::Accepted) => {
                             stats.accepted += 1;
                             stats.register_changes += usize::from(sta.is_register(i));
@@ -543,10 +556,6 @@ impl ResizeSearch<'_> {
                     }
                 }
             }
-            if self.trials >= limits.trials {
-                stats.stop_reason = ResizeStopReason::TrialLimit;
-                break;
-            }
             if accepted == 0 {
                 stats.stop_reason = ResizeStopReason::NoImprovement;
                 break;
@@ -573,7 +582,8 @@ pub fn resize_netlist(
     if !options.max_area_growth.is_finite() || options.max_area_growth < 0.0 {
         return Err(anyhow!("max_area_growth must be finite and nonnegative"));
     }
-    if options.max_candidate_sites == 0 || options.max_cell_candidates == 0 {
+    let work_limits = options.work_limits(module.instances.len());
+    if work_limits.timing_candidate_sites == 0 || options.max_cell_candidates == 0 {
         return Err(anyhow!("candidate limits must be positive"));
     }
     let families = CellFamilies::new(library);
@@ -596,7 +606,7 @@ pub fn resize_netlist(
         timing_checkpoint: initial_delay,
         area: initial_area,
         area_limit,
-        trials: 0,
+        work_limits,
     };
     let upsize = search.run_phase(SearchPhase::Timing, &mut sta)?;
     let upsized_delay = sta.score();
@@ -605,10 +615,8 @@ pub fn resize_netlist(
     let upsized_area = sta.cells.iter().map(|i| library.cells[*i].area).sum();
     search.area = upsized_area;
     let downsize = search.run_phase(SearchPhase::AreaRecovery, &mut sta)?;
-    let budget_exhausted = (upsize.stop_reason.is_work_limit()
-        || downsize.stop_reason.is_work_limit())
-        && (search.trials >= options.max_trials
-            || sta.propagated_instances() >= options.max_propagated_instances);
+    let budget_exhausted = upsize.stop_reason == ResizeStopReason::PropagationLimit
+        || downsize.stop_reason == ResizeStopReason::PropagationLimit;
     let incremental_delay = sta.score();
     let final_area: f64 = sta.cells.iter().map(|i| library.cells[*i].area).sum();
     if !final_area.is_finite() || final_area > area_limit + AREA_COMPARISON_TOLERANCE {
@@ -637,6 +645,7 @@ pub fn resize_netlist(
         final_delay,
         upsize,
         downsize,
+        work_limits,
         budget_exhausted,
     })
 }

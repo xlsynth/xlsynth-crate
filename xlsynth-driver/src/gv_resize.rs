@@ -22,8 +22,8 @@ pub fn command() -> Command {
         .arg(Arg::new("primary_input_transition").long("primary_input_transition").help(format!("Primary-input transition [default: {}]", defaults.timing.primary_input_transition)).value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("module_output_load").long("module_output_load").value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("max-area-growth").long("max-area-growth").help(format!("Fractional area allowance [default: {}]", defaults.max_area_growth)).value_parser(clap::value_parser!(f64)))
-        .arg(Arg::new("max-trials").long("max-trials").help(format!("Shared trial limit [default: {}]", defaults.max_trials)).value_parser(clap::value_parser!(usize)))
-        .arg(Arg::new("max-propagated-instances").long("max-propagated-instances").help(format!("Shared propagation-work limit [default: {}]", defaults.max_propagated_instances)).value_parser(clap::value_parser!(usize)))
+        .arg(Arg::new("timing-evaluation-budget").long("timing-evaluation-budget").help("Timing-instance evaluations across timing rounds [default: max(50000, 4 * instance count)]").value_parser(clap::value_parser!(usize)))
+        .arg(Arg::new("recovery-evaluation-budget").long("recovery-evaluation-budget").help("Timing-instance evaluations across recovery rounds [default: max(100000, 8 * instance count)]").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("upsize-rounds").long("upsize-rounds").help(format!("Timing-search rounds, in either size direction [default: {}]", defaults.max_upsize_rounds)).value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("downsize-rounds").long("downsize-rounds").help(format!("Area-recovery rounds [default: {}]", defaults.max_downsize_rounds)).value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("no-register-resize").long("no-register-resize").action(ArgAction::SetTrue))
@@ -83,14 +83,14 @@ fn resize_options(matches: &ArgMatches, library: &Library) -> Result<ResizeOptio
             .get_one::<f64>("max-area-growth")
             .copied()
             .unwrap_or(defaults.max_area_growth),
-        max_trials: matches
-            .get_one::<usize>("max-trials")
+        timing_evaluation_budget: matches
+            .get_one::<usize>("timing-evaluation-budget")
             .copied()
-            .unwrap_or(defaults.max_trials),
-        max_propagated_instances: matches
-            .get_one::<usize>("max-propagated-instances")
+            .or(defaults.timing_evaluation_budget),
+        recovery_evaluation_budget: matches
+            .get_one::<usize>("recovery-evaluation-budget")
             .copied()
-            .unwrap_or(defaults.max_propagated_instances),
+            .or(defaults.recovery_evaluation_budget),
         max_upsize_rounds: matches
             .get_one::<usize>("upsize-rounds")
             .copied()
@@ -127,10 +127,13 @@ mod tests {
         );
         assert_eq!(options.timing.module_output_load, 4.0);
         assert_eq!(options.max_area_growth, defaults.max_area_growth);
-        assert_eq!(options.max_trials, defaults.max_trials);
         assert_eq!(
-            options.max_propagated_instances,
-            defaults.max_propagated_instances
+            options.timing_evaluation_budget,
+            defaults.timing_evaluation_budget
+        );
+        assert_eq!(
+            options.recovery_evaluation_budget,
+            defaults.recovery_evaluation_budget
         );
         assert_eq!(options.max_upsize_rounds, defaults.max_upsize_rounds);
         assert_eq!(options.max_downsize_rounds, defaults.max_downsize_rounds);
@@ -153,9 +156,9 @@ mod tests {
             "0",
             "--max-area-growth",
             "0",
-            "--max-trials",
+            "--timing-evaluation-budget",
             "0",
-            "--max-propagated-instances",
+            "--recovery-evaluation-budget",
             "0",
             "--upsize-rounds",
             "0",
@@ -167,8 +170,8 @@ mod tests {
         assert_eq!(options.timing.primary_input_transition, 0.0);
         assert_eq!(options.timing.module_output_load, 0.0);
         assert_eq!(options.max_area_growth, 0.0);
-        assert_eq!(options.max_trials, 0);
-        assert_eq!(options.max_propagated_instances, 0);
+        assert_eq!(options.timing_evaluation_budget, Some(0));
+        assert_eq!(options.recovery_evaluation_budget, Some(0));
         assert_eq!(options.max_upsize_rounds, 0);
         assert_eq!(options.max_downsize_rounds, 0);
         assert!(!options.resize_registers);

@@ -355,17 +355,30 @@ the incumbent. Independent full STA using the `gv-stats` model verifies the fina
 result before replacing the caller's module. This is max-delay/setup timing with
 ideal clocks, not hold, clock-tree, placement, or routed timing signoff.
 
-`ResizeOptions` sets deterministic round, candidate, trial, and propagation limits;
+`ResizeOptions` sets deterministic round, candidate, and timing-evaluation limits;
 these are work bounds rather than a wall-clock deadline or a local-optimality
-guarantee. The default area allowance is 2% of the original input area and never
-compounds across moves. `ResizeReport` records initial, upsized, and final area and
-boundary delays, accepted moves (including FF changes), work, and budget exhaustion.
-Each phase reports `stop_reason`: `disabled`, `no_improvement`, `round_limit`,
-`trial_limit`, or `propagation_limit`. `no_improvement` refers only to the bounded
-candidate search, not proof of local optimality. The timing phase reserves two
-thirds of the shared work for recovery when recovery is enabled. Hitting that
-phase reservation is distinct from `budget_exhausted`, which is true only when
-a work-limited phase reaches an overall trial or propagation limit.
+guarantee. With `N` input instances (including FFs), defaults are:
+
+- `max(64, ceil(N / 512))` candidate sites per timing round.
+- `max(50_000, 4 * N)` instance timing evaluations across all timing rounds.
+- `max(100_000, 8 * N)` instance timing evaluations across all recovery rounds.
+- Four timing rounds, two recovery rounds, and eight alternatives per site.
+
+One substitution trial can evaluate many instances as timing changes propagate.
+Phase allowances are independent, do not reset each round, and do not borrow
+unused work from each other. There is no separate trial-count limit or combined
+phase-work limit, and recovery has no candidate-site cap. Optional candidate and
+evaluation overrides use these formulas when `None`; an explicit zero evaluation
+budget permits no evaluation work. `ResizeOptions::work_limits(N)` resolves the
+effective limits, which are also included in `ResizeReport`.
+
+The default area allowance is 2% of the original input area and never compounds
+across moves. `ResizeReport` records initial, upsized, and final area and boundary
+delays, accepted moves (including FF changes), work, and budget exhaustion.
+Each phase reports `stop_reason`: `disabled`, `no_improvement`, `round_limit`, or
+`propagation_limit`. `no_improvement` refers only to the bounded candidate search,
+not proof of local optimality. `budget_exhausted` is true if either phase stops
+because its evaluation budget is exhausted.
 The existing `upsize`/`downsize` report fields and round-option names refer to the
 timing-search/area-recovery phases respectively; timing search may move in either
 size direction.

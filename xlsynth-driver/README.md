@@ -1173,20 +1173,28 @@ cutoffs.
   defaults to the proto's `default_output_load`. Explicit `0` is supported.
 - `--max-area-growth <FRACTION>`: noncompounding growth relative to input area;
   default `0.02` (2%).
-- `--max-trials <COUNT>`: total substitution trials; default `1536`.
-- `--max-propagated-instances <COUNT>`: total trial propagation work; default
-  `150000`. Exhaustion rolls back the unfinished trial and keeps verified work.
+- `--timing-evaluation-budget <COUNT>`: instance timing evaluations across all
+  timing rounds; defaults to `max(50000, 4 * N)` for `N` mapped instances,
+  including FFs. Explicit `0` permits no evaluation work.
+- `--recovery-evaluation-budget <COUNT>`: instance timing evaluations across all
+  recovery rounds; defaults to `max(100000, 8 * N)`. Independent of the timing
+  budget; explicit `0` permits no evaluation work. Exhaustion rolls back the
+  unfinished trial and keeps verified work.
 - `--upsize-rounds <COUNT>`, `--downsize-rounds <COUNT>`: default `4` and `2`;
-  `0` disables that phase. Two thirds of the trial/propagation budget is reserved
-  for area recovery when both phases are enabled.
+  `0` disables that phase. Evaluation budgets do not reset each round or borrow
+  unused work from the other phase.
 - `--no-register-resize`: leave FF cells fixed; default permits resizing.
 - `--report-json <PATH>`: deterministic before/after boundary timing, cell area,
-  accepted moves, propagation counts, per-phase stopping reasons, and overall
-  budget-exhaustion status. Phase reasons are `disabled`, `no_improvement`,
-  `round_limit`, `trial_limit`, and `propagation_limit`. Hitting only the timing
-  phase's reserved work share does not set the overall `budget_exhausted` flag.
+  accepted moves, propagation counts, resolved `work_limits`, per-phase stopping
+  reasons, and budget-exhaustion status. Phase reasons are `disabled`,
+  `no_improvement`, `round_limit`, and `propagation_limit`. `budget_exhausted` is
+  true if either phase stops because its evaluation budget is exhausted.
 
-Search defaults come from the library's `ResizeOptions`. The historical
+Search defaults come from the library's `ResizeOptions`. Timing visits up to
+`max(64, ceil(N / 512))` candidate sites per round; recovery has no site cap.
+Both phases try up to eight alternative sizes per site. One trial can require
+many instance evaluations. There is no separate trial-count or combined
+phase-work limit. The historical
 `upsize`/`downsize` report fields mean timing search and area recovery;
 `no_improvement` means no improvement among the bounded candidates tried,
 not a local-optimality guarantee.

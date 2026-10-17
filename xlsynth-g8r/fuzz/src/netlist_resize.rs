@@ -125,7 +125,15 @@ fn library_proto() -> &'static LibertyProto {
 fn library_with_random_electrical_limits(rng: &mut StdRng) -> Result<Library> {
     let mut library = library_from_proto(library_proto().clone())?;
     if rng.gen_bool(0.5) {
-        let limits = [None, None, None, Some(0.0), Some(0.25), Some(2.0), Some(16.0)];
+        let limits = [
+            None,
+            None,
+            None,
+            Some(0.0),
+            Some(0.25),
+            Some(2.0),
+            Some(16.0),
+        ];
         let weights = [None, Some(0.0), Some(0.5), Some(1.0), Some(2.0)];
         for cell in &mut library.cells {
             for pin in &mut cell.pins {
@@ -311,10 +319,10 @@ pub fn check(data: &[u8]) -> ResizeReport {
         max_area_growth: [0.0, 0.02, 0.5][rng.gen_range(0..3)],
         max_upsize_rounds: rng.gen_range(0..=8),
         max_downsize_rounds: rng.gen_range(0..=8),
-        max_candidate_sites: rng.gen_range(1..=64),
+        max_candidate_sites: rng.gen_bool(0.5).then(|| rng.gen_range(1..=64)),
         max_cell_candidates: rng.gen_range(1..=8),
-        max_trials: rng.gen_range(0..=128),
-        max_propagated_instances: rng.gen_range(0..=4096),
+        timing_evaluation_budget: rng.gen_bool(0.5).then(|| rng.gen_range(0..=4096)),
+        recovery_evaluation_budget: rng.gen_bool(0.5).then(|| rng.gen_range(0..=4096)),
         resize_registers: rng.gen_bool(0.5),
     };
     let report = resize_netlist(
@@ -384,11 +392,12 @@ pub fn check(data: &[u8]) -> ResizeReport {
             }
         }
     }
-    assert!(report.upsize.trials + report.downsize.trials <= options.max_trials);
-    assert!(
-        report.upsize.propagated_instances + report.downsize.propagated_instances
-            <= options.max_propagated_instances
+    assert_eq!(
+        report.work_limits,
+        options.work_limits(original.instances.len())
     );
+    assert!(report.upsize.propagated_instances <= report.work_limits.timing_evaluations);
+    assert!(report.downsize.propagated_instances <= report.work_limits.recovery_evaluations);
     let after = project_labeled_sequential_netlist_aig(
         &mapped.module,
         &mapped.nets,

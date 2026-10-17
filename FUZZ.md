@@ -650,9 +650,10 @@ library, randomizes initial cell strengths, and runs bounded resizing. It compar
 cycle simulation of the original G8R graph, mapped netlist, and resized netlist
 from the same randomized initial state. It also checks deterministic output,
 all four boundary timing limits, recomputed area, area limits, unchanged
-connectivity, and trial/work budgets.
-Round counts, candidate limits, work budgets, and register resizing are varied,
-including disabled phases and frozen register cells.
+connectivity, and independent per-phase evaluation budgets.
+Round counts, candidate limits, evaluation budgets, and register resizing are
+varied, including graph-scaled defaults, explicit zero budgets, disabled phases,
+and frozen register cells.
 The library also varies optional capacitance, slew and fanout limits, including
 clock-pin slew limits and input fanout weights, while retaining unconstrained
 samples. This exercises electrical rejection and rollback as limits appear or
