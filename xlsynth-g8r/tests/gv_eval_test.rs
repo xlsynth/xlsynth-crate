@@ -3,6 +3,9 @@
 use xlsynth_pir::{IrBits, IrValue};
 
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
+use xlsynth_g8r::liberty::model::{
+    LIBERTY_FORMAT_MAGIC_V4, LIBERTY_FORMAT_MAGIC_V5, library_from_proto, library_to_proto,
+};
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, parse_liberty_files_with_payload_options,
 };
@@ -106,7 +109,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_checks_only_required_undriven_assign_bits() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -157,7 +160,7 @@ endmodule
 #[test]
 fn sequential_netlist_checks_undriven_assigns_feeding_next_state() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -225,7 +228,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_evaluates_and_preserves_external_pin_labels() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "AND2"
   pins: { name_string_id: 1 direction: INPUT }
@@ -313,7 +316,7 @@ endmodule
 #[test]
 fn module_port_labels_preserve_original_bit_numbers() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -360,7 +363,7 @@ endmodule
 #[test]
 fn toggle_activity_counts_external_pins_outside_the_primary_output_cone() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -412,7 +415,7 @@ endmodule
 #[test]
 fn dynamic_power_uses_slew_histograms_loads_and_previous_when_values() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -509,6 +512,48 @@ endmodule
         IrValue::parse_typed("(bits[1]:0)").unwrap(),
     ];
 
+    // A labeled AIG can be paired with a different library at analysis time;
+    // the independently supplied cell must retain valid driver semantics.
+    let wire =
+        library_to_proto(xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap())
+            .unwrap();
+    let options = GvDynamicPowerOptions {
+        primary_input_transition: 1.0,
+        module_output_load: 3.0,
+        cycle_time: Some(5.0),
+    };
+    for (magic, rejects) in [
+        (LIBERTY_FORMAT_MAGIC_V4, true),
+        (LIBERTY_FORMAT_MAGIC_V5, false),
+    ] {
+        let mut legacy = wire.clone();
+        legacy.format_magic = magic;
+        let legacy = library_from_proto(legacy).unwrap();
+        let result = model.analyze_dynamic_power(&legacy, &samples, options);
+        if rejects {
+            assert!(result.unwrap_err().contains("driver_type"));
+        } else {
+            assert!(result.is_ok());
+        }
+    }
+    let mut explicit_driver = wire;
+    explicit_driver.cells[0].unsupported_semantics.push(
+        xlsynth_g8r::liberty_proto::UnsupportedSemantics {
+            feature: xlsynth_g8r::liberty_proto::UnsupportedFeature::DriverType as i32,
+            location: "pin(Y).driver_type".into(),
+        },
+    );
+    assert!(
+        model
+            .analyze_dynamic_power(
+                &library_from_proto(explicit_driver).unwrap(),
+                &samples,
+                options,
+            )
+            .unwrap_err()
+            .contains("pin(Y).driver_type")
+    );
+
     let report = model
         .analyze_dynamic_power(
             &library,
@@ -553,7 +598,7 @@ endmodule
 #[test]
 fn dynamic_power_uses_owner_output_direction_for_negative_unate_cells() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -639,7 +684,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_counts_clock_q_and_feedback_safe_slew() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -841,7 +886,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_charges_output_owned_groups_only_on_output_transition() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -950,7 +995,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_accepts_clock_hint_without_registers() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -1045,7 +1090,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_resolves_state_aliases_in_when_conditions() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -1158,7 +1203,7 @@ endmodule
 #[test]
 fn sequential_cells_are_rejected_before_projection() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1192,7 +1237,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_simulates_ff_state() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1280,7 +1325,7 @@ endmodule
 #[test]
 fn sequential_toggle_activity_keeps_g8r_boundaries_and_labeled_dead_pins() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1383,7 +1428,7 @@ endmodule
 #[test]
 fn sequential_toggle_activity_counts_a_one_cycle_trace() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1440,7 +1485,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_supports_feedback_and_qn() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFE"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1522,7 +1567,7 @@ endmodule
 #[test]
 fn labeled_sequential_netlist_aig_preserves_negative_edge_clock() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFN"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1561,7 +1606,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_accepts_a_clock_wiring_alias() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1599,7 +1644,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_rejects_mixed_clock_edges() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFP"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1646,7 +1691,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_rejects_a_derived_clock() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1686,7 +1731,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_rejects_async_reset_cells() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFCLR"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1721,7 +1766,7 @@ endmodule
 
 #[test]
 fn sequential_netlist_gate_fn_accepts_an_outputless_module() {
-    let liberty = "format_magic: 5496997758194700879\n";
+    let liberty = "format_magic: 5496997758228255311\n";
     let netlist = r#"
 module top (clk, a);
   input clk;
@@ -1756,7 +1801,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_flattens_structural_hierarchy_and_keeps_boundaries() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1846,7 +1891,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_sizes_hierarchical_port_connections_directionally() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1983,7 +2028,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_flattens_nested_structural_hierarchy() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -2040,7 +2085,7 @@ endmodule
 #[test]
 fn labeled_sequential_netlist_aig_flattens_structural_hierarchy() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }

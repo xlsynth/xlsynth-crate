@@ -156,46 +156,49 @@ enum Tok {
 fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
     let mut tokens = Vec::new();
     let mut chars = s.chars().peekable();
+    let mut whitespace = false;
     while let Some(&c) = chars.peek() {
-        match c {
-            ' ' | '\t' | '\n' | '\r' => {
+        let token = match c {
+            c if c.is_ascii_whitespace() => {
                 chars.next();
+                whitespace = true;
+                continue;
             }
             '(' => {
-                tokens.push(Tok::LParen);
                 chars.next();
+                Tok::LParen
             }
             ')' => {
-                tokens.push(Tok::RParen);
                 chars.next();
+                Tok::RParen
             }
             '*' | '&' => {
-                tokens.push(Tok::And);
                 chars.next();
+                Tok::And
             }
             '+' | '|' => {
-                tokens.push(Tok::Or);
                 chars.next();
+                Tok::Or
             }
             '^' => {
-                tokens.push(Tok::Xor);
                 chars.next();
+                Tok::Xor
             }
             '!' => {
-                tokens.push(Tok::Not);
                 chars.next();
+                Tok::Not
             }
             '\'' => {
-                tokens.push(Tok::PostfixNot);
                 chars.next();
+                Tok::PostfixNot
             }
             '1' => {
-                tokens.push(Tok::Const(true));
                 chars.next();
+                Tok::Const(true)
             }
             '0' => {
-                tokens.push(Tok::Const(false));
                 chars.next();
+                Tok::Const(false)
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut ident = String::new();
@@ -207,48 +210,55 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                         break;
                     }
                 }
-                tokens.push(Tok::Ident(ident));
+                Tok::Ident(ident)
             }
             _ => return Err(format!("Unexpected character in formula: '{}'", c)),
+        };
+        // Liberty uses whitespace as AND only between complete operands; it
+        // is otherwise insignificant around operators, parentheses, and NOT.
+        if whitespace
+            && matches!(
+                tokens.last(),
+                Some(Tok::Ident(_) | Tok::Const(_) | Tok::RParen | Tok::PostfixNot)
+            )
+            && matches!(
+                token,
+                Tok::Ident(_) | Tok::Const(_) | Tok::LParen | Tok::Not
+            )
+        {
+            tokens.push(Tok::And);
         }
+        tokens.push(token);
+        whitespace = false;
     }
     Ok(tokens)
 }
 
-// Recursive descent parser for formula expressions
 fn parse_expr(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
-    parse_or(tokens)
+    parse_binary(tokens, 1)
 }
 
-fn parse_or(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
-    let (mut lhs, mut rest) = parse_xor(tokens)?;
-    while let Some(Tok::Or) = rest.first() {
-        rest = &rest[1..];
-        let (rhs, rest2) = parse_xor(rest)?;
-        lhs = Term::Or(Box::new(lhs), Box::new(rhs));
-        rest = rest2;
-    }
-    Ok((lhs, rest))
-}
-
-fn parse_xor(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
-    let (mut lhs, mut rest) = parse_and(tokens)?;
-    while let Some(Tok::Xor) = rest.first() {
-        rest = &rest[1..];
-        let (rhs, rest2) = parse_and(rest)?;
-        lhs = Term::Xor(Box::new(lhs), Box::new(rhs));
-        rest = rest2;
-    }
-    Ok((lhs, rest))
-}
-
-fn parse_and(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
+/// Parses left-associative binary operators in Liberty precedence order.
+fn parse_binary(tokens: &[Tok], min_precedence: u8) -> Result<(Term, &[Tok]), String> {
     let (mut lhs, mut rest) = parse_not(tokens)?;
-    while let Some(Tok::And) = rest.first() {
-        rest = &rest[1..];
-        let (rhs, rest2) = parse_not(rest)?;
-        lhs = Term::And(Box::new(lhs), Box::new(rhs));
-        rest = rest2;
+    while let Some(operator) = rest.first() {
+        let binding = match operator {
+            Tok::Or => 1,
+            Tok::And => 2,
+            Tok::Xor => 3,
+            _ => break,
+        };
+        if binding < min_precedence {
+            break;
+        }
+        let (rhs, next) = parse_binary(&rest[1..], binding + 1)?;
+        lhs = match operator {
+            Tok::And => Term::And(Box::new(lhs), Box::new(rhs)),
+            Tok::Or => Term::Or(Box::new(lhs), Box::new(rhs)),
+            Tok::Xor => Term::Xor(Box::new(lhs), Box::new(rhs)),
+            _ => unreachable!("only binary operators have a binding"),
+        };
+        rest = next;
     }
     Ok((lhs, rest))
 }
@@ -301,6 +311,81 @@ mod tests {
                 Box::new(Term::Input("B".to_string()))
             )
         );
+    }
+
+    #[test]
+    fn test_whitespace_and_respects_operands_and_explicit_operators() {
+        for (implicit, explicit) in [
+            (" A \t B ", "A*B"),
+            ("A B C", "A*B*C"),
+            ("A (B + C)", "A*(B+C)"),
+            ("(A + B) C", "(A+B)*C"),
+            ("(A + B) (C + D)", "(A+B)*(C+D)"),
+            ("A ! B", "A*!B"),
+            ("A ' B", "A'*B"),
+            ("! A B", "!A*B"),
+            ("A 1 + 0 B", "A*1+0*B"),
+            (" A  *  B +  ! ( C ) ", "A*B+!C"),
+        ] {
+            assert_eq!(
+                parse_formula(implicit).unwrap(),
+                parse_formula(explicit).unwrap(),
+                "{implicit}"
+            );
+        }
+        for invalid in ["A(B)", "(A)B", "A!B", "(A)(B)", "1A"] {
+            assert!(parse_formula(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn test_mixed_operator_precedence_against_truth_tables() {
+        // ABC uses a different AND/XOR precedence, so these cases use Liberty
+        // truth tables as the reference.
+        let formulas = [
+            "A * B ^ C + D",
+            "A B ^ C + D",
+            "A & B ^ C | D",
+            " A \t B ^ C + D ",
+        ];
+        for formula in formulas {
+            let term = parse_formula(formula).unwrap();
+            for assignment in 0..16 {
+                let a = assignment & 1 != 0;
+                let b = assignment & 2 != 0;
+                let c = assignment & 4 != 0;
+                let d = assignment & 8 != 0;
+                let values = HashMap::from([
+                    ("A".to_string(), a),
+                    ("B".to_string(), b),
+                    ("C".to_string(), c),
+                    ("D".to_string(), d),
+                ]);
+                assert_eq!(
+                    term.evaluate_partial(&values),
+                    Some((a && (b ^ c)) || d),
+                    "{formula}, assignment {assignment}"
+                );
+            }
+        }
+        let term = parse_formula("!A ^ B C + D'").unwrap();
+        for assignment in 0..16 {
+            let a = assignment & 1 != 0;
+            let b = assignment & 2 != 0;
+            let c = assignment & 4 != 0;
+            let d = assignment & 8 != 0;
+            let values = HashMap::from([
+                ("A".to_string(), a),
+                ("B".to_string(), b),
+                ("C".to_string(), c),
+                ("D".to_string(), d),
+            ]);
+            assert_eq!(
+                term.evaluate_partial(&values),
+                Some(((!a ^ b) && c) || !d),
+                "assignment {assignment}"
+            );
+        }
     }
 
     #[test]

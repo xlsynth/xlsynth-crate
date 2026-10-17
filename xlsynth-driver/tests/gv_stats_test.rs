@@ -8,7 +8,7 @@ use xlsynth_test_helpers::compare_golden_text;
 
 fn make_timing_enabled_inv_nand2_liberty_textproto() -> &'static str {
     r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 default_output_load: 0.004
 cells: {
   name: "INV"
@@ -370,7 +370,7 @@ fn gv_stats_default_and_overrides_affect_timing_in_library_units() {
     // Load-dependent tables catch accidental conversion to fF: all pin loads,
     // table axes, defaults, and overrides must stay in the same library units.
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 default_output_load: 0.005
 units: { time_unit: "1ps" capacitance_unit: "1pf" }
 cells: {
@@ -443,7 +443,7 @@ endmodule
     std::fs::write(
         directory.path().join("lib.textproto"),
         r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 default_output_load: 0.005
 units: { time_unit: "1ps" capacitance_unit: "1pf" }
 cells: {

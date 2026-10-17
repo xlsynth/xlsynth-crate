@@ -27,7 +27,7 @@ fn convert_netlist(netlist: &str) -> anyhow::Result<String> {
 }
 
 const LIBERTY_TEXTPROTO: &str = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT }
@@ -852,7 +852,7 @@ top block aliases(u_D: clock, u_Q: bits[1], u_Q_1: bits[1]) {
 #[test]
 fn test_gv2block_uniquifies_aliases_from_ambiguous_instance_pin_boundaries() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "X"
   pins: { name_string_id: 1 direction: INPUT }

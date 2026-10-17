@@ -297,11 +297,15 @@ fn compare_mappings(a: &RegisterCellMapping, b: &RegisterCellMapping) -> Orderin
 /// Finds the deterministic legal data/output/control assignment for one cell.
 fn map_cell(cell: &Cell, library: &Library) -> Result<RegisterCellMapping, String> {
     cell.validate_functional_semantics()?;
+    cell.validate_mapping_policy_coverage()?;
     if cell.name.is_empty() {
         return Err("cell name is empty".into());
     }
     if cell.dont_use == Some(true) {
         return Err("cell is marked dont_use".into());
+    }
+    if cell.use_for_size_only == Some(true) {
+        return Err("cell is marked use_for_size_only".into());
     }
     if !cell.area.is_finite() || cell.area < 0.0 {
         return Err("cell area must be finite and non-negative".into());
@@ -924,6 +928,50 @@ mod tests {
             .unwrap();
         assert_eq!(mapping.cell_name, "SDFF");
         assert_binding_semantics(&library, mapping);
+    }
+
+    #[test]
+    fn sizing_only_flop_is_excluded_after_proto_roundtrip() {
+        let library = import_roundtrip(
+            r#"library(test) {
+                cell(SIZE_ONLY) { area: 1; use_for_size_only: true;
+                    pin(D) {} pin(CLK) { clock: true; }
+                    pin(Q) { direction: output; function: "IQ"; }
+                    ff(IQ,IQN) { clocked_on: "CLK"; next_state: "D"; }
+                }
+                cell(ALLOWED) { area: 2; use_for_size_only: false;
+                    pin(D) {} pin(CLK) { clock: true; }
+                    pin(Q) { direction: output; function: "IQ"; }
+                    ff(IQ,IQN) { clocked_on: "CLK"; next_state: "D"; }
+                }
+                cell(UNSPECIFIED) { area: 3;
+                    pin(D) {} pin(CLK) { clock: true; }
+                    pin(Q) { direction: output; function: "IQ"; }
+                    ff(IQ,IQN) { clocked_on: "CLK"; next_state: "D"; }
+                }
+            }"#,
+        );
+        let catalog = RegisterMappingLibrary::new(&library).unwrap();
+        assert_eq!(
+            catalog
+                .select(&RegisterCellSelection::SmallestArea)
+                .unwrap()
+                .cell_name,
+            "ALLOWED"
+        );
+        assert_eq!(
+            catalog
+                .select(&RegisterCellSelection::FixedCell("SIZE_ONLY".into()))
+                .unwrap_err(),
+            "cannot use register cell 'SIZE_ONLY': cell is marked use_for_size_only"
+        );
+        assert_eq!(
+            catalog
+                .select(&RegisterCellSelection::FixedCell("UNSPECIFIED".into()))
+                .unwrap()
+                .cell_name,
+            "UNSPECIFIED"
+        );
     }
 
     #[test]

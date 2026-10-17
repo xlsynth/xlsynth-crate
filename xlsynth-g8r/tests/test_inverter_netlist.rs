@@ -11,7 +11,7 @@ use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_l
 use xlsynth_g8r::netlist::io::read_gv_from_path;
 
 const LIBERTY_INVERTER_AND_BUF_TEXTPROTO: &str = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 interned_strings: "A"
 interned_strings: "Y"
 interned_strings: "(!A)"
