@@ -2456,7 +2456,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("aig-tech-map")
-                .about("Structurally maps an AIGER file to a gate-level netlist using INV/NAND2 cells")
+                .about("Maps an AIGER file to library cells using NAND2 lowering or area covering")
                 .arg(
                     clap::Arg::new("aig_input_file")
                         .help("Input AIGER file (.aag or .aig)")
@@ -2466,7 +2466,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Timing-enabled Liberty proto (.proto, .textproto, or either with .gz); used to auto-select mapping cells")
+                        .help("Liberty proto (.proto, .textproto, or either with .gz); nand2 requires INV/NAND2 functions, area requires cell functions and positive areas")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2491,8 +2491,24 @@ fn main() {
                         .default_value("small-normal-vt")
                         .value_parser(["small-normal-vt", "max-speed"])
                         .help(
-                            "Auto-selection policy for INV/NAND2 cells: small-normal-vt or max-speed",
+                            "Cell selection for --strategy nand2 only: small-normal-vt or max-speed",
                         )
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("strategy")
+                        .long("strategy")
+                        .value_name("STRATEGY")
+                        .default_value("nand2")
+                        .value_parser(["nand2", "area"])
+                        .help("Mapping strategy: nand2 preserves structural lowering; area covers the fixed AIG using an area objective")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("json_out")
+                        .long("json_out")
+                        .value_name("PATH")
+                        .help("Optional JSON mapping summary, including area/sharing statistics for --strategy area")
                         .action(ArgAction::Set),
                 ),
         )

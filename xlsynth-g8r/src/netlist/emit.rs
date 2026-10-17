@@ -265,7 +265,7 @@ mod tests {
     use super::*;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
-    use crate::netlist::techmap::{StructuralTechMapOptions, map_gatefn_to_structural_netlist};
+    use crate::techmap::nand2::{StructuralTechMapOptions, map_gatefn_to_structural_netlist};
 
     /// Checks exact emitted text and its stable parse/emit round trip.
     fn assert_emitted_golden_round_trip(source: &str, expected: &str) {
