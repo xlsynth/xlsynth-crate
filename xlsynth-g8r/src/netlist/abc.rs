@@ -682,7 +682,11 @@ fn validate_mapped_cells(parsed: &ParsedNetlist, library: &Library) -> Result<()
             .ok_or_else(|| format!("ABC emitted cell absent from native Liberty: {name}"))?;
         cell.validate_functional_semantics()?;
         cell.validate_mapping_policy_coverage()?;
-        // ABC's sizing passes may legitimately introduce sizing-only cells.
+        // ABC does not report whether a cell was introduced by sizing, so a
+        // sizing-only cell could have been selected during initial mapping.
+        if cell.use_for_size_only == Some(true) {
+            return Err(format!("ABC emitted cell marked use_for_size_only: {name}"));
+        }
         if !cell.sequential.is_empty() || cell.dont_use == Some(true) || cell.clock_gate.is_some() {
             return Err(format!(
                 "ABC emitted unavailable/non-combinational cell: {name}"
@@ -929,12 +933,15 @@ mod tests;
 #[cfg(test)]
 mod mapping_policy_tests {
     use super::*;
+    use crate::aig::{GateBuilder, GateBuilderOptions};
     use crate::liberty::model::{library_from_proto, library_to_proto};
     use crate::liberty::parser::parse_liberty_files;
     use prost::Message;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn accepts_abc_cells_reserved_for_sizing_after_proto_roundtrip() {
+    fn rejects_sizing_only_abc_cells_after_proto_roundtrip() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             file.path(),
@@ -959,13 +966,74 @@ mod mapping_policy_tests {
             crate::liberty_proto::Library::decode(wire.encode_to_vec().as_slice()).unwrap(),
         )
         .unwrap();
-        for cell in ["SIZE_ONLY", "ALLOWED", "UNSPECIFIED"] {
+        for cell in ["ALLOWED", "UNSPECIFIED"] {
             let parsed = read_gv_from_str(&format!(
                 "module m(a,y); input a; output y; {cell} c(.A(a),.Y(y)); endmodule"
             ))
             .unwrap();
             validate_mapped_cells(&parsed, &library).unwrap();
         }
+        let parsed = read_gv_from_str(
+            "module m(a,y); input a; output y; SIZE_ONLY c(.A(a),.Y(y)); endmodule",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_mapped_cells(&parsed, &library).unwrap_err(),
+            "ABC emitted cell marked use_for_size_only: SIZE_ONLY"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn map_sequential_rejects_sizing_only_cells_emitted_by_abc() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("cells.lib");
+        std::fs::write(
+            &raw,
+            r#"library(test) {
+                cell(BUF) { pin(A) { direction: input; }
+                    pin(Y) { direction: output; function: "A"; } }
+                cell(SIZE_ONLY) { use_for_size_only: true;
+                    pin(A) { direction: input; }
+                    pin(Y) { direction: output; function: "!A"; } }
+            }"#,
+        )
+        .unwrap();
+        let library = parse_liberty_files(&[&raw]).unwrap();
+        let executable = dir.path().join("fake-abc");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$2" = "-c" ]; then exit 0; fi
+cat > mapped.v <<'EOF'
+module mapped(i0,o0);
+input i0; output o0;
+SIZE_ONLY inst(.A(i0),.Y(o0));
+endmodule
+EOF
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let context =
+            AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library)
+                .unwrap();
+        let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
+        let a = builder.add_input("a".into(), 1);
+        builder.add_output("y".into(), AigBitVector::from_bit(a.get_lsb(0).negate()));
+        let design = SequentialGateFn::from_gate_fn(builder.build());
+        let options = AbcMappingOptions::new(AbcIoConstraints {
+            driving_cell: "BUF".into(),
+            output_load_ff: 20.0,
+        });
+        let error = context
+            .map_sequential(&design, &options)
+            .err()
+            .expect("ABC's sizing-only cell must be rejected");
+        assert_eq!(
+            error.to_string().lines().next().unwrap(),
+            "ABC emitted cell marked use_for_size_only: SIZE_ONLY"
+        );
     }
 }
 

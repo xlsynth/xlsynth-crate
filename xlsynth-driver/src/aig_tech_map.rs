@@ -122,6 +122,7 @@ fn cell_binding_if_shape_matches(
     if !cell.name.starts_with(family_prefix) {
         return None;
     }
+    // `dont_use` forbids use; `use_for_size_only` permits only resizing.
     if cell.dont_use == Some(true) || cell.use_for_size_only == Some(true) {
         return None;
     }

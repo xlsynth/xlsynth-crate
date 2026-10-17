@@ -146,8 +146,13 @@ pub(crate) fn abc_formula_has_different_parse(s: &str) -> Result<bool, String> {
     Ok(liberty != abc)
 }
 
-/// Finds mapped cells whose source formulas cannot be interpreted safely by
-/// ABC.
+/// Checks one raw Liberty file for formula issues in cells emitted by ABC.
+///
+/// `AbcMappingContext` checks its staged source files before accepting a mapped
+/// netlist; normalized formulas can lose the original expression spelling. For
+/// example, Liberty parses `A * B ^ C` as `A * (B ^ C)`, while ABC interprets
+/// it as `(A * B) ^ C`, so the mapped cell may compute a different function
+/// than ABC intended.
 pub(crate) fn abc_source_formula_issues(
     path: &Path,
     mapped_cells: &BTreeSet<&str>,

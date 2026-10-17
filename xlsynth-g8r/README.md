@@ -285,6 +285,12 @@ are checked against the normalized library, but matching names do not establish
 functional/timing identity between the two inputs. Callers must use matching
 libraries and filtering policies.
 
+ABC can select a cell marked `use_for_size_only` during initial mapping and does
+not report how an emitted cell was selected. The mapper therefore rejects all
+emitted sizing-only cells, including cells that might have been introduced by a
+legitimate sizing pass. Filter such cells from the raw mapping library if they
+would otherwise be selected.
+
 Each mapping invocation snapshots and parses the raw libraries to check formulas
 for cells ABC emits. ABC and Liberty assign different precedence to AND and XOR;
 the mapper rejects a cell when the two parses differ. This check adds file I/O
