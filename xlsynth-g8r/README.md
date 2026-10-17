@@ -158,10 +158,12 @@ lacked that attribute or the importer discarded it. On import, cells carry
 explicit markers for this missing coverage through merges and V6 reserialization.
 V4 cells can be inspected and their timing payloads read, but cannot be used for
 Boolean evaluation or behavior-dependent timing and power analysis. V5 cells
-can be used for Boolean evaluation but neither V4 nor V5 cells can be newly
-mapped without regenerating from source Liberty. V3 and older incompatible
-schemas remain rejected. New files use V6 so older readers reject restrictions
-they cannot enforce; older V6 readers also reject the new coverage markers.
+can be used for Boolean evaluation. Structural INV/NAND2 and register cell
+selection require complete mapping-policy coverage, so V4 and V5 cells need
+regeneration from source Liberty for those operations. V3 and older
+incompatible schemas remain rejected. New files use V6 so older readers reject
+restrictions they cannot enforce; older V6 readers also reject the new coverage
+markers.
 
 Functional interpretation assumes normal powered-on operation. The importer
 intentionally ignores `power_down_function` on pins and sequential groups
@@ -284,18 +286,6 @@ version, source paths, exact script, and captured output. Emitted cell/pin names
 are checked against the normalized library, but matching names do not establish
 functional/timing identity between the two inputs. Callers must use matching
 libraries and filtering policies.
-
-ABC can select a cell marked `use_for_size_only` during initial mapping and does
-not report how an emitted cell was selected. The mapper therefore rejects all
-emitted sizing-only cells, including cells that might have been introduced by a
-legitimate sizing pass. Filter such cells from the raw mapping library if they
-would otherwise be selected.
-
-Each mapping invocation snapshots and parses the raw libraries to check formulas
-for cells ABC emits. ABC and Liberty assign different precedence to AND and XOR;
-the mapper rejects a cell when the two parses differ. This check adds file I/O
-and parsing, and requires the raw files to use syntax supported by the Liberty
-parser. Parenthesizing mixed AND/XOR expressions removes the ambiguity.
 
 The mapper uses opaque scalar ABC port names, then restores the original packed
 external interface and assembles FF clock/data/output connections and verified

@@ -4,11 +4,7 @@
 
 use crate::aig::gate::AigOperand;
 use crate::gate_builder::GateBuilder;
-use crate::liberty::liberty_parser::{Block, BlockMember, Value};
-use crate::liberty::{CharReader, LibertyParser};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::File;
-use std::path::Path;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Term {
@@ -136,105 +132,8 @@ impl Term {
 
 /// Parse a Liberty boolean formula string into a Term AST.
 pub fn parse_formula(s: &str) -> Result<Term, String> {
-    parse_formula_with_precedence(s, FormulaPrecedence::Liberty)
-}
-
-/// Detects a structural parse difference between Liberty and ABC precedence.
-pub(crate) fn abc_formula_has_different_parse(s: &str) -> Result<bool, String> {
-    let liberty = parse_formula_with_precedence(s, FormulaPrecedence::Liberty)?;
-    let abc = parse_formula_with_precedence(s, FormulaPrecedence::Abc)?;
-    Ok(liberty != abc)
-}
-
-/// Checks one raw Liberty file for formula issues in cells emitted by ABC.
-///
-/// `AbcMappingContext` checks its staged source files before accepting a mapped
-/// netlist; normalized formulas can lose the original expression spelling. For
-/// example, Liberty parses `A * B ^ C` as `A * (B ^ C)`, while ABC interprets
-/// it as `(A * B) ^ C`, so the mapped cell may compute a different function
-/// than ABC intended.
-pub(crate) fn abc_source_formula_issues(
-    path: &Path,
-    mapped_cells: &BTreeSet<&str>,
-) -> Result<BTreeMap<String, String>, String> {
-    let file = File::open(path).map_err(|error| format!("opening {}: {error}", path.display()))?;
-    let library = LibertyParser::new_from_iter(CharReader::new(file))
-        .parse()
-        .map_err(|error| format!("parsing {}: {error}", path.display()))?;
-    let mut issues = BTreeMap::new();
-    for member in &library.members {
-        let BlockMember::SubBlock(cell) = member else {
-            continue;
-        };
-        if cell.block_type != "cell" {
-            continue;
-        }
-        let Some(Value::String(name) | Value::Identifier(name)) = cell.qualifiers.first() else {
-            continue;
-        };
-        if mapped_cells.contains(name.as_str()) {
-            collect_abc_formula_issues(cell, name, &mut issues);
-        }
-    }
-    Ok(issues)
-}
-
-/// Checks pin and bundle formulas before source normalization can rewrite them.
-fn collect_abc_formula_issues(
-    block: &Block,
-    cell_name: &str,
-    issues: &mut BTreeMap<String, String>,
-) {
-    for member in &block.members {
-        match member {
-            BlockMember::BlockAttr(attr)
-                if matches!(block.block_type.as_str(), "pin" | "bundle" | "bus")
-                    && attr.attr_name == "function" =>
-            {
-                let pin = match block.qualifiers.first() {
-                    Some(Value::String(name) | Value::Identifier(name)) => name.as_str(),
-                    _ => "<unknown>",
-                };
-                let error = match &attr.value {
-                    Value::String(formula) | Value::Identifier(formula) => {
-                        match abc_formula_has_different_parse(formula) {
-                            Ok(false) => None,
-                            Ok(true) => Some(format!(
-                                "ABC may interpret AND/XOR precedence differently for {cell_name}.{pin}: {formula:?}"
-                            )),
-                            Err(error) => Some(format!(
-                                "cannot check ABC formula for {cell_name}.{pin}: {error}"
-                            )),
-                        }
-                    }
-                    _ => Some(format!("invalid ABC formula for {cell_name}.{pin}")),
-                };
-                if let Some(error) = error {
-                    issues.entry(cell_name.to_string()).or_insert(error);
-                }
-            }
-            BlockMember::SubBlock(child)
-                if matches!(child.block_type.as_str(), "pin" | "bundle" | "bus") =>
-            {
-                collect_abc_formula_issues(child, cell_name, issues);
-            }
-            _ => {
-                // Only ordinary pin and bundle function attributes affect
-                // mapping.
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum FormulaPrecedence {
-    Liberty,
-    Abc,
-}
-
-fn parse_formula_with_precedence(s: &str, precedence: FormulaPrecedence) -> Result<Term, String> {
     let tokens = tokenize(s)?;
-    let (term, rest) = parse_expr(&tokens, precedence)?;
+    let (term, rest) = parse_expr(&tokens)?;
     if !rest.is_empty() {
         return Err(format!("Unexpected tokens at end: {:?}", rest));
     }
@@ -301,18 +200,10 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 chars.next();
                 Tok::Const(false)
             }
-            c if c.is_ascii_graphic() && !matches!(c, '"' | '\\') => {
+            c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut ident = String::new();
                 while let Some(&c2) = chars.peek() {
-                    // ABC accepts punctuation in pin names. Stop at every
-                    // Boolean operator; quoted or escaped names need a
-                    // separate parser and are rejected rather than guessed.
-                    if c2.is_ascii_graphic()
-                        && !matches!(
-                            c2,
-                            '(' | ')' | '*' | '&' | '+' | '|' | '^' | '!' | '\'' | '"' | '\\'
-                        )
-                    {
+                    if c2.is_ascii_alphanumeric() || matches!(c2, '_' | '[' | ']') {
                         ident.push(c2);
                         chars.next();
                     } else {
@@ -343,30 +234,24 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
     Ok(tokens)
 }
 
-// ABC gives AND higher precedence than XOR, unlike Liberty. Use the same
-// tokenizer and unary parser for both so explicit parentheses remain binding.
-fn parse_expr(tokens: &[Tok], precedence: FormulaPrecedence) -> Result<(Term, &[Tok]), String> {
-    parse_binary(tokens, precedence, 1)
+fn parse_expr(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
+    parse_binary(tokens, 1)
 }
 
-/// Parses left-associative binary operators in the selected precedence order.
-fn parse_binary(
-    tokens: &[Tok],
-    precedence: FormulaPrecedence,
-    min_precedence: u8,
-) -> Result<(Term, &[Tok]), String> {
-    let (mut lhs, mut rest) = parse_not(tokens, precedence)?;
+/// Parses left-associative binary operators in Liberty precedence order.
+fn parse_binary(tokens: &[Tok], min_precedence: u8) -> Result<(Term, &[Tok]), String> {
+    let (mut lhs, mut rest) = parse_not(tokens)?;
     while let Some(operator) = rest.first() {
-        let binding = match (operator, precedence) {
-            (Tok::Or, _) => 1,
-            (Tok::And, FormulaPrecedence::Liberty) | (Tok::Xor, FormulaPrecedence::Abc) => 2,
-            (Tok::Xor, FormulaPrecedence::Liberty) | (Tok::And, FormulaPrecedence::Abc) => 3,
+        let binding = match operator {
+            Tok::Or => 1,
+            Tok::And => 2,
+            Tok::Xor => 3,
             _ => break,
         };
         if binding < min_precedence {
             break;
         }
-        let (rhs, next) = parse_binary(&rest[1..], precedence, binding + 1)?;
+        let (rhs, next) = parse_binary(&rest[1..], binding + 1)?;
         lhs = match operator {
             Tok::And => Term::And(Box::new(lhs), Box::new(rhs)),
             Tok::Or => Term::Or(Box::new(lhs), Box::new(rhs)),
@@ -378,12 +263,12 @@ fn parse_binary(
     Ok((lhs, rest))
 }
 
-fn parse_not(tokens: &[Tok], precedence: FormulaPrecedence) -> Result<(Term, &[Tok]), String> {
+fn parse_not(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
     if let Some(Tok::Not) = tokens.first() {
-        let (expr, rest) = parse_not(&tokens[1..], precedence)?;
+        let (expr, rest) = parse_not(&tokens[1..])?;
         Ok((Term::Negate(Box::new(expr)), rest))
     } else {
-        let (mut term, mut rest) = parse_atom(tokens, precedence)?;
+        let (mut term, mut rest) = parse_atom(tokens)?;
         while let Some(Tok::PostfixNot) = rest.first() {
             term = Term::Negate(Box::new(term));
             rest = &rest[1..];
@@ -392,12 +277,12 @@ fn parse_not(tokens: &[Tok], precedence: FormulaPrecedence) -> Result<(Term, &[T
     }
 }
 
-fn parse_atom(tokens: &[Tok], precedence: FormulaPrecedence) -> Result<(Term, &[Tok]), String> {
+fn parse_atom(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
     match tokens.first() {
         Some(Tok::Ident(s)) => Ok((Term::Input(s.clone()), &tokens[1..])),
         Some(Tok::Const(b)) => Ok((Term::Constant(*b), &tokens[1..])),
         Some(Tok::LParen) => {
-            let (expr, rest) = parse_expr(&tokens[1..], precedence)?;
+            let (expr, rest) = parse_expr(&tokens[1..])?;
             match rest.first() {
                 Some(Tok::RParen) => Ok((expr, &rest[1..])),
                 _ => Err("Expected ')'".to_string()),
@@ -455,6 +340,8 @@ mod tests {
 
     #[test]
     fn test_mixed_operator_precedence_against_truth_tables() {
+        // ABC uses a different AND/XOR precedence, so these cases use Liberty
+        // truth tables as the reference.
         let formulas = [
             "A * B ^ C + D",
             "A B ^ C + D",
@@ -498,63 +385,6 @@ mod tests {
                 Some(((!a ^ b) && c) || !d),
                 "assignment {assignment}"
             );
-        }
-    }
-
-    #[test]
-    fn abc_precedence_guard_detects_only_unparenthesized_differences() {
-        for formula in ["A*B^C", "A^B*C", "A B^C", "A^B C", "!A^B*C"] {
-            assert!(
-                abc_formula_has_different_parse(formula).unwrap(),
-                "{formula}"
-            );
-        }
-        for formula in [
-            "A*(B^C)", "(A*B)^C", "A^(B*C)", "(A^B)*C", "A (B^C)", "(A B)^C", "A^B+C", "A+B*C",
-            "A' B+C",
-        ] {
-            assert!(
-                !abc_formula_has_different_parse(formula).unwrap(),
-                "{formula}"
-            );
-        }
-        assert!(abc_formula_has_different_parse("A*").is_err());
-
-        let abc = parse_formula_with_precedence("A*B^C", FormulaPrecedence::Abc).unwrap();
-        let liberty = parse_formula("A*B^C").unwrap();
-        for assignment in 0..8 {
-            let a = assignment & 1 != 0;
-            let b = assignment & 2 != 0;
-            let c = assignment & 4 != 0;
-            let values = HashMap::from([
-                ("A".to_string(), a),
-                ("B".to_string(), b),
-                ("C".to_string(), c),
-            ]);
-            assert_eq!(abc.evaluate_partial(&values), Some((a && b) ^ c));
-            assert_eq!(liberty.evaluate_partial(&values), Some(a && (b ^ c)));
-        }
-    }
-
-    #[test]
-    fn abc_precedence_guard_handles_special_pin_names() {
-        for pin in ["A$B", "$A", "A.B", "A-B", "A/B", "A:B", "A@", "A[0]", "2A"] {
-            let values = HashMap::from([
-                (pin.to_string(), true),
-                ("C".to_string(), false),
-                ("D".to_string(), true),
-            ]);
-            let safe = format!("{pin}*C+D");
-            assert_eq!(
-                parse_formula(&safe).unwrap().evaluate_partial(&values),
-                Some(true)
-            );
-            assert!(!abc_formula_has_different_parse(&safe).unwrap());
-            assert!(!abc_formula_has_different_parse(&format!("{pin}*(C^D)")).unwrap());
-            assert!(abc_formula_has_different_parse(&format!("{pin}*C^D")).unwrap());
-        }
-        for unsupported in ["\"A\"*C", "\\A*C"] {
-            assert!(abc_formula_has_different_parse(unsupported).is_err());
         }
     }
 

@@ -254,8 +254,9 @@ values, and inline table geometry for the in-memory evaluator API. Loaders accep
 V4, V5, and V6 of xlsynth-g8r's protobuf import contract; these are not Liberty
 file format versions. V4 lacks reliable pin-driver and sizing-restriction coverage;
 V5 lacks reliable sizing-restriction coverage. Both can be inspected and their
-timing payloads read. V5 also supports Boolean evaluation, but new mapping
-requires regeneration from source Liberty with the current `lib2proto`. V4 also
+timing payloads read. V5 also supports Boolean evaluation, but structural
+INV/NAND2 and register cell selection require regeneration from source Liberty
+with the current `lib2proto`. V4 also
 requires regeneration for Boolean evaluation and behavior-dependent timing or
 power analysis. V3 and earlier formats remain incompatible.
 In Rust, `xlsynth_g8r::liberty_proto` contains the generated wire types, while

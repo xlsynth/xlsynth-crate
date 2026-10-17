@@ -20,7 +20,6 @@ use crate::aig::gate::{Input, Output};
 use crate::aig::sequential_cleanup::{SequentialCleanupStats, cleanup_sequential_gate_fn};
 use crate::aig::{AigBitVector, AigNode, AigOperand, GateFn, SequentialGateFn};
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use crate::liberty::cell_formula::abc_source_formula_issues;
 use crate::liberty::io_defaults::{
     buffer_input_pin, default_output_load_ff, resolve_reference_buffer,
 };
@@ -361,11 +360,9 @@ impl AbcMappingContext {
             ));
         }
         let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let mut staged_libraries = Vec::with_capacity(self.raw_liberty_files.len());
         for (index, source) in self.raw_liberty_files.iter().enumerate() {
             let target = directory.path().join(format!("library_{index}.lib"));
             stage_library(source, &target)?;
-            staged_libraries.push(target);
         }
         std::fs::write(
             directory.path().join("transition.aig"),
@@ -414,37 +411,22 @@ impl AbcMappingContext {
             .map_err(|e| diagnostics.failure(format!("ABC did not produce mapped.v: {e}")))?;
         let parsed = read_gv_from_str(&mapped)
             .map_err(|e| diagnostics.failure(format!("invalid ABC netlist: {e}")))?;
-        validate_abc_source_formulas(&parsed, &staged_libraries)
-            .map_err(|e| diagnostics.failure(e))?;
         Ok((parsed, diagnostics))
     }
 }
 
-/// Snapshots source libraries while avoiding interpolation of user paths.
+/// Avoids script interpolation of user paths, including spaces/metacharacters.
 fn stage_library(source: &Path, target: &Path) -> Result<(), String> {
-    std::fs::copy(source, target)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-/// Checks every source definition for each cell ABC actually emitted.
-fn validate_abc_source_formulas(parsed: &ParsedNetlist, paths: &[PathBuf]) -> Result<(), String> {
-    let cells = parsed
-        .modules
-        .iter()
-        .flat_map(|module| &module.instances)
-        .map(|instance| parsed.interner.resolve(instance.type_name).unwrap())
-        .collect::<BTreeSet<_>>();
-    if cells.is_empty() {
-        return Ok(());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, target).map_err(|e| e.to_string())
     }
-    for path in paths {
-        let issues = abc_source_formula_issues(path, &cells)?;
-        if let Some(error) = issues.into_values().next() {
-            return Err(error);
-        }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(source, target)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
-    Ok(())
 }
 
 /// Default optimization/mapping passes, including intermediate mapping and
@@ -681,12 +663,6 @@ fn validate_mapped_cells(parsed: &ParsedNetlist, library: &Library) -> Result<()
             .get(name)
             .ok_or_else(|| format!("ABC emitted cell absent from native Liberty: {name}"))?;
         cell.validate_functional_semantics()?;
-        cell.validate_mapping_policy_coverage()?;
-        // ABC does not report whether a cell was introduced by sizing, so a
-        // sizing-only cell could have been selected during initial mapping.
-        if cell.use_for_size_only == Some(true) {
-            return Err(format!("ABC emitted cell marked use_for_size_only: {name}"));
-        }
         if !cell.sequential.is_empty() || cell.dont_use == Some(true) || cell.clock_gate.is_some() {
             return Err(format!(
                 "ABC emitted unavailable/non-combinational cell: {name}"
@@ -705,8 +681,9 @@ fn validate_mapped_cells(parsed: &ParsedNetlist, library: &Library) -> Result<()
             }
         }
         for pin in &cell.pins {
-            let pin_name = library.resolve_string(&pin.name);
-            if pin.direction == PinDirection::Input as i32 && !connected.contains(pin_name) {
+            if pin.direction == PinDirection::Input as i32
+                && !connected.contains(library.resolve_string(&pin.name))
+            {
                 return Err(format!("ABC omitted input pin on {name}"));
             }
         }
@@ -929,320 +906,3 @@ fn add_alias(parsed: &mut ParsedNetlist, lhs: NetRef, rhs: NetRef) {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod mapping_policy_tests {
-    use super::*;
-    use crate::aig::{GateBuilder, GateBuilderOptions};
-    use crate::liberty::model::{library_from_proto, library_to_proto};
-    use crate::liberty::parser::parse_liberty_files;
-    use prost::Message;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn rejects_sizing_only_abc_cells_after_proto_roundtrip() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            file.path(),
-            r#"library(test) {
-                cell(SIZE_ONLY) { area: 1; use_for_size_only: true;
-                    pin(A) { direction: input; }
-                    pin(Y) { direction: output; function: "A"; }
-                }
-                cell(ALLOWED) { area: 2; use_for_size_only: false;
-                    pin(A) { direction: input; }
-                    pin(Y) { direction: output; function: "A"; }
-                }
-                cell(UNSPECIFIED) { area: 3;
-                    pin(A) { direction: input; }
-                    pin(Y) { direction: output; function: "A"; }
-                }
-            }"#,
-        )
-        .unwrap();
-        let wire = library_to_proto(parse_liberty_files(&[file.path()]).unwrap()).unwrap();
-        let library = library_from_proto(
-            crate::liberty_proto::Library::decode(wire.encode_to_vec().as_slice()).unwrap(),
-        )
-        .unwrap();
-        for cell in ["ALLOWED", "UNSPECIFIED"] {
-            let parsed = read_gv_from_str(&format!(
-                "module m(a,y); input a; output y; {cell} c(.A(a),.Y(y)); endmodule"
-            ))
-            .unwrap();
-            validate_mapped_cells(&parsed, &library).unwrap();
-        }
-        let parsed = read_gv_from_str(
-            "module m(a,y); input a; output y; SIZE_ONLY c(.A(a),.Y(y)); endmodule",
-        )
-        .unwrap();
-        assert_eq!(
-            validate_mapped_cells(&parsed, &library).unwrap_err(),
-            "ABC emitted cell marked use_for_size_only: SIZE_ONLY"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn map_sequential_rejects_sizing_only_cells_emitted_by_abc() {
-        let dir = tempfile::tempdir().unwrap();
-        let raw = dir.path().join("cells.lib");
-        std::fs::write(
-            &raw,
-            r#"library(test) {
-                cell(BUF) { pin(A) { direction: input; }
-                    pin(Y) { direction: output; function: "A"; } }
-                cell(SIZE_ONLY) { use_for_size_only: true;
-                    pin(A) { direction: input; }
-                    pin(Y) { direction: output; function: "!A"; } }
-            }"#,
-        )
-        .unwrap();
-        let library = parse_liberty_files(&[&raw]).unwrap();
-        let executable = dir.path().join("fake-abc");
-        std::fs::write(
-            &executable,
-            r#"#!/bin/sh
-if [ "$2" = "-c" ]; then exit 0; fi
-cat > mapped.v <<'EOF'
-module mapped(i0,o0);
-input i0; output o0;
-SIZE_ONLY inst(.A(i0),.Y(o0));
-endmodule
-EOF
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let context =
-            AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library)
-                .unwrap();
-        let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
-        let a = builder.add_input("a".into(), 1);
-        builder.add_output("y".into(), AigBitVector::from_bit(a.get_lsb(0).negate()));
-        let design = SequentialGateFn::from_gate_fn(builder.build());
-        let options = AbcMappingOptions::new(AbcIoConstraints {
-            driving_cell: "BUF".into(),
-            output_load_ff: 20.0,
-        });
-        let error = context
-            .map_sequential(&design, &options)
-            .err()
-            .expect("ABC's sizing-only cell must be rejected");
-        assert_eq!(
-            error.to_string().lines().next().unwrap(),
-            "ABC emitted cell marked use_for_size_only: SIZE_ONLY"
-        );
-    }
-}
-
-#[cfg(test)]
-mod formula_precedence_tests {
-    use super::*;
-    use crate::aig::{GateBuilder, GateBuilderOptions};
-    use crate::liberty::parser::parse_liberty_files;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn mapped_output_rejects_abc_precedence_differences() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let mapped = read_gv_from_str(
-            "module m(a,b,c,y); input a,b,c; output y; MIX inst(.A(a),.B(b),.C(c),.Y(y)); endmodule",
-        )
-        .unwrap();
-        for (formula, reject) in [
-            ("A*B^C", true),
-            ("A^B*C", true),
-            ("A B^C", true),
-            ("A^B C", true),
-            ("A*(B^C)", false),
-            ("(A*B)^C", false),
-            ("A^(B*C)", false),
-            ("(A^B)*C", false),
-            ("A+B^C", false),
-        ] {
-            std::fs::write(
-                file.path(),
-                format!(
-                    r#"library(test) {{
-                        cell(MIX) {{
-                            pin(A, B, C) {{ direction: input; }}
-                            pin(Y) {{ direction: output; function: "{formula}"; }}
-                        }}
-                        cell(UNUSED) {{ pin(Y) {{ direction: output; function: "("; }} }}
-                    }}"#
-                ),
-            )
-            .unwrap();
-            // Grouped input pins cause the importer to parenthesize all cell
-            // formulas, so this must examine the source, not the model.
-            let library = parse_liberty_files(&[file.path()]).unwrap();
-            let normalized = library
-                .cells
-                .iter()
-                .find(|cell| cell.name == "MIX")
-                .unwrap();
-            let output = normalized
-                .pins
-                .iter()
-                .find(|pin| library.resolve_string(&pin.name) == "Y")
-                .unwrap();
-            assert!(
-                !crate::liberty::cell_formula::abc_formula_has_different_parse(
-                    library.resolve_string(&output.function)
-                )
-                .unwrap()
-            );
-            let result = validate_abc_source_formulas(&mapped, &[file.path().to_path_buf()]);
-            if reject {
-                assert_eq!(
-                    result.unwrap_err(),
-                    format!(
-                        "ABC may interpret AND/XOR precedence differently for MIX.Y: {formula:?}"
-                    ),
-                );
-            } else {
-                result.unwrap();
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn map_sequential_rejects_abc_mixed_precedence_cell() {
-        let dir = tempfile::tempdir().unwrap();
-        let raw = dir.path().join("cells.lib");
-        std::fs::write(
-            &raw,
-            r#"library(test) {
-                cell(BUF) { pin(A) { direction: input; }
-                    pin(Y) { direction: output; function: "A"; } }
-                cell(MIX) { pin(A, B, C) { direction: input; }
-                    pin(Y) { direction: output; function: "A*B^C"; } }
-            }"#,
-        )
-        .unwrap();
-        let library = parse_liberty_files(&[&raw]).unwrap();
-        let executable = dir.path().join("fake-abc");
-        std::fs::write(
-            &executable,
-            r#"#!/bin/sh
-if [ "$2" = "-c" ]; then exit 0; fi
-cat > mapped.v <<'EOF'
-module mapped(i0,i1,i2,o0);
-input i0,i1,i2; output o0;
-MIX inst(.A(i0),.B(i1),.C(i2),.Y(o0));
-endmodule
-EOF
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let context =
-            AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library)
-                .unwrap();
-        let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
-        let a = builder.add_input("a".into(), 1);
-        let b = builder.add_input("b".into(), 1);
-        let c = builder.add_input("c".into(), 1);
-        let ab = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
-        let output = builder.add_xor_binary(ab, *c.get_lsb(0));
-        builder.add_output("y".into(), AigBitVector::from_bit(output));
-        let design = SequentialGateFn::from_gate_fn(builder.build());
-        let options = AbcMappingOptions::new(AbcIoConstraints {
-            driving_cell: "BUF".into(),
-            output_load_ff: 20.0,
-        });
-        let error = context
-            .map_sequential(&design, &options)
-            .err()
-            .expect("ambiguous ABC formula must be rejected");
-        assert_eq!(
-            error.to_string().lines().next().unwrap(),
-            "ABC may interpret AND/XOR precedence differently for MIX.Y: \"A*B^C\""
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn map_sequential_accepts_special_characters_in_cell_formulas() {
-        let dir = tempfile::tempdir().unwrap();
-        let raw = dir.path().join("cells.lib");
-        let executable = dir.path().join("fake-abc");
-        for pin in ["A$B", "$A", "A.B", "A-B", "A/B", "A:B", "A@", "A[0]", "2A"] {
-            std::fs::write(
-                &raw,
-                format!(
-                    r#"library(test) {{
-                        cell(BUF) {{ pin(A) {{ direction: input; }}
-                            pin(Y) {{ direction: output; function: "A"; }} }}
-                        cell(MIX) {{ pin("{pin}") {{ direction: input; }}
-                            pin(C) {{ direction: input; }}
-                            pin(D) {{ direction: input; }}
-                            pin(Y) {{ direction: output; function: "{pin}*C+D"; }} }}
-                    }}"#
-                ),
-            )
-            .unwrap();
-            let library = parse_liberty_files(&[&raw]).unwrap();
-            std::fs::write(
-                &executable,
-                format!(
-                    r#"#!/bin/sh
-if [ "$2" = "-c" ]; then exit 0; fi
-cat > mapped.v <<'EOF'
-module mapped(i0,i1,i2,o0);
-input i0,i1,i2; output o0;
-MIX inst(.\{pin} (i0),.C(i1),.D(i2),.Y(o0));
-endmodule
-EOF
-"#
-                ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let context =
-                AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[&raw], library)
-                    .unwrap();
-            let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
-            let a = builder.add_input("a".into(), 1);
-            let b = builder.add_input("b".into(), 1);
-            let c = builder.add_input("c".into(), 1);
-            let ab = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
-            let output = builder.add_or_binary(ab, *c.get_lsb(0));
-            builder.add_output("y".into(), AigBitVector::from_bit(output));
-            let design = SequentialGateFn::from_gate_fn(builder.build());
-            let options = AbcMappingOptions::new(AbcIoConstraints {
-                driving_cell: "BUF".into(),
-                output_load_ff: 20.0,
-            });
-            context.map_sequential(&design, &options).unwrap();
-        }
-    }
-
-    #[test]
-    fn source_check_includes_duplicate_cells_in_every_library_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let good = dir.path().join("good.lib");
-        let bad = dir.path().join("bad.lib");
-        let snapshot = dir.path().join("snapshot.lib");
-        let source = |formula: &str| {
-            format!(
-                r#"library(test) {{ cell(MIX) {{
-                    pin(Y) {{ direction: output; function: "{formula}"; }}
-                }} }}"#
-            )
-        };
-        std::fs::write(&good, source("(A*B)^C")).unwrap();
-        std::fs::write(&bad, source("A*B^C")).unwrap();
-        stage_library(&bad, &snapshot).unwrap();
-        std::fs::write(&bad, source("(A*B)^C")).unwrap();
-        let mapped = read_gv_from_str("module m(y); output y; MIX inst(.Y(y)); endmodule").unwrap();
-        assert_eq!(
-            validate_abc_source_formulas(&mapped, &[good, snapshot]).unwrap_err(),
-            "ABC may interpret AND/XOR precedence differently for MIX.Y: \"A*B^C\""
-        );
-    }
-}
