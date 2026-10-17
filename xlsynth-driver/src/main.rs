@@ -83,6 +83,7 @@ mod gv2ir;
 mod gv_area;
 mod gv_dump_cone;
 mod gv_eval;
+mod gv_fanout_opt;
 mod gv_instance_csv;
 mod gv_read_stats;
 mod gv_resize;
@@ -2727,6 +2728,7 @@ fn main() {
         )
         .subcommand(g8r2gv::command())
         .subcommand(gv_resize::command())
+        .subcommand(gv_fanout_opt::command())
         .subcommand(
             clap::Command::new("g8r2ugv")
                 .about("Converts a .g8r or .g8rbin sequential design to a .ugv netlist on stdout, emitting stored registers and optionally adding boundary registers.")
@@ -4292,6 +4294,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("g8r2gv", subm)) => {
             if let Err(e) = g8r2gv::handle(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, Some("g8r2gv"), vec![]);
+            }
+        }
+        Some(("gv-fanout-opt", subm)) => {
+            if let Err(e) = gv_fanout_opt::handle(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("gv-fanout-opt"), vec![]);
             }
         }
         Some(("gv-resize", subm)) => {

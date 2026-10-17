@@ -1254,6 +1254,56 @@ xlsynth-driver gv-stats --netlist resized.gv \
   --liberty_proto /path/to/cells.timing.proto
 ```
 
+### `gv-fanout-opt`: Timing-driven fanout optimization
+
+Optimizes a flat scalar combinational GV module and writes GV to stdout. For
+example, a gate driving many consumers may be buffered, replicated, or upsized
+when the modeled global output delay and delay/area score both improve. The
+input netlist may already be legal. High fanout and electrical table-range
+excursions prioritize search sites; they do not mandate an edit.
+
+The bounded search tries equivalent cells with matching named-input truth
+tables, one- or two-level buffer trees, and driver replication. Capacitance
+balances sink groups; external output loads stay on the original driver.
+Incremental STA includes changed upstream input loading and propagates exact
+rise/fall arrival and slew changes. It uses the same Liberty arc, interpolation,
+and functional timing-coverage kernels as full STA. Boolean-only connectivity\\ncycles fall back to full STA and are identified in the report. This is a\\ncell-delay model:
+no placement or interconnect parasitics, and table extrapolation can remain
+after optimization. It is not physical timing signoff.
+
+- `--netlist <PATH>`, `--liberty_proto <PATH>`: required GV and matching
+  timing-enabled Liberty proto. Input GV may be gzip-compressed.
+- `--module_name <NAME>`: selected module; optional for a single-module file.
+- `--primary_input_transition <VALUE>`: fixed input slew in library time
+  units; default `0.01`. Input arrival is zero.
+- `--module_output_load <VALUE>`: capacitance per output in library units;
+  defaults to the proto's `default_output_load`. Explicit `0` is supported.
+- `--rounds <COUNT>`: default `8`, at most `32`; `0` disables edits.
+- `--drivers <COUNT>`: sites per round, default `3`, range `1..=8`.
+- `--fanout-trigger <COUNT>`: default `16`; must be positive.
+- `--max-area-growth <FRACTION>`: default `0.05` (5%), relative to original
+  area, without compounding.
+- `--area-weight <VALUE>`: default `0.5` in
+  `delay / original_delay + weight * (area / original_area - 1)`.
+- `--report-json <PATH>`: deterministic metrics, decisions, trials and work
+  counts; area stays in the supplied library's units.
+- `--profile-json <PATH>`: the same report including elapsed seconds.
+- `--full-sta`: evaluate each candidate with full STA for comparison.
+- `--verify-incremental`: independently check every timed candidate against
+  full STA, including every net's edge timing, loads and diagnostics.
+  Mutually exclusive with `--full-sta`.
+
+Search is deliberately bounded, with at most 24 alternatives per selected
+driver. Single-output cells with at most five Boolean inputs are candidates;
+registers, buses and hierarchical instances are unsupported. A result with no
+accepted edit means no improving candidate was found within these limits.
+
+```bash
+xlsynth-driver gv-fanout-opt --netlist mapped.gv \
+  --liberty_proto /path/to/cells.timing.proto \
+  --report-json fanout.json > optimized.gv
+```
+
 ### `g8r2gv`: G8R to mapped gate-level Verilog
 
 Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level Verilog netlist
