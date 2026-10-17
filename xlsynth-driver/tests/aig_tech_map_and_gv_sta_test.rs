@@ -738,8 +738,10 @@ fn cli_rejects_json_fifo_with_stdout_stream_without_deadlock() {
     let aig_path = dir.path().join("input.aag");
     let lib_path = dir.path().join("cells.textproto");
     let fifo = dir.path().join("report.fifo");
+    let stdout_alias = dir.path().join("stdout-alias");
     std::fs::write(&aig_path, make_two_input_and_aig()).unwrap();
     std::fs::write(&lib_path, make_timing_enabled_inv_nand2_liberty_textproto()).unwrap();
+    std::os::unix::fs::symlink("/dev/stdout", &stdout_alias).unwrap();
     assert!(
         Command::new("mkfifo")
             .arg(&fifo)
@@ -748,49 +750,63 @@ fn cli_rejects_json_fifo_with_stdout_stream_without_deadlock() {
             .success()
     );
 
-    let (socket, peer) = UnixStream::pair().unwrap();
-    for (stdout, peer) in [
-        (Stdio::piped(), None),
-        (Stdio::from(OwnedFd::from(socket)), Some(peer)),
+    // No reader opens the report FIFO until netlist stdout reaches EOF.
+    for netlist_path in [
+        Path::new("-"),
+        Path::new("/dev/stdout"),
+        Path::new("/dev/fd/1"),
+        &stdout_alias,
     ] {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-            .arg("aig-tech-map")
-            .arg(&aig_path)
-            .args(["--strategy", "area", "--liberty_proto"])
-            .arg(&lib_path)
-            .args(["--netlist_out", "-", "--json_out"])
-            .arg(&fifo)
-            .stdout(stdout)
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("mapping blocked while opening the JSON FIFO");
+        let (socket, peer) = UnixStream::pair().unwrap();
+        for (stdout, peer) in [
+            (Stdio::piped(), None),
+            (Stdio::from(OwnedFd::from(socket)), Some(peer)),
+        ] {
+            let mut child = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+                .arg("aig-tech-map")
+                .arg(&aig_path)
+                .args(["--strategy", "area", "--liberty_proto"])
+                .arg(&lib_path)
+                .arg("--netlist_out")
+                .arg(netlist_path)
+                .arg("--json_out")
+                .arg(&fifo)
+                .stdout(stdout)
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!(
+                        "mapping blocked while opening the JSON FIFO for {}",
+                        netlist_path.display()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let output = child.wait_with_output().unwrap();
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out cannot be a FIFO when stdout is a pipe or socket\n"
-        );
-        if let Some(mut peer) = peer {
-            // Avoid blocking if a descriptor remains open, without relying on
-            // socket read timeouts, which are unsupported for AF_UNIX on macOS.
-            peer.set_nonblocking(true).unwrap();
-            let mut byte = [0; 1];
-            let read = peer.read(&mut byte);
-            assert!(
-                matches!(&read, Ok(0))
-                    || matches!(&read, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-                "unexpected socket read: {read:?}"
+            let output = child.wait_with_output().unwrap();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8(output.stderr).unwrap(),
+                "aig-tech-map error: --json_out cannot be a FIFO when stdout is a pipe or socket\n"
             );
+            if let Some(mut peer) = peer {
+                // Avoid blocking if a descriptor remains open, without relying
+                // on socket read timeouts, which are
+                // unsupported for AF_UNIX on macOS.
+                peer.set_nonblocking(true).unwrap();
+                let mut byte = [0; 1];
+                let read = peer.read(&mut byte);
+                assert!(
+                    matches!(&read, Ok(0))
+                        || matches!(&read, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                    "unexpected socket read: {read:?}"
+                );
+            }
         }
     }
 }

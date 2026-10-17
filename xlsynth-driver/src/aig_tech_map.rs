@@ -253,6 +253,19 @@ fn ensure_distinct_from_stderr(path: &Path, stderr: &same_file::Handle) -> Resul
     Ok(())
 }
 
+/// Rejects a report FIFO whose reader may be waiting for stdout to close.
+#[cfg(unix)]
+fn ensure_json_fifo_safe_for_stdout(path: &Path, stdout: &same_file::Handle) -> Result<()> {
+    if metadata_if_exists(path)?.is_some_and(|metadata| metadata.file_type().is_fifo()) {
+        let kind = stdout.as_file().metadata()?.file_type();
+        ensure!(
+            !kind.is_fifo() && !kind.is_socket(),
+            "--json_out cannot be a FIFO when stdout is a pipe or socket"
+        );
+    }
+    Ok(())
+}
+
 /// Loads the requested inputs, dispatches mapping, and writes netlist/report
 /// outputs.
 fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
@@ -351,6 +364,17 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         let netlist_path = Path::new(netlist_out);
         let json_path = Path::new(json_path);
         if is_special_output(netlist_path)? || is_special_output(json_path)? {
+            #[cfg(unix)]
+            if metadata_if_exists(json_path)?.is_some_and(|metadata| metadata.file_type().is_fifo())
+            {
+                // A named path such as /dev/stdout can keep the original
+                // stdout pipe open just as --netlist_out - does.
+                if let Ok(stdout) = same_file::Handle::stdout() {
+                    if path_aliases_stream(netlist_path, &stdout, &["/dev/stdout", "/dev/fd/1"])? {
+                        ensure_json_fifo_safe_for_stdout(json_path, &stdout)?;
+                    }
+                }
+            }
             // A consumer may wait for netlist EOF before opening the JSON
             // stream, so opening both FIFOs before writing can deadlock. Check
             // aliases again immediately before sequentially writing streams.
@@ -392,13 +416,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 // waiting for its EOF before opening a JSON FIFO would
                 // deadlock with a blocking FIFO open here.
                 #[cfg(unix)]
-                ensure!(
-                    !(std::fs::metadata(json_path)?.file_type().is_fifo() && {
-                        let kind = stdout.as_file().metadata()?.file_type();
-                        kind.is_fifo() || kind.is_socket()
-                    }),
-                    "--json_out cannot be a FIFO when stdout is a pipe or socket"
-                );
+                ensure_json_fifo_safe_for_stdout(json_path, &stdout)?;
                 print!("{netlist_text}");
                 let file = File::create(json_path).with_context(|| {
                     format!("failed to create JSON summary '{}'", json_path.display())
