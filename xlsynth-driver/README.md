@@ -863,6 +863,11 @@ Key flags:
 ### `gv-sta`: gate-level max-arrival STA
 
 Runs basic combinational max-arrival STA over a parsed gate-level netlist using Liberty timing arcs/tables.
+For parseable functions of at most two input pins with direct input-related
+arcs, STA checks rise and fall coverage for inputs that can affect the output.
+It does not fully validate coverage for larger or unsupported functions,
+output-related arcs, or conditional timing arcs. Verify timing coverage before
+relying on the reported delay. The same limitation applies to `gv-stats`.
 
 ```shell
 xlsynth-driver gv-sta \
@@ -1169,7 +1174,8 @@ strength direction. Area-growing moves must improve an area-delay-squared merit
 as well as pass the fixed area/timing limits. Area recovery prioritizes potential
 savings with estimated timing headroom; every acceptance uses exact incremental
 timing. Unchanged arrival/slew frontiers stop propagation, with no approximate
-cutoffs.
+cutoffs. Replacements that change arc-less output constants used to evaluate
+timing conditions are skipped.
 
 - `--netlist <PATH>`: required mapped GV input, optionally gzip-compressed.
 - `--liberty_proto <PATH>`: required matching timing-enabled Liberty proto.
@@ -1180,10 +1186,10 @@ cutoffs.
   defaults to the proto's `default_output_load`. Explicit `0` is supported.
 - `--max-area-growth <FRACTION>`: noncompounding growth relative to input area;
   default `0.02` (2%).
-- `--timing-evaluation-budget <COUNT>`: instance timing evaluations across all
+- `--timing-evaluation-budget <COUNT>`: instance evaluation visits across all
   timing rounds; defaults to `max(50000, 4 * N)` for `N` mapped instances,
   including FFs. Explicit `0` permits no evaluation work.
-- `--recovery-evaluation-budget <COUNT>`: instance timing evaluations across all
+- `--recovery-evaluation-budget <COUNT>`: instance evaluation visits across all
   recovery rounds; defaults to `max(100000, 8 * N)`. Independent of the timing
   budget; explicit `0` permits no evaluation work. Exhaustion rolls back the
   unfinished trial and keeps verified work.
@@ -1199,9 +1205,11 @@ cutoffs.
 
 Search defaults come from the library's `ResizeOptions`. Timing visits up to
 `max(64, ceil(N / 512))` candidate sites per round; recovery has no site cap.
-Both phases try up to eight alternative sizes per site. One trial can require
-many instance evaluations. There is no separate trial-count or combined
-phase-work limit. The historical
+Both phases try up to eight alternative sizes per site. Evaluation visits count
+timing propagation and, when a replacement may change inferred Boolean constants,
+functional timing-coverage propagation; both are included in the report's
+`propagated_instances` count. One trial can require many instance visits. There
+is no separate trial-count or combined phase-work limit. The historical
 `upsize`/`downsize` report fields mean timing search and area recovery;
 `no_improvement` means no improvement among the bounded candidates tried,
 not a local-optimality guarantee.

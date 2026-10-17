@@ -1241,6 +1241,425 @@ fn unusable_combinational_alternatives_do_not_abort_either_phase() -> Result<()>
 }
 
 #[test]
+fn incomplete_functional_timing_alternatives_are_skipped() -> Result<()> {
+    for source in [
+        "module m(input a, input b, output y); AND2 gate(.A(a),.B(b),.Y(y)); endmodule",
+        "module m(input clk, input d, input a, output y); wire q; DFF1 launch(.CLK(clk),.D(d),.Q(q)); AND2 gate(.A(a),.B(q),.Y(y)); endmodule",
+    ] {
+        let mut library = library()?;
+        let good = library.cells.iter().position(|c| c.name == "AND2").unwrap();
+        let bad = library.cells.iter().position(|c| c.name == "AND1").unwrap();
+        let good_output = library.cells[good]
+            .pins
+            .iter()
+            .find(|p| p.direction == PinDirection::Output as i32)
+            .unwrap();
+        // Keep the valid cell's timing for A but omit the arc from B. This
+        // cheaper candidate would otherwise pass the area's timing checkpoint.
+        let arcs = good_output
+            .timing_arcs
+            .iter()
+            .filter(|arc| library.resolve_string(&arc.related_pin) != "B")
+            .cloned()
+            .collect();
+        let bad_output = library.cells[bad]
+            .pins
+            .iter_mut()
+            .find(|p| p.direction == PinDirection::Output as i32)
+            .unwrap();
+        bad_output.timing_arcs = arcs;
+        assert!(
+            CellFamilies::new(&library)
+                .alternatives(good)
+                .contains(&bad)
+        );
+
+        let opts = ResizeOptions {
+            max_upsize_rounds: 0,
+            max_downsize_rounds: 1,
+            resize_registers: false,
+            ..options()
+        };
+        let mut actual = read_gv_from_str(source)?;
+        let report = resize(&mut actual, &library, &opts)?;
+        let gate = actual.modules[0].instances.last().unwrap();
+        assert_eq!(actual.interner.resolve(gate.type_name), Some("AND2"));
+
+        // An unusable candidate should have the same effect as excluding it,
+        // while still being considered by the recovery search.
+        library.cells[bad].dont_use = Some(true);
+        let mut expected = read_gv_from_str(source)?;
+        let expected_report = resize(&mut expected, &library, &opts)?;
+        assert_eq!(actual.modules, expected.modules);
+        assert_eq!(report.final_area, expected_report.final_area);
+        assert_eq!(report.final_delay, expected_report.final_delay);
+        assert!(report.downsize.trials > expected_report.downsize.trials);
+
+        // The same missing arc remains an error on the incumbent netlist.
+        let mut invalid = read_gv_from_str(&source.replace("AND2 gate", "AND1 gate"))?;
+        let before = invalid.modules.clone();
+        let error = resize(&mut invalid, &library, &opts).unwrap_err();
+        assert!(error.to_string().contains("timing coverage"));
+        assert_eq!(invalid.modules, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn equivalent_replacement_must_revalidate_downstream_constant_coverage() -> Result<()> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let constant = builder.intern_string("0")?;
+    let equivalent = builder.intern_string("A ^ A")?;
+    let source_cell = builder.cells.iter().position(|c| c.name == "BUF4").unwrap();
+    let bad = builder.cells.iter().position(|c| c.name == "BUF2").unwrap();
+    let gate = builder.cells.iter().position(|c| c.name == "AND1").unwrap();
+    for (cell, function) in [(source_cell, constant), (bad, equivalent)] {
+        builder.cells[cell]
+            .pins
+            .iter_mut()
+            .find(|p| p.direction == PinDirection::Output as i32)
+            .unwrap()
+            .function = function;
+    }
+    let mut library = builder.finish();
+    let gate_output = library.cells[gate]
+        .pins
+        .iter()
+        .position(|p| p.direction == PinDirection::Output as i32)
+        .unwrap();
+    let gate_arcs = library.cells[gate].pins[gate_output]
+        .timing_arcs
+        .iter()
+        .filter(|arc| library.resolve_string(&arc.related_pin) != "B")
+        .cloned()
+        .collect();
+    library.cells[gate].pins[gate_output].timing_arcs = gate_arcs;
+    assert!(
+        CellFamilies::new(&library)
+            .alternatives(source_cell)
+            .contains(&bad)
+    );
+
+    // Both source functions are always false, but partial evaluation of
+    // A ^ A cannot prove this without A. The original source's constant 0
+    // lets the downstream AND omit B's arc; substituting BUF2 loses that proof.
+    let source = "module m(input a, input b, output y); wire n; BUF4 tied(.A(a),.Y(n)); AND1 gate(.A(b),.B(n),.Y(y)); endmodule";
+    let opts = ResizeOptions {
+        max_upsize_rounds: 0,
+        max_downsize_rounds: 1,
+        ..options()
+    };
+    let mut actual = read_gv_from_str(source)?;
+    let report = resize(&mut actual, &library, &opts)?;
+    assert_eq!(
+        actual
+            .interner
+            .resolve(actual.modules[0].instances[0].type_name),
+        Some("BUF4")
+    );
+
+    library.cells[bad].dont_use = Some(true);
+    let mut expected = read_gv_from_str(source)?;
+    let expected_report = resize(&mut expected, &library, &opts)?;
+    assert_eq!(actual.modules, expected.modules);
+    assert_eq!(report.final_delay, expected_report.final_delay);
+    assert!(report.downsize.trials > expected_report.downsize.trials);
+
+    let mut invalid = read_gv_from_str(&source.replace("BUF4 tied", "BUF2 tied"))?;
+    let before = invalid.modules.clone();
+    let error = resize(&mut invalid, &library, &opts).unwrap_err();
+    assert!(error.to_string().contains("timing coverage"));
+    assert_eq!(invalid.modules, before);
+    Ok(())
+}
+
+/// Equivalent constant cells and a downstream gate with an incomplete arc.
+fn coverage_rescan_test_library() -> Result<Library> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let constant = builder.intern_string("0")?;
+    let equivalent = builder.intern_string("A ^ A")?;
+    let source = builder.cells.iter().position(|c| c.name == "AND4").unwrap();
+    let candidate = builder.cells.iter().position(|c| c.name == "AND2").unwrap();
+    let gate = builder.cells.iter().position(|c| c.name == "AND1").unwrap();
+    for (cell, function) in [(source, constant), (candidate, equivalent)] {
+        builder.cells[cell]
+            .pins
+            .iter_mut()
+            .find(|p| p.direction == PinDirection::Output as i32)
+            .unwrap()
+            .function = function;
+    }
+    let mut library = builder.finish();
+    for (cell, omitted_pin) in [(source, "A"), (candidate, "A"), (gate, "B")] {
+        let output = library.cells[cell]
+            .pins
+            .iter()
+            .position(|p| p.direction == PinDirection::Output as i32)
+            .unwrap();
+        let arcs = library.cells[cell].pins[output]
+            .timing_arcs
+            .iter()
+            .filter(|arc| library.resolve_string(&arc.related_pin) != omitted_pin)
+            .cloned()
+            .collect();
+        library.cells[cell].pins[output].timing_arcs = arcs;
+    }
+    assert!(
+        CellFamilies::new(&library)
+            .alternatives(source)
+            .contains(&candidate)
+    );
+    Ok(library)
+}
+
+#[test]
+fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells() -> Result<()> {
+    let library = coverage_rescan_test_library()?;
+    let source = "module m(input a, input b, input c, output y); wire n; AND4 tied(.A(a),.B(b),.Y(n)); AND1 gate(.A(c),.B(n),.Y(y)); endmodule";
+    let mut parsed = read_gv_from_str(source)?;
+    let before = parsed.modules.clone();
+    let mut sta = IncrementalSta::new(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        options().timing,
+    )?;
+    let original_score = sta.score();
+    let original_cells = sta.cells.clone();
+    let candidate = library.cells.iter().position(|c| c.name == "AND2").unwrap();
+    // The changed delay visits the source and gate. The remaining unit cannot
+    // cover the two-instance constant rescan, so that scan does no work.
+    assert_eq!(
+        sta.trial(0, candidate, 3, None, |_| true)?,
+        TrialOutcome::PropagationLimit
+    );
+    assert_eq!(sta.propagated_instances(), 2);
+    assert_eq!(sta.score(), original_score);
+    assert_eq!(sta.cells, original_cells);
+
+    // The restored state must also support a later complete rescan, which
+    // rejects this candidate for the missing downstream arc.
+    let error = sta
+        .trial(0, candidate, usize::MAX, None, |_| true)
+        .unwrap_err();
+    assert!(error.to_string().contains("functional input 'B'"));
+    assert_eq!(sta.score(), original_score);
+    assert_eq!(sta.cells, original_cells);
+    drop(sta);
+
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_upsize_rounds: 0,
+            max_downsize_rounds: 1,
+            recovery_evaluation_budget: Some(3),
+            ..options()
+        },
+    )?;
+    assert_eq!(
+        report.downsize.stop_reason,
+        ResizeStopReason::PropagationLimit
+    );
+    assert_eq!(report.downsize.propagated_instances, 2);
+    assert!(report.budget_exhausted);
+    assert_eq!(parsed.modules, before);
+    Ok(())
+}
+
+#[test]
+fn self_feedback_cannot_keep_a_stale_coverage_constant() -> Result<()> {
+    let library = coverage_rescan_test_library()?;
+    // The original constant output proves its own A input is zero. The
+    // equivalent A ^ A replacement cannot derive that fixed point from scratch.
+    let source = "module m(input b, input c, output y); wire n; AND4 tied(.A(n),.B(b),.Y(n)); AND1 gate(.A(c),.B(n),.Y(y)); endmodule";
+    let mut parsed = read_gv_from_str(source)?;
+    let before = parsed.modules.clone();
+    let report = resize(
+        &mut parsed,
+        &library,
+        &ResizeOptions {
+            max_upsize_rounds: 0,
+            max_downsize_rounds: 1,
+            ..options()
+        },
+    )?;
+    assert!(report.downsize.trials > 0);
+    assert_eq!(report.downsize.accepted, 0);
+    assert_eq!(parsed.modules, before);
+
+    // Full STA must reject the same replacement because the downstream gate's
+    // B input is no longer proven constant and has no timing arc.
+    let mut invalid = read_gv_from_str(&source.replace("AND4 tied", "AND2 tied"))?;
+    let invalid_before = invalid.modules.clone();
+    let error = resize(&mut invalid, &library, &options()).unwrap_err();
+    assert!(error.to_string().contains("functional input 'B'"));
+    assert_eq!(invalid.modules, invalid_before);
+    Ok(())
+}
+
+#[test]
+fn replacement_cannot_expose_uncovered_register_launch_downstream() -> Result<()> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let equivalent = builder.intern_string("A ^ A")?;
+    let original = builder.cells.iter().position(|c| c.name == "AND4").unwrap();
+    let candidate = builder.cells.iter().position(|c| c.name == "AND2").unwrap();
+    let gate = builder.cells.iter().position(|c| c.name == "AND1").unwrap();
+    for cell in [original, candidate] {
+        builder.cells[cell]
+            .pins
+            .iter_mut()
+            .find(|p| p.direction == PinDirection::Output as i32)
+            .unwrap()
+            .function = equivalent;
+    }
+    let mut library = builder.finish();
+    // The original's sole arc comes from an unknown literal; the candidate's
+    // comes from a register. Neither affects the output's Boolean function.
+    // The candidate thereby creates a register launch at the AND1 input, for
+    // which that downstream cell does not have a timing arc.
+    for (cell, omitted_pin) in [(original, "A"), (candidate, "B"), (gate, "B")] {
+        let output = library.cells[cell]
+            .pins
+            .iter()
+            .position(|p| p.direction == PinDirection::Output as i32)
+            .unwrap();
+        let arcs = library.cells[cell].pins[output]
+            .timing_arcs
+            .iter()
+            .filter(|arc| library.resolve_string(&arc.related_pin) != omitted_pin)
+            .cloned()
+            .collect();
+        library.cells[cell].pins[output].timing_arcs = arcs;
+    }
+    assert!(
+        CellFamilies::new(&library)
+            .alternatives(original)
+            .contains(&candidate)
+    );
+    let source = "module m(input clk, input d, input a, output y); wire q,n; DFF1 launch(.CLK(clk),.D(d),.Q(q)); AND4 tied(.A(q),.B(1'bx),.Y(n)); AND1 gate(.A(a),.B(n),.Y(y)); endmodule";
+    let opts = ResizeOptions {
+        max_upsize_rounds: 0,
+        max_downsize_rounds: 1,
+        resize_registers: false,
+        ..options()
+    };
+    let mut actual = read_gv_from_str(source)?;
+    let report = resize(&mut actual, &library, &opts)?;
+    assert_eq!(
+        actual
+            .interner
+            .resolve(actual.modules[0].instances[1].type_name),
+        Some("AND4")
+    );
+
+    library.cells[candidate].dont_use = Some(true);
+    let mut expected = read_gv_from_str(source)?;
+    let expected_report = resize(&mut expected, &library, &opts)?;
+    assert_eq!(actual.modules, expected.modules);
+    assert_eq!(report.final_delay, expected_report.final_delay);
+    assert!(report.downsize.trials > expected_report.downsize.trials);
+
+    let mut invalid = read_gv_from_str(&source.replace("AND4 tied", "AND2 tied"))?;
+    let before = invalid.modules.clone();
+    let error = resize(&mut invalid, &library, &opts).unwrap_err();
+    assert!(error.to_string().contains("timing coverage"));
+    assert_eq!(invalid.modules, before);
+    Ok(())
+}
+
+#[test]
+fn replacement_that_changes_when_constants_is_skipped() -> Result<()> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let constant = builder.intern_string("0")?;
+    let pin_a = builder.intern_string("A")?;
+    let when_b = builder.intern_string("B")?;
+    let original = builder.cells.iter().position(|c| c.name == "BUF4").unwrap();
+    let candidate = builder.cells.iter().position(|c| c.name == "BUF2").unwrap();
+    let gate = builder.cells.iter().position(|c| c.name == "AND1").unwrap();
+    for cell in [original, candidate] {
+        let output = builder.cells[cell]
+            .pins
+            .iter_mut()
+            .find(|p| p.direction == PinDirection::Output as i32)
+            .unwrap();
+        output.function = constant;
+        if cell == original {
+            output.timing_arcs.clear();
+        }
+    }
+    let output = builder.cells[gate]
+        .pins
+        .iter_mut()
+        .find(|p| p.direction == PinDirection::Output as i32)
+        .unwrap();
+    output
+        .timing_arcs
+        .iter_mut()
+        .find(|arc| arc.related_pin == pin_a)
+        .unwrap()
+        .when = when_b;
+    let mut library = builder.finish();
+    let source = "module m(input a, input b, output y); wire n; BUF4 tied(.A(a),.Y(n)); AND1 gate(.A(b),.B(n),.Y(y)); endmodule";
+    let opts = ResizeOptions {
+        max_upsize_rounds: 0,
+        max_downsize_rounds: 1,
+        ..options()
+    };
+    let mut actual = read_gv_from_str(source)?;
+    let changed = read_gv_from_str(&source.replace("BUF4 tied", "BUF2 tied"))?;
+    let initial = measure_boundary_delays(
+        &actual.modules[0],
+        &actual.nets,
+        &actual.interner,
+        &library,
+        opts.timing,
+    )?;
+    let changed_timing = measure_boundary_delays(
+        &changed.modules[0],
+        &changed.nets,
+        &changed.interner,
+        &library,
+        opts.timing,
+    )?;
+    // Only an arc-less tie is recognized as a constant for `when` evaluation.
+    // The alternative enables an additional possible timing path, so keeping
+    // the incumbent's old conditional bindings would mismeasure it.
+    assert!(changed_timing.input_to_output > initial.input_to_output);
+    assert!(
+        CellFamilies::new(&library)
+            .alternatives(original)
+            .contains(&candidate)
+    );
+    let mut sta = IncrementalSta::new(
+        &actual.modules[0],
+        &actual.nets,
+        &actual.interner,
+        &library,
+        opts.timing,
+    )?;
+    let before_cells = sta.cells.clone();
+    let before_score = sta.score();
+    let error = sta
+        .trial(0, candidate, usize::MAX, None, |_| true)
+        .unwrap_err();
+    assert!(error.to_string().contains("conditional timing arcs"));
+    assert_eq!(sta.cells, before_cells);
+    assert_eq!(sta.score(), before_score);
+    drop(sta);
+
+    let report = resize(&mut actual, &library, &opts)?;
+    library.cells[candidate].dont_use = Some(true);
+    let mut expected = read_gv_from_str(source)?;
+    let expected_report = resize(&mut expected, &library, &opts)?;
+    assert_eq!(actual.modules, expected.modules);
+    assert_eq!(report.final_delay, expected_report.final_delay);
+    assert!(report.downsize.trials > expected_report.downsize.trials);
+    Ok(())
+}
+
+#[test]
 fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Result<()> {
     let mut library = library()?;
     let bad = library.cells.iter().position(|c| c.name == "DFF2").unwrap();

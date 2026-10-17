@@ -40,12 +40,13 @@ pub struct ResizeOptions {
     pub max_candidate_sites: Option<usize>,
     /// Alternative cell sizes tried per candidate site in each round.
     pub max_cell_candidates: usize,
-    /// Instance timing evaluations across all timing rounds; None uses
-    /// max(50_000, 4 * instance_count). Explicit zero allows no evaluation
-    /// work.
+    /// Instance timing and functional-coverage propagation evaluations across
+    /// all timing rounds; None uses max(50_000, 4 * instance_count). Explicit
+    /// zero allows no evaluation work.
     pub timing_evaluation_budget: Option<usize>,
-    /// Instance timing evaluations across all recovery rounds; None uses
-    /// max(100_000, 8 * instance_count). Independent of unused timing work.
+    /// Instance timing and functional-coverage propagation evaluations across
+    /// all recovery rounds; None uses max(100_000, 8 * instance_count).
+    /// Independent of unused timing work.
     pub recovery_evaluation_budget: Option<usize>,
     pub resize_registers: bool,
 }
@@ -83,9 +84,11 @@ impl Default for ResizeOptions {
 pub struct ResizeWorkLimits {
     /// Candidate sites per timing round; recovery has no site cap.
     pub timing_candidate_sites: usize,
-    /// Instance timing evaluations across all timing rounds.
+    /// Instance timing and functional-coverage propagation evaluations across
+    /// all timing rounds.
     pub timing_evaluations: usize,
-    /// Instance timing evaluations across all area-recovery rounds.
+    /// Instance timing and functional-coverage propagation evaluations across
+    /// all area-recovery rounds.
     pub recovery_evaluations: usize,
 }
 
@@ -112,6 +115,7 @@ pub struct ResizePhaseStats {
     pub trials: usize,
     pub accepted: usize,
     pub register_changes: usize,
+    /// Instance visits for timing and functional-coverage propagation.
     pub propagated_instances: usize,
     pub stop_reason: ResizeStopReason,
 }
@@ -571,7 +575,8 @@ impl ResizeSearch<'_> {
 /// moves by an area-delay-squared merit, without worsening any boundary class.
 /// Recovery orders candidates by potential area savings and estimated timing
 /// headroom, but accepts them only against the exact timing checkpoint. No
-/// hold/physical timing guarantee is made.
+/// hold/physical timing guarantee is made. Replacements that change arc-less
+/// output constants used to evaluate timing conditions are skipped.
 pub fn resize_netlist(
     module: &mut NetlistModule,
     nets: &[Net],

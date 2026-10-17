@@ -369,17 +369,21 @@ violations. Timing prioritizes register-to-register paths when present.
 Incremental timing propagates changed arrival/slew frontiers in topological order
 and stops at unchanged frontiers, without approximate cutoffs. Each trial has a
 sparse undo log: rejected, erroneous, or budget-interrupted substitutions restore
-the incumbent. Independent full STA using the `gv-stats` model verifies the final
-result before replacing the caller's module. This is max-delay/setup timing with
-ideal clocks, not hold, clock-tree, placement, or routed timing signoff.
+the incumbent. Replacements that change arc-less output constants used to
+evaluate timing conditions are skipped. Independent full STA using the `gv-stats`
+model verifies the final result before replacing the caller's module. This is
+max-delay/setup timing with ideal clocks, not hold, clock-tree, placement, or
+routed timing signoff.
 
-`ResizeOptions` sets deterministic round, candidate, and timing-evaluation limits;
-these are work bounds rather than a wall-clock deadline or a local-optimality
-guarantee. With `N` input instances (including FFs), defaults are:
+`ResizeOptions` sets deterministic round, candidate, and evaluation limits; these
+are work bounds rather than a wall-clock deadline or a local-optimality guarantee.
+Evaluation visits count timing propagation and, when a replacement may change
+inferred Boolean constants, functional timing-coverage propagation. With `N`
+input instances (including FFs), defaults are:
 
 - `max(64, ceil(N / 512))` candidate sites per timing round.
-- `max(50_000, 4 * N)` instance timing evaluations across all timing rounds.
-- `max(100_000, 8 * N)` instance timing evaluations across all recovery rounds.
+- `max(50_000, 4 * N)` instance evaluation visits across all timing rounds.
+- `max(100_000, 8 * N)` instance evaluation visits across all recovery rounds.
 - Four timing rounds, two recovery rounds, and eight alternatives per site.
 
 One substitution trial can evaluate many instances as timing changes propagate.
@@ -392,7 +396,8 @@ effective limits, which are also included in `ResizeReport`.
 
 The default area allowance is 2% of the original input area and never compounds
 across moves. `ResizeReport` records initial, upsized, and final area and boundary
-delays, accepted moves (including FF changes), work, and budget exhaustion.
+delays, accepted moves (including FF changes), work, and budget exhaustion. The
+`propagated_instances` count includes both kinds of evaluation visits.
 Each phase reports `stop_reason`: `disabled`, `no_improvement`, `round_limit`, or
 `propagation_limit`. `no_improvement` refers only to the bounded candidate search,
 not proof of local optimality. `budget_exhausted` is true if either phase stops

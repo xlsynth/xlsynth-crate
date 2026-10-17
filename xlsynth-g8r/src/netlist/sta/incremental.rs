@@ -4,16 +4,19 @@
 //! incremental analyses share the output, Liberty-table and setup kernels.
 
 use super::{
-    EdgeLoadCapacitance, EdgeTiming, InstanceTimingInputs, PinBitSource, ResolvedTimingSource,
+    CoverageConstantPropagation, EdgeLoadCapacitance, EdgeTiming, FunctionalTimingCheck,
+    InstanceCoverageInputs, InstanceTimingInputs, NetEndpoint, PinBitSource, ResolvedTimingSource,
     SignalTiming, SignalTimingSet, StaLibraryIndex, StaOptions, StaTimingType,
     TimingEvaluationContext, analyze_assign_sources, analyze_combinational_max_arrival,
     analyze_register_boundary_max_arrival, canonicalize_pin_bit_source,
     combinational_output_pin_evaluation_order, constant_output_function_value,
-    effective_input_capacitance_by_edge, evaluate_instance_outputs,
+    coverage_boolean_function, effective_input_capacitance_by_edge, evaluate_instance_outputs,
     evaluate_register_setup_capture_arrival, is_sequential_boundary_cell, resolve_symbol,
-    resolve_timing_sources, validate_constraint_tables_once,
+    resolve_timing_sources, supports_combinational_boolean_analysis,
+    validate_constraint_tables_once, validate_instance_functional_timing_coverage,
 };
 use crate::liberty::Library;
+use crate::liberty::cell_formula::Term;
 use crate::liberty_model::{Pin, PinDirection, TimingArc};
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
@@ -256,6 +259,10 @@ pub(crate) struct IncrementalSta<'a> {
     scores: [EndpointScores; 4],
     electrical: Vec<Vec<f64>>,
     evaluation: TimingEvaluationContext<'a>,
+    functional_checks: HashMap<(usize, usize), Option<FunctionalTimingCheck>>,
+    coverage_functions: HashMap<(usize, usize), Option<Term>>,
+    coverage_supported: Vec<bool>,
+    coverage_known: Vec<HashMap<String, bool>>,
     registered: bool,
     literal: SignalTimingSet,
     propagated: usize,
@@ -514,6 +521,14 @@ impl<'a> IncrementalSta<'a> {
             scores: std::array::from_fn(|_| EndpointScores::default()),
             electrical,
             evaluation: TimingEvaluationContext::new(library),
+            functional_checks: HashMap::new(),
+            coverage_functions: HashMap::new(),
+            coverage_supported: library
+                .cells
+                .iter()
+                .map(supports_combinational_boolean_analysis)
+                .collect(),
+            coverage_known: Vec::new(),
             registered,
             literal,
             propagated: 0,
@@ -524,6 +539,10 @@ impl<'a> IncrementalSta<'a> {
         for pos in 0..sta.topological.len() {
             sta.recompute(sta.topological[pos])?;
         }
+        sta.coverage_known = sta
+            .coverage_constants(usize::MAX)
+            .0
+            .expect("unlimited coverage propagation");
         for endpoint in 0..sta.endpoints.len() {
             let values = sta.compute_endpoint(endpoint)?;
             sta.set_endpoint(endpoint, values);
@@ -539,6 +558,134 @@ impl<'a> IncrementalSta<'a> {
             }
         }
         Ok(sta)
+    }
+
+    /// Computes the same coverage-only constants as full STA for the current
+    /// cells.
+    fn coverage_constants(&self, limit: usize) -> (Option<Vec<HashMap<String, bool>>>, usize) {
+        // A full pass must visit every instance at least once. Avoid cloning
+        // the connectivity when the remaining trial budget cannot cover it.
+        if limit < self.instances.len() {
+            return (None, 0);
+        }
+        let pin_sources: Vec<_> = self
+            .instances
+            .iter()
+            .map(|inst| inst.pins.clone())
+            .collect();
+        let bit_loads: Vec<Vec<NetEndpoint>> = self
+            .loads
+            .iter()
+            .map(|loads| {
+                loads
+                    .iter()
+                    .map(|(inst_idx, pin_name)| NetEndpoint {
+                        inst_idx: *inst_idx,
+                        pin_name: pin_name.clone(),
+                    })
+                    .collect()
+            })
+            .collect();
+        CoverageConstantPropagation {
+            lib: &self.lib,
+            cell_indices: &self.cells,
+            pin_sources: &pin_sources,
+            output_pin_orders: &self.orders,
+            bit_loads: &bit_loads,
+        }
+        .run_limited(limit)
+    }
+
+    /// Detects whether a replacement changes any connected inferred output.
+    fn changes_coverage_constants(&mut self, i: usize, old: usize, new: usize) -> bool {
+        let lib = &self.lib;
+        let known = &self.coverage_known[i];
+        let old_cell = &lib.library.cells[old];
+        let cache = &mut self.coverage_functions;
+        let supported = &self.coverage_supported;
+        if !supported[old] && !supported[new] {
+            return false;
+        }
+        // The resizer's dependency order ignores a direct self-edge. Such a
+        // pin may contain a constant inferred from this very output, so it
+        // cannot be used to prove the replacement has the same fixed point.
+        let self_feedback = self.instances[i].pins.iter().any(|(name, sources)| {
+            lib.pin(old, name)
+                .is_some_and(|pin| pin.direction == PinDirection::Input as i32)
+                && sources.iter().any(|source| {
+                    matches!(source, PinBitSource::Bit(bit) if self.drivers[*bit] == Some(i))
+                })
+        });
+        let value =
+            |cache: &mut HashMap<(usize, usize), Option<Term>>, cell_idx: usize, pin_idx: usize| {
+                if !supported[cell_idx] {
+                    return None;
+                }
+                cache
+                    .entry((cell_idx, pin_idx))
+                    .or_insert_with(|| coverage_boolean_function(lib, cell_idx, pin_idx))
+                    .as_ref()
+                    .and_then(|term| term.evaluate_partial(known))
+            };
+        for (old_pin_idx, old_pin) in old_cell.pins.iter().enumerate() {
+            let name = lib.library.resolve_string(&old_pin.name);
+            if old_pin.direction != PinDirection::Output as i32
+                || !self.instances[i].pins.contains_key(name)
+            {
+                continue;
+            }
+            let Some(new_pin_idx) = lib.pin_index(new, name) else {
+                return true;
+            };
+            let new_pin = &lib.library.cells[new].pins[new_pin_idx];
+            let unsupported = |pin: &Pin| {
+                pin.timing_arcs
+                    .iter()
+                    .any(|arc| !StaTimingType::from_arc(arc, lib.library).is_combinational())
+            };
+            if supported[old] == supported[new]
+                && old_pin.function == new_pin.function
+                && unsupported(old_pin) == unsupported(new_pin)
+            {
+                continue;
+            }
+            if self_feedback {
+                return true;
+            }
+            if value(cache, old, old_pin_idx) != value(cache, new, new_pin_idx) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Rejects replacements that would change constants used by `when` arcs.
+    /// Incremental STA keeps those bindings fixed for the duration of a search.
+    fn changes_timing_constants(&self, i: usize, old: usize, new: usize) -> Result<bool> {
+        let old_cell = &self.lib.library.cells[old];
+        let new_cell = &self.lib.library.cells[new];
+        for old_pin in &old_cell.pins {
+            let name = self.lib.library.resolve_string(&old_pin.name);
+            if old_pin.direction != PinDirection::Output as i32
+                || !self.instances[i].pins.contains_key(name)
+            {
+                continue;
+            }
+            let Some(new_pin) = self.lib.pin(new, name) else {
+                return Ok(true);
+            };
+            let known = |cell_name: &str, pin: &Pin| -> Result<Option<bool>> {
+                if pin.timing_arcs.is_empty() {
+                    constant_output_function_value(self.lib.library, cell_name, pin)
+                } else {
+                    Ok(None)
+                }
+            };
+            if known(&old_cell.name, old_pin)? != known(&new_cell.name, new_pin)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Re-sums just one edited net to avoid accumulating subtraction roundoff.
@@ -924,8 +1071,15 @@ impl<'a> IncrementalSta<'a> {
         accept: impl FnOnce(&Self) -> bool,
     ) -> Result<TrialOutcome> {
         let old_cell = self.cells[i];
+        if self.changes_timing_constants(i, old_cell, cell)? {
+            return Err(anyhow!(
+                "replacement changes constants used by conditional timing arcs"
+            ));
+        }
         let old_order = self.orders[i].clone();
         let mut undo = Undo::default();
+        let mut pending_coverage = None;
+        let constants_may_change = self.changes_coverage_constants(i, old_cell, cell);
         self.cells[i] = cell;
         let result = (|| -> Result<TrialOutcome> {
             self.orders[i] = if self.instances[i].sequential {
@@ -1024,6 +1178,49 @@ impl<'a> IncrementalSta<'a> {
                     }
                 }
             }
+            if constants_may_change {
+                let (known, work) = self.coverage_constants(budget.saturating_sub(self.propagated));
+                self.propagated += work;
+                let Some(known) = known else {
+                    return Ok(TrialOutcome::PropagationLimit);
+                };
+                for (inst, (before, after)) in self.coverage_known.iter().zip(&known).enumerate() {
+                    if before != after {
+                        affected.insert(inst);
+                    }
+                }
+                pending_coverage = Some(known);
+            }
+            let coverage_known = pending_coverage.as_ref().unwrap_or(&self.coverage_known);
+            for &inst_idx in &affected {
+                let inst = &self.instances[inst_idx];
+                if inst.sequential {
+                    continue;
+                }
+                let instance_name = resolve_symbol(
+                    self.interner,
+                    self.normalized.instances[inst_idx].instance_name,
+                    "instance name",
+                )?;
+                for mode in 0..if self.registered { 2 } else { 1 } {
+                    validate_instance_functional_timing_coverage(
+                        InstanceCoverageInputs {
+                            lib: &self.lib,
+                            cell_idx: self.cells[inst_idx],
+                            pin_sources: &inst.pins,
+                            known_pin_values: &inst.known,
+                            coverage_known_pin_values: &coverage_known[inst_idx],
+                            output_pin_order: &self.orders[inst_idx],
+                            instance_name: &instance_name,
+                            launched_timing: self
+                                .registered
+                                .then_some(self.timing[mode].as_slice()),
+                        },
+                        &mut self.functional_checks,
+                        &mut self.evaluation,
+                    )?;
+                }
+            }
             for endpoint in endpoints {
                 let value = self.compute_endpoint(endpoint)?;
                 if let Some(limits) = limits {
@@ -1063,6 +1260,9 @@ impl<'a> IncrementalSta<'a> {
             }
             if !accept(self) {
                 return Ok(TrialOutcome::Rejected);
+            }
+            if let Some(known) = pending_coverage.take() {
+                self.coverage_known = known;
             }
             for (inst, new) in violations {
                 self.electrical[inst] = new;
