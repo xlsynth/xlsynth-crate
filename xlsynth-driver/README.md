@@ -841,14 +841,17 @@ strategy preserves the structural decomposition:
 - each `And2` becomes `NAND2` followed by `INV`
 - negated operands and output negations are materialized with explicit `INV` instances
 
-The `nand2` strategy requires a **timing-enabled** Liberty proto and auto-selects suitable `INV` and `NAND2` cells from that library.
+The `nand2` strategy auto-selects suitable `INV` and `NAND2` cells by name,
+pin shape, and Boolean function. It does not require timing data. Running
+`gv-sta` on the mapped netlist requires a matching timing-enabled proto; see
+the timing coverage limitation in the `gv-sta` section below.
 Both mapping strategies exclude cells marked `dont_use` or `use_for_size_only`.
 The structural mapping design is described in
 [`xlsynth-g8r/docs/tech_mapper_design.md`](../xlsynth-g8r/docs/tech_mapper_design.md).
 
 ```shell
 xlsynth-driver aig-tech-map my_design.aag \
-  --liberty_proto timing-enabled.liberty.proto \
+  --liberty_proto cells.liberty.proto \
   --netlist_out my_design.mapped.gv
 ```
 
@@ -872,13 +875,14 @@ Key flags:
 
 - `--strategy <nand2|area>`: mapping strategy (default: `nand2`).
 - `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
-  `nand2` requires timing data; `area` requires cell functions and positive areas.
+  `nand2` requires suitable `INV` and `NAND2` functions; `area` requires cell
+  functions and positive areas. Neither strategy requires timing data.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` is an error.
   `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
   `max-speed` prefers the highest available VT class and then the highest
-  available drive strength.
+  drive strength inferred from cell names. Neither policy compares timing tables.
 - `--json_out <PATH>`: optional deterministic mapping summary with the strategy,
   module, and instance/net counts. With `area`,
   it also includes unique emitted cell area, cell counts by type, inverter and

@@ -91,19 +91,6 @@ lut_shapes: {}
 "#
 }
 
-/// Provides a functional-only fixture rejected by timing-dependent commands.
-fn make_no_timing_liberty_textproto() -> &'static str {
-    r#"
-format_magic: 5496997758228255311
-cells: {
-  name: "INV"
-  pins: { name_string_id: 1 direction: INPUT }
-  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 3 }
-}
-interned_strings: ["A", "Y", "!A"]
-"#
-}
-
 #[test]
 fn aig_tech_map_then_gv_sta_smoke() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
@@ -177,45 +164,151 @@ fn aig_tech_map_then_gv_sta_smoke() {
 }
 
 #[test]
-fn commands_reject_non_timing_liberty_proto() {
+fn nand2_mapping_does_not_require_timing_but_sta_does() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-
     let aig_path = temp_dir.path().join("in.aag");
-    let liberty_path = temp_dir.path().join("lib_no_timing.textproto");
+    let source_path = temp_dir.path().join("cells.lib");
+    let untimed_path = temp_dir.path().join("untimed.proto");
+    let timed_path = temp_dir.path().join("timed.proto");
     let netlist_path = temp_dir.path().join("mapped.gv");
+    let report_path = temp_dir.path().join("mapping.json");
 
-    std::fs::write(&aig_path, make_two_input_and_aig()).expect("write aiger");
-    std::fs::write(&liberty_path, make_no_timing_liberty_textproto()).expect("write liberty");
+    let mut builder = GateBuilder::new("and2_demo".into(), GateBuilderOptions::no_opt());
+    let a = *builder.add_input("a".into(), 1).get_lsb(0);
+    let b = *builder.add_input("b".into(), 1).get_lsb(0);
+    let y = builder.add_and_binary(a, b);
+    builder.add_output("y".into(), y.into());
+    let aig = builder.build();
+    std::fs::write(&aig_path, emit_aiger(&aig, true).unwrap()).unwrap();
+    // Only the canonical INV has timing data, and it is incomplete. The
+    // higher-drive candidates have none. Mapping should ignore both facts.
+    std::fs::write(
+        &source_path,
+        r#"
+library (test) {
+  time_unit : "1ns";
+  lu_table_template (tmpl) { variable_1 : input_net_transition; index_1 ("0.1"); }
+  cell (INV) {
+    pin (A) { direction : input; }
+    pin (Y) { direction : output; function : "!A";
+      timing () { related_pin : "A"; timing_type : combinational;
+        timing_sense : negative_unate; cell_rise (tmpl) { values ("0.4"); } }
+    }
+  }
+  cell (INVx2) {
+    pin (A) { direction : input; }
+    pin (Y) { direction : output; function : "!A"; }
+  }
+  cell (INVx8) {
+    use_for_size_only : true;
+    pin (A) { direction : input; }
+    pin (Y) { direction : output; function : "!A"; }
+  }
+  cell (INVx9) {
+    dont_use : true;
+    pin (A) { direction : input; }
+    pin (Y) { direction : output; function : "!A"; }
+  }
+  cell (NAND2) {
+    pin (A) { direction : input; } pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "!(A*B)"; }
+  }
+  cell (NAND2x2) {
+    pin (A) { direction : input; } pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "!(A*B)"; }
+  }
+  cell (NAND2x8) {
+    use_for_size_only : true;
+    pin (A) { direction : input; } pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "!(A*B)"; }
+  }
+  cell (NAND2x9) {
+    dont_use : true;
+    pin (A) { direction : input; } pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "!(A*B)"; }
+  }
+}
+"#,
+    )
+    .unwrap();
 
-    let map_output = Command::new(driver)
-        .arg("aig-tech-map")
-        .arg(aig_path.as_os_str())
-        .arg("--liberty_proto")
-        .arg(liberty_path.as_os_str())
-        .arg("--netlist_out")
-        .arg(netlist_path.as_os_str())
-        .output()
-        .expect("aig-tech-map invocation should run");
+    for (path, include_timing) in [(&untimed_path, false), (&timed_path, true)] {
+        let mut command = Command::new(driver);
+        command.arg("lib2proto").arg("--output").arg(path);
+        if include_timing {
+            command.arg("--include-timing");
+        }
+        let output = command.arg(&source_path).output().unwrap();
+        assert!(
+            output.status.success(),
+            "lib2proto failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lib = load_liberty_from_path(path).unwrap();
+        let has_timing = lib
+            .cells
+            .iter()
+            .flat_map(|cell| &cell.pins)
+            .any(|pin| !pin.timing_arcs.is_empty());
+        assert_eq!(has_timing, include_timing);
+    }
 
-    assert!(
-        !map_output.status.success(),
-        "aig-tech-map should fail with non-timing liberty"
-    );
+    for (policy, inv, nand2) in [
+        ("small-normal-vt", "INV", "NAND2"),
+        ("max-speed", "INVx2", "NAND2x2"),
+    ] {
+        let mut mapped = Vec::new();
+        for lib_path in [&untimed_path, &timed_path] {
+            let output = Command::new(driver)
+                .arg("aig-tech-map")
+                .arg(&aig_path)
+                .arg("--liberty_proto")
+                .arg(lib_path)
+                .arg("--netlist_out")
+                .arg(&netlist_path)
+                .args(["--strategy", "nand2", "--cell_policy", policy])
+                .arg("--json_out")
+                .arg(&report_path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "aig-tech-map failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = std::fs::read_to_string(&netlist_path).unwrap();
+            let report: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+            assert_eq!(report["inv_cell"], inv);
+            assert_eq!(report["nand2_cell"], nand2);
+            assert_mapping_equivalent(&aig, &text, &aig_path, lib_path);
+            mapped.push((text, report));
+        }
+        assert_eq!(mapped[0], mapped[1]);
+    }
 
-    let sta_output = Command::new(driver)
-        .arg("gv-sta")
-        .arg("--netlist")
-        .arg(netlist_path.as_os_str())
-        .arg("--liberty_proto")
-        .arg(liberty_path.as_os_str())
-        .output()
-        .expect("gv-sta invocation should run");
-
-    assert!(
-        !sta_output.status.success(),
-        "gv-sta should fail with non-timing liberty"
-    );
+    // STA must diagnose missing timing both when the entire proto is untimed
+    // and when the proto has timing, but not for the selected max-speed cells.
+    for (lib_path, expected_error) in [
+        (&untimed_path, "has no timing payloads"),
+        (&timed_path, "has no combinational timing arcs"),
+    ] {
+        let sta_output = Command::new(driver)
+            .arg("gv-sta")
+            .arg("--netlist")
+            .arg(&netlist_path)
+            .arg("--liberty_proto")
+            .arg(lib_path)
+            .output()
+            .expect("gv-sta invocation should run");
+        assert!(!sta_output.status.success());
+        assert!(
+            String::from_utf8_lossy(&sta_output.stderr).contains(expected_error),
+            "unexpected gv-sta error: {}",
+            String::from_utf8_lossy(&sta_output.stderr)
+        );
+    }
 }
 
 /// Checks emitted cells by exhaustive simulation and, when enabled, explicit

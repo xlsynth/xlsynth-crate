@@ -36,7 +36,7 @@ decompositions.
 
 The implemented structural baseline currently needs concrete `INV` and `NAND2`
 cells. The `aig-tech-map` CLI exposes two policies for choosing among matching
-cells in a timing-enabled Liberty proto:
+cells in a Liberty proto:
 
 - `small-normal-vt`: prefer VT class `0`, then the unsuffixed canonical cell
   name, then an `x1` spelling
@@ -44,7 +44,11 @@ cells in a timing-enabled Liberty proto:
   drive strength
 
 These policies do not change the mapped topology. They only choose which
-concrete cell names appear in the output netlist.
+concrete cell names appear in the output netlist. Drive strength is inferred
+from cell names; neither policy compares timing data. Mapping does not require
+timing data. Later STA requires a timing-enabled proto, but its current model may
+not diagnose missing arcs for some functional inputs. Verify timing coverage
+for the selected cells before relying on its delay results.
 
 If a library does not provide VT ordering metadata, all matching cells are
 treated as unordered and selection still remains deterministic. If a candidate
@@ -56,9 +60,9 @@ relative ranking would be ambiguous.
 The first implementation binds cell families by convention:
 
 - inverter candidates have names beginning with `INV`, one input pin, and one
-  timed output pin whose Boolean function is the negation of that input
+  output pin whose Boolean function is the negation of that input
 - two-input NAND candidates have names beginning with `NAND2`, two input pins,
-  and one timed output pin whose Boolean function is the negation of their
+  and one output pin whose Boolean function is the negation of their
   conjunction
 
 That is sufficient for the structural baseline, but it is deliberately narrower

@@ -19,7 +19,6 @@ use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::parse::{
     Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
 };
-use crate::netlist::sta::validate_output_pin_for_basic_sta;
 use anyhow::{Result, anyhow};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -499,7 +498,7 @@ pub fn map_gatefn_to_structural_netlist(
         match (base_signal, output.operand.negated) {
             (TechSignal::Literal(_), _) => {
                 return Err(anyhow!(
-                    "constant output '{}' is unsupported by structural tech mapping because the STA-compatible cell subset does not include constant drivers",
+                    "constant output '{}' is unsupported by structural tech mapping because INV/NAND2 mapping has no constant drivers",
                     output.port_name
                 ));
             }
@@ -585,7 +584,7 @@ pub fn map_gatefn_to_structural_netlist(
     })
 }
 
-/// VT and drive-strength policy for choosing timed INV/NAND2 cells.
+/// VT and drive-strength policy for choosing INV/NAND2 cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellPolicy {
     SmallNormalVt,
@@ -622,12 +621,12 @@ fn input_pin_names(lib: &Library, cell: &Cell) -> Vec<String> {
     names
 }
 
-/// Collects output pins that carry timing arcs in lexical order.
-fn timed_output_pin_names(lib: &Library, cell: &Cell) -> Vec<String> {
+/// Collects cell output names in deterministic lexical order.
+fn output_pin_names(lib: &Library, cell: &Cell) -> Vec<String> {
     let mut names = cell
         .pins
         .iter()
-        .filter(|p| p.direction == PinDirection::Output as i32 && !p.timing_arcs.is_empty())
+        .filter(|p| p.direction == PinDirection::Output as i32)
         .map(|p| lib.resolve_string(&p.name).to_string())
         .collect::<Vec<_>>();
     names.sort();
@@ -683,8 +682,7 @@ fn is_nand2_formula(term: &Term, input_pin_names: &[String]) -> bool {
         || *term == expected_demorgan_ba
 }
 
-/// Accepts only functionally matching cells with complete basic-STA timing
-/// coverage.
+/// Accepts functionally matching cells that are eligible for mapping.
 fn cell_binding_if_shape_matches(
     lib: &Library,
     cell: &Cell,
@@ -696,6 +694,14 @@ fn cell_binding_if_shape_matches(
     }
     // `dont_use` forbids use; `use_for_size_only` permits only resizing.
     if cell.dont_use == Some(true) || cell.use_for_size_only == Some(true) {
+        return None;
+    }
+    // A combinational formula alone does not make a sequential or clocking
+    // cell safe to use as a logic gate.
+    if !cell.sequential.is_empty()
+        || cell.clock_gate.is_some()
+        || cell.pins.iter().any(|pin| pin.is_clocking_pin)
+    {
         return None;
     }
     if let Err(error) = cell
@@ -711,11 +717,19 @@ fn cell_binding_if_shape_matches(
         return None;
     }
     let input_pin_names = input_pin_names(lib, cell);
-    let output_pin_names = timed_output_pin_names(lib, cell);
+    let output_pin_names = output_pin_names(lib, cell);
     if input_pin_names.len() != expected_input_count || output_pin_names.len() != 1 {
         return None;
     }
     let output_pin_name = &output_pin_names[0];
+    // Named connections require nonempty and distinct input and output names.
+    if output_pin_name.is_empty()
+        || input_pin_names.iter().any(String::is_empty)
+        || input_pin_names.windows(2).any(|pair| pair[0] == pair[1])
+        || input_pin_names.contains(output_pin_name)
+    {
+        return None;
+    }
     let output_function = output_pin_function(lib, cell, output_pin_name)?;
     let output_term = parse_formula(output_function).ok()?;
     let formula_matches = match family_prefix {
@@ -726,22 +740,6 @@ fn cell_binding_if_shape_matches(
     if !formula_matches {
         return None;
     }
-    let output_pin = cell
-        .pins
-        .iter()
-        .find(|pin| lib.resolve_string(&pin.name) == output_pin_name)
-        .expect("timed output pin should still be present");
-    if let Err(err) =
-        validate_output_pin_for_basic_sta(lib, cell.name.as_str(), output_pin, &input_pin_names)
-    {
-        log::warn!(
-            "skipping {} candidate '{}' because it is incompatible with basic STA: {:#}",
-            family_prefix,
-            cell.name,
-            err
-        );
-        return None;
-    }
     Some(SelectedCellBinding {
         cell_name: cell.name.clone(),
         input_pin_names,
@@ -749,12 +747,12 @@ fn cell_binding_if_shape_matches(
     })
 }
 
-/// Checks whether a cell is an eligible timed inverter.
+/// Checks whether a cell is an eligible inverter.
 fn is_inv_candidate(lib: &Library, cell: &Cell) -> bool {
     cell_binding_if_shape_matches(lib, cell, "INV", 1).is_some()
 }
 
-/// Checks whether a cell is an eligible timed two-input NAND.
+/// Checks whether a cell is an eligible two-input NAND.
 fn is_nand2_candidate(lib: &Library, cell: &Cell) -> bool {
     cell_binding_if_shape_matches(lib, cell, "NAND2", 2).is_some()
 }
@@ -824,12 +822,13 @@ fn parse_drive_strength_milli(name: &str, base: &str) -> Option<i64> {
             return None;
         }
         let frac = frac_digits.parse::<i64>().ok()?;
-        let denom = 10i64.pow(frac_digits.len() as u32);
-        return Some((frac * 1000) / denom);
+        let exponent = u32::try_from(frac_digits.len()).ok()?;
+        let denom = 10i64.checked_pow(exponent)?;
+        return frac.checked_mul(1000)?.checked_div(denom);
     }
 
     let whole = token.parse::<i64>().ok()?;
-    Some(whole * 1000)
+    whole.checked_mul(1000)
 }
 
 /// Ranks candidates by the selected VT/drive policy with stable name
@@ -897,11 +896,16 @@ fn selected_binding_for_name(
     family_prefix: &str,
     expected_input_count: usize,
 ) -> Result<SelectedCellBinding, String> {
-    let cell = lib
-        .cells
-        .iter()
-        .find(|cell| cell.name == selected_name)
+    let mut matching_cells = lib.cells.iter().filter(|cell| cell.name == selected_name);
+    let cell = matching_cells
+        .next()
         .ok_or_else(|| format!("selected cell '{}' disappeared", selected_name))?;
+    if matching_cells.next().is_some() {
+        return Err(format!(
+            "selected cell name '{}' occurs more than once in the library",
+            selected_name
+        ));
+    }
     cell_binding_if_shape_matches(lib, cell, family_prefix, expected_input_count).ok_or_else(|| {
         format!(
             "selected cell '{}' no longer matches expected {} shape",
@@ -910,7 +914,7 @@ fn selected_binding_for_name(
     })
 }
 
-/// Selects one timed inverter using the requested VT/drive policy.
+/// Selects one inverter using the requested VT/drive policy.
 fn select_inv_cell(
     lib: &crate::liberty_model::Library,
     policy: CellPolicy,
@@ -922,14 +926,14 @@ fn select_inv_cell(
         .collect();
     let Some(name) = best_cell_name(lib, candidates.as_slice(), "INV", policy)? else {
         return Err(
-            "could not find an INV candidate with one input pin, one timed output pin, and complete combinational timing coverage"
+            "could not find an eligible INV candidate with one input pin, one output pin, and an inverter function"
                 .to_string(),
         );
     };
     selected_binding_for_name(lib, name, "INV", 1)
 }
 
-/// Selects one timed NAND2 using the requested VT/drive policy.
+/// Selects one NAND2 using the requested VT/drive policy.
 fn select_nand2_cell(
     lib: &crate::liberty_model::Library,
     policy: CellPolicy,
@@ -941,7 +945,7 @@ fn select_nand2_cell(
         .collect();
     let Some(name) = best_cell_name(lib, candidates.as_slice(), "NAND2", policy)? else {
         return Err(
-            "could not find a NAND2 candidate with two input pins, one timed output pin, and complete combinational timing coverage"
+            "could not find an eligible NAND2 candidate with two input pins, one output pin, and a NAND2 function"
                 .to_string(),
         );
     };
@@ -960,7 +964,9 @@ fn select_nand2_cell_name(lib: &Library, policy: CellPolicy) -> Result<String, S
     select_nand2_cell(lib, policy).map(|binding| binding.cell_name)
 }
 
-/// Selects timed INV/NAND2 bindings using the requested VT/drive policy.
+/// Selects functional INV/NAND2 bindings using the requested VT/drive policy.
+/// Timing arcs are not required for mapping; STA requires timing data
+/// separately.
 pub fn structural_options_from_liberty(
     lib: &Library,
     policy: CellPolicy,
@@ -1524,8 +1530,7 @@ mod selection_tests {
         }
     }
 
-    /// Imports complete timing models so rejection is due to functional
-    /// semantics.
+    /// Imports structural candidates with different functional semantics.
     fn import_structural_candidates(output_attribute: &str, extra_pin: &str) -> Library {
         let mut source = String::from("library(test) {");
         for (family, inputs, formula) in [
@@ -1698,6 +1703,45 @@ mod selection_tests {
     }
 
     #[test]
+    fn select_handles_extremely_long_fractional_drive_names() {
+        let tiny = format!("INVxp{}1", "0".repeat(64));
+        let near_one = format!("INVxp{}", "9".repeat(64));
+        let lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, &tiny, 0),
+                make_inv_cell(library, "INVxp1", 0),
+                make_inv_cell(library, &near_one, 0),
+            ]
+        });
+        assert_eq!(parse_drive_strength_milli(&tiny, "INV"), None);
+        assert_eq!(parse_drive_strength_milli(&near_one, "INV"), None);
+        assert_eq!(
+            select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
+            "INVxp1"
+        );
+    }
+
+    #[test]
+    fn select_handles_extremely_large_integer_drive_names() {
+        for large in [
+            "INVx9223372036854776".to_string(),
+            format!("INVx{}", "9".repeat(64)),
+        ] {
+            let lib = make_library_with_cells(|library| {
+                vec![
+                    make_inv_cell(library, "INVx1", 0),
+                    make_inv_cell(library, &large, 0),
+                ]
+            });
+            assert_eq!(parse_drive_strength_milli(&large, "INV"), None);
+            assert_eq!(
+                select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
+                "INVx1"
+            );
+        }
+    }
+
+    #[test]
     fn select_uses_default_threshold_voltage_group() {
         let mut lib = make_library_with_cells(|library| {
             vec![
@@ -1745,6 +1789,137 @@ mod selection_tests {
                 output_pin_name: "ZN".to_string().into(),
             }
         );
+    }
+
+    #[test]
+    fn structural_selection_rejects_duplicate_pin_names() {
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell_with_pins(library, "INV", 0, "A", "A"),
+                make_inv_cell(library, "INVx2", 0),
+                make_nand2_cell_with_pins(library, "NAND2", 0, ["A", "A"], "Y"),
+                make_nand2_cell_with_pins(library, "NAND2x1", 0, ["A", "B"], "A"),
+                make_nand2_cell(library, "NAND2x2", 0),
+            ]
+        });
+        for with_timing in [true, false] {
+            if !with_timing {
+                for cell in &mut lib.cells {
+                    for pin in &mut cell.pins {
+                        pin.timing_arcs.clear();
+                    }
+                }
+            }
+            assert!(!is_inv_candidate(&lib, &lib.cells[0]));
+            assert!(!is_nand2_candidate(&lib, &lib.cells[2]));
+            assert!(!is_nand2_candidate(&lib, &lib.cells[3]));
+            for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
+                assert_eq!(select_inv_cell_name(&lib, policy).unwrap(), "INVx2");
+                assert_eq!(select_nand2_cell_name(&lib, policy).unwrap(), "NAND2x2");
+            }
+        }
+    }
+
+    #[test]
+    fn structural_selection_rejects_empty_output_pin_name() {
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell_with_pins(library, "INV", 0, "A", ""),
+                make_nand2_cell_with_pins(library, "NAND2", 0, ["A", "B"], ""),
+            ]
+        });
+        for with_timing in [true, false] {
+            if !with_timing {
+                for cell in &mut lib.cells {
+                    for pin in &mut cell.pins {
+                        pin.timing_arcs.clear();
+                    }
+                }
+            }
+            assert!(!is_inv_candidate(&lib, &lib.cells[0]));
+            assert!(!is_nand2_candidate(&lib, &lib.cells[1]));
+        }
+    }
+
+    #[test]
+    fn structural_selection_rejects_sequential_and_clocking_cells() {
+        for kind in 0..3 {
+            let mut lib = make_library_with_cells(|library| {
+                let mut inv = make_inv_cell(library, "INV", 0);
+                let mut nand = make_nand2_cell(library, "NAND2", 0);
+                match kind {
+                    0 => {
+                        inv.sequential.push(Default::default());
+                        nand.sequential.push(Default::default());
+                    }
+                    1 => {
+                        inv.clock_gate = Some(Default::default());
+                        nand.clock_gate = Some(Default::default());
+                    }
+                    2 => {
+                        inv.pins[0].is_clocking_pin = true;
+                        nand.pins[0].is_clocking_pin = true;
+                    }
+                    _ => unreachable!(),
+                }
+                vec![
+                    inv,
+                    nand,
+                    make_inv_cell(library, "INVx2", 0),
+                    make_nand2_cell(library, "NAND2x2", 0),
+                ]
+            });
+            for with_timing in [true, false] {
+                if !with_timing {
+                    for cell in &mut lib.cells {
+                        for pin in &mut cell.pins {
+                            pin.timing_arcs.clear();
+                        }
+                    }
+                }
+                assert!(!is_inv_candidate(&lib, &lib.cells[0]));
+                assert!(!is_nand2_candidate(&lib, &lib.cells[1]));
+                for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
+                    assert_eq!(select_inv_cell_name(&lib, policy).unwrap(), "INVx2");
+                    assert_eq!(select_nand2_cell_name(&lib, policy).unwrap(), "NAND2x2");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn structural_selection_rejects_ambiguous_selected_cell_name() {
+        for family in ["INV", "NAND2"] {
+            for bad_first in [false, true] {
+                let lib = make_library_with_cells(|library| {
+                    let inv = make_inv_cell(library, "INV", 0);
+                    let nand = make_nand2_cell(library, "NAND2", 0);
+                    let mut bad = if family == "INV" {
+                        make_inv_cell(library, "INV", 0)
+                    } else {
+                        make_nand2_cell(library, "NAND2", 0)
+                    };
+                    let wrong_function = if family == "INV" { "A" } else { "A*B" };
+                    bad.pins.last_mut().unwrap().function =
+                        library.intern_string(wrong_function).unwrap();
+                    let mut cells = vec![inv, nand, bad];
+                    if bad_first {
+                        cells.swap(if family == "INV" { 0 } else { 1 }, 2);
+                    }
+                    cells
+                });
+                let error = structural_options_from_liberty(&lib, CellPolicy::SmallNormalVt)
+                    .unwrap_err()
+                    .to_string();
+                assert_eq!(
+                    error,
+                    format!(
+                        "selected cell name '{}' occurs more than once in the library",
+                        family
+                    )
+                );
+            }
+        }
     }
 
     #[test]
@@ -1825,7 +2000,7 @@ mod selection_tests {
     }
 
     #[test]
-    fn select_rejects_candidate_missing_timing_for_one_functional_input() {
+    fn select_accepts_candidate_missing_timing_for_one_functional_input() {
         let lib = make_library_with_cells(|library| {
             vec![Cell {
                 name: "NAND2".to_string().into(),
@@ -1838,11 +2013,14 @@ mod selection_tests {
             }]
         });
 
-        assert!(select_nand2_cell(&lib, CellPolicy::SmallNormalVt).is_err());
+        assert_eq!(
+            select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
+            "NAND2"
+        );
     }
 
     #[test]
-    fn select_skips_sta_incompatible_candidate_and_uses_valid_alternative() {
+    fn select_uses_preferred_candidate_even_if_sta_incompatible() {
         let mut builder = LibraryBuilder::new();
         let mut invalid_fast = make_nand2_cell(&mut builder, "NAND2x2_fast", 2);
         let output_pin_idx = invalid_fast
@@ -1862,8 +2040,54 @@ mod selection_tests {
 
         assert_eq!(
             select_nand2_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "NAND2x1_nominal"
+            "NAND2x2_fast"
         );
+    }
+
+    #[test]
+    fn structural_selection_is_independent_of_timing_data() {
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INVx1_nominal", 1),
+                make_inv_cell(library, "INVx2_fast", 2),
+                make_nand2_cell(library, "NAND2x1_nominal", 1),
+                make_nand2_cell(library, "NAND2x2_fast", 2),
+            ]
+        });
+        lib.threshold_voltage_groups = vec!["nominal".to_string(), "fast".to_string()];
+        lib.threshold_voltage_group_class_indices = vec![0, 1];
+        let policies = [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed];
+        let timed = policies.map(|policy| structural_options_from_liberty(&lib, policy).unwrap());
+        assert_eq!(timed[0].inv_cell_name, "INVx1_nominal");
+        assert_eq!(timed[0].nand2_cell_name, "NAND2x1_nominal");
+        assert_eq!(timed[1].inv_cell_name, "INVx2_fast");
+        assert_eq!(timed[1].nand2_cell_name, "NAND2x2_fast");
+
+        for cell in &mut lib.cells {
+            for pin in &mut cell.pins {
+                pin.timing_arcs.clear();
+            }
+        }
+        let untimed = policies.map(|policy| structural_options_from_liberty(&lib, policy).unwrap());
+        assert_eq!(timed, untimed);
+    }
+
+    #[test]
+    fn structural_selection_rejects_extra_untimed_output() {
+        let lib = make_library_with_cells(|library| {
+            let mut inv = make_inv_cell(library, "INV", 0);
+            inv.pins
+                .push(make_pin(library, "Z", PinDirection::Output, "!A"));
+            let mut nand = make_nand2_cell(library, "NAND2", 0);
+            nand.pins
+                .push(make_pin(library, "Z", PinDirection::Output, "!(A*B)"));
+            vec![inv, nand]
+        });
+
+        for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
+            assert!(select_inv_cell(&lib, policy).is_err());
+            assert!(select_nand2_cell(&lib, policy).is_err());
+        }
     }
 
     #[test]

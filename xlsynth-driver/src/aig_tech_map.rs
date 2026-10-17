@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
-use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_data_from_path};
+use xlsynth_g8r::netlist::io::load_liberty_from_path;
 use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
 use xlsynth_g8r::techmap::nand2::{
     CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
@@ -296,14 +296,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load AIG '{aig_input_file}'"))?
             .gate_fn;
-    // The structural policy validates timing coverage; area covering only needs
-    // functional Liberty data and positive cell areas, as its library API does.
-    let lib = match strategy {
-        "nand2" => load_liberty_with_timing_data_from_path(liberty_proto_path),
-        "area" => load_liberty_from_path(liberty_proto_path),
-        _ => unreachable!("strategy is constrained by clap"),
-    }
-    .with_context(|| {
+    let lib = load_liberty_from_path(liberty_proto_path).with_context(|| {
         format!(
             "failed to load Liberty proto '{}'",
             liberty_proto_path.display()

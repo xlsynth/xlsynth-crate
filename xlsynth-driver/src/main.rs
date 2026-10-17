@@ -2466,7 +2466,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Liberty proto (.proto, .textproto, or either with .gz); nand2 requires timing data, area requires cell functions and areas")
+                        .help("Liberty proto (.proto, .textproto, or either with .gz); nand2 requires INV/NAND2 functions, area requires cell functions and positive areas")
                         .required(true)
                         .action(ArgAction::Set),
                 )
