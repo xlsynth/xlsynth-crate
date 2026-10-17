@@ -1090,6 +1090,142 @@ fn invalid_options_leave_the_netlist_unchanged() -> Result<()> {
 }
 
 #[test]
+fn unusable_combinational_alternatives_do_not_abort_either_phase() -> Result<()> {
+    for recovery in [false, true] {
+        for defect in ["output_cycle", "negative_capacitance", "missing_tables"] {
+            let mut library = library()?;
+            let bad_name = if recovery { "BUF1" } else { "BUF2" };
+            let bad = library
+                .cells
+                .iter()
+                .position(|c| c.name == bad_name)
+                .unwrap();
+            let pin_index = library.cells[bad]
+                .pins
+                .iter()
+                .position(|p| {
+                    p.direction
+                        == if defect == "negative_capacitance" {
+                            PinDirection::Input as i32
+                        } else {
+                            PinDirection::Output as i32
+                        }
+                })
+                .unwrap();
+            let pin = &mut library.cells[bad].pins[pin_index];
+            match defect {
+                "output_cycle" => pin.timing_arcs[0].related_pin = pin.name,
+                "negative_capacitance" => pin.capacitance = Some(-1.0),
+                "missing_tables" => pin.timing_arcs[0].tables.clear(),
+                _ => unreachable!(),
+            }
+            let start = if recovery { "BUF4" } else { "BUF1" };
+            let source = format!(
+                "module m(input a, output y, output z); {start} b(.A(a),.Y(y)); INV1 guard(.A(a),.Y(z)); endmodule"
+            );
+            let opts = ResizeOptions {
+                max_upsize_rounds: usize::from(!recovery),
+                max_downsize_rounds: usize::from(recovery),
+                ..options()
+            };
+            let mut actual = read_gv_from_str(&source)?;
+            let report = resize(&mut actual, &library, &opts)?;
+            let phase = if recovery {
+                &report.downsize
+            } else {
+                &report.upsize
+            };
+            assert!(phase.accepted > 0, "{defect}, recovery={recovery}");
+            assert_eq!(
+                actual
+                    .interner
+                    .resolve(actual.modules[0].instances[0].type_name),
+                Some(if recovery { "BUF2" } else { "BUF4" }),
+                "{defect}, recovery={recovery}"
+            );
+
+            // Skipping the unusable alternative must agree with excluding it
+            // from the library's selectable cells, including final full STA.
+            library.cells[bad].dont_use = Some(true);
+            let mut expected = read_gv_from_str(&source)?;
+            let expected_report = resize(&mut expected, &library, &opts)?;
+            assert_eq!(actual.modules, expected.modules);
+            assert_eq!(report.final_area, expected_report.final_area);
+            assert_eq!(report.final_delay, expected_report.final_delay);
+            assert!(
+                phase.trials
+                    > if recovery {
+                        expected_report.downsize.trials
+                    } else {
+                        expected_report.upsize.trials
+                    }
+            );
+
+            // The same defect on an incumbent is still a fatal validation
+            // error, even if that cell is marked dont_use for replacements.
+            let mut invalid = read_gv_from_str(&source.replace(start, bad_name))?;
+            let before = invalid.modules.clone();
+            assert!(resize(&mut invalid, &library, &opts).is_err());
+            assert_eq!(invalid.modules, before);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Result<()> {
+    let mut library = library()?;
+    let bad = library.cells.iter().position(|c| c.name == "DFF2").unwrap();
+    let data = library.cells[bad]
+        .pins
+        .iter_mut()
+        .find(|p| !p.is_clocking_pin && p.direction == PinDirection::Input as i32)
+        .unwrap();
+    data.timing_arcs[0].tables.clear();
+    let source = "module m(input clk, input a, output y); wire n; DFF1 launch(.CLK(clk),.D(a),.Q(n)); DFF1 capture(.CLK(clk),.D(n),.Q(y)); endmodule";
+    let mut parsed = read_gv_from_str(source)?;
+    let opts = options();
+    let mut sta = IncrementalSta::new(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        opts.timing,
+    )?;
+    let before = sta.score();
+    let cells = sta.cells.clone();
+    // Missing capture tables fail after forward timing and input loads have
+    // changed, exercising rollback beyond candidate preparation.
+    assert!(sta.trial(1, bad, usize::MAX, None, |_| true).is_err());
+    assert_eq!(sta.score(), before);
+    assert_eq!(sta.cells, cells);
+    assert!(sta.propagated_instances() > 0);
+    let good = library.cells.iter().position(|c| c.name == "DFF4").unwrap();
+    assert_eq!(
+        sta.trial(1, good, usize::MAX, None, |_| true)?,
+        TrialOutcome::Accepted
+    );
+    let mut replacement = parsed.modules[0].clone();
+    let mut interner = parsed.interner.clone();
+    replacement.instances[1].type_name = interner.get_or_intern("DFF4");
+    verify_timing(
+        sta.score(),
+        measure_boundary_delays(&replacement, &parsed.nets, &interner, &library, opts.timing)?,
+    )?;
+    drop(sta);
+
+    let report = resize(&mut parsed, &library, &opts)?;
+    assert!(report.upsize.register_changes > 0);
+    library.cells[bad].dont_use = Some(true);
+    let mut expected = read_gv_from_str(source)?;
+    let expected_report = resize(&mut expected, &library, &opts)?;
+    assert_eq!(parsed.modules, expected.modules);
+    assert_eq!(report.final_area, expected_report.final_area);
+    assert_eq!(report.final_delay, expected_report.final_delay);
+    Ok(())
+}
+
+#[test]
 fn rejection_and_budget_rollback_restore_exact_timing() -> Result<()> {
     let library = library()?;
     let parsed = read_gv_from_str(

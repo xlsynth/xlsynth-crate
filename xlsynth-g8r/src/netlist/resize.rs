@@ -514,21 +514,31 @@ impl ResizeSearch<'_> {
                         self.area - library.cells[sta.cells[i]].area + library.cells[cell].area;
                     self.trials += 1;
                     stats.trials += 1;
-                    match self.trial(phase, sta, i, cell, limits.propagated_instances, new_area)? {
-                        TrialOutcome::Accepted => {
+                    match self.trial(phase, sta, i, cell, limits.propagated_instances, new_area) {
+                        Ok(TrialOutcome::Accepted) => {
                             stats.accepted += 1;
                             stats.register_changes += usize::from(sta.is_register(i));
                             accepted += 1;
                             self.area = new_area;
                             break;
                         }
-                        TrialOutcome::Rejected => {
+                        Ok(TrialOutcome::Rejected) => {
                             // The transaction restored the incumbent; try the
                             // next strength.
                         }
-                        TrialOutcome::PropagationLimit => {
+                        Ok(TrialOutcome::PropagationLimit) => {
                             stats.stop_reason = ResizeStopReason::PropagationLimit;
                             break 'rounds;
+                        }
+                        Err(error) => {
+                            // The incumbent passed full STA, and trial errors
+                            // restore it before returning. An equivalent cell
+                            // can still have unusable timing data: skip this
+                            // replacement, not the entire resizing pass.
+                            log::debug!(
+                                "Skipping resize of instance {i} to '{}': {error:#}",
+                                library.cells[cell].name
+                            );
                         }
                     }
                 }
