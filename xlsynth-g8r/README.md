@@ -344,9 +344,77 @@ let mapped = context.map_sequential(&design, &options)?;
 let verilog = mapped.emit_verilog()?;
 ```
 
-`AbcToolchain::from_env()` uses `XLSYNTH_ABC_PATH` or `abc` on PATH. The API is
-library-only; it does not add a driver command. See `FUZZ.md` for the opt-in
-end-to-end mapping campaign and its raw/proto library environment variables.
+`AbcToolchain::from_env()` uses `XLSYNTH_ABC_PATH` or `abc` on PATH. The driver
+exposes this API through `g8r2gv`. See `FUZZ.md` for the opt-in end-to-end mapping
+campaign and its raw/proto library environment variables.
+
+## Native netlist resizing
+
+`netlist::resize::resize_netlist` operates on a flat mapped module and its nets,
+symbol interner, and timing-enabled Liberty library. It changes only cell types:
+connections, port/register polarity, and the number of instances stay fixed.
+Both combinational cells and compatible FFs can be resized. Families require
+matching pin names/directions, output functions, and sequential semantics;
+unsupported or `dont_use` alternatives are not selected. There is no buffer
+insertion/removal, pin swapping, or logic remapping in this pass.
+
+The bounded timing phase visits near-critical paths, evaluates nearby cell sizes,
+and prices area-growing moves using an area-delay-squared merit. The subsequent
+area phase tries smaller equivalents against the timing checkpoint reached by
+the first phase. Both phases evaluate real pin capacitances and Liberty delay,
+slew, clock-to-output, and setup tables. None of the four PI/register-to-PO/register
+boundary classes may worsen; neither may existing capacitance, slew, or fanout
+violations. Timing prioritizes register-to-register paths when present.
+
+Incremental timing propagates changed arrival/slew frontiers in topological order
+and stops at unchanged frontiers, without approximate cutoffs. Each trial has a
+sparse undo log: rejected, erroneous, or budget-interrupted substitutions restore
+the incumbent. Independent full STA using the `gv-stats` model verifies the final
+result before replacing the caller's module. This is max-delay/setup timing with
+ideal clocks, not hold, clock-tree, placement, or routed timing signoff.
+
+`ResizeOptions` sets deterministic round, candidate, and timing-evaluation limits;
+these are work bounds rather than a wall-clock deadline or a local-optimality
+guarantee. With `N` input instances (including FFs), defaults are:
+
+- `max(64, ceil(N / 512))` candidate sites per timing round.
+- `max(50_000, 4 * N)` instance timing evaluations across all timing rounds.
+- `max(100_000, 8 * N)` instance timing evaluations across all recovery rounds.
+- Four timing rounds, two recovery rounds, and eight alternatives per site.
+
+One substitution trial can evaluate many instances as timing changes propagate.
+Phase allowances are independent, do not reset each round, and do not borrow
+unused work from each other. There is no separate trial-count limit or combined
+phase-work limit, and recovery has no candidate-site cap. Optional candidate and
+evaluation overrides use these formulas when `None`; an explicit zero evaluation
+budget permits no evaluation work. `ResizeOptions::work_limits(N)` resolves the
+effective limits, which are also included in `ResizeReport`.
+
+The default area allowance is 2% of the original input area and never compounds
+across moves. `ResizeReport` records initial, upsized, and final area and boundary
+delays, accepted moves (including FF changes), work, and budget exhaustion.
+Each phase reports `stop_reason`: `disabled`, `no_improvement`, `round_limit`, or
+`propagation_limit`. `no_improvement` refers only to the bounded candidate search,
+not proof of local optimality. `budget_exhausted` is true if either phase stops
+because its evaluation budget is exhausted.
+The existing `upsize`/`downsize` report fields and round-option names refer to the
+timing-search/area-recovery phases respectively; timing search may move in either
+size direction.
+Set `resize_registers: false` to freeze FFs. Library callers supply `StaOptions`
+explicitly when they want a particular IO model; the `gv-resize` CLI defaults its
+output load from the library's `default_output_load` metadata.
+
+```rust,ignore
+use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
+
+let options = ResizeOptions { timing, ..ResizeOptions::default() };
+let report = resize_netlist(&mut module, &nets, &mut interner, &library, &options)?;
+```
+
+The library pass needs no external synthesis executable. The `gv-resize` driver
+command exposes it separately so the same mapped input can be evaluated before
+and after resizing. See the driver README for flags and `FUZZ.md` for the shared
+G8R generation, sequential simulation, and timing-invariant campaign.
 
 ## External Yosys APIs
 

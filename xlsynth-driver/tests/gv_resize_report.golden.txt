@@ -1,0 +1,43 @@
+{
+  "initial_area": 1.0,
+  "upsized_area": 2.0,
+  "final_area": 2.0,
+  "initial_delay": {
+    "input_to_output": 2.0,
+    "input_to_register": 0.0,
+    "register_to_output": 0.0,
+    "register_to_register": 0.0
+  },
+  "upsized_delay": {
+    "input_to_output": 1.0,
+    "input_to_register": 0.0,
+    "register_to_output": 0.0,
+    "register_to_register": 0.0
+  },
+  "final_delay": {
+    "input_to_output": 1.0,
+    "input_to_register": 0.0,
+    "register_to_output": 0.0,
+    "register_to_register": 0.0
+  },
+  "upsize": {
+    "trials": 2,
+    "accepted": 1,
+    "register_changes": 0,
+    "propagated_instances": 2,
+    "stop_reason": "no_improvement"
+  },
+  "downsize": {
+    "trials": 1,
+    "accepted": 0,
+    "register_changes": 0,
+    "propagated_instances": 1,
+    "stop_reason": "no_improvement"
+  },
+  "work_limits": {
+    "timing_candidate_sites": 64,
+    "timing_evaluations": 50000,
+    "recovery_evaluations": 100000
+  },
+  "budget_exhausted": false
+}

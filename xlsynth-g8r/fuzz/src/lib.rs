@@ -3,6 +3,7 @@
 pub mod abc_mapping;
 pub mod direct_g8r;
 pub mod external_yosys;
+pub mod netlist_resize;
 pub mod random_block;
 pub mod sequential_cleanup;
 pub mod sequential_legalization;

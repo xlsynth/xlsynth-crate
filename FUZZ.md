@@ -642,6 +642,28 @@ Primarily tests:
   concatenations are tokenized correctly.
 - Top-level annotation tokenization with string-valued fields
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_netlist_resize.rs
+
+Uses the shared direct-G8R generator to construct combinational and sequential
+graphs, lowers them structurally into a small slew/load-sensitive Liberty
+library, randomizes initial cell strengths, and runs bounded resizing. It compares
+cycle simulation of the original G8R graph, mapped netlist, and resized netlist
+from the same randomized initial state. It also checks deterministic output,
+all four boundary timing limits, recomputed area, area limits, unchanged
+connectivity, and independent per-phase evaluation budgets.
+Round counts, candidate limits, evaluation budgets, and register resizing are
+varied, including graph-scaled defaults, explicit zero budgets, disabled phases,
+and frozen register cells.
+The library also varies optional capacitance, slew and fanout limits, including
+clock-pin slew limits and input fanout weights, while retaining unconstrained
+samples. This exercises electrical rejection and rollback as limits appear or
+disappear across functionally equivalent cell sizes.
+The resizer's independent full-STA checks also expose stale incremental timing
+or rollback state. The generator uses nonconstant, unfolded expressions to
+satisfy the structural mapper's literal-free contract. It generates ordinary
+registers without explicit reset/enable controls because resizing consumes
+already-legalized mapped netlists.
+
 ### xlsynth-vastly/fuzz/fuzz_targets/diff_iverilog.rs
 
 Builds random expression+environment pairs, normalizes expressions through the

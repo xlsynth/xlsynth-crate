@@ -22,6 +22,7 @@ pub mod parse;
 pub mod power;
 pub mod register_mapping;
 pub mod report;
+pub mod resize;
 pub(crate) mod sequential_liberty;
 pub mod sta;
 pub mod stages;

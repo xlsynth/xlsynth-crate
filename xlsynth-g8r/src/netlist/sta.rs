@@ -56,18 +56,126 @@
 //! 6. Report the maximum rise/fall arrival observed at module outputs.
 
 use crate::liberty::Library;
-use crate::liberty::cell_formula::parse_formula;
+use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::timing_table::TimingTableArrayView;
-use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
+use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, StringId, TimingArc, TimingTable};
+use crate::liberty_proto::{TimingSense as WireTimingSense, TimingType as WireTimingType};
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+pub(crate) mod incremental;
+
+/// Last exact interpolation for one immutable table, after resolving axis
+/// semantics. Diagnostics are still counted separately for every query.
+#[derive(Clone, Copy)]
+struct CachedInterpolation {
+    coordinates: [u64; 3],
+    value: f64,
+}
+
+/// Parsed conditional arc and its applicability without known constant pins.
+struct PreparedWhen {
+    formula: Term,
+    without_constants: bool,
+}
+
+/// Query-invariant table geometry and monotone delay/slew values, prepared
+/// once per immutable Liberty table rather than at every interpolation.
+struct PreparedTimingTable {
+    rank: usize,
+    strides: [usize; 3],
+    axes: [Vec<f64>; 3],
+    variables: [String; 3],
+    axis_kinds: [AxisVariable; 3],
+    values: Vec<f32>,
+    is_setup: bool,
+    last_interpolation: Option<CachedInterpolation>,
+}
+
+impl PreparedTimingTable {
+    fn new(
+        library: &Library,
+        table: &TimingTable,
+        context: &(impl std::fmt::Display + ?Sized),
+    ) -> Result<Self> {
+        validate_timing_table_structure(library, table, context)?;
+        let array = TimingTableArrayView::from_timing_table(library, table)?;
+        let layout = timing_table_layout(library, table, context)?;
+        let dimensions = array.dimensions();
+        let mut values = array.values().to_vec();
+        let mut strides = [0; 3];
+        let mut stride = 1;
+        for (axis, dimension) in dimensions.iter().enumerate().rev() {
+            strides[axis] = stride;
+            // Structure validation already checked the complete product.
+            stride *= *dimension as usize;
+        }
+        if uses_monotone_upper_envelope(table) {
+            // A prefix maximum along each coordinate produces exactly the
+            // maximum over the lower orthant used by the scalar reference.
+            let mut stride = 1;
+            for dimension in dimensions.iter().rev().copied() {
+                let dimension = dimension as usize;
+                for i in 0..values.len() {
+                    if (i / stride) % dimension != 0 {
+                        values[i] = values[i].max(values[i - stride]);
+                    }
+                }
+                stride *= dimension;
+            }
+        }
+        Ok(Self {
+            rank: dimensions.len(),
+            strides,
+            axes: std::array::from_fn(|i| layout.axes[i].to_vec()),
+            variables: std::array::from_fn(|i| layout.variables[i].to_string()),
+            axis_kinds: std::array::from_fn(|i| AxisVariable::from_raw(layout.variables[i])),
+            values,
+            is_setup: matches!(
+                LibertyTableKind::from_raw(table.kind_str()),
+                LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
+            ),
+            last_interpolation: None,
+        })
+    }
+}
+
+/// Per-analysis parsed formulas, validated arcs, prepared tables and counters.
+/// The library borrow keeps arc identities and contents immutable while cached.
+struct TimingEvaluationContext<'a> {
+    library: &'a Library,
+    // Values live in the borrowed library, so their address is stable. Shape
+    // and kind distinguish views with different axes or envelope semantics.
+    // These caches use only library-owned numeric identities, not external
+    // string keys. Name maps retain the standard randomized hasher.
+    tables: FxHashMap<(usize, u32, i32), PreparedTimingTable>,
+    when_formulas: FxHashMap<StringId, PreparedWhen>,
+    validated_delay_slew_arcs: FxHashSet<*const TimingArc>,
+    validated_setup_arcs: FxHashSet<*const TimingArc>,
+    diagnostics: TimingQueryDiagnosticCounts,
+}
+
+impl<'a> TimingEvaluationContext<'a> {
+    fn new(library: &'a Library) -> Self {
+        Self {
+            library,
+            tables: FxHashMap::default(),
+            when_formulas: FxHashMap::default(),
+            validated_delay_slew_arcs: FxHashSet::default(),
+            validated_setup_arcs: FxHashSet::default(),
+            diagnostics: TimingQueryDiagnosticCounts::default(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
@@ -121,9 +229,11 @@ impl EdgeTimingCandidate {
     }
 }
 
+/// A timing frontier usually contains one edge after envelope reduction;
+/// inline storage avoids allocating the common case without limiting width.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct EdgeTimingSet {
-    values: Vec<EdgeTimingCandidate>,
+    values: SmallVec<[EdgeTimingCandidate; 1]>,
 }
 
 impl EdgeTimingSet {
@@ -143,20 +253,12 @@ impl EdgeTimingSet {
         if self
             .values
             .iter()
-            .any(|existing| existing.timing == candidate.timing)
-        {
-            return;
-        }
-
-        if self
-            .values
-            .iter()
-            .any(|existing| edge_timing_dominates(existing.timing, candidate.timing))
+            .any(|existing| edge_timing_covers(existing.timing, candidate.timing))
         {
             return;
         }
         self.values
-            .retain(|existing| !edge_timing_dominates(candidate.timing, existing.timing));
+            .retain(|existing| !edge_timing_covers(candidate.timing, existing.timing));
 
         self.values.push(candidate);
         self.values.sort_by(|lhs, rhs| {
@@ -238,9 +340,9 @@ impl SignalTimingSet {
     }
 }
 
-fn edge_timing_dominates(lhs: EdgeTiming, rhs: EdgeTiming) -> bool {
-    (lhs.arrival >= rhs.arrival && lhs.transition >= rhs.transition)
-        && (lhs.arrival > rhs.arrival || lhs.transition > rhs.transition)
+/// Includes equality so insertion keeps the first equal-timing path payload.
+fn edge_timing_covers(lhs: EdgeTiming, rhs: EdgeTiming) -> bool {
+    lhs.arrival >= rhs.arrival && lhs.transition >= rhs.transition
 }
 
 fn parse_trace_env_flag(value: &str) -> bool {
@@ -342,32 +444,40 @@ impl StaReport {
     }
 }
 
+/// Validated library names and pin indexes for immutable timing queries.
 struct StaLibraryIndex<'a> {
     library: &'a crate::liberty_model::Library,
-    cell_by_name: HashMap<String, usize>,
-    pin_by_cell: Vec<HashMap<String, usize>>,
+    cell_by_name: HashMap<&'a str, usize>,
+    pin_by_cell: Vec<HashMap<&'a str, usize>>,
+    related_pin_names: FxHashMap<StringId, SmallVec<[&'a str; 1]>>,
 }
 
 impl<'a> StaLibraryIndex<'a> {
     fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
-        let mut cell_by_name = HashMap::new();
+        let mut cell_by_name = HashMap::with_capacity(library.cells.len());
         let mut pin_by_cell = Vec::with_capacity(library.cells.len());
+        let mut related_pin_names = FxHashMap::default();
         for (cell_idx, cell) in library.cells.iter().enumerate() {
-            if cell_by_name.insert(cell.name.clone(), cell_idx).is_some() {
+            if cell_by_name.insert(cell.name.as_str(), cell_idx).is_some() {
                 return Err(anyhow!(
                     "library defines cell '{}' more than once; duplicate cell names are unsupported in basic STA",
                     cell.name
                 ));
             }
-            let mut pin_map = HashMap::new();
+            let mut pin_map = HashMap::with_capacity(cell.pins.len());
             for (pin_idx, pin) in cell.pins.iter().enumerate() {
                 let pin_name = library.resolve_string(&pin.name);
-                if pin_map.insert(pin_name.to_string(), pin_idx).is_some() {
+                if pin_map.insert(pin_name, pin_idx).is_some() {
                     return Err(anyhow!(
                         "library cell '{}' defines pin '{}' more than once; duplicate pin names are unsupported in basic STA",
                         cell.name,
                         pin_name
                     ));
+                }
+                for arc in &pin.timing_arcs {
+                    related_pin_names.entry(arc.related_pin).or_insert_with(|| {
+                        split_related_pin_names(library.resolve_string(&arc.related_pin)).collect()
+                    });
                 }
             }
             pin_by_cell.push(pin_map);
@@ -376,6 +486,7 @@ impl<'a> StaLibraryIndex<'a> {
             library,
             cell_by_name,
             pin_by_cell,
+            related_pin_names,
         })
     }
 
@@ -390,6 +501,11 @@ impl<'a> StaLibraryIndex<'a> {
 
     fn pin_index(&self, cell_idx: usize, pin_name: &str) -> Option<usize> {
         self.pin_by_cell.get(cell_idx)?.get(pin_name).copied()
+    }
+
+    /// Borrows the parsed related-pin names of an arc in this indexed library.
+    fn related_pin_names(&self, related_pin: StringId) -> &[&'a str] {
+        &self.related_pin_names[&related_pin]
     }
 }
 
@@ -461,7 +577,7 @@ pub fn analyze_register_boundary_max_arrival(
     launch_primary_inputs: bool,
     launch_register_instances: &[usize],
 ) -> Result<StaReport> {
-    let launch_register_instances: HashSet<usize> =
+    let launch_register_instances: FxHashSet<usize> =
         launch_register_instances.iter().copied().collect();
     analyze_max_arrival_proto_with_mode(
         module,
@@ -492,11 +608,12 @@ pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> 
         })
 }
 
+/// Launch-source policy for combinational or register-boundary timing.
 enum StaAnalysisMode<'a> {
     CombinationalOnly,
     RegisterBoundaries {
         launch_primary_inputs: bool,
-        launch_register_instances: &'a HashSet<usize>,
+        launch_register_instances: &'a FxHashSet<usize>,
     },
 }
 
@@ -624,12 +741,12 @@ fn analyze_max_arrival_proto_with_mode(
                 .iter()
                 .filter(|pin| pin.direction == PinDirection::Output as i32)
             {
-                for arc in output_pin.timing_arcs.iter().filter(|arc| {
-                    StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-                }) {
-                    for related_pin_name in
-                        split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
-                    {
+                for arc in output_pin
+                    .timing_arcs
+                    .iter()
+                    .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
+                {
+                    for &related_pin_name in lib.related_pin_names(arc.related_pin) {
                         let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
                             anyhow!(
                                 "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
@@ -841,7 +958,9 @@ fn analyze_max_arrival_proto_with_mode(
 
     let mut successors: Vec<Vec<usize>> = vec![Vec::new(); instance_count];
     let mut indegree: Vec<usize> = vec![0; instance_count];
-    let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
+    // Only internal numeric identities are hashed, and the set is never
+    // iterated: successor order still follows the normalized netlist.
+    let mut seen_edges: FxHashSet<(usize, usize)> = FxHashSet::default();
     for (bit_idx, drivers) in bit_drivers.iter().enumerate() {
         let has_assign_source = assign_sources[bit_idx].is_some();
         if is_module_input[bit_idx] && (!drivers.is_empty() || has_assign_source) {
@@ -893,7 +1012,7 @@ fn analyze_max_arrival_proto_with_mode(
             })?;
             let pin_cap = effective_input_capacitance_by_edge(
                 pin,
-                &format!(
+                &format_args!(
                     "load pin '{}.{}'",
                     instance_cell_names[load.inst_idx], load.pin_name
                 ),
@@ -965,8 +1084,7 @@ fn analyze_max_arrival_proto_with_mode(
 
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
-    let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
-    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    let mut evaluation = TimingEvaluationContext::new(library);
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
             queue.push_back(idx);
@@ -977,304 +1095,26 @@ fn analyze_max_arrival_proto_with_mode(
     while let Some(inst_idx) = queue.pop_front() {
         processed += 1;
 
-        let cell_idx = instance_cell_indices[inst_idx];
-        let cell_name = &instance_cell_names[inst_idx];
-        let inst_pin_map = &instance_pin_sources[inst_idx];
-        let known_pin_values = &instance_known_pin_values[inst_idx];
-        let instance = &normalized.instances[inst_idx];
-        let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")
-            .unwrap_or_else(|_| "<unknown>".to_string());
-
-        let mut local_output_timing_sets: HashMap<String, SignalTimingSet> = HashMap::new();
-        for pin_idx in &instance_output_pin_orders[inst_idx] {
-            let pin = &lib.library.cells[cell_idx].pins[*pin_idx];
-            let pin_name = lib.library.resolve_string(&pin.name);
-            let output_sources = inst_pin_map.get(pin_name);
-            if analysis_mode.uses_register_boundaries() && instance_is_sequential[inst_idx] {
-                if analysis_mode.launches_register(inst_idx) {
-                    let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
-                        Some(PinBitSource::Bit(output_bit_idx)) => *output_bit_idx,
-                        Some(PinBitSource::Literal(_) | PinBitSource::Unknown) | None => {
-                            unreachable!("connected sequential output pins have net bit sources")
-                        }
-                    };
-                    let output_load = bit_load_capacitance[output_bit_idx];
-                    bit_timing_sets[output_bit_idx] = Some(evaluate_register_launch_output_set(
-                        lib.library,
-                        cell_name,
-                        pin,
-                        known_pin_values,
-                        output_load,
-                        &mut validated_timing_tables,
-                        &mut timing_query_diagnostic_counts,
-                        &format!(
-                            "{}.{} (instance '{}') clock-to-output",
-                            cell_name, pin_name, instance_name
-                        ),
-                    )?);
-                }
-                continue;
-            }
-            if let Some(unsupported_arc) = pin.timing_arcs.iter().find(|arc| {
-                !StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-            }) {
-                return Err(anyhow!(
-                    "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
-                    instance_name,
-                    cell_name,
-                    pin_name,
-                    unsupported_arc.timing_type_str(lib.library)
-                ));
-            }
-            let combinational_arcs: Vec<&TimingArc> = pin
-                .timing_arcs
-                .iter()
-                .filter(|arc| {
-                    StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational()
-                })
-                .collect();
-            let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
-                Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
-                Some(PinBitSource::Literal(_) | PinBitSource::Unknown) => {
-                    unreachable!("connected output pins have net bit sources")
-                }
-                None => None,
-            };
-            let output_net_name = output_bit_idx
-                .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
-                .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name));
-            if combinational_arcs.is_empty() {
-                if let Some(constant_value) =
-                    constant_output_function_value(lib.library, cell_name, pin)?
-                {
-                    sta_trace(|| {
-                        format!(
-                            "inst={} cell={} out_pin={} out_net={} constant_source={}",
-                            instance_name, cell_name, pin_name, output_net_name, constant_value,
-                        )
-                    });
-                    store_output_timing_set(
-                        &mut local_output_timing_sets,
-                        &mut bit_timing_sets,
-                        pin_name,
-                        output_bit_idx,
-                        literal_source_timing_set.clone(),
-                    );
-                    continue;
-                }
-                return Err(anyhow!(
-                    "basic STA only supports combinational or constant-source output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs and no constant function",
-                    instance_name,
-                    cell_name,
-                    pin_name
-                ));
-            }
-            validate_timing_tables_once(
-                lib.library,
-                cell_name,
-                pin_name,
-                combinational_arcs.as_slice(),
-                &mut validated_timing_tables,
-            )?;
-            let output_load = output_bit_idx
-                .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
-                .unwrap_or_default();
-            let mut accumulated: Option<SignalTimingSet> = None;
-
-            for arc in &combinational_arcs {
-                let arc_context = format!(
-                    "cell '{}' output pin '{}' timing arc related_pin '{}'",
-                    cell_name,
-                    pin_name,
-                    lib.library.resolve_string(&arc.related_pin)
-                );
-                if !arc_when_may_apply(lib.library, arc, known_pin_values, arc_context.as_str())? {
-                    sta_trace(|| {
-                        format!(
-                            "inst={} cell={} out_pin={} when={} skipped=true",
-                            instance_name,
-                            cell_name,
-                            pin_name,
-                            lib.library.resolve_string(&arc.when),
-                        )
-                    });
-                    continue;
-                }
-                for related_pin_name in
-                    split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
-                {
-                    let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
-                            anyhow!(
-                                "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
-                                cell_name,
-                                pin_name,
-                                related_pin_name
-                            )
-                        })?;
-                    let mut related_timing_sets: Vec<(&SignalTimingSet, String)> = Vec::new();
-                    if related_pin.direction == PinDirection::Output as i32 {
-                        let Some(timing) = local_output_timing_sets.get(related_pin_name) else {
-                            if analysis_mode.uses_register_boundaries() {
-                                continue;
-                            }
-                            return Err(anyhow!(
-                                "missing intra-cell source timing for output pin '{}.{}' feeding '{}.{}' in instance '{}'",
-                                cell_name,
-                                related_pin_name,
-                                cell_name,
-                                pin_name,
-                                instance_name
-                            ));
-                        };
-                        let related_net_name = inst_pin_map
-                            .get(related_pin_name)
-                            .and_then(|sources| sources.first())
-                            .and_then(|source| match source {
-                                PinBitSource::Bit(related_bit_idx) => {
-                                    Some(normalized.render_bit(*related_bit_idx, nets, interner))
-                                }
-                                PinBitSource::Literal(_) | PinBitSource::Unknown => None,
-                            })
-                            .unwrap_or_else(|| {
-                                format!("<unconnected {}.{}>", instance_name, related_pin_name)
-                            });
-                        related_timing_sets.push((timing, related_net_name));
-                    } else {
-                        let related_sources =
-                                inst_pin_map.get(related_pin_name).ok_or_else(|| {
-                                    anyhow!(
-                                        "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
-                                        instance_name,
-                                        cell_name,
-                                        pin_name,
-                                        related_pin_name
-                                    )
-                                })?;
-                        if related_sources.is_empty() {
-                            return Err(anyhow!(
-                                "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
-                                instance_name,
-                                cell_name,
-                                pin_name,
-                                related_pin_name
-                            ));
-                        }
-                        for related_source in related_sources {
-                            let (input_timing_set, related_net_name) = match related_source {
-                                PinBitSource::Bit(related_bit_idx) => {
-                                    let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
-                                    else {
-                                        if analysis_mode.uses_register_boundaries() {
-                                            continue;
-                                        }
-                                        return Err(anyhow!(
-                                            "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
-                                            normalized.render_bit(*related_bit_idx, nets, interner),
-                                            cell_name,
-                                            pin_name,
-                                            related_pin_name
-                                        ));
-                                    };
-                                    (
-                                        timing,
-                                        normalized.render_bit(*related_bit_idx, nets, interner),
-                                    )
-                                }
-                                PinBitSource::Literal(_) | PinBitSource::Unknown
-                                    if analysis_mode.uses_register_boundaries() =>
-                                {
-                                    continue;
-                                }
-                                PinBitSource::Literal(value) => (
-                                    &literal_source_timing_set,
-                                    if *value { "1'b1" } else { "1'b0" }.to_string(),
-                                ),
-                                PinBitSource::Unknown => {
-                                    (&literal_source_timing_set, "1'bx".to_string())
-                                }
-                            };
-                            related_timing_sets.push((input_timing_set, related_net_name));
-                        }
-                    }
-                    for (input_timing_set, related_net_name) in related_timing_sets {
-                        let context = format!(
-                            "{}.{} (instance '{}') related_pin '{}'",
-                            cell_name, pin_name, instance_name, related_pin_name
-                        );
-                        let candidate = evaluate_arc_set(
-                            lib.library,
-                            arc,
-                            input_timing_set,
-                            output_load,
-                            &mut timing_query_diagnostic_counts,
-                            &context,
-                        )?;
-                        sta_trace(|| {
-                            format!(
-                                "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
-                                instance_name,
-                                cell_name,
-                                pin_name,
-                                output_net_name,
-                                related_pin_name,
-                                related_net_name,
-                                if lib.library.resolve_string(&arc.when).is_empty() {
-                                    "<empty>"
-                                } else {
-                                    lib.library.resolve_string(&arc.when)
-                                },
-                                arc.timing_sense_str(lib.library),
-                                arc.timing_type_str(lib.library),
-                                format_edge_timing_set(&candidate.rise),
-                                format_edge_timing_set(&candidate.fall),
-                                format_optional_edge_timing(candidate.rise.max_arrival_edge()),
-                                format_optional_edge_timing(candidate.fall.max_arrival_edge()),
-                            )
-                        });
-                        accumulated = Some(match accumulated {
-                            Some(prev) => prev.merge(&candidate),
-                            None => candidate,
-                        });
-                    }
-                }
-            }
-
-            let Some(mut out_timing_set) = accumulated else {
-                if analysis_mode.uses_register_boundaries() {
-                    continue;
-                }
-                return Err(anyhow!(
-                    "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
-                    instance_name,
-                    cell_name,
-                    pin_name
-                ));
-            };
-            // Use a conservative per-edge envelope: max arrival and max
-            // transition may come from different source candidates.
-            collapse_signal_timing_set_to_envelope(&mut out_timing_set);
-            sta_trace(|| {
-                format!(
-                    "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
-                    instance_name,
-                    cell_name,
-                    pin_name,
-                    output_net_name,
-                    format_edge_timing_set(&out_timing_set.rise),
-                    format_edge_timing_set(&out_timing_set.fall),
-                    format_optional_edge_timing(out_timing_set.rise.max_arrival_edge()),
-                    format_optional_edge_timing(out_timing_set.fall.max_arrival_edge()),
-                )
-            });
-
-            store_output_timing_set(
-                &mut local_output_timing_sets,
-                &mut bit_timing_sets,
-                pin_name,
-                output_bit_idx,
-                out_timing_set,
-            );
-        }
+        evaluate_instance_outputs(
+            InstanceTimingInputs {
+                lib: &lib,
+                cell_idx: instance_cell_indices[inst_idx],
+                inst_pin_map: &instance_pin_sources[inst_idx],
+                known_pin_values: &instance_known_pin_values[inst_idx],
+                output_pin_order: &instance_output_pin_orders[inst_idx],
+                normalized: &normalized,
+                nets,
+                interner,
+                inst_idx,
+                register_boundaries: analysis_mode.uses_register_boundaries(),
+                is_sequential: instance_is_sequential[inst_idx],
+                launch_register: analysis_mode.launches_register(inst_idx),
+            },
+            &bit_load_capacitance,
+            &mut bit_timing_sets,
+            &literal_source_timing_set,
+            &mut evaluation,
+        )?;
 
         for succ in &successors[inst_idx] {
             instance_levels[*succ] = instance_levels[*succ].max(instance_levels[inst_idx] + 1);
@@ -1352,12 +1192,10 @@ fn analyze_max_arrival_proto_with_mode(
                 .filter(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
             {
                 let pin_name = lib.library.resolve_string(&pin.name);
-                let setup_arcs: Vec<&TimingArc> = pin
+                let setup_arcs: SmallVec<[&TimingArc; 4]> = pin
                     .timing_arcs
                     .iter()
-                    .filter(|arc| {
-                        StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_setup()
-                    })
+                    .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_setup())
                     .collect();
                 if setup_arcs.is_empty() {
                     continue;
@@ -1367,7 +1205,7 @@ fn analyze_max_arrival_proto_with_mode(
                     &instance_cell_names[inst_idx],
                     pin_name,
                     setup_arcs.as_slice(),
-                    &mut validated_timing_tables,
+                    &mut evaluation,
                 )?;
                 let Some(sources) = pin_sources.get(pin_name) else {
                     continue;
@@ -1384,17 +1222,14 @@ fn analyze_max_arrival_proto_with_mode(
                         setup_arcs.as_slice(),
                         &instance_known_pin_values[inst_idx],
                         timing_set,
-                        &mut timing_query_diagnostic_counts,
-                        &format!(
+                        &mut evaluation,
+                        &format_args!(
                             "{}.{} (instance '{}') setup",
                             instance_cell_names[inst_idx],
                             pin_name,
-                            resolve_symbol(
-                                interner,
-                                normalized.instances[inst_idx].instance_name,
-                                "instance name"
-                            )
-                            .unwrap_or_else(|_| "<unknown>".to_string())
+                            interner
+                                .resolve(normalized.instances[inst_idx].instance_name)
+                                .unwrap_or("<unknown>")
                         ),
                     )?
                     else {
@@ -1447,11 +1282,359 @@ fn analyze_max_arrival_proto_with_mode(
             .and_then(|timing| timing.register_path_breakdown),
         register_input_arrivals,
         register_input_breakdowns,
-        timing_query_diagnostic_counts,
+        timing_query_diagnostic_counts: evaluation.diagnostics,
         cell_levels,
     })
 }
-fn effective_input_capacitance_by_edge(pin: &Pin, context: &str) -> Result<EdgeLoadCapacitance> {
+
+/// Immutable connectivity and cell metadata for the shared timing kernel.
+struct InstanceTimingInputs<'a, 'lib> {
+    lib: &'a StaLibraryIndex<'lib>,
+    cell_idx: usize,
+    inst_pin_map: &'a HashMap<String, Vec<PinBitSource>>,
+    known_pin_values: &'a HashMap<String, bool>,
+    output_pin_order: &'a [usize],
+    normalized: &'a NormalizedNetlistModule<'a>,
+    nets: &'a [Net],
+    interner: &'a StringInterner<StringBackend<SymbolU32>>,
+    inst_idx: usize,
+    register_boundaries: bool,
+    is_sequential: bool,
+    launch_register: bool,
+}
+
+/// Evaluates one instance using the same kernel in full and incremental STA.
+fn evaluate_instance_outputs(
+    inputs: InstanceTimingInputs<'_, '_>,
+    bit_load_capacitance: &[EdgeLoadCapacitance],
+    bit_timing_sets: &mut [Option<SignalTimingSet>],
+    literal_source_timing_set: &SignalTimingSet,
+    evaluation: &mut TimingEvaluationContext<'_>,
+) -> Result<()> {
+    let InstanceTimingInputs {
+        lib,
+        cell_idx,
+        inst_pin_map,
+        known_pin_values,
+        output_pin_order,
+        normalized,
+        nets,
+        interner,
+        inst_idx,
+        register_boundaries,
+        is_sequential,
+        launch_register,
+    } = inputs;
+    let cell_name = &lib.library.cells[cell_idx].name;
+    let instance = &normalized.instances[inst_idx];
+    let instance_name = interner.resolve(instance.instance_name).ok_or_else(|| {
+        anyhow!(
+            "could not resolve instance name symbol {:?}",
+            instance.instance_name
+        )
+    })?;
+    // Only multi-output cells need local timing for output-to-output arcs.
+    // Borrow library pin names instead of allocating them for each query.
+    let mut local_output_timing_sets: Option<HashMap<&str, SignalTimingSet>> =
+        (output_pin_order.len() > 1).then(HashMap::new);
+    for pin_idx in output_pin_order {
+        let pin = &lib.library.cells[cell_idx].pins[*pin_idx];
+        let pin_name = lib.library.resolve_string(&pin.name);
+        let output_sources = inst_pin_map.get(pin_name);
+        if register_boundaries && is_sequential {
+            if launch_register {
+                let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
+                    Some(PinBitSource::Bit(output_bit_idx)) => *output_bit_idx,
+                    Some(PinBitSource::Literal(_) | PinBitSource::Unknown) | None => {
+                        unreachable!("connected sequential output pins have net bit sources")
+                    }
+                };
+                let output_load = bit_load_capacitance[output_bit_idx];
+                bit_timing_sets[output_bit_idx] = Some(evaluate_register_launch_output_set(
+                    lib.library,
+                    cell_name,
+                    pin,
+                    known_pin_values,
+                    output_load,
+                    evaluation,
+                    &format_args!(
+                        "{}.{} (instance '{}') clock-to-output",
+                        cell_name, pin_name, instance_name
+                    ),
+                )?);
+            }
+            continue;
+        }
+        if let Some(unsupported_arc) = pin
+            .timing_arcs
+            .iter()
+            .find(|arc| !StaTimingType::from_arc(arc, lib.library).is_combinational())
+        {
+            return Err(anyhow!(
+                "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
+                instance_name,
+                cell_name,
+                pin_name,
+                unsupported_arc.timing_type_str(lib.library)
+            ));
+        }
+        // Every arc passed the combinational check above; use the borrowed
+        // slice instead of classifying and copying the references again.
+        let combinational_arcs = &pin.timing_arcs;
+        let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
+            Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
+            Some(PinBitSource::Literal(_) | PinBitSource::Unknown) => {
+                unreachable!("connected output pins have net bit sources")
+            }
+            None => None,
+        };
+        let output_net_name = || {
+            output_bit_idx
+                .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
+                .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name))
+        };
+        if combinational_arcs.is_empty() {
+            if let Some(constant_value) =
+                constant_output_function_value(lib.library, cell_name, pin)?
+            {
+                sta_trace(|| {
+                    format!(
+                        "inst={} cell={} out_pin={} out_net={} constant_source={}",
+                        instance_name,
+                        cell_name,
+                        pin_name,
+                        output_net_name(),
+                        constant_value,
+                    )
+                });
+                store_output_timing_set(
+                    &mut local_output_timing_sets,
+                    bit_timing_sets,
+                    pin_name,
+                    output_bit_idx,
+                    literal_source_timing_set.clone(),
+                );
+                continue;
+            }
+            return Err(anyhow!(
+                "basic STA only supports combinational or constant-source output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs and no constant function",
+                instance_name,
+                cell_name,
+                pin_name
+            ));
+        }
+        validate_timing_tables_once(
+            lib.library,
+            cell_name,
+            pin_name,
+            combinational_arcs,
+            evaluation,
+        )?;
+        let output_load = output_bit_idx
+            .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
+            .unwrap_or_default();
+        let mut accumulated: Option<SignalTimingSet> = None;
+
+        for arc in combinational_arcs {
+            let arc_context = format_args!(
+                "cell '{}' output pin '{}' timing arc related_pin '{}'",
+                cell_name,
+                pin_name,
+                lib.library.resolve_string(&arc.related_pin)
+            );
+            if !arc_when_may_apply(lib.library, arc, known_pin_values, evaluation, &arc_context)? {
+                sta_trace(|| {
+                    format!(
+                        "inst={} cell={} out_pin={} when={} skipped=true",
+                        instance_name,
+                        cell_name,
+                        pin_name,
+                        lib.library.resolve_string(&arc.when),
+                    )
+                });
+                continue;
+            }
+            for &related_pin_name in lib.related_pin_names(arc.related_pin) {
+                let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
+                    anyhow!(
+                        "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                        cell_name,
+                        pin_name,
+                        related_pin_name
+                    )
+                })?;
+                let mut related_timing_sets: SmallVec<
+                    [(&SignalTimingSet, Option<PinBitSource>); 1],
+                > = SmallVec::new();
+                if related_pin.direction == PinDirection::Output as i32 {
+                    let Some(timing) = local_output_timing_sets
+                        .as_ref()
+                        .and_then(|outputs| outputs.get(related_pin_name))
+                    else {
+                        if register_boundaries {
+                            continue;
+                        }
+                        return Err(anyhow!(
+                            "missing intra-cell source timing for output pin '{}.{}' feeding '{}.{}' in instance '{}'",
+                            cell_name,
+                            related_pin_name,
+                            cell_name,
+                            pin_name,
+                            instance_name
+                        ));
+                    };
+                    let related_source = inst_pin_map
+                        .get(related_pin_name)
+                        .and_then(|sources| sources.first())
+                        .copied();
+                    related_timing_sets.push((timing, related_source));
+                } else {
+                    let related_sources =
+                            inst_pin_map.get(related_pin_name).ok_or_else(|| {
+                                anyhow!(
+                                    "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
+                                    instance_name,
+                                    cell_name,
+                                    pin_name,
+                                    related_pin_name
+                                )
+                            })?;
+                    if related_sources.is_empty() {
+                        return Err(anyhow!(
+                            "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
+                            instance_name,
+                            cell_name,
+                            pin_name,
+                            related_pin_name
+                        ));
+                    }
+                    for related_source in related_sources {
+                        let input_timing_set = match related_source {
+                            PinBitSource::Bit(related_bit_idx) => {
+                                let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
+                                else {
+                                    if register_boundaries {
+                                        continue;
+                                    }
+                                    return Err(anyhow!(
+                                        "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
+                                        normalized.render_bit(*related_bit_idx, nets, interner),
+                                        cell_name,
+                                        pin_name,
+                                        related_pin_name
+                                    ));
+                                };
+                                timing
+                            }
+                            PinBitSource::Literal(_) | PinBitSource::Unknown
+                                if register_boundaries =>
+                            {
+                                continue;
+                            }
+                            PinBitSource::Literal(_) | PinBitSource::Unknown => {
+                                literal_source_timing_set
+                            }
+                        };
+                        related_timing_sets.push((input_timing_set, Some(*related_source)));
+                    }
+                }
+                for (input_timing_set, related_source) in related_timing_sets {
+                    let context = format_args!(
+                        "{}.{} (instance '{}') related_pin '{}'",
+                        cell_name, pin_name, instance_name, related_pin_name
+                    );
+                    let candidate = evaluate_arc_set(
+                        lib.library,
+                        arc,
+                        input_timing_set,
+                        output_load,
+                        evaluation,
+                        &context,
+                    )?;
+                    sta_trace(|| {
+                        let related_net_name = match related_source {
+                            Some(PinBitSource::Bit(bit)) => {
+                                normalized.render_bit(bit, nets, interner)
+                            }
+                            Some(PinBitSource::Literal(value)) => {
+                                if value { "1'b1" } else { "1'b0" }.to_string()
+                            }
+                            Some(PinBitSource::Unknown) => "1'bx".to_string(),
+                            None => format!("<unconnected {}.{}>", instance_name, related_pin_name),
+                        };
+                        format!(
+                            "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
+                            instance_name,
+                            cell_name,
+                            pin_name,
+                            output_net_name(),
+                            related_pin_name,
+                            related_net_name,
+                            if lib.library.resolve_string(&arc.when).is_empty() {
+                                "<empty>"
+                            } else {
+                                lib.library.resolve_string(&arc.when)
+                            },
+                            arc.timing_sense_str(lib.library),
+                            arc.timing_type_str(lib.library),
+                            format_edge_timing_set(&candidate.rise),
+                            format_edge_timing_set(&candidate.fall),
+                            format_optional_edge_timing(candidate.rise.max_arrival_edge()),
+                            format_optional_edge_timing(candidate.fall.max_arrival_edge()),
+                        )
+                    });
+                    accumulated = Some(match accumulated {
+                        Some(prev) => prev.merge(&candidate),
+                        None => candidate,
+                    });
+                }
+            }
+        }
+
+        let Some(mut out_timing_set) = accumulated else {
+            if register_boundaries {
+                continue;
+            }
+            return Err(anyhow!(
+                "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
+                instance_name,
+                cell_name,
+                pin_name
+            ));
+        };
+        // Use a conservative per-edge envelope: max arrival and max
+        // transition may come from different source candidates.
+        collapse_signal_timing_set_to_envelope(&mut out_timing_set);
+        sta_trace(|| {
+            format!(
+                "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
+                instance_name,
+                cell_name,
+                pin_name,
+                output_net_name(),
+                format_edge_timing_set(&out_timing_set.rise),
+                format_edge_timing_set(&out_timing_set.fall),
+                format_optional_edge_timing(out_timing_set.rise.max_arrival_edge()),
+                format_optional_edge_timing(out_timing_set.fall.max_arrival_edge()),
+            )
+        });
+
+        store_output_timing_set(
+            &mut local_output_timing_sets,
+            bit_timing_sets,
+            pin_name,
+            output_bit_idx,
+            out_timing_set,
+        );
+    }
+
+    Ok(())
+}
+
+fn effective_input_capacitance_by_edge(
+    pin: &Pin,
+    context: &(impl std::fmt::Display + ?Sized),
+) -> Result<EdgeLoadCapacitance> {
     // max_capacitance is a design-rule limit, not nominal pin capacitance.
     // Prefer edge-specific capacitance when provided; fall back to nominal.
     let capacitance = EdgeLoadCapacitance {
@@ -1497,6 +1680,22 @@ enum StaTimingType {
 }
 
 impl StaTimingType {
+    /// Classifies normalized enums directly, preserving unknown-string
+    /// fallback.
+    fn from_arc(arc: &TimingArc, library: &Library) -> Self {
+        match arc.timing_type.wire_value() {
+            WireTimingType::Unspecified | WireTimingType::Combinational => Self::Combinational,
+            WireTimingType::CombinationalRise => Self::CombinationalRise,
+            WireTimingType::CombinationalFall => Self::CombinationalFall,
+            WireTimingType::RisingEdge => Self::RisingEdge,
+            WireTimingType::FallingEdge => Self::FallingEdge,
+            WireTimingType::SetupRising => Self::SetupRising,
+            WireTimingType::SetupFalling => Self::SetupFalling,
+            WireTimingType::Other => Self::from_raw(arc.timing_type_str(library)),
+            _ => Self::Other,
+        }
+    }
+
     fn from_raw(raw: &str) -> Self {
         match raw {
             "" | "combinational" => Self::Combinational,
@@ -1544,6 +1743,17 @@ enum StaTimingSense {
 }
 
 impl StaTimingSense {
+    /// Uses typed metadata for ordinary arcs without discarding fallback text.
+    fn from_arc(arc: &TimingArc, library: &Library) -> Self {
+        match arc.timing_sense.wire_value() {
+            WireTimingSense::Unspecified => Self::Unspecified,
+            WireTimingSense::PositiveUnate => Self::PositiveUnate,
+            WireTimingSense::NegativeUnate => Self::NegativeUnate,
+            WireTimingSense::NonUnate => Self::NonUnate,
+            WireTimingSense::Other => Self::from_raw(arc.timing_sense_str(library)),
+        }
+    }
+
     fn from_raw(raw: &str) -> Self {
         match raw {
             "" => Self::Unspecified,
@@ -1570,6 +1780,17 @@ enum StaTimingTableKind {
 }
 
 impl StaTimingTableKind {
+    fn as_wire(self) -> crate::liberty_proto::TimingTableKind {
+        match self {
+            Self::CellRise => crate::liberty_proto::TimingTableKind::CellRise,
+            Self::CellFall => crate::liberty_proto::TimingTableKind::CellFall,
+            Self::RiseTransition => crate::liberty_proto::TimingTableKind::RiseTransition,
+            Self::FallTransition => crate::liberty_proto::TimingTableKind::FallTransition,
+            Self::RiseConstraint => crate::liberty_proto::TimingTableKind::RiseConstraint,
+            Self::FallConstraint => crate::liberty_proto::TimingTableKind::FallConstraint,
+        }
+    }
+
     fn as_raw(self) -> &'static str {
         match self {
             Self::CellRise => "cell_rise",
@@ -1701,14 +1922,16 @@ fn constant_output_function_value(
 }
 
 /// Stores one instance-output timing set for local and net-level propagation.
-fn store_output_timing_set(
-    local_output_timing_sets: &mut HashMap<String, SignalTimingSet>,
+fn store_output_timing_set<'a>(
+    local_output_timing_sets: &mut Option<HashMap<&'a str, SignalTimingSet>>,
     bit_timing_sets: &mut [Option<SignalTimingSet>],
-    pin_name: &str,
+    pin_name: &'a str,
     output_bit_idx: Option<usize>,
     out_timing_set: SignalTimingSet,
 ) {
-    local_output_timing_sets.insert(pin_name.to_string(), out_timing_set.clone());
+    if let Some(outputs) = local_output_timing_sets {
+        outputs.insert(pin_name, out_timing_set.clone());
+    }
     if let Some(output_bit_idx) = output_bit_idx {
         bit_timing_sets[output_bit_idx] = Some(match bit_timing_sets[output_bit_idx].as_ref() {
             Some(prev) => prev.clone().merge(&out_timing_set),
@@ -1770,11 +1993,9 @@ fn visit_combinational_output_pin(
     for arc in pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(lib.library)).is_combinational())
+        .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
     {
-        for related_pin_name in
-            split_related_pin_names(lib.library.resolve_string(&arc.related_pin))
-        {
+        for &related_pin_name in lib.related_pin_names(arc.related_pin) {
             let related_pin_idx = lib.pin_index(cell_idx, related_pin_name).ok_or_else(|| {
                 anyhow!(
                     "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
@@ -1828,7 +2049,7 @@ pub fn validate_output_pin_for_basic_sta(
     if let Some(unsupported_arc) = pin
         .timing_arcs
         .iter()
-        .find(|arc| !StaTimingType::from_raw(arc.timing_type_str(library)).is_combinational())
+        .find(|arc| !StaTimingType::from_arc(arc, library).is_combinational())
     {
         return Err(anyhow!(
             "cell '{}' output pin '{}' has unsupported timing type '{}'",
@@ -1837,18 +2058,18 @@ pub fn validate_output_pin_for_basic_sta(
             unsupported_arc.timing_type_str(library)
         ));
     }
-    let combinational_arcs: Vec<&TimingArc> = pin.timing_arcs.iter().collect();
-    let mut validated_tables = HashSet::new();
+    let combinational_arcs = &pin.timing_arcs;
+    let mut evaluation = TimingEvaluationContext::new(library);
     validate_timing_tables_once(
         library,
         cell_name,
         pin_name,
-        combinational_arcs.as_slice(),
-        &mut validated_tables,
+        combinational_arcs,
+        &mut evaluation,
     )?;
 
-    for arc in &combinational_arcs {
-        let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
+    for arc in combinational_arcs {
+        let timing_type = StaTimingType::from_arc(arc, library);
         let context = format!(
             "cell '{}' output pin '{}' related_pin '{}'",
             cell_name,
@@ -1868,13 +2089,13 @@ pub fn validate_output_pin_for_basic_sta(
     for required_pin in required_related_pins {
         let mut has_rise = false;
         let mut has_fall = false;
-        for arc in &combinational_arcs {
+        for arc in combinational_arcs {
             if !split_related_pin_names(library.resolve_string(&arc.related_pin))
                 .any(|related_pin| related_pin == required_pin)
             {
                 continue;
             }
-            let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
+            let timing_type = StaTimingType::from_arc(arc, library);
             has_rise |= timing_type.produces_rise();
             has_fall |= timing_type.produces_fall();
         }
@@ -2099,15 +2320,39 @@ fn arc_when_may_apply(
     library: &crate::liberty_model::Library,
     arc: &TimingArc,
     known_pin_values: &HashMap<String, bool>,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<bool> {
+    debug_assert!(std::ptr::eq(library, evaluation.library));
     let when_text = library.resolve_string(&arc.when);
     if when_text.is_empty() {
         return Ok(true);
     }
+    if let Some(when) = evaluation.when_formulas.get(&arc.when) {
+        return Ok(if known_pin_values.is_empty() {
+            when.without_constants
+        } else {
+            when.formula.evaluate_partial(known_pin_values) != Some(false)
+        });
+    }
     let when = parse_formula(when_text)
         .map_err(|e| anyhow!("{context}: could not parse when='{}': {}", when_text, e))?;
-    Ok(when.evaluate_partial(known_pin_values) != Some(false))
+    let applicable = when.evaluate_partial(known_pin_values) != Some(false);
+    // Only the empty-binding result is instance-independent. All nonempty
+    // bindings must still evaluate the formula with this instance's constants.
+    let without_constants = if known_pin_values.is_empty() {
+        applicable
+    } else {
+        when.evaluate_partial(&HashMap::new()) != Some(false)
+    };
+    evaluation.when_formulas.insert(
+        arc.when,
+        PreparedWhen {
+            formula: when,
+            without_constants,
+        },
+    );
+    Ok(applicable)
 }
 
 #[cfg(test)]
@@ -2116,9 +2361,9 @@ fn evaluate_arc(
     arc: &TimingArc,
     input_timing: SignalTiming,
     output_load: f64,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTiming> {
-    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    let mut evaluation = TimingEvaluationContext::new(library);
     let set = evaluate_arc_set(
         library,
         arc,
@@ -2127,7 +2372,7 @@ fn evaluate_arc(
             rise: output_load,
             fall: output_load,
         },
-        &mut timing_query_diagnostic_counts,
+        &mut evaluation,
         context,
     )?;
     set.as_report_signal_timing().ok_or_else(|| {
@@ -2140,11 +2385,11 @@ fn evaluate_arc_set(
     arc: &TimingArc,
     input_timing: &SignalTimingSet,
     output_load: EdgeLoadCapacitance,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTimingSet> {
-    let timing_type = StaTimingType::from_raw(arc.timing_type_str(library));
-    let timing_sense = StaTimingSense::from_raw(arc.timing_sense_str(library));
+    let timing_type = StaTimingType::from_arc(arc, library);
+    let timing_sense = StaTimingSense::from_arc(arc, library);
     let all_inputs = if timing_sense.may_use_either_input_edge() {
         let mut combined = input_timing.rise.clone();
         combined.extend_from(&input_timing.fall);
@@ -2178,7 +2423,7 @@ fn evaluate_arc_set(
             rise_transition,
             source_edges(true)?,
             output_load.rise,
-            timing_query_diagnostic_counts,
+            evaluation,
             context,
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -2193,7 +2438,7 @@ fn evaluate_arc_set(
             fall_transition,
             source_edges(false)?,
             output_load.fall,
-            timing_query_diagnostic_counts,
+            evaluation,
             context,
             StaTimingTableKind::CellFall,
             StaTimingTableKind::FallTransition,
@@ -2208,8 +2453,8 @@ fn evaluate_output_edge_set(
     slew_table: &TimingTable,
     source_edges: &EdgeTimingSet,
     output_load: f64,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
     delay_kind: StaTimingTableKind,
     slew_kind: StaTimingTableKind,
 ) -> Result<EdgeTimingSet> {
@@ -2221,8 +2466,8 @@ fn evaluate_output_edge_set(
             delay_table,
             source_edge.timing.transition,
             output_load,
-            timing_query_diagnostic_counts,
-            &format!("{context} {}", delay_kind.as_raw()),
+            evaluation,
+            &format_args!("{context} {}", delay_kind.as_raw()),
         )?;
         // Characterized transition values may contain small negative artifacts;
         // physical transition is bounded below by zero.
@@ -2231,8 +2476,8 @@ fn evaluate_output_edge_set(
             slew_table,
             source_edge.timing.transition,
             output_load,
-            timing_query_diagnostic_counts,
-            &format!("{context} {}", slew_kind.as_raw()),
+            evaluation,
+            &format_args!("{context} {}", slew_kind.as_raw()),
         )?
         .max(0.0);
         let arrival = source_edge.timing.arrival + delay;
@@ -2274,14 +2519,13 @@ fn evaluate_register_launch_output_set(
     pin: &Pin,
     known_pin_values: &HashMap<String, bool>,
     output_load: EdgeLoadCapacitance,
-    validated_tables: &mut HashSet<*const TimingTable>,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<SignalTimingSet> {
-    let launch_arcs: Vec<&TimingArc> = pin
+    let launch_arcs: SmallVec<[&TimingArc; 4]> = pin
         .timing_arcs
         .iter()
-        .filter(|arc| StaTimingType::from_raw(arc.timing_type_str(library)).is_clock_to_output())
+        .filter(|arc| StaTimingType::from_arc(arc, library).is_clock_to_output())
         .collect();
     if launch_arcs.is_empty() {
         return Err(anyhow!(
@@ -2292,13 +2536,13 @@ fn evaluate_register_launch_output_set(
         library,
         cell_name,
         library.resolve_string(&pin.name),
-        launch_arcs.as_slice(),
-        validated_tables,
+        launch_arcs.iter().copied(),
+        evaluation,
     )?;
 
     let mut output = SignalTimingSet::default();
     for arc in launch_arcs {
-        if !arc_when_may_apply(library, arc, known_pin_values, context)? {
+        if !arc_when_may_apply(library, arc, known_pin_values, evaluation, context)? {
             continue;
         }
         if let Some((delay, transition)) = find_optional_delay_slew_tables(
@@ -2312,8 +2556,8 @@ fn evaluate_register_launch_output_set(
                 library,
                 delay,
                 query,
-                timing_query_diagnostic_counts,
-                &format!("{context} {}", StaTimingTableKind::CellRise.as_raw()),
+                evaluation,
+                &format_args!("{context} {}", StaTimingTableKind::CellRise.as_raw()),
             )?;
             output
                 .rise
@@ -2323,8 +2567,8 @@ fn evaluate_register_launch_output_set(
                         library,
                         transition,
                         query,
-                        timing_query_diagnostic_counts,
-                        &format!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
+                        evaluation,
+                        &format_args!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
                     )?
                     .max(0.0),
                 }));
@@ -2340,8 +2584,8 @@ fn evaluate_register_launch_output_set(
                 library,
                 delay,
                 query,
-                timing_query_diagnostic_counts,
-                &format!("{context} {}", StaTimingTableKind::CellFall.as_raw()),
+                evaluation,
+                &format_args!("{context} {}", StaTimingTableKind::CellFall.as_raw()),
             )?;
             output
                 .fall
@@ -2351,8 +2595,8 @@ fn evaluate_register_launch_output_set(
                         library,
                         transition,
                         query,
-                        timing_query_diagnostic_counts,
-                        &format!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
+                        evaluation,
+                        &format_args!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
                     )?
                     .max(0.0),
                 }));
@@ -2379,12 +2623,12 @@ fn evaluate_register_setup_capture_arrival(
     setup_arcs: &[&TimingArc],
     known_pin_values: &HashMap<String, bool>,
     data_timing: &SignalTimingSet,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<Option<RegisterCaptureTimingCandidate>> {
     let mut worst_timing: Option<RegisterCaptureTimingCandidate> = None;
     for arc in setup_arcs {
-        if !arc_when_may_apply(library, arc, known_pin_values, context)? {
+        if !arc_when_may_apply(library, arc, known_pin_values, evaluation, context)? {
             continue;
         }
         if let Some(table) =
@@ -2395,8 +2639,8 @@ fn evaluate_register_setup_capture_arrival(
                     library,
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
-                    timing_query_diagnostic_counts,
-                    &format!("{context} {}", StaTimingTableKind::RiseConstraint.as_raw()),
+                    evaluation,
+                    &format_args!("{context} {}", StaTimingTableKind::RiseConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
                 if !capture_arrival.is_finite() {
@@ -2422,8 +2666,8 @@ fn evaluate_register_setup_capture_arrival(
                     library,
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
-                    timing_query_diagnostic_counts,
-                    &format!("{context} {}", StaTimingTableKind::FallConstraint.as_raw()),
+                    evaluation,
+                    &format_args!("{context} {}", StaTimingTableKind::FallConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
                 if !capture_arrival.is_finite() {
@@ -2502,12 +2746,12 @@ fn choose_worse_edge_timing_candidate_by_arrival(
 fn find_optional_unique_table<'a>(
     arc: &'a TimingArc,
     kind: StaTimingTableKind,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<Option<&'a TimingTable>> {
     let mut matches = arc
         .tables
         .iter()
-        .filter(|table| table.kind_str() == kind.as_raw());
+        .filter(|table| table.kind == kind.as_wire());
     let first = matches.next();
     if matches.next().is_some() {
         return Err(anyhow!(
@@ -2521,7 +2765,7 @@ fn find_optional_unique_table<'a>(
 fn find_unique_table<'a>(
     arc: &'a TimingArc,
     kind: StaTimingTableKind,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<&'a TimingTable> {
     find_optional_unique_table(arc, kind, context)?
         .ok_or_else(|| anyhow!("{context}: missing '{}' timing table", kind.as_raw()))
@@ -2531,7 +2775,7 @@ fn find_optional_delay_slew_tables<'a>(
     arc: &'a TimingArc,
     delay_kind: StaTimingTableKind,
     slew_kind: StaTimingTableKind,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<Option<(&'a TimingTable, &'a TimingTable)>> {
     let delay = find_optional_unique_table(arc, delay_kind, context)?;
     let slew = find_optional_unique_table(arc, slew_kind, context)?;
@@ -2562,7 +2806,7 @@ struct TimingTableLayout<'a> {
 fn timing_table_layout<'a>(
     library: &'a crate::liberty_model::Library,
     table: &'a TimingTable,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<TimingTableLayout<'a>> {
     let shape = library.timing_table_shape(table);
     let template: Option<&LuTableTemplate> = if shape.template_id == 0 {
@@ -2610,7 +2854,7 @@ fn timing_table_layout<'a>(
 fn validate_timing_table_structure(
     library: &crate::liberty_model::Library,
     table: &TimingTable,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<()> {
     let array = TimingTableArrayView::from_timing_table(library, table)
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
@@ -2664,20 +2908,25 @@ fn validate_timing_table_structure(
 fn validate_timing_table_payload(
     library: &crate::liberty_model::Library,
     table: &TimingTable,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<()> {
     validate_timing_table_structure(library, table, context)
 }
 
-/// Validates each queried delay/slew table at most once during an STA run.
-fn validate_timing_tables_once(
+/// Validates all delay/slew tables in each arc at most once during an STA run.
+fn validate_timing_tables_once<'arc>(
     library: &crate::liberty_model::Library,
     cell_name: &str,
     pin_name: &str,
-    arcs: &[&TimingArc],
-    validated_tables: &mut HashSet<*const TimingTable>,
+    arcs: impl IntoIterator<Item = &'arc TimingArc>,
+    evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
+    debug_assert!(std::ptr::eq(library, evaluation.library));
     for arc in arcs {
+        let key = arc as *const TimingArc;
+        if evaluation.validated_delay_slew_arcs.contains(&key) {
+            continue;
+        }
         for table in &arc.tables {
             if !matches!(
                 LibertyTableKind::from_raw(table.kind_str()),
@@ -2688,13 +2937,10 @@ fn validate_timing_tables_once(
             ) {
                 continue;
             }
-            if !validated_tables.insert(table as *const TimingTable) {
-                continue;
-            }
             validate_timing_table_payload(
                 library,
                 table,
-                &format!(
+                &format_args!(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
                     cell_name,
                     pin_name,
@@ -2703,6 +2949,8 @@ fn validate_timing_tables_once(
                 ),
             )?;
         }
+        // A failed attempt must never suppress validation on a later trial.
+        evaluation.validated_delay_slew_arcs.insert(key);
     }
     Ok(())
 }
@@ -2717,9 +2965,14 @@ fn validate_constraint_tables_once(
     cell_name: &str,
     pin_name: &str,
     arcs: &[&TimingArc],
-    validated_tables: &mut HashSet<*const TimingTable>,
+    evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
+    debug_assert!(std::ptr::eq(library, evaluation.library));
     for arc in arcs {
+        let key = *arc as *const TimingArc;
+        if evaluation.validated_setup_arcs.contains(&key) {
+            continue;
+        }
         for table in &arc.tables {
             if !matches!(
                 LibertyTableKind::from_raw(table.kind_str()),
@@ -2727,13 +2980,10 @@ fn validate_constraint_tables_once(
             ) {
                 continue;
             }
-            if !validated_tables.insert(table as *const TimingTable) {
-                continue;
-            }
             validate_timing_table_structure(
                 library,
                 table,
-                &format!(
+                &format_args!(
                     "cell '{}' pin '{}' related_pin '{}' table '{}'",
                     cell_name,
                     pin_name,
@@ -2742,6 +2992,7 @@ fn validate_constraint_tables_once(
                 ),
             )?;
         }
+        evaluation.validated_setup_arcs.insert(key);
     }
     Ok(())
 }
@@ -2801,15 +3052,15 @@ fn evaluate_table(
     table: &TimingTable,
     input_transition: f64,
     output_load: f64,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
-    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    let mut evaluation = TimingEvaluationContext::new(library);
     evaluate_table_with_diagnostics(
         library,
         table,
         input_transition,
         output_load,
-        &mut timing_query_diagnostic_counts,
+        &mut evaluation,
         context,
     )
 }
@@ -2819,14 +3070,14 @@ fn evaluate_table_with_diagnostics(
     table: &TimingTable,
     input_transition: f64,
     output_load: f64,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     evaluate_table_with_query_and_diagnostics(
         library,
         table,
         TimingTableQuery::combinational(input_transition, output_load),
-        timing_query_diagnostic_counts,
+        evaluation,
         context,
     )
 }
@@ -2835,8 +3086,8 @@ fn evaluate_table_with_query_and_diagnostics(
     library: &crate::liberty_model::Library,
     table: &TimingTable,
     query: TimingTableQuery,
-    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
-    context: &str,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     validate_non_negative_finite(query.input_transition, "input transition query", context)?;
     validate_non_negative_finite(query.output_load, "output load query", context)?;
@@ -2850,28 +3101,41 @@ fn evaluate_table_with_query_and_diagnostics(
         "related pin transition query",
         context,
     )?;
-    let array = TimingTableArrayView::from_timing_table(library, table)
-        .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
-    let layout = timing_table_layout(library, table, context)?;
-    let rank = array.rank();
-    if rank == 0 {
-        return array
-            .get(&[])
-            .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
-    }
-    let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
-    let mut axis_queries: Vec<f64> = Vec::with_capacity(rank);
-    let is_setup = matches!(
-        LibertyTableKind::from_raw(table.kind_str()),
-        LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
+    debug_assert!(std::ptr::eq(library, evaluation.library));
+    let key = (
+        library.timing_table_values(table).as_ptr() as usize,
+        table.shape_id(),
+        table.kind as i32,
     );
+    let prepared = match evaluation.tables.entry(key) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(PreparedTimingTable::new(library, table, context)?)
+        }
+    };
+    let diagnostics = &mut evaluation.diagnostics;
+    let rank = prepared.rank;
+    if rank == 0 {
+        return Ok(f64::from(prepared.values[0]));
+    }
+    // Liberty timing tables have at most three axes. Keeping interpolation
+    // scratch on the stack avoids several allocations for every arc query.
+    debug_assert!(rank <= 3);
+    let mut bounds = [(0usize, 0usize, 0.0); 3];
+    let mut axis_queries = [0.0; 3];
+    let is_setup = prepared.is_setup;
     let mut above_max_axis_count = 0usize;
 
     for axis_idx in 0..rank {
-        let axis = layout.axes[axis_idx];
-        let axis_variable = AxisVariable::from_raw(layout.variables[axis_idx]);
-        let raw_axis_query =
-            axis_query_value_with_query(layout.variables[axis_idx], axis_idx, query, context)?;
+        let axis = &prepared.axes[axis_idx];
+        let axis_variable = prepared.axis_kinds[axis_idx];
+        let raw_axis_query = axis_query_value_with_query(
+            &prepared.variables[axis_idx],
+            axis_variable,
+            axis_idx,
+            query,
+            context,
+        )?;
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
         let selects_minimum_characterized_coordinate = match query.minimum_characterized_axis {
@@ -2893,27 +3157,37 @@ fn evaluate_table_with_query_and_diagnostics(
         };
         if axis_query < axis_lo {
             if is_setup {
-                timing_query_diagnostic_counts.setup_below_min_clamp_count += 1;
+                diagnostics.setup_below_min_clamp_count += 1;
             } else {
-                timing_query_diagnostic_counts.delay_slew_below_min_clamp_count += 1;
+                diagnostics.delay_slew_below_min_clamp_count += 1;
             }
         } else if axis_query > axis_hi {
             above_max_axis_count += 1;
         }
-        axis_queries.push(axis_query);
+        axis_queries[axis_idx] = axis_query;
     }
 
     let extrapolate_single_delay_slew_axis = !is_setup && above_max_axis_count == 1;
     if is_setup {
-        timing_query_diagnostic_counts.setup_above_max_clamp_count += above_max_axis_count;
+        diagnostics.setup_above_max_clamp_count += above_max_axis_count;
     } else if above_max_axis_count == 1 {
-        timing_query_diagnostic_counts.delay_slew_single_above_max_extrapolation_count += 1;
+        diagnostics.delay_slew_single_above_max_extrapolation_count += 1;
     } else if above_max_axis_count > 1 {
-        timing_query_diagnostic_counts.delay_slew_multiple_above_max_clamp_count += 1;
+        diagnostics.delay_slew_multiple_above_max_clamp_count += 1;
     }
 
-    for (axis_idx, raw_axis_query) in axis_queries.into_iter().enumerate() {
-        let axis = layout.axes[axis_idx];
+    let coordinates = axis_queries.map(f64::to_bits);
+    // Keep every diagnostic and trace event, including queries at distinct
+    // instances whose timing happens to match. No quantization is involved.
+    if !sta_trace_enabled()
+        && let Some(cached) = prepared.last_interpolation
+        && cached.coordinates == coordinates
+    {
+        return Ok(cached.value);
+    }
+
+    for (axis_idx, raw_axis_query) in axis_queries.into_iter().take(rank).enumerate() {
+        let axis = &prepared.axes[axis_idx];
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
         let mut axis_query = raw_axis_query;
@@ -2923,7 +3197,7 @@ fn evaluate_table_with_query_and_diagnostics(
                     "table_query_clamped_below_min context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
                     context,
                     axis_idx + 1,
-                    layout.variables[axis_idx],
+                    prepared.variables[axis_idx],
                     raw_axis_query,
                     axis_lo,
                     axis_hi,
@@ -2943,7 +3217,7 @@ fn evaluate_table_with_query_and_diagnostics(
                     action,
                     context,
                     axis_idx + 1,
-                    layout.variables[axis_idx],
+                    prepared.variables[axis_idx],
                     raw_axis_query,
                     axis_lo,
                     axis_hi,
@@ -2956,20 +3230,69 @@ fn evaluate_table_with_query_and_diagnostics(
         if !extrapolate_single_delay_slew_axis || axis_query <= axis_hi {
             axis_query = axis_query.min(axis_hi);
         }
-        bounds.push(bracket_axis(axis, axis_query));
+        bounds[axis_idx] = bracket_axis(axis, axis_query);
     }
 
-    let mut indices = vec![0usize; rank];
-    let mut varying_axes: Vec<(usize, usize, usize, f64)> = Vec::with_capacity(rank);
-    for (axis_idx, (lo, hi, t)) in bounds.iter().copied().enumerate() {
+    let result = interpolate_prepared_table(&prepared.values, prepared.strides, rank, bounds);
+    if !result.is_finite() {
+        return Err(anyhow!(
+            "{context}: timing table evaluation produced non-finite result {}",
+            result
+        ));
+    }
+    prepared.last_interpolation = Some(CachedInterpolation {
+        coordinates,
+        value: result,
+    });
+    Ok(result)
+}
+
+/// Specializes ordinary 2D tables without changing corner accumulation order.
+#[inline]
+fn interpolate_prepared_table(
+    values: &[f32],
+    strides: [usize; 3],
+    rank: usize,
+    bounds: [(usize, usize, f64); 3],
+) -> f64 {
+    if rank != 2 || bounds[0].0 == bounds[0].1 || bounds[1].0 == bounds[1].1 {
+        return interpolate_table_corners(values, strides, rank, bounds);
+    }
+    let (lo0, hi0, t0) = bounds[0];
+    let (lo1, hi1, t1) = bounds[1];
+    let lo0 = lo0 * strides[0];
+    let hi0 = hi0 * strides[0];
+    let lo1 = lo1 * strides[1];
+    let hi1 = hi1 * strides[1];
+    let mut result = 0.0;
+    result += (1.0 - t0) * (1.0 - t1) * f64::from(values[lo0 + lo1]);
+    result += t0 * (1.0 - t1) * f64::from(values[hi0 + lo1]);
+    result += (1.0 - t0) * t1 * f64::from(values[lo0 + hi1]);
+    result += t0 * t1 * f64::from(values[hi0 + hi1]);
+    result
+}
+
+/// Enumerates corners for scalar, 1D, degenerate-axis, and 3D tables.
+fn interpolate_table_corners(
+    values: &[f32],
+    strides: [usize; 3],
+    rank: usize,
+    bounds: [(usize, usize, f64); 3],
+) -> f64 {
+    let mut indices = [0usize; 3];
+    let mut varying_axes = [(0usize, 0usize, 0usize, 0.0); 3];
+    let mut varying_count = 0;
+    for (axis_idx, (lo, hi, t)) in bounds.into_iter().take(rank).enumerate() {
         if lo == hi {
             indices[axis_idx] = lo;
         } else {
-            varying_axes.push((axis_idx, lo, hi, t));
+            varying_axes[varying_count] = (axis_idx, lo, hi, t);
+            varying_count += 1;
         }
     }
 
-    let corner_count = 1usize << varying_axes.len();
+    let varying_axes = &varying_axes[..varying_count];
+    let corner_count = 1usize << varying_count;
     let mut result = 0.0;
     for corner in 0..corner_count {
         let mut weight = 1.0;
@@ -2982,16 +3305,17 @@ fn evaluate_table_with_query_and_diagnostics(
                 weight *= 1.0 - *t;
             }
         }
-        let value = evaluate_table_corner_value(&array, table, indices.as_slice(), context)?;
+        // Geometry is validated once when preparing the table; bracketing
+        // supplies in-range coordinates for every interpolation corner.
+        let linear = indices[..rank]
+            .iter()
+            .zip(strides)
+            .map(|(index, stride)| index * stride)
+            .sum::<usize>();
+        let value = f64::from(values[linear]);
         result += weight * value;
     }
-    if !result.is_finite() {
-        return Err(anyhow!(
-            "{context}: timing table evaluation produced non-finite result {}",
-            result
-        ));
-    }
-    Ok(result)
+    result
 }
 
 fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
@@ -3006,11 +3330,12 @@ fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
 
 /// Evaluates one characterized point after conservatively repairing delay/slew
 /// values: a point is at least as large as any predecessor along its axes.
+#[cfg(test)]
 fn evaluate_table_corner_value(
     array: &TimingTableArrayView<'_>,
     table: &TimingTable,
     indices: &[usize],
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     if !uses_monotone_upper_envelope(table) || indices.is_empty() {
         return array
@@ -3018,11 +3343,12 @@ fn evaluate_table_corner_value(
             .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices));
     }
 
-    let mut cursor = vec![0usize; indices.len()];
+    let mut cursor = [0usize; 3];
+    let cursor = &mut cursor[..indices.len()];
     let mut maximum = f64::NEG_INFINITY;
     loop {
         let value = array
-            .get(cursor.as_slice())
+            .get(cursor)
             .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", cursor))?;
         maximum = maximum.max(value);
 
@@ -3044,7 +3370,11 @@ fn evaluate_table_corner_value(
     Ok(maximum)
 }
 
-fn validate_non_negative_finite(value: f64, what: &str, context: &str) -> Result<()> {
+fn validate_non_negative_finite(
+    value: f64,
+    what: &str,
+    context: &(impl std::fmt::Display + ?Sized),
+) -> Result<()> {
     if !value.is_finite() {
         return Err(anyhow!("{context}: {what} must be finite; got {}", value));
     }
@@ -3079,7 +3409,11 @@ fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> boo
     true
 }
 
-fn validate_effective_axes(dimensions: &[u32], axes: [&[f64]; 3], context: &str) -> Result<()> {
+fn validate_effective_axes(
+    dimensions: &[u32],
+    axes: [&[f64]; 3],
+    context: &(impl std::fmt::Display + ?Sized),
+) -> Result<()> {
     if !axes_are_contiguous(axes[0], axes[1], axes[2]) {
         return Err(anyhow!(
             "{context}: timing table has non-contiguous effective axes (index_1={}, index_2={}, index_3={})",
@@ -3124,10 +3458,11 @@ fn axis_query_value(
     axis_idx: usize,
     input_transition: f64,
     output_load: f64,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
     axis_query_value_with_query(
         variable_name,
+        AxisVariable::from_raw(variable_name),
         axis_idx,
         TimingTableQuery::combinational(input_transition, output_load),
         context,
@@ -3136,11 +3471,12 @@ fn axis_query_value(
 
 fn axis_query_value_with_query(
     variable_name: &str,
+    axis_variable: AxisVariable,
     axis_idx: usize,
     query: TimingTableQuery,
-    context: &str,
+    context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<f64> {
-    match AxisVariable::from_raw(variable_name) {
+    match axis_variable {
         AxisVariable::Unspecified => match axis_idx {
             0 => Ok(query.input_transition),
             1 => Ok(query.output_load),
@@ -3166,6 +3502,7 @@ fn is_strictly_increasing(values: &[f64]) -> bool {
         .all(|w| w.first().copied().unwrap_or(0.0) < w.get(1).copied().unwrap_or(0.0))
 }
 
+/// Brackets a finite query in a validated, strictly increasing table axis.
 fn bracket_axis(axis: &[f64], query: f64) -> (usize, usize, f64) {
     debug_assert!(!axis.is_empty());
     if axis.len() == 1 {
@@ -3192,20 +3529,16 @@ fn bracket_axis(axis: &[f64], query: f64) -> (usize, usize, f64) {
         return (lo, hi, (query - axis[lo]) / denom);
     }
 
-    for idx in 0..last {
-        let lo = axis[idx];
-        let hi = axis[idx + 1];
-        if query >= lo && query <= hi {
-            let denom = hi - lo;
-            if denom.abs() < f64::EPSILON {
-                return (idx, idx, 0.0);
-            }
-            let t = (query - lo) / denom;
-            return (idx, idx + 1, t);
-        }
+    let lo = axis[1..]
+        .iter()
+        .position(|point| query <= *point)
+        .expect("interior query in a validated increasing axis");
+    let hi = lo + 1;
+    let denom = axis[hi] - axis[lo];
+    if denom.abs() < f64::EPSILON {
+        return (lo, lo, 0.0);
     }
-
-    (last, last, 0.0)
+    (lo, hi, (query - axis[lo]) / denom)
 }
 
 fn resolve_symbol(
@@ -3229,6 +3562,662 @@ mod tests {
     use crate::liberty_proto::{UnsupportedFeature, UnsupportedSemantics};
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    #[test]
+    fn related_pin_cache_preserves_whitespace_order_and_duplicates() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let cases: &[(&str, &[&str])] = &[
+            ("", &[]),
+            ("A", &["A"]),
+            ("A B", &["A", "B"]),
+            (
+                " \tA\nB\rA\u{b}\u{c}α\u{2003}ξ ",
+                &["A", "B", "A", "α", "ξ"],
+            ),
+            ("A", &["A"]),
+        ];
+        let arcs: Vec<_> = cases
+            .iter()
+            .map(|(names, _)| {
+                test_arc(
+                    &mut builder,
+                    names,
+                    "positive_unate",
+                    "combinational",
+                    "",
+                    vec![],
+                )
+            })
+            .collect();
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "", arcs);
+        builder.cells.push(Cell {
+            name: "TEST".into(),
+            pins: vec![output],
+            ..Default::default()
+        });
+        let library = builder.finish();
+        let index = StaLibraryIndex::new(&library)?;
+        assert_eq!(index.related_pin_names.len(), 4);
+        for _ in 0..2 {
+            for (arc, (_, expected)) in library.cells[0].pins[0].timing_arcs.iter().zip(cases) {
+                assert_eq!(index.related_pin_names(arc.related_pin), *expected);
+            }
+        }
+        Ok(())
+    }
+
+    /// Records diagnostic rendering without allocating on successful queries.
+    struct CountingContext<'a>(&'a std::cell::Cell<usize>);
+
+    impl std::fmt::Display for CountingContext<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.set(self.0.get() + 1);
+            f.write_str("timing query")
+        }
+    }
+
+    #[test]
+    fn timing_query_renders_context_only_on_error() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let table = builder.add_timing_table_f64(
+            crate::liberty_proto::TimingTableKind::CellRise,
+            0,
+            vec![0.0, 1.0],
+            vec![],
+            vec![],
+            vec![1.0, 2.0],
+            vec![2],
+            "",
+        )?;
+        let library = builder.finish();
+        let formats = std::cell::Cell::new(0);
+        let context = CountingContext(&formats);
+        assert_eq!(evaluate_table(&library, &table, 0.5, 0.0, &context)?, 1.5);
+        assert_eq!(formats.get(), 0);
+        assert!(evaluate_table(&library, &table, f64::NAN, 0.0, &context).is_err());
+        assert_eq!(formats.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn cached_when_syntax_uses_each_instances_constant_values() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "EN & !B",
+            vec![],
+        );
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for (en, b, expected) in [
+            (None, None, true),
+            (Some(false), None, false),
+            (Some(true), Some(false), true),
+            (Some(true), Some(true), false),
+            (None, None, true),
+        ] {
+            let known = [("EN", en), ("B", b)]
+                .into_iter()
+                .filter_map(|(name, value)| value.map(|value| (name.to_string(), value)))
+                .collect();
+            assert_eq!(
+                arc_when_may_apply(&library, &arc, &known, &mut evaluation, "test")?,
+                expected
+            );
+            assert_eq!(evaluation.when_formulas.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn when_cache_distinguishes_predicates_and_does_not_cache_parse_errors() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let cases = [
+            ("", [true, true, true]),
+            ("0", [false, false, false]),
+            ("1", [true, true, true]),
+            ("EN", [true, false, true]),
+            ("!EN", [true, true, false]),
+            ("EN", [true, false, true]),
+        ];
+        let arcs: Vec<_> = cases
+            .iter()
+            .map(|(predicate, _)| {
+                test_arc(
+                    &mut builder,
+                    "A",
+                    "positive_unate",
+                    "combinational",
+                    predicate,
+                    vec![],
+                )
+            })
+            .collect();
+        let invalid = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "EN &",
+            vec![],
+        );
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for _ in 0..2 {
+            for (binding, value) in [None, Some(false), Some(true)].into_iter().enumerate() {
+                let known = value
+                    .into_iter()
+                    .map(|value| ("EN".to_string(), value))
+                    .collect();
+                for (arc, (_, expected)) in arcs.iter().zip(cases) {
+                    assert_eq!(
+                        arc_when_may_apply(&library, arc, &known, &mut evaluation, "test")?,
+                        expected[binding]
+                    );
+                }
+                assert_eq!(evaluation.when_formulas.len(), 4);
+                assert!(
+                    arc_when_may_apply(
+                        &library,
+                        &invalid,
+                        &known,
+                        &mut evaluation,
+                        "invalid predicate"
+                    )
+                    .is_err()
+                );
+                assert_eq!(evaluation.when_formulas.len(), 4);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn constant_when_predicates_remain_constant_with_and_without_bindings() -> Result<()> {
+        for (predicate, expected) in [("0", false), ("1", true)] {
+            let mut builder = LibraryBuilder::new();
+            let arc = test_arc(
+                &mut builder,
+                "A",
+                "positive_unate",
+                "combinational",
+                predicate,
+                vec![],
+            );
+            let library = builder.finish();
+            let mut evaluation = TimingEvaluationContext::new(&library);
+            for known in [
+                HashMap::from([("A".to_string(), true)]),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::from([("A".to_string(), false)]),
+            ] {
+                assert_eq!(
+                    arc_when_may_apply(&library, &arc, &known, &mut evaluation, "test")?,
+                    expected
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_constraint_validation_is_not_cached_as_success() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let delay = scalar_table(&mut builder, "cell_rise", 1.0);
+        let constraint = scalar_table(&mut builder, "rise_constraint", f64::NAN);
+        let arc = test_arc(
+            &mut builder,
+            "A",
+            "positive_unate",
+            "combinational",
+            "",
+            vec![delay, constraint],
+        );
+        let library = builder.finish();
+        let mut validated = TimingEvaluationContext::new(&library);
+        for _ in 0..2 {
+            validate_timing_tables_once(&library, "CELL", "Y", [&arc], &mut validated)?;
+            let error =
+                validate_constraint_tables_once(&library, "CELL", "Y", &[&arc], &mut validated)
+                    .expect_err("failed validation must fail on every attempt");
+            assert_eq!(
+                error.to_string(),
+                "cell 'CELL' pin 'Y' related_pin 'A' table 'rise_constraint': timing table contains non-finite value NaN"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_parallel_arcs_contribute_beyond_inline_storage() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let arcs = (1..=8)
+            .map(|delay| {
+                scalar_arc(
+                    &mut builder,
+                    "A",
+                    "positive_unate",
+                    "combinational",
+                    "",
+                    f64::from(delay),
+                    f64::from(delay),
+                    1.0,
+                    1.0,
+                )
+            })
+            .collect();
+        let input = test_pin(&mut builder, "A", PinDirection::Input, "", vec![]);
+        let output = test_pin(&mut builder, "Y", PinDirection::Output, "A", arcs);
+        builder.cells.push(Cell {
+            name: "BUF".to_string(),
+            pins: vec![input, output],
+            ..Default::default()
+        });
+        let library = builder.finish();
+        let (module, nets, interner) =
+            parse_single_module("module m(input a, output y); BUF b(.A(a),.Y(y)); endmodule");
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+        )?;
+        assert_eq!(report.worst_output_arrival, 8.0);
+        Ok(())
+    }
+
+    #[test]
+    fn interpolation_fast_paths_match_corner_enumeration_bit_for_bit() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1a7e);
+        for trial in 0..10_000 {
+            let rank = trial % 4;
+            let dimensions: [usize; 3] =
+                std::array::from_fn(|axis| if axis < rank { rng.gen_range(1..=5) } else { 1 });
+            let mut strides = [0; 3];
+            let mut count = 1;
+            for axis in (0..rank).rev() {
+                strides[axis] = count;
+                count *= dimensions[axis];
+            }
+            let values: Vec<f32> = (0..count)
+                .map(|_| {
+                    if trial % 10 == 0 {
+                        -0.0
+                    } else {
+                        rng.gen_range(-100.0..100.0)
+                    }
+                })
+                .collect();
+            let bounds = std::array::from_fn(|axis| {
+                let lo = rng.gen_range(0..dimensions[axis]);
+                let hi = (lo + 1).min(dimensions[axis] - 1);
+                let t = match rng.gen_range(0..5) {
+                    0 => 0.0,
+                    1 => 1.0,
+                    _ => rng.gen_range(-2.0..3.0),
+                };
+                (lo, hi, t)
+            });
+            assert_eq!(
+                interpolate_prepared_table(&values, strides, rank, bounds).to_bits(),
+                interpolate_table_corners(&values, strides, rank, bounds).to_bits(),
+                "trial {trial}: rank={rank}, dimensions={dimensions:?}, bounds={bounds:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn typed_timing_types_preserve_text_classification() -> Result<()> {
+        for value in 0..=WireTimingType::Other as i32 {
+            let kind = WireTimingType::try_from(value)?;
+            let raw = match kind {
+                WireTimingType::Unspecified => String::new(),
+                WireTimingType::Other => "unrecognized_type".to_string(),
+                _ => kind
+                    .as_str_name()
+                    .strip_prefix("TIMING_TYPE_")
+                    .unwrap()
+                    .to_ascii_lowercase(),
+            };
+            let mut builder = LibraryBuilder::new();
+            let arc = builder.add_timing_arc("A", "positive_unate", &raw, "", vec![])?;
+            let library = builder.finish();
+            assert_eq!(arc.timing_type.wire_value(), kind);
+            assert_eq!(
+                StaTimingType::from_arc(&arc, &library),
+                StaTimingType::from_raw(&raw)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn typed_timing_senses_preserve_text_classification() -> Result<()> {
+        for value in 0..=WireTimingSense::Other as i32 {
+            let kind = WireTimingSense::try_from(value)?;
+            let raw = match kind {
+                WireTimingSense::Unspecified => String::new(),
+                WireTimingSense::Other => "unrecognized_sense".to_string(),
+                _ => kind
+                    .as_str_name()
+                    .strip_prefix("TIMING_SENSE_")
+                    .unwrap()
+                    .to_ascii_lowercase(),
+            };
+            let mut builder = LibraryBuilder::new();
+            let arc = builder.add_timing_arc("A", &raw, "combinational", "", vec![])?;
+            let library = builder.finish();
+            assert_eq!(arc.timing_sense.wire_value(), kind);
+            assert_eq!(
+                StaTimingSense::from_arc(&arc, &library),
+                StaTimingSense::from_raw(&raw)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn typed_timing_table_selectors_match_diagnostic_names() {
+        for kind in [
+            StaTimingTableKind::CellRise,
+            StaTimingTableKind::CellFall,
+            StaTimingTableKind::RiseTransition,
+            StaTimingTableKind::FallTransition,
+            StaTimingTableKind::RiseConstraint,
+            StaTimingTableKind::FallConstraint,
+        ] {
+            let mut table = TimingTable::default();
+            table.kind = kind.as_wire();
+            assert_eq!(table.kind_str(), kind.as_raw());
+        }
+    }
+
+    #[test]
+    fn equal_timing_frontier_entries_keep_the_first_path_and_signed_zero() {
+        let a = EdgeTimingCandidate::from_register_launch(EdgeTiming {
+            arrival: -0.0,
+            transition: 1.0,
+        });
+        let b = EdgeTimingCandidate::from_timing(EdgeTiming {
+            arrival: 0.0,
+            transition: 1.0,
+        });
+        for (first, second) in [(a, b), (b, a)] {
+            let mut set = EdgeTimingSet::default();
+            set.insert(first);
+            set.insert(second);
+            assert_eq!(set.values.as_slice(), &[first]);
+            assert_eq!(
+                set.values[0].timing.arrival.to_bits(),
+                first.timing.arrival.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn timing_frontier_matches_pairwise_pareto_filter_and_keeps_first_equal_path() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xf70a);
+        for _ in 0..16 {
+            let mut all: Vec<EdgeTimingCandidate> = Vec::new();
+            let mut actual = EdgeTimingSet::default();
+            for step in 0..128 {
+                let timing = EdgeTiming {
+                    arrival: f64::from(rng.gen_range(-5..=20)),
+                    transition: f64::from(rng.gen_range(0..=20)),
+                };
+                // Equal timing can carry different path provenance. Preserve
+                // the first payload, not whichever duplicate was most recent.
+                let candidate = if step % 2 == 0 {
+                    EdgeTimingCandidate::from_register_launch(timing)
+                } else {
+                    EdgeTimingCandidate::from_timing(timing)
+                };
+                if !all.iter().any(|old| old.timing == timing) {
+                    all.push(candidate);
+                }
+                let mut expected: Vec<_> = all
+                    .iter()
+                    .copied()
+                    .filter(|point| {
+                        !all.iter().any(|other| {
+                            let a = other.timing;
+                            let b = point.timing;
+                            a.arrival >= b.arrival
+                                && a.transition >= b.transition
+                                && (a.arrival > b.arrival || a.transition > b.transition)
+                        })
+                    })
+                    .collect();
+                expected.sort_by(|a, b| {
+                    a.timing
+                        .arrival
+                        .total_cmp(&b.timing.arrival)
+                        .then(a.timing.transition.total_cmp(&b.timing.transition))
+                });
+                actual.insert(candidate);
+                assert_eq!(actual.values.as_slice(), expected.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn inline_timing_frontier_spills_without_truncation() {
+        let mut set = EdgeTimingSet::default();
+        for i in (0..32).rev() {
+            set.insert(EdgeTimingCandidate::from_timing(EdgeTiming {
+                arrival: f64::from(i),
+                transition: f64::from(32 - i),
+            }));
+        }
+        assert_eq!(set.values.len(), 32);
+        for (i, edge) in set.iter().enumerate() {
+            assert_eq!(edge.timing.arrival, i as f64);
+            assert_eq!(edge.timing.transition, (32 - i) as f64);
+        }
+        collapse_edge_timing_set_to_envelope(&mut set);
+        assert_eq!(set.values.len(), 1);
+        assert_eq!(
+            set.values[0].timing,
+            EdgeTiming {
+                arrival: 31.0,
+                transition: 32.0
+            }
+        );
+    }
+
+    #[test]
+    fn prepared_envelopes_match_reference_for_scalar_and_multidimensional_tables() -> Result<()> {
+        for dimensions in [
+            vec![],
+            vec![1],
+            vec![4],
+            vec![1, 3],
+            vec![3, 2],
+            vec![2, 1, 3],
+            vec![3, 2, 4],
+        ] {
+            let count = dimensions.iter().copied().product::<u32>() as usize;
+            for seed in 0..12 {
+                let axes: [Vec<f64>; 3] = std::array::from_fn(|axis| {
+                    dimensions
+                        .get(axis)
+                        .map_or_else(Vec::new, |d| (0..*d).map(f64::from).collect())
+                });
+                let mut builder = LibraryBuilder::new();
+                let table = builder.add_timing_table_f64(
+                    crate::liberty_proto::TimingTableKind::CellRise,
+                    0,
+                    axes[0].clone(),
+                    axes[1].clone(),
+                    axes[2].clone(),
+                    (0..count)
+                        .map(|i| ((i * 97 + seed * 23) % 113) as f64 - 10.0)
+                        .collect(),
+                    dimensions.clone(),
+                    "",
+                )?;
+                let library = builder.finish();
+                let raw = TimingTableArrayView::from_timing_table(&library, &table)?;
+                let prepared = PreparedTimingTable::new(&library, &table, "prepared")?;
+                for flat in 0..count {
+                    let mut remaining = flat;
+                    let mut indices = vec![0; dimensions.len()];
+                    for axis in (0..dimensions.len()).rev() {
+                        indices[axis] = remaining % dimensions[axis] as usize;
+                        remaining /= dimensions[axis] as usize;
+                    }
+                    let reference =
+                        evaluate_table_corner_value(&raw, &table, &indices, "reference")?;
+                    assert_eq!(f64::from(prepared.values[flat]), reference);
+                    assert_eq!(
+                        indices
+                            .iter()
+                            .zip(prepared.strides)
+                            .map(|(index, stride)| index * stride)
+                            .sum::<usize>(),
+                        flat
+                    );
+                }
+                let mut setup_table = table.clone();
+                setup_table.kind = crate::liberty_proto::TimingTableKind::RiseConstraint;
+                let setup = PreparedTimingTable::new(&library, &setup_table, "setup")?;
+                assert_eq!(setup.values, raw.values());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cache_distinguishes_table_kinds_sharing_value_storage() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let delay = builder.add_timing_table_f64(
+            crate::liberty_proto::TimingTableKind::CellRise,
+            0,
+            vec![0.0, 1.0],
+            vec![],
+            vec![],
+            vec![3.0, 1.0],
+            vec![2],
+            "",
+        )?;
+        let mut setup = delay.clone();
+        setup.kind = crate::liberty_proto::TimingTableKind::RiseConstraint;
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for _ in 0..3 {
+            for (table, expected) in [(&delay, 3.0), (&setup, 1.0)] {
+                let value = evaluate_table_with_query_and_diagnostics(
+                    &library,
+                    table,
+                    TimingTableQuery::combinational(1.0, 0.0),
+                    &mut evaluation,
+                    "shared",
+                )?;
+                assert_eq!(value, expected);
+            }
+        }
+        assert_eq!(evaluation.tables.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn axis_bracketing_matches_linear_search_at_knots_and_small_intervals() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xb7ac);
+        for scale in [1e-20, 1e-6, 1.0, 1e6] {
+            for length in 1..=64 {
+                let mut sum = 0.0;
+                let axis: Vec<_> = (0..length)
+                    .map(|_| {
+                        sum += f64::from(rng.gen_range(1..=100)) * scale;
+                        sum
+                    })
+                    .collect();
+                let queries = std::iter::once(axis[0] - scale)
+                    .chain(std::iter::once(axis[length - 1] + scale))
+                    .chain(axis.iter().copied())
+                    .chain(axis.windows(2).map(|w| (w[0] + w[1]) / 2.0));
+                for query in queries {
+                    let expected = if length == 1 {
+                        (0, 0, 0.0)
+                    } else {
+                        let lo = axis
+                            .windows(2)
+                            .position(|w| query <= w[1])
+                            .unwrap_or(length - 2);
+                        let hi = lo + 1;
+                        let denominator = axis[hi] - axis[lo];
+                        if denominator.abs() < f64::EPSILON {
+                            let point = if query >= axis[length - 1] { hi } else { lo };
+                            (point, point, 0.0)
+                        } else {
+                            (lo, hi, (query - axis[lo]) / denominator)
+                        }
+                    };
+                    let actual = bracket_axis(&axis, query);
+                    assert_eq!((actual.0, actual.1), (expected.0, expected.1));
+                    assert_eq!(actual.2.to_bits(), expected.2.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_interpolation_preserves_query_diagnostics_and_rejects_nan() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let table = builder.add_timing_table_f64(
+            crate::liberty_proto::TimingTableKind::CellRise,
+            0,
+            vec![1.0, 2.0],
+            vec![1.0, 2.0],
+            vec![],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![2, 2],
+            "",
+        )?;
+        let library = builder.finish();
+        let mut evaluation = TimingEvaluationContext::new(&library);
+        for (slew, load, expected) in [(0.0, 3.0, 3.0), (3.0, 3.0, 4.0)] {
+            for _ in 0..4 {
+                let result = evaluate_table_with_diagnostics(
+                    &library,
+                    &table,
+                    slew,
+                    load,
+                    &mut evaluation,
+                    "repeated",
+                )?;
+                assert_eq!(result, expected);
+            }
+        }
+        assert_eq!(
+            evaluation.diagnostics,
+            TimingQueryDiagnosticCounts {
+                delay_slew_below_min_clamp_count: 4,
+                delay_slew_single_above_max_extrapolation_count: 4,
+                delay_slew_multiple_above_max_clamp_count: 4,
+                ..TimingQueryDiagnosticCounts::default()
+            }
+        );
+        assert!(
+            evaluate_table_with_diagnostics(
+                &library,
+                &table,
+                f64::NAN,
+                3.0,
+                &mut evaluation,
+                "invalid",
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 
     fn parse_single_module(
         src: &str,
@@ -3436,7 +4425,7 @@ mod tests {
             vec![2, 2],
         );
         let lib = builder.finish();
-        let mut counts = TimingQueryDiagnosticCounts::default();
+        let mut counts = TimingEvaluationContext::new(&lib);
 
         assert_close(
             evaluate_table_with_query_and_diagnostics(
@@ -3479,7 +4468,7 @@ mod tests {
             .expect("setup table evaluation"),
             1.0,
         );
-        assert_eq!(counts, TimingQueryDiagnosticCounts::default());
+        assert_eq!(counts.diagnostics, TimingQueryDiagnosticCounts::default());
     }
 
     #[test]
@@ -5847,7 +6836,7 @@ endmodule
             vec![2, 2],
         );
         let lib = builder.finish();
-        let mut counts = TimingQueryDiagnosticCounts::default();
+        let mut counts = TimingEvaluationContext::new(&lib);
 
         assert_close(
             evaluate_table_with_query_and_diagnostics(
@@ -5945,7 +6934,7 @@ endmodule
         );
 
         assert_eq!(
-            counts,
+            counts.diagnostics,
             TimingQueryDiagnosticCounts {
                 delay_slew_below_min_clamp_count: 2,
                 delay_slew_single_above_max_extrapolation_count: 1,
@@ -6145,7 +7134,7 @@ endmodule
         let delay_table = scalar_table(&mut builder, "cell_rise", 1.0);
         let slew_table = scalar_table(&mut builder, "rise_transition", -0.1);
         let lib = builder.finish();
-        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+        let mut evaluation = TimingEvaluationContext::new(&lib);
 
         let output = evaluate_output_edge_set(
             &lib,
@@ -6153,7 +7142,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
-            &mut timing_query_diagnostic_counts,
+            &mut evaluation,
             "negative_transition",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -6178,7 +7167,7 @@ endmodule
         let delay_table = scalar_table(&mut builder, "cell_rise", 0.0);
         let slew_table = scalar_table(&mut builder, "rise_transition", 0.1);
         let lib = builder.finish();
-        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+        let mut evaluation = TimingEvaluationContext::new(&lib);
 
         let error = evaluate_output_edge_set(
             &lib,
@@ -6186,7 +7175,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
-            &mut timing_query_diagnostic_counts,
+            &mut evaluation,
             "overflow_arrival",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -6197,6 +7186,46 @@ endmodule
                 .to_string()
                 .contains("propagated arrival must be finite")
         );
+    }
+
+    #[test]
+    fn pin_lookup_preserves_declaration_indices_and_handles_missing_names() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        for count in [0, 1, 2, 5, 8, 9, 32] {
+            let pins = (0..count)
+                .rev()
+                .map(|i| {
+                    test_pin(
+                        &mut builder,
+                        &format!("P{i}"),
+                        PinDirection::Input,
+                        "",
+                        vec![],
+                    )
+                })
+                .collect();
+            builder.cells.push(Cell {
+                name: format!("CELL{count}"),
+                pins,
+                ..Default::default()
+            });
+        }
+        let library = builder.finish();
+        let index = StaLibraryIndex::new(&library)?;
+        for (cell_idx, cell) in library.cells.iter().enumerate() {
+            for (pin_idx, pin) in cell.pins.iter().enumerate() {
+                let name = library.resolve_string(&pin.name);
+                assert_eq!(index.pin_index(cell_idx, name), Some(pin_idx));
+                assert!(std::ptr::eq(index.pin(cell_idx, name).unwrap(), pin));
+            }
+            for missing in ["", "A", "P", "P99", "Z"] {
+                assert!(index.pin_index(cell_idx, missing).is_none());
+                assert!(index.pin(cell_idx, missing).is_none());
+            }
+        }
+        assert!(index.pin_index(library.cells.len(), "P0").is_none());
+        assert!(index.pin(library.cells.len(), "P0").is_none());
+        Ok(())
     }
 
     #[test]

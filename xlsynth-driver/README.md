@@ -1154,6 +1154,66 @@ Example:
 xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
 ```
 
+### `gv-resize`: Native timing-driven cell resizing
+
+Resizes a flat mapped GV module, including compatible flip-flops, and writes
+the resulting GV to stdout. A bounded timing-improvement phase is followed by
+area recovery against the timing checkpoint reached by that phase. Connectivity,
+register polarity, and direct module/register wires are unchanged. No buffers
+are inserted or removed. Independent full STA verifies the final result using
+the same model as `gv-stats`: Liberty max-delay/setup timing with ideal clocks,
+not hold, placement, wire-delay or clock-tree signoff.
+
+The timing phase prioritizes near-critical paths and can change either cell
+strength direction. Area-growing moves must improve an area-delay-squared merit
+as well as pass the fixed area/timing limits. Area recovery prioritizes potential
+savings with estimated timing headroom; every acceptance uses exact incremental
+timing. Unchanged arrival/slew frontiers stop propagation, with no approximate
+cutoffs.
+
+- `--netlist <PATH>`: required mapped GV input, optionally gzip-compressed.
+- `--liberty_proto <PATH>`: required matching timing-enabled Liberty proto.
+- `--module_name <NAME>`: selected module; optional for a single-module file.
+- `--primary_input_transition <VALUE>`: input slew in library time units;
+  default `0.01`. This is a fixed slew, not ABC's virtual driving-cell model.
+- `--module_output_load <VALUE>`: output capacitance in library units;
+  defaults to the proto's `default_output_load`. Explicit `0` is supported.
+- `--max-area-growth <FRACTION>`: noncompounding growth relative to input area;
+  default `0.02` (2%).
+- `--timing-evaluation-budget <COUNT>`: instance timing evaluations across all
+  timing rounds; defaults to `max(50000, 4 * N)` for `N` mapped instances,
+  including FFs. Explicit `0` permits no evaluation work.
+- `--recovery-evaluation-budget <COUNT>`: instance timing evaluations across all
+  recovery rounds; defaults to `max(100000, 8 * N)`. Independent of the timing
+  budget; explicit `0` permits no evaluation work. Exhaustion rolls back the
+  unfinished trial and keeps verified work.
+- `--upsize-rounds <COUNT>`, `--downsize-rounds <COUNT>`: default `4` and `2`;
+  `0` disables that phase. Evaluation budgets do not reset each round or borrow
+  unused work from the other phase.
+- `--no-register-resize`: leave FF cells fixed; default permits resizing.
+- `--report-json <PATH>`: deterministic before/after boundary timing, cell area,
+  accepted moves, propagation counts, resolved `work_limits`, per-phase stopping
+  reasons, and budget-exhaustion status. Phase reasons are `disabled`,
+  `no_improvement`, `round_limit`, and `propagation_limit`. `budget_exhausted` is
+  true if either phase stops because its evaluation budget is exhausted.
+
+Search defaults come from the library's `ResizeOptions`. Timing visits up to
+`max(64, ceil(N / 512))` candidate sites per round; recovery has no site cap.
+Both phases try up to eight alternative sizes per site. One trial can require
+many instance evaluations. There is no separate trial-count or combined
+phase-work limit. The historical
+`upsize`/`downsize` report fields mean timing search and area recovery;
+`no_improvement` means no improvement among the bounded candidates tried,
+not a local-optimality guarantee.
+
+```bash
+xlsynth-driver gv-resize --netlist mapped.gv \
+  --liberty_proto /path/to/cells.timing.proto \
+  --report-json resize.json > resized.gv
+xlsynth-driver gv-stats --netlist resized.gv \
+  --liberty_proto /path/to/cells.timing.proto
+```
+
 ### `g8r2gv`: G8R to mapped gate-level Verilog
 
 Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level Verilog netlist
