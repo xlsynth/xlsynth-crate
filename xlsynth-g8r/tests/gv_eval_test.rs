@@ -3,6 +3,9 @@
 use xlsynth_pir::{IrBits, IrValue};
 
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
+use xlsynth_g8r::liberty::model::{
+    LIBERTY_FORMAT_MAGIC_V4, LIBERTY_FORMAT_MAGIC_V5, library_from_proto, library_to_proto,
+};
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, parse_liberty_files_with_payload_options,
 };
@@ -508,6 +511,48 @@ endmodule
         IrValue::parse_typed("(bits[1]:1)").unwrap(),
         IrValue::parse_typed("(bits[1]:0)").unwrap(),
     ];
+
+    // A labeled AIG can be paired with a different library at analysis time;
+    // the independently supplied cell must retain valid driver semantics.
+    let wire =
+        library_to_proto(xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap())
+            .unwrap();
+    let options = GvDynamicPowerOptions {
+        primary_input_transition: 1.0,
+        module_output_load: 3.0,
+        cycle_time: Some(5.0),
+    };
+    for (magic, rejects) in [
+        (LIBERTY_FORMAT_MAGIC_V4, true),
+        (LIBERTY_FORMAT_MAGIC_V5, false),
+    ] {
+        let mut legacy = wire.clone();
+        legacy.format_magic = magic;
+        let legacy = library_from_proto(legacy).unwrap();
+        let result = model.analyze_dynamic_power(&legacy, &samples, options);
+        if rejects {
+            assert!(result.unwrap_err().contains("driver_type"));
+        } else {
+            assert!(result.is_ok());
+        }
+    }
+    let mut explicit_driver = wire;
+    explicit_driver.cells[0].unsupported_semantics.push(
+        xlsynth_g8r::liberty_proto::UnsupportedSemantics {
+            feature: xlsynth_g8r::liberty_proto::UnsupportedFeature::DriverType as i32,
+            location: "pin(Y).driver_type".into(),
+        },
+    );
+    assert!(
+        model
+            .analyze_dynamic_power(
+                &library_from_proto(explicit_driver).unwrap(),
+                &samples,
+                options,
+            )
+            .unwrap_err()
+            .contains("pin(Y).driver_type")
+    );
 
     let report = model
         .analyze_dynamic_power(

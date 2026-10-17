@@ -939,6 +939,7 @@ fn build_topology(
                     instance.instance_name, instance.cell_type
                 )
             })?;
+        library.cells[cell].validate_driver_type_semantics()?;
         let pin_by_name: HashMap<_, _> = library.cells[cell]
             .pins
             .iter()

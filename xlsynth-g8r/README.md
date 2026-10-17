@@ -143,27 +143,25 @@ These APIs require no ABC, Yosys, or Liberty library.
 ## Liberty import contract
 
 The Liberty proto stores normalized functional and characterization data, not
-the complete source syntax. Current loaders require regeneration from raw
-Liberty for older protos: those artifacts may have silently omitted functional
-attributes. Both binary and textproto loaders check the format discriminator.
+the complete source syntax. V4, V5, and V6 are versions of xlsynth-g8r's own
+protobuf import contract, encoded in its `format_magic` field; they are not
+versions of the Liberty file format. Binary and textproto loaders accept all
+three payloads.
 
 The discriminator originally separated a schema rewrite that reused field
 numbers with different meanings: for example, the old library's units and the
 new library's cells both use field 2. Some old payloads could otherwise decode
 as plausible but incorrect data. The current value also identifies the import
-contract. V4 and earlier importers could omit pin driver behavior, and V5 and
-earlier importers could omit `use_for_size_only`. An absent field cannot tell a
-reader whether the source lacked that attribute or the importer discarded it.
-Current xlsynth-g8r readers reject earlier values rather than trusting incomplete
-imports; older xlsynth-g8r readers reject newly produced V6 files rather than
-ignoring the newer restrictions. These checks are application policy, not
-protobuf decoding behavior. They are conservative: even an older file unaffected
-by those attributes, or one used only for inspection, must be regenerated from
-the original Liberty source. An alternative would track source coverage and
-reject only operations that require missing information, although unmodified older
-readers would still not understand the new restrictions. The additive fields
-themselves are wire-compatible and do not require a format change for protobuf
-decoding.
+contract. V4 importers could omit pin driver behavior, and V4/V5 importers could
+omit `use_for_size_only`. An absent field cannot tell a reader whether the source
+lacked that attribute or the importer discarded it. On import, cells carry
+explicit markers for this missing coverage through merges and V6 reserialization.
+V4 cells can be inspected and their timing payloads read, but cannot be used for
+Boolean evaluation or behavior-dependent timing and power analysis. V5 cells
+can be used for Boolean evaluation but neither V4 nor V5 cells can be newly
+mapped without regenerating from source Liberty. V3 and older incompatible
+schemas remain rejected. New files use V6 so older readers reject restrictions
+they cannot enforce; older V6 readers also reject the new coverage markers.
 
 Functional interpretation assumes normal powered-on operation. The importer
 intentionally ignores `power_down_function` on pins and sequential groups
@@ -286,6 +284,12 @@ version, source paths, exact script, and captured output. Emitted cell/pin names
 are checked against the normalized library, but matching names do not establish
 functional/timing identity between the two inputs. Callers must use matching
 libraries and filtering policies.
+
+Each mapping invocation snapshots and parses the raw libraries to check formulas
+for cells ABC emits. ABC and Liberty assign different precedence to AND and XOR;
+the mapper rejects a cell when the two parses differ. This check adds file I/O
+and parsing, and requires the raw files to use syntax supported by the Liberty
+parser. Parenthesizing mixed AND/XOR expressions removes the ambiguity.
 
 The mapper uses opaque scalar ABC port names, then restores the original packed
 external interface and assembles FF clock/data/output connections and verified

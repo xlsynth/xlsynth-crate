@@ -250,12 +250,14 @@ generated when needed.
 `xlsynth-g8r/proto/liberty.proto`. The wire format uses float32 table values,
 typed enums for standard Liberty vocabularies, and library-wide interned
 strings, axis vectors, and table shapes. Loaders expand it to strings, float64
-values, and inline table geometry for the in-memory evaluator API. This is a
-breaking wire-format change, and older Liberty proto files must be regenerated.
-The import contract also versions source coverage: V4 and earlier protos may
-omit pin driver behavior, and V5 and earlier protos may omit the
-`use_for_size_only` mapping restriction. Regenerate them from source Liberty
-files with the current `lib2proto` before using them.
+values, and inline table geometry for the in-memory evaluator API. Loaders accept
+V4, V5, and V6 of xlsynth-g8r's protobuf import contract; these are not Liberty
+file format versions. V4 lacks reliable pin-driver and sizing-restriction coverage;
+V5 lacks reliable sizing-restriction coverage. Both can be inspected and their
+timing payloads read. V5 also supports Boolean evaluation, but new mapping
+requires regeneration from source Liberty with the current `lib2proto`. V4 also
+requires regeneration for Boolean evaluation and behavior-dependent timing or
+power analysis. V3 and earlier formats remain incompatible.
 In Rust, `xlsynth_g8r::liberty_proto` contains the generated wire types, while
 `xlsynth_g8r::liberty_model` contains the normalized evaluator-facing types.
 

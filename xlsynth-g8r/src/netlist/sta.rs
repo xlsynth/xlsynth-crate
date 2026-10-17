@@ -610,6 +610,9 @@ fn analyze_max_arrival_proto_with_mode(
                 cell_name
             )
         })?;
+        lib.library.cells[cell_idx]
+            .validate_driver_type_semantics()
+            .map_err(anyhow::Error::msg)?;
         instance_cell_indices.push(cell_idx);
         instance_cell_names.push(cell_name.clone());
         let is_sequential = is_sequential_boundary_cell(&lib.library.cells[cell_idx]);
@@ -3219,7 +3222,11 @@ fn resolve_symbol(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::liberty::model::{
+        LIBERTY_FORMAT_MAGIC_V4, LIBERTY_FORMAT_MAGIC_V5, library_from_proto, library_to_proto,
+    };
     use crate::liberty_model::{Cell, LibraryBuilder, Pin, TimingArc, TimingTable};
+    use crate::liberty_proto::{UnsupportedFeature, UnsupportedSemantics};
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
 
@@ -3525,6 +3532,68 @@ mod tests {
 
     fn scalar_inv_library() -> crate::liberty_model::Library {
         scalar_inv_builder().finish()
+    }
+
+    #[test]
+    fn sta_checks_driver_semantics_only_for_used_cells() {
+        let src = bench_synth_netlist::make_chain_netlist(1);
+        let (module, nets, interner) = parse_single_module(&src);
+        let original = library_to_proto(scalar_inv_library()).unwrap();
+        for (magic, fails) in [
+            (LIBERTY_FORMAT_MAGIC_V4, true),
+            (LIBERTY_FORMAT_MAGIC_V5, false),
+        ] {
+            let mut wire = original.clone();
+            wire.format_magic = magic;
+            let library = library_from_proto(wire).unwrap();
+            let result = analyze_combinational_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                StaOptions::default(),
+            );
+            if fails {
+                assert!(result.unwrap_err().to_string().contains("driver_type"));
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+        let mut unsupported = original.clone();
+        unsupported.cells[0]
+            .unsupported_semantics
+            .push(UnsupportedSemantics {
+                feature: UnsupportedFeature::DriverType as i32,
+                location: "pin(Y).driver_type".into(),
+            });
+        let library = library_from_proto(unsupported.clone()).unwrap();
+        assert!(
+            analyze_combinational_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                StaOptions::default()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("pin(Y).driver_type")
+        );
+        let mut unused = unsupported.cells.remove(0);
+        unused.name = "UNUSED".into();
+        let mut with_unused = original;
+        with_unused.cells.push(unused);
+        let library = library_from_proto(with_unused).unwrap();
+        assert!(
+            analyze_combinational_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                &library,
+                StaOptions::default(),
+            )
+            .is_ok()
+        );
     }
 
     #[test]

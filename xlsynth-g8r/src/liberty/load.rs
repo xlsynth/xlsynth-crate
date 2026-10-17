@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::liberty::descriptor::liberty_descriptor_pool;
-use crate::liberty::model::{LIBERTY_FORMAT_MAGIC, library_from_proto};
+use crate::liberty::model::{is_supported_format_magic, library_from_proto};
 use crate::liberty_model;
 use crate::liberty_proto;
 use anyhow::{Context, Result, anyhow};
@@ -115,7 +115,7 @@ pub fn decode_timing_table_summary_skip_values_from_bytes(
     source_name: &str,
 ) -> Result<TimingTableSummary> {
     if let Ok(payload) = LibraryTimingSummaryPayload::decode(bytes) {
-        if payload.format_magic == LIBERTY_FORMAT_MAGIC {
+        if is_supported_format_magic(payload.format_magic) {
             return Ok(TimingTableSummary {
                 cells: payload.cells.len(),
                 timing_tables: count_summary_tables(&payload),

@@ -7,17 +7,26 @@ use prost_reflect::DynamicMessage;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use tempfile::NamedTempFile;
+use xlsynth_g8r::liberty::cell_filter::CellFilterPolicy;
 use xlsynth_g8r::liberty::cell_formula::parse_formula;
 use xlsynth_g8r::liberty::descriptor::liberty_descriptor_pool;
-use xlsynth_g8r::liberty::load::load_library_from_path;
-use xlsynth_g8r::liberty::model::{library_from_proto, library_to_proto};
+use xlsynth_g8r::liberty::load::{
+    count_timing_tables, decode_timing_table_summary_skip_values_from_bytes,
+    load_library_from_path, load_library_with_timing_data_from_path,
+};
+use xlsynth_g8r::liberty::model::{
+    LIBERTY_FORMAT_MAGIC, LIBERTY_FORMAT_MAGIC_V4, LIBERTY_FORMAT_MAGIC_V5, library_from_proto,
+    library_to_proto,
+};
 use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, parse_liberty_files_with_payload_options,
 };
+use xlsynth_g8r::liberty::proto_info::liberty_proto_info_from_path;
 use xlsynth_g8r::liberty_model::{Library, Pin, PinDirection, SequentialKind};
 use xlsynth_g8r::liberty_proto::{Library as WireLibrary, UnsupportedFeature};
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
 use xlsynth_g8r::netlist::io::read_gv_from_path;
+use xlsynth_g8r::netlist::register_mapping::{RegisterCellSelection, RegisterMappingLibrary};
 
 fn parse(text: &str, payload: LibertyPayloadOptions) -> Result<Library, String> {
     let mut file = NamedTempFile::new().unwrap();
@@ -791,7 +800,7 @@ fn electrical_defaults_do_not_leak_between_merged_libraries() {
 }
 
 #[test]
-fn invalid_electrical_values_and_legacy_protos_are_rejected() {
+fn invalid_electrical_values_and_incompatible_protos_are_rejected() {
     for attribute in [
         "capacitance",
         "rise_capacitance",
@@ -832,11 +841,128 @@ fn invalid_electrical_values_and_legacy_protos_are_rejected() {
             location: "ff(IQ).future_control".into(),
         });
     assert!(library_from_proto(unknown).is_err());
-    for magic in [0x4c49_4256_3350_524f, 0x4c49_4256_3450_524f] {
-        let mut legacy = wire.clone();
+    let mut legacy = wire.clone();
+    legacy.format_magic = 0x4c49_4256_3350_524f;
+    let error = library_from_proto(legacy).unwrap_err().to_string();
+    assert!(error.contains("regenerate from source Liberty"), "{error}");
+}
+
+#[test]
+fn legacy_protos_remain_inspectable_and_preserve_distinct_coverage() {
+    let source = r#"
+        library(test) {
+            cell(BUF) {
+                pin(A) { direction: input; }
+                pin(Y) { direction: output; function: "A";
+                    timing() { related_pin: "A"; timing_type: combinational;
+                        cell_rise(scalar) { values("1"); }
+                    }
+                }
+            }
+            cell(FF) {
+                area: 1;
+                pin(D) { direction: input; }
+                pin(CLK) { direction: input; clock: true; }
+                pin(Q) { direction: output; function: "IQ"; }
+                ff(IQ,IQN) { clocked_on: "CLK"; next_state: "D"; }
+            }
+        }
+    "#;
+    let current = library_to_proto(parse(source, LibertyPayloadOptions::all()).unwrap()).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(
+        netlist_file,
+        "module top(input a, output y); BUF u(.A(a),.Y(y)); endmodule"
+    )
+    .unwrap();
+    let parsed = read_gv_from_path(netlist_file.path()).unwrap();
+
+    for (magic, driver_unknown) in [
+        (LIBERTY_FORMAT_MAGIC_V4, true),
+        (LIBERTY_FORMAT_MAGIC_V5, false),
+    ] {
+        let mut legacy = current.clone();
         legacy.format_magic = magic;
-        let error = library_from_proto(legacy).unwrap_err().to_string();
-        assert!(error.contains("regenerate from source Liberty"), "{error}");
+        let binary = legacy.encode_to_vec();
+        let descriptor = liberty_descriptor_pool()
+            .get_message_by_name("liberty.Library")
+            .unwrap();
+        let text = DynamicMessage::decode(descriptor, binary.as_slice())
+            .unwrap()
+            .to_text_format();
+        for payload in [binary.as_slice(), text.as_bytes()] {
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(payload).unwrap();
+            let mut library = load_library_with_timing_data_from_path(file.path()).unwrap();
+            assert_eq!(count_timing_tables(&library), 1);
+            let info = liberty_proto_info_from_path(file.path()).unwrap();
+            assert_eq!(info.cells, 2);
+            assert_eq!(info.timing_arcs, 1);
+            let summary =
+                decode_timing_table_summary_skip_values_from_bytes(payload, "test").unwrap();
+            assert_eq!(summary.cells, 2);
+            assert_eq!(summary.timing_tables, 1);
+
+            let boolean = project_gatefn_from_netlist_and_liberty(
+                &parsed.modules[0],
+                &parsed.nets,
+                &parsed.interner,
+                &library,
+                &HashSet::new(),
+                &HashSet::new(),
+            );
+            if driver_unknown {
+                assert!(
+                    boolean
+                        .unwrap_err()
+                        .contains("driver_type source coverage is unknown")
+                );
+            } else {
+                assert!(boolean.is_ok());
+            }
+            let catalog = RegisterMappingLibrary::new(&library).unwrap();
+            let error = catalog
+                .select(&RegisterCellSelection::FixedCell("FF".into()))
+                .unwrap_err();
+            if driver_unknown {
+                assert!(
+                    error.contains("driver_type source coverage is unknown"),
+                    "{error}"
+                );
+            } else {
+                assert!(
+                    error.contains("unknown use_for_size_only source coverage"),
+                    "{error}"
+                );
+            }
+
+            CellFilterPolicy::parse("include .*", "test")
+                .unwrap()
+                .apply(&mut library);
+            let reencoded = library_to_proto(library).unwrap();
+            assert_eq!(reencoded.format_magic, LIBERTY_FORMAT_MAGIC);
+            for cell in &reencoded.cells {
+                let features = cell
+                    .unsupported_semantics
+                    .iter()
+                    .map(|x| x.feature)
+                    .collect::<Vec<_>>();
+                let mut expected = Vec::new();
+                if driver_unknown {
+                    expected.push(UnsupportedFeature::IncompleteDriverTypeCoverage as i32);
+                }
+                expected.push(UnsupportedFeature::IncompleteSizeOnlyCoverage as i32);
+                assert_eq!(features, expected);
+            }
+            let roundtripped = roundtrip(library_from_proto(reencoded).unwrap());
+            for cell in &roundtripped.cells {
+                assert_eq!(
+                    cell.validate_functional_semantics().is_err(),
+                    driver_unknown
+                );
+                assert!(cell.validate_mapping_policy_coverage().is_err());
+            }
+        }
     }
 }
 

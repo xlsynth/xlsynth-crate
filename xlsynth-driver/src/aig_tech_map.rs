@@ -125,7 +125,10 @@ fn cell_binding_if_shape_matches(
     if cell.dont_use == Some(true) || cell.use_for_size_only == Some(true) {
         return None;
     }
-    if let Err(error) = cell.validate_functional_semantics() {
+    if let Err(error) = cell
+        .validate_functional_semantics()
+        .and_then(|()| cell.validate_mapping_policy_coverage())
+    {
         log::warn!(
             "skipping {} candidate '{}': {}",
             family_prefix,
@@ -722,6 +725,27 @@ mod tests {
             assert!(select_inv_cell_name(&library, policy).is_err());
             assert!(select_nand2_cell_name(&library, policy).is_err());
         }
+    }
+
+    #[test]
+    fn structural_selection_rejects_unknown_legacy_sizing_policy() {
+        let library = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INV", 0),
+                make_nand2_cell(library, "NAND2", 0),
+            ]
+        });
+        let mut wire = library_to_proto(library).unwrap();
+        wire.format_magic = xlsynth_g8r::liberty::model::LIBERTY_FORMAT_MAGIC_V5;
+        let library = library_from_proto(wire).unwrap();
+        assert!(
+            library
+                .cells
+                .iter()
+                .all(|cell| cell.validate_functional_semantics().is_ok())
+        );
+        assert!(select_inv_cell_name(&library, CellPolicy::SmallNormalVt).is_err());
+        assert!(select_nand2_cell_name(&library, CellPolicy::SmallNormalVt).is_err());
     }
 
     #[test]

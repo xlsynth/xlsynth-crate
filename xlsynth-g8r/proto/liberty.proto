@@ -10,8 +10,8 @@ package liberty;
 message Library {
   // Wire-format discriminator. Old Liberty proto encodings use a message at
   // tag 1, so their incompatible wire type is rejected rather than silently
-  // misdecoded. This also versions the import contract: earlier encodings
-  // omitted unsupported functional semantics and require source regeneration.
+  // misdecoded. This also versions the import contract: V4/V5 imports may
+  // lack source coverage, which readers retain as per-cell uncertainty.
   fixed64 format_magic = 1;
   repeated Cell cells = 2;
   LibraryUnits units = 3;
@@ -52,8 +52,8 @@ message Cell {
   uint32 threshold_voltage_group_id = 6;
   // Native Liberty `dont_use`, before any external filtering policy.
   optional bool dont_use = 7;
-  // Functional source constructs not represented by this model. Consumers
-  // must reject these cells before Boolean mapping or evaluation.
+  // Unsupported source constructs or explicitly incomplete source coverage.
+  // Consumers reject a cell only when their operation needs that coverage.
   repeated UnsupportedSemantics unsupported_semantics = 8;
   // Native Liberty `use_for_size_only`: usable for sizing, not new mapping.
   optional bool use_for_size_only = 9;
@@ -73,6 +73,10 @@ enum UnsupportedFeature {
   SEQUENTIAL_GROUP = 10;
   // Pin driver transformations and resolution are not Boolean functions.
   DRIVER_TYPE = 11;
+  // The importer did not record whether pin driver transformations were used.
+  INCOMPLETE_DRIVER_TYPE_COVERAGE = 12;
+  // The importer did not record whether use_for_size_only was specified.
+  INCOMPLETE_SIZE_ONLY_COVERAGE = 13;
 }
 
 message UnsupportedSemantics {

@@ -546,15 +546,19 @@ impl Cell {
     /// Rejects cells whose imported behavior cannot safely be used as Boolean
     /// logic.
     pub fn validate_functional_semantics(&self) -> std::result::Result<(), String> {
-        if !self.unsupported_semantics.is_empty() {
+        let functional_issues = self
+            .unsupported_semantics
+            .iter()
+            .filter(|issue| {
+                issue.feature != wire::UnsupportedFeature::IncompleteSizeOnlyCoverage as i32
+            })
+            .map(|issue| issue.location.as_str())
+            .collect::<Vec<_>>();
+        if !functional_issues.is_empty() {
             return Err(format!(
                 "cell '{}' has unsupported Liberty semantics: {}",
                 self.name,
-                self.unsupported_semantics
-                    .iter()
-                    .map(|issue| issue.location.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                functional_issues.join(", ")
             ));
         }
         // Check represented controls too: callers may construct normalized
@@ -576,6 +580,35 @@ impl Cell {
             return Err(format!(
                 "cell '{}' has unsupported pin directions",
                 self.name
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rejects new mapping when source coverage of sizing restrictions is
+    /// unknown.
+    pub fn validate_mapping_policy_coverage(&self) -> std::result::Result<(), String> {
+        if self.unsupported_semantics.iter().any(|issue| {
+            issue.feature == wire::UnsupportedFeature::IncompleteSizeOnlyCoverage as i32
+        }) {
+            return Err(format!(
+                "cell '{}' has unknown use_for_size_only source coverage; regenerate from source Liberty before mapping",
+                self.name
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rejects behavior-dependent analysis when pin-driver semantics are
+    /// unknown or unsupported.
+    pub fn validate_driver_type_semantics(&self) -> std::result::Result<(), String> {
+        if let Some(issue) = self.unsupported_semantics.iter().find(|issue| {
+            issue.feature == wire::UnsupportedFeature::IncompleteDriverTypeCoverage as i32
+                || issue.feature == wire::UnsupportedFeature::DriverType as i32
+        }) {
+            return Err(format!(
+                "cell '{}' has unsupported or unknown driver_type semantics: {}",
+                self.name, issue.location
             ));
         }
         Ok(())
@@ -972,10 +1005,22 @@ pub fn timing_table_kind_str(value: wire::TimingTableKind) -> &'static str {
 
 /// Wire-format discriminator stored in every serialized Liberty library.
 pub const LIBERTY_FORMAT_MAGIC: u64 = 0x4c49_4256_3650_524f;
+/// Earlier import contract without complete pin-driver or sizing-only coverage.
+pub const LIBERTY_FORMAT_MAGIC_V4: u64 = 0x4c49_4256_3450_524f;
+/// Earlier import contract without complete sizing-only coverage.
+pub const LIBERTY_FORMAT_MAGIC_V5: u64 = 0x4c49_4256_3550_524f;
 
-/// Returns whether a decoded library has the expected wire-format magic.
+/// Returns whether a wire-format discriminator is supported by this reader.
+pub fn is_supported_format_magic(magic: u64) -> bool {
+    matches!(
+        magic,
+        LIBERTY_FORMAT_MAGIC_V4 | LIBERTY_FORMAT_MAGIC_V5 | LIBERTY_FORMAT_MAGIC
+    )
+}
+
+/// Returns whether a decoded library has a supported wire-format magic.
 pub fn has_valid_header(library: &wire::Library) -> bool {
-    library.format_magic == LIBERTY_FORMAT_MAGIC
+    is_supported_format_magic(library.format_magic)
 }
 
 fn axis_key(axis: &[f64]) -> Vec<u64> {
@@ -1653,6 +1698,7 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
             library.format_magic
         );
     }
+    let format_magic = library.format_magic;
     if let Some(index) = library.interned_strings.iter().position(String::is_empty) {
         bail!("interned string pool entry {} is empty", index + 1);
     }
@@ -1854,7 +1900,7 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let cell = Cell {
+            let mut cell = Cell {
                 name: cell.name,
                 pins,
                 area: cell.area,
@@ -1865,6 +1911,34 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                 use_for_size_only: cell.use_for_size_only,
                 unsupported_semantics: cell.unsupported_semantics,
             };
+            // Older importers did not record these source attributes. Retain
+            // uncertainty per cell so merges and V6 serialization cannot turn
+            // missing coverage into an assertion that the attribute was absent.
+            for (missing, feature, location) in [
+                (
+                    format_magic == LIBERTY_FORMAT_MAGIC_V4,
+                    wire::UnsupportedFeature::IncompleteDriverTypeCoverage,
+                    "pin driver_type source coverage is unknown",
+                ),
+                (
+                    format_magic == LIBERTY_FORMAT_MAGIC_V4
+                        || format_magic == LIBERTY_FORMAT_MAGIC_V5,
+                    wire::UnsupportedFeature::IncompleteSizeOnlyCoverage,
+                    "use_for_size_only source coverage is unknown",
+                ),
+            ] {
+                if missing
+                    && !cell
+                        .unsupported_semantics
+                        .iter()
+                        .any(|issue| issue.feature == feature as i32)
+                {
+                    cell.unsupported_semantics.push(wire::UnsupportedSemantics {
+                        feature: feature as i32,
+                        location: location.to_string(),
+                    });
+                }
+            }
             cell.validate_import_metadata()
                 .map_err(anyhow::Error::msg)?;
             Ok(cell)
@@ -1893,6 +1967,7 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::liberty::cell_filter::CellFilterPolicy;
     use prost::Message;
 
     #[test]
@@ -2062,12 +2137,51 @@ mod tests {
     fn proto_conversion_rejects_invalid_header() {
         let error = library_from_proto(wire::Library::default()).unwrap_err();
         assert!(format!("{error:#}").contains("invalid Liberty proto header"));
-        let old_v5 = wire::Library {
-            format_magic: 0x4c49_4256_3550_524f,
+        let old_v3 = wire::Library {
+            format_magic: 0x4c49_4256_3350_524f,
             ..Default::default()
         };
-        let error = library_from_proto(old_v5).unwrap_err();
+        let error = library_from_proto(old_v3).unwrap_err();
         assert!(format!("{error:#}").contains("invalid Liberty proto header"));
+    }
+
+    #[test]
+    fn mixed_import_coverage_survives_merge_filter_and_v6_roundtrip() {
+        let load = |name: &str, format_magic| {
+            library_from_proto(wire::Library {
+                format_magic,
+                cells: vec![wire::Cell {
+                    name: name.to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let mut mixed = load("current", LIBERTY_FORMAT_MAGIC);
+        mixed
+            .append_cells_and_luts(load("legacy_v4", LIBERTY_FORMAT_MAGIC_V4))
+            .unwrap();
+        mixed
+            .append_cells_and_luts(load("legacy_v5", LIBERTY_FORMAT_MAGIC_V5))
+            .unwrap();
+        CellFilterPolicy::parse("include .*", "test")
+            .unwrap()
+            .apply(&mut mixed);
+        let wire = library_to_proto(mixed).unwrap();
+        assert_eq!(wire.format_magic, LIBERTY_FORMAT_MAGIC);
+        let reloaded = library_from_proto(wire).unwrap();
+        let expected = [(false, false), (true, true), (false, true)];
+        for (cell, (functional_rejected, mapping_rejected)) in reloaded.cells.iter().zip(expected) {
+            assert_eq!(
+                cell.validate_functional_semantics().is_err(),
+                functional_rejected
+            );
+            assert_eq!(
+                cell.validate_mapping_policy_coverage().is_err(),
+                mapping_rejected
+            );
+        }
     }
 
     #[test]

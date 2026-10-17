@@ -297,6 +297,7 @@ fn compare_mappings(a: &RegisterCellMapping, b: &RegisterCellMapping) -> Orderin
 /// Finds the deterministic legal data/output/control assignment for one cell.
 fn map_cell(cell: &Cell, library: &Library) -> Result<RegisterCellMapping, String> {
     cell.validate_functional_semantics()?;
+    cell.validate_mapping_policy_coverage()?;
     if cell.name.is_empty() {
         return Err("cell name is empty".into());
     }
