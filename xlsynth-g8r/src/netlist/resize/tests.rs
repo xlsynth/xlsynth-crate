@@ -1249,7 +1249,15 @@ fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Resu
         .iter_mut()
         .find(|p| !p.is_clocking_pin && p.direction == PinDirection::Input as i32)
         .unwrap();
-    data.timing_arcs[0].tables.clear();
+    // Missing setup tables are optional in STA, so removing them does not
+    // exercise error rollback. Duplicate constraint tables are unsupported.
+    let duplicate = data.timing_arcs[0]
+        .tables
+        .iter()
+        .find(|table| table.kind_str() == "rise_constraint")
+        .unwrap()
+        .clone();
+    data.timing_arcs[0].tables.push(duplicate);
     let source = "module m(input clk, input a, output y); wire n; DFF1 launch(.CLK(clk),.D(a),.Q(n)); DFF1 capture(.CLK(clk),.D(n),.Q(y)); endmodule";
     let mut parsed = read_gv_from_str(source)?;
     let opts = options();
@@ -1262,7 +1270,7 @@ fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Resu
     )?;
     let before = sta.score();
     let cells = sta.cells.clone();
-    // Missing capture tables fail after forward timing and input loads have
+    // Duplicate capture tables fail after forward timing and input loads have
     // changed, exercising rollback beyond candidate preparation.
     assert!(sta.trial(1, bad, usize::MAX, None, |_| true).is_err());
     assert_eq!(sta.score(), before);
