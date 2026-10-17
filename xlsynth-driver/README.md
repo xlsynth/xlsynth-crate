@@ -252,6 +252,10 @@ typed enums for standard Liberty vocabularies, and library-wide interned
 strings, axis vectors, and table shapes. Loaders expand it to strings, float64
 values, and inline table geometry for the in-memory evaluator API. This is a
 breaking wire-format change, and older Liberty proto files must be regenerated.
+The import contract also versions source coverage: V4 and earlier protos may
+omit pin driver behavior, and V5 and earlier protos may omit the
+`use_for_size_only` mapping restriction. Regenerate them from source Liberty
+files with the current `lib2proto` before using them.
 In Rust, `xlsynth_g8r::liberty_proto` contains the generated wire types, while
 `xlsynth_g8r::liberty_model` contains the normalized evaluator-facing types.
 

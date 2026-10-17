@@ -388,6 +388,7 @@ mod tests {
             clock_gate: None,
             threshold_voltage_group_id: 0,
             dont_use: None,
+            use_for_size_only: None,
             unsupported_semantics: vec![],
         }];
         builder.lu_table_templates = vec![LuTableTemplate {
@@ -575,6 +576,7 @@ mod tests {
             clock_gate: None,
             threshold_voltage_group_id: 0,
             dont_use: None,
+            use_for_size_only: None,
             unsupported_semantics: vec![],
         }];
         let indexed = IndexedLibrary::new(builder.finish());
@@ -630,6 +632,7 @@ mod tests {
             clock_gate: None,
             threshold_voltage_group_id: 0,
             dont_use: None,
+            use_for_size_only: None,
             unsupported_semantics: vec![],
         }];
         let indexed = IndexedLibrary::new(builder.finish());

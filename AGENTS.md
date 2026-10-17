@@ -142,6 +142,25 @@ To run only this check locally, you can execute:
 cargo test -p xlsynth-test-helpers check_all_rust_files_for_spdx
 ```
 
+## Protobuf schema evolution
+
+Protobuf schemas should evolve compatibly. Keep existing field numbers and wire
+types stable, add new fields instead of repurposing old ones, and reserve the
+numbers and names of removed fields. An additive, wire-compatible schema change
+does not by itself justify adding or bumping a format version. Test compatibility
+with existing serialized data when changing a schema.
+
+Any version number, format magic, or fingerprint used in a protobuf schema must
+have a clear justification documented in the proto comments or supporting design
+documentation. Explain what incompatibility or invariant it protects, why normal
+protobuf evolution is insufficient, and how existing data is handled.
+
+Handle newly absent fields according to their meaning, using explicit presence
+when absence must be distinguished from a default value. If an older producer may
+have discarded information needed by a particular operation, represent that
+uncertainty and prefer handling it at the affected operation; decoding a
+protobuf cannot recover data the producer never recorded.
+
 ## Generated protobuf descriptors
 
 When changing protobuf sources that feed checked-in descriptor sets, update the

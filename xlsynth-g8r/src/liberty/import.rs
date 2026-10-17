@@ -157,6 +157,23 @@ fn find_unsupported(block: &Block, path: &str, issues: &mut Vec<UnsupportedSeman
                     }
                     "three_state" => Some(UnsupportedFeature::ThreeState),
                     "x_function" => Some(UnsupportedFeature::XFunction),
+                    "driver_type" if block.block_type == "cell" => {
+                        // At cell scope this identifies drive strength; pin
+                        // scope uses the same name for electrical behavior.
+                        None
+                    }
+                    // Driver types and their programmable forms can alter
+                    // signal resolution or produce high impedance or weak
+                    // values. The normalized model only supports Boolean pins.
+                    "driver_type"
+                    | "pull_up_function"
+                    | "pull_down_function"
+                    | "bus_hold_function"
+                    | "open_drain_function"
+                    | "open_source_function"
+                    | "resistive_function"
+                    | "resistive_0_function"
+                    | "resistive_1_function" => Some(UnsupportedFeature::DriverType),
                     "clocked_on_also" => Some(UnsupportedFeature::SecondaryClock),
                     "enable_also" => Some(UnsupportedFeature::SecondaryEnable),
                     "clear_preset_var1" | "clear_preset_var2" => {

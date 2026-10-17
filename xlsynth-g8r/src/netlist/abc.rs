@@ -663,6 +663,7 @@ fn validate_mapped_cells(parsed: &ParsedNetlist, library: &Library) -> Result<()
             .get(name)
             .ok_or_else(|| format!("ABC emitted cell absent from native Liberty: {name}"))?;
         cell.validate_functional_semantics()?;
+        // ABC's sizing passes may legitimately introduce sizing-only cells.
         if !cell.sequential.is_empty() || cell.dont_use == Some(true) || cell.clock_gate.is_some() {
             return Err(format!(
                 "ABC emitted unavailable/non-combinational cell: {name}"
@@ -906,3 +907,46 @@ fn add_alias(parsed: &mut ParsedNetlist, lhs: NetRef, rhs: NetRef) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mapping_policy_tests {
+    use super::*;
+    use crate::liberty::model::{library_from_proto, library_to_proto};
+    use crate::liberty::parser::parse_liberty_files;
+    use prost::Message;
+
+    #[test]
+    fn accepts_abc_cells_reserved_for_sizing_after_proto_roundtrip() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"library(test) {
+                cell(SIZE_ONLY) { area: 1; use_for_size_only: true;
+                    pin(A) { direction: input; }
+                    pin(Y) { direction: output; function: "A"; }
+                }
+                cell(ALLOWED) { area: 2; use_for_size_only: false;
+                    pin(A) { direction: input; }
+                    pin(Y) { direction: output; function: "A"; }
+                }
+                cell(UNSPECIFIED) { area: 3;
+                    pin(A) { direction: input; }
+                    pin(Y) { direction: output; function: "A"; }
+                }
+            }"#,
+        )
+        .unwrap();
+        let wire = library_to_proto(parse_liberty_files(&[file.path()]).unwrap()).unwrap();
+        let library = library_from_proto(
+            crate::liberty_proto::Library::decode(wire.encode_to_vec().as_slice()).unwrap(),
+        )
+        .unwrap();
+        for cell in ["SIZE_ONLY", "ALLOWED", "UNSPECIFIED"] {
+            let parsed = read_gv_from_str(&format!(
+                "module m(a,y); input a; output y; {cell} c(.A(a),.Y(y)); endmodule"
+            ))
+            .unwrap();
+            validate_mapped_cells(&parsed, &library).unwrap();
+        }
+    }
+}

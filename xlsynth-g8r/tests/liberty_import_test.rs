@@ -58,6 +58,33 @@ fn pin<'a>(library: &'a Library, cell: &str, pin: &str) -> &'a Pin {
 }
 
 #[test]
+fn size_only_presence_survives_binary_and_text_proto_roundtrips() {
+    // The roundtrip helper checks that both serialized forms preserve the
+    // normalized wire representation, including optional field presence.
+    let library = roundtrip(
+        parse(
+            r#"
+        library(test) {
+            cell(SIZE_ONLY) { use_for_size_only: true; }
+            cell(EXPLICIT_FALSE) { use_for_size_only: false; }
+            cell(ABSENT) {}
+        }
+        "#,
+            LibertyPayloadOptions::all(),
+        )
+        .unwrap(),
+    );
+    for (name, expected) in [
+        ("SIZE_ONLY", Some(true)),
+        ("EXPLICIT_FALSE", Some(false)),
+        ("ABSENT", None),
+    ] {
+        let cell = library.cells.iter().find(|cell| cell.name == name).unwrap();
+        assert_eq!(cell.use_for_size_only, expected, "cell: {name}");
+    }
+}
+
+#[test]
 fn scan_equations_and_explicit_clock_annotations_roundtrip() {
     let library = roundtrip(
         parse(
@@ -271,6 +298,79 @@ fn unsupported_semantics_survive_all_payload_modes_and_proto_forms() {
                     .unwrap()
                     .validate_functional_semantics()
                     .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn driver_types_survive_import_and_are_rejected_for_boolean_use() {
+    let cases = [
+        ("driver_type: pull_up;", "Y"),
+        ("driver_type: pull_down;", "Y"),
+        ("driver_type: open_drain;", "Y"),
+        ("driver_type: open_source;", "Y"),
+        ("driver_type: bus_hold;", "Y"),
+        ("driver_type: resistive;", "Y"),
+        ("driver_type: resistive_0;", "Y"),
+        ("driver_type: resistive_1;", "Y"),
+        ("driver_type: \"open_drain pull_up\";", "Y"),
+        ("driver_type: future_extension;", "Y"),
+        ("driver_type: pull_up;", "A"),
+        ("pull_up_function: \"A\";", "Y"),
+        ("pull_down_function: \"A\";", "Y"),
+        ("bus_hold_function: \"A\";", "Y"),
+        ("open_drain_function: \"A\";", "Y"),
+        ("open_source_function: \"A\";", "Y"),
+        ("resistive_function: \"A\";", "Y"),
+        ("resistive_0_function: \"A\";", "Y"),
+        ("resistive_1_function: \"A\";", "Y"),
+    ];
+    for include_timing in [false, true] {
+        for include_power in [false, true] {
+            for (attribute, pin) in cases {
+                let input_attribute = if pin == "A" { attribute } else { "" };
+                let output_attribute = if pin == "Y" { attribute } else { "" };
+                let source = format!(
+                    r#"library(test) {{
+                        cell(UNSAFE) {{ area: 1; driver_type: "4";
+                            pin(A) {{ direction: input; {input_attribute} }}
+                            pin(B) {{ direction: input; }}
+                            pin(Y) {{ direction: output; function: "A * B"; {output_attribute} }}
+                        }}
+                        cell(SAFE) {{ area: 2; driver_type: "4";
+                            pin(A, B) {{ direction: input; }}
+                            pin(Y) {{ direction: output; function: "A * B"; }}
+                        }}
+                    }}"#
+                );
+                let library = roundtrip(
+                    parse(
+                        &source,
+                        LibertyPayloadOptions {
+                            include_timing,
+                            include_power,
+                        },
+                    )
+                    .unwrap(),
+                );
+                let unsafe_cell = library
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == "UNSAFE")
+                    .unwrap();
+                assert_eq!(unsafe_cell.unsupported_semantics.len(), 1, "{attribute}");
+                let issue = &unsafe_cell.unsupported_semantics[0];
+                assert_eq!(issue.feature, UnsupportedFeature::DriverType as i32);
+                let attr_name = attribute.split(':').next().unwrap();
+                assert_eq!(issue.location, format!("pin({pin}).{attr_name}"));
+                assert!(unsafe_cell.validate_functional_semantics().is_err());
+                let safe_cell = library
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == "SAFE")
+                    .unwrap();
+                safe_cell.validate_functional_semantics().unwrap();
             }
         }
     }
@@ -724,8 +824,7 @@ fn invalid_electrical_values_and_legacy_protos_are_rejected() {
         bad.cells[0].pins[0].max_transition = Some(value);
         assert!(library_from_proto(bad).is_err());
     }
-    let mut legacy = wire;
-    let mut unknown = legacy.clone();
+    let mut unknown = wire.clone();
     unknown.cells[0]
         .unsupported_semantics
         .push(xlsynth_g8r::liberty_proto::UnsupportedSemantics {
@@ -733,8 +832,12 @@ fn invalid_electrical_values_and_legacy_protos_are_rejected() {
             location: "ff(IQ).future_control".into(),
         });
     assert!(library_from_proto(unknown).is_err());
-    legacy.format_magic = 0x4c49_4256_3350_524f;
-    assert!(library_from_proto(legacy).is_err());
+    for magic in [0x4c49_4256_3350_524f, 0x4c49_4256_3450_524f] {
+        let mut legacy = wire.clone();
+        legacy.format_magic = magic;
+        let error = library_from_proto(legacy).unwrap_err().to_string();
+        assert!(error.contains("regenerate from source Liberty"), "{error}");
+    }
 }
 
 #[test]

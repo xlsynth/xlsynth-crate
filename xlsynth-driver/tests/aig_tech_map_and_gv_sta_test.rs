@@ -17,7 +17,7 @@ fn make_two_input_and_aig() -> String {
 
 fn make_timing_enabled_inv_nand2_liberty_textproto() -> &'static str {
     r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT capacitance: 0.01 }
@@ -74,7 +74,7 @@ lut_shapes: {}
 
 fn make_no_timing_liberty_textproto() -> &'static str {
     r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT }

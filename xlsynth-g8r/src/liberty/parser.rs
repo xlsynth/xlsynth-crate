@@ -1162,6 +1162,7 @@ fn block_to_model_cells(
         let mut area = 0.0;
         let mut threshold_voltage_group_id = 0;
         let mut dont_use = None;
+        let mut use_for_size_only = None;
         let mut clocking_pins: HashSet<String> = HashSet::new();
         let sequential = extract_sequential_blocks(cell_block)?;
 
@@ -1174,8 +1175,21 @@ fn block_to_model_cells(
                 } else if attr.attr_name == "threshold_voltage_group" {
                     threshold_voltage_group_id = threshold_voltage_group_interner
                         .intern(value_to_attr_string(&attr.value), None)?;
-                } else if attr.attr_name == "dont_use" {
-                    dont_use = value_to_bool(&attr.value);
+                } else if matches!(attr.attr_name.as_str(), "dont_use" | "use_for_size_only") {
+                    let policy = if attr.attr_name == "dont_use" {
+                        &mut dont_use
+                    } else {
+                        &mut use_for_size_only
+                    };
+                    if policy.is_some() {
+                        return Err(format!(
+                            "cell '{name}': duplicate {} attribute",
+                            attr.attr_name
+                        ));
+                    }
+                    *policy = Some(value_to_bool(&attr.value).ok_or_else(|| {
+                        format!("cell '{name}': invalid {} boolean", attr.attr_name)
+                    })?);
                 }
             }
         }
@@ -1382,6 +1396,7 @@ fn block_to_model_cells(
             clock_gate,
             threshold_voltage_group_id,
             dont_use,
+            use_for_size_only,
             unsupported_semantics: prepared.unsupported,
         });
     }
@@ -1951,12 +1966,13 @@ mod tests {
     }
 
     #[test]
-    fn test_native_cell_dont_use_is_captured() {
+    fn test_native_cell_mapping_policies_are_captured() {
         let liberty_text = r#"
         library (dont_use_library) {
             cell (INV) {
                 area : 1.0;
                 dont_use : true;
+                use_for_size_only : true;
                 pin (Y) {
                     direction : output;
                     function : "!A";
@@ -1966,6 +1982,7 @@ mod tests {
             cell (BUF) {
                 area : 1.0;
                 dont_use : false;
+                use_for_size_only : false;
                 pin (Y) {
                     direction : output;
                     function : "A";
@@ -1990,10 +2007,56 @@ mod tests {
 
         assert_eq!(lib.cells[0].name, "AND2");
         assert_eq!(lib.cells[0].dont_use, None);
+        assert_eq!(lib.cells[0].use_for_size_only, None);
         assert_eq!(lib.cells[1].name, "BUF");
         assert_eq!(lib.cells[1].dont_use, Some(false));
+        assert_eq!(lib.cells[1].use_for_size_only, Some(false));
         assert_eq!(lib.cells[2].name, "INV");
         assert_eq!(lib.cells[2].dont_use, Some(true));
+        assert_eq!(lib.cells[2].use_for_size_only, Some(true));
+    }
+
+    #[test]
+    fn invalid_cell_mapping_policy_boolean_is_rejected() {
+        for attribute in ["dont_use", "use_for_size_only"] {
+            for value in ["maybe", "\"true\"", "0"] {
+                let mut source = NamedTempFile::new().unwrap();
+                write!(
+                    source,
+                    "library(test) {{ cell(BAD) {{ {attribute}: {value}; }} }}"
+                )
+                .unwrap();
+                let error = parse_liberty_files(&[source.path()]).unwrap_err();
+                assert!(
+                    error.contains(&format!("cell 'BAD': invalid {attribute} boolean")),
+                    "{attribute}: {value}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_cell_mapping_policy_is_rejected() {
+        for attribute in ["dont_use", "use_for_size_only"] {
+            for (first, second) in [
+                ("true", "false"),
+                ("false", "true"),
+                ("true", "true"),
+                ("false", "false"),
+            ] {
+                let mut source = NamedTempFile::new().unwrap();
+                write!(
+                    source,
+                    "library(test) {{ cell(BAD) {{ {attribute}: {first}; {attribute}: {second}; }} }}"
+                )
+                .unwrap();
+                let error = parse_liberty_files(&[source.path()]).unwrap_err();
+                assert!(
+                    error.contains(&format!("cell 'BAD': duplicate {attribute} attribute")),
+                    "{attribute}: {first}, {second}: {error}"
+                );
+            }
+        }
     }
 
     #[test]

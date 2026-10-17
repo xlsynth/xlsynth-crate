@@ -50,11 +50,19 @@ fn is_simple_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
-fn render_identifier(name: &str) -> String {
+/// Renders an identifier only if it can be represented in Verilog.
+fn render_identifier(name: &str) -> Result<String> {
+    // Escaped identifiers contain one or more printable ASCII characters;
+    // whitespace terminates the identifier and cannot be part of its name.
+    if name.is_empty() || !name.bytes().all(|b| (b'!'..=b'~').contains(&b)) {
+        return Err(anyhow!(
+            "name cannot be represented as a Verilog identifier: {name:?}"
+        ));
+    }
     if is_simple_identifier(name) && !is_system_verilog_keyword(name) {
-        name.to_string()
+        Ok(name.to_string())
     } else {
-        format!("\\{} ", name)
+        Ok(format!("\\{} ", name))
     }
 }
 
@@ -81,15 +89,15 @@ fn render_netref(
     netref: &NetRef,
 ) -> Result<String> {
     match netref {
-        NetRef::Simple(idx) => Ok(render_identifier(&net_name(nets, interner, *idx)?)),
+        NetRef::Simple(idx) => render_identifier(&net_name(nets, interner, *idx)?),
         NetRef::BitSelect(idx, bit) => Ok(format!(
             "{}[{}]",
-            render_identifier(&net_name(nets, interner, *idx)?),
+            render_identifier(&net_name(nets, interner, *idx)?)?,
             bit
         )),
         NetRef::PartSelect(idx, msb, lsb) => Ok(format!(
             "{}[{}:{}]",
-            render_identifier(&net_name(nets, interner, *idx)?),
+            render_identifier(&net_name(nets, interner, *idx)?)?,
             msb,
             lsb
         )),
@@ -138,7 +146,7 @@ pub fn emit_module_as_netlist_text(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<String> {
-    let module_name = render_identifier(&resolve_symbol(interner, module.name, "module name")?);
+    let module_name = render_identifier(&resolve_symbol(interner, module.name, "module name")?)?;
     let mut out = String::new();
 
     let mut port_names: Vec<String> = Vec::with_capacity(module.ports.len());
@@ -147,7 +155,7 @@ pub fn emit_module_as_netlist_text(
             interner,
             port.name,
             "port name",
-        )?));
+        )?)?);
     }
 
     if port_names.is_empty() {
@@ -163,7 +171,7 @@ pub fn emit_module_as_netlist_text(
     }
 
     for port in &module.ports {
-        let port_name = render_identifier(&resolve_symbol(interner, port.name, "port name")?);
+        let port_name = render_identifier(&resolve_symbol(interner, port.name, "port name")?)?;
         let dir = match port.direction {
             PortDirection::Input => "input",
             PortDirection::Output => "output",
@@ -187,7 +195,7 @@ pub fn emit_module_as_netlist_text(
                 nets.len()
             )
         })?;
-        let wire_name = render_identifier(&resolve_symbol(interner, net.name, "wire name")?);
+        let wire_name = render_identifier(&resolve_symbol(interner, net.name, "wire name")?)?;
         writeln!(&mut out, "  wire {}{};", width_suffix(net.width), wire_name).unwrap();
     }
 
@@ -222,19 +230,19 @@ pub fn emit_module_as_netlist_text(
 
     for inst in &module.instances {
         let type_name =
-            render_identifier(&resolve_symbol(interner, inst.type_name, "instance type")?);
+            render_identifier(&resolve_symbol(interner, inst.type_name, "instance type")?)?;
         let inst_name = render_identifier(&resolve_symbol(
             interner,
             inst.instance_name,
             "instance name",
-        )?);
+        )?)?;
         if inst.connections.is_empty() {
             writeln!(&mut out, "  {} {} ();", type_name, inst_name).unwrap();
             continue;
         }
         let mut rendered_conns: Vec<String> = Vec::with_capacity(inst.connections.len());
         for (pin_sym, netref) in &inst.connections {
-            let pin = render_identifier(&resolve_symbol(interner, *pin_sym, "pin name")?);
+            let pin = render_identifier(&resolve_symbol(interner, *pin_sym, "pin name")?)?;
             let rhs = render_netref(nets, interner, netref)?;
             rendered_conns.push(format!(".{}({})", pin, rhs));
         }
@@ -378,10 +386,10 @@ mod tests {
             "soft",
             "nettype",
         ] {
-            assert_eq!(render_identifier(name), format!("\\{name} "));
+            assert_eq!(render_identifier(name).unwrap(), format!("\\{name} "));
         }
         for name in ["CASE", "Begin", "buf_cell", "nettype_", "_alias"] {
-            assert_eq!(render_identifier(name), name);
+            assert_eq!(render_identifier(name).unwrap(), name);
         }
     }
 
@@ -393,6 +401,68 @@ mod tests {
             \buf \fork (.\input (\begin ), .\output (\function ));
             endmodule"#;
         assert_emitted_golden_round_trip(source, include_str!("keyword_identifiers.golden.v"));
+    }
+
+    #[test]
+    fn emitter_round_trips_printable_escaped_identifiers() {
+        let source = r#"module \top/name (\in[0] , \out[0] );
+            input \in[0] ; output \out[0] ; wire \wire/name ;
+            assign \out[0] = \wire/name ;
+            \cell/name \inst.name (.\in-pin (\in[0] ), .\out-pin (\wire/name ));
+            endmodule"#;
+        let expected = r#"module \top/name (\in[0] , \out[0] );
+  input \in[0] ;
+  output \out[0] ;
+  wire \wire/name ;
+  assign \out[0]  = \wire/name ;
+  \cell/name  \inst.name  (.\in-pin (\in[0] ), .\out-pin (\wire/name ));
+endmodule
+"#;
+        assert_emitted_golden_round_trip(source, expected);
+    }
+
+    #[test]
+    fn emitter_rejects_unrepresentable_names_in_every_identifier_role() {
+        let source = r#"module top(a, y);
+            input a; output y; wire w; assign w = a;
+            CELL inst(.A(w), .Y(y)); endmodule"#;
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let lookup = move |line: u32| lines.get((line - 1) as usize).cloned();
+        let scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(source.as_bytes()),
+            Box::new(lookup),
+        );
+        let mut parser = NetlistParser::new(scanner);
+        let module = parser.parse_file().unwrap().remove(0);
+        for bad_name in ["", "AND 2", "line\nfeed", "null\0byte", "café", "del\u{7f}"] {
+            let symbol = parser.interner.get_or_intern(bad_name);
+            for role in ["module", "port", "wire", "net", "cell", "instance", "pin"] {
+                let mut module = module.clone();
+                let mut nets = parser.nets.clone();
+                match role {
+                    "module" => module.name = symbol,
+                    "port" => module.ports[0].name = symbol,
+                    "wire" => nets[module.wires[0].0].name = symbol,
+                    "net" => {
+                        let AssignExpr::Leaf(NetRef::Simple(index)) = &module.assigns[0].rhs else {
+                            panic!("expected a simple net reference");
+                        };
+                        nets[index.0].name = symbol;
+                    }
+                    "cell" => module.instances[0].type_name = symbol,
+                    "instance" => module.instances[0].instance_name = symbol,
+                    "pin" => module.instances[0].connections[0].0 = symbol,
+                    _ => unreachable!("all identifier roles are listed above"),
+                }
+                let error = emit_module_as_netlist_text(&module, &nets, &parser.interner)
+                    .expect_err("unrepresentable identifier must not be emitted");
+                assert_eq!(
+                    error.to_string(),
+                    format!("name cannot be represented as a Verilog identifier: {bad_name:?}"),
+                    "role: {role}"
+                );
+            }
+        }
     }
 
     #[test]

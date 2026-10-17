@@ -497,6 +497,7 @@ pub struct Cell {
     pub clock_gate: Option<wire::ClockGate>,
     pub threshold_voltage_group_id: u32,
     pub dont_use: Option<bool>,
+    pub use_for_size_only: Option<bool>,
     pub unsupported_semantics: Vec<wire::UnsupportedSemantics>,
 }
 
@@ -970,7 +971,7 @@ pub fn timing_table_kind_str(value: wire::TimingTableKind) -> &'static str {
 }
 
 /// Wire-format discriminator stored in every serialized Liberty library.
-pub const LIBERTY_FORMAT_MAGIC: u64 = 0x4c49_4256_3450_524f;
+pub const LIBERTY_FORMAT_MAGIC: u64 = 0x4c49_4256_3650_524f;
 
 /// Returns whether a decoded library has the expected wire-format magic.
 pub fn has_valid_header(library: &wire::Library) -> bool {
@@ -1533,6 +1534,7 @@ pub fn library_to_proto(mut library: Library) -> Result<wire::Library> {
                 clock_gate: cell.clock_gate,
                 threshold_voltage_group_id: cell.threshold_voltage_group_id,
                 dont_use: cell.dont_use,
+                use_for_size_only: cell.use_for_size_only,
                 unsupported_semantics: cell.unsupported_semantics,
             })
         })
@@ -1860,6 +1862,7 @@ pub fn library_from_proto(mut library: wire::Library) -> Result<Library> {
                 clock_gate: cell.clock_gate,
                 threshold_voltage_group_id: cell.threshold_voltage_group_id,
                 dont_use: cell.dont_use,
+                use_for_size_only: cell.use_for_size_only,
                 unsupported_semantics: cell.unsupported_semantics,
             };
             cell.validate_import_metadata()
@@ -2058,6 +2061,12 @@ mod tests {
     #[test]
     fn proto_conversion_rejects_invalid_header() {
         let error = library_from_proto(wire::Library::default()).unwrap_err();
+        assert!(format!("{error:#}").contains("invalid Liberty proto header"));
+        let old_v5 = wire::Library {
+            format_magic: 0x4c49_4256_3550_524f,
+            ..Default::default()
+        };
+        let error = library_from_proto(old_v5).unwrap_err();
         assert!(format!("{error:#}").contains("invalid Liberty proto header"));
     }
 

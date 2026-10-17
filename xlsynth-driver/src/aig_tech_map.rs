@@ -122,6 +122,9 @@ fn cell_binding_if_shape_matches(
     if !cell.name.starts_with(family_prefix) {
         return None;
     }
+    if cell.dont_use == Some(true) || cell.use_for_size_only == Some(true) {
+        return None;
+    }
     if let Err(error) = cell.validate_functional_semantics() {
         log::warn!(
             "skipping {} candidate '{}': {}",
@@ -688,6 +691,36 @@ mod tests {
                 assert!(select_inv_cell_name(&library, policy).is_err());
                 assert!(select_nand2_cell_name(&library, policy).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn structural_selection_excludes_mapping_restricted_cells() {
+        let mut library = make_library_with_cells(|library| {
+            let mut inv = make_inv_cell(library, "INV", 0);
+            inv.dont_use = Some(true);
+            let mut inv_size = make_inv_cell(library, "INVx1", 0);
+            inv_size.use_for_size_only = Some(true);
+            let mut inv_ok = make_inv_cell(library, "INVx2", 0);
+            inv_ok.dont_use = Some(false);
+            let mut nand = make_nand2_cell(library, "NAND2", 0);
+            nand.dont_use = Some(true);
+            let mut nand_size = make_nand2_cell(library, "NAND2x1", 0);
+            nand_size.use_for_size_only = Some(true);
+            let mut nand_ok = make_nand2_cell(library, "NAND2x2", 0);
+            nand_ok.use_for_size_only = Some(false);
+            vec![inv, inv_size, inv_ok, nand, nand_size, nand_ok]
+        });
+
+        for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
+            assert_eq!(select_inv_cell_name(&library, policy).unwrap(), "INVx2");
+            assert_eq!(select_nand2_cell_name(&library, policy).unwrap(), "NAND2x2");
+        }
+
+        library.cells.retain(|cell| !cell.name.ends_with("x2"));
+        for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
+            assert!(select_inv_cell_name(&library, policy).is_err());
+            assert!(select_nand2_cell_name(&library, policy).is_err());
         }
     }
 

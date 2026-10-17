@@ -106,7 +106,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_checks_only_required_undriven_assign_bits() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -157,7 +157,7 @@ endmodule
 #[test]
 fn sequential_netlist_checks_undriven_assigns_feeding_next_state() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -225,7 +225,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_evaluates_and_preserves_external_pin_labels() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "AND2"
   pins: { name_string_id: 1 direction: INPUT }
@@ -313,7 +313,7 @@ endmodule
 #[test]
 fn module_port_labels_preserve_original_bit_numbers() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -360,7 +360,7 @@ endmodule
 #[test]
 fn toggle_activity_counts_external_pins_outside_the_primary_output_cone() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -412,7 +412,7 @@ endmodule
 #[test]
 fn dynamic_power_uses_slew_histograms_loads_and_previous_when_values() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -553,7 +553,7 @@ endmodule
 #[test]
 fn dynamic_power_uses_owner_output_direction_for_negative_unate_cells() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -639,7 +639,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_counts_clock_q_and_feedback_safe_slew() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -841,7 +841,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_charges_output_owned_groups_only_on_output_transition() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -950,7 +950,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_accepts_clock_hint_without_registers() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -1045,7 +1045,7 @@ endmodule
 #[test]
 fn sequential_dynamic_power_resolves_state_aliases_in_when_conditions() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
   capacitance_unit: "pf"
@@ -1158,7 +1158,7 @@ endmodule
 #[test]
 fn sequential_cells_are_rejected_before_projection() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1192,7 +1192,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_simulates_ff_state() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1280,7 +1280,7 @@ endmodule
 #[test]
 fn sequential_toggle_activity_keeps_g8r_boundaries_and_labeled_dead_pins() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1383,7 +1383,7 @@ endmodule
 #[test]
 fn sequential_toggle_activity_counts_a_one_cycle_trace() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1440,7 +1440,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_supports_feedback_and_qn() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFE"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1522,7 +1522,7 @@ endmodule
 #[test]
 fn labeled_sequential_netlist_aig_preserves_negative_edge_clock() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFN"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1561,7 +1561,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_accepts_a_clock_wiring_alias() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1599,7 +1599,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_rejects_mixed_clock_edges() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFP"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1646,7 +1646,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_rejects_a_derived_clock() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "INV"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1686,7 +1686,7 @@ endmodule
 #[test]
 fn sequential_netlist_gate_fn_rejects_async_reset_cells() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFFCLR"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1721,7 +1721,7 @@ endmodule
 
 #[test]
 fn sequential_netlist_gate_fn_accepts_an_outputless_module() {
-    let liberty = "format_magic: 5496997758194700879\n";
+    let liberty = "format_magic: 5496997758228255311\n";
     let netlist = r#"
 module top (clk, a);
   input clk;
@@ -1756,7 +1756,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_flattens_structural_hierarchy_and_keeps_boundaries() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1846,7 +1846,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_sizes_hierarchical_port_connections_directionally() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -1983,7 +1983,7 @@ endmodule
 #[test]
 fn labeled_netlist_aig_flattens_nested_structural_hierarchy() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "BUF"
   pins: { name_string_id: 1 direction: INPUT }
@@ -2040,7 +2040,7 @@ endmodule
 #[test]
 fn labeled_sequential_netlist_aig_flattens_structural_hierarchy() {
     let liberty = r#"
-format_magic: 5496997758194700879
+format_magic: 5496997758228255311
 cells: {
   name: "DFF"
   pins: { name_string_id: 1 direction: INPUT }

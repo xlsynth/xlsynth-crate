@@ -55,6 +55,8 @@ message Cell {
   // Functional source constructs not represented by this model. Consumers
   // must reject these cells before Boolean mapping or evaluation.
   repeated UnsupportedSemantics unsupported_semantics = 8;
+  // Native Liberty `use_for_size_only`: usable for sizing, not new mapping.
+  optional bool use_for_size_only = 9;
 }
 
 enum UnsupportedFeature {
@@ -69,6 +71,8 @@ enum UnsupportedFeature {
   BUS = 8;
   SEQUENTIAL_ATTRIBUTE = 9;
   SEQUENTIAL_GROUP = 10;
+  // Pin driver transformations and resolution are not Boolean functions.
+  DRIVER_TYPE = 11;
 }
 
 message UnsupportedSemantics {

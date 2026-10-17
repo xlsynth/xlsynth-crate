@@ -143,9 +143,27 @@ These APIs require no ABC, Yosys, or Liberty library.
 ## Liberty import contract
 
 The Liberty proto stores normalized functional and characterization data, not
-the complete source syntax. The current format requires regeneration from raw
+the complete source syntax. Current loaders require regeneration from raw
 Liberty for older protos: those artifacts may have silently omitted functional
 attributes. Both binary and textproto loaders check the format discriminator.
+
+The discriminator originally separated a schema rewrite that reused field
+numbers with different meanings: for example, the old library's units and the
+new library's cells both use field 2. Some old payloads could otherwise decode
+as plausible but incorrect data. The current value also identifies the import
+contract. V4 and earlier importers could omit pin driver behavior, and V5 and
+earlier importers could omit `use_for_size_only`. An absent field cannot tell a
+reader whether the source lacked that attribute or the importer discarded it.
+Current xlsynth-g8r readers reject earlier values rather than trusting incomplete
+imports; older xlsynth-g8r readers reject newly produced V6 files rather than
+ignoring the newer restrictions. These checks are application policy, not
+protobuf decoding behavior. They are conservative: even an older file unaffected
+by those attributes, or one used only for inspection, must be regenerated from
+the original Liberty source. An alternative would track source coverage and
+reject only operations that require missing information, although unmodified older
+readers would still not understand the new restrictions. The additive fields
+themselves are wire-compatible and do not require a format change for protobuf
+decoding.
 
 Functional interpretation assumes normal powered-on operation. The importer
 intentionally ignores `power_down_function` on pins and sequential groups
