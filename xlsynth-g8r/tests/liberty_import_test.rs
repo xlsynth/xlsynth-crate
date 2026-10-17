@@ -7,6 +7,7 @@ use prost_reflect::DynamicMessage;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use tempfile::NamedTempFile;
+use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::liberty::cell_filter::CellFilterPolicy;
 use xlsynth_g8r::liberty::cell_formula::parse_formula;
 use xlsynth_g8r::liberty::descriptor::liberty_descriptor_pool;
@@ -27,6 +28,7 @@ use xlsynth_g8r::liberty_proto::{Library as WireLibrary, UnsupportedFeature};
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
 use xlsynth_g8r::netlist::io::read_gv_from_path;
 use xlsynth_g8r::netlist::register_mapping::{RegisterCellSelection, RegisterMappingLibrary};
+use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
 
 fn parse(text: &str, payload: LibertyPayloadOptions) -> Result<Library, String> {
     let mut file = NamedTempFile::new().unwrap();
@@ -313,7 +315,7 @@ fn unsupported_semantics_survive_all_payload_modes_and_proto_forms() {
 }
 
 #[test]
-fn driver_types_survive_import_and_are_rejected_for_boolean_use() {
+fn driver_types_survive_import_and_are_excluded_from_area_mapping() {
     let cases = [
         ("driver_type: pull_up;", "Y"),
         ("driver_type: pull_down;", "Y"),
@@ -335,6 +337,13 @@ fn driver_types_survive_import_and_are_rejected_for_boolean_use() {
         ("resistive_0_function: \"A\";", "Y"),
         ("resistive_1_function: \"A\";", "Y"),
     ];
+    let mut builder = GateBuilder::new("and".into(), GateBuilderOptions::no_opt());
+    let a = *builder.add_input("a".into(), 1).get_lsb(0);
+    let b = *builder.add_input("b".into(), 1).get_lsb(0);
+    let result = builder.add_and_binary(a, b);
+    builder.add_output("y".into(), result.into());
+    let gatefn = builder.build();
+
     for include_timing in [false, true] {
         for include_power in [false, true] {
             for (attribute, pin) in cases {
@@ -353,7 +362,7 @@ fn driver_types_survive_import_and_are_rejected_for_boolean_use() {
                         }}
                     }}"#
                 );
-                let library = roundtrip(
+                let mut library = roundtrip(
                     parse(
                         &source,
                         LibertyPayloadOptions {
@@ -380,6 +389,19 @@ fn driver_types_survive_import_and_are_rejected_for_boolean_use() {
                     .find(|cell| cell.name == "SAFE")
                     .unwrap();
                 safe_cell.validate_functional_semantics().unwrap();
+                let index = AreaMappingLibrary::new(&library).unwrap();
+                assert_eq!(index.excluded_cells, ["UNSAFE"]);
+                let mapped = map_gatefn_to_area_netlist(&gatefn, &index).unwrap();
+                assert_eq!(mapped.netlist.module.instances.len(), 1);
+                let cell = &mapped.netlist.module.instances[0];
+                assert_eq!(
+                    mapped.netlist.interner.resolve(cell.type_name),
+                    Some("SAFE")
+                );
+
+                library.cells.retain(|cell| cell.name == "UNSAFE");
+                let index = AreaMappingLibrary::new(&library).unwrap();
+                assert!(map_gatefn_to_area_netlist(&gatefn, &index).is_err());
             }
         }
     }

@@ -833,32 +833,60 @@ asynchronous clear/preset cells, mixed clock edges, and derived clocks. Both
 modes reject module `inout` ports, unconnected input pins, non-scalar
 standard-cell pin connections, and unresolved combinational cycles.
 
-### `aig-tech-map`: AIGER to structural gate netlist
+### `aig-tech-map`: AIGER to library-cell netlist
 
-Structurally maps an input AIGER graph to a cell-instance netlist using a simple decomposition:
+Maps an input AIGER graph with `--strategy nand2|area`. The default `nand2`
+strategy preserves the structural decomposition:
 
 - each `And2` becomes `NAND2` followed by `INV`
 - negated operands and output negations are materialized with explicit `INV` instances
 
-The command requires a **timing-enabled** Liberty proto and auto-selects suitable `INV` and `NAND2` cells from that library.
-The mapping-mode design is described in
+The `nand2` strategy requires a **timing-enabled** Liberty proto and auto-selects suitable `INV` and `NAND2` cells from that library.
+Both mapping strategies exclude cells marked `dont_use` or `use_for_size_only`.
+The structural mapping design is described in
 [`xlsynth-g8r/docs/tech_mapper_design.md`](../xlsynth-g8r/docs/tech_mapper_design.md).
 
 ```shell
 xlsynth-driver aig-tech-map my_design.aag \
-  --liberty_proto ~/timing-enabled.liberty.proto \
+  --liberty_proto timing-enabled.liberty.proto \
   --netlist_out my_design.mapped.gv
+```
+
+The `area` strategy (g8r-tm) matches combinational cells by function and area,
+using both polarities and input-pin permutations on cuts of at most five inputs.
+It keeps the AIG fixed, without choices or graph rewriting. Shared AND nodes
+are mandatory cut boundaries, and opposite polarity demands share an inverter.
+Bounded cuts and local phase selection are heuristics, not globally optimal DAG
+covering. Constants and aliases are ideal wiring; physical tie cells and timing
+optimization are outside this policy. Timing tables are not required for `area`.
+Cells with unsupported function syntax or semantics are excluded from area
+mapping, and all excluded cells are listed in the optional JSON summary.
+
+```shell
+xlsynth-driver aig-tech-map my_design.aig --strategy area \
+  --liberty_proto cells.proto --netlist_out my_design.mapped.gv \
+  --json_out mapping.json
 ```
 
 Key flags:
 
-- `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally gzip-compressed. Required.
+- `--strategy <nand2|area>`: mapping strategy (default: `nand2`).
+- `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
+  `nand2` requires timing data; `area` requires cell functions and positive areas.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional override for emitted module name.
-- `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for INV/NAND2 cells (default: `small-normal-vt`).
+- `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` is an error.
   `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
   `max-speed` prefers the highest available VT class and then the highest
   available drive strength.
+- `--json_out <PATH>`: optional deterministic mapping summary with the strategy,
+  module, and instance/net counts. With `area`,
+  it also includes unique emitted cell area, cell counts by type, inverter and
+  sharing statistics, the AND duplication audit, and excluded library cells.
+  Netlist text stays on stdout when `--netlist_out -` is used; diagnostics go to stderr.
+  The JSON destination must differ from the netlist output and stderr, including
+  redirected streams.
+  On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.
 
 ### `gv-sta`: gate-level max-arrival STA
 

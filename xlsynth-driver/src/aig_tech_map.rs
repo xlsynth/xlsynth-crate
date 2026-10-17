@@ -1,1038 +1,556 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::ArgMatches;
-use std::cmp::Reverse;
-use std::path::Path;
+use anyhow::{Context, Result, ensure};
+use clap::{ArgMatches, parser::ValueSource};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
-use xlsynth_g8r::liberty::cell_formula::{Term, parse_formula};
-use xlsynth_g8r::liberty_model::{Cell, Library, PinDirection};
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
-use xlsynth_g8r::netlist::io::load_liberty_with_timing_data_from_path;
-use xlsynth_g8r::netlist::sta::validate_output_pin_for_basic_sta;
-use xlsynth_g8r::netlist::techmap::{StructuralTechMapOptions, map_gatefn_to_structural_netlist};
+use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_data_from_path};
+use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
+use xlsynth_g8r::techmap::nand2::{
+    CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CellPolicy {
-    SmallNormalVt,
-    MaxSpeed,
-}
-
-impl CellPolicy {
-    fn from_cli(value: &str) -> Result<Self, String> {
-        match value {
-            "small-normal-vt" => Ok(Self::SmallNormalVt),
-            "max-speed" => Ok(Self::MaxSpeed),
-            _ => Err(format!(
-                "unknown --cell_policy '{}'; expected one of: small-normal-vt, max-speed",
-                value
-            )),
+/// Resolves existing output targets or their parents before either file is
+/// written.
+fn resolved_output_path(path: &Path) -> Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(resolved) => Ok(resolved),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            // A dangling file symlink still identifies its eventual write
+            // target.
+            if path
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                let target = std::fs::read_link(path)?;
+                return resolved_output_path(&parent.join(target));
+            }
+            let name = path.file_name().context("output path has no file name")?;
+            Ok(parent.canonicalize()?.join(name))
         }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::SmallNormalVt => "small-normal-vt",
-            Self::MaxSpeed => "max-speed",
-        }
+        Err(error) => Err(error.into()),
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SelectedCellBinding {
-    cell_name: String,
-    input_pin_names: Vec<String>,
-    output_pin_name: String,
-}
-
-fn input_pin_names(lib: &Library, cell: &Cell) -> Vec<String> {
-    let mut names = cell
-        .pins
-        .iter()
-        .filter(|p| p.direction == PinDirection::Input as i32)
-        .map(|p| lib.resolve_string(&p.name).to_string())
-        .collect::<Vec<_>>();
-    names.sort();
-    names
-}
-
-fn timed_output_pin_names(lib: &Library, cell: &Cell) -> Vec<String> {
-    let mut names = cell
-        .pins
-        .iter()
-        .filter(|p| p.direction == PinDirection::Output as i32 && !p.timing_arcs.is_empty())
-        .map(|p| lib.resolve_string(&p.name).to_string())
-        .collect::<Vec<_>>();
-    names.sort();
-    names
-}
-
-fn output_pin_function<'a>(
-    lib: &'a Library,
-    cell: &'a Cell,
-    output_pin_name: &str,
-) -> Option<&'a str> {
-    cell.pins
-        .iter()
-        .find(|p| {
-            lib.resolve_string(&p.name) == output_pin_name
-                && p.direction == PinDirection::Output as i32
-        })
-        .map(|p| lib.resolve_string(&p.function))
-}
-
-fn is_inv_formula(term: &Term, input_pin_name: &str) -> bool {
-    *term == Term::Negate(Box::new(Term::Input(input_pin_name.to_string())))
-}
-
-fn is_nand2_formula(term: &Term, input_pin_names: &[String]) -> bool {
-    let [a, b] = input_pin_names else {
-        return false;
+/// Detects equal destinations, including symlinks, hard links, and
+/// not-yet-created files.
+fn output_paths_alias(lhs: &Path, rhs: &Path) -> Result<bool> {
+    if resolved_output_path(lhs)? == resolved_output_path(rhs)? {
+        return Ok(true);
+    }
+    let Some(lhs_metadata) = metadata_if_exists(lhs)? else {
+        return Ok(false);
     };
-    // Liberty libraries may spell NAND2 either directly or in equivalent SOP
-    // form, so accept both exact two-input AST shapes after parsing.
-    let expected_ab = Term::Negate(Box::new(Term::And(
-        Box::new(Term::Input(a.clone())),
-        Box::new(Term::Input(b.clone())),
-    )));
-    let expected_ba = Term::Negate(Box::new(Term::And(
-        Box::new(Term::Input(b.clone())),
-        Box::new(Term::Input(a.clone())),
-    )));
-    let expected_demorgan_ab = Term::Or(
-        Box::new(Term::Negate(Box::new(Term::Input(a.clone())))),
-        Box::new(Term::Negate(Box::new(Term::Input(b.clone())))),
-    );
-    let expected_demorgan_ba = Term::Or(
-        Box::new(Term::Negate(Box::new(Term::Input(b.clone())))),
-        Box::new(Term::Negate(Box::new(Term::Input(a.clone())))),
-    );
-    *term == expected_ab
-        || *term == expected_ba
-        || *term == expected_demorgan_ab
-        || *term == expected_demorgan_ba
-}
-
-fn cell_binding_if_shape_matches(
-    lib: &Library,
-    cell: &Cell,
-    family_prefix: &str,
-    expected_input_count: usize,
-) -> Option<SelectedCellBinding> {
-    if !cell.name.starts_with(family_prefix) {
-        return None;
-    }
-    // `dont_use` forbids use; `use_for_size_only` permits only resizing.
-    if cell.dont_use == Some(true) || cell.use_for_size_only == Some(true) {
-        return None;
-    }
-    if let Err(error) = cell
-        .validate_functional_semantics()
-        .and_then(|()| cell.validate_mapping_policy_coverage())
+    let Some(rhs_metadata) = metadata_if_exists(rhs)? else {
+        return Ok(false);
+    };
+    #[cfg(unix)]
     {
-        log::warn!(
-            "skipping {} candidate '{}': {}",
-            family_prefix,
-            cell.name,
-            error
-        );
-        return None;
+        Ok(same_unix_file(&lhs_metadata, &rhs_metadata))
     }
-    let input_pin_names = input_pin_names(lib, cell);
-    let output_pin_names = timed_output_pin_names(lib, cell);
-    if input_pin_names.len() != expected_input_count || output_pin_names.len() != 1 {
-        return None;
-    }
-    let output_pin_name = &output_pin_names[0];
-    let output_function = output_pin_function(lib, cell, output_pin_name)?;
-    let output_term = parse_formula(output_function).ok()?;
-    let formula_matches = match family_prefix {
-        "INV" => is_inv_formula(&output_term, &input_pin_names[0]),
-        "NAND2" => is_nand2_formula(&output_term, &input_pin_names),
-        _ => false,
-    };
-    if !formula_matches {
-        return None;
-    }
-    let output_pin = cell
-        .pins
-        .iter()
-        .find(|pin| lib.resolve_string(&pin.name) == output_pin_name)
-        .expect("timed output pin should still be present");
-    if let Err(err) =
-        validate_output_pin_for_basic_sta(lib, cell.name.as_str(), output_pin, &input_pin_names)
+    #[cfg(not(unix))]
     {
-        log::warn!(
-            "skipping {} candidate '{}' because it is incompatible with basic STA: {:#}",
-            family_prefix,
-            cell.name,
-            err
-        );
-        return None;
-    }
-    Some(SelectedCellBinding {
-        cell_name: cell.name.clone(),
-        input_pin_names,
-        output_pin_name: output_pin_name.clone(),
-    })
-}
-
-fn is_inv_candidate(lib: &Library, cell: &Cell) -> bool {
-    cell_binding_if_shape_matches(lib, cell, "INV", 1).is_some()
-}
-
-fn is_nand2_candidate(lib: &Library, cell: &Cell) -> bool {
-    cell_binding_if_shape_matches(lib, cell, "NAND2", 2).is_some()
-}
-
-/// Returns the effective VT class for a cell when the library provides
-/// ordering.
-fn effective_vt_class(lib: &Library, cell: &Cell) -> Result<Option<i32>, String> {
-    let group_id = if cell.threshold_voltage_group_id != 0 {
-        cell.threshold_voltage_group_id
-    } else {
-        lib.default_threshold_voltage_group_id
-    };
-    if group_id == 0 {
-        return Ok(None);
-    }
-    let group_index = group_id as usize - 1;
-    if group_index >= lib.threshold_voltage_groups.len() {
-        return Err(format!(
-            "Cell '{}' effective threshold-voltage group ID {} is out of range",
-            cell.name, group_id
-        ));
-    }
-    if lib.threshold_voltage_group_class_indices.is_empty() {
-        return Ok(None);
-    }
-    let Some(class_index) = lib
-        .threshold_voltage_group_class_indices
-        .get(group_index)
-        .copied()
-    else {
-        return Err(format!(
-            "Cell '{}' effective threshold-voltage group '{}' has no class index",
-            cell.name, lib.threshold_voltage_groups[group_index]
-        ));
-    };
-    Ok(Some(class_index))
-}
-
-fn drive_x1_priority(name: &str, base: &str) -> usize {
-    if name == base {
-        return 0;
-    }
-    let needle = format!("{}x1_", base);
-    if name.contains(needle.as_str()) || name.ends_with(&format!("{}x1", base)) {
-        1
-    } else {
-        2
-    }
-}
-
-fn parse_drive_strength_milli(name: &str, base: &str) -> Option<i64> {
-    if !name.starts_with(base) {
-        return None;
-    }
-    let rest = name.strip_prefix(base)?;
-    let rest = rest.strip_prefix('x')?;
-    let end = rest.find('_').unwrap_or(rest.len());
-    let token = &rest[..end];
-    if token.is_empty() {
-        return None;
-    }
-
-    if let Some(frac_digits) = token.strip_prefix('p') {
-        if frac_digits.is_empty() {
-            return None;
+        // Opening special files to compare their identities can block or have
+        // side effects. Regular files are also checked using their output
+        // handles before either is written.
+        if !lhs_metadata.is_file() || !rhs_metadata.is_file() {
+            return Ok(false);
         }
-        let frac = frac_digits.parse::<i64>().ok()?;
-        let denom = 10i64.pow(frac_digits.len() as u32);
-        return Some((frac * 1000) / denom);
-    }
-
-    let whole = token.parse::<i64>().ok()?;
-    Some(whole * 1000)
-}
-
-fn best_cell_name<'a>(
-    lib: &Library,
-    candidates: &[&'a Cell],
-    exact_base: &str,
-    policy: CellPolicy,
-) -> Result<Option<&'a str>, String> {
-    let candidates_with_class = candidates
-        .iter()
-        .map(|cell| effective_vt_class(lib, cell).map(|class_index| (*cell, class_index)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let has_any_class = candidates_with_class
-        .iter()
-        .any(|(_, class_index)| class_index.is_some());
-    let has_missing_class = candidates_with_class
-        .iter()
-        .any(|(_, class_index)| class_index.is_none());
-    if has_any_class && has_missing_class {
-        return Err(format!(
-            "{} candidates mix ordered and unordered threshold-voltage metadata",
-            exact_base
-        ));
-    }
-
-    match policy {
-        CellPolicy::SmallNormalVt => Ok(candidates_with_class
-            .iter()
-            .map(|(cell, class_index)| (cell.name.as_str(), *class_index))
-            .min_by_key(|(name, class_index)| {
-                (
-                    if class_index.map_or(true, |class| class == 0) {
-                        0usize
-                    } else {
-                        1usize
-                    },
-                    if *name == exact_base { 0usize } else { 1usize },
-                    drive_x1_priority(name, exact_base),
-                    *name,
-                )
-            })
-            .map(|(name, _)| name)),
-        CellPolicy::MaxSpeed => Ok(candidates_with_class
-            .iter()
-            .map(|(cell, class_index)| (cell.name.as_str(), *class_index))
-            .min_by_key(|(name, class_index)| {
-                let drive = parse_drive_strength_milli(name, exact_base);
-                (
-                    Reverse(class_index.unwrap_or(0)),
-                    if drive.is_some() { 0usize } else { 1usize },
-                    Reverse(drive.unwrap_or(0)),
-                    *name,
-                )
-            })
-            .map(|(name, _)| name)),
+        match (identity_handle(lhs), identity_handle(rhs)) {
+            (Ok(lhs_handle), Ok(rhs_handle)) => Ok(lhs_handle == rhs_handle),
+            // Identity checking is best effort here; both outputs are checked
+            // again after opening them for writing when both are regular.
+            _ => Ok(false),
+        }
     }
 }
 
-fn selected_binding_for_name(
-    lib: &Library,
-    selected_name: &str,
-    family_prefix: &str,
-    expected_input_count: usize,
-) -> Result<SelectedCellBinding, String> {
-    let cell = lib
-        .cells
-        .iter()
-        .find(|cell| cell.name == selected_name)
-        .ok_or_else(|| format!("selected cell '{}' disappeared", selected_name))?;
-    cell_binding_if_shape_matches(lib, cell, family_prefix, expected_input_count).ok_or_else(|| {
-        format!(
-            "selected cell '{}' no longer matches expected {} shape",
-            selected_name, family_prefix
-        )
-    })
+/// Reads metadata without treating a missing output as an error.
+fn metadata_if_exists(path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
-fn select_inv_cell(
-    lib: &xlsynth_g8r::liberty_model::Library,
-    policy: CellPolicy,
-) -> Result<SelectedCellBinding, String> {
-    let candidates: Vec<&Cell> = lib
-        .cells
-        .iter()
-        .filter(|c| is_inv_candidate(lib, c))
-        .collect();
-    let Some(name) = best_cell_name(lib, candidates.as_slice(), "INV", policy)? else {
-        return Err(
-            "could not find an INV candidate with one input pin, one timed output pin, and complete combinational timing coverage"
-                .to_string(),
-        );
-    };
-    selected_binding_for_name(lib, name, "INV", 1)
+/// Identifies existing stream-like outputs, excluding invalid directories.
+fn is_special_output(path: &Path) -> std::io::Result<bool> {
+    Ok(metadata_if_exists(path)?.is_some_and(|metadata| !metadata.is_file() && !metadata.is_dir()))
 }
 
-fn select_nand2_cell(
-    lib: &xlsynth_g8r::liberty_model::Library,
-    policy: CellPolicy,
-) -> Result<SelectedCellBinding, String> {
-    let candidates: Vec<&Cell> = lib
-        .cells
-        .iter()
-        .filter(|c| is_nand2_candidate(lib, c))
-        .collect();
-    let Some(name) = best_cell_name(lib, candidates.as_slice(), "NAND2", policy)? else {
-        return Err(
-            "could not find a NAND2 candidate with two input pins, one timed output pin, and complete combinational timing coverage"
-                .to_string(),
-        );
-    };
-    selected_binding_for_name(lib, name, "NAND2", 2)
+/// Compares Unix file identities without opening either file's data.
+#[cfg(unix)]
+fn same_unix_file(lhs: &std::fs::Metadata, rhs: &std::fs::Metadata) -> bool {
+    (lhs.dev(), lhs.ino()) == (rhs.dev(), rhs.ino())
 }
 
-#[cfg(test)]
-fn select_inv_cell_name(lib: &Library, policy: CellPolicy) -> Result<String, String> {
-    select_inv_cell(lib, policy).map(|binding| binding.cell_name)
+/// Opens a file for identity queries without requesting read or write access.
+#[cfg(windows)]
+fn identity_handle(path: &Path) -> std::io::Result<same_file::Handle> {
+    let file = OpenOptions::new().access_mode(0).open(path)?;
+    same_file::Handle::from_file(file)
 }
 
-#[cfg(test)]
-fn select_nand2_cell_name(lib: &Library, policy: CellPolicy) -> Result<String, String> {
-    select_nand2_cell(lib, policy).map(|binding| binding.cell_name)
+/// Opens a file for identity queries on other supported platforms.
+#[cfg(not(any(unix, windows)))]
+fn identity_handle(path: &Path) -> std::io::Result<same_file::Handle> {
+    same_file::Handle::from_path(path)
 }
 
-pub fn handle_aig_tech_map(matches: &ArgMatches) {
-    let aig_input_file = matches
-        .get_one::<String>("aig_input_file")
-        .expect("aig_input_file is required");
-    let liberty_proto_path = matches
-        .get_one::<String>("liberty_proto")
-        .expect("liberty_proto is required");
-    let netlist_out = matches
-        .get_one::<String>("netlist_out")
-        .expect("netlist_out is required");
-    let module_name = matches.get_one::<String>("module_name").cloned();
-    let cell_policy = matches
-        .get_one::<String>("cell_policy")
-        .map(|s| s.as_str())
-        .unwrap_or("small-normal-vt");
-    let cell_policy = match CellPolicy::from_cli(cell_policy) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("aig-tech-map error: {}", e);
-            std::process::exit(1);
+/// Checks that a placeholder still names the file that was created.
+fn path_matches_handle(path: &Path, handle: &same_file::Handle) -> bool {
+    #[cfg(unix)]
+    {
+        match (std::fs::metadata(path), handle.as_file().metadata()) {
+            (Ok(path_metadata), Ok(handle_metadata)) => {
+                same_unix_file(&path_metadata, &handle_metadata)
+            }
+            _ => false,
         }
-    };
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+            && identity_handle(path).is_ok_and(|path_handle| path_handle == *handle)
+    }
+}
 
-    let load_res =
-        load_aiger_auto_from_path(Path::new(aig_input_file), GateBuilderOptions::no_opt())
-            .map_err(|e| format!("failed to load AIG '{}': {}", aig_input_file, e));
-    let gate_fn = match load_res {
-        Ok(r) => r.gate_fn,
-        Err(e) => {
-            eprintln!("aig-tech-map error: {}", e);
-            std::process::exit(1);
-        }
-    };
+/// An output opened without truncation, with cleanup for a new placeholder.
+struct PendingOutput {
+    handle: Option<same_file::Handle>,
+    created_path: Option<PathBuf>,
+}
 
-    let lib = match load_liberty_with_timing_data_from_path(Path::new(liberty_proto_path)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!(
-                "aig-tech-map error: failed to load timing-enabled Liberty proto '{}': {:#}",
-                liberty_proto_path, e
-            );
-            std::process::exit(1);
-        }
-    };
-
-    let inv_cell = match select_inv_cell(&lib, cell_policy) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("aig-tech-map error: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let nand2_cell = match select_nand2_cell(&lib, cell_policy) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("aig-tech-map error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let mapped = match map_gatefn_to_structural_netlist(
-        &gate_fn,
-        &StructuralTechMapOptions {
-            module_name,
-            nand2_cell_name: nand2_cell.cell_name.clone(),
-            nand2_input_pin_names: [
-                nand2_cell.input_pin_names[0].clone(),
-                nand2_cell.input_pin_names[1].clone(),
-            ],
-            nand2_output_pin_name: nand2_cell.output_pin_name.clone(),
-            inv_cell_name: inv_cell.cell_name.clone(),
-            inv_input_pin_name: inv_cell.input_pin_names[0].clone(),
-            inv_output_pin_name: inv_cell.output_pin_name.clone(),
-        },
-    ) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("aig-tech-map error: structural mapping failed: {:#}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let netlist_text =
-        match emit_module_as_netlist_text(&mapped.module, mapped.nets.as_slice(), &mapped.interner)
+impl PendingOutput {
+    /// Opens a destination without destroying existing contents.
+    fn open(path: &Path) -> Result<Self> {
+        // Resolving dangling symlinks lets us record the actual newly created
+        // target for cleanup without deleting the symlink itself.
+        let resolved = resolved_output_path(path)?;
+        let (file, created) = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&resolved)
         {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "aig-tech-map error: failed to emit mapped netlist text: {:#}",
-                    e
-                );
-                std::process::exit(1);
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                (OpenOptions::new().write(true).open(&resolved)?, false)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let handle = match same_file::Handle::from_file(file) {
+            Ok(handle) => handle,
+            Err(error) => {
+                if created {
+                    let _ = std::fs::remove_file(&resolved);
+                }
+                return Err(error.into());
             }
         };
-
-    if netlist_out == "-" {
-        print!("{}", netlist_text);
-    } else if let Err(e) = std::fs::write(netlist_out, netlist_text) {
-        eprintln!(
-            "aig-tech-map error: failed to write netlist output '{}': {}",
-            netlist_out, e
-        );
-        std::process::exit(1);
+        Ok(Self {
+            handle: Some(handle),
+            created_path: created.then_some(resolved),
+        })
     }
 
+    /// Keeps the destination and truncates it immediately before writing.
+    fn prepare_write(&mut self) -> Result<&mut File> {
+        self.created_path = None;
+        let file = self.handle.as_mut().unwrap().as_file_mut();
+        if file.metadata()?.is_file() {
+            file.set_len(0)?;
+        }
+        Ok(file)
+    }
+}
+
+impl Drop for PendingOutput {
+    fn drop(&mut self) {
+        if let Some(path) = self.created_path.take() {
+            let handle = self.handle.take().unwrap();
+            let still_same_file = path_matches_handle(&path, &handle);
+            drop(handle);
+            if still_same_file {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// Both file outputs, opened and checked for filesystem-level aliasing.
+struct OutputFiles {
+    netlist: PendingOutput,
+    json: PendingOutput,
+}
+
+/// Opens both destinations before truncating either, including new files.
+fn open_distinct_outputs(netlist_path: &Path, json_path: &Path) -> Result<OutputFiles> {
+    let netlist = PendingOutput::open(netlist_path)
+        .with_context(|| format!("failed to open netlist output '{}'", netlist_path.display()))?;
+    let json = PendingOutput::open(json_path)
+        .with_context(|| format!("failed to open JSON summary '{}'", json_path.display()))?;
+    ensure!(
+        netlist.handle != json.handle,
+        "--json_out and --netlist_out must name different files"
+    );
+    Ok(OutputFiles { netlist, json })
+}
+
+/// Detects an existing path that aliases a standard output stream.
+fn path_aliases_stream(
+    path: &Path,
+    stream: &same_file::Handle,
+    #[cfg_attr(not(unix), allow(unused_variables))] stream_paths: &[&str],
+) -> Result<bool> {
+    let Some(metadata) = metadata_if_exists(path)? else {
+        return Ok(false);
+    };
+    #[cfg(unix)]
+    let aliases = {
+        // On some Unix systems, stat of a /dev/fd entry reports the identity
+        // of its descriptor vnode rather than the identity returned by fstat
+        // on the descriptor itself. Compare both forms without opening a
+        // potentially blocking FIFO or another special output.
+        same_unix_file(&metadata, &stream.as_file().metadata()?)
+            || stream_paths.iter().any(|stream_path| {
+                std::fs::metadata(stream_path)
+                    .is_ok_and(|stream_metadata| same_unix_file(&metadata, &stream_metadata))
+            })
+    };
+    #[cfg(not(unix))]
+    let aliases = metadata.is_file() && identity_handle(path).is_ok_and(|handle| handle == *stream);
+    Ok(aliases)
+}
+
+/// Detects an existing JSON destination that aliases the netlist's stdout.
+fn ensure_distinct_from_stdout(path: &Path, stdout: &same_file::Handle) -> Result<()> {
+    ensure!(
+        !path_aliases_stream(path, stdout, &["/dev/stdout", "/dev/fd/1"])?,
+        "--json_out must not refer to stdout when --netlist_out is '-'"
+    );
+    Ok(())
+}
+
+/// Detects a JSON destination that aliases the diagnostics stream.
+fn ensure_distinct_from_stderr(path: &Path, stderr: &same_file::Handle) -> Result<()> {
+    ensure!(
+        !path_aliases_stream(path, stderr, &["/dev/stderr", "/dev/fd/2"])?,
+        "--json_out must not refer to stderr"
+    );
+    Ok(())
+}
+
+/// Loads the requested inputs, dispatches mapping, and writes netlist/report
+/// outputs.
+fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
+    let aig_input_file = matches.get_one::<String>("aig_input_file").unwrap();
+    let liberty_proto_path = Path::new(matches.get_one::<String>("liberty_proto").unwrap());
+    let netlist_out = matches.get_one::<String>("netlist_out").unwrap();
+    let json_out = matches.get_one::<String>("json_out");
+    let module_name = matches.get_one::<String>("module_name");
+    let strategy = matches.get_one::<String>("strategy").unwrap().as_str();
+    ensure!(
+        strategy != "area" || matches.value_source("cell_policy") != Some(ValueSource::CommandLine),
+        "--cell_policy applies only to --strategy nand2"
+    );
+    let stderr = if let Some(json_path) = json_out {
+        ensure!(
+            netlist_out == "-"
+                || !output_paths_alias(Path::new(json_path), Path::new(netlist_out))?,
+            "--json_out and --netlist_out must name different files"
+        );
+        let stderr = same_file::Handle::stderr()?;
+        ensure_distinct_from_stderr(Path::new(json_path), &stderr)?;
+        Some(stderr)
+    } else {
+        None
+    };
+    let gate_fn =
+        load_aiger_auto_from_path(Path::new(aig_input_file), GateBuilderOptions::no_opt())
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("failed to load AIG '{aig_input_file}'"))?
+            .gate_fn;
+    // The structural policy validates timing coverage; area covering only needs
+    // functional Liberty data and positive cell areas, as its library API does.
+    let lib = match strategy {
+        "nand2" => load_liberty_with_timing_data_from_path(liberty_proto_path),
+        "area" => load_liberty_from_path(liberty_proto_path),
+        _ => unreachable!("strategy is constrained by clap"),
+    }
+    .with_context(|| {
+        format!(
+            "failed to load Liberty proto '{}'",
+            liberty_proto_path.display()
+        )
+    })?;
+
+    let (mut mapped, mut report, summary) = match strategy {
+        "nand2" => {
+            let policy = match matches.get_one::<String>("cell_policy").unwrap().as_str() {
+                "small-normal-vt" => CellPolicy::SmallNormalVt,
+                "max-speed" => CellPolicy::MaxSpeed,
+                _ => unreachable!("cell policy is constrained by clap"),
+            };
+            let options = structural_options_from_liberty(&lib, policy)?;
+            let mapped = map_gatefn_to_structural_netlist(&gate_fn, &options)
+                .context("structural mapping failed")?;
+            let summary = format!(
+                "using policy='{}' INV='{}' NAND2='{}'",
+                policy.as_str(),
+                options.inv_cell_name,
+                options.nand2_cell_name
+            );
+            let report = serde_json::json!({
+                "mapper": "nand2", "cell_policy": policy.as_str(),
+                "inv_cell": options.inv_cell_name, "nand2_cell": options.nand2_cell_name
+            });
+            (mapped, report, summary)
+        }
+        "area" => {
+            let library = AreaMappingLibrary::new(&lib)?;
+            let mapped =
+                map_gatefn_to_area_netlist(&gate_fn, &library).context("area mapping failed")?;
+            let summary = format!(
+                "using strategy='area' area={} inverters={} duplicated_ands={}",
+                mapped.stats.cell_area, mapped.stats.inverter_count, mapped.stats.duplicated_ands
+            );
+            let report = serde_json::json!({
+                "mapper": "g8r-tm", "stats": mapped.stats,
+                "excluded_cells": library.excluded_cells
+            });
+            (mapped.netlist, report, summary)
+        }
+        _ => unreachable!("strategy is constrained by clap"),
+    };
+    if let Some(name) = module_name {
+        mapped.module.name = mapped.interner.get_or_intern(name);
+    }
+    report["strategy"] = strategy.into();
+    report["module"] = mapped.interner.resolve(mapped.module.name).unwrap().into();
+    report["cell_count"] = mapped.module.instances.len().into();
+    report["net_count"] = mapped.nets.len().into();
+    let netlist_text = emit_module_as_netlist_text(&mapped.module, &mapped.nets, &mapped.interner)
+        .context("failed to emit mapped netlist text")?;
+    if let (Some(json_path), Some(stderr)) = (json_out, stderr.as_ref()) {
+        ensure_distinct_from_stderr(Path::new(json_path), stderr)?;
+    }
+    if let Some(json_path) = json_out.filter(|_| netlist_out != "-") {
+        let netlist_path = Path::new(netlist_out);
+        let json_path = Path::new(json_path);
+        if is_special_output(netlist_path)? || is_special_output(json_path)? {
+            // A consumer may wait for netlist EOF before opening the JSON
+            // stream, so opening both FIFOs before writing can deadlock. Check
+            // aliases again immediately before sequentially writing streams.
+            // Concurrent replacement of paths cannot be made atomic here.
+            ensure!(
+                !output_paths_alias(netlist_path, json_path)?,
+                "--json_out and --netlist_out must name different files"
+            );
+            std::fs::write(netlist_path, netlist_text)
+                .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
+            let file = File::create(json_path).with_context(|| {
+                format!("failed to create JSON summary '{}'", json_path.display())
+            })?;
+            serde_json::to_writer_pretty(file, &report).with_context(|| {
+                format!("failed writing JSON summary to '{}'", json_path.display())
+            })?;
+        } else {
+            let mut outputs = open_distinct_outputs(netlist_path, json_path)?;
+            ensure!(
+                outputs.json.handle.as_ref() != stderr.as_ref(),
+                "--json_out must not refer to stderr"
+            );
+            outputs
+                .netlist
+                .prepare_write()?
+                .write_all(netlist_text.as_bytes())
+                .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
+            serde_json::to_writer_pretty(outputs.json.prepare_write()?, &report).with_context(
+                || format!("failed writing JSON summary to '{}'", json_path.display()),
+            )?;
+        }
+    } else if netlist_out == "-" {
+        if let Some(json_path) = json_out {
+            let json_path = Path::new(json_path);
+            let stdout = same_file::Handle::stdout()?;
+            ensure_distinct_from_stdout(json_path, &stdout)?;
+            if is_special_output(json_path)? {
+                // Stdout remains open until process exit, so a consumer
+                // waiting for its EOF before opening a JSON FIFO would
+                // deadlock with a blocking FIFO open here.
+                #[cfg(unix)]
+                ensure!(
+                    !(std::fs::metadata(json_path)?.file_type().is_fifo() && {
+                        let kind = stdout.as_file().metadata()?.file_type();
+                        kind.is_fifo() || kind.is_socket()
+                    }),
+                    "--json_out cannot be a FIFO when stdout is a pipe or socket"
+                );
+                print!("{netlist_text}");
+                let file = File::create(json_path).with_context(|| {
+                    format!("failed to create JSON summary '{}'", json_path.display())
+                })?;
+                serde_json::to_writer_pretty(file, &report).with_context(|| {
+                    format!("failed writing JSON summary to '{}'", json_path.display())
+                })?;
+            } else {
+                let mut json = PendingOutput::open(json_path).with_context(|| {
+                    format!("failed to open JSON summary '{}'", json_path.display())
+                })?;
+                ensure!(
+                    json.handle.as_ref() != Some(&stdout),
+                    "--json_out must not refer to stdout when --netlist_out is '-'"
+                );
+                ensure!(
+                    json.handle.as_ref() != stderr.as_ref(),
+                    "--json_out must not refer to stderr"
+                );
+                print!("{netlist_text}");
+                serde_json::to_writer_pretty(json.prepare_write()?, &report).with_context(
+                    || format!("failed writing JSON summary to '{}'", json_path.display()),
+                )?;
+            }
+        } else {
+            print!("{netlist_text}");
+        }
+    } else {
+        std::fs::write(netlist_out, netlist_text)
+            .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
+    }
     eprintln!(
-        "aig-tech-map: mapped '{}' to {} instances / {} nets using policy='{}' INV='{}' NAND2='{}'",
+        "aig-tech-map: mapped '{}' to {} instances / {} nets {}",
         aig_input_file,
         mapped.module.instances.len(),
         mapped.nets.len(),
-        cell_policy.as_str(),
-        inv_cell.cell_name,
-        nand2_cell.cell_name
+        summary
     );
+    Ok(())
+}
+
+/// Runs technology mapping and renders a CLI error on failure.
+pub fn handle_aig_tech_map(matches: &ArgMatches) {
+    if let Err(error) = run_aig_tech_map(matches) {
+        eprintln!("aig-tech-map error: {error:#}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use prost::Message;
-    use xlsynth_g8r::liberty::model::{library_from_proto, library_to_proto};
-    use xlsynth_g8r::liberty::parser::parse_liberty_files;
-    use xlsynth_g8r::liberty_model::{LibraryBuilder, Pin, TimingTable};
+    use super::open_distinct_outputs;
+    #[cfg(unix)]
+    use super::{PendingOutput, ensure_distinct_from_stdout, output_paths_alias};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::sync::mpsc;
+    #[cfg(unix)]
+    use std::time::Duration;
 
-    fn make_pin(
-        library: &mut LibraryBuilder,
-        name: &str,
-        direction: PinDirection,
-        function: &str,
-    ) -> Pin {
-        Pin {
-            name: library.intern_string(name).unwrap(),
-            direction: direction as i32,
-            function: library.intern_string(function).unwrap(),
-            ..Default::default()
+    #[cfg(unix)]
+    #[test]
+    fn stdout_alias_check_accepts_descriptor_vnode_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let unrelated = dir.path().join("unrelated");
+        std::fs::write(&unrelated, "unrelated file").unwrap();
+        let other_handle = same_file::Handle::from_path(&unrelated).unwrap();
+
+        // The differing handle simulates systems where stat of /dev/stdout
+        // and fstat of stdout report different identities.
+        assert!(ensure_distinct_from_stdout(Path::new("/dev/stdout"), &other_handle).is_err());
+    }
+
+    #[test]
+    fn opened_output_aliases_do_not_clobber_or_leave_placeholders() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output");
+        assert!(open_distinct_outputs(&path, &path).is_err());
+        assert!(!path.exists());
+
+        std::fs::write(&path, "keep this output").unwrap();
+        assert!(open_distinct_outputs(&path, &path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep this output");
+    }
+
+    #[test]
+    fn failed_second_open_removes_only_the_new_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output");
+        let invalid_path = dir.path().join("missing").join("report");
+        assert!(open_distinct_outputs(&path, &invalid_path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_checks_do_not_require_read_permission() {
+        let dir = tempfile::tempdir().unwrap();
+        let netlist = dir.path().join("netlist");
+        let report = dir.path().join("report");
+        std::fs::write(&netlist, "netlist").unwrap();
+        std::fs::write(&report, "report").unwrap();
+        for path in [&netlist, &report] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o200)).unwrap();
         }
-    }
+        assert!(!output_paths_alias(&netlist, &report).unwrap());
+        assert!(open_distinct_outputs(&netlist, &report).is_ok());
 
-    fn make_timed_output_pin(
-        library: &mut LibraryBuilder,
-        name: &str,
-        function: &str,
-        related_pins: &[&str],
-    ) -> Pin {
-        let mut timing_arcs = Vec::with_capacity(related_pins.len());
-        for related_pin in related_pins {
-            let tables = vec![
-                scalar_table(library, "cell_rise", 1.0),
-                scalar_table(library, "cell_fall", 1.0),
-                scalar_table(library, "rise_transition", 0.1),
-                scalar_table(library, "fall_transition", 0.1),
-            ];
-            timing_arcs.push(
-                library
-                    .add_timing_arc(related_pin, "", "combinational", "", tables)
-                    .unwrap(),
-            );
-        }
-        Pin {
-            name: library.intern_string(name).unwrap(),
-            direction: PinDirection::Output as i32,
-            function: library.intern_string(function).unwrap(),
-            timing_arcs,
-            ..Default::default()
-        }
-    }
-
-    fn scalar_table(library: &mut LibraryBuilder, kind: &str, value: f64) -> TimingTable {
-        let kind = match kind {
-            "cell_rise" => xlsynth_g8r::liberty_proto::TimingTableKind::CellRise,
-            "cell_fall" => xlsynth_g8r::liberty_proto::TimingTableKind::CellFall,
-            "rise_transition" => xlsynth_g8r::liberty_proto::TimingTableKind::RiseTransition,
-            "fall_transition" => xlsynth_g8r::liberty_proto::TimingTableKind::FallTransition,
-            other => panic!("unsupported test timing-table kind {other}"),
-        };
-        library
-            .add_timing_table_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
-            .unwrap()
-    }
-
-    fn make_inv_cell(
-        library: &mut LibraryBuilder,
-        name: &str,
-        threshold_voltage_group_id: u32,
-    ) -> Cell {
-        make_inv_cell_with_pins(library, name, threshold_voltage_group_id, "A", "Y")
-    }
-
-    fn make_inv_cell_with_pins(
-        library: &mut LibraryBuilder,
-        name: &str,
-        threshold_voltage_group_id: u32,
-        input_pin_name: &str,
-        output_pin_name: &str,
-    ) -> Cell {
-        Cell {
-            name: name.to_string().into(),
-            threshold_voltage_group_id,
-            pins: vec![
-                make_pin(library, input_pin_name, PinDirection::Input, ""),
-                make_timed_output_pin(
-                    library,
-                    output_pin_name,
-                    format!("!{}", input_pin_name).as_str(),
-                    &[input_pin_name],
-                ),
-            ],
-            ..Default::default()
-        }
-    }
-
-    fn make_nand2_cell(
-        library: &mut LibraryBuilder,
-        name: &str,
-        threshold_voltage_group_id: u32,
-    ) -> Cell {
-        make_nand2_cell_with_pins(library, name, threshold_voltage_group_id, ["A", "B"], "Y")
-    }
-
-    fn make_nand2_cell_with_pins(
-        library: &mut LibraryBuilder,
-        name: &str,
-        threshold_voltage_group_id: u32,
-        input_pin_names: [&str; 2],
-        output_pin_name: &str,
-    ) -> Cell {
-        Cell {
-            name: name.to_string().into(),
-            threshold_voltage_group_id,
-            pins: vec![
-                make_pin(library, input_pin_names[0], PinDirection::Input, ""),
-                make_pin(library, input_pin_names[1], PinDirection::Input, ""),
-                make_timed_output_pin(
-                    library,
-                    output_pin_name,
-                    format!("!({}*{})", input_pin_names[0], input_pin_names[1]).as_str(),
-                    &input_pin_names,
-                ),
-            ],
-            ..Default::default()
-        }
-    }
-
-    fn make_library_with_cells(
-        build_cells: impl FnOnce(&mut LibraryBuilder) -> Vec<Cell>,
-    ) -> xlsynth_g8r::liberty_model::Library {
-        let mut library = LibraryBuilder::new();
-        library.cells = build_cells(&mut library);
-        library.finish()
-    }
-
-    /// Imports complete timing models so rejection is due to functional
-    /// semantics.
-    fn import_structural_candidates(output_attribute: &str, extra_pin: &str) -> Library {
-        let mut source = String::from("library(test) {");
-        for (family, inputs, formula) in [
-            ("INV", vec!["A"], "!A"),
-            ("NAND2", vec!["A", "B"], "!(A * B)"),
-        ] {
-            for safe in [false, true] {
-                let name = if safe {
-                    format!("{family}_SAFE")
-                } else {
-                    family.into()
-                };
-                source.push_str(&format!("cell({name}) {{ area: 1;"));
-                for input in &inputs {
-                    source.push_str(&format!("pin({input}) {{ direction: input; }}"));
-                }
-                if !safe {
-                    source.push_str(extra_pin);
-                }
-                source.push_str(&format!(
-                    r#"pin(Y) {{ direction: output; function: "{formula}";"#
-                ));
-                if !safe {
-                    source.push_str(output_attribute);
-                }
-                for input in &inputs {
-                    source.push_str(&format!(r#"timing() {{ related_pin: "{input}"; timing_type: combinational;
-                        cell_rise(scalar) {{ values("1"); }} cell_fall(scalar) {{ values("1"); }}
-                        rise_transition(scalar) {{ values("0.1"); }} fall_transition(scalar) {{ values("0.1"); }}
-                    }}"#));
-                }
-                source.push_str("} }");
-            }
-        }
-        source.push('}');
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), source).unwrap();
-        let wire = library_to_proto(parse_liberty_files(&[file.path()]).unwrap()).unwrap();
-        library_from_proto(
-            xlsynth_g8r::liberty_proto::Library::decode(wire.encode_to_vec().as_slice()).unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn structural_selection_rejects_unsupported_imported_semantics() {
-        for (output_attribute, extra_pin) in [
-            (r#"three_state: "A";"#, ""),
-            (r#"x_function: "A";"#, ""),
-            ("", "pin(I) { direction: internal; }"),
-            ("", "pin(IO) { direction: inout; }"),
-        ] {
-            let mut library = import_structural_candidates(output_attribute, extra_pin);
-            for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
-                assert_eq!(select_inv_cell_name(&library, policy).unwrap(), "INV_SAFE");
-                assert_eq!(
-                    select_nand2_cell_name(&library, policy).unwrap(),
-                    "NAND2_SAFE"
-                );
-            }
-            library.cells.retain(|cell| !cell.name.ends_with("_SAFE"));
-            for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
-                assert!(select_inv_cell_name(&library, policy).is_err());
-                assert!(select_nand2_cell_name(&library, policy).is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn structural_selection_excludes_mapping_restricted_cells() {
-        let mut library = make_library_with_cells(|library| {
-            let mut inv = make_inv_cell(library, "INV", 0);
-            inv.dont_use = Some(true);
-            let mut inv_size = make_inv_cell(library, "INVx1", 0);
-            inv_size.use_for_size_only = Some(true);
-            let mut inv_ok = make_inv_cell(library, "INVx2", 0);
-            inv_ok.dont_use = Some(false);
-            let mut nand = make_nand2_cell(library, "NAND2", 0);
-            nand.dont_use = Some(true);
-            let mut nand_size = make_nand2_cell(library, "NAND2x1", 0);
-            nand_size.use_for_size_only = Some(true);
-            let mut nand_ok = make_nand2_cell(library, "NAND2x2", 0);
-            nand_ok.use_for_size_only = Some(false);
-            vec![inv, inv_size, inv_ok, nand, nand_size, nand_ok]
-        });
-
-        for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
-            assert_eq!(select_inv_cell_name(&library, policy).unwrap(), "INVx2");
-            assert_eq!(select_nand2_cell_name(&library, policy).unwrap(), "NAND2x2");
-        }
-
-        library.cells.retain(|cell| !cell.name.ends_with("x2"));
-        for policy in [CellPolicy::SmallNormalVt, CellPolicy::MaxSpeed] {
-            assert!(select_inv_cell_name(&library, policy).is_err());
-            assert!(select_nand2_cell_name(&library, policy).is_err());
-        }
-    }
-
-    #[test]
-    fn structural_selection_rejects_unknown_legacy_sizing_policy() {
-        let library = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INV", 0),
-                make_nand2_cell(library, "NAND2", 0),
-            ]
-        });
-        let mut wire = library_to_proto(library).unwrap();
-        wire.format_magic = xlsynth_g8r::liberty::model::LIBERTY_FORMAT_MAGIC_V5;
-        let library = library_from_proto(wire).unwrap();
-        assert!(
-            library
-                .cells
-                .iter()
-                .all(|cell| cell.validate_functional_semantics().is_ok())
-        );
-        assert!(select_inv_cell_name(&library, CellPolicy::SmallNormalVt).is_err());
-        assert!(select_nand2_cell_name(&library, CellPolicy::SmallNormalVt).is_err());
-    }
-
-    #[test]
-    fn select_prefers_exact_base_names_in_small_normal_vt_mode() {
-        let mut lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INV", 1),
-                make_inv_cell(library, "INVx1_nominal", 1),
-                make_nand2_cell(library, "NAND2", 1),
-                make_nand2_cell(library, "NAND2x1_nominal", 1),
-            ]
-        });
-        lib.threshold_voltage_groups = vec!["nominal".to_string()];
-        lib.threshold_voltage_group_class_indices = vec![0];
-
-        assert_eq!(
-            select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "INV"
-        );
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "NAND2"
-        );
-    }
-
-    #[test]
-    fn select_prefers_x1_nominal_when_no_exact_base_in_small_normal_vt_mode() {
-        let mut lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INVx2_fast", 2),
-                make_inv_cell(library, "INVx1_nominal", 1),
-                make_inv_cell(library, "INVx1_faster", 3),
-                make_nand2_cell(library, "NAND2x2_fast", 2),
-                make_nand2_cell(library, "NAND2x1_nominal", 1),
-            ]
-        });
-        lib.threshold_voltage_groups = vec![
-            "nominal".to_string(),
-            "fast".to_string(),
-            "faster".to_string(),
-        ];
-        lib.threshold_voltage_group_class_indices = vec![0, 1, 2];
-
-        assert_eq!(
-            select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "INVx1_nominal"
-        );
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "NAND2x1_nominal"
-        );
-    }
-
-    #[test]
-    fn select_prefers_max_drive_in_fastest_vt_in_max_speed_mode() {
-        let mut lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INVx1_nominal", 1),
-                make_inv_cell(library, "INVx2_faster", 3),
-                make_inv_cell(library, "INVx4_faster", 3),
-                make_nand2_cell(library, "NAND2x1_nominal", 1),
-                make_nand2_cell(library, "NAND2x2_fast", 2),
-                make_nand2_cell(library, "NAND2x4_faster", 3),
-            ]
-        });
-        lib.threshold_voltage_groups = vec![
-            "nominal".to_string(),
-            "fast".to_string(),
-            "faster".to_string(),
-        ];
-        lib.threshold_voltage_group_class_indices = vec![0, 1, 2];
-
-        assert_eq!(
-            select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "INVx4_faster"
-        );
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "NAND2x4_faster"
-        );
-    }
-
-    #[test]
-    fn select_uses_drive_strength_with_fractional_suffix_in_max_speed_mode() {
-        let mut lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INVxp75_faster", 1),
-                make_inv_cell(library, "INVx1_faster", 1),
-                make_nand2_cell(library, "NAND2xp33_faster", 1),
-                make_nand2_cell(library, "NAND2x1_faster", 1),
-            ]
-        });
-        lib.threshold_voltage_groups = vec!["faster".to_string()];
-        lib.threshold_voltage_group_class_indices = vec![2];
-
-        assert_eq!(
-            select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "INVx1_faster"
-        );
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "NAND2x1_faster"
-        );
-    }
-
-    #[test]
-    fn select_uses_default_threshold_voltage_group() {
-        let mut lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INVx1_default", 0),
-                make_inv_cell(library, "INVx2_fast", 2),
-                make_nand2_cell(library, "NAND2x1_default", 0),
-            ]
-        });
-        lib.threshold_voltage_groups = vec!["nominal".to_string(), "fast".to_string()];
-        lib.default_threshold_voltage_group_id = 1;
-        lib.threshold_voltage_group_class_indices = vec![0, 1];
-
-        assert_eq!(
-            select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "INVx1_default"
-        );
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "NAND2x1_default"
-        );
-    }
-
-    #[test]
-    fn select_discovers_nonstandard_pin_names() {
-        let lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell_with_pins(library, "INV", 0, "I", "ZN"),
-                make_nand2_cell_with_pins(library, "NAND2", 0, ["I0", "I1"], "ZN"),
-            ]
-        });
-
-        assert_eq!(
-            select_inv_cell(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            SelectedCellBinding {
-                cell_name: "INV".to_string().into(),
-                input_pin_names: vec!["I".to_string()],
-                output_pin_name: "ZN".to_string().into(),
-            }
-        );
-        assert_eq!(
-            select_nand2_cell(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            SelectedCellBinding {
-                cell_name: "NAND2".to_string().into(),
-                input_pin_names: vec!["I0".to_string(), "I1".to_string()],
-                output_pin_name: "ZN".to_string().into(),
-            }
-        );
-    }
-
-    #[test]
-    fn select_rejects_family_name_with_wrong_formula() {
-        let lib = make_library_with_cells(|library| {
-            vec![
-                Cell {
-                    name: "INV".to_string().into(),
-                    pins: vec![
-                        make_pin(library, "A", PinDirection::Input, ""),
-                        make_timed_output_pin(library, "Y", "A", &["A"]),
-                    ],
-                    ..Default::default()
-                },
-                Cell {
-                    name: "NAND2".to_string().into(),
-                    pins: vec![
-                        make_pin(library, "A", PinDirection::Input, ""),
-                        make_pin(library, "B", PinDirection::Input, ""),
-                        make_timed_output_pin(library, "Y", "A*B", &["A", "B"]),
-                    ],
-                    ..Default::default()
-                },
-            ]
-        });
-
-        assert!(select_inv_cell(&lib, CellPolicy::SmallNormalVt).is_err());
-        assert!(select_nand2_cell(&lib, CellPolicy::SmallNormalVt).is_err());
-    }
-
-    #[test]
-    fn select_accepts_demorgan_nand2_formula() {
-        let lib = make_library_with_cells(|library| {
-            vec![Cell {
-                name: "NAND2".to_string().into(),
-                pins: vec![
-                    make_pin(library, "A", PinDirection::Input, ""),
-                    make_pin(library, "B", PinDirection::Input, ""),
-                    make_timed_output_pin(library, "Y", "(!A)+(!B)", &["A", "B"]),
-                ],
-                ..Default::default()
-            }]
-        });
-
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "NAND2"
-        );
-    }
-
-    #[test]
-    fn select_is_deterministic_without_vt_metadata() {
-        let lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INVx2", 0),
-                make_inv_cell(library, "INVx1", 0),
-                make_nand2_cell(library, "NAND2x2", 0),
-                make_nand2_cell(library, "NAND2x1", 0),
-            ]
-        });
-
-        assert_eq!(
-            select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "INVx1"
-        );
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
-            "NAND2x1"
-        );
-        assert_eq!(
-            select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "INVx2"
-        );
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "NAND2x2"
-        );
-    }
-
-    #[test]
-    fn select_rejects_candidate_missing_timing_for_one_functional_input() {
-        let lib = make_library_with_cells(|library| {
-            vec![Cell {
-                name: "NAND2".to_string().into(),
-                pins: vec![
-                    make_pin(library, "A", PinDirection::Input, ""),
-                    make_pin(library, "B", PinDirection::Input, ""),
-                    make_timed_output_pin(library, "Y", "!(A*B)", &["A"]),
-                ],
-                ..Default::default()
-            }]
-        });
-
-        assert!(select_nand2_cell(&lib, CellPolicy::SmallNormalVt).is_err());
-    }
-
-    #[test]
-    fn select_skips_sta_incompatible_candidate_and_uses_valid_alternative() {
-        let mut builder = LibraryBuilder::new();
-        let mut invalid_fast = make_nand2_cell(&mut builder, "NAND2x2_fast", 2);
-        let output_pin_idx = invalid_fast
-            .pins
-            .iter()
-            .position(|pin| builder.resolve_string(&pin.name) == "Y")
-            .expect("output pin");
-        let tables = std::mem::take(&mut invalid_fast.pins[output_pin_idx].timing_arcs[0].tables);
-        invalid_fast.pins[output_pin_idx].timing_arcs[0] = builder
-            .add_timing_arc("A", "", "rising_edge", "", tables)
+        let placeholder_path = dir.path().join("placeholder");
+        let placeholder = PendingOutput::open(&placeholder_path).unwrap();
+        std::fs::set_permissions(&placeholder_path, std::fs::Permissions::from_mode(0o200))
             .unwrap();
-        let nominal = make_nand2_cell(&mut builder, "NAND2x1_nominal", 1);
-        builder.cells = vec![invalid_fast, nominal];
-        builder.threshold_voltage_groups = vec!["nominal".to_string(), "fast".to_string()];
-        builder.threshold_voltage_group_class_indices = vec![0, 1];
-        let lib = builder.finish();
-
-        assert_eq!(
-            select_nand2_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
-            "NAND2x1_nominal"
-        );
+        drop(placeholder);
+        assert!(!placeholder_path.exists());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn select_rejects_mixed_ordered_and_unordered_vt_metadata() {
-        let mut lib = make_library_with_cells(|library| {
-            vec![
-                make_inv_cell(library, "INVx1_nominal", 1),
-                make_inv_cell(library, "INVx2_unclassified", 0),
-            ]
-        });
-        lib.threshold_voltage_groups = vec!["nominal".to_string()];
-        lib.threshold_voltage_group_class_indices = vec![0];
+    fn output_alias_check_does_not_open_fifos() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        let fifo_alias = dir.path().join("fifo-alias");
+        let regular = dir.path().join("report");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::hard_link(&fifo, &fifo_alias).unwrap();
+        std::fs::write(&regular, "report").unwrap();
 
-        let err = select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap_err();
-        assert!(err.contains("mix ordered and unordered threshold-voltage metadata"));
+        let (sender, receiver) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            sender
+                .send((
+                    output_paths_alias(&regular, &fifo),
+                    output_paths_alias(&fifo, &fifo_alias),
+                ))
+                .unwrap();
+        });
+        let (different, same) = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("checking FIFO output paths blocked");
+        assert!(!different.unwrap());
+        assert!(same.unwrap());
+        thread.join().unwrap();
     }
 }
