@@ -477,7 +477,7 @@ fn strategies_preserve_default_and_cli_semantics() {
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
         assert_eq!(report["strategy"], strategy.unwrap_or("nand2"));
-        assert_eq!(report["mapper"], strategy.unwrap_or("nand2"));
+        assert!(report.get("mapper").is_none());
         assert_eq!(report["module"], "mapped_top");
         let expected_count = if strategy == Some("area") { 1 } else { 3 };
         assert_eq!(report["cell_count"], expected_count);

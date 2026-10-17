@@ -2,11 +2,11 @@
 
 //! Structural technology mapping from `GateFn` (AIG) to gate-level netlists.
 //!
-//! The initial mapper is intentionally simple and deterministic:
+//! The `nand2` strategy is intentionally simple and deterministic:
 //! - Each AIG `And2` node maps to `NAND2` followed by `INV`.
 //! - Negated operands are materialized via explicit `INV` edge inverters.
 //! - Output negations are materialized via explicit `INV` instances.
-//! - Current scope is limited to direct structural lowering, not general
+//! - Its scope is limited to direct structural lowering, not general
 //!   cell-covering or optimization across wider cell libraries.
 //!
 //! Output is provided in parsed-netlist data structures so later flows (e.g.

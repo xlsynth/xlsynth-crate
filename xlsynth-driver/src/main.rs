@@ -2501,7 +2501,7 @@ fn main() {
                         .value_name("STRATEGY")
                         .default_value("nand2")
                         .value_parser(["nand2", "area"])
-                        .help("Mapping strategy: nand2 preserves structural lowering; area covers the fixed AIG to minimize cell area")
+                        .help("Mapping strategy: nand2 preserves structural lowering; area covers the fixed AIG using an area objective")
                         .action(ArgAction::Set),
                 )
                 .arg(

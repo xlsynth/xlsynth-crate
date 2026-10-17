@@ -1,32 +1,30 @@
-# Technology Mapper Design
+# NAND2 Technology Mapping Design
 
-This note describes the current AIG technology-mapping design in
-`xlsynth-g8r`.
+This note describes the `nand2` AIG technology-mapping strategy in
+`xlsynth-g8r`. For the `area` strategy, see the
+[`aig-tech-map` documentation](../../xlsynth-driver/README.md#aig-tech-map-aiger-to-library-cell-netlist).
 
-There are two separate decisions in the mapper:
+There are two separate decisions:
 
-- the **mapping mode**, which decides how an AIG is lowered into cell families
-- the **cell-selection policy**, which decides which concrete cell variant to
-  use after the mapper has chosen a family such as `INV` or `NAND2`
+- the **mapping strategy**, which determines how an AIG is lowered into cells
+- for `nand2`, the **cell-selection policy**, which chooses the concrete `INV`
+  and `NAND2` variants used by that strategy
 
-Keeping those separate matters. A mode changes the produced structure; a policy
-only chooses among interchangeable implementations of a structure the mode has
-already selected.
+The strategy determines the produced structure; the policy chooses among
+interchangeable implementations of the cell families used by `nand2`.
 
-## Mapping Mode
+## NAND2 Strategy
 
-### Structural Baseline
-
-This mode performs direct, deterministic structural lowering:
+The `nand2` strategy performs direct, deterministic structural lowering:
 
 - each AIG `And2` becomes `NAND2` followed by `INV`
 - negated operands become explicit edge `INV` instances
 - negated outputs become explicit output `INV` instances
 - the emitted netlist is purely structural and does not use continuous assigns
 
-The purpose of this mode is to preserve the AIG shape in a simple standard-cell
-netlist. It is useful as a baseline, for inspection, and as a predictable input
-to later netlist analyses such as STA.
+The purpose of this strategy is to preserve the AIG shape in a simple
+standard-cell netlist. It is useful as a baseline, for inspection, and as a
+predictable input to later netlist analyses such as STA.
 
 This is not a general cell-covering algorithm. It does not search wider Liberty
 cell sets, collapse Boolean cones, or optimize area or delay across alternative
@@ -34,14 +32,16 @@ decompositions.
 
 ## Cell-Selection Policies
 
-The implemented structural baseline currently needs concrete `INV` and `NAND2`
-cells. The `aig-tech-map` CLI exposes two policies for choosing among matching
-cells in a Liberty proto:
+The `nand2` strategy needs concrete `INV` and `NAND2` cells. The `aig-tech-map`
+CLI exposes two `--cell_policy` values for choosing among matching cells in a
+Liberty proto:
 
 - `small-normal-vt`: prefer VT class `0`, then the unsuffixed canonical cell
   name, then an `x1` spelling
 - `max-speed`: prefer the highest available VT class, then the highest parsed
   drive strength
+
+This option applies only to `nand2`; specifying it with `area` is an error.
 
 These policies do not change the mapped topology. They only choose which
 concrete cell names appear in the output netlist. Drive strength is inferred
@@ -56,9 +56,9 @@ treated as unordered and selection still remains deterministic. If a candidate
 set mixes ordered and unordered VT metadata, selection is rejected because the
 relative ranking would be ambiguous.
 
-## Current Cell Binding
+## Cell Binding
 
-The first implementation binds cell families by convention:
+The `nand2` strategy binds cell families by convention:
 
 - inverter candidates have names beginning with `INV`, one input pin, and one
   output pin whose Boolean function is the negation of that input
@@ -66,16 +66,17 @@ The first implementation binds cell families by convention:
   and one output pin whose Boolean function is the negation of their
   conjunction
 
-That is sufficient for the structural baseline, but it is deliberately narrower
-than a general Liberty-function matcher.
+That is sufficient for `nand2`, but it is deliberately narrower than a general
+Liberty-function matcher.
 
 ## Output Contract
 
-The mapper returns parsed netlist structures, not only text, so other library
-flows can consume the result without reparsing emitted Verilog-like netlists.
-Text emission is a separate step layered on top of the parsed representation.
+The `nand2` strategy returns parsed netlist structures, not only text, so other
+library flows can consume the result without reparsing emitted Verilog-like
+netlists. Text emission is a separate step layered on top of the parsed
+representation.
 
-The output is deterministic:
+The `nand2` output is deterministic:
 
 - generated instance names are stable
 - generated net names are stable

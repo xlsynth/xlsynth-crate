@@ -320,7 +320,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 options.nand2_cell_name
             );
             let report = serde_json::json!({
-                "mapper": "nand2", "cell_policy": policy.as_str(),
+                "cell_policy": policy.as_str(),
                 "inv_cell": options.inv_cell_name, "nand2_cell": options.nand2_cell_name
             });
             (mapped, report, summary)
@@ -334,7 +334,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 mapped.stats.cell_area, mapped.stats.inverter_count, mapped.stats.duplicated_ands
             );
             let report = serde_json::json!({
-                "mapper": "area", "stats": mapped.stats,
+                "stats": mapped.stats,
                 "excluded_cells": library.excluded_cells
             });
             (mapped.netlist, report, summary)
