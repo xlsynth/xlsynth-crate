@@ -366,6 +366,123 @@ fn nand2_mapping_accepts_missing_input_arc_but_sta_reports_it() {
     );
 }
 
+#[test]
+fn area_mapping_and_sta_check_three_input_cell_coverage() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let aig_path = dir.path().join("and3.aag");
+    let mut builder = GateBuilder::new("and3_demo".into(), GateBuilderOptions::no_opt());
+    let a = *builder.add_input("a".into(), 1).get_lsb(0);
+    let b = *builder.add_input("b".into(), 1).get_lsb(0);
+    let c = *builder.add_input("c".into(), 1).get_lsb(0);
+    let ab = builder.add_and_binary(a, b);
+    let abc = builder.add_and_binary(ab, c);
+    builder.add_output("y".into(), abc.into());
+    std::fs::write(&aig_path, emit_aiger(&builder.build(), true).unwrap()).unwrap();
+
+    let mut mapped_netlists = Vec::new();
+    for missing_c_arc in [false, true] {
+        let arcs = ["A", "B", "C"]
+            .into_iter()
+            .filter(|pin| !missing_c_arc || *pin != "C")
+            .map(|pin| {
+                format!(
+                    r#"
+      timing () {{
+        related_pin : "{pin}"; timing_type : combinational; timing_sense : positive_unate;
+        cell_rise (tmpl) {{ values ("1.0"); }}
+        cell_fall (tmpl) {{ values ("1.1"); }}
+        rise_transition (tmpl) {{ values ("0.3"); }}
+        fall_transition (tmpl) {{ values ("0.4"); }}
+      }}"#
+                )
+            })
+            .collect::<String>();
+        // AND3 has the same Boolean function and direct pin arcs as the ASAP7
+        // three-input AND; omit C's arc only for the negative case.
+        let liberty = format!(
+            r#"
+library (test) {{
+  time_unit : "1ns";
+  lu_table_template (tmpl) {{ variable_1 : input_net_transition; index_1 ("0.1"); }}
+  cell (INV) {{ area : 1.0;
+    pin (A) {{ direction : input; }}
+    pin (Y) {{ direction : output; function : "!A"; }}
+  }}
+  cell (AND3) {{ area : 1.0;
+    pin (A) {{ direction : input; capacitance : 0.01; }}
+    pin (B) {{ direction : input; capacitance : 0.01; }}
+    pin (C) {{ direction : input; capacitance : 0.01; }}
+    pin (Y) {{ direction : output; function : "(A * B * C)"; {arcs}
+    }}
+  }}
+}}
+"#
+        );
+        let source_path = dir.path().join("cells.lib");
+        let liberty_path = dir.path().join("cells.proto");
+        let netlist_path = dir.path().join("mapped.gv");
+        let report_path = dir.path().join("mapping.json");
+        std::fs::write(&source_path, liberty).unwrap();
+        let import = Command::new(driver)
+            .arg("lib2proto")
+            .arg("--include-timing")
+            .arg("--output")
+            .arg(&liberty_path)
+            .arg(&source_path)
+            .output()
+            .unwrap();
+        assert!(
+            import.status.success(),
+            "lib2proto failed: {}",
+            String::from_utf8_lossy(&import.stderr)
+        );
+        let mapped = Command::new(driver)
+            .arg("aig-tech-map")
+            .arg(&aig_path)
+            .args(["--strategy", "area", "--liberty_proto"])
+            .arg(&liberty_path)
+            .arg("--netlist_out")
+            .arg(&netlist_path)
+            .arg("--json_out")
+            .arg(&report_path)
+            .output()
+            .unwrap();
+        assert!(
+            mapped.status.success(),
+            "aig-tech-map failed: {}",
+            String::from_utf8_lossy(&mapped.stderr)
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!(
+            report["stats"]["cells_by_type"],
+            serde_json::json!({"AND3": 1})
+        );
+        mapped_netlists.push(std::fs::read_to_string(&netlist_path).unwrap());
+
+        let sta = Command::new(driver)
+            .arg("gv-sta")
+            .arg("--netlist")
+            .arg(&netlist_path)
+            .arg("--liberty_proto")
+            .arg(&liberty_path)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&sta.stderr);
+        if missing_c_arc {
+            assert!(!sta.status.success(), "missing C arc must fail STA");
+            assert!(
+                stderr.contains("functional input 'C'") && stderr.contains("AND3"),
+                "unexpected gv-sta error: {stderr}"
+            );
+        } else {
+            assert!(sta.status.success(), "gv-sta failed: {stderr}");
+        }
+    }
+    assert_eq!(mapped_netlists[0], mapped_netlists[1]);
+}
+
 /// Checks emitted cells by exhaustive simulation and, when enabled, explicit
 /// Bitwuzla CLI proof.
 fn assert_mapping_equivalent(aig: &GateFn, text: &str, aig_path: &Path, liberty_path: &Path) {

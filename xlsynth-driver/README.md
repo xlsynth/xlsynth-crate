@@ -895,7 +895,7 @@ Key flags:
 ### `gv-sta`: gate-level max-arrival STA
 
 Runs basic combinational max-arrival STA over a parsed gate-level netlist using Liberty timing arcs/tables.
-For parseable functions of at most two input pins with direct input-related
+For parseable functions of at most five input pins with direct input-related
 arcs, STA checks rise and fall coverage for inputs that can affect the output.
 It does not fully validate coverage for larger or unsupported functions,
 output-related arcs, or conditional timing arcs. Verify timing coverage before

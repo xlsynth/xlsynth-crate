@@ -1306,6 +1306,89 @@ fn incomplete_functional_timing_alternatives_are_skipped() -> Result<()> {
 }
 
 #[test]
+fn five_input_candidate_with_missing_arc_is_rejected_and_rolled_back() -> Result<()> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let good = builder.cells.iter().position(|c| c.name == "AND2").unwrap();
+    let bad = builder.cells.iter().position(|c| c.name == "AND1").unwrap();
+    builder.cells[good].name = "AND5x2".to_string();
+    builder.cells[bad].name = "AND5x1".to_string();
+    let function = builder.intern_string("A & B & C & D & E")?;
+    let extra_pins = ["C", "D", "E"]
+        .into_iter()
+        .map(|name| builder.intern_string(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    for cell_idx in [good, bad] {
+        let cell = &mut builder.cells[cell_idx];
+        let input = cell
+            .pins
+            .iter()
+            .find(|pin| pin.direction == PinDirection::Input as i32)
+            .unwrap()
+            .clone();
+        let output_idx = cell
+            .pins
+            .iter()
+            .position(|pin| pin.direction == PinDirection::Output as i32)
+            .unwrap();
+        cell.pins[output_idx].function = function;
+        let arc = cell.pins[output_idx].timing_arcs[0].clone();
+        for (idx, name) in extra_pins.iter().enumerate() {
+            let mut pin = input.clone();
+            pin.name = *name;
+            cell.pins.push(pin);
+            // The smaller candidate lacks only E's timing arc.
+            if cell_idx != bad || idx != 2 {
+                let mut pin_arc = arc.clone();
+                pin_arc.related_pin = *name;
+                cell.pins[output_idx].timing_arcs.push(pin_arc);
+            }
+        }
+    }
+    let mut library = builder.finish();
+    assert!(
+        CellFamilies::new(&library)
+            .alternatives(good)
+            .contains(&bad)
+    );
+    let source = "module m(input a, input b, input c, input d, input e, output y); AND5x2 gate(.A(a),.B(b),.C(c),.D(d),.E(e),.Y(y)); endmodule";
+    let mut actual = read_gv_from_str(source)?;
+    let opts = ResizeOptions {
+        max_upsize_rounds: 0,
+        max_downsize_rounds: 1,
+        ..options()
+    };
+    let mut sta = IncrementalSta::new(
+        &actual.modules[0],
+        &actual.nets,
+        &actual.interner,
+        &library,
+        opts.timing,
+    )?;
+    let original_score = sta.score();
+    let original_cells = sta.cells.clone();
+    let error = sta.trial(0, bad, usize::MAX, None, |_| true).unwrap_err();
+    assert!(error.to_string().contains("functional input 'E'"));
+    assert_eq!(sta.score(), original_score);
+    assert_eq!(sta.cells, original_cells);
+    drop(sta);
+
+    let report = resize(&mut actual, &library, &opts)?;
+    assert_eq!(
+        actual
+            .interner
+            .resolve(actual.modules[0].instances[0].type_name),
+        Some("AND5x2")
+    );
+    library.cells[bad].dont_use = Some(true);
+    let mut expected = read_gv_from_str(source)?;
+    let expected_report = resize(&mut expected, &library, &opts)?;
+    assert_eq!(actual.modules, expected.modules);
+    assert_eq!(report.final_delay, expected_report.final_delay);
+    assert!(report.downsize.trials > expected_report.downsize.trials);
+    Ok(())
+}
+
+#[test]
 fn equivalent_replacement_must_revalidate_downstream_constant_coverage() -> Result<()> {
     let mut builder = LibraryBuilder::from_library(library()?);
     let constant = builder.intern_string("0")?;

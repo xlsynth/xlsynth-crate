@@ -19,7 +19,7 @@
 //! - Uses Liberty `when` predicates when known scalar constants make an arc
 //!   provably false; arcs with true or unknown predicates remain possible.
 //! - Checks input-arc coverage for supported combinational cells with direct
-//!   input-related timing and functions of at most two distinct input pins.
+//!   input-related timing and functions of at most five distinct input pins.
 //!   That check can propagate constants through supported cell functions; it
 //!   does not prove that conditional arcs cover every possible input state.
 //! - Treats arc-less output pins with constant Liberty functions as zero-delay
@@ -77,6 +77,9 @@ use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
 pub(crate) mod incremental;
+
+/// Limits the size of each cached truth table and contextual coverage check.
+const MAX_FUNCTIONAL_TIMING_INPUTS: usize = 5;
 
 /// Last exact interpolation for one immutable table, after resolving axis
 /// semantics. Diagnostics are still counted separately for every query.
@@ -602,8 +605,8 @@ impl FunctionalTimingCheck {
         pin_sources: &HashMap<String, Vec<PinBitSource>>,
     ) -> Vec<FunctionalInputCoverage<'a>> {
         let mut required = Vec::new();
-        // There are at most two distinct inputs, so enumerate the assignments
-        // exactly instead of treating redundant formula references as paths.
+        // Enumerate the bounded assignments exactly instead of treating
+        // redundant formula references as paths.
         let mut known_mask = 0usize;
         let mut known_bits = 0usize;
         for (idx, name) in self.input_names.iter().enumerate() {
@@ -658,7 +661,7 @@ fn functional_timing_check(
     let mut input_names = function.inputs();
     input_names.sort();
     input_names.dedup();
-    if input_names.len() > 2
+    if input_names.len() > MAX_FUNCTIONAL_TIMING_INPUTS
         || input_names.iter().any(|name| {
             lib.pin(cell_idx, name)
                 .is_none_or(|input| input.direction != PinDirection::Input as i32)
@@ -5745,6 +5748,319 @@ endmodule
                 .to_string()
                 .contains("requires timing-related input pin 'B' to be connected")
         );
+    }
+
+    /// Builds a combinational test cell with the specified timing arc types.
+    fn wide_coverage_library(
+        cell_name: &str,
+        inputs: &[&str],
+        function: &str,
+        arcs: &[(&str, &str, &str)],
+    ) -> Library {
+        let mut builder = LibraryBuilder::new();
+        let mut timing_arcs = Vec::new();
+        for &(pin, timing_type, when) in arcs {
+            let tables = match timing_type {
+                "combinational" => vec![
+                    scalar_table(&mut builder, "cell_rise", 2.0),
+                    scalar_table(&mut builder, "cell_fall", 3.0),
+                    scalar_table(&mut builder, "rise_transition", 0.2),
+                    scalar_table(&mut builder, "fall_transition", 0.3),
+                ],
+                "combinational_rise" => vec![
+                    scalar_table(&mut builder, "cell_rise", 2.0),
+                    scalar_table(&mut builder, "rise_transition", 0.2),
+                ],
+                "combinational_fall" => vec![
+                    scalar_table(&mut builder, "cell_fall", 3.0),
+                    scalar_table(&mut builder, "fall_transition", 0.3),
+                ],
+                other => panic!("unexpected timing type {other}"),
+            };
+            timing_arcs.push(test_arc(
+                &mut builder,
+                pin,
+                "positive_unate",
+                timing_type,
+                when,
+                tables,
+            ));
+        }
+        let mut pins: Vec<_> = inputs
+            .iter()
+            .map(|name| test_pin(&mut builder, name, PinDirection::Input, "", vec![]))
+            .collect();
+        pins.push(test_pin(
+            &mut builder,
+            "Y",
+            PinDirection::Output,
+            function,
+            timing_arcs,
+        ));
+        builder.cells.push(Cell {
+            name: cell_name.into(),
+            pins,
+            ..Default::default()
+        });
+        builder.finish()
+    }
+
+    #[test]
+    fn sta_checks_complete_and_missing_wide_functional_arcs() {
+        for (src, cell_name, inputs, function) in [
+            (
+                r#"module top (a, b, c, y);
+  input a, b, c;
+  output y;
+  AND3 gate (.A(a), .B(b), .C(c), .Y(y));
+endmodule"#,
+                "AND3",
+                &["A", "B", "C"][..],
+                "A * B * C",
+            ),
+            (
+                r#"module top (a, b, c, d, e, y);
+  input a, b, c, d, e;
+  output y;
+  AND5 gate (.A(a), .B(b), .C(c), .D(d), .E(e), .Y(y));
+endmodule"#,
+                "AND5",
+                &["A", "B", "C", "D", "E"][..],
+                "A * B * C * D * E",
+            ),
+        ] {
+            let (module, nets, interner) = parse_single_module(src);
+            // Check the final input, whose truth-table bit has the highest
+            // index.
+            let last = *inputs.last().unwrap();
+            let base_arcs: Vec<_> = inputs[..inputs.len() - 1]
+                .iter()
+                .map(|name| (*name, "combinational", ""))
+                .collect();
+            for edge in [None, Some("combinational_rise"), Some("combinational_fall")] {
+                let mut arcs = base_arcs.clone();
+                if let Some(edge) = edge {
+                    arcs.push((last, edge, ""));
+                }
+                let lib = wide_coverage_library(cell_name, inputs, function, &arcs);
+                let error = analyze_combinational_max_arrival_proto(
+                    &module,
+                    &nets,
+                    &interner,
+                    &lib,
+                    StaOptions::default(),
+                )
+                .expect_err("a functional input needs both output-edge arcs");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("functional input '{last}'")),
+                    "{error:#}"
+                );
+            }
+            let mut complete_arcs = base_arcs;
+            complete_arcs.push((last, "combinational", ""));
+            let lib = wide_coverage_library(cell_name, inputs, function, &complete_arcs);
+            let prepared = PreparedStaLibrary::new(&lib).unwrap();
+            assert!(prepared.coverage[0].supported.get().is_none());
+            let report = prepared
+                .analyze_combinational_max_arrival(&module, &nets, &interner, StaOptions::default())
+                .expect("complete input arcs must be accepted");
+            assert_close(report.worst_output_arrival, 3.0);
+            let check = prepared.functional_check(0, inputs.len()).unwrap();
+            assert_eq!(check.function_values.len(), 1 << inputs.len());
+            assert!(check.unconditionally_complete);
+            assert!(std::ptr::eq(
+                check,
+                prepared.functional_check(0, inputs.len()).unwrap()
+            ));
+        }
+    }
+
+    #[test]
+    fn sta_wide_coverage_handles_constants_and_redundant_inputs() {
+        let src = r#"module top (a, b, c, e, y);
+  input a, b, c, e;
+  output y;
+  AND5 gate (.A(a), .B(b), .C(c), .D(1'b1), .E(e), .Y(y));
+endmodule"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = wide_coverage_library(
+            "AND5",
+            &["A", "B", "C", "D", "E"],
+            "A * B * C * (D + E * !E)",
+            &[
+                ("A", "combinational", ""),
+                ("B", "combinational", ""),
+                ("C", "combinational", ""),
+            ],
+        );
+        let prepared = PreparedStaLibrary::new(&lib).unwrap();
+        let report = prepared
+            .analyze_combinational_max_arrival(&module, &nets, &interner, StaOptions::default())
+            .expect("a constant input and redundant reference do not need arcs");
+        assert_close(report.worst_output_arrival, 3.0);
+        let check = prepared.functional_check(0, 5).unwrap();
+        assert!(!check.unconditionally_complete);
+
+        let dynamic_src = r#"module top (a, b, c, d, e, y);
+  input a, b, c, d, e;
+  output y;
+  AND5 gate (.A(a), .B(b), .C(c), .D(d), .E(e), .Y(y));
+endmodule"#;
+        let (module, nets, interner) = parse_single_module(dynamic_src);
+        let error = prepared
+            .analyze_combinational_max_arrival(&module, &nets, &interner, StaOptions::default())
+            .expect_err("the untied D input needs a timing arc");
+        assert!(
+            error.to_string().contains("functional input 'D'"),
+            "{error:#}"
+        );
+        assert!(std::ptr::eq(
+            check,
+            prepared.functional_check(0, 5).unwrap()
+        ));
+    }
+
+    #[test]
+    fn sta_wide_coverage_respects_disabled_conditional_arc() {
+        let src = r#"module top (a, b, c, e, y);
+  input a, b, c, e;
+  output y;
+  AND5 gate (.A(a), .B(b), .C(c), .D(1'b1), .E(e), .Y(y));
+endmodule"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = wide_coverage_library(
+            "AND5",
+            &["A", "B", "C", "D", "E"],
+            "A * B * C * D * E",
+            &[
+                ("A", "combinational", ""),
+                ("B", "combinational", ""),
+                ("C", "combinational", ""),
+                ("E", "combinational", "!D"),
+            ],
+        );
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect_err("the E arc is disabled even though E affects the output");
+        assert!(
+            error.to_string().contains("functional input 'E'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn register_boundary_wide_coverage_checks_only_launched_inputs() {
+        let src = r#"module top (a, b, c, d, data, clk, y);
+  input a, b, c, d, data, clk;
+  output y;
+  wire q;
+  AND5 gate (.A(a), .B(b), .C(c), .D(d), .E(q), .Y(y));
+  DFF reg0 (.D(data), .CLK(clk), .Q(q));
+endmodule"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = wide_coverage_library(
+            "AND5",
+            &["A", "B", "C", "D", "E"],
+            "A * B * C * D * E",
+            &[
+                ("A", "combinational", ""),
+                ("B", "combinational", ""),
+                ("C", "combinational", ""),
+                ("D", "combinational", ""),
+            ],
+        );
+        let mut builder = LibraryBuilder::from_library(lib);
+        let clk_to_q = scalar_arc(
+            &mut builder,
+            "CLK",
+            "positive_unate",
+            "rising_edge",
+            "",
+            1.0,
+            1.0,
+            0.1,
+            0.1,
+        );
+        let d = test_pin(&mut builder, "D", PinDirection::Input, "", vec![]);
+        let clk = test_pin(&mut builder, "CLK", PinDirection::Input, "", vec![]);
+        let q = test_pin(&mut builder, "Q", PinDirection::Output, "", vec![clk_to_q]);
+        builder.cells.push(Cell {
+            name: "DFF".into(),
+            pins: vec![d, clk, q],
+            sequential: vec![crate::liberty_proto::Sequential {
+                kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let library = builder.finish();
+        let prepared = PreparedStaLibrary::new(&library).unwrap();
+        let primary = prepared
+            .analyze_register_boundary_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                StaOptions::default(),
+                true,
+                &[],
+            )
+            .expect("the unlaunched register input needs no timing arc");
+        assert_close(primary.worst_output_arrival, 3.0);
+        let check = prepared.functional_check(0, 5).unwrap();
+        let error = prepared
+            .analyze_register_boundary_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                StaOptions::default(),
+                false,
+                &[1],
+            )
+            .expect_err("the launched register input requires an E arc");
+        assert!(
+            error.to_string().contains("functional input 'E'"),
+            "{error:#}"
+        );
+        assert!(std::ptr::eq(
+            check,
+            prepared.functional_check(0, 5).unwrap()
+        ));
+    }
+
+    #[test]
+    fn sta_does_not_prepare_coverage_above_wide_limit() {
+        let src = r#"module top (a, b, c, d, e, f, y);
+  input a, b, c, d, e, f;
+  output y;
+  AND6 gate (.A(a), .B(b), .C(c), .D(d), .E(e), .F(f), .Y(y));
+endmodule"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = wide_coverage_library(
+            "AND6",
+            &["A", "B", "C", "D", "E", "F"],
+            "A * B * C * D * E * F",
+            &[
+                ("A", "combinational", ""),
+                ("B", "combinational", ""),
+                ("C", "combinational", ""),
+                ("D", "combinational", ""),
+                ("E", "combinational", ""),
+                ("F", "combinational", ""),
+            ],
+        );
+        let prepared = PreparedStaLibrary::new(&lib).unwrap();
+        assert!(prepared.functional_check(0, 6).is_none());
+        let report = prepared
+            .analyze_combinational_max_arrival(&module, &nets, &interner, StaOptions::default())
+            .expect("a wider function with complete timing arcs can be analyzed");
+        assert_close(report.worst_output_arrival, 3.0);
     }
 
     #[test]
