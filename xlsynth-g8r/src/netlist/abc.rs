@@ -1071,7 +1071,7 @@ mod formula_precedence_tests {
                             pin(A, B, C) {{ direction: input; }}
                             pin(Y) {{ direction: output; function: "{formula}"; }}
                         }}
-                        cell(UNUSED) {{ pin(Y) {{ direction: output; function: "@"; }} }}
+                        cell(UNUSED) {{ pin(Y) {{ direction: output; function: "("; }} }}
                     }}"#
                 ),
             )
@@ -1163,6 +1163,63 @@ EOF
             error.to_string().lines().next().unwrap(),
             "ABC may interpret AND/XOR precedence differently for MIX.Y: \"A*B^C\""
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn map_sequential_accepts_special_characters_in_cell_formulas() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("cells.lib");
+        let executable = dir.path().join("fake-abc");
+        for pin in ["A$B", "$A", "A.B", "A-B", "A/B", "A:B", "A@", "A[0]", "2A"] {
+            std::fs::write(
+                &raw,
+                format!(
+                    r#"library(test) {{
+                        cell(BUF) {{ pin(A) {{ direction: input; }}
+                            pin(Y) {{ direction: output; function: "A"; }} }}
+                        cell(MIX) {{ pin("{pin}") {{ direction: input; }}
+                            pin(C) {{ direction: input; }}
+                            pin(D) {{ direction: input; }}
+                            pin(Y) {{ direction: output; function: "{pin}*C+D"; }} }}
+                    }}"#
+                ),
+            )
+            .unwrap();
+            let library = parse_liberty_files(&[&raw]).unwrap();
+            std::fs::write(
+                &executable,
+                format!(
+                    r#"#!/bin/sh
+if [ "$2" = "-c" ]; then exit 0; fi
+cat > mapped.v <<'EOF'
+module mapped(i0,i1,i2,o0);
+input i0,i1,i2; output o0;
+MIX inst(.\{pin} (i0),.C(i1),.D(i2),.Y(o0));
+endmodule
+EOF
+"#
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let context =
+                AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[&raw], library)
+                    .unwrap();
+            let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
+            let a = builder.add_input("a".into(), 1);
+            let b = builder.add_input("b".into(), 1);
+            let c = builder.add_input("c".into(), 1);
+            let ab = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+            let output = builder.add_or_binary(ab, *c.get_lsb(0));
+            builder.add_output("y".into(), AigBitVector::from_bit(output));
+            let design = SequentialGateFn::from_gate_fn(builder.build());
+            let options = AbcMappingOptions::new(AbcIoConstraints {
+                driving_cell: "BUF".into(),
+                output_load_ff: 20.0,
+            });
+            context.map_sequential(&design, &options).unwrap();
+        }
     }
 
     #[test]

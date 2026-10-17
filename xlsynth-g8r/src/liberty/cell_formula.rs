@@ -260,7 +260,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
     let mut whitespace = false;
     while let Some(&c) = chars.peek() {
         let token = match c {
-            ' ' | '\t' | '\n' | '\r' => {
+            c if c.is_ascii_whitespace() => {
                 chars.next();
                 whitespace = true;
                 continue;
@@ -301,10 +301,18 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 chars.next();
                 Tok::Const(false)
             }
-            c if c.is_ascii_alphabetic() || c == '_' => {
+            c if c.is_ascii_graphic() && !matches!(c, '"' | '\\') => {
                 let mut ident = String::new();
                 while let Some(&c2) = chars.peek() {
-                    if c2.is_ascii_alphanumeric() || matches!(c2, '_' | '[' | ']') {
+                    // ABC accepts punctuation in pin names. Stop at every
+                    // Boolean operator; quoted or escaped names need a
+                    // separate parser and are rejected rather than guessed.
+                    if c2.is_ascii_graphic()
+                        && !matches!(
+                            c2,
+                            '(' | ')' | '*' | '&' | '+' | '|' | '^' | '!' | '\'' | '"' | '\\'
+                        )
+                    {
                         ident.push(c2);
                         chars.next();
                     } else {
@@ -525,6 +533,28 @@ mod tests {
             ]);
             assert_eq!(abc.evaluate_partial(&values), Some((a && b) ^ c));
             assert_eq!(liberty.evaluate_partial(&values), Some(a && (b ^ c)));
+        }
+    }
+
+    #[test]
+    fn abc_precedence_guard_handles_special_pin_names() {
+        for pin in ["A$B", "$A", "A.B", "A-B", "A/B", "A:B", "A@", "A[0]", "2A"] {
+            let values = HashMap::from([
+                (pin.to_string(), true),
+                ("C".to_string(), false),
+                ("D".to_string(), true),
+            ]);
+            let safe = format!("{pin}*C+D");
+            assert_eq!(
+                parse_formula(&safe).unwrap().evaluate_partial(&values),
+                Some(true)
+            );
+            assert!(!abc_formula_has_different_parse(&safe).unwrap());
+            assert!(!abc_formula_has_different_parse(&format!("{pin}*(C^D)")).unwrap());
+            assert!(abc_formula_has_different_parse(&format!("{pin}*C^D")).unwrap());
+        }
+        for unsupported in ["\"A\"*C", "\\A*C"] {
+            assert!(abc_formula_has_different_parse(unsupported).is_err());
         }
     }
 
