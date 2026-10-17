@@ -448,18 +448,45 @@ impl StaReport {
     }
 }
 
-/// Validated library names and pin indexes for immutable timing queries.
-struct StaLibraryIndex<'a> {
+/// A borrowed Liberty library and reusable, lazily prepared STA metadata.
+///
+/// Reuse this object for multiple analyses of the same library to avoid
+/// reparsing cell functions and rebuilding their coverage checks. The shared
+/// borrow prevents the library from changing while its metadata is cached.
+/// Netlist connectivity, launch sources, and timing query diagnostics remain
+/// specific to each analysis.
+pub struct PreparedStaLibrary<'a> {
     library: &'a crate::liberty_model::Library,
     cell_by_name: HashMap<&'a str, usize>,
     pin_by_cell: Vec<HashMap<&'a str, usize>>,
     related_pin_names: FxHashMap<StringId, SmallVec<[&'a str; 1]>>,
+    coverage: Vec<PreparedCellCoverage>,
+}
+
+/// Library-only Boolean eligibility and per-pin prepared coverage metadata.
+#[derive(Default)]
+struct PreparedCellCoverage {
+    supported: OnceLock<bool>,
+    functional_semantics: OnceLock<Result<(), String>>,
+    driver_semantics: OnceLock<Result<(), String>>,
+    pins: OnceLock<Vec<PreparedOutputCoverage>>,
+}
+
+/// Output data shared by constant propagation, coverage checks and tie sources.
+#[derive(Default)]
+struct PreparedOutputCoverage {
+    formula: OnceLock<Result<Term, String>>,
+    unsupported_arcs: OnceLock<bool>,
+    constant_function: OnceLock<bool>,
+    functional_check: OnceLock<Option<FunctionalTimingCheck>>,
+    timing_constant: OnceLock<Result<Option<bool>, String>>,
 }
 
 /// A small output function whose relevant input arcs STA can check directly.
 struct FunctionalTimingCheck {
     function_values: Vec<bool>,
     input_names: Vec<String>,
+    unconditionally_complete: bool,
 }
 
 /// Rise/fall timing coverage for one input that can affect a simple output.
@@ -469,29 +496,16 @@ struct FunctionalInputCoverage<'a> {
     has_fall: bool,
 }
 
-/// Whether a cell's metadata permits interpreting its outputs as Boolean logic.
-fn supports_combinational_boolean_analysis(cell: &crate::liberty_model::Cell) -> bool {
-    cell.sequential.is_empty()
-        && cell.clock_gate.is_none()
-        && !cell.pins.iter().any(|pin| pin.is_clocking_pin)
-        && cell.validate_functional_semantics().is_ok()
-}
-
 /// Parses an output usable for coverage-only constant inference.
-fn coverage_boolean_function(
-    lib: &StaLibraryIndex<'_>,
+fn coverage_boolean_function<'a>(
+    lib: &'a PreparedStaLibrary<'_>,
     cell_idx: usize,
     pin_idx: usize,
-) -> Option<Term> {
-    let pin = &lib.library.cells[cell_idx].pins[pin_idx];
-    if pin
-        .timing_arcs
-        .iter()
-        .any(|arc| !StaTimingType::from_arc(arc, lib.library).is_combinational())
-    {
+) -> Option<&'a Term> {
+    if lib.output_has_unsupported_arcs(cell_idx, pin_idx) {
         return None;
     }
-    let function = parse_formula(lib.library.resolve_string(&pin.function)).ok()?;
+    let function = lib.output_formula(cell_idx, pin_idx).ok()?;
     if function.inputs().iter().any(|name| {
         lib.pin(cell_idx, name)
             .is_none_or(|input| input.direction != PinDirection::Input as i32)
@@ -503,7 +517,7 @@ fn coverage_boolean_function(
 
 /// Connectivity needed to infer constants solely for functional arc coverage.
 struct CoverageConstantPropagation<'a, 'lib> {
-    lib: &'a StaLibraryIndex<'lib>,
+    lib: &'a PreparedStaLibrary<'lib>,
     cell_indices: &'a [usize],
     pin_sources: &'a [HashMap<String, Vec<PinBitSource>>],
     output_pin_orders: &'a [Vec<usize>],
@@ -535,15 +549,6 @@ impl CoverageConstantPropagation<'_, '_> {
         let mut bit_values = vec![None; self.bit_loads.len()];
         let mut queue: VecDeque<usize> = (0..self.cell_indices.len()).collect();
         let mut queued = vec![true; self.cell_indices.len()];
-        let mut functions: HashMap<(usize, usize), Option<Term>> = HashMap::new();
-        let supported_cells: Vec<bool> = self
-            .lib
-            .library
-            .cells
-            .iter()
-            .map(supports_combinational_boolean_analysis)
-            .collect();
-
         let mut visited = 0;
         while let Some(inst_idx) = queue.pop_front() {
             if visited == limit {
@@ -555,7 +560,7 @@ impl CoverageConstantPropagation<'_, '_> {
             let cell = &self.lib.library.cells[cell_idx];
             // Stateful and incompletely modeled cells may not implement their
             // output formulas as ordinary combinational Boolean functions.
-            if !supported_cells[cell_idx] {
+            if !self.lib.supports_boolean_analysis(cell_idx) {
                 continue;
             }
             for pin_idx in &self.output_pin_orders[inst_idx] {
@@ -569,11 +574,7 @@ impl CoverageConstantPropagation<'_, '_> {
                 if bit_values[*bit_idx].is_some() {
                     continue;
                 }
-                let Some(function) = functions
-                    .entry((cell_idx, *pin_idx))
-                    .or_insert_with(|| coverage_boolean_function(self.lib, cell_idx, *pin_idx))
-                    .as_ref()
-                else {
+                let Some(function) = self.lib.constant_function(cell_idx, *pin_idx) else {
                     continue;
                 };
                 let Some(value) = function.evaluate_partial(&known_values[inst_idx]) else {
@@ -645,14 +646,15 @@ impl FunctionalTimingCheck {
 /// Identifies simple output functions with directly related input timing arcs.
 /// Other cells retain the existing timing-only and output-related-arc behavior.
 fn functional_timing_check(
-    lib: &StaLibraryIndex<'_>,
+    lib: &PreparedStaLibrary<'_>,
     cell_idx: usize,
-    pin: &Pin,
+    pin_idx: usize,
 ) -> Option<FunctionalTimingCheck> {
-    if !supports_combinational_boolean_analysis(&lib.library.cells[cell_idx]) {
+    if !lib.supports_boolean_analysis(cell_idx) {
         return None;
     }
-    let function = parse_formula(lib.library.resolve_string(&pin.function)).ok()?;
+    let pin = &lib.library.cells[cell_idx].pins[pin_idx];
+    let function = lib.output_formula(cell_idx, pin_idx).ok()?;
     let mut input_names = function.inputs();
     input_names.sort();
     input_names.dedup();
@@ -682,10 +684,31 @@ fn functional_timing_check(
             function.evaluate_partial(&values)
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(FunctionalTimingCheck {
+    let mut check = FunctionalTimingCheck {
         function_values,
         input_names,
-    })
+        unconditionally_complete: false,
+    };
+    let mut all_inputs = check.required_inputs(&HashMap::new(), &HashMap::new());
+    for arc in &pin.timing_arcs {
+        let timing_type = StaTimingType::from_arc(arc, lib.library);
+        if !timing_type.is_combinational() || !lib.library.resolve_string(&arc.when).is_empty() {
+            continue;
+        }
+        for &related_pin in lib.related_pin_names(arc.related_pin) {
+            record_functional_timing_coverage(&mut all_inputs, related_pin, timing_type);
+        }
+    }
+    // Keep the contextual path for any conditional arc: it also reports
+    // malformed `when` expressions, even when another arc covers the input.
+    check.unconditionally_complete = pin
+        .timing_arcs
+        .iter()
+        .all(|arc| lib.library.resolve_string(&arc.when).is_empty())
+        && all_inputs
+            .iter()
+            .all(|input| input.has_rise && input.has_fall);
+    Some(check)
 }
 
 /// Records the output edges covered by one active input-related arc.
@@ -725,7 +748,7 @@ fn validate_functional_timing_coverage(
 
 /// Inputs needed to validate one instance's functional timing arc coverage.
 struct InstanceCoverageInputs<'a, 'lib> {
-    lib: &'a StaLibraryIndex<'lib>,
+    lib: &'a PreparedStaLibrary<'lib>,
     cell_idx: usize,
     pin_sources: &'a HashMap<String, Vec<PinBitSource>>,
     known_pin_values: &'a HashMap<String, bool>,
@@ -739,7 +762,6 @@ struct InstanceCoverageInputs<'a, 'lib> {
 /// Checks functional input arcs with the constants and launch mode of a pass.
 fn validate_instance_functional_timing_coverage(
     inputs: InstanceCoverageInputs<'_, '_>,
-    checks: &mut HashMap<(usize, usize), Option<FunctionalTimingCheck>>,
     evaluation: &mut TimingEvaluationContext<'_>,
 ) -> Result<()> {
     let InstanceCoverageInputs {
@@ -759,13 +781,14 @@ fn validate_instance_functional_timing_coverage(
         if pin.timing_arcs.is_empty() {
             continue;
         }
-        let Some(check) = checks
-            .entry((cell_idx, *pin_idx))
-            .or_insert_with(|| functional_timing_check(lib, cell_idx, pin))
-            .as_ref()
-        else {
+        let Some(check) = lib.functional_check(cell_idx, *pin_idx) else {
             continue;
         };
+        // A complete unconditional arc set covers every instance and launch
+        // mode; only incomplete sets need the contextual check below.
+        if check.unconditionally_complete {
+            continue;
+        }
         let mut coverage = check.required_inputs(coverage_known_pin_values, pin_sources);
         if let Some(timing) = launched_timing {
             coverage.retain(|input| {
@@ -802,8 +825,9 @@ fn validate_instance_functional_timing_coverage(
     Ok(())
 }
 
-impl<'a> StaLibraryIndex<'a> {
-    fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
+impl<'a> PreparedStaLibrary<'a> {
+    /// Builds name indexes and lazily prepares STA coverage for this library.
+    pub fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
         let mut cell_by_name = HashMap::with_capacity(library.cells.len());
         let mut pin_by_cell = Vec::with_capacity(library.cells.len());
         let mut related_pin_names = FxHashMap::default();
@@ -837,7 +861,121 @@ impl<'a> StaLibraryIndex<'a> {
             cell_by_name,
             pin_by_cell,
             related_pin_names,
+            coverage: (0..library.cells.len())
+                .map(|_| PreparedCellCoverage::default())
+                .collect(),
         })
+    }
+
+    /// Returns the cached eligibility of a cell for Boolean coverage analysis.
+    fn supports_boolean_analysis(&self, cell_idx: usize) -> bool {
+        *self.coverage[cell_idx].supported.get_or_init(|| {
+            let cell = &self.library.cells[cell_idx];
+            cell.sequential.is_empty()
+                && cell.clock_gate.is_none()
+                && !cell.pins.iter().any(|pin| pin.is_clocking_pin)
+                && self.validate_functional_semantics(cell_idx).is_ok()
+        })
+    }
+
+    /// Validates library-only Boolean semantics once per used cell.
+    fn validate_functional_semantics(&self, cell_idx: usize) -> Result<(), String> {
+        self.coverage[cell_idx]
+            .functional_semantics
+            .get_or_init(|| self.library.cells[cell_idx].validate_functional_semantics())
+            .clone()
+    }
+
+    /// Validates library-only driver semantics once per used cell.
+    fn validate_driver_semantics(&self, cell_idx: usize) -> Result<(), String> {
+        self.coverage[cell_idx]
+            .driver_semantics
+            .get_or_init(|| self.library.cells[cell_idx].validate_driver_type_semantics())
+            .clone()
+    }
+
+    /// Allocates per-pin preparation only for a cell used by an analysis.
+    fn coverage_output(&self, cell_idx: usize, pin_idx: usize) -> &PreparedOutputCoverage {
+        &self.coverage[cell_idx].pins.get_or_init(|| {
+            (0..self.library.cells[cell_idx].pins.len())
+                .map(|_| PreparedOutputCoverage::default())
+                .collect()
+        })[pin_idx]
+    }
+
+    /// Parses an output formula at most once, including unsuccessful parses.
+    fn output_formula(&self, cell_idx: usize, pin_idx: usize) -> Result<&Term, &str> {
+        let pin = &self.library.cells[cell_idx].pins[pin_idx];
+        self.coverage_output(cell_idx, pin_idx)
+            .formula
+            .get_or_init(|| {
+                parse_formula(self.library.resolve_string(&pin.function))
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(String::as_str)
+    }
+
+    /// Classifies whether an output has arcs unsupported by Boolean inference.
+    fn output_has_unsupported_arcs(&self, cell_idx: usize, pin_idx: usize) -> bool {
+        *self
+            .coverage_output(cell_idx, pin_idx)
+            .unsupported_arcs
+            .get_or_init(|| {
+                self.library.cells[cell_idx].pins[pin_idx]
+                    .timing_arcs
+                    .iter()
+                    .any(|arc| !StaTimingType::from_arc(arc, self.library).is_combinational())
+            })
+    }
+
+    /// Caches constants used by timing predicates, retaining parse errors.
+    fn timing_constant(&self, cell_idx: usize, pin_idx: usize) -> Result<Option<bool>> {
+        let cell = &self.library.cells[cell_idx];
+        let pin = &cell.pins[pin_idx];
+        let function = self.library.resolve_string(&pin.function);
+        self.coverage_output(cell_idx, pin_idx)
+            .timing_constant
+            .get_or_init(|| {
+                if !pin.timing_arcs.is_empty() || function.trim().is_empty() {
+                    Ok(None)
+                } else {
+                    self.output_formula(cell_idx, pin_idx)
+                        .map(|term| term.evaluate_partial(&HashMap::new()))
+                        .map_err(|error| {
+                            format!(
+                                "cell '{}' output pin '{}' has invalid function='{}': {}",
+                                cell.name,
+                                self.library.resolve_string(&pin.name),
+                                function,
+                                error
+                            )
+                        })
+                }
+            })
+            .clone()
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Returns the cached formula used by coverage-only constant propagation.
+    fn constant_function(&self, cell_idx: usize, pin_idx: usize) -> Option<&Term> {
+        if *self
+            .coverage_output(cell_idx, pin_idx)
+            .constant_function
+            .get_or_init(|| coverage_boolean_function(self, cell_idx, pin_idx).is_some())
+        {
+            self.output_formula(cell_idx, pin_idx).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Returns the cached truth table and inputs for an output coverage check.
+    fn functional_check(&self, cell_idx: usize, pin_idx: usize) -> Option<&FunctionalTimingCheck> {
+        self.coverage_output(cell_idx, pin_idx)
+            .functional_check
+            .get_or_init(|| functional_timing_check(self, cell_idx, pin_idx))
+            .as_ref()
     }
 
     fn cell_index(&self, cell_name: &str) -> Option<usize> {
@@ -927,19 +1065,59 @@ pub fn analyze_register_boundary_max_arrival(
     launch_primary_inputs: bool,
     launch_register_instances: &[usize],
 ) -> Result<StaReport> {
-    let launch_register_instances: FxHashSet<usize> =
-        launch_register_instances.iter().copied().collect();
-    analyze_max_arrival_proto_with_mode(
+    PreparedStaLibrary::new(library)?.analyze_register_boundary_max_arrival(
         module,
         nets,
         interner,
-        library,
         options,
-        StaAnalysisMode::RegisterBoundaries {
-            launch_primary_inputs,
-            launch_register_instances: &launch_register_instances,
-        },
+        launch_primary_inputs,
+        launch_register_instances,
     )
+}
+
+impl PreparedStaLibrary<'_> {
+    /// Analyzes a combinational netlist, reusing this library's prepared data.
+    pub fn analyze_combinational_max_arrival(
+        &self,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        options: StaOptions,
+    ) -> Result<StaReport> {
+        analyze_max_arrival_proto_with_mode(
+            module,
+            nets,
+            interner,
+            self,
+            options,
+            StaAnalysisMode::CombinationalOnly,
+        )
+    }
+
+    /// Analyzes selected launch sources while reusing prepared library data.
+    pub fn analyze_register_boundary_max_arrival(
+        &self,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        options: StaOptions,
+        launch_primary_inputs: bool,
+        launch_register_instances: &[usize],
+    ) -> Result<StaReport> {
+        let launch_register_instances: FxHashSet<usize> =
+            launch_register_instances.iter().copied().collect();
+        analyze_max_arrival_proto_with_mode(
+            module,
+            nets,
+            interner,
+            self,
+            options,
+            StaAnalysisMode::RegisterBoundaries {
+                launch_primary_inputs,
+                launch_register_instances: &launch_register_instances,
+            },
+        )
+    }
 }
 
 /// Returns whether a cell should form a timing boundary for register-aware
@@ -1000,21 +1178,15 @@ fn analyze_combinational_max_arrival_proto(
     library: &crate::liberty_model::Library,
     options: StaOptions,
 ) -> Result<StaReport> {
-    analyze_max_arrival_proto_with_mode(
-        module,
-        nets,
-        interner,
-        library,
-        options,
-        StaAnalysisMode::CombinationalOnly,
-    )
+    PreparedStaLibrary::new(library)?
+        .analyze_combinational_max_arrival(module, nets, interner, options)
 }
 
 fn analyze_max_arrival_proto_with_mode(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    library: &crate::liberty_model::Library,
+    lib: &PreparedStaLibrary<'_>,
     options: StaOptions,
     analysis_mode: StaAnalysisMode<'_>,
 ) -> Result<StaReport> {
@@ -1043,7 +1215,7 @@ fn analyze_max_arrival_proto_with_mode(
         ));
     }
 
-    let lib = StaLibraryIndex::new(library)?;
+    let library = lib.library;
     let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
     let instance_count = normalized.instances.len();
     let bit_count = normalized.bit_count();
@@ -1077,8 +1249,7 @@ fn analyze_max_arrival_proto_with_mode(
                 cell_name
             )
         })?;
-        lib.library.cells[cell_idx]
-            .validate_driver_type_semantics()
+        lib.validate_driver_semantics(cell_idx)
             .map_err(anyhow::Error::msg)?;
         instance_cell_indices.push(cell_idx);
         instance_cell_names.push(cell_name.clone());
@@ -1184,10 +1355,9 @@ fn analyze_max_arrival_proto_with_mode(
                                 pin_name: pin_name.clone(),
                             });
                             if pin.timing_arcs.is_empty() {
-                                bit_constant_values[*bit_idx] = constant_output_function_value(
-                                    lib.library,
-                                    cell_name.as_str(),
-                                    pin,
+                                bit_constant_values[*bit_idx] = lib.timing_constant(
+                                    cell_idx,
+                                    lib.pin_index(cell_idx, &pin_name).expect("validated pin"),
                                 )?;
                             }
                         }
@@ -1446,7 +1616,6 @@ fn analyze_max_arrival_proto_with_mode(
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
     let mut evaluation = TimingEvaluationContext::new(library);
-    let mut functional_timing_checks = HashMap::new();
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
             queue.push_back(idx);
@@ -1474,7 +1643,6 @@ fn analyze_max_arrival_proto_with_mode(
                     instance_name: &instance_name,
                     launched_timing: None,
                 },
-                &mut functional_timing_checks,
                 &mut evaluation,
             )?;
         }
@@ -1536,7 +1704,6 @@ fn analyze_max_arrival_proto_with_mode(
                     instance_name: &instance_name,
                     launched_timing: Some(&bit_timing_sets),
                 },
-                &mut functional_timing_checks,
                 &mut evaluation,
             )?;
         }
@@ -1698,7 +1865,7 @@ fn analyze_max_arrival_proto_with_mode(
 
 /// Immutable connectivity and cell metadata for the shared timing kernel.
 struct InstanceTimingInputs<'a, 'lib> {
-    lib: &'a StaLibraryIndex<'lib>,
+    lib: &'a PreparedStaLibrary<'lib>,
     cell_idx: usize,
     inst_pin_map: &'a HashMap<String, Vec<PinBitSource>>,
     known_pin_values: &'a HashMap<String, bool>,
@@ -1774,11 +1941,12 @@ fn evaluate_instance_outputs(
             }
             continue;
         }
-        if let Some(unsupported_arc) = pin
-            .timing_arcs
-            .iter()
-            .find(|arc| !StaTimingType::from_arc(arc, lib.library).is_combinational())
-        {
+        if lib.output_has_unsupported_arcs(cell_idx, *pin_idx) {
+            let unsupported_arc = pin
+                .timing_arcs
+                .iter()
+                .find(|arc| !StaTimingType::from_arc(arc, lib.library).is_combinational())
+                .expect("cached unsupported arc must exist in the borrowed library");
             return Err(anyhow!(
                 "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
                 instance_name,
@@ -1803,9 +1971,7 @@ fn evaluate_instance_outputs(
                 .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name))
         };
         if combinational_arcs.is_empty() {
-            if let Some(constant_value) =
-                constant_output_function_value(lib.library, cell_name, pin)?
-            {
+            if let Some(constant_value) = lib.timing_constant(cell_idx, *pin_idx)? {
                 sta_trace(|| {
                     format!(
                         "inst={} cell={} out_pin={} out_net={} constant_source={}",
@@ -2359,7 +2525,7 @@ enum OutputPinVisitState {
 
 /// Orders connected outputs and their output-pin dependencies for local STA.
 fn combinational_output_pin_evaluation_order(
-    lib: &StaLibraryIndex<'_>,
+    lib: &PreparedStaLibrary<'_>,
     cell_idx: usize,
     pin_sources: &HashMap<String, Vec<PinBitSource>>,
 ) -> Result<Vec<usize>> {
@@ -2378,7 +2544,7 @@ fn combinational_output_pin_evaluation_order(
 
 /// Adds one output pin after recursively ordering its output-pin dependencies.
 fn visit_combinational_output_pin(
-    lib: &StaLibraryIndex<'_>,
+    lib: &PreparedStaLibrary<'_>,
     cell_idx: usize,
     pin_idx: usize,
     visit_states: &mut [OutputPinVisitState],
@@ -4007,7 +4173,7 @@ mod tests {
             ..Default::default()
         });
         let library = builder.finish();
-        let index = StaLibraryIndex::new(&library)?;
+        let index = PreparedStaLibrary::new(&library)?;
         assert_eq!(index.related_pin_names.len(), 4);
         for _ in 0..2 {
             for (arc, (_, expected)) in library.cells[0].pins[0].timing_arcs.iter().zip(cases) {
@@ -5914,6 +6080,228 @@ endmodule
     }
 
     #[test]
+    fn prepared_library_reuses_coverage_across_analyses_but_not_netlist_state() -> Result<()> {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PreparedStaLibrary<'static>>();
+
+        let library = constant_coverage_library("!A");
+        let prepared = PreparedStaLibrary::new(&library)?;
+        // Preparation is lazy: the unused dual-output cell is not analyzed.
+        assert!(prepared.coverage[2].supported.get().is_none());
+        let constant_netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire b;
+  INV source (.A(1'b0), .Y(b));
+  NAND2 gate (.A(a), .B(b), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(constant_netlist);
+        let first = prepared.analyze_combinational_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            StaOptions::default(),
+        )?;
+        let formula = prepared.constant_function(1, 2).expect("NAND formula");
+        let check = prepared
+            .functional_check(1, 2)
+            .expect("NAND coverage check");
+        assert!(!check.unconditionally_complete);
+        assert!(
+            prepared
+                .functional_check(0, 1)
+                .unwrap()
+                .unconditionally_complete
+        );
+        assert!(std::ptr::eq(
+            formula,
+            prepared.output_formula(1, 2).unwrap()
+        ));
+        let repeated = prepared.analyze_combinational_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            StaOptions::default(),
+        )?;
+        assert_eq!(first, repeated, "each analysis has independent diagnostics");
+        prepared.analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            StaOptions::default(),
+            true,
+            &[],
+        )?;
+        assert!(std::ptr::eq(
+            formula,
+            prepared.constant_function(1, 2).unwrap()
+        ));
+        assert!(std::ptr::eq(
+            check,
+            prepared.functional_check(1, 2).unwrap()
+        ));
+        assert!(prepared.coverage[2].supported.get().is_none());
+
+        let dynamic_netlist = r#"
+module top (a, b, y);
+  input a, b;
+  output y;
+  NAND2 gate (.A(a), .B(b), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(dynamic_netlist);
+        let error = prepared
+            .analyze_combinational_max_arrival(&module, &nets, &interner, StaOptions::default())
+            .expect_err("the missing B arc matters for a dynamic input");
+        assert!(
+            error.to_string().contains("functional input 'B'"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_library_preserves_tie_formula_errors_while_caching_coverage_misses() -> Result<()> {
+        let mut builder = LibraryBuilder::new();
+        let bad = test_pin(&mut builder, "Y", PinDirection::Output, "A +", vec![]);
+        builder.cells.push(Cell {
+            name: "BAD".into(),
+            pins: vec![bad],
+            ..Default::default()
+        });
+        let library = builder.finish();
+        let prepared = PreparedStaLibrary::new(&library)?;
+        assert!(prepared.constant_function(0, 0).is_none());
+        assert!(prepared.functional_check(0, 0).is_none());
+        let error = prepared
+            .timing_constant(0, 0)
+            .expect_err("malformed tie formula");
+        assert!(
+            error.to_string().contains("invalid function='A +'"),
+            "{error:#}"
+        );
+        let repeated = prepared.timing_constant(0, 0).unwrap_err();
+        assert_eq!(error.to_string(), repeated.to_string());
+        assert!(
+            prepared
+                .coverage_output(0, 0)
+                .formula
+                .get()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(
+            prepared.coverage_output(0, 0).constant_function.get(),
+            Some(&false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resize_rescan_and_final_check_reuse_the_same_prepared_library() -> Result<()> {
+        let mut builder = LibraryBuilder::from_library(constant_coverage_library("0"));
+        let equivalent = builder.intern_string("A ^ A")?;
+        let mut alternate = builder.cells[0].clone();
+        alternate.name = "INV_ALT".into();
+        alternate.pins[1].function = equivalent;
+        builder.cells.push(alternate);
+        let library = builder.finish();
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  wire b;
+  INV source (.A(a), .Y(b));
+  NAND2 gate (.A(a), .B(b), .Y(y));
+endmodule
+"#,
+        );
+        let mut sta = incremental::IncrementalSta::new(
+            &module,
+            &nets,
+            &interner,
+            &library,
+            StaOptions::default(),
+        )?;
+        let formula = sta.prepared_library().constant_function(1, 2).unwrap() as *const Term;
+        let check =
+            sta.prepared_library().functional_check(1, 2).unwrap() as *const FunctionalTimingCheck;
+        // Both source cells implement zero, but the replacement's A ^ A
+        // cannot be inferred as constant without knowing A. Its trial forces
+        // a coverage rescan and exposes the missing NAND input arc.
+        let error = sta
+            .trial(0, 3, usize::MAX, None, |_| true)
+            .expect_err("replacement loses the downstream coverage proof");
+        assert!(
+            error.to_string().contains("functional input 'B'"),
+            "{error:#}"
+        );
+        assert_eq!(
+            formula,
+            sta.prepared_library().constant_function(1, 2).unwrap() as *const Term
+        );
+        assert_eq!(
+            check,
+            sta.prepared_library().functional_check(1, 2).unwrap() as *const FunctionalTimingCheck
+        );
+
+        let prepared = sta.into_prepared_library();
+        incremental::measure_boundary_delays_with_library(
+            &module,
+            &nets,
+            &interner,
+            &prepared,
+            StaOptions::default(),
+        )?;
+        assert_eq!(
+            formula,
+            prepared.constant_function(1, 2).unwrap() as *const Term
+        );
+        assert_eq!(
+            check,
+            prepared.functional_check(1, 2).unwrap() as *const FunctionalTimingCheck
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_unconditional_arcs_do_not_hide_malformed_conditional_arcs() -> Result<()> {
+        let mut builder = LibraryBuilder::from_library(constant_coverage_library("!A"));
+        let when = builder.intern_string("A +")?;
+        let mut conditional = builder.cells[0].pins[1].timing_arcs[0].clone();
+        conditional.when = when;
+        builder.cells[0].pins[1].timing_arcs.push(conditional);
+        let library = builder.finish();
+        let prepared = PreparedStaLibrary::new(&library)?;
+        assert!(
+            !prepared
+                .functional_check(0, 1)
+                .unwrap()
+                .unconditionally_complete
+        );
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  INV gate (.A(a), .Y(y));
+endmodule
+"#,
+        );
+        let error = prepared
+            .analyze_combinational_max_arrival(&module, &nets, &interner, StaOptions::default())
+            .expect_err("a malformed conditional arc must still be reported");
+        assert!(
+            error.to_string().contains("could not parse when='A +'"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn sta_finds_constants_through_timed_cells_independent_of_instance_order() {
         let lib = constant_coverage_library("!A");
         for src in [
@@ -6299,35 +6687,41 @@ endmodule
             },
         ];
         let lib = builder.finish();
+        let prepared = PreparedStaLibrary::new(&lib).unwrap();
 
-        let primary_report = analyze_register_boundary_max_arrival(
-            &module,
-            &nets,
-            &interner,
-            &lib,
-            StaOptions::default(),
-            true,
-            &[],
-        )
-        .expect("the unlaunched register input does not require a timing arc");
+        let primary_report = prepared
+            .analyze_register_boundary_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                StaOptions::default(),
+                true,
+                &[],
+            )
+            .expect("the unlaunched register input does not require a timing arc");
         assert_close(primary_report.worst_output_arrival, 3.0);
+        let prepared_check = prepared.functional_check(0, 2).unwrap();
 
         // The NAND appears before the DFF, and the missing B arc supplies no
         // topological edge. Coverage is checked after Q has been launched.
-        let error = analyze_register_boundary_max_arrival(
-            &module,
-            &nets,
-            &interner,
-            &lib,
-            StaOptions::default(),
-            false,
-            &[1],
-        )
-        .expect_err("the launched register input needs a B timing arc");
+        let error = prepared
+            .analyze_register_boundary_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                StaOptions::default(),
+                false,
+                &[1],
+            )
+            .expect_err("the launched register input needs a B timing arc");
         assert!(
             error.to_string().contains("functional input 'B'"),
             "{error:#}"
         );
+        assert!(std::ptr::eq(
+            prepared_check,
+            prepared.functional_check(0, 2).unwrap()
+        ));
     }
 
     #[test]
@@ -8375,7 +8769,7 @@ endmodule
             });
         }
         let library = builder.finish();
-        let index = StaLibraryIndex::new(&library)?;
+        let index = PreparedStaLibrary::new(&library)?;
         for (cell_idx, cell) in library.cells.iter().enumerate() {
             for (pin_idx, pin) in cell.pins.iter().enumerate() {
                 let name = library.resolve_string(&pin.name);
@@ -8407,7 +8801,7 @@ endmodule
             ],
             ..Default::default()
         };
-        let cell_error = match StaLibraryIndex::new(&duplicate_cells) {
+        let cell_error = match PreparedStaLibrary::new(&duplicate_cells) {
             Ok(_) => panic!("duplicate cells should fail"),
             Err(error) => error,
         };
@@ -8426,7 +8820,7 @@ endmodule
             ..Default::default()
         }];
         let duplicate_pins = builder.finish();
-        let pin_error = match StaLibraryIndex::new(&duplicate_pins) {
+        let pin_error = match PreparedStaLibrary::new(&duplicate_pins) {
             Ok(_) => panic!("duplicate pins should fail"),
             Err(error) => error,
         };

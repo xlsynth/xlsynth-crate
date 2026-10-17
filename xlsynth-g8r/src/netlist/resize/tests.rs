@@ -975,7 +975,7 @@ fn random_substitution_sequences_match_full_timing_and_rollback() -> Result<()> 
         let old = sta.score();
         let old_cells = sta.cells.clone();
         let limits = (iteration % 2 == 0).then_some(old);
-        let acceptable = |timing: &IncrementalSta<'_>| {
+        let acceptable = |timing: &IncrementalSta<'_, '_>| {
             accept && limits.is_none_or(|limits| timing.score().within(limits))
         };
         let expected = full_propagation.trial(i, replacement, usize::MAX, None, acceptable)?;

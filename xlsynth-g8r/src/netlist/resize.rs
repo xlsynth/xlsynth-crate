@@ -19,7 +19,7 @@ use crate::netlist::sta::StaOptions;
 pub use crate::netlist::sta::incremental::{BoundaryDelays, measure_boundary_delays};
 use crate::netlist::sta::incremental::{
     IncrementalSta, STA_VERIFICATION_TOLERANCE, TIMING_COMPARISON_TOLERANCE, TimingTieBreak,
-    TrialOutcome,
+    TrialOutcome, measure_boundary_delays_with_library,
 };
 
 const AREA_COMPARISON_TOLERANCE: f64 = 1e-12;
@@ -352,7 +352,7 @@ struct ResizeSearch<'a> {
 
 impl ResizeSearch<'_> {
     /// Selects timing sites or ranks recoverable area once per unchanged round.
-    fn candidate_sites(&self, phase: SearchPhase, sta: &IncrementalSta<'_>) -> Vec<usize> {
+    fn candidate_sites(&self, phase: SearchPhase, sta: &IncrementalSta<'_, '_>) -> Vec<usize> {
         let mut sites = match phase {
             SearchPhase::Timing => sta.critical_instances(
                 self.objective,
@@ -414,7 +414,7 @@ impl ResizeSearch<'_> {
     fn trial(
         &self,
         phase: SearchPhase,
-        sta: &mut IncrementalSta<'_>,
+        sta: &mut IncrementalSta<'_, '_>,
         instance: usize,
         cell: usize,
         work_limit: usize,
@@ -442,7 +442,7 @@ impl ResizeSearch<'_> {
     /// near-critical progress. Hard limits retain all four boundary classes.
     fn accept_timing(
         &self,
-        timing: &IncrementalSta<'_>,
+        timing: &IncrementalSta<'_, '_>,
         previous: BoundaryDelays,
         previous_secondary: TimingTieBreak,
         new_area: f64,
@@ -472,7 +472,7 @@ impl ResizeSearch<'_> {
     fn run_phase(
         &mut self,
         phase: SearchPhase,
-        sta: &mut IncrementalSta<'_>,
+        sta: &mut IncrementalSta<'_, '_>,
     ) -> Result<ResizePhaseStats> {
         let mut stats = ResizePhaseStats::default();
         let rounds = phase.rounds(self.options);
@@ -628,12 +628,18 @@ pub fn resize_netlist(
         return Err(anyhow!("final resizing exceeds the area allowance"));
     }
     let cells = sta.cells.clone();
-    drop(sta);
+    let prepared = sta.into_prepared_library();
     let mut candidate = module.clone();
     for (instance, cell) in candidate.instances.iter_mut().zip(cells) {
         instance.type_name = interner.get_or_intern(&library.cells[cell].name);
     }
-    let final_delay = measure_boundary_delays(&candidate, nets, interner, library, options.timing)?;
+    let final_delay = measure_boundary_delays_with_library(
+        &candidate,
+        nets,
+        interner,
+        &prepared,
+        options.timing,
+    )?;
     verify_timing(incremental_delay, final_delay)?;
     if !final_delay.within(upsized_delay) {
         return Err(anyhow!(

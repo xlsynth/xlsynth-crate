@@ -4,19 +4,16 @@
 //! incremental analyses share the output, Liberty-table and setup kernels.
 
 use super::{
-    CoverageConstantPropagation, EdgeLoadCapacitance, EdgeTiming, FunctionalTimingCheck,
-    InstanceCoverageInputs, InstanceTimingInputs, NetEndpoint, PinBitSource, ResolvedTimingSource,
-    SignalTiming, SignalTimingSet, StaLibraryIndex, StaOptions, StaTimingType,
-    TimingEvaluationContext, analyze_assign_sources, analyze_combinational_max_arrival,
-    analyze_register_boundary_max_arrival, canonicalize_pin_bit_source,
-    combinational_output_pin_evaluation_order, constant_output_function_value,
-    coverage_boolean_function, effective_input_capacitance_by_edge, evaluate_instance_outputs,
+    CoverageConstantPropagation, EdgeLoadCapacitance, EdgeTiming, InstanceCoverageInputs,
+    InstanceTimingInputs, NetEndpoint, PinBitSource, PreparedStaLibrary, ResolvedTimingSource,
+    SignalTiming, SignalTimingSet, StaOptions, StaTimingType, TimingEvaluationContext,
+    analyze_assign_sources, canonicalize_pin_bit_source, combinational_output_pin_evaluation_order,
+    effective_input_capacitance_by_edge, evaluate_instance_outputs,
     evaluate_register_setup_capture_arrival, is_sequential_boundary_cell, resolve_symbol,
-    resolve_timing_sources, supports_combinational_boolean_analysis,
-    validate_constraint_tables_once, validate_instance_functional_timing_coverage,
+    resolve_timing_sources, validate_constraint_tables_once,
+    validate_instance_functional_timing_coverage,
 };
 use crate::liberty::Library;
-use crate::liberty::cell_formula::Term;
 use crate::liberty_model::{Pin, PinDirection, TimingArc};
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
@@ -51,6 +48,19 @@ pub fn measure_boundary_delays(
     library: &Library,
     options: StaOptions,
 ) -> Result<BoundaryDelays> {
+    let prepared = PreparedStaLibrary::new(library)?;
+    measure_boundary_delays_with_library(module, nets, interner, &prepared, options)
+}
+
+/// Measures launch classes using one reusable prepared library.
+pub(crate) fn measure_boundary_delays_with_library(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    prepared: &PreparedStaLibrary<'_>,
+    options: StaOptions,
+) -> Result<BoundaryDelays> {
+    let library = prepared.library;
     let by_name: HashMap<_, _> = library
         .cells
         .iter()
@@ -69,16 +79,22 @@ pub fn measure_boundary_delays(
         }
     }
     if registers.is_empty() {
-        let report = analyze_combinational_max_arrival(module, nets, interner, library, options)?;
+        let report = prepared.analyze_combinational_max_arrival(module, nets, interner, options)?;
         return Ok(BoundaryDelays {
             input_to_output: report.worst_output_arrival,
             ..BoundaryDelays::default()
         });
     }
-    let input =
-        analyze_register_boundary_max_arrival(module, nets, interner, library, options, true, &[])?;
-    let register = analyze_register_boundary_max_arrival(
-        module, nets, interner, library, options, false, &registers,
+    let input = prepared.analyze_register_boundary_max_arrival(
+        module,
+        nets,
+        interner,
+        options,
+        true,
+        &[],
+    )?;
+    let register = prepared.analyze_register_boundary_max_arrival(
+        module, nets, interner, options, false, &registers,
     )?;
     Ok(BoundaryDelays {
         input_to_output: input.worst_output_arrival,
@@ -236,8 +252,8 @@ struct Undo {
 }
 
 /// Mutable timing state; the borrowed module's connectivity cannot change.
-pub(crate) struct IncrementalSta<'a> {
-    lib: StaLibraryIndex<'a>,
+pub(crate) struct IncrementalSta<'a, 'lib> {
+    lib: PreparedStaLibrary<'lib>,
     normalized: NormalizedNetlistModule<'a>,
     nets: &'a [Net],
     interner: &'a StringInterner<StringBackend<SymbolU32>>,
@@ -258,27 +274,35 @@ pub(crate) struct IncrementalSta<'a> {
     capture_endpoint: Vec<Option<usize>>,
     scores: [EndpointScores; 4],
     electrical: Vec<Vec<f64>>,
-    evaluation: TimingEvaluationContext<'a>,
-    functional_checks: HashMap<(usize, usize), Option<FunctionalTimingCheck>>,
-    coverage_functions: HashMap<(usize, usize), Option<Term>>,
-    coverage_supported: Vec<bool>,
+    evaluation: TimingEvaluationContext<'lib>,
     coverage_known: Vec<HashMap<String, bool>>,
     registered: bool,
     literal: SignalTimingSet,
     propagated: usize,
 }
 
-impl<'a> IncrementalSta<'a> {
+impl<'a, 'lib> IncrementalSta<'a, 'lib> {
+    /// Retains prepared Liberty metadata for the final full timing check.
+    pub(crate) fn into_prepared_library(self) -> PreparedStaLibrary<'lib> {
+        self.lib
+    }
+
+    /// Exposes the retained session to coverage-reuse regression tests.
+    #[cfg(test)]
+    pub(super) fn prepared_library(&self) -> &PreparedStaLibrary<'lib> {
+        &self.lib
+    }
+
     /// Prepares stable connectivity and initializes both independent launch
     /// classes.
     pub fn new(
         module: &'a NetlistModule,
         nets: &'a [Net],
         interner: &'a StringInterner<StringBackend<SymbolU32>>,
-        library: &'a Library,
+        library: &'lib Library,
         options: StaOptions,
     ) -> Result<Self> {
-        let lib = StaLibraryIndex::new(library)?;
+        let lib = PreparedStaLibrary::new(library)?;
         let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
         let assign = analyze_assign_sources(&normalized, nets, interner)?;
         let resolved = resolve_timing_sources(&assign.bit_sources, &normalized, nets, interner)?;
@@ -294,8 +318,8 @@ impl<'a> IncrementalSta<'a> {
                 .cell_index(&name)
                 .ok_or_else(|| anyhow!("unknown cell {name}"))?;
             let cell = &library.cells[cell_idx];
-            cell.validate_functional_semantics()
-                .map_err(|e| anyhow!(e))?;
+            lib.validate_functional_semantics(cell_idx)
+                .map_err(anyhow::Error::msg)?;
             let mut pins = HashMap::new();
             let mut known = HashMap::new();
             let mut outputs = Vec::new();
@@ -366,7 +390,8 @@ impl<'a> IncrementalSta<'a> {
         // Full STA is the validation authority, including undriven nets,
         // aliases, conditional arcs and unsupported assignments.
         // Preparation is one-time.
-        let reference = measure_boundary_delays(module, nets, interner, library, options)?;
+        let reference =
+            measure_boundary_delays_with_library(module, nets, interner, &lib, options)?;
         let mut constants = vec![None; n];
         for (i, inst) in instances.iter().enumerate() {
             for (name, sources) in &inst.pins {
@@ -375,10 +400,9 @@ impl<'a> IncrementalSta<'a> {
                     && pin.timing_arcs.is_empty()
                     && let [BitSource::Bit(bit)] = sources.as_slice()
                 {
-                    constants[*bit] = constant_output_function_value(
-                        library,
-                        &library.cells[cells[i]].name,
-                        pin,
+                    constants[*bit] = lib.timing_constant(
+                        cells[i],
+                        lib.pin_index(cells[i], name).expect("validated pin"),
                     )?;
                 }
             }
@@ -521,13 +545,6 @@ impl<'a> IncrementalSta<'a> {
             scores: std::array::from_fn(|_| EndpointScores::default()),
             electrical,
             evaluation: TimingEvaluationContext::new(library),
-            functional_checks: HashMap::new(),
-            coverage_functions: HashMap::new(),
-            coverage_supported: library
-                .cells
-                .iter()
-                .map(supports_combinational_boolean_analysis)
-                .collect(),
             coverage_known: Vec::new(),
             registered,
             literal,
@@ -601,9 +618,9 @@ impl<'a> IncrementalSta<'a> {
         let lib = &self.lib;
         let known = &self.coverage_known[i];
         let old_cell = &lib.library.cells[old];
-        let cache = &mut self.coverage_functions;
-        let supported = &self.coverage_supported;
-        if !supported[old] && !supported[new] {
+        let old_supported = lib.supports_boolean_analysis(old);
+        let new_supported = lib.supports_boolean_analysis(new);
+        if !old_supported && !new_supported {
             return false;
         }
         // The resizer's dependency order ignores a direct self-edge. Such a
@@ -616,17 +633,13 @@ impl<'a> IncrementalSta<'a> {
                     matches!(source, PinBitSource::Bit(bit) if self.drivers[*bit] == Some(i))
                 })
         });
-        let value =
-            |cache: &mut HashMap<(usize, usize), Option<Term>>, cell_idx: usize, pin_idx: usize| {
-                if !supported[cell_idx] {
-                    return None;
-                }
-                cache
-                    .entry((cell_idx, pin_idx))
-                    .or_insert_with(|| coverage_boolean_function(lib, cell_idx, pin_idx))
-                    .as_ref()
-                    .and_then(|term| term.evaluate_partial(known))
-            };
+        let value = |cell_idx: usize, pin_idx: usize, supported: bool| {
+            if !supported {
+                return None;
+            }
+            lib.constant_function(cell_idx, pin_idx)
+                .and_then(|term| term.evaluate_partial(known))
+        };
         for (old_pin_idx, old_pin) in old_cell.pins.iter().enumerate() {
             let name = lib.library.resolve_string(&old_pin.name);
             if old_pin.direction != PinDirection::Output as i32
@@ -638,21 +651,17 @@ impl<'a> IncrementalSta<'a> {
                 return true;
             };
             let new_pin = &lib.library.cells[new].pins[new_pin_idx];
-            let unsupported = |pin: &Pin| {
-                pin.timing_arcs
-                    .iter()
-                    .any(|arc| !StaTimingType::from_arc(arc, lib.library).is_combinational())
-            };
-            if supported[old] == supported[new]
+            if old_supported == new_supported
                 && old_pin.function == new_pin.function
-                && unsupported(old_pin) == unsupported(new_pin)
+                && lib.output_has_unsupported_arcs(old, old_pin_idx)
+                    == lib.output_has_unsupported_arcs(new, new_pin_idx)
             {
                 continue;
             }
             if self_feedback {
                 return true;
             }
-            if value(cache, old, old_pin_idx) != value(cache, new, new_pin_idx) {
+            if value(old, old_pin_idx, old_supported) != value(new, new_pin_idx, new_supported) {
                 return true;
             }
         }
@@ -663,25 +672,19 @@ impl<'a> IncrementalSta<'a> {
     /// Incremental STA keeps those bindings fixed for the duration of a search.
     fn changes_timing_constants(&self, i: usize, old: usize, new: usize) -> Result<bool> {
         let old_cell = &self.lib.library.cells[old];
-        let new_cell = &self.lib.library.cells[new];
-        for old_pin in &old_cell.pins {
+        for (old_pin_idx, old_pin) in old_cell.pins.iter().enumerate() {
             let name = self.lib.library.resolve_string(&old_pin.name);
             if old_pin.direction != PinDirection::Output as i32
                 || !self.instances[i].pins.contains_key(name)
             {
                 continue;
             }
-            let Some(new_pin) = self.lib.pin(new, name) else {
+            let Some(new_pin_idx) = self.lib.pin_index(new, name) else {
                 return Ok(true);
             };
-            let known = |cell_name: &str, pin: &Pin| -> Result<Option<bool>> {
-                if pin.timing_arcs.is_empty() {
-                    constant_output_function_value(self.lib.library, cell_name, pin)
-                } else {
-                    Ok(None)
-                }
-            };
-            if known(&old_cell.name, old_pin)? != known(&new_cell.name, new_pin)? {
+            if self.lib.timing_constant(old, old_pin_idx)?
+                != self.lib.timing_constant(new, new_pin_idx)?
+            {
                 return Ok(true);
             }
         }
@@ -1216,7 +1219,6 @@ impl<'a> IncrementalSta<'a> {
                                 .registered
                                 .then_some(self.timing[mode].as_slice()),
                         },
-                        &mut self.functional_checks,
                         &mut self.evaluation,
                     )?;
                 }

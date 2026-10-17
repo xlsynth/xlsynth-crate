@@ -6,8 +6,8 @@ use crate::liberty_model::Library;
 pub use crate::netlist::io::{resolve_symbol, select_module};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::{
-    RegisterPathDelayBreakdown, StaOptions, StaReport, TimingQueryDiagnosticCounts,
-    analyze_combinational_max_arrival, analyze_register_boundary_max_arrival,
+    PreparedStaLibrary, RegisterPathDelayBreakdown, StaOptions, StaReport,
+    TimingQueryDiagnosticCounts, analyze_combinational_max_arrival,
 };
 use crate::netlist::stages::{StagePartitionStatus, analyze_register_stages};
 use anyhow::{Result, anyhow};
@@ -281,13 +281,19 @@ pub fn build_netlist_report(
         });
     }
 
-    let input_launch =
-        analyze_register_boundary_max_arrival(module, nets, interner, library, options, true, &[])?;
-    let register_launch = analyze_register_boundary_max_arrival(
+    let prepared = PreparedStaLibrary::new(library)?;
+    let input_launch = prepared.analyze_register_boundary_max_arrival(
         module,
         nets,
         interner,
-        library,
+        options,
+        true,
+        &[],
+    )?;
+    let register_launch = prepared.analyze_register_boundary_max_arrival(
+        module,
+        nets,
+        interner,
         options,
         false,
         stages.register_indices.as_slice(),
@@ -303,11 +309,10 @@ pub fn build_netlist_report(
                 .copied()
                 .filter(|idx| stages.register_levels[*idx] == Some(*stage))
                 .collect();
-            let stage_timing = analyze_register_boundary_max_arrival(
+            let stage_timing = prepared.analyze_register_boundary_max_arrival(
                 module,
                 nets,
                 interner,
-                library,
                 options,
                 false,
                 launch_registers.as_slice(),
