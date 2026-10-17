@@ -328,11 +328,17 @@ fn normalize_ports(
     bits_by_net: &[Vec<BitIndex>],
     canonical_bits: &[BitIndex],
 ) -> Result<Vec<NormalizedPort>> {
+    // Preserve first-match lookup semantics while avoiding O(ports * nets)
+    // scans on large scalar modules with many endpoints.
+    let mut net_by_name = HashMap::with_capacity(module.net_index_range.len());
+    for i in module.net_index_range.clone() {
+        net_by_name.entry(nets[i].name).or_insert(NetIndex(i));
+    }
     module
         .ports
         .iter()
         .map(|port| {
-            let net_idx = module.find_net_index(port.name, nets).ok_or_else(|| {
+            let net_idx = net_by_name.get(&port.name).copied().ok_or_else(|| {
                 anyhow!("module port net for symbol {:?} was not found", port.name)
             })?;
             Ok(NormalizedPort {

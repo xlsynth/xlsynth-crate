@@ -76,6 +76,7 @@ use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
+pub(crate) mod fanout;
 pub(crate) mod incremental;
 
 /// Limits the size of each cached truth table and contextual coverage check.
