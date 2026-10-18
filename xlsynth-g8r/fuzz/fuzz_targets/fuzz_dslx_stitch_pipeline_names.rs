@@ -84,6 +84,7 @@ fn foo_cycle1({c}: u8, {d}: u8) -> u8 {{ {c} - {d} }}"#
         reset_active_low: false,
         add_invariant_assertions: false,
         array_index_bounds_checking: true,
+        gate_format: None,
         output_module_name: "foo",
     };
 
