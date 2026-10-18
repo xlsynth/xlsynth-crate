@@ -1,9 +1,12 @@
 # Preserving operand gating with Yosys and OpenROAD
 
-`gate!(enable, value)` can stop switching before an occasionally enabled
-multiplier. Masking only the result gives the same observable values but lets
-the multiplier keep switching. **Liberty `use_for_size_only : true` is a cell
-selection restriction, not an instance-retention guarantee.** The xlsynth
+Operand gating suppresses switching in combinational logic whose result is
+unused when disabled. `gate!(enable, value)` isolates inputs to that logic.
+This particular worked example uses a multiplier; applicability and net
+switching benefit depend on the circuit and enable activity. Masking only the
+result preserves observable values but can leave the internal logic switching.
+**Liberty `use_for_size_only : true` is a cell selection restriction, not an
+instance-retention guarantee.** The xlsynth
 optimizer's size-only policy does not automatically constrain downstream tools.
 
 Use `gate_format` to emit explicit isolation cells with an enable pin. The
