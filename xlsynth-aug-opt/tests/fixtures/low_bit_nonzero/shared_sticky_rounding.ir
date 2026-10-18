@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package shared_sticky_rounding
+
+top fn main(a: bits[6] id=1, b: bits[6] id=2, cancel: bits[1] id=3) -> bits[2] {
+  sum: bits[6] = add(a, b, id=4)
+  value: bits[5] = bit_slice(sum, start=0, width=5, id=5)
+  sign: bits[1] = bit_slice(sum, start=5, width=1, id=6)
+  negated: bits[5] = neg(value, id=7)
+  absolute: bits[5] = sel(sign, cases=[value, negated], id=8)
+  low: bits[2] = bit_slice(absolute, start=0, width=2, id=9)
+  sticky: bits[1] = or_reduce(low, id=10)
+  high: bits[3] = bit_slice(absolute, start=2, width=3, id=11)
+  carry_fraction: bits[4] = concat(high, sticky, id=12)
+  enabled: bits[1] = not(cancel, id=13)
+  mask: bits[4] = sign_ext(enabled, new_bit_count=4, id=14)
+  fraction: bits[4] = and(carry_fraction, mask, id=15)
+  remainder: bits[3] = bit_slice(fraction, start=0, width=3, id=16)
+  half: bits[3] = literal(value=4, id=17)
+  round_up: bits[1] = ugt(remainder, half, id=18)
+  msb: bits[1] = bit_slice(fraction, start=3, width=1, id=19)
+  zero: bits[1] = literal(value=0, id=20)
+  unrounded: bits[2] = concat(zero, msb, id=21)
+  increment: bits[2] = concat(zero, round_up, id=22)
+  ret rounded: bits[2] = add(unrounded, increment, id=23)
+}

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Reduced from float64.x::fma, BVC generated crate 0.74.0 / DSO 0.59.0.
+# Canonical source package SHA-256:
+# dcd01afb5af1f88133a502ab7dcc4140f471d8e4e86e6b84f7daf00ec2e03a32
+# Cut aligned operands; narrow 161 to 5 bits; specialize normalization/rounding.
+# Keep high numeric bits and sticky bits sharing the conditional negation.
+# Without the retained-consumer guard: raw ANDs 88 -> 81, LE 74.60 -> 70.86;
+# normal g8r ANDs 61 -> 86, LE 63.51 -> 55.40 (area regression).
+sha256: "2f5c865dff84565cd54b3eceb4b1ef26cc6492bbeb2c8eb1c420b3af04f54054"
+predicate_simplification {
+  expected_simplifications: 0
+  pir_limits { and_nodes_max: 61 graph_le_max: 63.51162549533767 depth_max: 15 }
+  sandwich_limits { and_nodes_max: 61 graph_le_max: 63.51162549533767 depth_max: 15 }
+}

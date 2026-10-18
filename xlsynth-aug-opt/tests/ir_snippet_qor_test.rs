@@ -455,9 +455,6 @@ fn low_bit_nonzero_corpus_respects_equivalence_and_native_qor_limits() {
             #[cfg(not(feature = "has-bitwuzla"))]
             check_equivalence_via_toolchain(&case.text, &result.output_text)
                 .unwrap_or_else(|error| panic!("{context}: {error}"));
-            // Prove the changed IR above; g8r lowering is unchanged. Re-proving
-            // a whole FMA multiplier against bit-level gates is
-            // needlessly costly.
             let (_, cost) =
                 map_and_measure_cost(&result.output_text, &case.original.name, &corpus.profile)
                     .unwrap_or_else(|error| panic!("{context}: {error}"));
