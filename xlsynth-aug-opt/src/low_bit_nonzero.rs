@@ -7,6 +7,8 @@
 //! starting above bit zero, or a set of slices with holes, does not have this
 //! property. Whole-function costing accounts for retained numeric consumers.
 
+use std::collections::BTreeSet;
+
 use crate::ir_cost::IrCost;
 use xlsynth_pir::ir::{self, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_match::MatchCtx;
@@ -30,12 +32,21 @@ fn low_prefix(f: &ir::Fn, root: NodeRef) -> Option<LowPrefix> {
     if ctx.bits_width(root) != Some(1) {
         return None;
     }
-    let leaves = ctx
-        .flattened_nary_operands(root, NaryOp::Or)
-        .unwrap_or_else(|| vec![root]);
+    // OR is idempotent, so each shared node need only be visited once.
+    // Multiplicity-preserving associative flattening can expand a small shared
+    // DAG exponentially; this traversal is bounded by reachable nodes/edges.
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
     let mut source = None;
     let mut intervals = Vec::new();
-    for leaf in leaves {
+    while let Some(leaf) = pending.pop() {
+        if !visited.insert(leaf.index) {
+            continue;
+        }
+        if let NodePayload::Nary(NaryOp::Or, operands) = &f.get_node(leaf).payload {
+            pending.extend(operands.iter().copied());
+            continue;
+        }
         let operand = match f.get_node(leaf).payload {
             NodePayload::Unop(Unop::OrReduce, arg) => arg,
             NodePayload::BitSlice { width: 1, .. } => leaf,
@@ -179,6 +190,9 @@ mod tests {
 
     fn sample(shape: &str) -> ir::Fn {
         let tail = match shape {
+            "empty" => {
+                "  lo: bits[0] = bit_slice(v, start=0, width=0, id=5)\n  ret out: bits[1] = or_reduce(lo, id=6)"
+            }
             "offset" => {
                 "  lo: bits[3] = bit_slice(v, start=1, width=3, id=5)\n  ret out: bits[1] = or_reduce(lo, id=6)"
             }
@@ -205,7 +219,7 @@ mod tests {
 
     #[test]
     fn rejects_offset_and_gapped_slices_but_accepts_overlapping_contiguous_slices() {
-        for shape in ["offset", "gap"] {
+        for shape in ["empty", "offset", "gap"] {
             assert!(candidate(&sample(shape)).is_none(), "{shape}");
         }
         for shape in ["single", "decomposed"] {
@@ -275,6 +289,30 @@ mod tests {
             0
         );
         assert_eq!(f.to_string(), before);
+    }
+
+    #[test]
+    fn shared_or_dag_does_not_expand_operand_multiplicity() {
+        let mut f = sample("single");
+        let mut root = f.ret_node_ref.unwrap();
+        for text_id in 7..71 {
+            let next = NodeRef {
+                index: f.nodes.len(),
+            };
+            f.nodes.push(ir::Node {
+                text_id,
+                name: None,
+                ty: Type::Bits(1),
+                payload: NodePayload::Nary(NaryOp::Or, vec![root, root]),
+                pos: None,
+            });
+            root = next;
+        }
+        f.ret_node_ref = Some(root);
+        let (rewritten, count) = candidate(&f).unwrap();
+        assert_eq!(count, 65);
+        xlsynth_pir::ir_verify::verify_function(&rewritten).unwrap();
+        assert!(rewritten.nodes.len() <= f.nodes.len() + count);
     }
 
     #[test]
