@@ -26,7 +26,7 @@ use names::{collect_stage_name_infos, validate_stitch_pipeline_names};
 
 use crate::verilog_version::VerilogVersion;
 
-// Insert StitchPipelineOptions struct and Default implementation
+/// Options for generating combinational stages and their pipeline wrapper.
 #[derive(Debug)]
 pub struct StitchPipelineOptions<'a> {
     pub verilog_version: VerilogVersion,
@@ -41,6 +41,8 @@ pub struct StitchPipelineOptions<'a> {
     pub reset_active_low: bool,
     pub add_invariant_assertions: bool,
     pub array_index_bounds_checking: bool,
+    /// Optional Verilog template for each stage's gate! operations.
+    pub gate_format: Option<&'a str>,
     pub output_module_name: &'a str,
 }
 
@@ -196,8 +198,8 @@ fn verify_stage_port_widths(
     Ok(())
 }
 
-// Run XLS optimise + schedule + codegen for a stage without inserting any
-// flops so the resulting module is purely combinational.
+/// Optimizes and emits a combinational stage with the requested codegen
+/// options.
 fn make_stage_info_comb(
     cfg: &PipelineCfg,
     stage_name_unmangled: &str,
@@ -231,6 +233,9 @@ use_system_verilog: {sv}"#,
         "\narray_index_bounds_checking: {}",
         cfg.array_index_bounds_checking
     ));
+    if let Some(gate_format) = cfg.gate_format {
+        codegen.push_str(&format!("\ngate_format: {gate_format:?}"));
+    }
     let result = schedule_and_codegen(&opt, sched, &codegen)?;
     let sv_text = result.get_verilog_text()?;
 
@@ -423,6 +428,7 @@ pub fn stitch_pipeline<'a>(
         verilog_version,
         add_invariant_assertions,
         array_index_bounds_checking,
+        gate_format: opts.gate_format,
     };
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
@@ -513,6 +519,7 @@ mod tests {
             reset_active_low: false,
             add_invariant_assertions: true,
             array_index_bounds_checking: true,
+            gate_format: None,
             output_module_name,
         }
     }
@@ -561,6 +568,7 @@ mod tests {
                 reset_active_low: false,
                 add_invariant_assertions: true,
                 array_index_bounds_checking: true,
+                gate_format: None,
                 output_module_name: "mul_add",
             },
         )
@@ -595,6 +603,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 reset_active_low: false,
                 add_invariant_assertions: true,
                 array_index_bounds_checking: true,
+                gate_format: None,
                 output_module_name: "foo",
             },
         )
@@ -623,6 +632,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 reset_active_low: false,
                 add_invariant_assertions: true,
                 array_index_bounds_checking: true,
+                gate_format: None,
                 output_module_name: "one",
             },
         )
@@ -656,6 +666,7 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
                 reset_active_low: false,
                 add_invariant_assertions: true,
                 array_index_bounds_checking: true,
+                gate_format: None,
                 output_module_name: "stitchme",
             },
         )
@@ -686,6 +697,7 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
                 reset_active_low: true,
                 add_invariant_assertions: false,
                 array_index_bounds_checking: true,
+                gate_format: None,
                 output_module_name: "foo",
             },
         )
@@ -739,6 +751,7 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
                 reset_active_low: false,
                 add_invariant_assertions: false,
                 array_index_bounds_checking: true,
+                gate_format: None,
                 output_module_name: "foo",
             },
         )
@@ -771,6 +784,7 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
                 reset_active_low: false,
                 add_invariant_assertions: true,
                 array_index_bounds_checking: true,
+                gate_format: None,
                 output_module_name: "foo",
             },
         );

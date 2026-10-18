@@ -654,6 +654,12 @@ fn main() {
                 .about("Stitches DSLX pipeline stages")
                 .add_dslx_input_args(false)
                 .arg(
+                    Arg::new("gate_format")
+                        .long("gate_format")
+                        .value_name("TEMPLATE")
+                        .help("Verilog template for gate! operations; overrides toolchain.codegen.gate_format"),
+                )
+                .arg(
                     Arg::new("dslx_top")
                         .long("dslx_top")
                         .value_name("DSLX_TOP")

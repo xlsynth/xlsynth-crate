@@ -118,6 +118,10 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         reset_active_low,
         add_invariant_assertions,
         array_index_bounds_checking,
+        gate_format: matches
+            .get_one::<String>("gate_format")
+            .map(String::as_str)
+            .or_else(|| config.as_ref()?.codegen.as_ref()?.gate_format.as_deref()),
         output_module_name: wrapper_name,
     };
 
