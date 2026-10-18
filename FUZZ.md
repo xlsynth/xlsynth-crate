@@ -339,6 +339,32 @@ Primarily tests:
 - Aggregate input/output flattening stays aligned between PIR and g8r evaluation
 - Broad concrete-value equivalence at higher throughput than formal proof
 
+### xlsynth-lean/fuzz/fuzz_targets/fuzz_gate_fn_lean_eval.rs
+
+Differentially evaluates bounded, directly generated combinational `GateFn`s
+through `PreparedGateSim` and the `xlsynth-lean` export/evaluation path. Each
+sample generates up to 256 nodes and permits constants, complemented edges,
+sharing, dead logic, and independently sized input/output ports, including
+zero-width and greater-than-64-bit vectors. A generic node permutation exercises valid
+graphs whose stored IDs are not topologically ordered. The target compares 32
+input vectors from the shared mixed-vector sampler and surfaces graph export,
+bit ordering, interface, or Lean evaluation mismatches. Failures report the
+fuzz bytes, seed, textual native g8r artifact, inputs, and available outputs.
+
+Set `XLSYNTH_LEAN` to the actual executable in a compatible Lean toolchain.
+The evaluator initializes once at fuzzer startup. Each graph writes an ASCII
+AIGER sidecar, compiles an exported Lean module, and evaluates its full input
+batch through a generated wrapper. Missing or unusable Lean setup fails startup;
+unexpected export or evaluation errors fail the fuzz sample. The non-default
+`external-lean` feature keeps this external-tool target out of the ordinary
+smoke suite unless explicitly requested.
+
+```bash
+XLSYNTH_LEAN=/path/to/lean cargo fuzz run \
+  --fuzz-dir xlsynth-lean/fuzz --features external-lean --sanitizer none \
+  fuzz_gate_fn_lean_eval -- -timeout=30 -max_len=2048
+```
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_g8r_formal.rs
 
 Generates random gatify-supported PIR functions with up to 64 generated nodes,

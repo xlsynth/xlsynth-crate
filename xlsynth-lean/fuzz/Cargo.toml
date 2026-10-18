@@ -1,0 +1,36 @@
+[package]
+name = "xlsynth-lean-fuzz"
+version = "0.75.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1"
+libfuzzer-sys = "0.4"
+rand = "0.8"
+xlsynth-g8r = { path = "../../xlsynth-g8r", version = "0.75.0" }
+xlsynth-ir-value = { path = "../../xlsynth-ir-value", version = "0.75.0" }
+xlsynth-lean = { path = "..", version = "0.75.0" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.75.0" }
+
+[features]
+external-lean = []
+
+[workspace]
+members = ["."]
+
+[workspace.lints.rust]
+warnings = "deny"
+
+[[bin]]
+name = "fuzz_gate_fn_lean_eval"
+path = "fuzz_targets/fuzz_gate_fn_lean_eval.rs"
+test = false
+doc = false
+required-features = ["external-lean"]

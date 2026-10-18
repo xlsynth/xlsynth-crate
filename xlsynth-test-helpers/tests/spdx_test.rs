@@ -33,6 +33,8 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
         "/*"
     } else if filename.ends_with(".vim") {
         "\""
+    } else if filename.ends_with(".lean") {
+        "--"
     } else {
         "//"
     };
