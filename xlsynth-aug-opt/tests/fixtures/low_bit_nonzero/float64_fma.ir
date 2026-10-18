@@ -249,4 +249,3 @@ top fn __float64__fma(a: (bits[1], bits[11], bits[52]) id=1543, b: (bits[1], bit
   assert_2840__4: token = assert(after_all.3606, nand.3607, message="Assertion failure via fail! @ /inputs/subtree/xls/dslx/stdlib/apfloat.x:3733:19-3733:60", label="__float64__fma_0_non_synth___float64__fma_carry_and_cancel", id=3610, pos=[(3,176,56)])
   ret tuple.3070: (bits[1], bits[11], bits[52]) = tuple(result_sign__2, result_exp__2, result_fraction__4, id=3070, pos=[(0,3790,33), (3,176,56)])
 }
-

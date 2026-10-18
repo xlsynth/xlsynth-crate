@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # BVC generated crate 0.74.0 / DSO 0.59.0, stdlib float64.x::fma.
-# Canonical package SHA-256 before adding the license annotation:
+# Canonical package SHA-256 before adding the license annotation and trimming the final blank line:
 # dcd01afb5af1f88133a502ab7dcc4140f471d8e4e86e6b84f7daf00ec2e03a32
 # The previous retained-consumer rewrite grew normal g8r from 46653 to 46658 ANDs.
-sha256: "4d4e5f6946b6f8788f0419b1dee264ababec7e91bba9a99c85925f972f967ffd"
+sha256: "ce443654e80234d34405b854a32cb41ffa6f2577d025c0c36b163192044bf52f"
 predicate_simplification {
   expected_simplifications: 0
   pir_limits { and_nodes_max: 46526 graph_le_max: 1085.926856462289 depth_max: 178 }
