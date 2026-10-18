@@ -9,6 +9,7 @@ pub(crate) struct PipelineCfg<'a> {
     pub(crate) verilog_version: VerilogVersion,
     pub(crate) add_invariant_assertions: bool,
     pub(crate) array_index_bounds_checking: bool,
+    pub(crate) gate_format: Option<&'a str>,
 }
 
 /// One port in a stage module (flattened).

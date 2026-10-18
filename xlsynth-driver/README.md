@@ -3687,6 +3687,7 @@ The generated text is written to **stdout**; diagnostic messages appear on **std
 Supported flags:
 
 - `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
+- `--gate_format=<TEMPLATE>` – Verilog template for `gate!` operations in every selected stage. Overrides `[toolchain.codegen].gate_format`; when neither is set, uses the default XLS gate emission. An empty template restores the XLS default even when the toolchain sets a template.
 - `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
 - `--output_module_name=<NAME>` – wrapper module name. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
 
@@ -3720,6 +3721,11 @@ xlsynth-driver dslx-stitch-pipeline \
   --dslx_input_file my_design.x \
   --stages=foo_cycle0,foo_cycle1,foo_cycle2 \
   --output_module_name=foo > foo.sv
+
+# Override gate! emission in each stage (also available via toolchain.codegen.gate_format)
+xlsynth-driver dslx-stitch-pipeline \
+  --dslx_input_file my_design.x --dslx_top foo \
+  --gate_format="assign {output} = {condition} ? {input} : {width}'d0" > foo.sv
 ```
 
 ### `dslx-stitch-g8r-pipeline`: Stitch DSLX stages into sequential g8r
