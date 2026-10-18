@@ -173,6 +173,13 @@ and graph LE are Pareto-better, keeping local folding, hashing, and DCE.
 Ties, tradeoffs, and cost errors preserve the input. No additional flag is
 needed; `low_bit_nonzero_simplified` reports accepted predicates.
 
+Matching shares a visit budget proportional to function size across all
+roots, including shared OR graphs. Once matches exist, the pass makes two
+whole-function gate estimates for the combined candidate. The raw cost guard
+accounts for retained numeric consumers; normal downstream g8r may subsume
+small raw wins. Regression fixtures also check the normal cut-rewriting and
+reassociation pipeline with FRAIG disabled.
+
 ### Other arithmetic rewrites
 
 - **Sum equal to zero:** `x + y == 0` becomes `y == 0 - x`, exposing a modular

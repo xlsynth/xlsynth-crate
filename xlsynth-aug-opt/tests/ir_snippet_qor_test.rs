@@ -410,15 +410,15 @@ fn check_priority_result_corpus(corpus: ir_snippet_qor::Corpus) {
     }
 }
 
-/// Keeps corpus exposure and shared-consumer rejection under strict raw costs.
+/// Keeps corpus exposure and shared-consumer rejection under normal g8r costs.
 #[test]
-fn low_bit_nonzero_corpus_respects_equivalence_and_raw_qor_limits() {
+fn low_bit_nonzero_corpus_respects_equivalence_and_native_qor_limits() {
     let root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/low_bit_nonzero");
     let corpus = ir_snippet_qor::load_from_dir(&root).unwrap();
     assert!(!corpus.profile.canonical_options.fraig);
-    assert!(!corpus.profile.canonical_options.reassociation);
-    assert!(!corpus.profile.canonical_options.cut_db_rewrite);
+    assert!(corpus.profile.canonical_options.reassociation);
+    assert!(corpus.profile.canonical_options.cut_db_rewrite);
     for (mode, rounds) in [
         (AugOptMode::PirOnly, 1),
         (AugOptMode::Sandwich, 1),

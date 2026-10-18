@@ -21,7 +21,7 @@ struct LowPrefix {
 }
 
 /// Finds a contiguous low prefix through scalar ORs and reduction/slice leaves.
-fn low_prefix(f: &ir::Fn, root: NodeRef) -> Option<LowPrefix> {
+fn low_prefix(f: &ir::Fn, root: NodeRef, remaining: &mut usize) -> Option<LowPrefix> {
     let ctx = MatchCtx::new(f);
     if !matches!(
         f.get_node(root).payload,
@@ -40,10 +40,15 @@ fn low_prefix(f: &ir::Fn, root: NodeRef) -> Option<LowPrefix> {
     let mut source = None;
     let mut intervals = Vec::new();
     while let Some(leaf) = pending.pop() {
+        *remaining = remaining.checked_sub(1)?;
         if !visited.insert(leaf.index) {
             continue;
         }
         if let NodePayload::Nary(NaryOp::Or, operands) = &f.get_node(leaf).payload {
+            *remaining = remaining.checked_sub(operands.len()).or_else(|| {
+                *remaining = 0;
+                None
+            })?;
             pending.extend(operands.iter().copied());
             continue;
         }
@@ -108,6 +113,20 @@ struct Rewrite {
 
 /// Builds a basis-IR candidate while leaving the original function untouched.
 fn candidate(f: &ir::Fn) -> Option<(ir::Fn, usize)> {
+    // A visited set bounds one root's traversal, but overlapping roots can
+    // still repeat quadratic work. Share a linear visit budget across roots;
+    // exhaustion only loses optimization opportunities, never correctness.
+    let size = f.nodes.iter().fold(f.nodes.len(), |size, node| {
+        if let NodePayload::Nary(NaryOp::Or, operands) = &node.payload {
+            size.saturating_add(operands.len())
+        } else {
+            size
+        }
+    });
+    candidate_with_budget(f, &mut size.saturating_mul(16))
+}
+
+fn candidate_with_budget(f: &ir::Fn, remaining: &mut usize) -> Option<(ir::Fn, usize)> {
     let dead = xlsynth_pir::dce::get_dead_nodes(f);
     let mut live = vec![true; f.nodes.len()];
     for node in dead {
@@ -116,10 +135,13 @@ fn candidate(f: &ir::Fn) -> Option<(ir::Fn, usize)> {
     let mut matches = Vec::new();
     for (index, live) in live.into_iter().enumerate() {
         let root = NodeRef { index };
+        if *remaining == 0 {
+            break;
+        }
         if !live {
             continue;
         }
-        let Some(prefix) = low_prefix(f, root) else {
+        let Some(prefix) = low_prefix(f, root, remaining) else {
             continue;
         };
         if let Some(arg) = before_negation(f, prefix.arg) {
@@ -310,9 +332,41 @@ mod tests {
         }
         f.ret_node_ref = Some(root);
         let (rewritten, count) = candidate(&f).unwrap();
-        assert_eq!(count, 65);
+        assert!(count > 0 && count <= 65);
         xlsynth_pir::ir_verify::verify_function(&rewritten).unwrap();
         assert!(rewritten.nodes.len() <= f.nodes.len() + count);
+    }
+
+    #[test]
+    fn overlapping_roots_share_one_traversal_budget() {
+        for has_negation in [false, true] {
+            let mut f = sample("single");
+            if !has_negation {
+                f.nodes[3].payload = NodePayload::Unop(Unop::Not, f.params[0]);
+            }
+            let mut root = f.ret_node_ref.unwrap();
+            for text_id in 7..4103 {
+                let next = NodeRef {
+                    index: f.nodes.len(),
+                };
+                f.nodes.push(ir::Node {
+                    text_id,
+                    name: None,
+                    ty: Type::Bits(1),
+                    payload: NodePayload::Nary(NaryOp::Or, vec![root, root]),
+                    pos: None,
+                });
+                root = next;
+            }
+            f.ret_node_ref = Some(root);
+            let mut remaining = f.nodes.len() * 16;
+            let result = candidate_with_budget(&f, &mut remaining);
+            assert_eq!(remaining, 0, "shared budget must bound every root");
+            assert_eq!(result.is_some(), has_negation);
+            if let Some((rewritten, _)) = result {
+                xlsynth_pir::ir_verify::verify_function(&rewritten).unwrap();
+            }
+        }
     }
 
     #[test]

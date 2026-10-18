@@ -15,14 +15,14 @@ canonical_options {
   adder_mapping: "brent-kung"
   unsafe_gatify_gate_operation: false
   fraig: false
-  reassociation: false
+  reassociation: true
   max_fraig_sim_samples: 8192
   gate_formal_backend: "cadical"
   cadical_terminate_limit: 1000
   compute_graph_logical_effort: true
   graph_logical_effort_beta1: 1.0
   graph_logical_effort_beta2: 0.0
-  cut_db_rewrite: false
+  cut_db_rewrite: true
   cut_db_enable_large_cone_rewrite: true
   cut_db_rewrite_mode: "Delay"
   toggle_sample_count: 0
