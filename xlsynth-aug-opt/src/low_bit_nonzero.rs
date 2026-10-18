@@ -5,7 +5,8 @@
 //! For `x: u32`, `or_reduce((p ? -x : x)[0:8])` equals
 //! `or_reduce(x[0:8])`: negation modulo 2^8 preserves zero. A slice
 //! starting above bit zero, or a set of slices with holes, does not have this
-//! property. Whole-function costing accounts for retained numeric consumers.
+//! property. Retained negation/select consumers conservatively block the
+//! rewrite.
 
 use std::collections::BTreeSet;
 
@@ -82,9 +83,9 @@ fn low_prefix(f: &ir::Fn, root: NodeRef, remaining: &mut usize) -> Option<LowPre
 }
 
 /// Returns the input of negation or either ordering of select(x, -x).
-fn before_negation(f: &ir::Fn, node: NodeRef) -> Option<NodeRef> {
+fn before_negation(f: &ir::Fn, node: NodeRef) -> Option<(NodeRef, NodeRef)> {
     match &f.get_node(node).payload {
-        NodePayload::Unop(Unop::Neg, arg) => Some(*arg),
+        NodePayload::Unop(Unop::Neg, arg) => Some((*arg, node)),
         NodePayload::Sel {
             selector,
             cases,
@@ -95,7 +96,7 @@ fn before_negation(f: &ir::Fn, node: NodeRef) -> Option<NodeRef> {
                     f.get_node(negated).payload,
                     NodePayload::Unop(Unop::Neg, arg) if arg == plain
                 ) {
-                    return Some(plain);
+                    return Some((plain, negated));
                 }
             }
             None
@@ -107,6 +108,8 @@ fn before_negation(f: &ir::Fn, node: NodeRef) -> Option<NodeRef> {
 /// One scalar predicate and its negation-independent low prefix.
 struct Rewrite {
     root: NodeRef,
+    source: NodeRef,
+    negated: NodeRef,
     arg: NodeRef,
     width: usize,
 }
@@ -144,9 +147,11 @@ fn candidate_with_budget(f: &ir::Fn, remaining: &mut usize) -> Option<(ir::Fn, u
         let Some(prefix) = low_prefix(f, root, remaining) else {
             continue;
         };
-        if let Some(arg) = before_negation(f, prefix.arg) {
+        if let Some((arg, negated)) = before_negation(f, prefix.arg) {
             matches.push(Rewrite {
                 root,
+                source: prefix.arg,
+                negated,
                 arg,
                 width: prefix.width,
             });
@@ -157,7 +162,10 @@ fn candidate_with_budget(f: &ir::Fn, remaining: &mut usize) -> Option<(ir::Fn, u
     }
     let mut result = f.clone();
     let mut next_id = f.nodes.iter().map(|node| node.text_id).max().unwrap_or(0);
-    for &Rewrite { root, arg, width } in &matches {
+    for &Rewrite {
+        root, arg, width, ..
+    } in &matches
+    {
         let reduced = if MatchCtx::new(f).bits_width(arg) == Some(width) {
             arg
         } else {
@@ -180,6 +188,20 @@ fn candidate_with_budget(f: &ir::Fn, remaining: &mut usize) -> Option<(ir::Fn, u
         };
         result.nodes[root.index].payload = NodePayload::Unop(Unop::OrReduce, reduced);
     }
+    // A small raw-cost gain with retained arithmetic can become a regression
+    // after ordinary cut rewriting. Require the bypassed computation to die
+    // after all replacements, including a select's separately shared negation
+    // arm. Reject the combined candidate atomically before any gate estimates.
+    let mut dead = vec![false; result.nodes.len()];
+    for node in xlsynth_pir::dce::get_dead_nodes(&result) {
+        dead[node.index] = true;
+    }
+    if matches
+        .iter()
+        .any(|rewrite| !dead[rewrite.source.index] || !dead[rewrite.negated.index])
+    {
+        return None;
+    }
     ir_utils::compact_and_toposort_in_place(&mut result).ok()?;
     Some((result, matches.len()))
 }
@@ -187,7 +209,7 @@ fn candidate_with_budget(f: &ir::Fn, remaining: &mut usize) -> Option<(ir::Fn, u
 /// Installs the rewrite only when whole-function area/delay strictly improve.
 ///
 /// Ties, invalid costs, evaluation errors, and required ID allocation overflow
-/// preserve the input. Numeric sharing is permitted and included in the cost.
+/// preserve the input. Retained negation/select consumers block costing.
 pub fn rewrite_with_evaluator(
     f: &mut ir::Fn,
     evaluator: &mut impl FnMut(&ir::Fn) -> Result<IrCost, String>,
@@ -256,6 +278,71 @@ mod tests {
                     .any(|node| matches!(node.payload, NodePayload::Unop(Unop::Neg, _)))
             );
         }
+    }
+
+    fn sharing_sample(operand: &str, tail: &str, ret_ty: &str) -> ir::Fn {
+        let text = format!(
+            "package test\n\ntop fn main(x: bits[8] id=1, p: bits[1] id=2) -> {ret_ty} {{\n  n: bits[8] = neg(x, id=3)\n  v: bits[8] = sel(p, cases=[x, n], id=4)\n  lo: bits[3] = bit_slice({operand}, start=0, width=3, id=5)\n  result: bits[1] = or_reduce(lo, id=6)\n{tail}\n}}"
+        );
+        Parser::new(&text)
+            .parse_and_validate_package()
+            .unwrap()
+            .get_top_fn()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn retained_select_negation_arm_and_direct_negation_skip_costing() {
+        for (operand, retained) in [("v", "v"), ("v", "n"), ("n", "n")] {
+            let mut f = sharing_sample(
+                operand,
+                &format!("  ret out: (bits[1], bits[8]) = tuple(result, {retained}, id=7)"),
+                "(bits[1], bits[8])",
+            );
+            let before = f.to_string();
+            assert_eq!(
+                rewrite_with_evaluator(&mut f, &mut |_| panic!(
+                    "retained arithmetic must skip costing"
+                )),
+                0
+            );
+            assert_eq!(f.to_string(), before);
+        }
+    }
+
+    #[test]
+    fn dead_numeric_consumers_and_multiple_predicates_remain_eligible() {
+        for (tail, ret_ty) in [
+            (
+                "  unused: bits[8] = add(n, v, id=7)\n  ret out: bits[1] = identity(result, id=8)",
+                "bits[1]",
+            ),
+            (
+                "  lo2: bits[5] = bit_slice(v, start=0, width=5, id=7)\n  result2: bits[1] = or_reduce(lo2, id=8)\n  ret out: (bits[1], bits[1]) = tuple(result, result2, id=9)",
+                "(bits[1], bits[1])",
+            ),
+        ] {
+            let f = sharing_sample("v", tail, ret_ty);
+            let (rewritten, count) = candidate(&f).expect("all live numeric uses were bypassed");
+            assert!(count > 0);
+            xlsynth_pir::ir_verify::verify_function(&rewritten).unwrap();
+        }
+    }
+
+    #[test]
+    fn mixed_groups_with_retained_arithmetic_reject_atomically() {
+        let mut f = sharing_sample(
+            "v",
+            "  y: bits[8] = not(x, id=7)\n  ny: bits[8] = neg(y, id=8)\n  vy: bits[8] = sel(p, cases=[y, ny], id=9)\n  lo2: bits[3] = bit_slice(vy, start=0, width=3, id=10)\n  result2: bits[1] = or_reduce(lo2, id=11)\n  ret out: (bits[1], bits[1], bits[8]) = tuple(result, result2, vy, id=12)",
+            "(bits[1], bits[1], bits[8])",
+        );
+        let before = f.to_string();
+        assert_eq!(
+            rewrite_with_evaluator(&mut f, &mut |_| panic!("mixed candidate must skip costing")),
+            0
+        );
+        assert_eq!(f.to_string(), before);
     }
 
     #[test]

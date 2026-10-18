@@ -814,3 +814,12 @@ mapper. Generates add-only sums and signed/unsigned or constant products, mixed
 negation, delayed inputs, repeated contributions, and shared/sliced/truncated
 product boundaries. Asserts deferred-product hits and resolved negative controls
 using the actual lowering map. Solver timeouts are inconclusive, not proofs.
+
+### Low-prefix nonzero predicates
+
+`fuzz_low_bit_nonzero` checks direct and conditional negation, reversed arms,
+contiguous decomposed prefixes, and rejection controls for retained numeric
+consumers, offset/gapped slices, bitwise NOT, and dead predicates. It proves
+both forced eligible rewrites and the ordinary PIR/sandwich output with
+Bitwuzla, checks cost-tie/error rollback, and audits accepted rewrites in all
+three pipeline modes. Retained arithmetic must reject before gate costing.

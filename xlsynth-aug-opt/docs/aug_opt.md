@@ -167,17 +167,20 @@ For `x: u32`, `or_reduce(sel(p, [x, -x])[0:8])` becomes
 selection arms, and ORs of slices covering a contiguous low prefix. Offset
 or gapped slices do not satisfy this identity.
 
-The rewrite runs in ordinary PIR rounds and retains numeric consumers. It
-accepts the combined candidate only when whole-function raw live AND count
+The rewrite runs in ordinary PIR rounds. It requires the bypassed negation
+and optional select to become dead after all replacements; any retained
+consumer rejects the combined candidate before costing. It then accepts the
+candidate only when whole-function raw live AND count
 and graph LE are Pareto-better, keeping local folding, hashing, and DCE.
 Ties, tradeoffs, and cost errors preserve the input. No additional flag is
 needed; `low_bit_nonzero_simplified` reports accepted predicates.
 
 Matching shares a visit budget proportional to function size across all
 roots, including shared OR graphs. Once matches exist, the pass makes two
-whole-function gate estimates for the combined candidate. The raw cost guard
-accounts for retained numeric consumers; normal downstream g8r may subsume
-small raw wins. Regression fixtures also check the normal cut-rewriting and
+whole-function gate estimates for an eligible combined candidate. The liveness
+guard excludes retained arithmetic whose small raw gains can regress after
+normal g8r optimization; it does not replace the cost guard or guarantee
+native Pareto improvement. Regression fixtures also check normal cut rewriting and
 reassociation pipeline with FRAIG disabled.
 
 ### Other arithmetic rewrites

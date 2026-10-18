@@ -136,7 +136,7 @@ pub fn check_input(data: &[u8]) -> Result<Outcome, String> {
             delay: 100.0,
         })
     });
-    if (family < 5) != (count > 0) {
+    if (family < 4) != (count > 0) {
         return Err(format!(
             "unexpected forced recognition for {}: {count}\n{original}",
             FAMILIES[family]
@@ -198,19 +198,19 @@ mod tests {
 
     #[test]
     fn deterministic_audit_requires_proved_acceptance_and_checked_rejections() {
-        let mut accepted = [[0usize; 3]; 5];
-        let mut rejected = [0usize; 4];
+        let mut accepted = [[0usize; 3]; 4];
+        let mut rejected = [0usize; 5];
         for family in 0..9 {
             for pipeline in 0..3 {
                 for width in [2, 3, 6, 8] {
                     for prefix in [0, 1, 6, 127] {
                         let result = check_input(&[family, pipeline, width, prefix, 1, 1]).unwrap();
                         assert_eq!(result.proofs, 2);
-                        if family < 5 {
+                        if family < 4 {
                             accepted[family as usize][pipeline as usize] += result.accepted;
                         } else {
                             assert_eq!(result.forced, 0);
-                            rejected[family as usize - 5] += 1;
+                            rejected[family as usize - 4] += 1;
                         }
                     }
                 }
