@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-lean-fuzz"
-version = "0.75.0"
+version = "0.76.0"
 publish = false
 edition = "2024"
 
@@ -14,10 +14,10 @@ workspace = true
 blake3 = "1"
 libfuzzer-sys = "0.4"
 rand = "0.8"
-xlsynth-g8r = { path = "../../xlsynth-g8r", version = "0.75.0" }
-xlsynth-ir-value = { path = "../../xlsynth-ir-value", version = "0.75.0" }
-xlsynth-lean = { path = "..", version = "0.75.0" }
-xlsynth-pir = { path = "../../xlsynth-pir", version = "0.75.0" }
+xlsynth-g8r = { path = "../../xlsynth-g8r", version = "0.76.0" }
+xlsynth-ir-value = { path = "../../xlsynth-ir-value", version = "0.76.0" }
+xlsynth-lean = { path = "..", version = "0.76.0" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.76.0" }
 
 [features]
 external-lean = []
