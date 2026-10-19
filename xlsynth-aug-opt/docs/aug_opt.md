@@ -183,26 +183,32 @@ normal g8r optimization; it does not replace the cost guard or guarantee
 native Pareto improvement. Regression fixtures also check normal cut rewriting and
 reassociation pipeline with FRAIG disabled.
 
-### Contained-range zero/nonzero predicates
+### Negative-and-nonzero predicates
 
-For `x: u32`, `x[7+:u1] & (x != u32:0)` becomes `x[7+:u1]`.
-The [rewrite](../src/predicate_implication.rs) uses interval containment:
-a nonzero subrange implies that a containing range is nonzero. It handles
-zero-test duals, inverted AND/OR results, nested slices, and either comparison
-operand order. It does not infer relationships across arithmetic, casts, or
-different source nodes, and declines empty ranges.
+For `x: s32`, `(x < s32:0) && (x != s32:0)` becomes `x < s32:0`.
+The [rewrite](../src/predicate_implication.rs) recognizes a source's sign bit
+and its full-width zero/nonzero test, including inverted AND/OR spellings,
+nested slices, and either comparison operand order. Other bit ranges, empty
+ranges, and different sources are declined. It does not infer relationships
+across arithmetic or extensions.
 
-The pass runs before arithmetic equality rewriting in each ordinary PIR
-round. It preserves node indices and equivalent values, so existing range
-facts remain valid. Other predicate and numeric consumers remain live.
-Whole-function raw live AND count and graph LE must be Pareto-better; ties,
-tradeoffs, and cost errors leave the function unchanged. No flag is needed.
+The pass runs before arithmetic equality rewriting in each ordinary PIR round.
+It preserves node indices and equivalent values. The removed comparison, its
+inversion wrappers, and bypassed Boolean clause nodes must have no remaining
+live consumers. Numeric consumers of the common source are allowed.
 
-Clause matching visits shared nodes once and is bounded to 256 graph nodes,
-32 distinct terms, and 64 steps per wrapper traversal. Predicate descriptors and wide
-literal checks are cached for the immutable graph. The
-`predicate_implication_simplified` counter counts initially live changed
-Boolean roots, including roots made dead by a simultaneous ancestor rewrite.
+This is a cheap structural policy: it builds no gate graph and performs no
+whole-function trial costing. The consumer guard rejects a known family of
+native regressions, but does not guarantee Pareto improvement after heuristic
+cut rewriting and reassociation. A retained 27-bit fixture records a native
+area/delay tradeoff; the wider FMA cone is a positive case missed by the pinned
+XLS optimizer. The proposal remains experimental while these tradeoffs persist.
+
+Liveness and users are computed once per unchanged graph. Clause matching
+visits shared nodes once and is bounded to 256 nodes, 32 distinct terms, and
+64 steps per wrapper traversal. Predicate descriptors and wide zero checks are
+cached. `predicate_implication_simplified` counts initially live changed Boolean
+roots, including roots made dead by a simultaneous ancestor rewrite.
 
 ### Other arithmetic rewrites
 

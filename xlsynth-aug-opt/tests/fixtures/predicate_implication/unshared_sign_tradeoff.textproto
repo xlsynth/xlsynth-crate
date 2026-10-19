@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Native baseline: 538 AND, graph LE 84.56; the rewrite is an area/delay tradeoff.
+sha256: "98ffe187a96cbb9e22f81b27599746bc7e16a42e97193178879c5bbec398dafe"
+predicate_simplification {
+  expected_simplifications: 1
+  pir_limits { and_nodes_max: 327 graph_le_max: 87.5079702334715 depth_max: 18 }
+  sandwich_limits { and_nodes_max: 327 graph_le_max: 87.5079702334715 depth_max: 18 }
+}

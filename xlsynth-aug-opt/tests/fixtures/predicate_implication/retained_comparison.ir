@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// Origin: BVC 0.74.0 k3-cone-537cca41bca3ee7e-a0e7f7547fd3; selected its sole function as top.
+package replay_input
+
+top fn __k3_cone_537cca41bca3ee7e(leaf_123: bits[1] id=3124, leaf_131: bits[74] id=3125, leaf_132: bits[75] id=3126) -> bits[1] {
+  literal.3127: bits[1] = literal(value=0, id=3127)
+  sign_ext.3128: bits[75] = sign_ext(leaf_131, new_bit_count=75, id=3128)
+  add.3129: bits[75] = add(leaf_132, sign_ext.3128, id=3129)
+  bit_slice.3130: bits[1] = bit_slice(add.3129, start=74, width=1, id=3130)
+  literal.3131: bits[75] = literal(value=0x0, id=3131)
+  eq.3132: bits[1] = eq(add.3129, literal.3131, id=3132)
+  not.3133: bits[1] = not(bit_slice.3130, id=3133)
+  nor.3134: bits[1] = nor(eq.3132, not.3133, id=3134)
+  concat.3135: bits[2] = concat(nor.3134, eq.3132, id=3135)
+  not.3136: bits[1] = not(leaf_123, id=3136)
+  ret priority_sel.3137: bits[1] = priority_sel(concat.3135, cases=[literal.3127, not.3136], default=leaf_123, id=3137)
+}

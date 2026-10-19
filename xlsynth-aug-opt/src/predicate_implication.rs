@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Remove redundant zero/nonzero tests of contained bit ranges.
+//! Simplify a negative-and-nonzero predicate when its zero test becomes dead.
 //!
-//! For `x: u32`, `x[7+:u1] & (x != u32:0)` equals `x[7+:u1]`.
-//! More generally, a nonzero subrange implies that every containing range is
-//! nonzero. The dual zero tests and inverted AND/OR results obey the same
-//! absorption law. Whole-function costing retains all other consumers.
+//! For `x: s32`, `(x < s32:0) && (x != s32:0)` equals `x < s32:0`.
+//! The same identity covers inverted AND/OR spellings. Restricting the witness
+//! to the source's sign bit and declining retained comparison cones is an
+//! inexpensive structural policy, not a guarantee about heuristic gate mapping.
 
 use std::collections::BTreeSet;
 
-use crate::ir_cost::IrCost;
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Unop};
 use xlsynth_pir::ir_match::{MatchCtx, any, exact};
+use xlsynth_pir::ir_utils::{UserList, compute_users};
 
 // Bound local graph traversal independently of arithmetic width and shared DAG
 // size.
@@ -91,14 +91,21 @@ fn predicate(
     None
 }
 
+/// A bounded Boolean clause and the internal nodes bypassed by flattening it.
+struct Clause {
+    terms: Vec<NodeRef>,
+    interior: BTreeSet<usize>,
+}
+
 /// Flattens a bounded idempotent clause, visiting shared children only once.
-fn clause(f: &ir::Fn, operands: &[NodeRef], plain_op: NaryOp) -> Option<Vec<NodeRef>> {
+fn clause(f: &ir::Fn, operands: &[NodeRef], plain_op: NaryOp) -> Option<Clause> {
     if operands.len() > MAX_CLAUSE_NODES {
         return None;
     }
     let mut pending: Vec<_> = operands.iter().rev().copied().collect();
     let mut visited = BTreeSet::new();
     let mut terms = Vec::new();
+    let mut interior = BTreeSet::new();
     while let Some(node) = pending.pop() {
         if !visited.insert(node.index) {
             continue;
@@ -112,6 +119,7 @@ fn clause(f: &ir::Fn, operands: &[NodeRef], plain_op: NaryOp) -> Option<Vec<Node
             if pending.len().checked_add(children.len())? > MAX_CLAUSE_NODES {
                 return None;
             }
+            interior.insert(node.index);
             pending.extend(children.iter().rev().copied());
         } else {
             terms.push(node);
@@ -120,13 +128,28 @@ fn clause(f: &ir::Fn, operands: &[NodeRef], plain_op: NaryOp) -> Option<Vec<Node
             }
         }
     }
-    Some(terms)
+    Some(Clause { terms, interior })
 }
 
-/// Removes an implied term, keeping a stable representative of equal ranges.
+/// Adds the discarded predicate and its inversion wrappers to a dead region.
+fn discarded_predicate(f: &ir::Fn, mut node: NodeRef, region: &mut BTreeSet<usize>) -> Option<()> {
+    for _ in 0..MAX_WRAPPERS {
+        region.insert(node.index);
+        match f.get_node(node).payload {
+            NodePayload::Unop(Unop::Not, arg) => node = arg,
+            NodePayload::Unop(Unop::OrReduce, _)
+            | NodePayload::Binop(Binop::Eq | Binop::Ne, _, _) => return Some(()),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Removes a full-source predicate implied by the sign bit of that source.
 fn replacement(
     f: &ir::Fn,
     root: NodeRef,
+    users: &[UserList],
     cache: &mut [Option<Option<Predicate>>],
     zero_literals: &mut [Option<bool>],
 ) -> Option<NodePayload> {
@@ -143,7 +166,10 @@ fn replacement(
         _ => return None,
     };
     let plain_op = if conjunction { NaryOp::And } else { NaryOp::Or };
-    let terms = clause(f, operands, plain_op)?;
+    let Clause {
+        terms,
+        mut interior,
+    } = clause(f, operands, plain_op)?;
     let predicates: Vec<_> = terms
         .iter()
         .map(|&node| *cache[node.index].get_or_insert_with(|| predicate(f, node, zero_literals)))
@@ -160,27 +186,38 @@ fn replacement(
             if i == j || a.source != b.source || a.zero != b.zero {
                 continue;
             }
-            let equal = a.start == b.start && a.end == b.end;
-            if equal {
-                if j < i {
-                    keep[i] = false;
-                }
-                continue;
-            }
-            // AND(nonzero A, nonzero B), with A contained in B, drops B.
-            // Negating the predicates or changing AND to OR reverses this.
-            let drop_superset = conjunction != a.zero;
-            let redundant = if drop_superset {
-                a.start <= b.start && b.end <= a.end
-            } else {
-                b.start <= a.start && a.end <= b.end
-            };
-            if redundant {
+            let width = ctx.bits_width(a.source)?;
+            // The sign being set implies nonzero; equivalently, zero implies
+            // the sign is clear. Other ranges and opposite polarities stay put.
+            if width > 1
+                && conjunction != a.zero
+                && a.start == 0
+                && a.end == width
+                && b.start == width - 1
+                && b.end == width
+            {
                 keep[i] = false;
             }
         }
     }
     if keep.iter().all(|&value| value) {
+        return None;
+    }
+    for (&term, &keep) in terms.iter().zip(&keep) {
+        if !keep {
+            discarded_predicate(f, term, &mut interior)?;
+        }
+    }
+    // All bypassed clause nodes and discarded predicate wrappers must become
+    // dead. In particular, a shared equality feeding another selector declines
+    // the rewrite even when its inversion wrapper has only this root as a user.
+    if interior.iter().any(|&index| {
+        let node = NodeRef { index };
+        f.ret_node_ref == Some(node)
+            || users[index]
+                .iter()
+                .any(|user| *user != root && !interior.contains(&user.index))
+    }) {
         return None;
     }
     let remaining: Vec<_> = terms
@@ -198,48 +235,48 @@ fn replacement(
     }
 }
 
-/// Installs only a strict whole-function raw area/delay Pareto improvement.
+/// Applies sign/nonzero absorption only when the discarded predicate dies.
 ///
-/// Analysis uses one immutable graph and one liveness scan. Local clause work
-/// is bounded; no general implication solver or whole-function scan runs per
-/// root. Accepted payload edits preserve node indices and equivalent values,
-/// so the current round's range facts remain valid. Cost errors and ties leave
-/// the input unchanged. Other live consumers of every predicate remain intact.
-pub fn rewrite_with_evaluator(
-    f: &mut ir::Fn,
-    evaluator: &mut impl FnMut(&ir::Fn) -> Result<IrCost, String>,
-) -> usize {
+/// Liveness and users are computed once for an immutable graph snapshot.
+/// Candidate clause work is bounded, and wide literal checks are cached.
+/// Edits preserve indices and equivalent values, keeping range facts valid.
+/// No gate graph is built or cost evaluator invoked by this pass. The consumer
+/// guard avoids one known native mapping regression family, but the gate
+/// optimizer can still trade area against logical effort on unshared inputs.
+pub fn rewrite(f: &mut ir::Fn) -> usize {
     let mut live = vec![true; f.nodes.len()];
     for node in xlsynth_pir::dce::get_dead_nodes(f) {
         live[node.index] = false;
     }
+    // Filter dead users once: repeatedly skipping a shared predicate's dead
+    // users at every root would be quadratic. With live-only lists, a candidate
+    // examines at most its bounded discarded region plus the first outside
+    // user.
+    let users: Vec<UserList> = compute_users(f)
+        .iter()
+        .map(|(_, users)| {
+            users
+                .iter()
+                .copied()
+                .filter(|user| live[user.index])
+                .collect()
+        })
+        .collect();
     let mut cache = vec![None; f.nodes.len()];
-    // Inspect each literal at most once, including shared arbitrary-width
-    // zeros.
     let mut zero_literals = vec![None; f.nodes.len()];
     let edits: Vec<_> = live
-        .into_iter()
+        .iter()
         .enumerate()
-        .filter_map(|(index, live)| {
-            live.then(|| replacement(f, NodeRef { index }, &mut cache, &mut zero_literals))
+        .filter_map(|(index, &is_live)| {
+            is_live
+                .then(|| replacement(f, NodeRef { index }, &users, &mut cache, &mut zero_literals))
                 .flatten()
                 .map(|payload| (index, payload))
         })
         .collect();
-    if edits.is_empty() {
-        return 0;
-    }
-    let mut rewritten = f.clone();
     for (index, payload) in &edits {
-        rewritten.nodes[*index].payload = payload.clone();
+        f.nodes[*index].payload = payload.clone();
     }
-    let (Ok(old), Ok(new)) = (evaluator(f), evaluator(&rewritten)) else {
-        return 0;
-    };
-    if !new.is_pareto_improvement_on(old) {
-        return 0;
-    }
-    *f = rewritten;
     edits.len()
 }
 
@@ -255,12 +292,11 @@ mod tests {
             r#"package implication
 top fn main(x: bits[129] id=1, y: bits[129] id=2) -> bits[1] {{
   a: bits[{width}] = bit_slice(x, start={start}, width={width}, id=3)
-  b: bits[65] = bit_slice({source}, start=32, width=65, id=4)
-  az: bits[{width}] = literal(value=0, id=5)
-  bz: bits[65] = literal(value=0, id=6)
-  p: bits[1] = {compare}(a, az, id=7)
-  q: bits[1] = {compare}(bz, b, id=8)
-  ret result: bits[1] = {op}(q, p, id=9)
+  az: bits[{width}] = literal(value=0, id=4)
+  bz: bits[129] = literal(value=0, id=5)
+  p: bits[1] = {compare}(a, az, id=6)
+  q: bits[1] = {compare}(bz, {source}, id=7)
+  ret result: bits[1] = {op}(q, p, id=8)
 }}
 "#
         );
@@ -272,136 +308,147 @@ top fn main(x: bits[129] id=1, y: bits[129] id=2) -> bits[1] {{
             .clone()
     }
 
-    fn force(f: &mut ir::Fn) -> usize {
-        let mut calls = 0;
-        rewrite_with_evaluator(f, &mut |_| {
-            calls += 1;
-            Ok(IrCost {
-                area: 3 - calls,
-                delay: 1.0,
-            })
-        })
-    }
-
     #[test]
-    fn interval_polarity_and_operand_order_are_explicit() {
+    fn sign_polarity_and_operand_order_are_explicit() {
         for op in ["and", "nand", "or", "nor"] {
             for zero in [false, true] {
-                let mut f = sample(op, zero, 40, 9, false);
-                let count = f.nodes.len();
-                assert_eq!(force(&mut f), 1, "{op}, zero={zero}");
-                assert_eq!(f.nodes.len(), count);
-                let text = format!("package checked\n\ntop {f}");
-                Parser::new(&text).parse_and_validate_package().unwrap();
-                let conjunction = matches!(op, "and" | "nand");
-                let survivor_id = if conjunction != zero { 7 } else { 8 };
-                let NodePayload::Unop(_, arg) = f.nodes.last().unwrap().payload else {
-                    panic!("expected one surviving term");
-                };
-                assert_eq!(f.get_node(arg).text_id, survivor_id);
+                for reverse in [false, true] {
+                    let mut f = sample(op, zero, 128, 1, false);
+                    if reverse {
+                        let NodePayload::Nary(_, operands) =
+                            &mut f.nodes.last_mut().unwrap().payload
+                        else {
+                            unreachable!()
+                        };
+                        operands.reverse();
+                    }
+                    let count = f.nodes.len();
+                    let expected = usize::from(matches!(op, "and" | "nand") != zero);
+                    assert_eq!(rewrite(&mut f), expected, "{op}, zero={zero}");
+                    assert_eq!(f.nodes.len(), count);
+                    Parser::new(&format!("package checked\n\ntop {f}"))
+                        .parse_and_validate_package()
+                        .unwrap();
+                    if expected != 0 {
+                        let NodePayload::Unop(_, arg) = f.nodes.last().unwrap().payload else {
+                            panic!("expected sign predicate");
+                        };
+                        assert_eq!(f.get_node(arg).text_id, 6);
+                    }
+                }
             }
         }
     }
 
     #[test]
-    fn unrelated_overlapping_empty_and_wrong_polarity_ranges_are_declined() {
-        for (start, width, other) in [(40, 9, true), (31, 2, false), (0, 1, false), (40, 0, false)]
-        {
+    fn other_sources_ranges_and_empty_witnesses_are_declined() {
+        for (start, width, other) in [
+            (128, 1, true),
+            (127, 1, false),
+            (127, 2, false),
+            (128, 0, false),
+        ] {
             let mut f = sample("and", false, start, width, other);
-            let original = f.clone();
-            assert_eq!(force(&mut f), 0);
-            assert_eq!(f.to_string(), original.to_string());
+            let original = f.to_string();
+            assert_eq!(rewrite(&mut f), 0);
+            assert_eq!(f.to_string(), original);
         }
-        let mut f = sample("and", false, 40, 9, false);
-        let NodePayload::Binop(_, lhs, rhs) =
-            f.nodes.iter().find(|n| n.text_id == 7).unwrap().payload
-        else {
-            unreachable!()
-        };
-        f.nodes.iter_mut().find(|n| n.text_id == 7).unwrap().payload =
-            NodePayload::Binop(Binop::Eq, lhs, rhs);
-        assert_eq!(force(&mut f), 0);
     }
 
     #[test]
-    fn ties_invalid_costs_and_errors_preserve_the_input() {
-        for delay in [1.0, f64::NAN, -1.0, f64::INFINITY] {
-            let mut f = sample("and", false, 40, 9, false);
-            let original = f.clone();
-            assert_eq!(
-                rewrite_with_evaluator(&mut f, &mut |_| Ok(IrCost { area: 1, delay })),
-                0
+    fn retained_comparison_and_inversion_wrappers_are_declined() {
+        for retained in ["eq", "inv", "clause"] {
+            let text = format!(
+                r#"package retained
+top fn main(x: bits[65] id=1) -> (bits[1], bits[1]) {{
+  bit: bits[1] = bit_slice(x, start=64, width=1, id=2)
+  z: bits[65] = literal(value=0, id=3)
+  eq: bits[1] = eq(x, z, id=4)
+  inv: bits[1] = not(eq, id=5)
+  clause: bits[1] = and(inv, inv, id=6)
+  result: bits[1] = and(clause, bit, id=7)
+  ret out: (bits[1], bits[1]) = tuple(result, {retained}, id=8)
+}}
+"#
             );
-            assert_eq!(f.to_string(), original.to_string());
+            let mut f = Parser::new(&text)
+                .parse_and_validate_package()
+                .unwrap()
+                .get_top_fn()
+                .unwrap()
+                .clone();
+            let original = f.to_string();
+            assert_eq!(rewrite(&mut f), 0, "{retained}");
+            assert_eq!(f.to_string(), original);
         }
-        let mut f = sample("and", false, 40, 9, false);
-        let original = f.clone();
-        assert_eq!(
-            rewrite_with_evaluator(&mut f, &mut |_| Err("unavailable".to_string())),
-            0
-        );
-        assert_eq!(f.to_string(), original.to_string());
     }
 
     #[test]
-    fn scalar_parameter_replacement_keeps_parameter_layout_valid() {
-        let text = r#"package scalar
-top fn main(x: bits[1] id=1) -> bits[1] {
-  z: bits[1] = literal(value=0, id=2)
-  nz: bits[1] = ne(x, z, id=3)
-  ret result: bits[1] = and(x, nz, id=4)
-}
-"#;
-        let mut f = Parser::new(text)
-            .parse_and_validate_package()
-            .unwrap()
-            .get_top_fn()
-            .unwrap()
-            .clone();
-        assert_eq!(force(&mut f), 1);
-        Parser::new(&format!("package checked\n\ntop {f}"))
-            .parse_and_validate_package()
-            .unwrap();
-    }
-    #[test]
-    fn deep_shared_clause_matching_preserves_retained_consumers() {
+    fn dead_users_before_many_live_roots_do_not_hide_shared_comparison() {
+        // User order puts every dead identity before the retained consumers.
+        // Liveness must be filtered once, not rescanned at every matching root.
+        let count = 1024;
         let mut text = String::from(
-            "package shared\ntop fn main(x: bits[65] id=1) -> (bits[1], bits[1], bits[65]) {\n  bit: bits[1] = bit_slice(x, start=64, width=1, id=2)\n  z: bits[65] = literal(value=0, id=3)\n  nz: bits[1] = ne(x, z, id=4)\n",
+            "package many_users\ntop fn main(x: bits[65] id=1) -> RET {\n  bit: bits[1] = bit_slice(x, start=64, width=1, id=2)\n  zero: bits[65] = literal(value=0, id=3)\n  nz: bits[1] = ne(x, zero, id=4)\n",
         );
-        let mut previous = "bit".to_string();
-        for depth in 0..64 {
-            let name = format!("shared_{depth}");
-            text += &format!(
-                "  {name}: bits[1] = and({previous}, {previous}, id={})\n",
-                5 + depth
-            );
-            previous = name;
+        for index in 0..count {
+            text += &format!("  dead_{index}: bits[1] = identity(nz, id={})\n", 5 + index);
         }
+        for index in 0..count {
+            text += &format!(
+                "  live_{index}: bits[1] = and(bit, nz, id={})\n",
+                5 + count + index
+            );
+        }
+        let ty = format!("({})", vec!["bits[1]"; count].join(", "));
+        let values = (0..count)
+            .map(|index| format!("live_{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         text += &format!(
-            "  result: bits[1] = and({previous}, nz, id=100)\n  ret out: (bits[1], bits[1], bits[65]) = tuple(result, nz, x, id=101)\n}}\n"
+            "  ret out: {ty} = tuple({values}, id={})\n}}\n",
+            5 + count * 2
         );
+        let text = text.replace("RET", &ty);
         let mut f = Parser::new(&text)
             .parse_and_validate_package()
             .unwrap()
             .get_top_fn()
             .unwrap()
             .clone();
-        let original = f.clone();
-        assert_eq!(force(&mut f), 1);
-        assert_eq!(f.nodes.len(), original.nodes.len());
-        for id in [1, 4, 101] {
-            assert_eq!(
-                f.nodes.iter().find(|n| n.text_id == id).unwrap().payload,
-                original
-                    .nodes
-                    .iter()
-                    .find(|n| n.text_id == id)
-                    .unwrap()
-                    .payload,
+        let original = f.to_string();
+        assert_eq!(rewrite(&mut f), 0);
+        assert_eq!(f.to_string(), original);
+    }
+
+    #[test]
+    fn deep_shared_clause_is_bounded_and_numeric_consumers_are_allowed() {
+        for depth in [64, 260] {
+            let mut text = String::from(
+                "package shared\ntop fn main(x: bits[65] id=1) -> (bits[1], bits[65]) {\n  bit: bits[1] = bit_slice(x, start=64, width=1, id=2)\n  z: bits[65] = literal(value=0, id=3)\n  nz: bits[1] = ne(x, z, id=4)\n",
             );
+            let mut previous = "bit".to_string();
+            for i in 0..depth {
+                let name = format!("shared_{i}");
+                text += &format!(
+                    "  {name}: bits[1] = and({previous}, {previous}, id={})\n",
+                    5 + i
+                );
+                previous = name;
+            }
+            text += &format!(
+                "  result: bits[1] = and({previous}, nz, id=1000)\n  ret out: (bits[1], bits[65]) = tuple(result, x, id=1001)\n}}\n"
+            );
+            let mut f = Parser::new(&text)
+                .parse_and_validate_package()
+                .unwrap()
+                .get_top_fn()
+                .unwrap()
+                .clone();
+            assert_eq!(rewrite(&mut f), usize::from(depth == 64));
+            Parser::new(&format!("package checked\n\ntop {f}"))
+                .parse_and_validate_package()
+                .unwrap();
         }
-        Parser::new(&format!("package checked\n\ntop {f}"))
-            .parse_and_validate_package()
-            .unwrap();
     }
 }

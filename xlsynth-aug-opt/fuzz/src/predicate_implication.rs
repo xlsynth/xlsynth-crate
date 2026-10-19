@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Focused mutation checks for structural predicate implication.
-use xlsynth_aug_opt::ir_cost::IrCost;
-use xlsynth_aug_opt::predicate_implication::rewrite_with_evaluator;
+use xlsynth_aug_opt::predicate_implication::rewrite;
 use xlsynth_aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text_with_stats};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_prover::prover::types::EquivResult;
 use xlsynth_prover::prover::{SolverChoice, prover_for_choice_with_limits};
 
-pub const FAMILIES: [&str; 13] = [
+pub const FAMILIES: [&str; 14] = [
     "bit",
     "subrange",
     "dual",
@@ -22,6 +21,7 @@ pub const FAMILIES: [&str; 13] = [
     "outside",
     "nonzero_literal",
     "same_range",
+    "numeric_consumer",
 ];
 
 /// Records completed proofs and actual accepted rewrites for generated inputs.
@@ -31,7 +31,7 @@ pub struct Outcome {
     pub pipeline: usize,
     pub width: usize,
     pub prefix: usize,
-    pub forced: usize,
+    pub rewritten: usize,
     pub accepted: usize,
     pub proofs: usize,
     pub features: [usize; 9],
@@ -47,17 +47,18 @@ struct Sample {
     features: [usize; 9],
 }
 
-/// Generates contained ranges and explicit non-contained or unrelated controls.
+/// Generates sign witnesses, retained consumers, and out-of-scope range
+/// controls.
 fn sample(data: &[u8]) -> Sample {
     let byte = |i: usize| data.get(i).copied().unwrap_or(0) as usize;
     let family = byte(0) % FAMILIES.len();
     let pipeline = byte(1) % 3;
     let width = [3usize, 4, 8, 17, 65, 129, 161][byte(2) % 7];
     let input_width = width - 1;
-    let mut prefix = if family == 0 {
-        1
+    let mut prefix = if family == 1 || family == 12 {
+        2 + byte(3) % (width - 1)
     } else {
-        1 + byte(3) % (width / 2)
+        1
     };
     let mut start = width - prefix;
     let (guard_start, guard_width) = if matches!(family, 7 | 10) {
@@ -143,6 +144,10 @@ top fn main(x: bits[{input_width}] id=1, y: bits[{input_width}] id=2, p: bits[1]
         let ty = format!("(bits[1], bits[{width}], bits[1], bits[1])");
         text += &format!("  ret out: {ty} = tuple(result, base, guard, {witness}, id=101)\n");
         ty
+    } else if family == 13 {
+        let ty = format!("(bits[1], bits[{width}])");
+        text += &format!("  ret out: {ty} = tuple(result, base, id=101)\n");
+        ty
     } else {
         let ret = if family == 9 { "p" } else { "result" };
         text += &format!("  ret out: bits[1] = identity({ret}, id=101)\n");
@@ -177,7 +182,7 @@ fn prove(lhs: &ir::Fn, rhs: &ir::Fn) -> Result<(), String> {
     }
 }
 
-/// Checks forced soundness, rollback, and real-cost pipeline acceptance.
+/// Proves direct rewrite soundness and the complete optimizer pipeline.
 pub fn check_input(data: &[u8]) -> Result<Outcome, String> {
     let Sample {
         original,
@@ -187,40 +192,18 @@ pub fn check_input(data: &[u8]) -> Result<Outcome, String> {
         prefix,
         features,
     } = sample(data);
-    let mut forced = original.clone();
-    let mut first = true;
-    let count = rewrite_with_evaluator(&mut forced, &mut |_| {
-        Ok(IrCost {
-            area: if std::mem::take(&mut first) { 100 } else { 99 },
-            delay: 100.0,
-        })
-    });
-    if count != usize::from(family < 6 || family == 12) {
+    let mut rewritten = original.clone();
+    let count = rewrite(&mut rewritten);
+    if count != usize::from(matches!(family, 0 | 4 | 5 | 13)) {
         return Err(format!(
-            "unexpected forced recognition for {}: {count}\n{original}",
+            "unexpected recognition for {}: {count}\n{original}",
             FAMILIES[family]
         ));
     }
-    if count == 0 && !first {
-        return Err("no-match input invoked costing".to_string());
+    if count == 0 && rewritten.to_string() != original.to_string() {
+        return Err("declined input changed".to_string());
     }
-    prove(&original, &forced)?;
-    for fail in [false, true] {
-        let mut declined = original.clone();
-        let count = rewrite_with_evaluator(&mut declined, &mut |_| {
-            if fail {
-                Err("injected cost error".to_string())
-            } else {
-                Ok(IrCost {
-                    area: 100,
-                    delay: 100.0,
-                })
-            }
-        });
-        if count != 0 || declined.to_string() != original.to_string() {
-            return Err("cost tie/error changed input".to_string());
-        }
-    }
+    prove(&original, &rewritten)?;
     let source = format!("package implication_fuzz\n\ntop {original}");
     let result = run_aug_opt_over_ir_text_with_stats(
         &source,
@@ -248,7 +231,7 @@ pub fn check_input(data: &[u8]) -> Result<Outcome, String> {
         pipeline,
         width,
         prefix,
-        forced: count,
+        rewritten: count,
         accepted: result.rewrite_stats.predicate_implication_simplified,
         proofs: 2,
         features,
@@ -260,9 +243,9 @@ mod tests {
     use super::*;
     #[test]
     fn deterministic_audit_requires_proved_acceptance_and_checked_rejections() {
-        let mut accepted = [[0usize; 3]; 13];
-        let mut rejected = [0usize; 6];
-        for family in 0..13 {
+        let mut accepted = [[0usize; 3]; 14];
+        let mut rejected = [0usize; 14];
+        for family in 0..14 {
             for pipeline in 0..3 {
                 for width in [2, 3, 4, 6] {
                     for op in 0..4 {
@@ -273,20 +256,25 @@ mod tests {
                             check_input(&[family, pipeline, width, 6, 1, op, 1, 63]).unwrap();
                         assert_eq!(result.proofs, 2);
                         accepted[family as usize][pipeline as usize] += result.accepted;
-                        if (6..12).contains(&family) {
-                            assert_eq!(result.forced, 0);
-                            rejected[family as usize - 6] += 1;
+                        if !matches!(family, 0 | 4 | 5 | 13) {
+                            assert_eq!(result.rewritten, 0);
+                            rejected[family as usize] += 1;
                         }
                     }
                 }
             }
         }
-        for family in [0, 1, 4, 5] {
+        for family in [0, 4, 5, 13] {
             for pipeline in 0..3 {
                 assert!(accepted[family][pipeline] > 0, "{accepted:?}");
             }
         }
-        assert!(rejected.into_iter().all(|count| count > 0));
+        assert!(
+            rejected
+                .into_iter()
+                .enumerate()
+                .all(|(family, count)| matches!(family, 0 | 4 | 5 | 13) || count > 0)
+        );
         eprintln!("implication_audit accepted={accepted:?} rejected={rejected:?}");
     }
 }

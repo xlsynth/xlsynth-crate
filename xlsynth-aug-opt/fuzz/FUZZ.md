@@ -115,12 +115,13 @@ Focused mutation target for contiguous low-bit nonzero tests through negation or
 
 ## fuzz_predicate_implication
 
-Checks structural zero/nonzero containment across scalar AND/OR and inverted
-forms, nested slices, operand orders, shared clauses, and retained numeric and
-predicate consumers. Wrong sources, overlapping/disjoint ranges, mixed polarity,
-nonzero literals, and dead predicates are rejection controls. Each input proves
-both forced rewriting and actual optimizer output with Bitwuzla, checks cost
-tie/error rollback, and reports accepted rewrites only after both proofs pass.
+Checks the sign-bit/nonzero absorption identity across scalar AND/OR and
+inverted forms, nested slices, operand orders, and shared clauses. Retained
+comparison consumers, non-sign ranges, wrong sources, mixed polarity, nonzero
+literals, and dead predicates are rejection controls; numeric consumers remain
+allowed. Each input proves both the direct structural rewrite and actual
+one/three-round optimizer output with Bitwuzla. Inconclusive proofs fail the
+campaign. No gate-cost evaluator is used by this rewrite.
 
 The implication generator limits shared Boolean chains to eight levels because
 the existing priority-result matcher expands deep shared AND DAGs in both

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Origin: focused retained-predicate/retained-numeric rejection control.
 sha256: "df3d6904733f89ee591e9b7d52e4216846f38aa7d6b67ce816b50e0cf588eefa"
 predicate_simplification {
   expected_simplifications: 0

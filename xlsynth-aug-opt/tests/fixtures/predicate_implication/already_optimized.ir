@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Control: normal XLS optimization already removes this predicate.
+package already_optimized
+top fn main(x: bits[8] id=1) -> bits[1] {
+  bit: bits[1] = bit_slice(x, start=5, width=1, id=2)
+  zero: bits[8] = literal(value=0, id=3)
+  nonzero: bits[1] = ne(x, zero, id=4)
+  ret result: bits[1] = and(bit, nonzero, id=5)
+}

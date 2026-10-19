@@ -546,10 +546,7 @@ fn apply_basis_rewrites_to_fn(
     // Preserve common-source witnesses before arithmetic equality rewriting.
     // This pass changes equivalent payloads without renumbering nodes, so the
     // current round's range facts remain valid.
-    stats.predicate_implication_simplified =
-        crate::predicate_implication::rewrite_with_evaluator(&mut cloned, &mut |function| {
-            function_evaluator.estimate(function)
-        });
+    stats.predicate_implication_simplified = crate::predicate_implication::rewrite(&mut cloned);
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
     let affine_shift_amount = rewrite_affine_shift_amounts(&mut cloned);
     stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
