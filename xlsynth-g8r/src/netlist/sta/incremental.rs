@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transactional, fixed-topology timing for cell substitution. Full and
-//! incremental analyses share the output, Liberty-table and setup kernels.
+//! Transactional timing for cell substitution and bounded topology edits. Full
+//! and incremental analyses share the output, Liberty-table and setup kernels.
 
 use super::{
     CoverageConstantPropagation, EdgeLoadCapacitance, EdgeTiming, InstanceCoverageInputs,
     InstanceTimingInputs, NetEndpoint, PinBitSource, PreparedStaLibrary, ResolvedTimingSource,
     SignalTiming, SignalTimingSet, StaOptions, StaTimingType, TimingEvaluationContext,
-    analyze_assign_sources, canonicalize_pin_bit_source, combinational_output_pin_evaluation_order,
-    effective_input_capacitance_by_edge, evaluate_instance_outputs,
-    evaluate_register_setup_capture_arrival, is_sequential_boundary_cell, resolve_symbol,
-    resolve_timing_sources, validate_constraint_tables_once,
-    validate_instance_functional_timing_coverage,
+    TimingQueryDiagnosticCounts, analyze_assign_sources, canonicalize_pin_bit_source,
+    combinational_output_pin_evaluation_order, effective_input_capacitance_by_edge,
+    evaluate_instance_outputs, evaluate_register_setup_capture_arrival,
+    is_sequential_boundary_cell, resolve_symbol, resolve_timing_sources,
+    validate_constraint_tables_once, validate_instance_functional_timing_coverage,
 };
 use crate::liberty::Library;
-use crate::liberty_model::{Pin, PinDirection, TimingArc};
+use crate::liberty_model::{PinDirection, TimingArc};
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
@@ -22,19 +22,18 @@ use serde::Serialize;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
 
 pub(crate) const TIMING_COMPARISON_TOLERANCE: f64 = 1e-9;
 pub(crate) const STA_VERIFICATION_TOLERANCE: f64 = 1e-7;
-const ELECTRICAL_COMPARISON_TOLERANCE: f64 = 1e-9;
-const NEAR_CRITICAL_ENDPOINT_LIMIT: usize = 32;
-const NEAR_CRITICAL_WINDOW_FRACTION: f64 = 0.05;
 
 /// Transaction result; rejected and work-limited trials both restore the
 /// incumbent, but only the latter stops the caller's current search phase.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TrialOutcome {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrialOutcome {
     Accepted,
+    #[default]
     Rejected,
     PropagationLimit,
 }
@@ -155,7 +154,7 @@ impl Ord for RankedIndex {
 /// Ordered endpoint arrivals with an incrementally maintained count of ties at
 /// the maximum. A bounded endpoint sum alone cannot see progress when more
 /// endpoints share the maximum than fit in that sum.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct EndpointScores {
     values: BTreeSet<RankedIndex>,
     worst_count: usize,
@@ -200,36 +199,11 @@ impl EndpointScores {
     }
 }
 
-/// Lexicographic progress below the worst delay: first reduce the number of
-/// equally critical endpoints, then improve a bounded near-critical sum.
-#[derive(Clone, Copy)]
-pub(crate) struct TimingTieBreak {
-    worst_count: usize,
-    near_sum: f64,
-}
-
-impl TimingTieBreak {
-    pub fn improves(self, old: Self) -> bool {
-        self.worst_count < old.worst_count
-            || (self.worst_count == old.worst_count
-                && self.near_sum < old.near_sum - TIMING_COMPARISON_TOLERANCE)
-    }
-
-    /// Returns a dimensionless progress ratio for area-efficiency ranking.
-    /// A nonpositive baseline cannot justify paying additional area.
-    pub fn relative_to(self, old: Self) -> f64 {
-        if self.worst_count < old.worst_count {
-            self.worst_count as f64 / old.worst_count as f64
-        } else if old.near_sum > 0.0 {
-            self.near_sum / old.near_sum
-        } else {
-            1.0
-        }
-    }
-}
-
 /// Cached connectivity independent of the selected drive strength.
+#[derive(Clone)]
 struct Instance {
+    name: String,
+    pin_order: Vec<String>,
     pins: HashMap<String, Vec<PinBitSource>>,
     known: HashMap<String, bool>,
     outputs: Vec<usize>,
@@ -238,7 +212,7 @@ struct Instance {
 
 /// A physical output or a complete register capture boundary.
 #[derive(Clone, Copy)]
-enum Endpoint {
+pub enum TimingEndpoint {
     Output(usize),
     Capture(usize),
 }
@@ -247,43 +221,80 @@ enum Endpoint {
 #[derive(Default)]
 struct Undo {
     bits: Vec<(usize, [Option<SignalTimingSet>; 2])>,
-    loads: Vec<(usize, EdgeLoadCapacitance)>,
     endpoints: Vec<(usize, [Option<f64>; 2])>,
+    counts: Vec<(usize, TimingQueryDiagnosticCounts)>,
 }
 
-/// Mutable timing state; the borrowed module's connectivity cannot change.
-pub(crate) struct IncrementalSta<'a, 'lib> {
-    lib: PreparedStaLibrary<'lib>,
-    normalized: NormalizedNetlistModule<'a>,
-    nets: &'a [Net],
-    interner: &'a StringInterner<StringBackend<SymbolU32>>,
+/// Connected-cell dependencies are cyclic even when finer timing-pin
+/// dependencies might admit full STA. Callers may choose a full-STA fallback.
+#[derive(Debug)]
+pub struct UnsupportedTopology;
+impl std::fmt::Display for UnsupportedTopology {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("unsupported cyclic cell dependencies")
+    }
+}
+impl std::error::Error for UnsupportedTopology {}
+
+/// Componentwise violation amounts for one pin, all zero when unconstrained.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ElectricalViolations {
+    pub capacitance: f64,
+    pub transition: f64,
+    pub fanout: f64,
+}
+
+/// Read-only normalized instance bindings. Iterate pin_order for stable
+/// ordering.
+pub struct TimingInstanceView<'a> {
+    pub name: &'a str,
+    pub cell: usize,
+    pub pins: &'a HashMap<String, Vec<BitSource>>,
+    pub pin_order: &'a [String],
+    pub outputs: &'a [usize],
+    pub sequential: bool,
+}
+
+/// Owned timing graph with shared Liberty preparation and transactional edits.
+pub struct IncrementalSta<'lib> {
+    lib: Arc<PreparedStaLibrary<'lib>>,
+    bit_names: Vec<String>,
+    bit_sources: Vec<BitSource>,
+    primary_inputs: BTreeSet<usize>,
+    instance_names: HashSet<String>,
+    timing_constants: Vec<Option<bool>>,
+    coverage_values: Vec<Option<bool>>,
     instances: Vec<Instance>,
-    pub cells: Vec<usize>,
+    cells: Vec<usize>,
     orders: Vec<Vec<usize>>,
     drivers: Vec<Option<usize>>,
     loads: Vec<Vec<(usize, String)>>,
     capacitances: Vec<EdgeLoadCapacitance>,
-    external_loads: Vec<f64>,
+    external_load_counts: Vec<usize>,
+    module_output_load: f64,
     consumers: Vec<Vec<usize>>,
     positions: Vec<usize>,
     topological: Vec<usize>,
+    traversal_dirty: bool,
     timing: [Vec<Option<SignalTimingSet>>; 2],
-    endpoints: Vec<Endpoint>,
+    endpoints: Vec<TimingEndpoint>,
     endpoint_values: Vec<[Option<f64>; 2]>,
     endpoints_by_bit: Vec<Vec<usize>>,
     capture_endpoint: Vec<Option<usize>>,
     scores: [EndpointScores; 4],
-    electrical: Vec<Vec<f64>>,
+    electrical: Vec<Vec<ElectricalViolations>>,
     evaluation: TimingEvaluationContext<'lib>,
+    query_counts: Vec<TimingQueryDiagnosticCounts>,
+    query_totals: TimingQueryDiagnosticCounts,
     coverage_known: Vec<HashMap<String, bool>>,
     registered: bool,
     literal: SignalTimingSet,
     propagated: usize,
 }
 
-impl<'a, 'lib> IncrementalSta<'a, 'lib> {
+impl<'lib> IncrementalSta<'lib> {
     /// Retains prepared Liberty metadata for the final full timing check.
-    pub(crate) fn into_prepared_library(self) -> PreparedStaLibrary<'lib> {
+    pub(crate) fn into_prepared_library(self) -> Arc<PreparedStaLibrary<'lib>> {
         self.lib
     }
 
@@ -296,13 +307,50 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
     /// Prepares stable connectivity and initializes both independent launch
     /// classes.
     pub fn new(
-        module: &'a NetlistModule,
-        nets: &'a [Net],
-        interner: &'a StringInterner<StringBackend<SymbolU32>>,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
         library: &'lib Library,
         options: StaOptions,
     ) -> Result<Self> {
-        let lib = PreparedStaLibrary::new(library)?;
+        Self::new_mode(
+            module,
+            nets,
+            interner,
+            Arc::new(PreparedStaLibrary::new(library)?),
+            options,
+            true,
+        )
+    }
+
+    /// Constructs an explicitly combinational session. Unused output arcs do
+    /// not turn otherwise combinational instances into register boundaries.
+    pub fn new_combinational(
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        library: &'lib Library,
+        options: StaOptions,
+    ) -> Result<Self> {
+        Self::new_mode(
+            module,
+            nets,
+            interner,
+            Arc::new(PreparedStaLibrary::new(library)?),
+            options,
+            false,
+        )
+    }
+
+    fn new_mode(
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        lib: Arc<PreparedStaLibrary<'lib>>,
+        options: StaOptions,
+        register_boundaries: bool,
+    ) -> Result<Self> {
+        let library = lib.library;
         let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
         let assign = analyze_assign_sources(&normalized, nets, interner)?;
         let resolved = resolve_timing_sources(&assign.bit_sources, &normalized, nets, interner)?;
@@ -321,6 +369,7 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
             lib.validate_functional_semantics(cell_idx)
                 .map_err(anyhow::Error::msg)?;
             let mut pins = HashMap::new();
+            let mut pin_order = Vec::new();
             let mut known = HashMap::new();
             let mut outputs = Vec::new();
             for conn in &inst.connections {
@@ -361,9 +410,10 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
                         _ => { /* The full validation below rejects unsupported bindings. */ }
                     }
                 }
+                pin_order.push(name.clone());
                 pins.insert(name, sources);
             }
-            let sequential = is_sequential_boundary_cell(cell);
+            let sequential = register_boundaries && is_sequential_boundary_cell(cell);
             let order = if sequential {
                 cell.pins
                     .iter()
@@ -380,6 +430,8 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
             cells.push(cell_idx);
             orders.push(order);
             instances.push(Instance {
+                name: resolve_symbol(interner, inst.instance_name, "instance name")?,
+                pin_order,
                 pins,
                 known,
                 outputs,
@@ -390,8 +442,18 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
         // Full STA is the validation authority, including undriven nets,
         // aliases, conditional arcs and unsupported assignments.
         // Preparation is one-time.
-        let reference =
-            measure_boundary_delays_with_library(module, nets, interner, &lib, options)?;
+        let reference = if register_boundaries {
+            measure_boundary_delays_with_library(module, nets, interner, &lib, options)?
+        } else {
+            BoundaryDelays {
+                input_to_output: lib
+                    .analyze_combinational_max_arrival(module, nets, interner, options)?
+                    .worst_output_arrival,
+                input_to_register: 0.0,
+                register_to_output: 0.0,
+                register_to_register: 0.0,
+            }
+        };
         let mut constants = vec![None; n];
         for (i, inst) in instances.iter().enumerate() {
             for (name, sources) in &inst.pins {
@@ -451,16 +513,17 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
             }
         }
         if topological.len() != instances.len() {
-            return Err(anyhow!("unsupported cyclic cell dependencies"));
+            return Err(UnsupportedTopology.into());
         }
         let mut positions = vec![0; instances.len()];
+        let rank_gap = topology::RANK_GAP.min(usize::MAX / (instances.len() + 1));
         for (pos, i) in topological.iter().enumerate() {
-            positions[*i] = pos;
+            positions[*i] = (pos + 1) * rank_gap;
         }
         let mut endpoints = Vec::new();
         let mut endpoints_by_bit = vec![Vec::new(); n];
         let mut capture_endpoint = vec![None; instances.len()];
-        let mut external_loads = vec![0.0; n];
+        let mut external_load_counts = vec![0; n];
         let mut seen_outputs = HashSet::new();
         let mut timing: [Vec<Option<SignalTimingSet>>; 2] = [vec![None; n], vec![None; n]];
         let source = SignalTiming {
@@ -494,9 +557,9 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
                 } else if seen_outputs.insert(*bit)
                     && let ResolvedTimingSource::Bit(root) = resolved[*bit]
                 {
-                    external_loads[root] += options.module_output_load;
+                    external_load_counts[root] += 1;
                     endpoints_by_bit[root].push(endpoints.len());
-                    endpoints.push(Endpoint::Output(root));
+                    endpoints.push(TimingEndpoint::Output(root));
                 }
             }
         }
@@ -517,26 +580,41 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
                         }
                     }
                 }
-                endpoints.push(Endpoint::Capture(i));
+                endpoints.push(TimingEndpoint::Capture(i));
             }
         }
         let endpoint_values = vec![[None; 2]; endpoints.len()];
         let electrical = vec![Vec::new(); instances.len()];
+        let query_counts = vec![TimingQueryDiagnosticCounts::default(); instances.len()];
         let mut sta = Self {
             lib,
-            normalized,
-            nets,
-            interner,
+            bit_names: (0..n)
+                .map(|bit| normalized.render_bit(bit, nets, interner))
+                .collect(),
+            bit_sources: (0..n)
+                .map(|bit| canonicalize_pin_bit_source(BitSource::Bit(bit), &resolved))
+                .collect(),
+            primary_inputs: normalized
+                .ports
+                .iter()
+                .filter(|p| p.direction == PortDirection::Input)
+                .flat_map(|p| p.bits.iter().copied())
+                .collect(),
+            instance_names: instances.iter().map(|inst| inst.name.clone()).collect(),
+            timing_constants: constants,
+            coverage_values: vec![None; n],
             instances,
             cells,
             orders,
             drivers,
             loads,
             capacitances: vec![EdgeLoadCapacitance::default(); n],
-            external_loads,
+            external_load_counts,
+            module_output_load: options.module_output_load,
             consumers,
             positions,
             topological,
+            traversal_dirty: false,
             timing,
             endpoints,
             endpoint_values,
@@ -545,6 +623,8 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
             scores: std::array::from_fn(|_| EndpointScores::default()),
             electrical,
             evaluation: TimingEvaluationContext::new(library),
+            query_counts,
+            query_totals: TimingQueryDiagnosticCounts::default(),
             coverage_known: Vec::new(),
             registered,
             literal,
@@ -560,6 +640,7 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
             .coverage_constants(usize::MAX)
             .0
             .expect("unlimited coverage propagation");
+        sta.refresh_coverage_values();
         for endpoint in 0..sta.endpoints.len() {
             let values = sta.compute_endpoint(endpoint)?;
             sta.set_endpoint(endpoint, values);
@@ -585,11 +666,7 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
         if limit < self.instances.len() {
             return (None, 0);
         }
-        let pin_sources: Vec<_> = self
-            .instances
-            .iter()
-            .map(|inst| inst.pins.clone())
-            .collect();
+        let pin_sources: Vec<_> = self.instances.iter().map(|inst| &inst.pins).collect();
         let bit_loads: Vec<Vec<NetEndpoint>> = self
             .loads
             .iter()
@@ -668,8 +745,8 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
         false
     }
 
-    /// Rejects replacements that would change constants used by `when` arcs.
-    /// Incremental STA keeps those bindings fixed for the duration of a search.
+    /// Checks the fixed-pin Resize contract for constants used by `when` arcs.
+    /// Combinational Replace edits can instead update these bindings.
     fn changes_timing_constants(&self, i: usize, old: usize, new: usize) -> Result<bool> {
         let old_cell = &self.lib.library.cells[old];
         for (old_pin_idx, old_pin) in old_cell.pins.iter().enumerate() {
@@ -693,10 +770,7 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
 
     /// Re-sums just one edited net to avoid accumulating subtraction roundoff.
     fn compute_load(&self, bit: usize) -> Result<EdgeLoadCapacitance> {
-        let mut cap = EdgeLoadCapacitance {
-            rise: self.external_loads[bit],
-            fall: self.external_loads[bit],
-        };
+        let mut cap = EdgeLoadCapacitance::default();
         for (inst, name) in &self.loads[bit] {
             let pin = self
                 .lib
@@ -706,12 +780,19 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
             cap.rise += c.rise;
             cap.fall += c.fall;
         }
+        // Match full STA's original sink order, then each physical output
+        // port load, so trial/report arithmetic also agrees bit for bit.
+        for _ in 0..self.external_load_counts[bit] {
+            cap.rise += self.module_output_load;
+            cap.fall += self.module_output_load;
+        }
         Ok(cap)
     }
 
     /// Updates the two independent launch classes through the shared STA
     /// kernel.
     fn recompute(&mut self, i: usize) -> Result<()> {
+        self.evaluation.diagnostics = TimingQueryDiagnosticCounts::default();
         let inst = &self.instances[i];
         for mode in 0..if self.registered { 2 } else { 1 } {
             for bit in &inst.outputs {
@@ -724,10 +805,8 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
                     inst_pin_map: &inst.pins,
                     known_pin_values: &inst.known,
                     output_pin_order: &self.orders[i],
-                    normalized: &self.normalized,
-                    nets: self.nets,
-                    interner: self.interner,
-                    inst_idx: i,
+                    instance_name: &inst.name,
+                    render_bit: &|bit| self.bit_names[bit].clone(),
                     register_boundaries: self.registered,
                     is_sequential: inst.sequential,
                     launch_register: mode == 1,
@@ -738,7 +817,35 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
                 &mut self.evaluation,
             )?;
         }
+        self.set_query_counts(i, self.evaluation.diagnostics);
         Ok(())
+    }
+
+    /// Maintains exact query totals through the same per-instance journal used
+    /// for timing, avoiding a full reduction on every candidate.
+    fn set_query_counts(&mut self, i: usize, next: TimingQueryDiagnosticCounts) {
+        let old = self.query_counts[i];
+        self.query_totals.delay_slew_below_min_clamp_count =
+            self.query_totals.delay_slew_below_min_clamp_count
+                - old.delay_slew_below_min_clamp_count
+                + next.delay_slew_below_min_clamp_count;
+        self.query_totals
+            .delay_slew_single_above_max_extrapolation_count = self
+            .query_totals
+            .delay_slew_single_above_max_extrapolation_count
+            - old.delay_slew_single_above_max_extrapolation_count
+            + next.delay_slew_single_above_max_extrapolation_count;
+        self.query_totals.delay_slew_multiple_above_max_clamp_count =
+            self.query_totals.delay_slew_multiple_above_max_clamp_count
+                - old.delay_slew_multiple_above_max_clamp_count
+                + next.delay_slew_multiple_above_max_clamp_count;
+        self.query_totals.setup_below_min_clamp_count =
+            self.query_totals.setup_below_min_clamp_count - old.setup_below_min_clamp_count
+                + next.setup_below_min_clamp_count;
+        self.query_totals.setup_above_max_clamp_count =
+            self.query_totals.setup_above_max_clamp_count - old.setup_above_max_clamp_count
+                + next.setup_above_max_clamp_count;
+        self.query_counts[i] = next;
     }
 
     /// Evaluates one changed physical output or setup-adjusted capture
@@ -751,11 +858,11 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
             .take(if self.registered { 2 } else { 1 })
         {
             *value = match self.endpoints[endpoint] {
-                Endpoint::Output(bit) => self.timing[mode][bit]
+                TimingEndpoint::Output(bit) => self.timing[mode][bit]
                     .as_ref()
                     .and_then(SignalTimingSet::worst_arrival_candidate)
                     .map(|t| t.timing.arrival),
-                Endpoint::Capture(i) => {
+                TimingEndpoint::Capture(i) => {
                     let mut worst: Option<f64> = None;
                     let cell = &self.lib.library.cells[self.cells[i]];
                     for pin in cell
@@ -809,7 +916,10 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
     /// Maintains ordered endpoint scores without rescanning unaffected
     /// endpoints.
     fn set_endpoint(&mut self, endpoint: usize, values: [Option<f64>; 2]) {
-        let capture = usize::from(matches!(self.endpoints[endpoint], Endpoint::Capture(_)));
+        let capture = usize::from(matches!(
+            self.endpoints[endpoint],
+            TimingEndpoint::Capture(_)
+        ));
         for (mode, value) in values.iter().enumerate() {
             let scores = &mut self.scores[mode * 2 + capture];
             scores.replace(endpoint, self.endpoint_values[endpoint][mode], *value);
@@ -827,101 +937,130 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
         }
     }
 
-    /// Prioritizes register-to-register timing when present, otherwise worst
-    /// IO.
-    pub fn objective(&self) -> usize {
-        if self.scores[3].worst().is_some() {
-            3
-        } else {
-            (0..4)
-                .filter(|i| self.scores[*i].worst().is_some())
-                .max_by(|a, b| self.score().values()[*a].total_cmp(&self.score().values()[*b]))
-                .unwrap_or(0)
-        }
-    }
-
-    /// Breaks delay ties without losing progress on large critical plateaus.
-    pub fn secondary(&self, objective: usize) -> TimingTieBreak {
-        let scores = &self.scores[objective];
-        TimingTieBreak {
-            worst_count: scores.worst_count,
-            near_sum: scores
-                .values
-                .iter()
-                .rev()
-                .take(NEAR_CRITICAL_ENDPOINT_LIMIT)
-                .map(|key| key.0)
-                .sum(),
-        }
-    }
-
     pub fn is_register(&self, i: usize) -> bool {
         self.instances[i].sequential
     }
 
-    /// Cumulative propagation work, including rejected and interrupted trials.
+    /// Cumulative timing and Boolean-coverage cell visits, including rejected
+    /// and interrupted trials.
     pub fn propagated_instances(&self) -> usize {
         self.propagated
     }
 
-    /// Visits near-critical fanin by cumulative arrival deficit, once per
-    /// round. This is only a search-order heuristic: asymmetric pin arcs
-    /// and load/slew effects are accounted for by accurate candidate
-    /// evaluation afterward. Ineligible cells are traversed but do not
-    /// consume the limit of selectable candidates.
-    pub fn critical_instances(
-        &self,
-        objective: usize,
-        limit: usize,
-        eligible: impl Fn(usize) -> bool,
-    ) -> Vec<usize> {
-        let mut queue = BTreeSet::new();
-        let worst = self.score().values()[objective];
-        for key in self.scores[objective]
-            .values
-            .iter()
-            .rev()
-            .take(NEAR_CRITICAL_ENDPOINT_LIMIT)
-            .filter(|k| k.0 >= worst - worst.abs() * NEAR_CRITICAL_WINDOW_FRACTION)
-        {
-            match self.endpoints[key.1] {
-                Endpoint::Output(bit) => {
-                    if let Some(i) = self.drivers[bit] {
-                        queue.insert(RankedIndex(worst - key.0, i));
-                    }
-                }
-                Endpoint::Capture(i) => {
-                    queue.insert(RankedIndex(worst - key.0, i));
-                    queue.extend(self.fanin_priorities(i, objective / 2, worst - key.0));
-                }
-            }
-        }
-        let mut seen = HashSet::new();
-        let mut result = Vec::new();
-        while let Some(RankedIndex(deficit, i)) = queue.pop_first() {
-            if !seen.insert(i) {
-                continue;
-            }
-            if eligible(i) {
-                result.push(i);
-                if result.len() >= limit {
-                    break;
-                }
-            }
-            // A launch register's D cone belongs to another timing path.
-            // Capture-register fanin is seeded separately above.
-            if !self.instances[i].sequential {
-                queue.extend(self.fanin_priorities(i, objective / 2, deficit));
-            }
-        }
-        result
+    /// Stable current cell selections, indexed by instance ID.
+    pub fn cell_indices(&self) -> &[usize] {
+        &self.cells
     }
 
-    /// Ranks data-input drivers by arrival deficit in one launch class.
-    fn fanin_priorities(&self, i: usize, mode: usize, deficit: f64) -> SmallVec<[RankedIndex; 4]> {
-        let mut inputs: SmallVec<[RankedIndex; 4]> = SmallVec::new();
-        for (pin, sources) in &self.instances[i].pins {
-            let pin = self.lib.pin(self.cells[i], pin).expect("validated pin");
+    /// Read-only normalized bindings for one stable instance ID.
+    pub fn instance(&self, i: usize) -> Option<TimingInstanceView<'_>> {
+        let inst = self.instances.get(i)?;
+        Some(TimingInstanceView {
+            name: &inst.name,
+            cell: self.cells[i],
+            pins: &inst.pins,
+            pin_order: &inst.pin_order,
+            outputs: &inst.outputs,
+            sequential: inst.sequential,
+        })
+    }
+
+    /// Driver of a canonical bit, if driven by an instance.
+    pub fn driver_for_bit(&self, bit: usize) -> Option<usize> {
+        self.drivers.get(bit).copied().flatten()
+    }
+
+    /// Input-pin loads in deterministic capacitance-summation order.
+    pub fn loads_for_bit(&self, bit: usize) -> &[(usize, String)] {
+        &self.loads[bit]
+    }
+
+    /// Number of physical module outputs loading a canonical bit.
+    pub fn output_load_count(&self, bit: usize) -> usize {
+        self.external_load_counts[bit]
+    }
+
+    /// Whether a stable instance name is already present.
+    pub fn contains_instance_name(&self, name: &str) -> bool {
+        self.instance_names.contains(name)
+    }
+
+    /// Library pin index for a current instance binding.
+    pub fn pin_index(&self, instance: usize, name: &str) -> Option<usize> {
+        self.cells
+            .get(instance)
+            .and_then(|&cell| self.lib.pin_index(cell, name))
+    }
+
+    /// Output pin driving a canonical bit from this instance.
+    pub fn output_pin_index(&self, instance: usize, bit: usize) -> Option<usize> {
+        let inst = self.instances.get(instance)?;
+        let outputs = &self.orders[instance];
+        // Ordinary scalar cells have one output. Reuse its prepared pin index
+        // instead of resolving every input-pin name during metric reduction.
+        if inst.outputs.as_slice() == [bit] && outputs.len() == 1 {
+            return Some(outputs[0]);
+        }
+        outputs.iter().copied().find(|&pin| {
+            let name = self
+                .lib
+                .library
+                .resolve_string(&self.lib.library.cells[self.cells[instance]].pins[pin].name);
+            inst.pins
+                .get(name)
+                .is_some_and(|sources| sources.as_slice() == [BitSource::Bit(bit)])
+        })
+    }
+
+    /// Number of independently propagated launch classes (PI, then registers).
+    pub fn launch_class_count(&self) -> usize {
+        if self.registered { 2 } else { 1 }
+    }
+
+    /// Current instances in dependency order, including outstanding edits.
+    /// During a topology trial the order is materialized on demand; otherwise
+    /// this borrows the committed traversal without copying.
+    pub fn topological_instances(&self) -> std::borrow::Cow<'_, [usize]> {
+        if self.traversal_dirty {
+            let mut order: Vec<_> = (0..self.instance_count()).collect();
+            order.sort_by_key(|&i| (self.positions[i], i));
+            std::borrow::Cow::Owned(order)
+        } else {
+            std::borrow::Cow::Borrowed(&self.topological)
+        }
+    }
+
+    /// Ordered endpoint arrivals for PI->PO, PI->register, register->PO or
+    /// register->register (indices 0 through 3).
+    pub fn endpoint_arrivals(
+        &self,
+        boundary: usize,
+    ) -> impl DoubleEndedIterator<Item = (TimingEndpoint, f64)> + '_ {
+        self.scores[boundary]
+            .values
+            .iter()
+            .map(|key| (self.endpoints[key.1], key.0))
+    }
+
+    /// Number of endpoints tied at this boundary's maximum.
+    pub fn endpoint_maximum_count(&self, boundary: usize) -> usize {
+        self.scores[boundary].worst_count
+    }
+
+    /// Endpoints and their separate PI/register launch arrivals.
+    pub fn endpoint_values(&self) -> impl Iterator<Item = (TimingEndpoint, [Option<f64>; 2])> + '_ {
+        self.endpoints
+            .iter()
+            .copied()
+            .zip(self.endpoint_values.iter().copied())
+    }
+
+    /// Data-input driver arrivals in a launch class; excludes register clock
+    /// pins while retaining clock-marked combinational dependencies.
+    pub fn data_input_arrivals(&self, i: usize, mode: usize) -> SmallVec<[(usize, f64); 4]> {
+        let mut inputs = SmallVec::new();
+        for (name, sources) in &self.instances[i].pins {
+            let pin = self.lib.pin(self.cells[i], name).expect("validated pin");
             if pin.direction != PinDirection::Input as i32
                 || (self.instances[i].sequential && pin.is_clocking_pin)
             {
@@ -934,79 +1073,34 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
                         .as_ref()
                         .and_then(SignalTimingSet::worst_arrival_candidate)
                 {
-                    inputs.push(RankedIndex(arrival.timing.arrival, driver));
+                    inputs.push((driver, arrival.timing.arrival));
                 }
             }
-        }
-        let latest = inputs.iter().map(|input| input.0).fold(0.0, f64::max);
-        for input in &mut inputs {
-            input.0 = deficit + (latest - input.0).max(0.0);
         }
         inputs
     }
 
-    /// Estimates per-cell headroom once per recovery round, across all timing
-    /// boundaries. This is an ordering heuristic, not a timing constraint:
-    /// exact trials still account for pin arcs, slew and upstream load changes.
-    pub fn recovery_headroom(&self, limits: BoundaryDelays) -> Vec<f64> {
-        let mut result = vec![f64::INFINITY; self.instances.len()];
-        for mode in 0..if self.registered { 2 } else { 1 } {
-            let mut margins = vec![f64::INFINITY; self.instances.len()];
-            for (endpoint, values) in self.endpoints.iter().zip(&self.endpoint_values) {
-                let Some(arrival) = values[mode] else {
-                    continue;
-                };
-                let capture = usize::from(matches!(endpoint, Endpoint::Capture(_)));
-                let margin = (limits.values()[mode * 2 + capture] - arrival).max(0.0);
-                match *endpoint {
-                    Endpoint::Output(bit) => {
-                        if let Some(i) = self.drivers[bit] {
-                            margins[i] = margins[i].min(margin);
-                        }
-                    }
-                    Endpoint::Capture(i) => {
-                        margins[i] = margins[i].min(margin);
-                        for RankedIndex(value, driver) in self.fanin_priorities(i, mode, margin) {
-                            margins[driver] = margins[driver].min(value);
-                        }
-                    }
-                }
-            }
-            for i in self.topological.iter().rev().copied() {
-                if !self.instances[i].sequential && margins[i].is_finite() {
-                    for RankedIndex(value, driver) in self.fanin_priorities(i, mode, margins[i]) {
-                        margins[driver] = margins[driver].min(value);
-                    }
-                }
-            }
-            for (result, margin) in result.iter_mut().zip(margins) {
-                *result = result.min(margin);
-            }
-        }
-        result
+    /// Incumbent electrical violations, ordered by pin name. During a trial
+    /// this remains the pre-trial baseline; unconstrained cells have no
+    /// entries.
+    pub fn cached_electrical_violations(&self, i: usize) -> &[ElectricalViolations] {
+        &self.electrical[i]
     }
 
-    /// Reports componentwise violations in stable pin-name order. Existing
-    /// violations may remain but cannot be worsened by an accepted
-    /// substitution. Unconstrained cells use an empty zero-violation vector.
-    fn electrical_violations(&self, i: usize) -> Vec<f64> {
+    /// Reports current componentwise violations in stable pin-name order.
+    /// Clients choose their acceptance policy. Unconstrained cells have no
+    /// entries; otherwise each cell pin has one entry, including zero amounts.
+    pub fn electrical_violations(&self, i: usize) -> Vec<ElectricalViolations> {
         let cell = &self.lib.library.cells[self.cells[i]];
-        if cell.pins.iter().all(|pin| {
-            pin.max_capacitance.is_none()
-                && pin.max_transition.is_none()
-                && pin.max_fanout.is_none()
-        }) {
-            return Vec::new();
-        }
-        let mut pins: SmallVec<[&Pin; 8]> = cell.pins.iter().collect();
-        pins.sort_by_key(|p| self.lib.library.resolve_string(&p.name));
-        let mut values = Vec::with_capacity(pins.len() * 3);
-        for pin in pins {
+        let pins = self.lib.electrical_pin_order(self.cells[i]);
+        let mut values = Vec::with_capacity(pins.len());
+        for &pin_index in pins {
+            let pin = &cell.pins[pin_index];
             if pin.max_capacitance.is_none()
                 && pin.max_transition.is_none()
                 && pin.max_fanout.is_none()
             {
-                values.extend([0.0; 3]);
+                values.push(ElectricalViolations::default());
                 continue;
             }
             let sources = self.instances[i]
@@ -1048,243 +1142,80 @@ impl<'a, 'lib> IncrementalSta<'a, 'lib> {
                     }
                 }
             }
-            values.extend([
-                pin.max_capacitance
+            values.push(ElectricalViolations {
+                capacitance: pin
+                    .max_capacitance
                     .map_or(0.0, |limit| (cap - limit).max(0.0)),
-                pin.max_transition
+                transition: pin
+                    .max_transition
                     .map_or(0.0, |limit| (transition - limit).max(0.0)),
-                pin.max_fanout
+                fanout: pin
+                    .max_fanout
                     .map_or(0.0, |limit| (fanout - limit).max(0.0)),
-            ]);
+            });
         }
         values
     }
 
-    /// Trials one prevalidated equivalent cell; only the acceptance closure can
-    /// commit it. Errors, rejection and budget exhaustion restore the
-    /// incumbent. Optional boundary limits allow early rejection at settled
-    /// module outputs and during endpoint updates; the acceptance closure
-    /// still checks complete timing before any substitution is committed.
-    pub fn trial(
+    /// Propagates a seeded cone through the same kernels for both edit APIs.
+    fn propagate_edits(
         &mut self,
-        i: usize,
-        cell: usize,
+        mut queue: BTreeSet<(usize, usize)>,
+        undo: &mut Undo,
+        affected: &mut BTreeSet<usize>,
+        endpoints: &mut BTreeSet<usize>,
         budget: usize,
         limits: Option<BoundaryDelays>,
-        accept: impl FnOnce(&Self) -> bool,
-    ) -> Result<TrialOutcome> {
-        let old_cell = self.cells[i];
-        if self.changes_timing_constants(i, old_cell, cell)? {
-            return Err(anyhow!(
-                "replacement changes constants used by conditional timing arcs"
-            ));
-        }
-        let old_order = self.orders[i].clone();
-        let mut undo = Undo::default();
-        let mut pending_coverage = None;
-        let constants_may_change = self.changes_coverage_constants(i, old_cell, cell);
-        self.cells[i] = cell;
-        let result = (|| -> Result<TrialOutcome> {
-            self.orders[i] = if self.instances[i].sequential {
-                self.lib.library.cells[cell]
-                    .pins
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, p)| {
-                        p.direction == PinDirection::Output as i32
-                            && self.instances[i]
-                                .pins
-                                .contains_key(self.lib.library.resolve_string(&p.name))
-                    })
-                    .map(|(idx, _)| idx)
-                    .collect()
-            } else {
-                combinational_output_pin_evaluation_order(&self.lib, cell, &self.instances[i].pins)?
-            };
-            let mut changed_loads = BTreeSet::new();
-            for (name, sources) in &self.instances[i].pins {
-                if self.lib.pin(cell, name).expect("compatible pin").direction
-                    == PinDirection::Input as i32
-                {
-                    for source in sources {
-                        if let BitSource::Bit(bit) = source {
-                            changed_loads.insert(*bit);
-                        }
-                    }
-                }
+    ) -> Result<Option<TrialOutcome>> {
+        while let Some((_, inst)) = queue.pop_first() {
+            if self.propagated >= budget {
+                return Ok(Some(TrialOutcome::PropagationLimit));
             }
-            let mut queue = BTreeSet::from([(self.positions[i], i)]);
-            let mut affected = BTreeSet::from([i]);
-            for bit in changed_loads {
-                // Fanout weights can change even when pin capacitance does not.
-                if let Some(driver) = self.drivers[bit] {
-                    affected.insert(driver);
-                }
-                let load = self.compute_load(bit)?;
-                if load != self.capacitances[bit] {
-                    undo.loads.push((bit, self.capacitances[bit]));
-                    self.capacitances[bit] = load;
-                    if let Some(driver) = self.drivers[bit] {
-                        queue.insert((self.positions[driver], driver));
-                        affected.insert(driver);
-                    }
-                }
+            self.propagated += 1;
+            let start = undo.bits.len();
+            for bit in &self.instances[inst].outputs {
+                undo.bits.push((
+                    *bit,
+                    [self.timing[0][*bit].clone(), self.timing[1][*bit].clone()],
+                ));
             }
-            let mut endpoints = BTreeSet::new();
-            if let Some(endpoint) = self.capture_endpoint[i] {
-                endpoints.insert(endpoint);
-            }
-            while let Some((_, inst)) = queue.pop_first() {
-                if self.propagated >= budget {
-                    return Ok(TrialOutcome::PropagationLimit);
-                }
-                self.propagated += 1;
-                let start = undo.bits.len();
-                for bit in &self.instances[inst].outputs {
-                    undo.bits.push((
-                        *bit,
-                        [self.timing[0][*bit].clone(), self.timing[1][*bit].clone()],
-                    ));
-                }
-                self.recompute(inst)?;
-                affected.insert(inst);
-                for (bit, old) in &undo.bits[start..] {
-                    if old[0] == self.timing[0][*bit] && old[1] == self.timing[1][*bit] {
-                        continue;
-                    }
-                    if let Some(limits) = limits
-                        && self.endpoints_by_bit[*bit].iter().any(|endpoint| {
-                            matches!(self.endpoints[*endpoint], Endpoint::Output(_))
-                        })
-                    {
-                        // Topological propagation has settled this output:
-                        // later work cannot repair its timing. Capture setup
-                        // constraints can depend on other pending inputs and
-                        // remain part of the complete endpoint update below.
-                        for (mode, timing) in self.timing.iter().enumerate() {
-                            if let Some(arrival) = timing[*bit]
-                                .as_ref()
-                                .and_then(SignalTimingSet::worst_arrival_candidate)
-                                && arrival.timing.arrival
-                                    > limits.values()[mode * 2] + TIMING_COMPARISON_TOLERANCE
-                            {
-                                return Ok(TrialOutcome::Rejected);
-                            }
-                        }
-                    }
-                    endpoints.extend(self.endpoints_by_bit[*bit].iter().copied());
-                    for consumer in &self.consumers[*bit] {
-                        affected.insert(*consumer);
-                        if !self.instances[*consumer].sequential {
-                            queue.insert((self.positions[*consumer], *consumer));
-                        }
-                    }
-                }
-            }
-            if constants_may_change {
-                let (known, work) = self.coverage_constants(budget.saturating_sub(self.propagated));
-                self.propagated += work;
-                let Some(known) = known else {
-                    return Ok(TrialOutcome::PropagationLimit);
-                };
-                for (inst, (before, after)) in self.coverage_known.iter().zip(&known).enumerate() {
-                    if before != after {
-                        affected.insert(inst);
-                    }
-                }
-                pending_coverage = Some(known);
-            }
-            let coverage_known = pending_coverage.as_ref().unwrap_or(&self.coverage_known);
-            for &inst_idx in &affected {
-                let inst = &self.instances[inst_idx];
-                if inst.sequential {
+            undo.counts.push((inst, self.query_counts[inst]));
+            self.recompute(inst)?;
+            affected.insert(inst);
+            for (bit, old) in &undo.bits[start..] {
+                if old[0] == self.timing[0][*bit] && old[1] == self.timing[1][*bit] {
                     continue;
                 }
-                let instance_name = resolve_symbol(
-                    self.interner,
-                    self.normalized.instances[inst_idx].instance_name,
-                    "instance name",
-                )?;
-                for mode in 0..if self.registered { 2 } else { 1 } {
-                    validate_instance_functional_timing_coverage(
-                        InstanceCoverageInputs {
-                            lib: &self.lib,
-                            cell_idx: self.cells[inst_idx],
-                            pin_sources: &inst.pins,
-                            known_pin_values: &inst.known,
-                            coverage_known_pin_values: &coverage_known[inst_idx],
-                            output_pin_order: &self.orders[inst_idx],
-                            instance_name: &instance_name,
-                            launched_timing: self
-                                .registered
-                                .then_some(self.timing[mode].as_slice()),
-                        },
-                        &mut self.evaluation,
-                    )?;
-                }
-            }
-            for endpoint in endpoints {
-                let value = self.compute_endpoint(endpoint)?;
-                if let Some(limits) = limits {
-                    let capture =
-                        usize::from(matches!(self.endpoints[endpoint], Endpoint::Capture(_)));
-                    if value.iter().enumerate().any(|(mode, arrival)| {
-                        arrival.is_some_and(|arrival| {
-                            arrival
-                                > limits.values()[mode * 2 + capture] + TIMING_COMPARISON_TOLERANCE
-                        })
-                    }) {
-                        // All input propagation has settled. Stop at the first
-                        // failing endpoint instead of evaluating unrelated
-                        // captures and updating scores for a rejected trial.
-                        return Ok(TrialOutcome::Rejected);
+                if let Some(limits) = limits
+                    && self.endpoints_by_bit[*bit].iter().any(|endpoint| {
+                        matches!(self.endpoints[*endpoint], TimingEndpoint::Output(_))
+                    })
+                {
+                    // Topological propagation has settled this output:
+                    // later work cannot repair its timing. Capture setup
+                    // constraints can depend on other pending inputs and
+                    // remain part of the complete endpoint update below.
+                    for (mode, timing) in self.timing.iter().enumerate() {
+                        if let Some(arrival) = timing[*bit]
+                            .as_ref()
+                            .and_then(SignalTimingSet::worst_arrival_candidate)
+                            && arrival.timing.arrival
+                                > limits.values()[mode * 2] + TIMING_COMPARISON_TOLERANCE
+                        {
+                            return Ok(Some(TrialOutcome::Rejected));
+                        }
                     }
                 }
-                undo.endpoints
-                    .push((endpoint, self.endpoint_values[endpoint]));
-                self.set_endpoint(endpoint, value);
-            }
-            let mut violations = Vec::new();
-            for inst in affected {
-                let new = self.electrical_violations(inst);
-                let old = self.electrical[inst]
-                    .iter()
-                    .copied()
-                    .chain(std::iter::repeat(0.0));
-                if new
-                    .iter()
-                    .zip(old)
-                    .any(|(a, b)| *a > b + ELECTRICAL_COMPARISON_TOLERANCE)
-                {
-                    return Ok(TrialOutcome::Rejected);
+                endpoints.extend(self.endpoints_by_bit[*bit].iter().copied());
+                for consumer in &self.consumers[*bit] {
+                    affected.insert(*consumer);
+                    if !self.instances[*consumer].sequential {
+                        queue.insert((self.positions[*consumer], *consumer));
+                    }
                 }
-                violations.push((inst, new));
-            }
-            if !accept(self) {
-                return Ok(TrialOutcome::Rejected);
-            }
-            if let Some(known) = pending_coverage.take() {
-                self.coverage_known = known;
-            }
-            for (inst, new) in violations {
-                self.electrical[inst] = new;
-            }
-            Ok(TrialOutcome::Accepted)
-        })();
-        if !matches!(result, Ok(TrialOutcome::Accepted)) {
-            self.cells[i] = old_cell;
-            self.orders[i] = old_order;
-            for (bit, values) in undo.bits.into_iter().rev() {
-                [self.timing[0][bit], self.timing[1][bit]] = values;
-            }
-            for (bit, load) in undo.loads {
-                self.capacitances[bit] = load;
-            }
-            for (endpoint, value) in undo.endpoints {
-                self.set_endpoint(endpoint, value);
             }
         }
-        result
+        Ok(None)
     }
 }
 
@@ -1343,3 +1274,6 @@ mod tests {
         assert_eq!(scores.worst_count, 0);
     }
 }
+
+mod topology;
+pub use topology::{TimingEdit, TimingInstance, TimingMutation, TrialOptions, TrialResult};

@@ -18,9 +18,12 @@ use crate::netlist::parse::{Net, NetlistModule};
 use crate::netlist::sta::StaOptions;
 pub use crate::netlist::sta::incremental::{BoundaryDelays, measure_boundary_delays};
 use crate::netlist::sta::incremental::{
-    IncrementalSta, STA_VERIFICATION_TOLERANCE, TIMING_COMPARISON_TOLERANCE, TimingTieBreak,
-    TrialOutcome, measure_boundary_delays_with_library,
+    IncrementalSta, STA_VERIFICATION_TOLERANCE, TIMING_COMPARISON_TOLERANCE, TrialOutcome,
+    measure_boundary_delays_with_library,
 };
+
+mod timing;
+use timing::{ResizeTimingPolicy, TimingTieBreak};
 
 const AREA_COMPARISON_TOLERANCE: f64 = 1e-12;
 const MAX_SIGNATURE_VARIABLES: usize = 10;
@@ -352,13 +355,13 @@ struct ResizeSearch<'a> {
 
 impl ResizeSearch<'_> {
     /// Selects timing sites or ranks recoverable area once per unchanged round.
-    fn candidate_sites(&self, phase: SearchPhase, sta: &IncrementalSta<'_, '_>) -> Vec<usize> {
+    fn candidate_sites(&self, phase: SearchPhase, sta: &IncrementalSta<'_>) -> Vec<usize> {
         let mut sites = match phase {
             SearchPhase::Timing => sta.critical_instances(
                 self.objective,
                 self.work_limits.timing_candidate_sites,
                 |i| {
-                    let current = sta.cells[i];
+                    let current = sta.cell_indices()[i];
                     (self.options.resize_registers || !sta.is_register(i))
                         && self.families.alternatives(current).iter().any(|c| {
                             *c != current
@@ -372,7 +375,7 @@ impl ResizeSearch<'_> {
                 let priorities = sta
                     .recovery_headroom(self.timing_checkpoint)
                     .into_iter()
-                    .zip(&sta.cells)
+                    .zip(sta.cell_indices())
                     .map(|(headroom, cell)| {
                         let area = self.library.cells[*cell].area;
                         let savings = self
@@ -390,16 +393,16 @@ impl ResizeSearch<'_> {
                 // Zero-headroom candidates remain eligible: a cheaper cell
                 // can have identical or better timing. No cheaper cell means
                 // there is no useful recovery work at this site.
-                let mut sites: Vec<_> = (0..sta.cells.len())
+                let mut sites: Vec<_> = (0..sta.cell_indices().len())
                     .filter(|i| priorities[*i] >= 0.0)
                     .collect();
                 sites.sort_by(|a, b| {
                     priorities[*b]
                         .total_cmp(&priorities[*a])
                         .then_with(|| {
-                            self.library.cells[sta.cells[*b]]
+                            self.library.cells[sta.cell_indices()[*b]]
                                 .area
-                                .total_cmp(&self.library.cells[sta.cells[*a]].area)
+                                .total_cmp(&self.library.cells[sta.cell_indices()[*a]].area)
                         })
                         .then(a.cmp(b))
                 });
@@ -414,7 +417,7 @@ impl ResizeSearch<'_> {
     fn trial(
         &self,
         phase: SearchPhase,
-        sta: &mut IncrementalSta<'_, '_>,
+        sta: &mut IncrementalSta<'_>,
         instance: usize,
         cell: usize,
         work_limit: usize,
@@ -442,7 +445,7 @@ impl ResizeSearch<'_> {
     /// near-critical progress. Hard limits retain all four boundary classes.
     fn accept_timing(
         &self,
-        timing: &IncrementalSta<'_, '_>,
+        timing: &IncrementalSta<'_>,
         previous: BoundaryDelays,
         previous_secondary: TimingTieBreak,
         new_area: f64,
@@ -472,7 +475,7 @@ impl ResizeSearch<'_> {
     fn run_phase(
         &mut self,
         phase: SearchPhase,
-        sta: &mut IncrementalSta<'_, '_>,
+        sta: &mut IncrementalSta<'_>,
     ) -> Result<ResizePhaseStats> {
         let mut stats = ResizePhaseStats::default();
         let rounds = phase.rounds(self.options);
@@ -489,7 +492,7 @@ impl ResizeSearch<'_> {
             let sites = self.candidate_sites(phase, sta);
             let mut accepted = 0;
             for i in sites {
-                let current = sta.cells[i];
+                let current = sta.cell_indices()[i];
                 let area = self.area;
                 let area_limit = self.area_limit;
                 let library = self.library;
@@ -528,8 +531,8 @@ impl ResizeSearch<'_> {
                     .filter(allowed)
                     .take(self.options.max_cell_candidates)
                 {
-                    let new_area =
-                        self.area - library.cells[sta.cells[i]].area + library.cells[cell].area;
+                    let new_area = self.area - library.cells[sta.cell_indices()[i]].area
+                        + library.cells[cell].area;
                     stats.trials += 1;
                     match self.trial(phase, sta, i, cell, work_limit, new_area) {
                         Ok(TrialOutcome::Accepted) => {
@@ -594,8 +597,17 @@ pub fn resize_netlist(
     let families = CellFamilies::new(library);
     let mut sta = IncrementalSta::new(module, nets, interner, library, options.timing)?;
     let initial_delay = sta.score();
-    let initial_area: f64 = sta.cells.iter().map(|i| library.cells[*i].area).sum();
-    if !initial_area.is_finite() || sta.cells.iter().any(|i| library.cells[*i].area < 0.0) {
+    let initial_area: f64 = sta
+        .cell_indices()
+        .iter()
+        .map(|i| library.cells[*i].area)
+        .sum();
+    if !initial_area.is_finite()
+        || sta
+            .cell_indices()
+            .iter()
+            .any(|i| library.cells[*i].area < 0.0)
+    {
         return Err(anyhow!("cell areas must be finite and nonnegative"));
     }
     let area_limit = initial_area * (1.0 + options.max_area_growth);
@@ -617,17 +629,25 @@ pub fn resize_netlist(
     let upsized_delay = sta.score();
     search.timing_checkpoint = upsized_delay;
     // Re-anchor at the phase boundary to avoid incremental cancellation error.
-    let upsized_area = sta.cells.iter().map(|i| library.cells[*i].area).sum();
+    let upsized_area = sta
+        .cell_indices()
+        .iter()
+        .map(|i| library.cells[*i].area)
+        .sum();
     search.area = upsized_area;
     let downsize = search.run_phase(SearchPhase::AreaRecovery, &mut sta)?;
     let budget_exhausted = upsize.stop_reason == ResizeStopReason::PropagationLimit
         || downsize.stop_reason == ResizeStopReason::PropagationLimit;
     let incremental_delay = sta.score();
-    let final_area: f64 = sta.cells.iter().map(|i| library.cells[*i].area).sum();
+    let final_area: f64 = sta
+        .cell_indices()
+        .iter()
+        .map(|i| library.cells[*i].area)
+        .sum();
     if !final_area.is_finite() || final_area > area_limit + AREA_COMPARISON_TOLERANCE {
         return Err(anyhow!("final resizing exceeds the area allowance"));
     }
-    let cells = sta.cells.clone();
+    let cells = sta.cell_indices().to_vec();
     let prepared = sta.into_prepared_library();
     let mut candidate = module.clone();
     for (instance, cell) in candidate.instances.iter_mut().zip(cells) {

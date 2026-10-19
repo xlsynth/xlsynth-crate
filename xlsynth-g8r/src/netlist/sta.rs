@@ -70,13 +70,14 @@ use anyhow::{Result, anyhow};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use smallvec::SmallVec;
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
-pub(crate) mod incremental;
+pub mod incremental;
 
 /// Limits the size of each cached truth table and contextual coverage check.
 const MAX_FUNCTIONAL_TIMING_INPUTS: usize = 5;
@@ -466,9 +467,11 @@ pub struct PreparedStaLibrary<'a> {
     coverage: Vec<PreparedCellCoverage>,
 }
 
-/// Library-only Boolean eligibility and per-pin prepared coverage metadata.
+/// Library-only validation, electrical ordering and coverage metadata.
 #[derive(Default)]
 struct PreparedCellCoverage {
+    timing_inputs: OnceLock<Result<HashSet<String>, String>>,
+    electrical_pin_order: OnceLock<Vec<usize>>,
     supported: OnceLock<bool>,
     functional_semantics: OnceLock<Result<(), String>>,
     driver_semantics: OnceLock<Result<(), String>>,
@@ -519,15 +522,15 @@ fn coverage_boolean_function<'a>(
 }
 
 /// Connectivity needed to infer constants solely for functional arc coverage.
-struct CoverageConstantPropagation<'a, 'lib> {
+struct CoverageConstantPropagation<'a, 'lib, P: Borrow<HashMap<String, Vec<PinBitSource>>>> {
     lib: &'a PreparedStaLibrary<'lib>,
     cell_indices: &'a [usize],
-    pin_sources: &'a [HashMap<String, Vec<PinBitSource>>],
+    pin_sources: &'a [P],
     output_pin_orders: &'a [Vec<usize>],
     bit_loads: &'a [Vec<NetEndpoint>],
 }
 
-impl CoverageConstantPropagation<'_, '_> {
+impl<P: Borrow<HashMap<String, Vec<PinBitSource>>>> CoverageConstantPropagation<'_, '_, P> {
     /// Propagates only proven Boolean constants, independently of timing arcs.
     fn run(&self) -> Vec<HashMap<String, bool>> {
         self.run_limited(usize::MAX)
@@ -541,7 +544,8 @@ impl CoverageConstantPropagation<'_, '_> {
             .pin_sources
             .iter()
             .map(|pins| {
-                pins.iter()
+                pins.borrow()
+                    .iter()
                     .filter_map(|(name, sources)| match sources.as_slice() {
                         [PinBitSource::Literal(value)] => Some((name.clone(), *value)),
                         _ => None,
@@ -569,8 +573,10 @@ impl CoverageConstantPropagation<'_, '_> {
             for pin_idx in &self.output_pin_orders[inst_idx] {
                 let pin = &cell.pins[*pin_idx];
                 let pin_name = self.lib.library.resolve_string(&pin.name);
-                let Some([PinBitSource::Bit(bit_idx)]) =
-                    self.pin_sources[inst_idx].get(pin_name).map(Vec::as_slice)
+                let Some([PinBitSource::Bit(bit_idx)]) = self.pin_sources[inst_idx]
+                    .borrow()
+                    .get(pin_name)
+                    .map(Vec::as_slice)
                 else {
                     continue;
                 };
@@ -829,6 +835,58 @@ fn validate_instance_functional_timing_coverage(
 }
 
 impl<'a> PreparedStaLibrary<'a> {
+    /// Validates related-pin identities on every combinational output arc,
+    /// including outputs that are unconnected in a particular instance.
+    fn timing_related_input_pins(&self, cell_idx: usize) -> Result<&HashSet<String>> {
+        self.coverage[cell_idx]
+            .timing_inputs
+            .get_or_init(|| {
+                self.compute_timing_related_input_pins(cell_idx)
+                    .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|error| anyhow!(error.clone()))
+    }
+
+    /// Resolves the library-only references once for each instantiated cell.
+    fn compute_timing_related_input_pins(&self, cell_idx: usize) -> Result<HashSet<String>> {
+        let mut timing_related_input_pins = HashSet::new();
+        for output_pin in self.library.cells[cell_idx]
+            .pins
+            .iter()
+            .filter(|pin| pin.direction == PinDirection::Output as i32)
+        {
+            for arc in output_pin
+                .timing_arcs
+                .iter()
+                .filter(|arc| StaTimingType::from_arc(arc, self.library).is_combinational())
+            {
+                for &related_pin_name in self.related_pin_names(arc.related_pin) {
+                    let related_pin = self.pin(cell_idx, related_pin_name).ok_or_else(|| {
+                            anyhow!(
+                                "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                                self.library.cells[cell_idx].name,
+                                self.library.resolve_string(&output_pin.name),
+                                related_pin_name
+                            )
+                        })?;
+                    if related_pin.direction == PinDirection::Input as i32 {
+                        timing_related_input_pins.insert(related_pin_name.to_string());
+                    } else if related_pin.direction != PinDirection::Output as i32 {
+                        return Err(anyhow!(
+                            "cell '{}' output pin '{}' has timing arc related pin '{}' with unsupported direction value {}",
+                            self.library.cells[cell_idx].name,
+                            self.library.resolve_string(&output_pin.name),
+                            related_pin_name,
+                            related_pin.direction
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(timing_related_input_pins)
+    }
+
     /// Builds name indexes and lazily prepares STA coverage for this library.
     pub fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
         let mut cell_by_name = HashMap::with_capacity(library.cells.len());
@@ -868,6 +926,26 @@ impl<'a> PreparedStaLibrary<'a> {
                 .map(|_| PreparedCellCoverage::default())
                 .collect(),
         })
+    }
+
+    /// Prepares stable electrical-result order once per library cell.
+    /// Empty means unconstrained; constrained cells retain every pin entry.
+    fn electrical_pin_order(&self, cell_idx: usize) -> &[usize] {
+        self.coverage[cell_idx]
+            .electrical_pin_order
+            .get_or_init(|| {
+                let cell = &self.library.cells[cell_idx];
+                if cell.pins.iter().all(|p| {
+                    p.max_capacitance.is_none()
+                        && p.max_transition.is_none()
+                        && p.max_fanout.is_none()
+                }) {
+                    return Vec::new();
+                }
+                let mut order: Vec<_> = (0..cell.pins.len()).collect();
+                order.sort_by_key(|&i| self.library.resolve_string(&cell.pins[i].name));
+                order
+            })
     }
 
     /// Returns the cached eligibility of a cell for Boolean coverage analysis.
@@ -1258,42 +1336,13 @@ fn analyze_max_arrival_proto_with_mode(
         instance_cell_names.push(cell_name.clone());
         let is_sequential = is_sequential_boundary_cell(&lib.library.cells[cell_idx]);
         instance_is_sequential.push(is_sequential);
-        let mut timing_related_input_pins = HashSet::new();
-        if !(analysis_mode.uses_register_boundaries() && is_sequential) {
-            for output_pin in lib.library.cells[cell_idx]
-                .pins
-                .iter()
-                .filter(|pin| pin.direction == PinDirection::Output as i32)
-            {
-                for arc in output_pin
-                    .timing_arcs
-                    .iter()
-                    .filter(|arc| StaTimingType::from_arc(arc, lib.library).is_combinational())
-                {
-                    for &related_pin_name in lib.related_pin_names(arc.related_pin) {
-                        let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
-                            anyhow!(
-                                "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
-                                cell_name,
-                                lib.library.resolve_string(&output_pin.name),
-                                related_pin_name
-                            )
-                        })?;
-                        if related_pin.direction == PinDirection::Input as i32 {
-                            timing_related_input_pins.insert(related_pin_name.to_string());
-                        } else if related_pin.direction != PinDirection::Output as i32 {
-                            return Err(anyhow!(
-                                "cell '{}' output pin '{}' has timing arc related pin '{}' with unsupported direction value {}",
-                                cell_name,
-                                lib.library.resolve_string(&output_pin.name),
-                                related_pin_name,
-                                related_pin.direction
-                            ));
-                        }
-                    }
-                }
-            }
-        }
+        let no_combinational_inputs = HashSet::new();
+        let timing_related_input_pins = if analysis_mode.uses_register_boundaries() && is_sequential
+        {
+            &no_combinational_inputs
+        } else {
+            lib.timing_related_input_pins(cell_idx)?
+        };
 
         let mut pin_sources: HashMap<String, Vec<PinBitSource>> = HashMap::new();
         let mut known_pin_values = HashMap::new();
@@ -1406,7 +1455,7 @@ fn analyze_max_arrival_proto_with_mode(
         };
         instance_pin_sources.push(pin_sources);
         instance_known_pin_values.push(known_pin_values);
-        instance_timing_related_input_pins.push(timing_related_input_pins);
+        instance_timing_related_input_pins.push(timing_related_input_pins.clone());
         instance_output_pin_orders.push(output_pin_order);
     }
 
@@ -1657,10 +1706,12 @@ fn analyze_max_arrival_proto_with_mode(
                 inst_pin_map: &instance_pin_sources[inst_idx],
                 known_pin_values: &instance_known_pin_values[inst_idx],
                 output_pin_order: &instance_output_pin_orders[inst_idx],
-                normalized: &normalized,
-                nets,
-                interner,
-                inst_idx,
+                instance_name: &resolve_symbol(
+                    interner,
+                    normalized.instances[inst_idx].instance_name,
+                    "instance name",
+                )?,
+                render_bit: &|bit| normalized.render_bit(bit, nets, interner),
                 register_boundaries: analysis_mode.uses_register_boundaries(),
                 is_sequential: instance_is_sequential[inst_idx],
                 launch_register: analysis_mode.launches_register(inst_idx),
@@ -1873,10 +1924,8 @@ struct InstanceTimingInputs<'a, 'lib> {
     inst_pin_map: &'a HashMap<String, Vec<PinBitSource>>,
     known_pin_values: &'a HashMap<String, bool>,
     output_pin_order: &'a [usize],
-    normalized: &'a NormalizedNetlistModule<'a>,
-    nets: &'a [Net],
-    interner: &'a StringInterner<StringBackend<SymbolU32>>,
-    inst_idx: usize,
+    instance_name: &'a str,
+    render_bit: &'a dyn Fn(usize) -> String,
     register_boundaries: bool,
     is_sequential: bool,
     launch_register: bool,
@@ -1896,22 +1945,13 @@ fn evaluate_instance_outputs(
         inst_pin_map,
         known_pin_values,
         output_pin_order,
-        normalized,
-        nets,
-        interner,
-        inst_idx,
+        instance_name,
+        render_bit,
         register_boundaries,
         is_sequential,
         launch_register,
     } = inputs;
     let cell_name = &lib.library.cells[cell_idx].name;
-    let instance = &normalized.instances[inst_idx];
-    let instance_name = interner.resolve(instance.instance_name).ok_or_else(|| {
-        anyhow!(
-            "could not resolve instance name symbol {:?}",
-            instance.instance_name
-        )
-    })?;
     // Only multi-output cells need local timing for output-to-output arcs.
     // Borrow library pin names instead of allocating them for each query.
     let mut local_output_timing_sets: Option<HashMap<&str, SignalTimingSet>> =
@@ -1970,7 +2010,7 @@ fn evaluate_instance_outputs(
         };
         let output_net_name = || {
             output_bit_idx
-                .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
+                .map(|output_bit_idx| render_bit(output_bit_idx))
                 .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin_name))
         };
         if combinational_arcs.is_empty() {
@@ -2096,7 +2136,7 @@ fn evaluate_instance_outputs(
                                     }
                                     return Err(anyhow!(
                                         "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
-                                        normalized.render_bit(*related_bit_idx, nets, interner),
+                                        render_bit(*related_bit_idx),
                                         cell_name,
                                         pin_name,
                                         related_pin_name
@@ -2131,9 +2171,7 @@ fn evaluate_instance_outputs(
                     )?;
                     sta_trace(|| {
                         let related_net_name = match related_source {
-                            Some(PinBitSource::Bit(bit)) => {
-                                normalized.render_bit(bit, nets, interner)
-                            }
+                            Some(PinBitSource::Bit(bit)) => render_bit(bit),
                             Some(PinBitSource::Literal(value)) => {
                                 if value { "1'b1" } else { "1'b0" }.to_string()
                             }
@@ -6549,7 +6587,17 @@ endmodule
         // cannot be inferred as constant without knowing A. Its trial forces
         // a coverage rescan and exposes the missing NAND input arc.
         let error = sta
-            .trial(0, 3, usize::MAX, None, |_| true)
+            .trial_edit(
+                &incremental::TimingEdit {
+                    new_bits: 0,
+                    mutations: vec![incremental::TimingMutation::Resize {
+                        instance: 0,
+                        cell: 3,
+                    }],
+                },
+                incremental::TrialOptions::default(),
+                |_, _| Ok(true),
+            )
             .expect_err("replacement loses the downstream coverage proof");
         assert!(
             error.to_string().contains("functional input 'B'"),

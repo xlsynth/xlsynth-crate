@@ -348,6 +348,31 @@ let verilog = mapped.emit_verilog()?;
 exposes this API through `g8r2gv`. See `FUZZ.md` for the opt-in end-to-end mapping
 campaign and its raw/proto library environment variables.
 
+## Incremental netlist timing
+
+`netlist::sta::incremental::IncrementalSta` owns a timing graph and shares the
+prepared Liberty/output/setup kernels with full STA. `new` preserves independent
+primary-input and register launch classes; `new_combinational` explicitly selects
+combinational analysis. The instance and normalized-bit IDs remain stable.
+
+`trial_edit(&TimingEdit, TrialOptions, callback)` is the common transaction API.
+The callback observes candidate timing and affected instance IDs: `Ok(true)`
+commits, while `Ok(false)`, an error, or an exhausted budget restores the
+incumbent. A `Resize` preserves pin bindings and timing-condition constants.
+One compatible `Resize` also supports sequential modules and updates launch and
+capture timing. Combinational batches additionally support `Replace`, `Insert`
+and `Rewire`; these can append bits and instances. The caller owns equivalence,
+optimization policy and the matching source-netlist edit.
+
+`TrialOptions::cell_budget` bounds combined timing and Boolean-coverage cell
+visits in that transaction. Optional boundary limits allow exact early rejection.
+Returned work separates timing, coverage, touched connectivity and exceptional
+ordering work. Ordinary edits journal only touched state. Backward dependencies
+may require a full ordering pass; accepted insertions maintain the traversal
+list once. Registered feedback retains the bounded least-fixed-point coverage
+fallback. Direct input-slew/output-load updates, deletions, module-port changes,
+original-alias rewrites and registered topology changes are outside this API.
+
 ## Native netlist resizing
 
 `netlist::resize::resize_netlist` operates on a flat mapped module and its nets,
