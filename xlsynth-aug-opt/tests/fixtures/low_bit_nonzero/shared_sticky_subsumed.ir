@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package shared_sticky_subsumed
+
+top fn main(x: bits[4] id=1, p: bits[1] id=2) -> bits[3] {
+  negated: bits[4] = neg(x, id=3)
+  absolute: bits[4] = sel(p, cases=[x, negated], id=4)
+  low: bits[2] = bit_slice(absolute, start=0, width=2, id=5)
+  sticky: bits[1] = or_reduce(low, id=6)
+  high: bits[2] = bit_slice(absolute, start=2, width=2, id=7)
+  ret out: bits[3] = concat(high, sticky, id=8)
+}

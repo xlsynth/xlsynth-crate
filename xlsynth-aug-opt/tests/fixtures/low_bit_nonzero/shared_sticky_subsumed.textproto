@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Minimal shared high/sticky-bit consumer from the bfloat16/hfloat16 FMA family.
+# Replaces whole-function native-tie controls; full functions stay in corpus runs.
+# Without the guard: raw ANDs 21 -> 14, but normal g8r remains 10 ANDs / LE 18.80.
+sha256: "e1776ac135db848af243718ba4bc46f0dcb99be82d86b50caf9477f234f1d396"
+predicate_simplification {
+  expected_simplifications: 0
+  pir_limits { and_nodes_max: 10 graph_le_max: 18.79671940515263 depth_max: 5 }
+  sandwich_limits { and_nodes_max: 10 graph_le_max: 18.79671940515263 depth_max: 5 }
+}

@@ -68,3 +68,10 @@ with-bitwuzla-built = [
     "xlsynth-pir-fuzz/with-bitwuzla-built",
     "xlsynth-prover/with-bitwuzla-built",
 ]
+
+[[bin]]
+name = "fuzz_low_bit_nonzero"
+path = "fuzz_targets/fuzz_low_bit_nonzero.rs"
+test = false
+doc = false
+required-features = ["has-bitwuzla"]

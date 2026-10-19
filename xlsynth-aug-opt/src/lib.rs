@@ -9,6 +9,7 @@
 pub mod constant_shift_choices;
 pub mod cost;
 pub mod ir_cost;
+pub mod low_bit_nonzero;
 mod optimizer;
 pub mod priority_result_fusion;
 pub mod split_adder;

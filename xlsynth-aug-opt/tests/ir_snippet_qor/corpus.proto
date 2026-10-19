@@ -40,6 +40,13 @@ message PipelineExpectations {
   required Limits sandwich_limits = 3;
 }
 
+// Generic scalar-predicate simplification under both optimizer pipelines.
+message PredicateSimplificationExpectations {
+  required uint64 expected_simplifications = 1;
+  required Limits pir_limits = 2;
+  required Limits sandwich_limits = 3;
+}
+
 // The filename supplies the case name; the paired IR supplies its top function.
 message Case {
   required string sha256 = 1;
@@ -48,6 +55,7 @@ message Case {
     SplitAdderExpectations split_adder = 3;
     PriorityResultExpectations priority_result = 4;
     PipelineExpectations pipeline = 5;
+    PredicateSimplificationExpectations predicate_simplification = 6;
   }
 }
 

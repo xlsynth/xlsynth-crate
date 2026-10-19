@@ -159,6 +159,30 @@ using additional facts may still eliminate the addition. The regression tests
 check that repeated PIR and sandwich rounds produce stable output without
 recovering the same addition again.
 
+### Low-bit nonzero through negation
+
+For `x: u32`, `or_reduce(sel(p, [x, -x])[0:8])` becomes
+`or_reduce(x[0:8])`: negation modulo `2^8` preserves zero. The
+[rewrite](../src/low_bit_nonzero.rs) also handles direct negation, reversed
+selection arms, and ORs of slices covering a contiguous low prefix. Offset
+or gapped slices do not satisfy this identity.
+
+The rewrite runs in ordinary PIR rounds. It requires the bypassed negation
+and optional select to become dead after all replacements; any retained
+consumer rejects the combined candidate before costing. It then accepts the
+candidate only when whole-function raw live AND count
+and graph LE are Pareto-better, keeping local folding, hashing, and DCE.
+Ties, tradeoffs, and cost errors preserve the input. No additional flag is
+needed; `low_bit_nonzero_simplified` reports accepted predicates.
+
+Matching shares a visit budget proportional to function size across all
+roots, including shared OR graphs. Once matches exist, the pass makes two
+whole-function gate estimates for an eligible combined candidate. The liveness
+guard excludes retained arithmetic whose small raw gains can regress after
+normal g8r optimization; it does not replace the cost guard or guarantee
+native Pareto improvement. Regression fixtures also check normal cut rewriting and
+reassociation pipeline with FRAIG disabled.
+
 ### Other arithmetic rewrites
 
 - **Sum equal to zero:** `x + y == 0` becomes `y == 0 - x`, exposing a modular
