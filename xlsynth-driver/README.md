@@ -892,6 +892,26 @@ Key flags:
   redirected streams.
   On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.
 
+With `--strategy area --fanout-opt`, a bounded post-mapping pass tries equivalent
+cell upsizing, buffering, and replication. Each accepted edit improves modeled
+worst delay and the delay/area score. The pass requires timing-enabled Liberty;
+timing uses pin capacitances and excludes interconnect parasitics.
+
+```shell
+xlsynth-driver aig-tech-map design.aig --strategy area --fanout-opt \
+  --liberty_proto timed-cells.proto --netlist_out optimized.gv \
+  --module_output_load 1 --json_out mapping.json
+```
+
+- `--primary_input_transition`: source slew in Liberty time units (default: `0.01`).
+- `--module_output_load`: capacitance per output in Liberty units; defaults to the
+  library's `default_output_load`, or must be supplied if that value is absent.
+- `--fanout-max-area-growth`: maximum fractional growth over mapped area
+  (default: `0.05`). These three options require `--fanout-opt`.
+- JSON `stats` retains the original mapping statistics; `fanout_optimization`
+  contains before/after metrics and decisions. Top-level instance/net counts
+  describe the emitted netlist. Elapsed times are omitted.
+
 ### `gv-sta`: gate-level max-arrival STA
 
 Runs basic combinational max-arrival STA over a parsed gate-level netlist using Liberty timing arcs/tables.

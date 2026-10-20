@@ -617,6 +617,139 @@ fn strategies_preserve_default_and_cli_semantics() {
     assert_eq!(nand2_outputs[0], nand2_outputs[1]);
 }
 
+/// Checks a real timing improvement through the area mapper's opt-in CLI path.
+#[test]
+fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
+    let dir = tempfile::tempdir().unwrap();
+    let aig_path = dir.path().join("input.aag");
+    let lib_path = dir.path().join("cells.textproto");
+    let netlist_path = dir.path().join("mapped.v");
+    let report_path = dir.path().join("mapping.json");
+    let mut builder = GateBuilder::new("and2_demo".into(), GateBuilderOptions::no_opt());
+    let a = *builder.add_input("a".into(), 1).get_lsb(0);
+    let b = *builder.add_input("b".into(), 1).get_lsb(0);
+    let and = builder.add_and_binary(a, b);
+    builder.add_output("y".into(), and.into());
+    let aig = builder.build();
+    std::fs::write(&aig_path, emit_aiger(&aig, true).unwrap()).unwrap();
+
+    // Cheap NAND2 violates its drive limit; a slightly larger equivalent cell
+    // improves delay within the default 5% total-area budget.
+    let base = make_timing_enabled_inv_nand2_liberty_textproto();
+    let start = base.find("cells: {\n  name: \"NAND2\"").unwrap();
+    let end = base.find("units:").unwrap();
+    let weak = base[start..end].replace(
+        "function_string_id: 5",
+        "function_string_id: 5\n    max_capacitance: 0.001",
+    );
+    let fast = weak
+        .replace("name: \"NAND2\"", "name: \"NAND_FAST\"")
+        .replace("area: 2.0", "area: 2.1")
+        .replace("values: 2.0", "values: 0.2")
+        .replace("values: 2.1", "values: 0.3");
+    std::fs::write(
+        &lib_path,
+        format!("{}{}{}{}", &base[..start], weak, fast, &base[end..]),
+    )
+    .unwrap();
+
+    let mut outputs = Vec::new();
+    let mut reports = Vec::new();
+    for mode in ["disabled", "zero-budget", "enabled", "repeat"] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        command
+            .arg("aig-tech-map")
+            .arg(&aig_path)
+            .args(["--strategy", "area", "--liberty_proto"])
+            .arg(&lib_path)
+            .arg("--netlist_out")
+            .arg(&netlist_path)
+            .arg("--json_out")
+            .arg(&report_path);
+        if mode != "disabled" {
+            command.args([
+                "--fanout-opt",
+                "--primary_input_transition",
+                "0",
+                "--module_output_load",
+                "0",
+            ]);
+        }
+        if mode == "zero-budget" {
+            command.args(["--fanout-max-area-growth", "0"]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = std::fs::read_to_string(&netlist_path).unwrap();
+        let report_text = std::fs::read_to_string(&report_path).unwrap();
+        assert!(!report_text.contains("_seconds"));
+        let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
+        let parsed = read_gv_from_str(&text).unwrap();
+        assert_eq!(report["cell_count"], parsed.modules[0].instances.len());
+        assert_eq!(report["net_count"], parsed.nets.len());
+        assert_eq!(report["stats"]["cell_area"], 3.0);
+        assert_mapping_equivalent(&aig, &text, &aig_path, &lib_path);
+        outputs.push(text);
+        reports.push(report);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    assert!(reports[0].get("fanout_optimization").is_none());
+    let blocked = &reports[1]["fanout_optimization"];
+    assert_eq!(blocked["before"], blocked["after"]);
+    assert!(blocked["decisions"].as_array().unwrap().is_empty());
+    assert!(
+        blocked["trials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["reason"] == "area budget")
+    );
+    let optimized = &reports[2]["fanout_optimization"];
+    assert!(!optimized["decisions"].as_array().unwrap().is_empty());
+    assert!(
+        optimized["after"]["worst_delay"].as_f64().unwrap()
+            < optimized["before"]["worst_delay"].as_f64().unwrap()
+    );
+    assert!(optimized["after"]["area"].as_f64().unwrap() <= 3.0 * 1.05);
+    assert!(outputs[2].contains("NAND_FAST"));
+    assert_eq!(outputs[2], outputs[3]);
+    assert_eq!(reports[2], reports[3]);
+}
+
+#[test]
+fn area_fanout_cli_rejects_options_without_area_optimization() {
+    for (extra, expected) in [
+        (
+            vec!["--fanout-opt"],
+            "--fanout-opt requires --strategy area",
+        ),
+        (vec!["--fanout-max-area-growth", "0.1"], "--fanout-opt"),
+    ] {
+        // These errors must be detected before attempting to open either input.
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .args([
+                "aig-tech-map",
+                "missing.aag",
+                "--liberty_proto",
+                "missing.proto",
+                "--netlist_out",
+                "-",
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!stderr.contains("failed to load"), "{stderr}");
+    }
+}
+
 #[test]
 fn mapping_reports_are_deterministic_for_both_strategies() {
     let dir = tempfile::tempdir().unwrap();

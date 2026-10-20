@@ -8,7 +8,7 @@ use string_interner::{StringInterner, backend::StringBackend};
 
 /// One mapped module with the nets and interned symbols referenced by its
 /// cells.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MappedNetlist {
     pub module: NetlistModule,
     pub nets: Vec<Net>,

@@ -2511,6 +2511,33 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("fanout_opt")
+                        .long("fanout-opt")
+                        .help("Improve modeled delay after area mapping with bounded fanout optimization")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary_input_transition")
+                        .requires("fanout_opt")
+                        .help("Fanout optimization input transition in Liberty units")
+                        .value_parser(clap::value_parser!(f64)),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module_output_load")
+                        .requires("fanout_opt")
+                        .help("Fanout optimization output capacitance; defaults to the library value")
+                        .value_parser(clap::value_parser!(f64)),
+                )
+                .arg(
+                    Arg::new("fanout_max_area_growth")
+                        .long("fanout-max-area-growth")
+                        .requires("fanout_opt")
+                        .help("Maximum fractional area growth from fanout optimization (default: 0.05)")
+                        .value_parser(clap::value_parser!(f64)),
+                )
+                .arg(
                     Arg::new("json_out")
                         .long("json_out")
                         .value_name("PATH")

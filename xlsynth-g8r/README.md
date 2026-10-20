@@ -373,6 +373,16 @@ list once. Registered feedback retains the bounded least-fixed-point coverage
 fallback. Direct input-slew/output-load updates, deletions, module-port changes,
 original-alias rewrites and registered topology changes are outside this API.
 
+Resizing and fanout optimization are clients of this engine. Resize selection,
+area/timing merit and electrical acceptance remain in the resize client; fanout
+candidate construction and metrics remain in its client. The engine's read-only
+graph/timing/electrical observations do not impose those policies.
+`netlist::fanout_opt::optimize_fanout` accepts an owned `MappedNetlist`, including
+one read from GV. `FanoutOptimizationOptions` exposes search bounds, timing/load
+assumptions, full-STA evaluation, and per-candidate oracle verification; reports
+retain profiling measurements. The CLI exposes the common path through
+`aig-tech-map --strategy area --fanout-opt`.
+
 ## Native netlist resizing
 
 `netlist::resize::resize_netlist` operates on a flat mapped module and its nets,

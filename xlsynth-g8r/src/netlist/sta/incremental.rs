@@ -320,6 +320,7 @@ impl<'lib> IncrementalSta<'lib> {
             Arc::new(PreparedStaLibrary::new(library)?),
             options,
             true,
+            None,
         )
     }
 
@@ -339,6 +340,34 @@ impl<'lib> IncrementalSta<'lib> {
             Arc::new(PreparedStaLibrary::new(library)?),
             options,
             false,
+            None,
+        )
+    }
+
+    /// Reuses the caller's prepared library and successful full combinational
+    /// analysis of these exact inputs. Only internal clients that just
+    /// performed that analysis use this entry point; public constructors
+    /// validate normally. The caller also compares every initialized net
+    /// with this report.
+    pub(crate) fn from_validated_combinational(
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        prepared: Arc<PreparedStaLibrary<'lib>>,
+        options: StaOptions,
+        report: &super::StaReport,
+    ) -> Result<Self> {
+        Self::new_mode(
+            module,
+            nets,
+            interner,
+            prepared,
+            options,
+            false,
+            Some(BoundaryDelays {
+                input_to_output: report.worst_output_arrival,
+                ..BoundaryDelays::default()
+            }),
         )
     }
 
@@ -349,6 +378,7 @@ impl<'lib> IncrementalSta<'lib> {
         lib: Arc<PreparedStaLibrary<'lib>>,
         options: StaOptions,
         register_boundaries: bool,
+        validated: Option<BoundaryDelays>,
     ) -> Result<Self> {
         let library = lib.library;
         let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
@@ -442,7 +472,9 @@ impl<'lib> IncrementalSta<'lib> {
         // Full STA is the validation authority, including undriven nets,
         // aliases, conditional arcs and unsupported assignments.
         // Preparation is one-time.
-        let reference = if register_boundaries {
+        let reference = if let Some(validated) = validated {
+            validated
+        } else if register_boundaries {
             measure_boundary_delays_with_library(module, nets, interner, &lib, options)?
         } else {
             BoundaryDelays {
