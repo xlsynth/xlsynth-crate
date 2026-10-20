@@ -269,6 +269,11 @@ section to `xlsynth-driver/README.md` that follows the style of the existing
 entries (name, short description, flag list, example usage, etc.). Pull requests
 that introduce a command without updating the README are subject to rejection.
 
+Prefer dashed (kebab-case) long CLI flags, such as `--output-path`, over
+underscored spellings. Use underscores only for a compelling reason, such as
+preserving compatibility or an established external interface. Preserve accepted
+spellings as compatibility aliases when changing a flag's canonical spelling.
+
 When adding or changing flags for an existing `xlsynth-driver` subcommand, update the corresponding section in `xlsynth-driver/README.md` to document the new/changed flags and their defaults.
 
 When adding or changing the `ir-query` pattern language (new matchers, syntax tweaks, etc.), update the `ir-query` documentation in `xlsynth-driver/README.md` to keep the DSL reference current.

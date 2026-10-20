@@ -1542,40 +1542,52 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
         assert!(json.get("fanout_optimization").is_none());
         assert!(!String::from_utf8_lossy(&output.stderr).contains("fanout delay"));
         if error == "requires an output load" {
-            let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-                .arg("aig-tech-map")
-                .arg(&aig)
-                .args([
-                    "--strategy",
-                    "area",
-                    "--module_output_load",
-                    "0.02",
-                    "--primary_input_transition",
-                    "0.03",
-                    "--liberty_proto",
-                ])
-                .arg(&lib)
-                .arg("--netlist_out")
-                .arg(&netlist)
-                .arg("--json_out")
-                .arg(&report)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let json: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
-            assert_eq!(
-                json["fanout_optimization"]["options"]["module_output_load"],
-                0.02
-            );
-            assert_eq!(
-                json["fanout_optimization"]["options"]["primary_input_transition"],
-                0.03
-            );
+            let mut previous = None;
+            for (load_flag, slew_flag) in [
+                ("--module-output-load", "--primary-input-transition"),
+                ("--module_output_load", "--primary_input_transition"),
+            ] {
+                let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+                    .arg("aig-tech-map")
+                    .arg(&aig)
+                    .args([
+                        "--strategy",
+                        "area",
+                        load_flag,
+                        "0.02",
+                        slew_flag,
+                        "0.03",
+                        "--liberty_proto",
+                    ])
+                    .arg(&lib)
+                    .arg("--netlist_out")
+                    .arg(&netlist)
+                    .arg("--json_out")
+                    .arg(&report)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let json: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+                assert_eq!(
+                    json["fanout_optimization"]["options"]["module_output_load"],
+                    0.02
+                );
+                assert_eq!(
+                    json["fanout_optimization"]["options"]["primary_input_transition"],
+                    0.03
+                );
+                let netlist_text = std::fs::read_to_string(&netlist).unwrap();
+                if let Some((old_report, old_netlist)) = previous {
+                    assert_eq!(json, old_report);
+                    assert_eq!(netlist_text, old_netlist);
+                }
+                previous = Some((json, netlist_text));
+            }
         }
     }
 }

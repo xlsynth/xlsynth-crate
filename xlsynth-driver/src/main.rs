@@ -2522,13 +2522,15 @@ fn main() {
                 )
                 .arg(
                     Arg::new("primary_input_transition")
-                        .long("primary_input_transition")
+                        .long("primary-input-transition")
+                        .visible_alias("primary_input_transition")
                         .help("Fanout optimization input transition in Liberty units")
                         .value_parser(clap::value_parser!(f64)),
                 )
                 .arg(
                     Arg::new("module_output_load")
-                        .long("module_output_load")
+                        .long("module-output-load")
+                        .visible_alias("module_output_load")
                         .help("Fanout optimization output capacitance; defaults to the library value")
                         .value_parser(clap::value_parser!(f64)),
                 )

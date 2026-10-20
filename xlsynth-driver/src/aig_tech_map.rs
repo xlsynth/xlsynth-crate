@@ -399,7 +399,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             module_output_load: match matches.get_one::<f64>("module_output_load") {
                 Some(load) => *load,
                 None => default_output_load(&lib).map_err(anyhow::Error::msg).context(
-                    "area fanout optimization requires an output load; supply --module_output_load or use --fanout-opt=false for raw mapping",
+                    "area fanout optimization requires an output load; supply --module-output-load or use --fanout-opt=false for raw mapping",
                 )?,
             },
             area_growth_limit: matches

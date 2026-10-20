@@ -877,7 +877,7 @@ Key flags:
 - `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
   `nand2` requires suitable `INV` and `NAND2` functions; `area` requires cell
   functions and positive areas. Default area optimization also requires usable
-  timing data and an output load (library default or `--module_output_load`).
+  timing data and an output load (library default or `--module-output-load`).
   `nand2` and raw area mapping with `--fanout-opt=false` do not require timing.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional override for emitted module name.
@@ -903,21 +903,23 @@ timing uses pin capacitances and excludes interconnect parasitics. Use
 `--fanout-opt` and `--fanout-opt=true` explicitly enable the pass. The default
 `nand2` strategy still leaves it disabled; enabling it requires `--strategy area`.
 Missing or unusable timing data, or a missing output-load default without an
-explicit `--module_output_load`, causes an error before outputs are written; the
+explicit `--module-output-load`, causes an error before outputs are written; the
 pass is never silently skipped.
 
 ```shell
 xlsynth-driver aig-tech-map design.aig --strategy area \
   --liberty_proto timed-cells.proto --netlist_out optimized.gv \
-  --module_output_load 1 --json_out mapping.json
+  --module-output-load 1 --json_out mapping.json
 ```
 
-- `--primary_input_transition`: source slew in Liberty time units (default: `0.01`).
-- `--module_output_load`: capacitance per output in Liberty units; defaults to the
+- `--primary-input-transition`: source slew in Liberty time units (default: `0.01`).
+- `--module-output-load`: capacitance per output in Liberty units; defaults to the
   library's `default_output_load`, or must be supplied if that value is absent.
 - `--fanout-max-area-growth`: maximum fractional growth over mapped area
   (default: `0.05`). These three options require enabled area optimization and
   are rejected with `--fanout-opt=false` or the `nand2` strategy.
+- The underscored spellings `--primary_input_transition` and
+  `--module_output_load` remain accepted compatibility aliases.
 - JSON `stats` retains the original mapping statistics; `fanout_optimization`
   contains before/after metrics and decisions with electrical diagnostics. Trial
   metrics contain only area, cell count, and worst delay. Top-level instance/net
