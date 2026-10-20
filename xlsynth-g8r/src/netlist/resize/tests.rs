@@ -4,6 +4,8 @@ use super::*;
 use crate::liberty::model::{LibraryBuilder, TimingType};
 use crate::liberty::parser::parse_liberty_files;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
+use crate::netlist::normalized::BitSource;
+use crate::netlist::sta::incremental::{TimingEdit, TimingInstance, TimingMutation, TrialOptions};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::io::Write;
@@ -833,7 +835,7 @@ fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
         );
         let mut changed = original.clone();
         let mut interner = parsed.interner.clone();
-        for (instance, cell) in changed.instances.iter_mut().zip(&sta.cells) {
+        for (instance, cell) in changed.instances.iter_mut().zip(sta.cell_indices()) {
             instance.type_name = interner.get_or_intern(&library.cells[*cell].name);
         }
         verify_timing(
@@ -968,29 +970,41 @@ fn random_substitution_sequences_match_full_timing_and_rollback() -> Result<()> 
         options().timing,
     )?;
     for iteration in 0..250 {
-        let i = rng.gen_range(0..sta.cells.len());
-        let alternatives = families.alternatives(sta.cells[i]);
+        let i = rng.gen_range(0..sta.cell_indices().len());
+        let alternatives = families.alternatives(sta.cell_indices()[i]);
         let replacement = alternatives[rng.gen_range(0..alternatives.len())];
         let accept = iteration % 3 != 0;
         let old = sta.score();
-        let old_cells = sta.cells.clone();
+        let old_cells = sta.cell_indices().to_vec();
         let limits = (iteration % 2 == 0).then_some(old);
-        let acceptable = |timing: &IncrementalSta<'_, '_>| {
+        let acceptable = |timing: &IncrementalSta<'_>| {
             accept && limits.is_none_or(|limits| timing.score().within(limits))
         };
-        let expected = full_propagation.trial(i, replacement, usize::MAX, None, acceptable)?;
+        let expected = full_propagation
+            .trial_edit(
+                &TimingEdit {
+                    new_bits: 0,
+                    mutations: vec![TimingMutation::Resize {
+                        instance: i,
+                        cell: replacement,
+                    }],
+                },
+                TrialOptions::default(),
+                |timing, _| Ok(acceptable(timing)),
+            )?
+            .outcome;
         let committed = sta.trial(i, replacement, usize::MAX, limits, acceptable)?;
         assert_eq!(committed, expected);
         assert_eq!(sta.score(), full_propagation.score());
-        assert_eq!(sta.cells, full_propagation.cells);
+        assert_eq!(sta.cell_indices(), full_propagation.cell_indices());
         if committed != TrialOutcome::Accepted {
             assert_eq!(sta.score(), old);
-            assert_eq!(sta.cells, old_cells);
+            assert_eq!(sta.cell_indices(), old_cells);
         }
         let mut trial_module = original.clone();
         // All cell names are preinterned by fixture setup above rather
         // than modifying the interner while the timing engine borrows it.
-        for (instance, cell) in trial_module.instances.iter_mut().zip(&sta.cells) {
+        for (instance, cell) in trial_module.instances.iter_mut().zip(sta.cell_indices()) {
             instance.type_name = parsed.interner.get(&library.cells[*cell].name).unwrap();
         }
         let full = measure_boundary_delays(
@@ -1365,11 +1379,11 @@ fn five_input_candidate_with_missing_arc_is_rejected_and_rolled_back() -> Result
         opts.timing,
     )?;
     let original_score = sta.score();
-    let original_cells = sta.cells.clone();
+    let original_cells = sta.cell_indices().to_vec();
     let error = sta.trial(0, bad, usize::MAX, None, |_| true).unwrap_err();
     assert!(error.to_string().contains("functional input 'E'"));
     assert_eq!(sta.score(), original_score);
-    assert_eq!(sta.cells, original_cells);
+    assert_eq!(sta.cell_indices(), original_cells);
     drop(sta);
 
     let report = resize(&mut actual, &library, &opts)?;
@@ -1509,7 +1523,7 @@ fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells(
         options().timing,
     )?;
     let original_score = sta.score();
-    let original_cells = sta.cells.clone();
+    let original_cells = sta.cell_indices().to_vec();
     let candidate = library.cells.iter().position(|c| c.name == "AND2").unwrap();
     // The changed delay visits the source and gate. The remaining unit cannot
     // cover the two-instance constant rescan, so that scan does no work.
@@ -1519,7 +1533,7 @@ fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells(
     );
     assert_eq!(sta.propagated_instances(), 2);
     assert_eq!(sta.score(), original_score);
-    assert_eq!(sta.cells, original_cells);
+    assert_eq!(sta.cell_indices(), original_cells);
 
     // The restored state must also support a later complete rescan, which
     // rejects this candidate for the missing downstream arc.
@@ -1528,7 +1542,7 @@ fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells(
         .unwrap_err();
     assert!(error.to_string().contains("functional input 'B'"));
     assert_eq!(sta.score(), original_score);
-    assert_eq!(sta.cells, original_cells);
+    assert_eq!(sta.cell_indices(), original_cells);
     drop(sta);
 
     let report = resize(
@@ -1722,13 +1736,13 @@ fn replacement_that_changes_when_constants_is_skipped() -> Result<()> {
         &library,
         opts.timing,
     )?;
-    let before_cells = sta.cells.clone();
+    let before_cells = sta.cell_indices().to_vec();
     let before_score = sta.score();
     let error = sta
         .trial(0, candidate, usize::MAX, None, |_| true)
         .unwrap_err();
     assert!(error.to_string().contains("conditional timing arcs"));
-    assert_eq!(sta.cells, before_cells);
+    assert_eq!(sta.cell_indices(), before_cells);
     assert_eq!(sta.score(), before_score);
     drop(sta);
 
@@ -1771,12 +1785,12 @@ fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Resu
         opts.timing,
     )?;
     let before = sta.score();
-    let cells = sta.cells.clone();
+    let cells = sta.cell_indices().to_vec();
     // Duplicate capture tables fail after forward timing and input loads have
     // changed, exercising rollback beyond candidate preparation.
     assert!(sta.trial(1, bad, usize::MAX, None, |_| true).is_err());
     assert_eq!(sta.score(), before);
-    assert_eq!(sta.cells, cells);
+    assert_eq!(sta.cell_indices(), cells);
     assert!(sta.propagated_instances() > 0);
     let good = library.cells.iter().position(|c| c.name == "DFF4").unwrap();
     assert_eq!(
@@ -1817,21 +1831,21 @@ fn rejection_and_budget_rollback_restore_exact_timing() -> Result<()> {
         options().timing,
     )?;
     let original_score = sta.score();
-    let original_cells = sta.cells.clone();
+    let original_cells = sta.cell_indices().to_vec();
     let larger = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
     assert_eq!(
         sta.trial(1, larger, usize::MAX, None, |_| false)?,
         TrialOutcome::Rejected
     );
     assert_eq!(sta.score(), original_score);
-    assert_eq!(sta.cells, original_cells);
+    assert_eq!(sta.cell_indices(), original_cells);
     let budget = sta.propagated_instances() + 1;
     assert_eq!(
         sta.trial(1, larger, budget, None, |_| true)?,
         TrialOutcome::PropagationLimit
     );
     assert_eq!(sta.score(), original_score);
-    assert_eq!(sta.cells, original_cells);
+    assert_eq!(sta.cell_indices(), original_cells);
     // A subsequent trial must not inherit any rejected or aborted work.
     assert_eq!(
         sta.trial(1, larger, usize::MAX, None, |_| true)?,
@@ -1874,7 +1888,7 @@ fn settled_output_violation_rejects_before_propagating_unrelated_logic() -> Resu
             },
         )?;
         let before = sta.score();
-        let original = sta.cells.clone();
+        let original = sta.cell_indices().to_vec();
         let weak = library
             .cells
             .iter()
@@ -1896,7 +1910,7 @@ fn settled_output_violation_rejects_before_propagating_unrelated_logic() -> Resu
         );
         assert!(sta.propagated_instances() - full_work < full_work);
         assert_eq!(sta.score(), before);
-        assert_eq!(sta.cells, original);
+        assert_eq!(sta.cell_indices(), original);
     }
     Ok(())
 }
@@ -1922,7 +1936,7 @@ fn capture_limit_rejection_precedes_final_acceptance_and_restores_timing() -> Re
             options().timing,
         )?;
         let before = sta.score();
-        let cells = sta.cells.clone();
+        let cells = sta.cell_indices().to_vec();
         let weak = library
             .cells
             .iter()
@@ -1944,7 +1958,7 @@ fn capture_limit_rejection_precedes_final_acceptance_and_restores_timing() -> Re
         );
         assert!(!accepted_called);
         assert_eq!(sta.score(), before);
-        assert_eq!(sta.cells, cells);
+        assert_eq!(sta.cell_indices(), cells);
     }
     Ok(())
 }
@@ -2069,7 +2083,7 @@ fn clearing_electrical_limits_does_not_keep_stale_violation_allowances() -> Resu
                 TrialOutcome::Rejected,
                 "{limit}"
             );
-            assert_eq!(sta.cells[0], replacement);
+            assert_eq!(sta.cell_indices()[0], replacement);
             assert_eq!(sta.score(), before);
         }
     }
@@ -2099,14 +2113,14 @@ fn resizing_clock_drivers_preserves_clock_pin_transition_limits() -> Result<()> 
         options().timing,
     )?;
     let before = sta.score();
-    let cells = sta.cells.clone();
+    let cells = sta.cell_indices().to_vec();
     let weak = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
     assert_eq!(
         sta.trial(0, weak, usize::MAX, None, |_| true)?,
         TrialOutcome::Rejected
     );
     assert_eq!(sta.score(), before);
-    assert_eq!(sta.cells, cells);
+    assert_eq!(sta.cell_indices(), cells);
     Ok(())
 }
 
@@ -2176,7 +2190,7 @@ fn resizing_a_consumer_preserves_its_drivers_electrical_limits() -> Result<()> {
             "{limit}"
         );
         assert_eq!(sta.score(), before);
-        assert_eq!(sta.cells, vec![small, small]);
+        assert_eq!(sta.cell_indices(), vec![small, small]);
         assert_eq!(
             sta.trial(0, large, usize::MAX, None, |_| true)?,
             TrialOutcome::Accepted
@@ -2215,14 +2229,14 @@ fn resizing_a_driver_preserves_combinational_and_capture_pin_slew_limits() -> Re
             options().timing,
         )?;
         let before = sta.score();
-        let cells_before = sta.cells.clone();
+        let cells_before = sta.cell_indices().to_vec();
         let replacement = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
         assert_eq!(
             sta.trial(0, replacement, usize::MAX, None, |_| true)?,
             TrialOutcome::Rejected
         );
         assert_eq!(sta.score(), before);
-        assert_eq!(sta.cells, cells_before);
+        assert_eq!(sta.cell_indices(), cells_before);
     }
     Ok(())
 }
@@ -2245,6 +2259,336 @@ fn budget_sweeps_preserve_timing_and_area_guards() -> Result<()> {
         assert!(report.final_area <= report.initial_area * (1.0 + options.max_area_growth));
         assert!(report.upsize.propagated_instances <= budget);
         assert!(report.downsize.propagated_instances <= budget);
+    }
+    Ok(())
+}
+
+/// Compares all signal envelopes and diagnostics after cross-client edits.
+fn compare_combinational_state(
+    sta: &IncrementalSta<'_>,
+    parsed: &ParsedNetlist,
+    library: &Library,
+) -> Result<()> {
+    let full = crate::netlist::sta::analyze_combinational_max_arrival(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        library,
+        options().timing,
+    )?;
+    assert_eq!(sta.bit_count(), full.net_timing.len());
+    for (bit, expected) in full.net_timing.iter().enumerate() {
+        assert_eq!(sta.timing_for_bit(bit), *expected, "bit {bit}");
+    }
+    assert_eq!(sta.score().input_to_output, full.worst_output_arrival);
+    assert_eq!(
+        sta.combinational_query_diagnostics(),
+        Some(full.timing_query_diagnostic_counts)
+    );
+    Ok(())
+}
+
+#[test]
+fn topology_and_resize_clients_share_transaction_state_and_budgets() -> Result<()> {
+    let library = library()?;
+    let text = "module m(input a,output y,z); wire n; BUF1 driver(.A(a),.Y(n)); BUF1 left(.A(n),.Y(y)); BUF1 right(.A(n),.Y(z)); endmodule";
+    let original = read_gv_from_str(text)?;
+    let mut sta = IncrementalSta::new_combinational(
+        &original.modules[0],
+        &original.nets,
+        &original.interner,
+        &library,
+        options().timing,
+    )?;
+    let net = original
+        .nets
+        .iter()
+        .position(|n| original.interner.resolve(n.name) == Some("n"))
+        .unwrap();
+    let small = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
+    let large = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
+    let new_bit = sta.bit_count();
+    let edit = TimingEdit {
+        new_bits: 1,
+        mutations: vec![
+            TimingMutation::Insert(TimingInstance {
+                name: "extra".into(),
+                cell: small,
+                connections: vec![
+                    ("A".into(), BitSource::Bit(net)),
+                    ("Y".into(), BitSource::Bit(new_bit)),
+                ],
+            }),
+            TimingMutation::Rewire {
+                instance: 1,
+                pin: "A".into(),
+                source: BitSource::Bit(new_bit),
+            },
+        ],
+    };
+    let inserted_text = text.replace("left(.A(n)", "left(.A(added)").replace(
+        "endmodule",
+        "wire added; BUF1 extra(.A(n),.Y(added)); endmodule",
+    );
+    let inserted = read_gv_from_str(&inserted_text)?;
+    for budget in 0..12 {
+        let before = sta.propagated_instances();
+        let work = sta.trial_edit(
+            &edit,
+            TrialOptions {
+                cell_budget: budget,
+                limits: None,
+            },
+            |timing, _| {
+                compare_combinational_state(timing, &inserted, &library)?;
+                Ok(false)
+            },
+        )?;
+        assert_ne!(work.outcome, TrialOutcome::Accepted);
+        assert!(sta.propagated_instances() - before <= budget);
+        assert_eq!(
+            sta.propagated_instances() - before,
+            work.propagated_instances + work.coverage_instances
+        );
+        compare_combinational_state(&sta, &original, &library)?;
+    }
+    assert!(
+        sta.trial_edit(&edit, TrialOptions::default(), |timing, _| {
+            compare_combinational_state(timing, &inserted, &library)?;
+            Err(anyhow!("deliberate caller failure"))
+        })
+        .is_err()
+    );
+    compare_combinational_state(&sta, &original, &library)?;
+    assert_eq!(
+        sta.trial_edit(&edit, TrialOptions::default(), |_, _| Ok(true))?
+            .outcome,
+        TrialOutcome::Accepted
+    );
+    compare_combinational_state(&sta, &inserted, &library)?;
+    let resized = read_gv_from_str(&inserted_text.replace("BUF1 extra", "BUF4 extra"))?;
+    assert_eq!(
+        sta.trial(3, large, usize::MAX, None, |_| true)?,
+        TrialOutcome::Accepted
+    );
+    compare_combinational_state(&sta, &resized, &library)?;
+    assert_eq!(
+        sta.trial(0, large, usize::MAX, None, |_| false)?,
+        TrialOutcome::Rejected
+    );
+    compare_combinational_state(&sta, &resized, &library)?;
+    let limit = sta.propagated_instances();
+    assert_eq!(
+        sta.trial(0, large, limit, None, |_| true)?,
+        TrialOutcome::PropagationLimit
+    );
+    compare_combinational_state(&sta, &resized, &library)?;
+    Ok(())
+}
+
+#[test]
+fn registered_resize_preserves_ignored_arc_validation_semantics() -> Result<()> {
+    let library = library()?;
+    let ff = library.cells.iter().position(|c| c.name == "DFF1").unwrap();
+    let q = library.cells[ff]
+        .pins
+        .iter()
+        .position(|p| library.resolve_string(&p.name) == "Q")
+        .unwrap();
+    let mut builder = LibraryBuilder::from_library(library);
+    let ignored =
+        builder.add_timing_arc("MISSING", "positive_unate", "combinational", "", vec![])?;
+    builder.cells[ff].pins[q].timing_arcs.push(ignored);
+    let library = builder.finish();
+    let parsed = read_gv_from_str(
+        "module m(input clk, input d, output q); DFF1 ff(.CLK(clk),.D(d),.Q(q)); endmodule",
+    )?;
+    let full = measure_boundary_delays(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        options().timing,
+    )?;
+    let mut sta = IncrementalSta::new(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        options().timing,
+    )?;
+    let edit = TimingEdit {
+        mutations: vec![TimingMutation::Resize {
+            instance: 0,
+            cell: ff,
+        }],
+        ..Default::default()
+    };
+    for accepted in [false, true] {
+        let result = sta.trial_edit(&edit, TrialOptions::default(), |s, _| {
+            verify_timing(s.score(), full)?;
+            Ok(accepted)
+        })?;
+        assert_eq!(
+            result.outcome,
+            if accepted {
+                TrialOutcome::Accepted
+            } else {
+                TrialOutcome::Rejected
+            }
+        );
+        verify_timing(sta.score(), full)?;
+        assert_eq!(
+            sta.trial(0, ff, usize::MAX, None, |_| accepted)?,
+            if accepted {
+                TrialOutcome::Accepted
+            } else {
+                TrialOutcome::Rejected
+            }
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn registered_resize_rejects_changed_clock_data_pin_roles() -> Result<()> {
+    let mut library = library()?;
+    let ff = library.cells.iter().position(|c| c.name == "DFF1").unwrap();
+    let mut changed = library.cells[ff].clone();
+    changed.name = "DFF_CHANGED".into();
+    let d = changed
+        .pins
+        .iter()
+        .position(|p| library.resolve_string(&p.name) == "D")
+        .unwrap();
+    changed.pins[d].is_clocking_pin = true;
+    let changed_index = library.cells.len();
+    library.cells.push(changed);
+    for (before_cell, after_cell) in [("DFF1", changed_index), ("DFF_CHANGED", ff)] {
+        let parsed = read_gv_from_str(&format!(
+            "module m(input clk, input d, output q); wire n; BUF1 driver(.A(d),.Y(n)); {before_cell} ff(.CLK(clk),.D(n),.Q(q)); endmodule"
+        ))?;
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        let before = sta.score();
+        let cells = sta.cell_indices().to_vec();
+        let edit = TimingEdit {
+            mutations: vec![TimingMutation::Resize {
+                instance: 1,
+                cell: after_cell,
+            }],
+            ..Default::default()
+        };
+        let error = sta
+            .trial_edit(&edit, TrialOptions::default(), |_, _| {
+                panic!("invalid edit reaches callback")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("clock/data pin role"));
+        assert_eq!(sta.score(), before);
+        assert_eq!(sta.cell_indices(), cells);
+        let strong = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
+        assert_eq!(
+            sta.trial(0, strong, usize::MAX, None, |_| true)?,
+            TrialOutcome::Accepted
+        );
+        let mut module = parsed.modules[0].clone();
+        let mut interner = parsed.interner.clone();
+        module.instances[0].type_name = interner.get_or_intern("BUF4");
+        verify_timing(
+            sta.score(),
+            measure_boundary_delays(&module, &parsed.nets, &interner, &library, options().timing)?,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn topology_commit_refreshes_electrical_fanout_before_resize_policy() -> Result<()> {
+    let mut library = library()?;
+    let small = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
+    let output = library.cells[small]
+        .pins
+        .iter()
+        .position(|p| library.resolve_string(&p.name) == "Y")
+        .unwrap();
+    let input = library.cells[small]
+        .pins
+        .iter()
+        .position(|p| library.resolve_string(&p.name) == "A")
+        .unwrap();
+    library.cells[small].pins[output].max_fanout = Some(1.0);
+    let mut heavy = library.cells[small].clone();
+    heavy.name = "HEAVY".into();
+    heavy.pins[input].fanout_load = Some(2.0);
+    let heavy_index = library.cells.len();
+    library.cells.push(heavy);
+    let parsed = read_gv_from_str(
+        "module m(input a, output y,z); wire n; BUF1 root(.A(a),.Y(n)); BUF1 sink(.A(n),.Y(y)); BUF1 extra(.A(a),.Y(z)); endmodule",
+    )?;
+    for batch_resize in [false, true] {
+        let mut sta = IncrementalSta::new_combinational(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            options().timing,
+        )?;
+        let initial = sta.cached_electrical_violations(0).to_vec();
+        let inst = sta.instance(1).unwrap();
+        let connections = inst
+            .pin_order
+            .iter()
+            .map(|p| (p.clone(), inst.pins[p][0].clone()))
+            .collect();
+        let edit = TimingEdit {
+            mutations: if batch_resize {
+                vec![
+                    TimingMutation::Resize {
+                        instance: 1,
+                        cell: heavy_index,
+                    },
+                    TimingMutation::Resize {
+                        instance: 2,
+                        cell: small,
+                    },
+                ]
+            } else {
+                vec![TimingMutation::Replace {
+                    instance: 1,
+                    cell: heavy_index,
+                    connections,
+                }]
+            },
+            ..Default::default()
+        };
+        for accept in [false, true] {
+            sta.trial_edit(&edit, TrialOptions::default(), |s, affected| {
+                assert!(affected.contains(&0), "electrical-only upstream change");
+                assert!(s.electrical_violations(0).iter().any(|v| v.fanout == 1.0));
+                assert_eq!(s.cached_electrical_violations(0), initial);
+                Ok(accept)
+            })?;
+            if accept {
+                assert_eq!(
+                    sta.cached_electrical_violations(0),
+                    sta.electrical_violations(0)
+                );
+            } else {
+                assert_eq!(sta.cached_electrical_violations(0), initial);
+                assert_eq!(sta.electrical_violations(0), initial);
+            }
+        }
+        assert_eq!(
+            sta.trial(0, small, usize::MAX, None, |_| true)?,
+            TrialOutcome::Accepted,
+            "resize accepts an unchanged existing violation after topology commit"
+        );
     }
     Ok(())
 }

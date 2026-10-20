@@ -13,7 +13,7 @@ documentation = "https://docs.rs/xlsynth"
 workspace = true
 
 [dependencies]
-annotate-snippets = "0.12.16"
+annotate-snippets = "=0.12.16"
 xlsynth = { path = "../xlsynth", version = "0.76.0" }
 xlsynth-aug-opt = { path = "../xlsynth-aug-opt", version = "0.76.0" }
 xlsynth-codegen = { path = "../xlsynth-codegen", version = "0.76.0" }
