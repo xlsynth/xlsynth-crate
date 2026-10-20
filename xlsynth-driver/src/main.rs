@@ -2472,7 +2472,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Liberty proto (.proto, .textproto, or either with .gz); nand2 requires INV/NAND2 functions, area requires cell functions and positive areas")
+                        .help("Liberty proto (.proto, .textproto, or either with .gz); nand2 requires INV/NAND2 functions; area requires cell functions and positive areas, plus timing and output load unless --fanout-opt=false")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2509,6 +2509,36 @@ fn main() {
                         .value_parser(["nand2", "area"])
                         .help("Mapping strategy: nand2 preserves structural lowering; area covers the fixed AIG using an area objective")
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("fanout_opt")
+                        .long("fanout-opt")
+                        .help("Optimize fanout after area mapping (default: true for area, false for nand2); --fanout-opt=false disables it. Requires timing-enabled Liberty and output load")
+                        .num_args(0..=1)
+                        .require_equals(true)
+                        .default_missing_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary-input-transition")
+                        .visible_alias("primary_input_transition")
+                        .help("Fanout optimization input transition in Liberty units")
+                        .value_parser(clap::value_parser!(f64)),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module-output-load")
+                        .visible_alias("module_output_load")
+                        .help("Fanout optimization output capacitance; defaults to the library value")
+                        .value_parser(clap::value_parser!(f64)),
+                )
+                .arg(
+                    Arg::new("fanout_max_area_growth")
+                        .long("fanout-max-area-growth")
+                        .help("Maximum fractional area growth from fanout optimization (default: 0.05)")
+                        .value_parser(clap::value_parser!(f64)),
                 )
                 .arg(
                     Arg::new("json_out")

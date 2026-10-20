@@ -11,8 +11,10 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
+use xlsynth_g8r::liberty::io_defaults::default_output_load;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
-use xlsynth_g8r::netlist::io::load_liberty_from_path;
+use xlsynth_g8r::netlist::fanout_opt::{FanoutOptimizationOptions, optimize_fanout};
+use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_data_from_path};
 use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
 use xlsynth_g8r::techmap::nand2::{
     CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
@@ -266,8 +268,23 @@ fn ensure_json_fifo_safe_for_stdout(path: &Path, stdout: &same_file::Handle) -> 
     Ok(())
 }
 
-/// Loads the requested inputs, dispatches mapping, and writes netlist/report
-/// outputs.
+/// Keeps the mapping JSON deterministic while retaining optimization work
+/// counts.
+fn remove_runtime(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.retain(|key, _| !key.ends_with("_seconds"));
+            for value in fields.values_mut() {
+                remove_runtime(value);
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(remove_runtime),
+        _ => {} // Scalar report values have no elapsed-time fields.
+    }
+}
+
+/// Loads inputs, dispatches mapping and optional fanout optimization, and
+/// writes outputs.
 fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let aig_input_file = matches.get_one::<String>("aig_input_file").unwrap();
     let liberty_proto_path = Path::new(matches.get_one::<String>("liberty_proto").unwrap());
@@ -275,6 +292,25 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let json_out = matches.get_one::<String>("json_out");
     let module_name = matches.get_one::<String>("module_name");
     let strategy = matches.get_one::<String>("strategy").unwrap().as_str();
+    let fanout_opt = matches
+        .get_one::<bool>("fanout_opt")
+        .copied()
+        .unwrap_or(strategy == "area");
+    ensure!(
+        !fanout_opt || strategy == "area",
+        "--fanout-opt requires --strategy area"
+    );
+    ensure!(
+        fanout_opt
+            || [
+                "primary_input_transition",
+                "module_output_load",
+                "fanout_max_area_growth"
+            ]
+            .iter()
+            .all(|name| matches.value_source(name) != Some(ValueSource::CommandLine)),
+        "fanout tuning options require enabled area optimization; use --strategy area without --fanout-opt=false"
+    );
     ensure!(
         strategy != "area" || matches.value_source("cell_policy") != Some(ValueSource::CommandLine),
         "--cell_policy applies only to --strategy nand2"
@@ -296,14 +332,23 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load AIG '{aig_input_file}'"))?
             .gate_fn;
-    let lib = load_liberty_from_path(liberty_proto_path).with_context(|| {
-        format!(
-            "failed to load Liberty proto '{}'",
-            liberty_proto_path.display()
-        )
+    let load = if fanout_opt {
+        load_liberty_with_timing_data_from_path
+    } else {
+        load_liberty_from_path
+    };
+    let lib = load(liberty_proto_path).with_context(|| {
+        if fanout_opt {
+            format!(
+                "failed to load timing-enabled Liberty proto '{}' for area fanout optimization; use --fanout-opt=false for raw mapping",
+                liberty_proto_path.display()
+            )
+        } else {
+            format!("failed to load Liberty proto '{}'", liberty_proto_path.display())
+        }
     })?;
 
-    let (mut mapped, mut report, summary) = match strategy {
+    let (mut mapped, mut report, mut summary) = match strategy {
         "nand2" => {
             let policy = match matches.get_one::<String>("cell_policy").unwrap().as_str() {
                 "small-normal-vt" => CellPolicy::SmallNormalVt,
@@ -343,6 +388,39 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     };
     if let Some(name) = module_name {
         mapped.module.name = mapped.interner.get_or_intern(name);
+    }
+    if fanout_opt {
+        let defaults = FanoutOptimizationOptions::default();
+        let options = FanoutOptimizationOptions {
+            primary_input_transition: matches
+                .get_one::<f64>("primary_input_transition")
+                .copied()
+                .unwrap_or(defaults.primary_input_transition),
+            module_output_load: match matches.get_one::<f64>("module_output_load") {
+                Some(load) => *load,
+                None => default_output_load(&lib).map_err(anyhow::Error::msg).context(
+                    "area fanout optimization requires an output load; supply --module-output-load or use --fanout-opt=false for raw mapping",
+                )?,
+            },
+            area_growth_limit: matches
+                .get_one::<f64>("fanout_max_area_growth")
+                .copied()
+                .unwrap_or(defaults.area_growth_limit),
+            ..defaults
+        };
+        let optimized =
+            optimize_fanout(&mut mapped, &lib, options).context(
+                "area fanout optimization failed; provide usable timing data or use --fanout-opt=false for raw mapping",
+            )?;
+        summary.push_str(&format!(
+            "; fanout delay {} -> {}, area {} -> {}",
+            optimized.before.worst_delay,
+            optimized.after.worst_delay,
+            optimized.before.area,
+            optimized.after.area
+        ));
+        report["fanout_optimization"] = serde_json::to_value(optimized)?;
+        remove_runtime(&mut report["fanout_optimization"]);
     }
     report["strategy"] = strategy.into();
     report["module"] = mapped.interner.resolve(mapped.module.name).unwrap().into();

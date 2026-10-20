@@ -887,6 +887,82 @@ impl<'a> PreparedStaLibrary<'a> {
         Ok(timing_related_input_pins)
     }
 
+    /// Screens a combinational replacement with independent dynamic inputs.
+    /// Optimizers still validate each actual instance context when trialing it.
+    pub(crate) fn validate_independent_combinational_cell(&self, cell_idx: usize) -> Result<()> {
+        let cell = self
+            .library
+            .cells
+            .get(cell_idx)
+            .ok_or_else(|| anyhow!("unknown cell"))?;
+        let pins: HashMap<_, _> = cell
+            .pins
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                (
+                    self.library.resolve_string(&p.name).to_string(),
+                    vec![PinBitSource::Bit(i)],
+                )
+            })
+            .collect();
+        let order = combinational_output_pin_evaluation_order(self, cell_idx, &pins)?;
+        let signal = SignalTimingSet::from_single(SignalTiming {
+            rise: EdgeTiming {
+                arrival: 0.0,
+                transition: 1.0,
+            },
+            fall: EdgeTiming {
+                arrival: 0.0,
+                transition: 1.0,
+            },
+        });
+        let mut timing = cell
+            .pins
+            .iter()
+            .map(|p| (p.direction == PinDirection::Input as i32).then(|| signal.clone()))
+            .collect::<Vec<_>>();
+        let known = HashMap::new();
+        let mut evaluation = TimingEvaluationContext::new(self.library);
+        validate_instance_functional_timing_coverage(
+            InstanceCoverageInputs {
+                lib: self,
+                cell_idx,
+                pin_sources: &pins,
+                known_pin_values: &known,
+                coverage_known_pin_values: &known,
+                output_pin_order: &order,
+                instance_name: "independent inputs",
+                launched_timing: None,
+            },
+            &mut evaluation,
+        )?;
+        evaluate_instance_outputs(
+            InstanceTimingInputs {
+                lib: self,
+                cell_idx,
+                inst_pin_map: &pins,
+                known_pin_values: &known,
+                output_pin_order: &order,
+                instance_name: "independent inputs",
+                render_bit: &|i| i.to_string(),
+                register_boundaries: false,
+                is_sequential: false,
+                launch_register: false,
+            },
+            &vec![
+                EdgeLoadCapacitance {
+                    rise: 1.0,
+                    fall: 1.0
+                };
+                cell.pins.len()
+            ],
+            &mut timing,
+            &signal,
+            &mut evaluation,
+        )
+    }
+
     /// Builds name indexes and lazily prepares STA coverage for this library.
     pub fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
         let mut cell_by_name = HashMap::with_capacity(library.cells.len());

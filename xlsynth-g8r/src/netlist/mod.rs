@@ -7,6 +7,7 @@ pub mod bit_ref;
 pub mod cone;
 pub mod connectivity;
 pub mod emit;
+pub mod fanout_opt;
 mod form;
 pub mod gatefn_from_netlist;
 pub mod gv2aig;

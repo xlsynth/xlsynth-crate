@@ -58,6 +58,11 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
             .arg(&library)
             .arg("--netlist_out")
             .arg(&netlist);
+        if strategy == "area" {
+            // Exercise legacy mapping policy independently of timing
+            // requirements.
+            command.arg("--fanout-opt=false");
+        }
         if let Some(policy) = policy {
             command.args(["--cell_policy", policy]);
         }
