@@ -909,8 +909,9 @@ xlsynth-driver aig-tech-map design.aig --strategy area --fanout-opt \
 - `--fanout-max-area-growth`: maximum fractional growth over mapped area
   (default: `0.05`). These three options require `--fanout-opt`.
 - JSON `stats` retains the original mapping statistics; `fanout_optimization`
-  contains before/after metrics and decisions. Top-level instance/net counts
-  describe the emitted netlist. Elapsed times are omitted.
+  contains before/after metrics and decisions with electrical diagnostics. Trial
+  metrics contain only area, cell count, and worst delay. Top-level instance/net
+  counts describe the emitted netlist. Elapsed times are omitted.
 
 ### `gv-sta`: gate-level max-arrival STA
 

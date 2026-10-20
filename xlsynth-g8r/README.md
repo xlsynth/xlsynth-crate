@@ -383,6 +383,12 @@ assumptions, full-STA evaluation, and per-candidate oracle verification; reports
 retain profiling measurements. The CLI exposes the common path through
 `aig-tech-map --strategy area --fanout-opt`.
 
+A shared edit plan supplies both netlist emission and timing-engine mutations.
+Trial metrics contain only `area`, `cell_count`, and `worst_delay`; baseline,
+accepted-decision, and final metrics retain electrical diagnostics. These
+reporting changes do not change candidate eligibility or the delay/area objective.
+The incremental profile no longer includes `metrics_seconds`.
+
 ## Native netlist resizing
 
 `netlist::resize::resize_netlist` operates on a flat mapped module and its nets,

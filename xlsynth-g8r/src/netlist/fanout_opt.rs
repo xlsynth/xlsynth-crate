@@ -69,7 +69,6 @@ struct CellChoice {
 struct Sink {
     instance: usize,
     connection: usize,
-    pin: usize,
     capacitance: f64,
 }
 
@@ -91,6 +90,7 @@ struct Driver {
 struct Graph {
     drivers: Vec<Driver>,
     roots: Vec<Option<usize>>,
+    cells: Vec<usize>,
 }
 
 /// Timing, physical area, and electrical range diagnostics for a trial.
@@ -107,6 +107,24 @@ pub struct FanoutMetrics {
     pub max_capacitance_violations: usize,
     pub max_transition_violations: usize,
     pub timing_queries: TimingQueryDiagnosticCounts,
+}
+
+/// Objective values for a measured trial; rich diagnostics are reported only
+/// for the baseline and accepted edits, not speculatively maintained.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FanoutTrialMetrics {
+    pub area: f64,
+    pub cell_count: usize,
+    pub worst_delay: f64,
+}
+impl From<&FanoutMetrics> for FanoutTrialMetrics {
+    fn from(m: &FanoutMetrics) -> Self {
+        Self {
+            area: m.area,
+            cell_count: m.cell_count,
+            worst_delay: m.worst_delay,
+        }
+    }
 }
 
 /// A bounded edit; buffer levels count added stages from the original driver.
@@ -132,7 +150,7 @@ pub struct FanoutTrial {
     pub round: usize,
     pub instance: String,
     pub kind: FanoutEdit,
-    pub metrics: Option<FanoutMetrics>,
+    pub metrics: Option<FanoutTrialMetrics>,
     pub score: Option<f64>,
     pub reason: String,
 }
@@ -374,7 +392,13 @@ fn graph(
         netlist.nets.iter().all(|n| n.width.is_none()),
         "fanout optimization requires scalar nets"
     );
-    let byname: BTreeMap<_, _> = library.cells.iter().map(|c| (c.name.as_str(), c)).collect();
+    let byname: BTreeMap<_, _> = library
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.name.as_str(), (i, c)))
+        .collect();
+    let mut cells = Vec::with_capacity(netlist.module.instances.len());
     let mut aliases = BTreeMap::new();
     for a in &netlist.module.assigns {
         ensure!(
@@ -408,9 +432,10 @@ fn graph(
     let mut seen_drivers = BTreeSet::new();
     for (i, inst) in netlist.module.instances.iter().enumerate() {
         let name = resolve_symbol(&netlist.interner, inst.type_name, "cell")?;
-        let cell = byname
+        let &(cell_index, cell) = byname
             .get(name.as_str())
             .ok_or_else(|| anyhow!("unknown cell {name}"))?;
+        cells.push(cell_index);
         ensure!(
             cell.sequential.is_empty() && cell.clock_gate.is_none(),
             "fanout optimization requires combinational cells"
@@ -419,11 +444,10 @@ fn graph(
             .map_err(anyhow::Error::msg)?;
         for (j, (pn, r)) in inst.connections.iter().enumerate() {
             let pname = resolve_symbol(&netlist.interner, *pn, "pin")?;
-            let (pin, p) = cell
+            let p = cell
                 .pins
                 .iter()
-                .enumerate()
-                .find(|(_, p)| library.resolve_string(&p.name) == pname)
+                .find(|p| library.resolve_string(&p.name) == pname)
                 .ok_or_else(|| anyhow!("unknown pin {pname}"))?;
             let Some(n) = source(r, &roots)? else {
                 continue;
@@ -433,7 +457,6 @@ fn graph(
                 sinks.entry(n).or_default().push(Sink {
                     instance: i,
                     connection: j,
-                    pin,
                     capacitance: cap[0].max(cap[1]),
                 });
                 let load = loads.entry(n).or_insert([0.0; 2]);
@@ -492,13 +515,18 @@ fn graph(
         d.fixed_output_load = d.output_ports as f64 * options.module_output_load;
         d.slew_bound = slew_bounds.get(&d.net).copied().unwrap_or(f64::INFINITY);
     }
-    Ok(Graph { drivers, roots })
+    Ok(Graph {
+        drivers,
+        roots,
+        cells,
+    })
 }
 
 /// Best complete candidate retained while exploring one bounded search round.
 struct TrialWinner {
     score: f64,
-    metrics: FanoutMetrics,
+    metrics: FanoutTrialMetrics,
+    plan: edit::EditPlan,
     driver: Driver,
     kind: FanoutEdit,
     trial: usize,
@@ -545,8 +573,19 @@ fn measure_prepared(
             },
         )
         .map_err(CandidateTimingError)?;
-    let area = build_area_report(&netlist.module, &netlist.interner, library)?;
     let g = graph(netlist, library, options)?;
+    let m = report_metrics(netlist, library, &sta, &g)?;
+    Ok((m, sta, g))
+}
+
+/// Computes rich electrical diagnostics at accepted search boundaries.
+fn report_metrics(
+    netlist: &MappedNetlist,
+    library: &Library,
+    sta: &StaReport,
+    g: &Graph,
+) -> Result<FanoutMetrics> {
+    let area = build_area_report(&netlist.module, &netlist.interner, library)?;
     let mut m = FanoutMetrics {
         area: area.area,
         cell_count: area.cell_count,
@@ -611,7 +650,7 @@ fn measure_prepared(
             m.input_slew_above_table_max += usize::from(slew > bound);
         }
     }
-    Ok((m, sta, g))
+    Ok(m)
 }
 
 /// Partitions large capacitances first, with deterministic instance/pin tie
@@ -650,109 +689,19 @@ fn fresh_symbol(netlist: &mut MappedNetlist) -> crate::netlist::parse::PortId {
     }
 }
 
-/// Adds one scalar wire without changing existing ports or aliases.
-fn wire(netlist: &mut MappedNetlist) -> usize {
-    let name = fresh_symbol(netlist);
-    let index = netlist.nets.len();
-    netlist.nets.push(Net { name, width: None });
-    netlist.module.wires.push(NetIndex(index));
-    netlist.module.net_index_range.end = netlist.nets.len();
-    index
-}
-
-/// Inserts a proven non-inverting buffer between two scalar nets.
-fn buffer(netlist: &mut MappedNetlist, cell: &CellChoice, input: usize, output: usize) {
-    let instance_name = fresh_symbol(netlist);
-    let type_name = netlist.interner.get_or_intern(&cell.name);
-    let a = netlist.interner.get_or_intern(&cell.inputs[0]);
-    let y = netlist.interner.get_or_intern(&cell.output);
-    netlist.module.instances.push(NetlistInstance {
-        type_name,
-        instance_name,
-        connections: vec![
-            (a, NetRef::Simple(NetIndex(input))),
-            (y, NetRef::Simple(NetIndex(output))),
-        ],
-        inst_lineno: 0,
-        inst_colno: 0,
-    });
-}
-
-/// Applies one structure-preserving candidate; untouched external loads stay on
-/// the root.
+#[cfg(test)]
 fn apply(
     netlist: &mut MappedNetlist,
+    library: &Library,
     driver: &Driver,
     kind: &FanoutEdit,
     choices: &[CellChoice],
 ) -> Result<()> {
-    match kind {
-        FanoutEdit::Upsize { cell } => {
-            let new = choices
-                .iter()
-                .find(|c| &c.name == cell)
-                .ok_or_else(|| anyhow!("missing replacement"))?;
-            netlist.module.instances[driver.instance].type_name =
-                netlist.interner.get_or_intern(&new.name);
-            netlist.module.instances[driver.instance].connections[driver.output_connection].0 =
-                netlist.interner.get_or_intern(&new.output);
-        }
-        FanoutEdit::Replicate { groups } => {
-            let parts = partition(&driver.sinks, *groups, driver.fixed_output_load);
-            for part in parts.iter().skip(1) {
-                if part.is_empty() {
-                    continue;
-                }
-                let output = wire(netlist);
-                let mut clone = netlist.module.instances[driver.instance].clone();
-                clone.instance_name = fresh_symbol(netlist);
-                clone.connections[driver.output_connection].1 = NetRef::Simple(NetIndex(output));
-                netlist.module.instances.push(clone);
-                for s in part {
-                    netlist.module.instances[s.instance].connections[s.connection].1 =
-                        NetRef::Simple(NetIndex(output));
-                }
-            }
-        }
-        FanoutEdit::Buffer {
-            cell,
-            groups,
-            levels,
-        } => {
-            let choice = choices
-                .iter()
-                .find(|c| &c.name == cell)
-                .ok_or_else(|| anyhow!("missing buffer"))?;
-            ensure!(
-                choice.inputs.len() == 1 && choice.truth == 2,
-                "buffer must preserve polarity"
-            );
-            let parts = partition(&driver.sinks, *groups, 0.0);
-            let mut parents = vec![driver.net; *groups];
-            if *levels == 2 {
-                for parity in 0..2 {
-                    let output = wire(netlist);
-                    buffer(netlist, choice, driver.net, output);
-                    for k in (parity..*groups).step_by(2) {
-                        parents[k] = output;
-                    }
-                }
-            }
-            for (k, part) in parts.iter().enumerate() {
-                if part.is_empty() {
-                    continue;
-                }
-                let output = wire(netlist);
-                buffer(netlist, choice, parents[k], output);
-                for s in part {
-                    netlist.module.instances[s.instance].connections[s.connection].1 =
-                        NetRef::Simple(NetIndex(output));
-                }
-            }
-        }
-    }
-    Ok(())
+    let g = graph(netlist, library, &FanoutOptimizationOptions::default())?;
+    edit::EditPlan::new(netlist, &g, driver, kind, choices)?.apply(netlist, library)
 }
+
+mod edit;
 
 /// Selects a small spread of library strengths from an area-ordered list.
 fn spread<T: Clone>(items: &[T]) -> Vec<T> {
@@ -897,7 +846,7 @@ pub fn optimize_fanout(
     let before = current.clone();
     let mut trials = vec![];
     let mut decisions = vec![];
-    let score = |m: &FanoutMetrics| {
+    let score = |m: &FanoutTrialMetrics| {
         m.worst_delay / before.worst_delay.max(1e-12)
             + options.area_weight * (m.area / before.area.max(1e-12) - 1.0)
     };
@@ -965,16 +914,13 @@ pub fn optimize_fanout(
                     netlist.module.instances[driver.instance].instance_name,
                     "instance",
                 )?;
+                let plan = edit::EditPlan::new(netlist, &g, &driver, &kind, &cells)?;
                 let mut full_candidate = None;
-                let mut incremental_edit = None;
                 let area = if let Some(engine) = cache.as_ref() {
-                    let edit = engine.edit(&driver, &kind, &cells)?;
-                    let area = engine.candidate_area(&edit);
-                    incremental_edit = Some(edit);
-                    area
+                    engine.candidate_area(&plan)
                 } else {
                     let mut candidate = netlist.clone();
-                    apply(&mut candidate, &driver, &kind, &cells)?;
+                    plan.apply(&mut candidate, library)?;
                     let area =
                         build_area_report(&candidate.module, &candidate.interner, library)?.area;
                     full_candidate = Some(candidate);
@@ -993,12 +939,11 @@ pub fn optimize_fanout(
                 }
                 let ts = Instant::now();
                 let measured = if let Some(engine) = cache.as_mut() {
-                    let edit = incremental_edit.expect("incremental candidate exists");
-                    engine.trial(edit, area, |engine, metrics| {
+                    engine.trial(&plan, &g, area, |engine, metrics| {
                         if options.verify_incremental {
                             let start = Instant::now();
                             let mut candidate = netlist.clone();
-                            apply(&mut candidate, &driver, &kind, &cells)?;
+                            plan.apply(&mut candidate, library)?;
                             let (full_metrics, full_sta, full_g) =
                                 measure_prepared(&candidate, library, &options, &prepared)
                                     .map_err(|error| {
@@ -1007,7 +952,7 @@ pub fn optimize_fanout(
                             engine.check(&full_sta)?;
                             engine.check_loads(&full_g)?;
                             ensure!(
-                                *metrics == full_metrics,
+                                *metrics == FanoutTrialMetrics::from(&full_metrics),
                                 "oracle optimization metrics mismatch: {:?} vs {:?}",
                                 metrics,
                                 full_metrics
@@ -1019,8 +964,28 @@ pub fn optimize_fanout(
                     })
                 } else {
                     let candidate = full_candidate.as_ref().expect("full STA candidate exists");
-                    measure_prepared(candidate, library, &options, &prepared)
-                        .map(|(metrics, _, _)| (metrics, incremental::Work::default()))
+                    prepared
+                        .analyze_combinational_max_arrival(
+                            &candidate.module,
+                            &candidate.nets,
+                            &candidate.interner,
+                            StaOptions {
+                                primary_input_transition: options.primary_input_transition,
+                                module_output_load: options.module_output_load,
+                            },
+                        )
+                        .map_err(CandidateTimingError)
+                        .map(|sta| {
+                            (
+                                FanoutTrialMetrics {
+                                    area,
+                                    cell_count: candidate.module.instances.len(),
+                                    worst_delay: sta.worst_output_arrival,
+                                },
+                                incremental::Work::default(),
+                            )
+                        })
+                        .map_err(anyhow::Error::from)
                 };
                 sta_seconds += ts.elapsed().as_secs_f64();
                 sta_evaluations += 1;
@@ -1046,7 +1011,7 @@ pub fn optimize_fanout(
                 }
                 let value = score(&metrics);
                 let eligible = metrics.worst_delay < current.worst_delay - 1e-9
-                    && value < score(&current) - 1e-12;
+                    && value < score(&FanoutTrialMetrics::from(&current)) - 1e-12;
                 let wins = eligible
                     && best.as_ref().is_none_or(|b| {
                         value < b.score - 1e-12
@@ -1070,6 +1035,7 @@ pub fn optimize_fanout(
                     best = Some(TrialWinner {
                         score: value,
                         metrics,
+                        plan,
                         driver: driver.clone(),
                         kind,
                         trial,
@@ -1079,6 +1045,7 @@ pub fn optimize_fanout(
         }
         let Some(TrialWinner {
             metrics,
+            plan,
             driver,
             kind,
             trial,
@@ -1088,50 +1055,56 @@ pub fn optimize_fanout(
             break;
         };
         trials[trial].reason = "selected".into();
-        decisions.push(FanoutDecision {
-            round,
-            instance: trials[trial].instance.clone(),
-            kind: kind.clone(),
-            input_timing: input_context(netlist, &driver, &g, &sta)?,
-            sink_count: driver.sinks.len(),
-            output_ports: driver.output_ports,
-            old_load: driver.load,
-            before: current.clone(),
-            after: metrics.clone(),
-        });
+        let input_timing = input_context(netlist, &driver, &g, &sta)?;
         if let Some(engine) = cache.as_mut() {
-            let edit = engine.edit(&driver, &kind, &cells)?;
-            engine.commit(edit)?;
+            engine.commit(&plan, &g)?;
         }
-        apply(netlist, &driver, &kind, &cells)?;
-        if options.verify_incremental
-            && let Some(engine) = cache.as_ref()
-        {
-            let start = Instant::now();
-            let (accepted, accepted_sta, accepted_graph) =
-                measure_prepared(netlist, library, &options, &prepared)?;
-            engine.check(&accepted_sta)?;
-            engine.check_loads(&accepted_graph)?;
-            ensure!(
-                accepted == metrics,
-                "accepted optimization differs from candidate"
-            );
-            incremental.accepted_checks += 1;
-            incremental.oracle_seconds += start.elapsed().as_secs_f64();
-        }
-        current = metrics;
-        if let Some(engine) = cache.as_ref() {
-            sta = engine.report()?;
+        plan.apply(netlist, library)?;
+        let accepted = if let Some(engine) = cache.as_ref() {
+            sta = engine.report();
             g = graph(netlist, library, &options)?;
+            report_metrics(netlist, library, &sta, &g)?
         } else {
             let ts = Instant::now();
-            let (_, accepted_sta, accepted_graph) =
+            let (accepted, accepted_sta, accepted_graph) =
                 measure_prepared(netlist, library, &options, &prepared)?;
             sta_seconds += ts.elapsed().as_secs_f64();
             sta_evaluations += 1;
             sta = accepted_sta;
             g = accepted_graph;
+            accepted
+        };
+        ensure!(
+            FanoutTrialMetrics::from(&accepted) == metrics,
+            "accepted objective differs from candidate"
+        );
+        if options.verify_incremental
+            && let Some(engine) = cache.as_ref()
+        {
+            let start = Instant::now();
+            let (full, full_sta, full_graph) =
+                measure_prepared(netlist, library, &options, &prepared)?;
+            engine.check(&full_sta)?;
+            engine.check_loads(&full_graph)?;
+            ensure!(
+                accepted == full,
+                "accepted optimization differs from full STA"
+            );
+            incremental.accepted_checks += 1;
+            incremental.oracle_seconds += start.elapsed().as_secs_f64();
         }
+        decisions.push(FanoutDecision {
+            round,
+            instance: trials[trial].instance.clone(),
+            kind,
+            input_timing,
+            sink_count: driver.sinks.len(),
+            output_ports: driver.output_ports,
+            old_load: driver.load,
+            before: current,
+            after: accepted.clone(),
+        });
+        current = accepted;
     }
     drop(cache);
     Ok(FanoutOptimizationReport {

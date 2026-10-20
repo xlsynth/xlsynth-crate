@@ -230,6 +230,7 @@ fn buffer_and_two_level_trees_preserve_polarity_constants_and_shared_outputs() {
         let mut changed = original.clone();
         apply(
             &mut changed,
+            &lib,
             d,
             &FanoutEdit::Buffer {
                 cell: "BUF".into(),
@@ -266,6 +267,7 @@ fn replication_balances_capacitance_and_keeps_shared_outputs_on_original() {
     let mut changed = original.clone();
     apply(
         &mut changed,
+        &lib,
         d,
         &FanoutEdit::Replicate { groups: 4 },
         &choices(&lib).unwrap(),
@@ -292,6 +294,7 @@ fn rejection_accounts_for_replication_loading_upstream() {
     let mut changed = original.clone();
     apply(
         &mut changed,
+        &lib,
         d,
         &FanoutEdit::Replicate { groups: 4 },
         &choices(&lib).unwrap(),
@@ -339,6 +342,7 @@ fn rejection_accounts_for_upsizing_loading_upstream_and_output_renaming() {
     let mut changed = original.clone();
     apply(
         &mut changed,
+        &lib,
         d,
         &FanoutEdit::Upsize {
             cell: "STRONG".into(),
@@ -404,6 +408,24 @@ fn no_op_area_rejection_and_determinism() {
     let rb = optimize_fanout(&mut b, &lib, options()).unwrap();
     assert!(!ra.decisions.is_empty());
     assert!(ra.after.worst_delay < ra.before.worst_delay);
+    let measured = ra
+        .trials
+        .iter()
+        .filter_map(|t| t.metrics.as_ref())
+        .next()
+        .unwrap();
+    let json = serde_json::to_value(measured).unwrap();
+    assert_eq!(
+        json.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["area", "cell_count", "worst_delay"]
+    );
+    let (final_metrics, _, _) = measure(&a, &lib, &options()).unwrap();
+    assert_eq!(ra.after, final_metrics);
+
     assert_eq!(
         serde_json::to_value(&ra.decisions).unwrap(),
         serde_json::to_value(&rb.decisions).unwrap()
@@ -471,6 +493,7 @@ fn constant_input_and_name_collisions_survive_replication() {
     let mut n = original.clone();
     apply(
         &mut n,
+        &lib,
         &g.drivers[0],
         &FanoutEdit::Replicate { groups: 2 },
         &choices(&lib).unwrap(),
@@ -514,6 +537,7 @@ fn conditional_arcs_remain_pruned_after_replication_with_constant_input() {
     let mut changed = original.clone();
     apply(
         &mut changed,
+        &lib,
         &g.drivers[0],
         &FanoutEdit::Replicate { groups: 2 },
         &choices(&lib).unwrap(),
@@ -543,33 +567,36 @@ fn check_incremental_candidates(original: &MappedNetlist, lib: &Library) {
             continue;
         };
         for kind in candidates(d, old, &cells) {
-            let edit = engine.edit(d, &kind, &cells).unwrap();
+            let edit = edit::EditPlan::new(original, &g, d, &kind, &cells).unwrap();
             let mut changed = original.clone();
-            apply(&mut changed, d, &kind, &cells).unwrap();
+            apply(&mut changed, &lib, d, &kind, &cells).unwrap();
             let (m, full, full_g) = measure(&changed, lib, &opts).unwrap();
             let (actual, _) = engine
-                .trial(edit.clone(), engine.candidate_area(&edit), |e, actual| {
+                .trial(&edit, &g, engine.candidate_area(&edit), |e, actual| {
                     e.check(&full)?;
                     e.check_loads(&full_g)?;
-                    ensure!(*actual == m, "trial metrics");
+                    ensure!(*actual == FanoutTrialMetrics::from(&m), "trial metrics");
                     Ok(())
                 })
                 .unwrap();
-            assert_eq!(actual, m);
+            assert_eq!(actual, FanoutTrialMetrics::from(&m));
             engine.check(&sta).unwrap();
-            assert_eq!(engine.metrics().unwrap(), baseline);
+            assert_eq!(
+                report_metrics(original, lib, &engine.report(), &g).unwrap(),
+                baseline
+            );
             // Error exits roll back just like unselected candidates.
-            let edit = engine.edit(d, &kind, &cells).unwrap();
+            let edit = edit::EditPlan::new(original, &g, d, &kind, &cells).unwrap();
             assert!(
                 engine
-                    .trial(edit.clone(), engine.candidate_area(&edit), |_, _| Err(
+                    .trial(&edit, &g, engine.candidate_area(&edit), |_, _| Err(
                         anyhow!("intentional oracle failure")
                     ))
                     .is_err()
             );
             engine.check(&sta).unwrap();
             assert_eq!(
-                engine.metrics().unwrap(),
+                report_metrics(original, lib, &engine.report(), &g).unwrap(),
                 baseline,
                 "oracle error restores aggregates"
             );
@@ -934,26 +961,30 @@ fn successive_edits_preserve_pin_identity_after_empty_connections() {
     ] {
         let (_, _, graph) = measure(&changed, &lib, &opts).unwrap();
         let driver = graph.drivers.iter().find(|d| d.sinks.len() == 16).unwrap();
-        let trial = engine.edit(driver, &kind, &cells).unwrap();
-        let commit = engine.edit(driver, &kind, &cells).unwrap();
-        apply(&mut changed, driver, &kind, &cells).unwrap();
+        let trial = edit::EditPlan::new(&changed, &graph, driver, &kind, &cells).unwrap();
+        let commit = edit::EditPlan::new(&changed, &graph, driver, &kind, &cells).unwrap();
+        apply(&mut changed, &lib, driver, &kind, &cells).unwrap();
         let (metrics, full, graph) = measure(&changed, &lib, &opts).unwrap();
         engine
             .trial(
-                trial.clone(),
+                &trial,
+                &graph,
                 engine.candidate_area(&trial),
                 |view, actual| {
                     view.check(&full)?;
                     view.check_loads(&graph)?;
-                    assert_eq!(*actual, metrics);
+                    assert_eq!(*actual, FanoutTrialMetrics::from(&metrics));
                     Ok(())
                 },
             )
             .unwrap();
-        engine.commit(commit).unwrap();
+        engine.commit(&commit, &graph).unwrap();
         engine.check(&full).unwrap();
         engine.check_loads(&graph).unwrap();
-        assert_eq!(engine.metrics().unwrap(), metrics);
+        assert_eq!(
+            report_metrics(&changed, &lib, &engine.report(), &graph).unwrap(),
+            metrics
+        );
     }
     // The AIG projector requires every input to be connected even when the
     // cell function ignores it. Tie only U for the independent logic proof.
@@ -976,8 +1007,7 @@ fn successive_replications_preserve_tied_metrics_and_remove_last_maximum() {
     let output = lib.cells[0].pins.last_mut().unwrap();
     output.max_capacitance = Some(8.0);
     output.max_transition = Some(1.1);
-    // Exactly 32 initial instances also exercise speculative aggregate-capacity
-    // growth and restoration when the first replica group is inserted.
+    // Two tied maxima exercise accurate accepted diagnostics after each edit.
     let outputs = (0..30).map(|i| format!("o{i}")).collect::<Vec<_>>();
     let mut text = format!(
         "module top(a,b,{}); input a,b; output {}; wire n0,n1; DRIVE d0(.A(a),.Y(n0)); DRIVE d1(.A(b),.Y(n1));",
@@ -998,7 +1028,7 @@ fn successive_replications_preserve_tied_metrics_and_remove_last_maximum() {
     assert_eq!(baseline.max_transition_violations, 2);
     let mut engine = incremental::Engine::new(&changed, &lib, &opts, &sta).unwrap();
     for instance in 0..2 {
-        let before = engine.metrics().unwrap();
+        let before = engine.report();
         let (_, _, graph) = measure(&changed, &lib, &opts).unwrap();
         let driver = graph
             .drivers
@@ -1006,9 +1036,9 @@ fn successive_replications_preserve_tied_metrics_and_remove_last_maximum() {
             .find(|d| d.instance == instance)
             .unwrap();
         let kind = FanoutEdit::Replicate { groups: 4 };
-        let edit = engine.edit(driver, &kind, &cells).unwrap();
+        let edit = edit::EditPlan::new(&changed, &graph, driver, &kind, &cells).unwrap();
         let commit = edit.clone();
-        apply(&mut changed, driver, &kind, &cells).unwrap();
+        apply(&mut changed, &lib, driver, &kind, &cells).unwrap();
         let (expected, full, graph) = measure(&changed, &lib, &opts).unwrap();
         assert_eq!(expected.max_fanout, if instance == 0 { 15 } else { 4 });
         assert_eq!(expected.max_capacitance_violations, 1 - instance);
@@ -1020,26 +1050,118 @@ fn successive_replications_preserve_tied_metrics_and_remove_last_maximum() {
             assert!(expected.max_load < baseline.max_load);
             assert!(expected.max_slew < baseline.max_slew);
         }
-        // Both successful previews and a later oracle failure must leave the
-        // incumbent reductions intact, including after an earlier commit.
+        // Successful trials and oracle failures must both restore timing,
+        // including after an earlier commit.
         for fail in [false, true] {
             let result = engine.trial(
-                edit.clone(),
+                &edit,
+                &graph,
                 engine.candidate_area(&edit),
                 |view, actual| {
                     view.check(&full)?;
                     view.check_loads(&graph)?;
-                    assert_eq!(*actual, expected);
+                    assert_eq!(*actual, FanoutTrialMetrics::from(&expected));
                     ensure!(!fail, "intentional oracle failure");
                     Ok(())
                 },
             );
             assert_eq!(result.is_err(), fail);
-            assert_eq!(engine.metrics().unwrap(), before);
+            engine.check(&before).unwrap();
         }
-        engine.commit(commit).unwrap();
+        engine.commit(&commit, &graph).unwrap();
         engine.check(&full).unwrap();
-        assert_eq!(engine.metrics().unwrap(), expected);
+        assert_eq!(
+            report_metrics(&changed, &lib, &engine.report(), &graph).unwrap(),
+            expected
+        );
     }
     equivalent(&original, &changed, &lib);
+}
+
+#[test]
+fn common_plan_preserves_baseline_names_bindings_and_topologies() {
+    let mut strong = Spec::new("STRONG", "A & !B", 1.0, 1.0);
+    strong.output = "Z";
+    let mut builder = LibraryBuilder::from_library(library(&[
+        Spec::new("DRIVE", "A & !B", 1.0, 10.0),
+        strong,
+        Spec::new("LOAD", "A", 1.0, 0.1),
+        Spec::new("BUF", "A", 0.25, 0.5),
+    ]));
+    let unused = builder.intern_string("U").unwrap();
+    builder.cells[2].pins.insert(
+        0,
+        Pin {
+            name: unused,
+            direction: PinDirection::Input as i32,
+            ..Default::default()
+        },
+    );
+    let lib = builder.finish();
+    let mut text = String::from(
+        "module top(a,o0,o1,o2,o3,z); input a; output o0,o1,o2,o3,z; wire n,alias,tied,ain; assign ain=a; assign tied=1'b0; assign alias=n; assign z=n; DRIVE drv(.B(tied),.Y(n),.A(ain));",
+    );
+    for i in 0..4 {
+        text.push_str(&format!("LOAD s{i}(.Y(o{i}),.U(),.A(alias));"));
+    }
+    text.push_str("endmodule");
+    let mut original = parsed(&text);
+    let collision = format!("fanout_opt_{}", original.interner.len() + 1);
+    let name = original.interner.get_or_intern(collision);
+    let index = original.nets.len();
+    original.nets.push(Net { name, width: None });
+    original.module.wires.push(NetIndex(index));
+    original.module.net_index_range.end = original.nets.len();
+    let (_, sta, graph) = measure(&original, &lib, &options()).unwrap();
+    let driver = graph.drivers.iter().find(|d| d.sinks.len() == 4).unwrap();
+    let cells = choices(&lib).unwrap();
+    for (name, kind) in [
+        (
+            "upsize",
+            FanoutEdit::Upsize {
+                cell: "STRONG".into(),
+            },
+        ),
+        ("replicate", FanoutEdit::Replicate { groups: 2 }),
+        (
+            "buffer",
+            FanoutEdit::Buffer {
+                cell: "BUF".into(),
+                groups: 2,
+                levels: 1,
+            },
+        ),
+        (
+            "two-level",
+            FanoutEdit::Buffer {
+                cell: "BUF".into(),
+                groups: 4,
+                levels: 2,
+            },
+        ),
+    ] {
+        let plan = edit::EditPlan::new(&original, &graph, driver, &kind, &cells).unwrap();
+        let mut changed = original.clone();
+        plan.apply(&mut changed, &lib).unwrap();
+        let emitted =
+            emit_module_as_netlist_text(&changed.module, &changed.nets, &changed.interner).unwrap();
+        // Captured from the independent netlist editor at 9f776cf3.
+        let expected = match name {
+            "upsize" => include_str!("testdata/upsize.gv"),
+            "replicate" => include_str!("testdata/replicate.gv"),
+            "buffer" => include_str!("testdata/buffer.gv"),
+            "two-level" => include_str!("testdata/two-level.gv"),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            format!("// SPDX-License-Identifier: Apache-2.0\n{emitted}"),
+            expected,
+            "{name}"
+        );
+        let (_, full, full_graph) = measure(&changed, &lib, &options()).unwrap();
+        let mut engine = incremental::Engine::new(&original, &lib, &options(), &sta).unwrap();
+        engine.commit(&plan, &graph).unwrap();
+        engine.check(&full).unwrap();
+        engine.check_loads(&full_graph).unwrap();
+    }
 }

@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+module top(a, o0, o1, o2, o3, z);
+  input a;
+  output o0;
+  output o1;
+  output o2;
+  output o3;
+  output z;
+  wire n;
+  wire \alias ;
+  wire tied;
+  wire ain;
+  wire fanout_opt_23;
+  assign ain = a;
+  assign tied = 1'b0;
+  assign \alias  = n;
+  assign z = n;
+  STRONG drv (.B(tied), .Z(n), .A(ain));
+  LOAD s0 (.Y(o0), .U(), .A(\alias ));
+  LOAD s1 (.Y(o1), .U(), .A(\alias ));
+  LOAD s2 (.Y(o2), .U(), .A(\alias ));
+  LOAD s3 (.Y(o3), .U(), .A(\alias ));
+endmodule
