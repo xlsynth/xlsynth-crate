@@ -381,7 +381,9 @@ graph/timing/electrical observations do not impose those policies.
 one read from GV. `FanoutOptimizationOptions` exposes search bounds, timing/load
 assumptions, full-STA evaluation, and per-candidate oracle verification; reports
 retain profiling measurements. The CLI exposes the common path through
-`aig-tech-map --strategy area --fanout-opt`.
+`aig-tech-map --strategy area`, which enables fanout optimization by default.
+Use `--fanout-opt=false` for raw area mapping; other strategies retain their
+existing defaults.
 
 A shared edit plan supplies both netlist emission and timing-engine mutations.
 Trial metrics contain only `area`, `cell_count`, and `worst_delay`; baseline,

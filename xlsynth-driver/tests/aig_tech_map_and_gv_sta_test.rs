@@ -85,6 +85,7 @@ cells: {
   }
   area: 2.0
 }
+default_output_load: 0.01
 units: { time_unit: "1ps" capacitance_unit: "1pf" }
 interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
 lut_shapes: {}
@@ -440,7 +441,12 @@ library (test) {{
         let mapped = Command::new(driver)
             .arg("aig-tech-map")
             .arg(&aig_path)
-            .args(["--strategy", "area", "--liberty_proto"])
+            .args([
+                "--strategy",
+                "area",
+                "--fanout-opt=false",
+                "--liberty_proto",
+            ])
             .arg(&liberty_path)
             .arg("--netlist_out")
             .arg(&netlist_path)
@@ -610,6 +616,7 @@ fn strategies_preserve_default_and_cli_semantics() {
             assert_eq!(report["stats"]["inverter_count"], 0);
             assert_eq!(report["stats"]["duplicated_ands"], 0);
         } else {
+            assert!(report.get("fanout_optimization").is_none());
             nand2_outputs.push(text.clone());
         }
         assert_mapping_equivalent(&aig, &text, &aig_path, &lib_path);
@@ -617,7 +624,7 @@ fn strategies_preserve_default_and_cli_semantics() {
     assert_eq!(nand2_outputs[0], nand2_outputs[1]);
 }
 
-/// Checks a real timing improvement through the area mapper's opt-in CLI path.
+/// Checks default optimization, explicit overrides, budget, and equivalence.
 #[test]
 fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
     let dir = tempfile::tempdir().unwrap();
@@ -637,7 +644,7 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
     // improves delay within the default 5% total-area budget.
     let base = make_timing_enabled_inv_nand2_liberty_textproto();
     let start = base.find("cells: {\n  name: \"NAND2\"").unwrap();
-    let end = base.find("units:").unwrap();
+    let end = base.find("default_output_load:").unwrap();
     let weak = base[start..end].replace(
         "function_string_id: 5",
         "function_string_id: 5\n    max_capacitance: 0.001",
@@ -655,7 +662,13 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
 
     let mut outputs = Vec::new();
     let mut reports = Vec::new();
-    for mode in ["disabled", "zero-budget", "enabled", "repeat"] {
+    for mode in [
+        "disabled",
+        "zero-budget",
+        "default",
+        "bare-enable",
+        "explicit-enable",
+    ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
         command
             .arg("aig-tech-map")
@@ -666,14 +679,17 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
             .arg(&netlist_path)
             .arg("--json_out")
             .arg(&report_path);
-        if mode != "disabled" {
-            command.args([
-                "--fanout-opt",
-                "--primary_input_transition",
-                "0",
-                "--module_output_load",
-                "0",
-            ]);
+        match mode {
+            "disabled" => {
+                command.arg("--fanout-opt=false");
+            }
+            "bare-enable" => {
+                command.arg("--fanout-opt");
+            }
+            "explicit-enable" => {
+                command.arg("--fanout-opt=true");
+            }
+            _ => {} // Exercise implicit area-mode enablement.
         }
         if mode == "zero-budget" {
             command.args(["--fanout-max-area-growth", "0"]);
@@ -718,6 +734,8 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
     assert!(outputs[2].contains("NAND_FAST"));
     assert_eq!(outputs[2], outputs[3]);
     assert_eq!(reports[2], reports[3]);
+    assert_eq!(outputs[2], outputs[4]);
+    assert_eq!(reports[2], reports[4]);
 }
 
 #[test]
@@ -727,7 +745,24 @@ fn area_fanout_cli_rejects_options_without_area_optimization() {
             vec!["--fanout-opt"],
             "--fanout-opt requires --strategy area",
         ),
-        (vec!["--fanout-max-area-growth", "0.1"], "--fanout-opt"),
+        (
+            vec!["--fanout-max-area-growth", "0.1"],
+            "fanout tuning options",
+        ),
+        (
+            vec![
+                "--strategy",
+                "area",
+                "--fanout-opt=false",
+                "--module_output_load",
+                "0",
+            ],
+            "fanout tuning options",
+        ),
+        (
+            vec!["--fanout-opt=true"],
+            "--fanout-opt requires --strategy area",
+        ),
     ] {
         // These errors must be detected before attempting to open either input.
         let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
@@ -834,7 +869,7 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("aig-tech-map")
         .arg(&aig_path)
-        .args(["--strategy", "area"])
+        .args(["--strategy", "area", "--fanout-opt=false"])
         .arg("--liberty_proto")
         .arg(&lib_path)
         .args(["--netlist_out", "-"])
@@ -1417,4 +1452,130 @@ fn cli_rejects_hard_linked_output_aliases() {
         std::fs::read_to_string(alias).unwrap(),
         "keep this netlist\n"
     );
+}
+
+/// Default optimization must fail visibly when its required data is absent.
+#[test]
+fn area_fanout_requires_timing_and_load_unless_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let aig = dir.path().join("input.aag");
+    let lib = dir.path().join("library.textproto");
+    let netlist = dir.path().join("out.v");
+    let report = dir.path().join("out.json");
+    std::fs::write(&aig, make_two_input_and_aig()).unwrap();
+    let timingless = r#"
+format_magic: 5496997758228255311
+cells: {
+  name: "INV" area: 1.0
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 3 }
+}
+cells: {
+  name: "NAND2" area: 2.0
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 4 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 5 }
+}
+default_output_load: 0.01
+interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
+"#;
+    for (library, error) in [
+        (timingless.to_owned(), "no timing payloads"),
+        (
+            make_timing_enabled_inv_nand2_liberty_textproto()
+                .replace("default_output_load: 0.01", ""),
+            "requires an output load",
+        ),
+    ] {
+        std::fs::write(&lib, library).unwrap();
+        for enable in [None, Some("--fanout-opt"), Some("--fanout-opt=true")] {
+            std::fs::write(&netlist, "preserve netlist").unwrap();
+            std::fs::write(&report, "preserve report").unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+            command
+                .arg("aig-tech-map")
+                .arg(&aig)
+                .args(["--strategy", "area", "--liberty_proto"])
+                .arg(&lib)
+                .arg("--netlist_out")
+                .arg(&netlist)
+                .arg("--json_out")
+                .arg(&report);
+            if let Some(flag) = enable {
+                command.arg(flag);
+            }
+            let output = command.output().unwrap();
+            assert!(!output.status.success());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(error), "{stderr}");
+            assert!(stderr.contains("--fanout-opt=false"), "{stderr}");
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                std::fs::read_to_string(&netlist).unwrap(),
+                "preserve netlist"
+            );
+            assert_eq!(std::fs::read_to_string(&report).unwrap(), "preserve report");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("aig-tech-map")
+            .arg(&aig)
+            .args([
+                "--strategy",
+                "area",
+                "--fanout-opt=false",
+                "--liberty_proto",
+            ])
+            .arg(&lib)
+            .arg("--netlist_out")
+            .arg(&netlist)
+            .arg("--json_out")
+            .arg(&report)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        assert!(json.get("fanout_optimization").is_none());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("fanout delay"));
+        if error == "requires an output load" {
+            let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+                .arg("aig-tech-map")
+                .arg(&aig)
+                .args([
+                    "--strategy",
+                    "area",
+                    "--module_output_load",
+                    "0.02",
+                    "--primary_input_transition",
+                    "0.03",
+                    "--liberty_proto",
+                ])
+                .arg(&lib)
+                .arg("--netlist_out")
+                .arg(&netlist)
+                .arg("--json_out")
+                .arg(&report)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+            assert_eq!(
+                json["fanout_optimization"]["options"]["module_output_load"],
+                0.02
+            );
+            assert_eq!(
+                json["fanout_optimization"]["options"]["primary_input_transition"],
+                0.03
+            );
+        }
+    }
 }

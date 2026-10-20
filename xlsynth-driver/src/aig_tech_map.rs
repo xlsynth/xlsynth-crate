@@ -292,10 +292,24 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let json_out = matches.get_one::<String>("json_out");
     let module_name = matches.get_one::<String>("module_name");
     let strategy = matches.get_one::<String>("strategy").unwrap().as_str();
-    let fanout_opt = matches.get_flag("fanout_opt");
+    let fanout_opt = matches
+        .get_one::<bool>("fanout_opt")
+        .copied()
+        .unwrap_or(strategy == "area");
     ensure!(
         !fanout_opt || strategy == "area",
         "--fanout-opt requires --strategy area"
+    );
+    ensure!(
+        fanout_opt
+            || [
+                "primary_input_transition",
+                "module_output_load",
+                "fanout_max_area_growth"
+            ]
+            .iter()
+            .all(|name| matches.value_source(name) != Some(ValueSource::CommandLine)),
+        "fanout tuning options require enabled area optimization; use --strategy area without --fanout-opt=false"
     );
     ensure!(
         strategy != "area" || matches.value_source("cell_policy") != Some(ValueSource::CommandLine),
@@ -324,10 +338,14 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         load_liberty_from_path
     };
     let lib = load(liberty_proto_path).with_context(|| {
-        format!(
-            "failed to load Liberty proto '{}'",
-            liberty_proto_path.display()
-        )
+        if fanout_opt {
+            format!(
+                "failed to load timing-enabled Liberty proto '{}' for area fanout optimization; use --fanout-opt=false for raw mapping",
+                liberty_proto_path.display()
+            )
+        } else {
+            format!("failed to load Liberty proto '{}'", liberty_proto_path.display())
+        }
     })?;
 
     let (mut mapped, mut report, mut summary) = match strategy {
@@ -380,7 +398,9 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 .unwrap_or(defaults.primary_input_transition),
             module_output_load: match matches.get_one::<f64>("module_output_load") {
                 Some(load) => *load,
-                None => default_output_load(&lib).map_err(anyhow::Error::msg)?,
+                None => default_output_load(&lib).map_err(anyhow::Error::msg).context(
+                    "area fanout optimization requires an output load; supply --module_output_load or use --fanout-opt=false for raw mapping",
+                )?,
             },
             area_growth_limit: matches
                 .get_one::<f64>("fanout_max_area_growth")
@@ -389,7 +409,9 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             ..defaults
         };
         let optimized =
-            optimize_fanout(&mut mapped, &lib, options).context("fanout optimization failed")?;
+            optimize_fanout(&mut mapped, &lib, options).context(
+                "area fanout optimization failed; provide usable timing data or use --fanout-opt=false for raw mapping",
+            )?;
         summary.push_str(&format!(
             "; fanout delay {} -> {}, area {} -> {}",
             optimized.before.worst_delay,

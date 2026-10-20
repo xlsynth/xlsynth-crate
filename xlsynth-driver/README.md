@@ -876,7 +876,9 @@ Key flags:
 - `--strategy <nand2|area>`: mapping strategy (default: `nand2`).
 - `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
   `nand2` requires suitable `INV` and `NAND2` functions; `area` requires cell
-  functions and positive areas. Neither strategy requires timing data.
+  functions and positive areas. Default area optimization also requires usable
+  timing data and an output load (library default or `--module_output_load`).
+  `nand2` and raw area mapping with `--fanout-opt=false` do not require timing.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` is an error.
@@ -892,13 +894,20 @@ Key flags:
   redirected streams.
   On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.
 
-With `--strategy area --fanout-opt`, a bounded post-mapping pass tries equivalent
+With `--strategy area`, fanout optimization is enabled by default: a bounded
+post-mapping pass tries equivalent
 cell upsizing, buffering, and replication. Each accepted edit improves modeled
 worst delay and the delay/area score. The pass requires timing-enabled Liberty;
-timing uses pin capacitances and excludes interconnect parasitics.
+timing uses pin capacitances and excludes interconnect parasitics. Use
+`--fanout-opt=false` for raw area mapping without timing requirements. Bare
+`--fanout-opt` and `--fanout-opt=true` explicitly enable the pass. The default
+`nand2` strategy still leaves it disabled; enabling it requires `--strategy area`.
+Missing or unusable timing data, or a missing output-load default without an
+explicit `--module_output_load`, causes an error before outputs are written; the
+pass is never silently skipped.
 
 ```shell
-xlsynth-driver aig-tech-map design.aig --strategy area --fanout-opt \
+xlsynth-driver aig-tech-map design.aig --strategy area \
   --liberty_proto timed-cells.proto --netlist_out optimized.gv \
   --module_output_load 1 --json_out mapping.json
 ```
@@ -907,7 +916,8 @@ xlsynth-driver aig-tech-map design.aig --strategy area --fanout-opt \
 - `--module_output_load`: capacitance per output in Liberty units; defaults to the
   library's `default_output_load`, or must be supplied if that value is absent.
 - `--fanout-max-area-growth`: maximum fractional growth over mapped area
-  (default: `0.05`). These three options require `--fanout-opt`.
+  (default: `0.05`). These three options require enabled area optimization and
+  are rejected with `--fanout-opt=false` or the `nand2` strategy.
 - JSON `stats` retains the original mapping statistics; `fanout_optimization`
   contains before/after metrics and decisions with electrical diagnostics. Trial
   metrics contain only area, cell count, and worst delay. Top-level instance/net
