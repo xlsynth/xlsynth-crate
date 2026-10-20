@@ -612,6 +612,17 @@ fn incremental_oracle_covers_all_topologies_aliases_edge_loads_and_siblings() {
     opts.full_sta = true;
     opts.verify_incremental = false;
     let fr = optimize_fanout(&mut full, &lib, opts).unwrap();
+    assert!(!fr.decisions.is_empty());
+    assert_eq!(
+        fr.sta_evaluations,
+        1 + fr
+            .trials
+            .iter()
+            .filter(|t| t.reason != "area budget")
+            .count()
+            + fr.decisions.len(),
+        "full STA counts the baseline, measured candidates, and accepted refreshes"
+    );
     assert_eq!(
         serde_json::to_value(&ir.trials).unwrap(),
         serde_json::to_value(&fr.trials).unwrap()
@@ -834,6 +845,17 @@ fn boolean_only_connectivity_cycles_fall_back_to_full_sta() {
     let report = optimize_fanout(&mut incremental, &lib, options()).unwrap();
     assert!(report.incremental.is_none());
     assert!(report.incremental_fallback_reason.is_some());
+    assert!(!report.decisions.is_empty());
+    assert_eq!(
+        report.sta_evaluations,
+        1 + report
+            .trials
+            .iter()
+            .filter(|t| t.reason != "area budget")
+            .count()
+            + report.decisions.len(),
+        "full STA fallback also counts accepted refreshes"
+    );
     let mut opts = options();
     opts.full_sta = true;
     opts.verify_incremental = false;

@@ -1124,8 +1124,11 @@ pub fn optimize_fanout(
             sta = engine.report()?;
             g = graph(netlist, library, &options)?;
         } else {
+            let ts = Instant::now();
             let (_, accepted_sta, accepted_graph) =
                 measure_prepared(netlist, library, &options, &prepared)?;
+            sta_seconds += ts.elapsed().as_secs_f64();
+            sta_evaluations += 1;
             sta = accepted_sta;
             g = accepted_graph;
         }
