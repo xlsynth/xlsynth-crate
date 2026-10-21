@@ -32,8 +32,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use string_interner::StringInterner;
 use xlsynth_pir::IrBits;
 
-const MAX_INPUTS: usize = 5;
+mod six_input;
+
+use six_input::{SixInputCache, SixInputIndex};
+
+const MAX_EAGER_INPUTS: usize = 5;
+const MAX_INPUTS: usize = 6;
 const MAX_CUTS: usize = 64;
+const MAX_SIX_INPUT_CUTS: usize = 16;
 
 /// Eligible single-output cell, with pins in stable lexical order.
 #[derive(Clone, Debug)]
@@ -53,23 +59,29 @@ struct Binding {
     phases: usize,
 }
 
-/// Reusable truth-table index for combinational single-output cells of <=5
-/// inputs. Cells with dont_use, use_for_size_only, unsupported semantics,
+/// Reusable truth-table index for combinational single-output cells of up to
+/// six inputs. Cells with dont_use, use_for_size_only, unsupported semantics,
 /// clocks, or multiple outputs are excluded, as are cells with unparseable
 /// functions. Invalid areas or unknown function inputs are errors.
 #[derive(Debug)]
 pub struct AreaMappingLibrary {
     cells: Vec<Cell>,
     matches: BTreeMap<(usize, u64), Vec<Binding>>,
+    six_input: SixInputIndex,
     inv: Option<usize>,
     /// A potentially usable cell excluded because its sizing policy is unknown.
     missing_policy_coverage: Option<String>,
     pub excluded_cells: Vec<String>,
 }
 
-/// Returns the active truth-table bits for at most five inputs.
+/// Returns the active truth-table bits for at most six inputs.
 fn mask(n: usize) -> u64 {
-    (1u64 << (1usize << n)) - 1
+    assert!(n <= MAX_INPUTS);
+    if n == MAX_INPUTS {
+        u64::MAX
+    } else {
+        (1u64 << (1usize << n)) - 1
+    }
 }
 /// Builds the truth table for one input in assignment-bit order.
 fn variable(n: usize, pin: usize) -> u64 {
@@ -101,10 +113,12 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
 }
 
 impl AreaMappingLibrary {
-    /// Compiles exact cell truth tables and all input permutations/polarities.
+    /// Compiles small-cell bindings eagerly and six-input functions for
+    /// bounded, on-demand exact matching.
     pub fn new(lib: &Library) -> Result<Self> {
         let mut cells: Vec<Cell> = Vec::new();
         let mut matches: BTreeMap<(usize, u64), Vec<Binding>> = BTreeMap::new();
+        let mut six_input_functions = Vec::new();
         let mut excluded_cells = Vec::new();
         let mut missing_policy_coverage = None;
         let mut names = BTreeSet::new();
@@ -215,6 +229,10 @@ impl AreaMappingLibrary {
                 output: lib.resolve_string(&outputs[0].name).to_string(),
                 area: cell.area,
             });
+            if n == 6 {
+                six_input_functions.push((index, tt));
+                continue;
+            }
             for perm in permutations(n) {
                 for phases in 0..1usize << n {
                     let mut transformed = 0u64;
@@ -246,9 +264,11 @@ impl AreaMappingLibrary {
             let mut seen = BTreeSet::new();
             bindings.retain(|b| seen.insert(b.phases));
         }
+        let six_input = SixInputIndex::new(six_input_functions, &cells);
         Ok(Self {
             cells,
             matches,
+            six_input,
             inv,
             missing_policy_coverage,
             excluded_cells,
@@ -507,6 +527,12 @@ pub fn map_gatefn_to_area_netlist(
     };
     let mut cuts: Vec<Vec<Cut>> = vec![Vec::new(); aig.gates.len()];
     let mut stats = AreaMappingStats::default();
+    let mut six_input_cache = SixInputCache::default();
+    let max_cut_inputs = if lib.six_input.is_empty() {
+        MAX_EAGER_INPUTS
+    } else {
+        MAX_INPUTS
+    };
     for node in order {
         let id = node.id;
         match aig.get(node) {
@@ -552,7 +578,7 @@ pub fn map_gatefn_to_area_netlist(
                             .collect::<BTreeSet<_>>()
                             .into_iter()
                             .collect::<Vec<_>>();
-                        if leaves.len() > MAX_INPUTS {
+                        if leaves.len() > max_cut_inputs {
                             continue;
                         }
                         let m = mask(leaves.len());
@@ -563,7 +589,12 @@ pub fn map_gatefn_to_area_netlist(
                 }
                 let mut candidates = candidates.into_iter().collect::<Vec<_>>();
                 candidates.sort_by(|a, b| a.leaves.len().cmp(&b.leaves.len()).then(a.cmp(b)));
+                // Separate bounded budgets prevent smaller cuts from crowding
+                // out every six-input matching opportunity.
+                let wide_start = candidates.partition_point(|c| c.leaves.len() <= MAX_EAGER_INPUTS);
+                let wide = candidates.split_off(wide_start);
                 candidates.truncate(MAX_CUTS);
+                candidates.extend(wide.into_iter().take(MAX_SIX_INPUT_CUTS));
                 let mut direct: [Option<Plan>; 2] = [None, None];
                 for cut in &candidates {
                     for p in 0..2 {
@@ -595,11 +626,16 @@ pub fn map_gatefn_to_area_netlist(
                                 }
                             }
                         }
-                        if let Some(bindings) = lib.matches.get(&(cut.leaves.len(), tt)) {
-                            for binding in bindings {
-                                if let Some(plan) = cover.cell_plan(cut, binding) {
-                                    cover.consider(&mut direct[p], plan);
-                                }
+                        let bindings = if cut.leaves.len() == 6 {
+                            six_input_cache.lookup(&lib.six_input, &lib.cells, tt)
+                        } else {
+                            lib.matches
+                                .get(&(cut.leaves.len(), tt))
+                                .map_or(&[][..], Vec::as_slice)
+                        };
+                        for binding in bindings {
+                            if let Some(plan) = cover.cell_plan(cut, binding) {
+                                cover.consider(&mut direct[p], plan);
                             }
                         }
                     }
@@ -1609,5 +1645,170 @@ mod tests {
             }
             verify(&b.build(), &lib);
         }
+    }
+
+    /// Builds six-input fixtures with inexpensive explicit polarity conversion.
+    fn six_input_library(name: &str, pins: &[&str], function: &str, area: f64) -> Library {
+        library(&[
+            ("INV", &["A"], "!A", 0.01),
+            ("NAND2", &["A", "B"], "!(A*B)", 1.0),
+            (name, pins, function, area),
+        ])
+    }
+
+    #[test]
+    fn six_input_aoi222_is_selected_and_charged_once() {
+        let lib = six_input_library(
+            "AOI222",
+            &["A1", "A2", "B1", "B2", "C1", "C2"],
+            "!((A1*A2)+(B1*B2)+(C1*C2))",
+            0.25,
+        );
+        let mut b = GateBuilder::new("aoi222".into(), GateBuilderOptions::no_opt());
+        let x = (0..6)
+            .map(|i| *b.add_input(format!("i{i}"), 1).get_lsb(0))
+            .collect::<Vec<_>>();
+        let a = b.add_and_binary(x[0], x[1]);
+        let c = b.add_and_binary(x[2], x[3]);
+        let e = b.add_and_binary(x[4], x[5]);
+        let ac = b.add_or_binary(a, c);
+        let y = b.add_or_binary(ac, e).negate();
+        b.add_output("out".into(), y.into());
+        let aig = b.build();
+        let index = AreaMappingLibrary::new(&lib).unwrap();
+        assert!(index.excluded_cells.is_empty());
+        let baseline_lib = library(&[
+            ("INV", &["A"], "!A", 0.01),
+            ("NAND2", &["A", "B"], "!(A*B)", 1.0),
+        ]);
+        let baseline = verify(&aig, &baseline_lib);
+        let wide = verify(&aig, &lib);
+        assert_eq!(
+            wide.stats.cells_by_type,
+            BTreeMap::from([("AOI222".into(), 1)])
+        );
+        assert_eq!(wide.stats.cell_area, 0.25);
+        assert!(wide.stats.cell_area < baseline.stats.cell_area);
+
+        let mut expensive = lib;
+        expensive
+            .cells
+            .iter_mut()
+            .find(|c| c.name == "AOI222")
+            .unwrap()
+            .area = 100.0;
+        let fallback = verify(&aig, &expensive);
+        assert_eq!(fallback.stats.cells_by_type, baseline.stats.cells_by_type);
+        assert_eq!(fallback.stats.cell_area, baseline.stats.cell_area);
+    }
+
+    #[test]
+    fn six_input_matching_preserves_pin_permutations_and_both_root_polarities() {
+        let lib = six_input_library(
+            "AOI321",
+            &["z", "d", "k", "a", "p", "q"],
+            "!((z*d*k)+(a*p)+q)",
+            0.25,
+        );
+        let mut b = GateBuilder::new("permuted".into(), GateBuilderOptions::no_opt());
+        let x = (0..6)
+            .map(|i| *b.add_input(format!("i{i}"), 1).get_lsb(0))
+            .collect::<Vec<_>>();
+        let a = b.add_and_binary(x[4].negate(), x[1]);
+        let a = b.add_and_binary(a, x[3].negate());
+        let c = b.add_and_binary(x[0], x[5].negate());
+        let ac = b.add_or_binary(a, c);
+        let y = b.add_or_binary(ac, x[2].negate()).negate();
+        b.add_output("out".into(), y.into());
+        b.add_output("complement".into(), y.negate().into());
+        let mapped = verify(&b.build(), &lib);
+        assert_eq!(mapped.stats.cells_by_type.get("AOI321"), Some(&1));
+    }
+
+    #[test]
+    fn six_input_binding_selection_includes_required_inverter_area() {
+        let pins = &["A", "B", "C", "D", "E", "F"];
+        let lib = library(&[
+            ("INV", &["A"], "!A", 0.05),
+            ("NAND2", &["A", "B"], "!(A*B)", 1.0),
+            ("AND6", pins, "A*B*C*D*E*F", 0.2),
+            ("NOR6", pins, "!(A+B+C+D+E+F)", 0.1),
+        ]);
+        let mut b = GateBuilder::new("phase_cost".into(), GateBuilderOptions::no_opt());
+        let x = (0..6)
+            .map(|i| *b.add_input(format!("i{i}"), 1).get_lsb(0))
+            .collect::<Vec<_>>();
+        let ab = b.add_and_binary(x[0], x[1]);
+        let cd = b.add_and_binary(x[2], x[3]);
+        let ef = b.add_and_binary(x[4], x[5]);
+        let abcd = b.add_and_binary(ab, cd);
+        let y = b.add_and_binary(abcd, ef);
+        b.add_output("out".into(), y.into());
+        let mapped = verify(&b.build(), &lib);
+        // NOR6 matches with six complemented inputs. Its lower cell area does
+        // not offset the required input inverters, so preserve the AND6 match.
+        assert_eq!(
+            mapped.stats.cells_by_type,
+            BTreeMap::from([("AND6".into(), 1)])
+        );
+        assert_eq!(mapped.stats.cell_area, 0.2);
+    }
+
+    #[test]
+    fn six_input_cut_survives_many_smaller_structural_cuts() {
+        let lib = six_input_library(
+            "NAND6",
+            &["A", "B", "C", "D", "E", "F"],
+            "!(A*B*C*D*E*F)",
+            0.25,
+        );
+        let mut b = GateBuilder::new("many_cuts".into(), GateBuilderOptions::no_opt());
+        let x = (0..6)
+            .map(|i| *b.add_input(format!("i{i}"), 1).get_lsb(0))
+            .collect::<Vec<_>>();
+        // Repeated uses of two inputs on the left and four on the right create
+        // 96 root cuts with at most five leaves. A shared 64-cut budget
+        // would discard the all-six-input cut needed for one NAND6 instance.
+        let mut level = (0..16)
+            .map(|i| x[i % 2])
+            .chain((0..16).map(|i| x[2 + i % 4]))
+            .collect::<Vec<_>>();
+        while level.len() > 1 {
+            level = level
+                .chunks_exact(2)
+                .map(|pair| b.add_and_binary(pair[0], pair[1]))
+                .collect();
+        }
+        b.add_output("out".into(), level[0].negate().into());
+        let mapped = verify(&b.build(), &lib);
+        assert_eq!(
+            mapped.stats.cells_by_type,
+            BTreeMap::from([("NAND6".into(), 1)])
+        );
+    }
+
+    #[test]
+    fn six_input_matching_preserves_eligibility_rules() {
+        let mut lib = six_input_library(
+            "NAND6",
+            &["A", "B", "C", "D", "E", "F"],
+            "!(A*B*C*D*E*F)",
+            0.25,
+        );
+        let wide = lib.cells.iter().position(|c| c.name == "NAND6").unwrap();
+        lib.cells[wide].dont_use = Some(true);
+        assert_eq!(
+            AreaMappingLibrary::new(&lib).unwrap().excluded_cells,
+            vec!["NAND6"]
+        );
+        lib.cells[wide].dont_use = Some(false);
+        lib.cells[wide].use_for_size_only = Some(true);
+        assert_eq!(
+            AreaMappingLibrary::new(&lib).unwrap().excluded_cells,
+            vec!["NAND6"]
+        );
+        lib.cells[wide].use_for_size_only = Some(false);
+        lib.cells[wide].area = f64::NAN;
+        assert!(AreaMappingLibrary::new(&lib).is_err());
     }
 }

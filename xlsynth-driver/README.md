@@ -855,13 +855,14 @@ xlsynth-driver aig-tech-map my_design.aag \
   --netlist_out my_design.mapped.gv
 ```
 
-The `area` strategy matches combinational cells by function and area,
-using both polarities and input-pin permutations on cuts of at most five inputs.
+The `area` strategy matches single-output combinational cells by function and area,
+using both polarities and input-pin permutations on cuts of at most six inputs.
 It keeps the AIG fixed, without choices or graph rewriting. Shared AND nodes
 are mandatory cut boundaries, and opposite polarity demands share an inverter.
 Bounded cuts and local phase selection are heuristics, not globally optimal DAG
 covering. Constants and aliases are ideal wiring; physical tie cells and timing
-optimization are outside this policy. Timing tables are not required for `area`.
+optimization are outside this covering policy. The subsequent fanout optimization
+requires timing tables; use `--fanout-opt=false` for raw area mapping without them.
 Cells with unsupported function syntax or semantics are excluded from area
 mapping, and all excluded cells are listed in the optional JSON summary.
 
