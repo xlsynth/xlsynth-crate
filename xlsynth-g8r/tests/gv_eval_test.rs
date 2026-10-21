@@ -681,6 +681,159 @@ endmodule
     );
 }
 
+/// A buffer with an independent control pin for condition reachability tests.
+fn conditioned_power_liberty(condition: &str, related_pin: &str) -> String {
+    r#"
+format_magic: 5496997758228255311
+units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
+nominal_voltage: 1.0
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
+  pins: { name_string_id: 2 direction: INPUT capacitance: 1.0 }
+  pins: {
+    name_string_id: 3
+    direction: OUTPUT
+    function_string_id: 1
+    timing_arcs: {
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_POSITIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 1.0 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 1.0 }
+    }
+    internal_power: {
+      related_pin_string_ids: 5
+      when_string_id: 4
+      tables: { transition: POWER_TRANSITION_RISE shape_id: 1 values: 2.0 }
+      tables: { transition: POWER_TRANSITION_FALL shape_id: 1 values: 3.0 }
+    }
+  }
+}
+lut_shapes: {}
+interned_strings: ["A", "C", "Y", "<condition>", "<related_pin>"]
+"#
+    .replace("<condition>", condition)
+    .replace("<related_pin>", related_pin)
+}
+
+const CONDITIONED_POWER_NETLIST: &str = r#"
+module top (a, c, y);
+  input a;
+  input c;
+  output y;
+  BUF u_buf (.A(a), .C(c), .Y(y));
+endmodule
+"#;
+
+#[test]
+fn dynamic_power_defers_invalid_groups_until_reached() {
+    let stable_output = [
+        IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+        IrValue::parse_typed("(bits[1]:0, bits[1]:1)").unwrap(),
+    ];
+    let changing_output = [
+        IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+        IrValue::parse_typed("(bits[1]:1, bits[1]:0)").unwrap(),
+    ];
+    for (condition, related_pin) in [("A &", "A"), ("1", "MISSING")] {
+        let (_directory, netlist_path, liberty_path) = write_fixture(
+            CONDITIONED_POWER_NETLIST,
+            &conditioned_power_liberty(condition, related_pin),
+        );
+        let model =
+            load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default())
+                .unwrap();
+        let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+        // Output-owned groups are unreachable while the output is stable,
+        // even when another instance pin changes.
+        let report = model
+            .analyze_dynamic_power(&library, &stable_output, GvDynamicPowerOptions::default())
+            .unwrap();
+        assert_eq!(report.cell_internal_energy, 0.0);
+        assert_eq!(report.diagnostics.when_evaluation_count, 0);
+        assert!(
+            model
+                .analyze_dynamic_power(
+                    &library,
+                    &changing_output,
+                    GvDynamicPowerOptions::default(),
+                )
+                .is_err()
+        );
+    }
+
+    let (_directory, netlist_path, liberty_path) = write_fixture(
+        CONDITIONED_POWER_NETLIST,
+        &conditioned_power_liberty("0", "MISSING"),
+    );
+    let model =
+        load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default()).unwrap();
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    // A false condition also keeps malformed related-pin metadata unreachable.
+    let report = model
+        .analyze_dynamic_power(&library, &changing_output, GvDynamicPowerOptions::default())
+        .unwrap();
+    assert_eq!(report.cell_internal_energy, 0.0);
+    assert_eq!(report.diagnostics.when_evaluation_count, 1);
+}
+
+#[test]
+fn dynamic_power_checks_current_condition_even_when_previous_is_false() {
+    let (_directory, netlist_path, liberty_path) = write_fixture(
+        CONDITIONED_POWER_NETLIST,
+        &conditioned_power_liberty("C & MISSING", "A"),
+    );
+    let model =
+        load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default()).unwrap();
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    let samples = [
+        IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+        IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
+    ];
+    assert_eq!(
+        model
+            .analyze_dynamic_power(&library, &samples, GvDynamicPowerOptions::default())
+            .unwrap_err(),
+        "Liberty when 'C & MISSING' could not be evaluated from cell pin values"
+    );
+}
+
+#[test]
+fn dynamic_power_preserves_predecessor_across_simd_batches() {
+    let (_directory, netlist_path, liberty_path) = write_fixture(
+        CONDITIONED_POWER_NETLIST,
+        &conditioned_power_liberty("!Y", "A"),
+    );
+    let model =
+        load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default()).unwrap();
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    for sample_count in [255, 256, 257] {
+        let samples = (0..sample_count)
+            .map(|i| IrValue::parse_typed(&format!("(bits[1]:{}, bits[1]:0)", i % 2)).unwrap())
+            .collect::<Vec<_>>();
+        let report = model
+            .analyze_dynamic_power(&library, &samples, GvDynamicPowerOptions::default())
+            .unwrap();
+        let rises = sample_count / 2;
+        let falls = (sample_count - 1) / 2;
+        assert_eq!(report.sample_count, sample_count);
+        assert_eq!(report.transition_count, sample_count - 1);
+        assert_eq!(report.instances[0].outputs[0].rise_count, rises);
+        assert_eq!(report.instances[0].outputs[0].fall_count, falls);
+        assert_eq!(report.cell_internal_energy, 2.0 * rises as f64);
+        assert_eq!(report.diagnostics.when_evaluation_count, sample_count - 1);
+        assert_eq!(
+            report.diagnostics.when_changed_during_transition_count,
+            sample_count - 1
+        );
+        assert_eq!(report.diagnostics.unattributed_output_transition_count, 0);
+        let histogram = &report.instances[0].outputs[0].slew_histogram;
+        assert_eq!(histogram.rise.iter().sum::<f64>(), rises as f64);
+        assert_eq!(histogram.fall.iter().sum::<f64>(), falls as f64);
+    }
+}
+
 #[test]
 fn sequential_dynamic_power_counts_clock_q_and_feedback_safe_slew() {
     let liberty = r#"
