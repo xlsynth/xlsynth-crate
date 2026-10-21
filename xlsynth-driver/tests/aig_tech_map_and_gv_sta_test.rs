@@ -503,9 +503,9 @@ fn assert_mapping_equivalent(aig: &GateFn, text: &str, aig_path: &Path, liberty_
         &HashSet::new(),
     )
     .expect("project CLI netlist");
-    for assignment in 0..4 {
-        let inputs = (0..2)
-            .map(|i| IrBits::make_ubits(1, (assignment >> i) & 1).unwrap())
+    for assignment in 0..1usize << aig.inputs.len() {
+        let inputs = (0..aig.inputs.len())
+            .map(|i| IrBits::make_ubits(1, ((assignment >> i) & 1) as u64).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
             eval(aig, &inputs, Collect::None).outputs,
@@ -918,6 +918,80 @@ fn area_cli_rejects_explicit_nand2_policy() {
             "aig-tech-map error: --cell_policy applies only to --strategy nand2\n"
         );
     }
+}
+
+#[test]
+fn area_cli_matches_six_input_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let aig_path = dir.path().join("input.aag");
+    let lib_path = dir.path().join("functional.textproto");
+    let report_path = dir.path().join("mapping.json");
+    std::fs::write(
+        &lib_path,
+        r#"
+format_magic: 5496997758228255311
+cells: {
+  name: "INV" area: 1.0
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 3 }
+}
+cells: {
+  name: "AND2" area: 1.0
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 4 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 5 }
+}
+cells: {
+  name: "AND6" area: 1.0
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 4 direction: INPUT }
+  pins: { name_string_id: 6 direction: INPUT }
+  pins: { name_string_id: 7 direction: INPUT }
+  pins: { name_string_id: 8 direction: INPUT }
+  pins: { name_string_id: 9 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 10 }
+}
+interned_strings: ["A", "Y", "!A", "B", "A*B", "C", "D", "E", "F", "A*B*C*D*E*F"]
+"#,
+    )
+    .unwrap();
+    let mut builder = GateBuilder::new("and6_demo".into(), GateBuilderOptions::no_opt());
+    let inputs = (0..6)
+        .map(|i| *builder.add_input(format!("i{i}"), 1).get_lsb(0))
+        .collect::<Vec<_>>();
+    let mut output = inputs[0];
+    for input in &inputs[1..] {
+        output = builder.add_and_binary(output, *input);
+    }
+    builder.add_output("y".into(), output.into());
+    let aig = builder.build();
+    std::fs::write(&aig_path, emit_aiger(&aig, true).unwrap()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("aig-tech-map")
+        .arg(&aig_path)
+        .args(["--strategy", "area", "--fanout-opt=false"])
+        .arg("--liberty_proto")
+        .arg(&lib_path)
+        .args(["--netlist_out", "-"])
+        .arg("--json_out")
+        .arg(&report_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(
+        report["stats"]["cells_by_type"],
+        serde_json::json!({"AND6": 1})
+    );
+    assert_eq!(report["stats"]["cell_area"], 1.0);
+    assert_mapping_equivalent(&aig, &text, &aig_path, &lib_path);
 }
 
 #[test]
