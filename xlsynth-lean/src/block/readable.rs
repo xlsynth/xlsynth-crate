@@ -331,6 +331,12 @@ impl<'a> Presentation<'a> {
 
     /// Add collision-free constructors for every unnamed physical enum
     /// encoding.
+    ///
+    /// Keeping unnamed encodings in the readable proof domain is provisional.
+    /// This choice has not yet had a thorough design review. Revisit whether
+    /// proofs should range only over declared enum values, with explicit
+    /// obligations for legal initialization and transitions that preserve
+    /// those values.
     fn enum_cases(&self, name: &str) -> Result<Vec<(String, u64)>> {
         let TypeDecl::Enum { width, members, .. } = self.declaration(name)? else {
             bail!("{name} is not an enum")
