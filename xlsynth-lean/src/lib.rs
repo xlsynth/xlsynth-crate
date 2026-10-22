@@ -6,6 +6,10 @@
 //! The word-level exporter preserves the XLS function signature and is checked
 //! against the PIR evaluator. The gate exporter supports user-supplied proofs
 //! and uses an evaluator proved equivalent to Lean's stock AIG semantics.
+//!
+//! [`block`] separately exports stateful block models as Lean source text.
+
+pub mod block;
 
 mod error;
 mod evaluate;
