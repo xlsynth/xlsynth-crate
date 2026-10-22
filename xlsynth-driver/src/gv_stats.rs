@@ -241,6 +241,7 @@ pub fn handle_gv_stats(matches: &ArgMatches) {
         StaOptions {
             primary_input_transition,
             module_output_load,
+            wire_load: Default::default(),
         },
     )
     .unwrap_or_else(|e| {

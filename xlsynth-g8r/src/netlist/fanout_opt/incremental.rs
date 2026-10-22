@@ -59,6 +59,7 @@ impl<'a> Engine<'a> {
             StaOptions {
                 primary_input_transition: options.primary_input_transition,
                 module_output_load: options.module_output_load,
+                wire_load: Default::default(),
             },
             sta,
         )?;

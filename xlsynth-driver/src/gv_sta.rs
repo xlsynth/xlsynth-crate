@@ -7,7 +7,7 @@ use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, read_gv_
 use xlsynth_g8r::netlist::report::{
     NetlistStaReport, OutputTimingRow, build_sta_report, select_module,
 };
-use xlsynth_g8r::netlist::sta::StaOptions;
+use xlsynth_g8r::netlist::sta::{StaOptions, WireLoadModel};
 
 #[derive(Debug, Serialize)]
 struct StaSummary {
@@ -78,6 +78,22 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
         }
     };
 
+    let wire_load = match WireLoadModel::from_femtofarads(
+        *matches
+            .get_one::<f64>("wire-capacitance-constant-ff")
+            .expect("default"),
+        *matches
+            .get_one::<f64>("wire-capacitance-per-sink-ff")
+            .expect("default"),
+        &liberty,
+    ) {
+        Ok(model) => model,
+        Err(e) => {
+            eprintln!("gv-sta error: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let summary = match build_sta_report(
         module,
         parsed.nets.as_slice(),
@@ -86,6 +102,7 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
         StaOptions {
             primary_input_transition,
             module_output_load,
+            wire_load,
         },
     ) {
         Ok(r) => StaSummary::from(r),

@@ -85,7 +85,7 @@ pub fn default_output_load_ff(library: &Library) -> Result<f64, String> {
 }
 
 /// Converts an explicitly scaled Liberty capacitance unit to femtofarads.
-fn capacitance_unit_in_ff(unit: &str) -> Result<f64, String> {
+pub(crate) fn capacitance_unit_in_ff(unit: &str) -> Result<f64, String> {
     let normalized = unit.trim().to_ascii_lowercase();
     for (suffix, scale) in [
         ("af", 1e-3),

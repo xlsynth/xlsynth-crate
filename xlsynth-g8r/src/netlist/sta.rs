@@ -393,8 +393,14 @@ fn format_optional_edge_timing(edge: Option<EdgeTiming>) -> String {
         .unwrap_or_else(|| "<none>".to_string())
 }
 
+mod wire_load;
+pub use wire_load::WireLoadModel;
+
+/// Input constraints and lumped load policy shared by full and incremental STA.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StaOptions {
+    /// Optional affine wire capacitance in Liberty capacitance units.
+    pub wire_load: WireLoadModel,
     /// Transition applied to primary-input source nets.
     pub primary_input_transition: f64,
     /// Extra load added to nets attached to module outputs.
@@ -406,6 +412,7 @@ impl Default for StaOptions {
         Self {
             primary_input_transition: 0.01,
             module_output_load: 0.0,
+            wire_load: WireLoadModel::default(),
         }
     }
 }
@@ -1372,6 +1379,7 @@ fn analyze_max_arrival_proto_with_mode(
         ));
     }
 
+    options.wire_load.validate()?;
     let library = lib.library;
     let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
     let instance_count = normalized.instances.len();
@@ -1689,6 +1697,14 @@ fn analyze_max_arrival_proto_with_mode(
         };
         bit_load_capacitance[output_source_bit_idx].rise += options.module_output_load;
         bit_load_capacitance[output_source_bit_idx].fall += options.module_output_load;
+    }
+
+    for (bit, cap) in bit_load_capacitance.iter_mut().enumerate() {
+        if !bit_drivers[bit].is_empty() {
+            options
+                .wire_load
+                .add_to(cap, bit_loads[bit].len(), has_resolved_module_output[bit])?;
+        }
     }
 
     let source_timing = SignalTiming {
@@ -5704,6 +5720,7 @@ endmodule
             StaOptions {
                 primary_input_transition: f64::NAN,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect_err("NaN primary-input transition should be rejected");
@@ -5721,6 +5738,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.01,
                 module_output_load: f64::INFINITY,
+                wire_load: Default::default(),
             },
         )
         .expect_err("infinite module-output load should be rejected");
@@ -5751,6 +5769,7 @@ endmodule
             StaOptions {
                 primary_input_transition: -0.1,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect_err("negative primary-input transition should be rejected");
@@ -5768,6 +5787,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.01,
                 module_output_load: -0.1,
+                wire_load: Default::default(),
             },
         )
         .expect_err("negative module-output load should be rejected");
@@ -7708,6 +7728,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.1,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect("one-sided combinational arcs should combine");
@@ -8125,6 +8146,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.0,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect("sta should succeed");
@@ -8173,6 +8195,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.2,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect("sta should succeed");
@@ -8269,6 +8292,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.1,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect("sta should succeed");
@@ -8421,6 +8445,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.0,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect("sta should succeed");
@@ -8546,6 +8571,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.0,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect("sta should succeed");
@@ -8641,6 +8667,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.2,
                 module_output_load: 2.0,
+                wire_load: Default::default(),
             },
         )
         .expect("sta should succeed");
@@ -8859,6 +8886,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.0,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .expect("sta should succeed");

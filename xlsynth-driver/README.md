@@ -974,6 +974,56 @@ Key flags:
   `xlsynth_g8r::netlist::sta_trace` log target to emit per-arc timing-candidate
   diagnostics.
 
+#### Optional affine wire capacitance
+
+`gv-sta` accepts `--wire-capacitance-constant-ff` and
+`--wire-capacitance-per-sink-ff`, both defaulting to zero. Parameters must be
+finite and nonnegative; overflow in conversion or total net load is rejected.
+CLI values are in femtofarads, converted to the Liberty capacitance unit.
+The reusable `StaOptions::wire_load` API uses Liberty units and is honored by
+both full and incremental STA.
+
+For each used cell-driven net, add `Cwire = Cconstant + CperSink * F` once
+to each edge's actual Liberty sink-pin capacitance plus external output load.
+`F` counts connected input pin bits, including two pins on the same cell.
+Output ports do not increment `F`; an output-only net receives the constant
+term. Aliased outputs retain their individual external loads but share one
+wire term. Dangling nets receive no wire load. Primary inputs remain ideal
+arrival/slew sources. No fanout cutoff is applied.
+
+This is a capacitance-only affine approximation to conventional fanout-based
+wire-load models, not full Liberty wire-load import or resistance/delay support.
+One statistical interpretation is `L = L0 + l * F`, `C = c' * L`: fixed
+overhead plus average incremental capacitance per consumer. Coefficients are
+empirical; they do not imply literal unit areas or identical wire geometry.
+The [Liberty Reference Manual 2007.03, §§1.9.45–1.9.47](https://people.eecs.berkeley.edu/~alanmi/publications/other/liberty07_03.pdf)
+describes fanout-length tables, per-length capacitance/resistance and slope,
+as well as direct fanout-capacitance tables. It does not mandate this affine
+formula. [Boese, Kahng and Mantik, “On the Relevance of Wire Load Models” (2001)](https://vlsicad.ucsd.edu/Publications/Conferences/124/c124.pdf)
+discuss flow-dependent benefits and limitations; WLMs can reduce flow runtime,
+but do not promise universal power, performance or area improvements.
+
+An experimental ASAP7 starting point is constant `0` and coefficient
+`0.13` fF/sink (fitted coefficient approximately `0.1263`); consider
+`0.10 / 0.13 / 0.16` sensitivity runs:
+
+```shell
+xlsynth-driver gv-sta --netlist mapped.gv --liberty_proto asap7.proto \
+  --primary_input_transition 10 --module_output_load 1 \
+  --wire-capacitance-constant-ff 0 --wire-capacitance-per-sink-ff 0.13
+```
+
+This example came from eight dense arithmetic blocks at ASAP7 RVT TT, 0.7 V,
+25°C, using final post-buffering internal nets with fanout 1–10. On matched
+final signal netlists, leave-one-design-out slopes reduced g8r worst-arrival
+MAE against extracted routed reference timing from 347.6 to 114.7 ps, and mean
+absolute relative error from 18.27% to 6.61%. That evaluation excluded IO-lineage
+and fanout-above-10 nets from added model capacitance; the generic CLI has no
+such cutoff. These results are flow-dependent and do not validate extrapolation
+above 10, pre-layout topology transfer, or a positive constant term. Capacitance
+alone omits wire resistance, distributed propagation and coupling activity;
+it is a statistical prior, not a physical per-net prediction.
+
 ### `gv-area`: gate-level mapped cell area
 
 Reports the summed standard-cell area for one selected gate-level netlist module using per-cell `area` values from a Liberty proto.

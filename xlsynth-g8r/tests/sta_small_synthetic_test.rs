@@ -325,6 +325,7 @@ endmodule
             StaOptions {
                 primary_input_transition: 0.0,
                 module_output_load: 0.0,
+                wire_load: Default::default(),
             },
         )
         .unwrap_or_else(|e| panic!("sta failed for '{}': {e}", case.name));
@@ -372,6 +373,7 @@ endmodule
         StaOptions {
             primary_input_transition: 0.0,
             module_output_load: 0.0,
+            wire_load: Default::default(),
         },
     )
     .expect("sta should succeed");

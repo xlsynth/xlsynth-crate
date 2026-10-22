@@ -86,6 +86,7 @@ fn options() -> StaOptions {
     StaOptions {
         primary_input_transition: 1.0,
         module_output_load: 0.5,
+        wire_load: Default::default(),
     }
 }
 
@@ -105,8 +106,18 @@ fn bit(p: &ParsedNetlist, name: &str) -> Result<usize> {
 
 /// Checks every signal, rather than only the worst endpoint.
 fn compare(sta: &IncrementalSta<'_>, p: &ParsedNetlist, lib: &Library) -> Result<()> {
+    compare_options(sta, p, lib, options())
+}
+
+/// Checks full/incremental agreement with a caller-selected load policy.
+fn compare_options(
+    sta: &IncrementalSta<'_>,
+    p: &ParsedNetlist,
+    lib: &Library,
+    options: StaOptions,
+) -> Result<()> {
     let full =
-        analyze_combinational_max_arrival(&p.modules[0], &p.nets, &p.interner, lib, options())?;
+        analyze_combinational_max_arrival(&p.modules[0], &p.nets, &p.interner, lib, options)?;
     ensure!(sta.bit_count() == p.nets.len(), "bit count");
     let order = sta.topological_instances();
     ensure!(
@@ -818,5 +829,47 @@ fn combinational_session_can_edit_a_cell_with_unused_sequential_output_arc() -> 
             .is_err()
     );
     compare(&sta, &expected, &lib)?;
+    Ok(())
+}
+
+#[test]
+fn affine_wire_load_counts_pins_and_tracks_fanout_edits() -> Result<()> {
+    let lib = library()?;
+    let text = "module m(a,n,y,z); input a; output n,y,z; wire dead; BUF drive(.A(a),.Y(n)); GATE sink(.A(n),.B(n),.Y(y)); BUF dangling(.A(a),.Y(dead)); assign z=n; endmodule";
+    let p = read_gv_from_str(text)?;
+    let n = bit(&p, "n")?;
+    for (constant, per_sink) in [(0.0, 0.0), (0.75, 0.0), (0.0, 0.125), (0.75, 0.125)] {
+        let opts = StaOptions {
+            wire_load: crate::netlist::sta::WireLoadModel {
+                constant_capacitance: constant,
+                capacitance_per_sink: per_sink,
+            },
+            ..options()
+        };
+        let mut sta = IncrementalSta::new(&p.modules[0], &p.nets, &p.interner, &lib, opts)?;
+        compare_options(&sta, &p, &lib, opts)?;
+        // Two input pins on one cell and two aliased external output loads.
+        assert_eq!(sta.capacitances[n].rise, 1.5 + constant + 2.0 * per_sink);
+        assert_eq!(sta.capacitances[n].fall, 1.75 + constant + 2.0 * per_sink);
+        assert_eq!(sta.capacitances[bit(&p, "dead")?].rise, 0.0);
+        assert_eq!(sta.capacitances[bit(&p, "a")?].rise, 0.5);
+        let expected = read_gv_from_str(&text.replace(".B(n)", ".B(a)"))?;
+        let edit = TimingEdit {
+            new_bits: 0,
+            mutations: vec![TimingMutation::Rewire {
+                instance: 1,
+                pin: "B".into(),
+                source: BitSource::Bit(bit(&p, "a")?),
+            }],
+        };
+        for accept in [false, true] {
+            sta.trial_edit(&edit, TrialOptions::default(), |s, _| {
+                compare_options(s, &expected, &lib, opts)?;
+                assert_eq!(s.capacitances[n].rise, 1.25 + constant + per_sink);
+                Ok(accept)
+            })?;
+            compare_options(&sta, if accept { &expected } else { &p }, &lib, opts)?;
+        }
+    }
     Ok(())
 }
