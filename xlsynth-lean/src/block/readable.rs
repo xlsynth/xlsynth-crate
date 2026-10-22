@@ -6,6 +6,12 @@
 //! still supplies every equation and physical port. Codecs include undeclared
 //! enum encodings so arbitrary physical state remains representable. This
 //! module emits correspondence proof source but does not check it with Lean.
+//!
+//! Once checked by Lean, these proofs provide a sanity check on both the raw
+//! and readable Lean models by establishing agreement on next state, outputs,
+//! and assertion results. A translation error shared by both models can escape
+//! this check; agreement between them does not establish agreement with XLS
+//! execution.
 
 use std::{collections::BTreeSet, fmt::Write};
 
