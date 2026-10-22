@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package swap
+
+top block swap(clk: clock, rst: bits[1], en: bits[1], out: bits[2]) {
+  #![reset(port="rst", asynchronous=false, active_low=true)]
+  reg a(bits[2], reset_value=1)
+  reg b(bits[2])
+  rst: bits[1] = input_port(name=rst, id=1)
+  en: bits[1] = input_port(name=en, id=2)
+  old_a: bits[2] = register_read(register=a, id=3)
+  old_b: bits[2] = register_read(register=b, id=4)
+  tok: token = literal(value=token, id=5)
+  checked: token = assert(tok, en, message="enable expected", label="enable", id=6)
+  write_a: () = register_write(old_b, register=a, load_enable=en, reset=rst, id=7)
+  write_b: () = register_write(old_a, register=b, id=8)
+  out: () = output_port(old_a, name=out, id=9)
+}

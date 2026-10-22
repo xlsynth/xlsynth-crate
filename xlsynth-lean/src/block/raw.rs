@@ -1,0 +1,596 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Direct Lean emission from native-verified, typed XLS block IR.
+//!
+//! The generated `XlsBlock.eval` evaluates every node from old registers and
+//! current inputs. Its result contains old-state outputs, simultaneous next
+//! registers, and every source assertion, including disconnected assertions.
+//! No assertion narrows the input/state domain. Tuples remain typed products;
+//! no enum decoding or payload projection is part of this translation.
+
+use anyhow::{Context, Result, bail, ensure};
+use std::fmt::Write;
+use xlsynth_ir_value::{IrFormatPreference, IrValue};
+use xlsynth_pir::{
+    ir::{self, Binop, NaryOp, NodePayload, NodeRef, Register, Type, Unop},
+    ir_utils,
+};
+
+use crate::block::Block;
+
+/// Emit a self-contained Lean module for the arbiter/operator-control subset.
+///
+/// `State`, `Input`, and `Output` fields keep source names and exact widths.
+/// An XLS tuple `[a, b]` is represented by `(a, (b, ()))`; element `j` uses
+/// `j` second projections followed by a first projection. Tokens are `Unit`.
+/// `reset q x` forces only the reset port and evaluates an ordinary clock; it
+/// does not invent an initial value for unreset storage or clear old outputs.
+/// One-hot selection supports bits only; ordinary and priority selects retain
+/// tuple structure, matching the native reference evaluator's supported subset.
+/// Records derive `Repr`, but whole-record `DecidableEq` is left to callers:
+/// deriving it exceeds Lean's instance-search size limit on nested state.
+/// Unsupported nodes, types, or reset/instance shapes return a source error.
+/// Do not treat `reset` as a constructor for initialized state: registers
+/// without a reset value still depend on the supplied old state.
+pub fn emit(block: &Block) -> Result<String> {
+    emit_block(block).with_context(|| {
+        format!(
+            "Lean emission of block {} in package {}",
+            block.graph.name, block.package_name
+        )
+    })
+}
+
+/// Assemble a clock-step model after checking the emitter's supported shapes.
+///
+/// Every register must have exactly one write; outputs use the data operand of
+/// each output port, whose graph node itself has the empty tuple type.
+fn emit_block(block: &Block) -> Result<String> {
+    ensure!(
+        block.graph.instantiations.is_empty(),
+        "block instances are outside the supported Lean subset"
+    );
+    if let Some(reset) = &block.graph.reset {
+        ensure!(
+            !reset.asynchronous,
+            "asynchronous reset on {} is outside the Lean clock-step contract",
+            block.graph.port_name(reset.port)
+        );
+        ensure!(
+            block.graph.port_type(reset.port) == &Type::Bits(1),
+            "reset port must be bits[1]"
+        );
+    }
+
+    let graph = &block.graph;
+    let writes = block
+        .graph
+        .registers
+        .iter()
+        .map(|register| {
+            let mut writes = graph.nodes.iter().enumerate().filter_map(|(index, node)| {
+                matches!(&node.payload, NodePayload::RegisterWrite { register: name, .. }
+                    if name == &register.name)
+                .then_some(NodeRef { index })
+            });
+            let write = writes
+                .next()
+                .with_context(|| format!("register {} has no write", register.name))?;
+            ensure!(
+                writes.next().is_none(),
+                "register {} has multiple writes; exactly one is supported",
+                register.name
+            );
+            Ok(write)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let assertions: Vec<_> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| {
+            matches!(node.payload, NodePayload::Assert { .. }).then_some(NodeRef { index })
+        })
+        .collect();
+    let names: Vec<_> = (0..graph.nodes.len())
+        .map(|index| {
+            let source_name = ir::node_textual_id(graph, NodeRef { index });
+            let suffix: String = source_name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            // The graph index makes normalization injective. The prefix keeps
+            // source names such as q, x, and Output from shadowing the API.
+            format!("xls_node_{index}_{suffix}")
+        })
+        .collect();
+
+    let mut source = format!(
+        "-- Generated from XLS block {} in package {}.\n\
+         -- Exact BitVec values; tuple elements end in Unit.\n\
+         -- Outputs read old registers; all writes commit together.\n\
+         -- Source assertions are results, never assumptions.\n\
+         import Std\n\nnamespace XlsBlock\n\n",
+        comment(&graph.name),
+        comment(&block.package_name)
+    );
+    source.push_str(&record_type(
+        "State",
+        block
+            .graph
+            .registers
+            .iter()
+            .map(|r| (r.name.as_str(), &r.ty)),
+    )?);
+    source.push_str(&record_type(
+        "Input",
+        graph
+            .input_ports()
+            .map(|port| (graph.port_name(port), graph.port_type(port))),
+    )?);
+    source.push_str(&record_type(
+        "Output",
+        graph
+            .output_ports()
+            .map(|port| (graph.port_name(port), graph.port_type(port))),
+    )?);
+    source.push_str("structure Assertions where\n");
+    for reference in &assertions {
+        let node = graph.get_node(*reference);
+        if let NodePayload::Assert { label, message, .. } = &node.payload {
+            writeln!(
+                source,
+                "  -- id={}; label={}; message={}\n  {} : Bool",
+                node.text_id,
+                comment(label),
+                comment(message),
+                identifier(&ir::node_textual_id(graph, *reference))?
+            )?;
+        }
+    }
+    source.push_str(
+        "  deriving Repr\n\n\
+         structure Evaluation where\n\
+         \x20 next : State\n\
+         \x20 output : Output\n\
+         \x20 assertions : Assertions\n\
+         \x20 deriving Repr\n\n\
+         def eval (q : State) (x : Input) : Evaluation :=\n",
+    );
+
+    for reference in ir_utils::get_topological_nodes(&graph.nodes) {
+        let node = graph.get_node(reference);
+        if !matches!(node.payload, NodePayload::Nil) {
+            let context = node_context(block, reference);
+            let ty = lean_type(&node.ty).with_context(|| context.clone())?;
+            let expression =
+                node_expression(block, reference, |operand| Ok(names[operand.index].clone()))
+                    .with_context(|| context.clone())?;
+            writeln!(source, "  -- {}", comment(&context))?;
+            writeln!(
+                source,
+                "  let {} : {ty} := {expression}",
+                names[reference.index]
+            )?;
+        }
+    }
+
+    let next_fields = block
+        .graph
+        .registers
+        .iter()
+        .zip(writes)
+        .map(|(register, reference)| {
+            let expression = register_update(block, register, reference, &names)
+                .with_context(|| node_context(block, reference))?;
+            Ok((identifier(&register.name)?, expression))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let output_fields = block
+        .graph
+        .output_ports()
+        .map(|port| {
+            Ok((
+                identifier(graph.port_name(port))?,
+                names[graph.output_value(port).index].clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let assertion_fields = assertions
+        .iter()
+        .map(|reference| {
+            let NodePayload::Assert { activate, .. } = graph.get_node(*reference).payload else {
+                unreachable!("assertions were selected by payload")
+            };
+            Ok((
+                identifier(&ir::node_textual_id(graph, *reference))?,
+                predicate(&names[activate.index]),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    writeln!(
+        source,
+        "  {{ next := {},\n    output := {},\n    assertions := {} }}\n",
+        record_value(&next_fields),
+        record_value(&output_fields),
+        record_value(&assertion_fields)
+    )?;
+    source.push_str(
+        "def step (q : State) (x : Input) : State := (eval q x).next\n\n\
+         def observe (q : State) (x : Input) : Output := (eval q x).output\n\n\
+         def assertions (q : State) (x : Input) : Assertions := (eval q x).assertions\n\n",
+    );
+    let holds = assertion_fields
+        .iter()
+        .rev()
+        .fold("True".to_string(), |rest, (name, _)| {
+            format!("And (checks.{name} = true) ({rest})")
+        });
+    writeln!(
+        source,
+        "def assertionsHold (q : State) (x : Input) : Prop :=\n  let checks := assertions q x\n  {holds}\n"
+    )?;
+    source.push_str(
+        "-- One clock with the declared reset port active. Other inputs and old\n\
+         -- registers stay arbitrary. With no reset port this is an ordinary clock.\n\
+         def reset (q : State) (x : Input) : Evaluation :=\n",
+    );
+    if let Some(reset) = &block.graph.reset {
+        writeln!(
+            source,
+            "  eval q {{ x with {} := BitVec.ofNat 1 {} }}",
+            identifier(graph.port_name(reset.port))?,
+            u8::from(!reset.active_low)
+        )?;
+    } else {
+        source.push_str("  eval q x\n");
+    }
+    source.push_str("\nend XlsBlock\n");
+    Ok(source)
+}
+
+/// Render physical bits, tokens, and tuples, rejecting arrays and zero-width
+/// bits.
+pub(crate) fn lean_type(ty: &Type) -> Result<String> {
+    match ty {
+        Type::Bits(width) => {
+            ensure!(*width > 0, "bits[0] is outside the supported Lean subset");
+            Ok(format!("BitVec {width}"))
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .rev()
+            .try_fold("Unit".to_string(), |tail, element| {
+                Ok(format!("Prod ({}) ({tail})", lean_type(element)?))
+            }),
+        Type::Token => Ok("Unit".to_string()),
+        Type::Array(_) => bail!("arrays are outside the supported Lean subset"),
+    }
+}
+
+/// Declare fields in caller order, retaining names through Lean quotation.
+fn record_type<'a>(
+    name: &str,
+    fields: impl Iterator<Item = (&'a str, &'a Type)>,
+) -> Result<String> {
+    let mut source = format!("structure {name} where\n");
+    for (field, ty) in fields {
+        writeln!(
+            source,
+            "  {} : {}",
+            identifier(field).with_context(|| format!("{name} field {field}"))?,
+            lean_type(ty).with_context(|| format!("{name} field {field}"))?
+        )?;
+    }
+    source.push_str("  deriving Repr\n\n");
+    Ok(source)
+}
+
+/// Assemble a record from already rendered field identifiers and expressions.
+pub(crate) fn record_value(fields: &[(String, String)]) -> String {
+    format!(
+        "{{ {} }}",
+        fields
+            .iter()
+            .map(|(name, expression)| format!("{name} := {expression}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Preserve tuple order in nested pairs terminated by the unit value.
+pub(crate) fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
+    elements.rev().fold("()".to_string(), |tail, element| {
+        format!("({element}, {tail})")
+    })
+}
+
+/// Project a zero-based tuple position using the nested-pair representation.
+pub(crate) fn tuple_element(tuple: &str, index: usize) -> String {
+    format!("({tuple}){}.1", ".2".repeat(index))
+}
+
+/// Render a physical literal whose type and shape were checked by the parser.
+pub(crate) fn literal(ty: &Type, value: &IrValue) -> Result<String> {
+    match ty {
+        Type::Bits(width) => Ok(format!(
+            "(BitVec.ofNat {width} {})",
+            value
+                .to_bits()
+                .context("literal bits")?
+                .to_string_fmt(IrFormatPreference::Hex, false)
+                .replace('_', "")
+        )),
+        Type::Tuple(types) => {
+            let values = value.get_elements().context("tuple literal elements")?;
+            let elements = types
+                .iter()
+                .zip(&values)
+                .map(|(ty, value)| literal(ty, value))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(tuple_value(elements.into_iter()))
+        }
+        Type::Token => Ok("()".to_string()),
+        Type::Array(_) => bail!("array literal is outside the supported Lean subset"),
+    }
+}
+
+/// Interpret a rendered one-bit value as the Boolean condition that it is set.
+fn predicate(value: &str) -> String {
+    format!("({value} == (BitVec.ofNat 1 1))")
+}
+
+/// Render one supported graph operation using caller-supplied operand
+/// expressions.
+///
+/// Resolve only the operands used by this operation. Register writes and
+/// output ports return unit here; their effects are collected by `emit_block`.
+pub(crate) fn node_expression(
+    block: &Block,
+    reference: NodeRef,
+    operand: impl Fn(NodeRef) -> Result<String>,
+) -> Result<String> {
+    let graph = &block.graph;
+    let node = graph.get_node(reference);
+    match &node.payload {
+        NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
+        // Output values are collected separately in declaration order. The
+        // graph-resident output operation itself has the empty tuple type.
+        NodePayload::OutputPort { .. } => Ok("()".to_string()),
+        NodePayload::Literal(value) => literal(&node.ty, value),
+        NodePayload::RegisterRead { register } => {
+            ensure!(
+                block.graph.registers.iter().any(|r| r.name == *register),
+                "no declaration for register {register}"
+            );
+            Ok(format!("q.{}", identifier(register)?))
+        }
+        NodePayload::RegisterWrite { .. } => Ok("()".to_string()),
+        NodePayload::Tuple(args) => Ok(tuple_value(
+            args.iter()
+                .map(|r| operand(*r))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter(),
+        )),
+        NodePayload::TupleIndex { tuple, index } => Ok(tuple_element(&operand(*tuple)?, *index)),
+        NodePayload::Unop(Unop::Not, arg) => Ok(format!("BitVec.not {}", operand(*arg)?)),
+        NodePayload::Binop(Binop::Add, lhs, rhs) => {
+            Ok(format!("BitVec.add {} {}", operand(*lhs)?, operand(*rhs)?))
+        }
+        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
+            let operator = if *op == Binop::Eq { "==" } else { "!=" };
+            Ok(format!(
+                "BitVec.ofBool ({} {operator} {})",
+                operand(*lhs)?,
+                operand(*rhs)?
+            ))
+        }
+        NodePayload::Nary(NaryOp::Concat, args) => {
+            let (first, rest) = args.split_first().context("concat has no operands")?;
+            rest.iter().try_fold(operand(*first)?, |left, right| {
+                Ok(format!("(BitVec.append {left} {})", operand(*right)?))
+            })
+        }
+        NodePayload::Nary(op @ (NaryOp::And | NaryOp::Or | NaryOp::Nor), args) => {
+            let (first, rest) = args
+                .split_first()
+                .context("bitwise operation has no operands")?;
+            let operator = if *op == NaryOp::And { "and" } else { "or" };
+            let reduced = rest.iter().try_fold(operand(*first)?, |left, right| {
+                Ok::<_, anyhow::Error>(format!("(BitVec.{operator} {left} {})", operand(*right)?))
+            })?;
+            Ok(if *op == NaryOp::Nor {
+                format!("BitVec.not {reduced}")
+            } else {
+                reduced
+            })
+        }
+        NodePayload::BitSlice { arg, start, width } => Ok(format!(
+            "BitVec.extractLsb' {start} {width} {}",
+            operand(*arg)?
+        )),
+        NodePayload::SignExt { arg, new_bit_count } => Ok(format!(
+            "BitVec.signExtend {new_bit_count} {}",
+            operand(*arg)?
+        )),
+        NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } => {
+            // Native/PIR verification checks complete coverage when no default
+            // exists; only that final covered case becomes the last branch.
+            let (fallback, tested) = if let Some(default) = default {
+                (*default, cases.as_slice())
+            } else {
+                let (last, rest) = cases.split_last().context("sel has no cases")?;
+                (*last, rest)
+            };
+            let selector = operand(*selector)?;
+            tested.iter().enumerate().rev().try_fold(
+                operand(fallback)?,
+                |otherwise, (index, case)| {
+                    Ok(format!(
+                        "(if {selector}.toNat == {index} then {} else {otherwise})",
+                        operand(*case)?
+                    ))
+                },
+            )
+        }
+        NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => {
+            let fallback = default.context("priority_sel requires an explicit default")?;
+            let selector = operand(*selector)?;
+            cases.iter().enumerate().rev().try_fold(
+                operand(fallback)?,
+                |otherwise, (index, case)| {
+                    Ok(format!(
+                        "(if {selector}.getLsbD {index} then {} else {otherwise})",
+                        operand(*case)?
+                    ))
+                },
+            )
+        }
+        NodePayload::OneHot { arg, lsb_prio } => {
+            let input = operand(*arg)?;
+            let candidate = if *lsb_prio {
+                input.clone()
+            } else {
+                format!("(BitVec.reverse {input})")
+            };
+            let low = format!("(BitVec.and {candidate} (BitVec.neg {candidate}))");
+            let selected = if *lsb_prio {
+                low
+            } else {
+                format!("(BitVec.reverse {low})")
+            };
+            Ok(format!(
+                "BitVec.append (BitVec.ofBool ({input} == 0)) {selected}"
+            ))
+        }
+        NodePayload::OneHotSel { selector, cases } => {
+            let Type::Bits(width) = &node.ty else {
+                bail!("only bits-valued one_hot_sel is supported by Lean")
+            };
+            let selector = operand(*selector)?;
+            cases.iter().enumerate().try_fold(
+                format!("(BitVec.ofNat {width} 0)"),
+                |merged, (index, case)| {
+                    let case = operand(*case)?;
+                    Ok(format!(
+                        "(BitVec.or {merged} (if {selector}.getLsbD {index} then {case} else (BitVec.ofNat {width} 0)))"
+                    ))
+                },
+            )
+        }
+        // Tokens have one value. All assertion predicates are returned
+        // independently, so ignoring token data never drops an obligation.
+        NodePayload::Assert { token, .. } => operand(*token),
+        NodePayload::AfterAll(_) => Ok("()".to_string()),
+        other => bail!("unsupported Lean operation {}", other.get_operator()),
+    }
+}
+
+/// Compute one next-state field with reset taking precedence over load enable.
+///
+/// The reference must be the selected write for this register, and every entry
+/// in `names` must denote an expression evaluated from old state.
+fn register_update(
+    block: &Block,
+    register: &Register,
+    reference: NodeRef,
+    names: &[String],
+) -> Result<String> {
+    let NodePayload::RegisterWrite {
+        arg,
+        load_enable,
+        reset,
+        ..
+    } = &block.graph.get_node(reference).payload
+    else {
+        unreachable!("register writes were selected by payload")
+    };
+    let enabled = if let Some(enable) = load_enable {
+        format!(
+            "(if {} then {} else q.{})",
+            predicate(&names[enable.index]),
+            names[arg.index],
+            identifier(&register.name)?
+        )
+    } else {
+        names[arg.index].clone()
+    };
+    if let Some(signal) = reset {
+        let behavior = block
+            .graph
+            .reset
+            .as_ref()
+            .context("register reset has no block reset behavior")?;
+        let value = register
+            .reset_value
+            .as_ref()
+            .context("reset register has no reset value")?;
+        Ok(format!(
+            "(if {} == (BitVec.ofNat 1 {}) then {} else {enabled})",
+            names[signal.index],
+            u8::from(!behavior.active_low),
+            literal(&register.ty, value)?
+        ))
+    } else {
+        Ok(enabled)
+    }
+}
+
+/// Quote a nonempty ASCII graphic name without merging distinct source names.
+pub(crate) fn identifier(source: &str) -> Result<String> {
+    ensure!(
+        !source.is_empty() && source.chars().all(|c| c.is_ascii_graphic()),
+        "unsupported Lean source identifier {source:?}"
+    );
+    // Quoting keeps source dots and keywords distinct instead of normalizing
+    // fields. The ASCII check prevents embedded quote delimiters or newlines.
+    Ok(format!("\u{00ab}{source}\u{00bb}"))
+}
+
+/// Describe a node and its available source locations for errors and Lean
+/// comments.
+pub(crate) fn node_context(block: &Block, reference: NodeRef) -> String {
+    let node = block.graph.get_node(reference);
+    let locations = node
+        .pos
+        .iter()
+        .flatten()
+        .map(|position| {
+            position
+                .to_human_string(&block.file_table)
+                .unwrap_or_else(|| {
+                    format!(
+                        "file_number {}:{}:{}",
+                        position.fileno,
+                        position.lineno + 1,
+                        position.colno + 1
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "node {} [id={}, op={}, type={}]{}",
+        ir::node_textual_id(&block.graph, reference),
+        node.text_id,
+        node.payload.get_operator(),
+        node.ty,
+        if locations.is_empty() {
+            String::new()
+        } else {
+            format!(" at {}", locations.join(", "))
+        }
+    )
+}
+
+/// Escape source text so it cannot split or terminate a generated line comment.
+pub(crate) fn comment(text: &str) -> String {
+    text.chars().flat_map(char::escape_default).collect()
+}
