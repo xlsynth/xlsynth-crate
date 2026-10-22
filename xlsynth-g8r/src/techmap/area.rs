@@ -48,6 +48,7 @@ struct Cell {
     pins: Vec<String>,
     output: String,
     area: f64,
+    pin_delays: Vec<f64>,
 }
 
 /// A truth-table match: physical pin i receives leaf perm[i], optionally
@@ -65,6 +66,7 @@ struct Binding {
 /// functions. Invalid areas or unknown function inputs are errors.
 #[derive(Debug)]
 pub struct AreaMappingLibrary {
+    delay_first: bool,
     cells: Vec<Cell>,
     matches: BTreeMap<(usize, u64), Vec<Binding>>,
     six_input: SixInputIndex,
@@ -116,6 +118,16 @@ impl AreaMappingLibrary {
     /// Compiles small-cell bindings eagerly and six-input functions for
     /// bounded, on-demand exact matching.
     pub fn new(lib: &Library) -> Result<Self> {
+        Self::new_internal(lib, None)
+    }
+
+    pub(super) fn new_internal(
+        lib: &Library,
+        timing: Option<super::delay::DelayMappingOptions>,
+    ) -> Result<Self> {
+        let prepared = timing
+            .map(|_| crate::netlist::sta::PreparedStaLibrary::new(lib))
+            .transpose()?;
         let mut cells: Vec<Cell> = Vec::new();
         let mut matches: BTreeMap<(usize, u64), Vec<Binding>> = BTreeMap::new();
         let mut six_input_functions = Vec::new();
@@ -223,11 +235,26 @@ impl AreaMappingLibrary {
             if n == 1 && tt == 1 && inv.is_none_or(|i: usize| cell.area < cells[i].area) {
                 inv = Some(index);
             }
+            let pin_delays = if let Some(options) = timing {
+                let original = lib.cells.iter().position(|c| c.name == cell.name).unwrap();
+                let delays = crate::netlist::sta::fixed_pin_delays(
+                    prepared.as_ref().unwrap(),
+                    original,
+                    options.reference_transition,
+                    options.reference_load,
+                )?;
+                pins.iter()
+                    .map(|p| delays.iter().find(|(n, _)| n == p).unwrap().1)
+                    .collect()
+            } else {
+                vec![0.0; n]
+            };
             cells.push(Cell {
                 name: cell.name.clone(),
                 pins,
                 output: lib.resolve_string(&outputs[0].name).to_string(),
                 area: cell.area,
+                pin_delays,
             });
             if n == 6 {
                 six_input_functions.push((index, tt));
@@ -262,10 +289,35 @@ impl AreaMappingLibrary {
                     .then(a.cmp(b))
             });
             let mut seen = BTreeSet::new();
-            bindings.retain(|b| seen.insert(b.phases));
+            if timing.is_none() {
+                bindings.retain(|b| seen.insert(b.phases));
+            }
         }
-        let six_input = SixInputIndex::new(six_input_functions, &cells);
+        let six_input = if timing.is_some() {
+            SixInputIndex::new_timing(six_input_functions, &cells)
+        } else {
+            SixInputIndex::new(six_input_functions, &cells)
+        };
+        if timing.is_some() {
+            inv = cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.pins.len() == 1)
+                .filter(|(i, _)| {
+                    matches
+                        .get(&(1, 1))
+                        .is_some_and(|bs| bs.iter().any(|b| b.cell == *i && b.phases == 0))
+                })
+                .min_by(|(ai, a), (bi, b)| {
+                    a.pin_delays[0]
+                        .total_cmp(&b.pin_delays[0])
+                        .then(a.area.total_cmp(&b.area))
+                        .then(ai.cmp(bi))
+                })
+                .map(|(i, _)| i);
+        }
         Ok(Self {
+            delay_first: timing.is_some(),
             cells,
             matches,
             six_input,
@@ -321,6 +373,7 @@ fn embed(cut: &Cut, leaves: &[usize]) -> u64 {
 /// region.
 #[derive(Clone, Debug)]
 struct Plan {
+    arrival: f64,
     area: f64,
     demands: OrdSet<AigOperand>,
     kind: PlanKind,
@@ -406,6 +459,7 @@ impl Cover<'_> {
                     let plan = self.plans[operand.node.id][usize::from(phase)].as_ref()?;
                     if let PlanKind::Literal(value) = &plan.kind {
                         return Some(Plan {
+                            arrival: 0.0,
                             area: 0.0,
                             demands: OrdSet::new(),
                             kind: PlanKind::Literal(*value ^ (phase != operand.negated)),
@@ -428,7 +482,23 @@ impl Cover<'_> {
             if track_demand {
                 demands.insert(operand);
             }
+            let phase = if self.lib.inv.is_some() {
+                self.anchors[operand.node.id]
+            } else {
+                operand.negated
+            };
+            let arrival = self.plans[operand.node.id][usize::from(phase)]
+                .as_ref()
+                .map_or(0.0, |p| p.arrival)
+                + if phase != operand.negated {
+                    self.lib
+                        .inv
+                        .map_or(0.0, |i| self.lib.cells[i].pin_delays[0])
+                } else {
+                    0.0
+                };
             Some(Plan {
+                arrival,
                 area: 0.0,
                 demands,
                 kind: PlanKind::Leaf(operand),
@@ -440,16 +510,21 @@ impl Cover<'_> {
     /// Keeps the first minimum-cost plan to make area ties deterministic.
     fn consider(&self, best: &mut Option<Plan>, candidate: Plan) {
         let inv = self.lib.inv.map_or(0.0, |i| self.lib.cells[i].area);
-        if best
-            .as_ref()
-            .is_none_or(|b| candidate.score(inv) < b.score(inv))
-        {
+        if best.as_ref().is_none_or(|b| {
+            if self.lib.delay_first {
+                candidate.arrival < b.arrival
+                    || (candidate.arrival == b.arrival && candidate.score(inv) < b.score(inv))
+            } else {
+                candidate.score(inv) < b.score(inv)
+            }
+        }) {
             *best = Some(candidate);
         }
     }
     /// Combines selected child states, unioning shared polarity costs.
     fn cell_plan(&self, cut: &Cut, binding: &Binding) -> Option<Plan> {
         let mut plan = Plan {
+            arrival: 0.0,
             area: self.lib.cells[binding.cell].area,
             demands: OrdSet::new(),
             kind: PlanKind::Cell {
@@ -462,6 +537,10 @@ impl Cover<'_> {
                 node: AigRef { id: *id },
                 negated: binding.phases & (1 << i) != 0,
             })?;
+            let pin = binding.perm.iter().position(|leaf| *leaf == i).unwrap();
+            plan.arrival = plan
+                .arrival
+                .max(child.arrival + self.lib.cells[binding.cell].pin_delays[pin]);
             plan.area += child.area;
             // Insert the smaller set into a structurally shared clone of the
             // larger one, avoiding copies of growing demand prefixes.
@@ -543,6 +622,7 @@ pub fn map_gatefn_to_area_netlist(
                 }];
                 for p in 0..2 {
                     cover.plans[id][p] = Some(Plan {
+                        arrival: 0.0,
                         area: 0.0,
                         demands: OrdSet::new(),
                         kind: PlanKind::Literal(*value ^ (p != 0)),
@@ -603,6 +683,7 @@ pub fn map_gatefn_to_area_netlist(
                             cover.consider(
                                 &mut direct[p],
                                 Plan {
+                                    arrival: 0.0,
                                     area: 0.0,
                                     demands: OrdSet::new(),
                                     kind: PlanKind::Literal(tt != 0),
@@ -644,6 +725,7 @@ pub fn map_gatefn_to_area_netlist(
                     let mut best = direct[p].clone();
                     if let (Some(inv), Some(other)) = (lib.inv, &direct[1 - p]) {
                         let mut inverted = other.clone();
+                        inverted.arrival += lib.cells[inv].pin_delays[0];
                         inverted.area += lib.cells[inv].area;
                         inverted.kind = PlanKind::Invert(Box::new(other.clone()));
                         cover.consider(&mut best, inverted);
@@ -653,7 +735,13 @@ pub fn map_gatefn_to_area_netlist(
                 let inv_area = lib.inv.map_or(0.0, |i| lib.cells[i].area);
                 cover.anchors[id] = match (&cover.plans[id][0], &cover.plans[id][1]) {
                     (Some(positive), Some(negative)) => {
-                        negative.score(inv_area) < positive.score(inv_area)
+                        if lib.delay_first {
+                            negative.arrival < positive.arrival
+                                || (negative.arrival == positive.arrival
+                                    && negative.score(inv_area) < positive.score(inv_area))
+                        } else {
+                            negative.score(inv_area) < positive.score(inv_area)
+                        }
                     }
                     (None, Some(_)) => true,
                     _ => false,

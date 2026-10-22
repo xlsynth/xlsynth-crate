@@ -2506,8 +2506,8 @@ fn main() {
                         .long("strategy")
                         .value_name("STRATEGY")
                         .default_value("nand2")
-                        .value_parser(["nand2", "area"])
-                        .help("Mapping strategy: nand2 preserves structural lowering; area covers the fixed AIG using an area objective")
+                        .value_parser(["nand2", "area", "delay"])
+                        .help("Mapping strategy: nand2 preserves structural lowering; area covers the fixed AIG using an area objective; delay is experimental fixed-slew/load arrival-first mapping")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2524,14 +2524,14 @@ fn main() {
                     Arg::new("primary_input_transition")
                         .long("primary-input-transition")
                         .visible_alias("primary_input_transition")
-                        .help("Fanout optimization input transition in Liberty units")
+                        .help("Input transition in Liberty units; delay mode requires it as its frozen reference slew")
                         .value_parser(clap::value_parser!(f64)),
                 )
                 .arg(
                     Arg::new("module_output_load")
                         .long("module-output-load")
                         .visible_alias("module_output_load")
-                        .help("Fanout optimization output capacitance; defaults to the library value")
+                        .help("Output capacitance; delay mode requires it as the frozen reference load for every cell")
                         .value_parser(clap::value_parser!(f64)),
                 )
                 .arg(

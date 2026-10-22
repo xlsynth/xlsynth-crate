@@ -3047,6 +3047,80 @@ fn arc_when_may_apply(
     Ok(applicable)
 }
 
+/// Conservative independent-pin delays at a frozen slew and output load.
+/// This is a mapping estimate, not timing of a loaded network. Unknown `when`
+/// conditions remain possible, using the same table rules as full STA.
+pub(crate) fn fixed_pin_delays(
+    prepared: &PreparedStaLibrary<'_>,
+    cell_idx: usize,
+    transition: f64,
+    load: f64,
+) -> Result<Vec<(String, f64)>> {
+    let library = prepared.library;
+    prepared.validate_independent_combinational_cell(cell_idx)?;
+    let cell = &library.cells[cell_idx];
+    let output = cell
+        .pins
+        .iter()
+        .find(|p| p.direction == PinDirection::Output as i32)
+        .ok_or_else(|| anyhow!("missing output"))?;
+    let input = SignalTimingSet::from_single(SignalTiming {
+        rise: EdgeTiming {
+            arrival: 0.0,
+            transition,
+        },
+        fall: EdgeTiming {
+            arrival: 0.0,
+            transition,
+        },
+    });
+    let mut evaluation = TimingEvaluationContext::new(library);
+    let mut result = Vec::new();
+    for pin in cell
+        .pins
+        .iter()
+        .filter(|p| p.direction == PinDirection::Input as i32)
+    {
+        let name = library.resolve_string(&pin.name);
+        let mut candidates = SignalTimingSet::default();
+        for arc in &output.timing_arcs {
+            if !split_related_pin_names(library.resolve_string(&arc.related_pin))
+                .any(|related| related == name)
+            {
+                continue;
+            }
+            if !arc_when_may_apply(library, arc, &HashMap::new(), &mut evaluation, &cell.name)? {
+                continue;
+            }
+            let timing = evaluate_arc_set(
+                library,
+                arc,
+                &input,
+                EdgeLoadCapacitance {
+                    rise: load,
+                    fall: load,
+                },
+                &mut evaluation,
+                &cell.name,
+            )?;
+            candidates = candidates.merge(&timing);
+        }
+        // Complementary one-sided arcs may supply the two edges separately.
+        // An empty or incomplete pin set must never become a zero-delay path.
+        let timing = candidates
+            .as_report_signal_timing()
+            .ok_or_else(|| anyhow!("missing complete timing for {}.{name}", cell.name))?;
+        let delay = timing.rise.arrival.max(timing.fall.arrival).max(0.0);
+        anyhow::ensure!(
+            delay.is_finite(),
+            "non-finite mapping delay for {}.{name}",
+            cell.name
+        );
+        result.push((name.to_string(), delay));
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 fn evaluate_arc(
     library: &crate::liberty_model::Library,
@@ -7517,6 +7591,64 @@ endmodule
     }
 
     #[test]
+    fn fixed_pin_delays_reject_missing_or_inapplicable_six_input_timing() {
+        for final_when in [None, Some("0"), Some("")] {
+            let mut builder = LibraryBuilder::new();
+            let mut pins = Vec::new();
+            let mut arcs = Vec::new();
+            for name in ["A", "B", "C", "D", "E", "F"] {
+                pins.push(test_pin(
+                    &mut builder,
+                    name,
+                    PinDirection::Input,
+                    "",
+                    vec![],
+                ));
+                if name != "F" || final_when.is_some() {
+                    arcs.push(scalar_arc(
+                        &mut builder,
+                        name,
+                        "positive_unate",
+                        "combinational",
+                        if name == "F" { final_when.unwrap() } else { "" },
+                        2.0,
+                        3.0,
+                        0.2,
+                        0.3,
+                    ));
+                }
+            }
+            pins.push(test_pin(
+                &mut builder,
+                "Y",
+                PinDirection::Output,
+                "A*B*C*D*E*F",
+                arcs,
+            ));
+            builder.cells = vec![Cell {
+                name: "AND6".into(),
+                pins,
+                area: 1.0,
+                ..Default::default()
+            }];
+            let lib = builder.finish();
+            let prepared = PreparedStaLibrary::new(&lib).unwrap();
+            // Demonstrate the gap in pre-existing validation, not just any
+            // error.
+            prepared.validate_independent_combinational_cell(0).unwrap();
+            let result = fixed_pin_delays(&prepared, 0, 0.1, 0.0);
+            if final_when == Some("") {
+                assert_eq!(result.unwrap().len(), 6);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "missing complete timing for AND6.F"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sta_combines_one_sided_combinational_rise_and_fall_arcs() {
         let src = r#"
 module top (a, y);
@@ -7579,6 +7711,11 @@ endmodule
             },
         )
         .expect("one-sided combinational arcs should combine");
+        let prepared = PreparedStaLibrary::new(&lib).unwrap();
+        assert_eq!(
+            fixed_pin_delays(&prepared, 0, 0.1, 0.0).unwrap(),
+            vec![("A".to_string(), 3.0)]
+        );
         let y_idx = find_net_index(&nets, &interner, "y");
         let y_timing = report.timing_for_net(y_idx).expect("timing for y");
         assert_close(y_timing.rise.arrival, 2.0);
