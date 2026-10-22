@@ -3082,7 +3082,7 @@ pub(crate) fn fixed_pin_delays(
         .filter(|p| p.direction == PinDirection::Input as i32)
     {
         let name = library.resolve_string(&pin.name);
-        let mut delay = 0.0_f64;
+        let mut candidates = SignalTimingSet::default();
         for arc in &output.timing_arcs {
             if !split_related_pin_names(library.resolve_string(&arc.related_pin))
                 .any(|related| related == name)
@@ -3102,11 +3102,15 @@ pub(crate) fn fixed_pin_delays(
                 },
                 &mut evaluation,
                 &cell.name,
-            )?
-            .as_report_signal_timing()
-            .ok_or_else(|| anyhow!("no timing for {}.{name}", cell.name))?;
-            delay = delay.max(timing.rise.arrival).max(timing.fall.arrival);
+            )?;
+            candidates = candidates.merge(&timing);
         }
+        // Complementary one-sided arcs may supply the two edges separately.
+        // An empty or incomplete pin set must never become a zero-delay path.
+        let timing = candidates
+            .as_report_signal_timing()
+            .ok_or_else(|| anyhow!("missing complete timing for {}.{name}", cell.name))?;
+        let delay = timing.rise.arrival.max(timing.fall.arrival).max(0.0);
         anyhow::ensure!(
             delay.is_finite(),
             "non-finite mapping delay for {}.{name}",
@@ -7587,6 +7591,64 @@ endmodule
     }
 
     #[test]
+    fn fixed_pin_delays_reject_missing_or_inapplicable_six_input_timing() {
+        for final_when in [None, Some("0"), Some("")] {
+            let mut builder = LibraryBuilder::new();
+            let mut pins = Vec::new();
+            let mut arcs = Vec::new();
+            for name in ["A", "B", "C", "D", "E", "F"] {
+                pins.push(test_pin(
+                    &mut builder,
+                    name,
+                    PinDirection::Input,
+                    "",
+                    vec![],
+                ));
+                if name != "F" || final_when.is_some() {
+                    arcs.push(scalar_arc(
+                        &mut builder,
+                        name,
+                        "positive_unate",
+                        "combinational",
+                        if name == "F" { final_when.unwrap() } else { "" },
+                        2.0,
+                        3.0,
+                        0.2,
+                        0.3,
+                    ));
+                }
+            }
+            pins.push(test_pin(
+                &mut builder,
+                "Y",
+                PinDirection::Output,
+                "A*B*C*D*E*F",
+                arcs,
+            ));
+            builder.cells = vec![Cell {
+                name: "AND6".into(),
+                pins,
+                area: 1.0,
+                ..Default::default()
+            }];
+            let lib = builder.finish();
+            let prepared = PreparedStaLibrary::new(&lib).unwrap();
+            // Demonstrate the gap in pre-existing validation, not just any
+            // error.
+            prepared.validate_independent_combinational_cell(0).unwrap();
+            let result = fixed_pin_delays(&prepared, 0, 0.1, 0.0);
+            if final_when == Some("") {
+                assert_eq!(result.unwrap().len(), 6);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "missing complete timing for AND6.F"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sta_combines_one_sided_combinational_rise_and_fall_arcs() {
         let src = r#"
 module top (a, y);
@@ -7649,6 +7711,11 @@ endmodule
             },
         )
         .expect("one-sided combinational arcs should combine");
+        let prepared = PreparedStaLibrary::new(&lib).unwrap();
+        assert_eq!(
+            fixed_pin_delays(&prepared, 0, 0.1, 0.0).unwrap(),
+            vec![("A".to_string(), 3.0)]
+        );
         let y_idx = find_net_index(&nets, &interner, "y");
         let y_timing = report.timing_for_net(y_idx).expect("timing for y");
         assert_close(y_timing.rise.arrival, 2.0);

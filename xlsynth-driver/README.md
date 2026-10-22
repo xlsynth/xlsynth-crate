@@ -835,7 +835,7 @@ standard-cell pin connections, and unresolved combinational cycles.
 
 ### `aig-tech-map`: AIGER to library-cell netlist
 
-Maps an input AIGER graph with `--strategy nand2|area`. The default `nand2`
+Maps an input AIGER graph with `--strategy nand2|area|delay`. The default `nand2`
 strategy preserves the structural decomposition:
 
 - each `And2` becomes `NAND2` followed by `INV`
@@ -845,7 +845,7 @@ The `nand2` strategy auto-selects suitable `INV` and `NAND2` cells by name,
 pin shape, and Boolean function. It does not require timing data. Running
 `gv-sta` on the mapped netlist requires a matching timing-enabled proto; see
 the timing coverage limitation in the `gv-sta` section below.
-Both mapping strategies exclude cells marked `dont_use` or `use_for_size_only`.
+All mapping strategies exclude cells marked `dont_use` or `use_for_size_only`.
 The structural mapping design is described in
 [`xlsynth-g8r/docs/tech_mapper_design.md`](../xlsynth-g8r/docs/tech_mapper_design.md).
 
@@ -872,17 +872,28 @@ xlsynth-driver aig-tech-map my_design.aig --strategy area \
   --json_out mapping.json
 ```
 
+The experimental `delay` strategy reuses the same cuts and emission, retaining
+cell and pin alternatives and minimizing estimated arrival before area. It requires
+explicit `--primary-input-transition` and `--module-output-load` values in Liberty
+units, frozen for **every cell** during selection. One state per polarity, fixed
+shared boundaries, ideal wires and fixed loads are approximations, not a global
+optimum or hard delay constraint. Every input pin must have applicable timing for
+both output edges; complementary rise/fall arcs are combined. Validate the emitted
+network with `gv-sta` and formal equivalence. Fanout optimization is off by default
+for delay mode; enable it explicitly with `--fanout-opt=true`.
+
 Key flags:
 
-- `--strategy <nand2|area>`: mapping strategy (default: `nand2`).
+- `--strategy <nand2|area|delay>`: mapping strategy (default: `nand2`).
 - `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
   `nand2` requires suitable `INV` and `NAND2` functions; `area` requires cell
   functions and positive areas. Default area optimization also requires usable
   timing data and an output load (library default or `--module-output-load`).
+  `delay` requires usable timing data even with `--fanout-opt=false`.
   `nand2` and raw area mapping with `--fanout-opt=false` do not require timing.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional override for emitted module name.
-- `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` is an error.
+- `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` or `delay` is an error.
   `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
   `max-speed` prefers the highest available VT class and then the highest
   drive strength inferred from cell names. Neither policy compares timing tables.
@@ -890,6 +901,8 @@ Key flags:
   module, and instance/net counts. With `area`,
   it also includes unique emitted cell area, cell counts by type, inverter and
   sharing statistics, the AND duplication audit, and excluded library cells.
+  With `delay`, it includes mapping statistics, the timing model and reference
+  slew/load.
   Netlist text stays on stdout when `--netlist_out -` is used; diagnostics go to stderr.
   The JSON destination must differ from the netlist output and stderr, including
   redirected streams.
@@ -902,7 +915,8 @@ worst delay and the delay/area score. The pass requires timing-enabled Liberty;
 timing uses pin capacitances and excludes interconnect parasitics. Use
 `--fanout-opt=false` for raw area mapping without timing requirements. Bare
 `--fanout-opt` and `--fanout-opt=true` explicitly enable the pass. The default
-`nand2` strategy still leaves it disabled; enabling it requires `--strategy area`.
+`nand2` and `delay` strategies leave it disabled. Enabling it requires
+`--strategy area` or `--strategy delay`.
 Missing or unusable timing data, or a missing output-load default without an
 explicit `--module-output-load`, causes an error before outputs are written; the
 pass is never silently skipped.
@@ -913,12 +927,17 @@ xlsynth-driver aig-tech-map design.aig --strategy area \
   --module-output-load 1 --json_out mapping.json
 ```
 
-- `--primary-input-transition`: source slew in Liberty time units (default: `0.01`).
+- `--primary-input-transition`: source slew in Liberty time units (default: `0.01`
+  for area fanout optimization); explicitly required as the frozen reference slew
+  for delay mapping.
 - `--module-output-load`: capacitance per output in Liberty units; defaults to the
-  library's `default_output_load`, or must be supplied if that value is absent.
+  library's `default_output_load` for area fanout optimization, or must be supplied
+  if that value is absent. Delay mapping always requires an explicit value as its
+  frozen reference load.
 - `--fanout-max-area-growth`: maximum fractional growth over mapped area
-  (default: `0.05`). These three options require enabled area optimization and
-  are rejected with `--fanout-opt=false` or the `nand2` strategy.
+  (default: `0.05`); requires enabled fanout optimization. The slew/load options
+  require either delay mapping or enabled area fanout optimization. All three
+  options are rejected with `nand2`.
 - The underscored spellings `--primary_input_transition` and
   `--module_output_load` remain accepted compatibility aliases.
 - JSON `stats` retains the original mapping statistics; `fanout_optimization`
@@ -4005,15 +4024,3 @@ before conversion and explains that V1 is no longer supported:
 ```shell
 xlsynth-driver dslx2ir --dslx_input_file my_module.x --dslx_top main
 ```
-
-### Experimental delay-first technology mapping
-
-`aig-tech-map --strategy=delay --primary-input-transition=10 --module-output-load=1`
-retains timing-relevant cell and pin alternatives and minimizes a scalar estimated
-arrival, with area as a tie-break. Values use the Liberty time/capacitance units.
-The supplied slew/load are frozen for **every cell**, not propagated network
-conditions. One state per polarity, shared-node boundaries, ideal wires and
-fixed loads are explicit approximations; this is neither a global optimum nor
-a hard delay constraint. Area mapping remains unchanged. Fanout optimization is
-off by default for delay mode; opt in with `--fanout-opt=true` and evaluate it
-separately. Validate actual output with full STA and formal equivalence.
