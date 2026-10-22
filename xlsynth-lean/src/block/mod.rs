@@ -15,7 +15,12 @@ use xlsynth_pir::{
 };
 
 mod raw;
+mod source_map;
 pub use raw::emit;
+pub use source_map::{
+    Attachment, EnumMember, SourceMap, SourceType, StructField, TypeDecl, ValidatedSourceMap,
+    collect_source_map, validate_source_map,
+};
 
 /// One native-verified block, its typed graph, and package source locations.
 ///
