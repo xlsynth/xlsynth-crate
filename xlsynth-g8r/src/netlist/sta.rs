@@ -3047,6 +3047,76 @@ fn arc_when_may_apply(
     Ok(applicable)
 }
 
+/// Conservative independent-pin delays at a frozen slew and output load.
+/// This is a mapping estimate, not timing of a loaded network. Unknown `when`
+/// conditions remain possible, using the same table rules as full STA.
+pub(crate) fn fixed_pin_delays(
+    prepared: &PreparedStaLibrary<'_>,
+    cell_idx: usize,
+    transition: f64,
+    load: f64,
+) -> Result<Vec<(String, f64)>> {
+    let library = prepared.library;
+    prepared.validate_independent_combinational_cell(cell_idx)?;
+    let cell = &library.cells[cell_idx];
+    let output = cell
+        .pins
+        .iter()
+        .find(|p| p.direction == PinDirection::Output as i32)
+        .ok_or_else(|| anyhow!("missing output"))?;
+    let input = SignalTimingSet::from_single(SignalTiming {
+        rise: EdgeTiming {
+            arrival: 0.0,
+            transition,
+        },
+        fall: EdgeTiming {
+            arrival: 0.0,
+            transition,
+        },
+    });
+    let mut evaluation = TimingEvaluationContext::new(library);
+    let mut result = Vec::new();
+    for pin in cell
+        .pins
+        .iter()
+        .filter(|p| p.direction == PinDirection::Input as i32)
+    {
+        let name = library.resolve_string(&pin.name);
+        let mut delay = 0.0_f64;
+        for arc in &output.timing_arcs {
+            if !split_related_pin_names(library.resolve_string(&arc.related_pin))
+                .any(|related| related == name)
+            {
+                continue;
+            }
+            if !arc_when_may_apply(library, arc, &HashMap::new(), &mut evaluation, &cell.name)? {
+                continue;
+            }
+            let timing = evaluate_arc_set(
+                library,
+                arc,
+                &input,
+                EdgeLoadCapacitance {
+                    rise: load,
+                    fall: load,
+                },
+                &mut evaluation,
+                &cell.name,
+            )?
+            .as_report_signal_timing()
+            .ok_or_else(|| anyhow!("no timing for {}.{name}", cell.name))?;
+            delay = delay.max(timing.rise.arrival).max(timing.fall.arrival);
+        }
+        anyhow::ensure!(
+            delay.is_finite(),
+            "non-finite mapping delay for {}.{name}",
+            cell.name
+        );
+        result.push((name.to_string(), delay));
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 fn evaluate_arc(
     library: &crate::liberty_model::Library,

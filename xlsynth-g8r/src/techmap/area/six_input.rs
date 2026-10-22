@@ -83,11 +83,21 @@ struct Function {
 #[derive(Debug, Default)]
 pub(super) struct SixInputIndex {
     buckets: BTreeMap<Signature, Vec<Function>>,
+    preserve_timing: bool,
 }
 
 impl SixInputIndex {
     /// Keeps the cheapest deterministic representative of each identical table.
     pub(super) fn new(functions: Vec<(usize, u64)>, cells: &[Cell]) -> Self {
+        Self::build(functions, cells, false)
+    }
+
+    pub(super) fn new_timing(functions: Vec<(usize, u64)>, cells: &[Cell]) -> Self {
+        Self::build(functions, cells, true)
+    }
+
+    fn build(functions: Vec<(usize, u64)>, cells: &[Cell], preserve_timing: bool) -> Self {
+        let all = functions.clone();
         let mut unique = BTreeMap::<u64, usize>::new();
         for (cell, table) in functions {
             let incumbent = unique.entry(table).or_insert(cell);
@@ -97,8 +107,16 @@ impl SixInputIndex {
                 *incumbent = cell;
             }
         }
-        let mut result = Self::default();
-        for (table, cell) in unique {
+        let functions = if preserve_timing {
+            all
+        } else {
+            unique.into_iter().map(|(tt, cell)| (cell, tt)).collect()
+        };
+        let mut result = Self {
+            preserve_timing,
+            ..Self::default()
+        };
+        for (cell, table) in functions {
             let properties = TableProperties::new(table);
             // Transposition symmetries form equivalence classes. Ordering the
             // assigned leaves inside each class removes equivalent permutations
@@ -118,7 +136,11 @@ impl SixInputIndex {
                     cell,
                     table,
                     properties,
-                    symmetry_predecessor,
+                    symmetry_predecessor: if preserve_timing {
+                        [None; INPUTS]
+                    } else {
+                        symmetry_predecessor
+                    },
                 });
         }
         result
@@ -135,6 +157,7 @@ impl SixInputIndex {
             return Vec::new();
         };
         let mut best: [Option<Binding>; 64] = std::array::from_fn(|_| None);
+        let mut all = Vec::new();
         for function in functions {
             Search {
                 function,
@@ -142,10 +165,19 @@ impl SixInputIndex {
                 query: &query,
                 cells,
                 best: &mut best,
+                all: if self.preserve_timing {
+                    Some(&mut all)
+                } else {
+                    None
+                },
             }
             .permutations(0, 0, &mut [0; INPUTS]);
         }
-        let mut result = best.into_iter().flatten().collect::<Vec<_>>();
+        let mut result = if self.preserve_timing {
+            all
+        } else {
+            best.into_iter().flatten().collect::<Vec<_>>()
+        };
         result.sort_by(|a, b| compare_bindings(a, b, cells));
         result
     }
@@ -158,6 +190,7 @@ struct Search<'a> {
     query: &'a TableProperties,
     cells: &'a [Cell],
     best: &'a mut [Option<Binding>; 64],
+    all: Option<&'a mut Vec<Binding>>,
 }
 
 impl Search<'_> {
@@ -214,6 +247,10 @@ impl Search<'_> {
                 perm: permutation.to_vec(),
                 phases,
             };
+            if let Some(all) = &mut self.all {
+                all.push(candidate);
+                continue;
+            }
             if self.best[phases]
                 .as_ref()
                 .is_none_or(|current| compare_bindings(&candidate, current, self.cells).is_lt())
@@ -293,6 +330,7 @@ mod tests {
             pins: (0..INPUTS).map(|i| format!("I{i}")).collect(),
             output: "Y".to_string(),
             area,
+            pin_delays: vec![0.0; INPUTS],
         }
     }
 
@@ -343,6 +381,26 @@ mod tests {
         let matches = index.matches(query, &cells);
         assert_eq!(matches, exhaustive_matches(table, query, &cells));
         assert!(matches.iter().any(|binding| binding.phases == phases));
+    }
+
+    #[test]
+    fn timing_index_keeps_costlier_cells_and_symmetric_pin_permutations() {
+        let cells = vec![cell("AND_CHEAP", 1.0), cell("AND_STRONG", 2.0)];
+        let table = 1u64 << 63;
+        let index = SixInputIndex::new_timing(vec![(0, table), (1, table)], &cells);
+        let matches = index.matches(table, &cells);
+        assert_eq!(matches.len(), 2 * 720);
+        for binding in &matches {
+            assert_eq!(bound_table(table, &binding.perm, binding.phases), table);
+        }
+        for cell in 0..2 {
+            let permutations = matches
+                .iter()
+                .filter(|b| b.cell == cell)
+                .map(|b| b.perm.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(permutations.len(), 720);
+        }
     }
 
     #[test]

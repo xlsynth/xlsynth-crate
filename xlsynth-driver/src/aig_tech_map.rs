@@ -16,6 +16,9 @@ use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::fanout_opt::{FanoutOptimizationOptions, optimize_fanout};
 use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_data_from_path};
 use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
+use xlsynth_g8r::techmap::delay::{
+    DelayMappingLibrary, DelayMappingOptions, map_gatefn_to_delay_netlist,
+};
 use xlsynth_g8r::techmap::nand2::{
     CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
 };
@@ -297,11 +300,12 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         .copied()
         .unwrap_or(strategy == "area");
     ensure!(
-        !fanout_opt || strategy == "area",
-        "--fanout-opt requires --strategy area"
+        !fanout_opt || strategy == "area" || strategy == "delay",
+        "--fanout-opt requires --strategy area or delay"
     );
     ensure!(
         fanout_opt
+            || strategy == "delay"
             || [
                 "primary_input_transition",
                 "module_output_load",
@@ -312,7 +316,13 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         "fanout tuning options require enabled area optimization; use --strategy area without --fanout-opt=false"
     );
     ensure!(
-        strategy != "area" || matches.value_source("cell_policy") != Some(ValueSource::CommandLine),
+        fanout_opt
+            || matches.value_source("fanout_max_area_growth") != Some(ValueSource::CommandLine),
+        "--fanout-max-area-growth requires enabled fanout optimization"
+    );
+    ensure!(
+        strategy == "nand2"
+            || matches.value_source("cell_policy") != Some(ValueSource::CommandLine),
         "--cell_policy applies only to --strategy nand2"
     );
     let stderr = if let Some(json_path) = json_out {
@@ -332,7 +342,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load AIG '{aig_input_file}'"))?
             .gate_fn;
-    let load = if fanout_opt {
+    let load = if fanout_opt || strategy == "delay" {
         load_liberty_with_timing_data_from_path
     } else {
         load_liberty_from_path
@@ -369,6 +379,29 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 "inv_cell": options.inv_cell_name, "nand2_cell": options.nand2_cell_name
             });
             (mapped, report, summary)
+        }
+        "delay" => {
+            let options = DelayMappingOptions {
+                reference_transition: *matches
+                    .get_one::<f64>("primary_input_transition")
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("delay mode requires --primary-input-transition")
+                    })?,
+                reference_load: *matches
+                    .get_one::<f64>("module_output_load")
+                    .ok_or_else(|| anyhow::anyhow!("delay mode requires --module-output-load"))?,
+            };
+            let library = DelayMappingLibrary::new(&lib, options)?;
+            let mapped = map_gatefn_to_delay_netlist(&gate_fn, &library)?;
+            let summary = format!(
+                "using experimental strategy='delay' area={}",
+                mapped.stats.cell_area
+            );
+            let report = serde_json::json!({"stats": mapped.stats,
+                "timing_model": "scalar worst-edge pin delay at fixed slew/load; one state per polarity",
+                "reference_transition": options.reference_transition,
+                "reference_load": options.reference_load});
+            (mapped.netlist, report, summary)
         }
         "area" => {
             let library = AreaMappingLibrary::new(&lib)?;

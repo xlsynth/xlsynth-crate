@@ -4005,3 +4005,15 @@ before conversion and explains that V1 is no longer supported:
 ```shell
 xlsynth-driver dslx2ir --dslx_input_file my_module.x --dslx_top main
 ```
+
+### Experimental delay-first technology mapping
+
+`aig-tech-map --strategy=delay --primary-input-transition=10 --module-output-load=1`
+retains timing-relevant cell and pin alternatives and minimizes a scalar estimated
+arrival, with area as a tie-break. Values use the Liberty time/capacitance units.
+The supplied slew/load are frozen for **every cell**, not propagated network
+conditions. One state per polarity, shared-node boundaries, ideal wires and
+fixed loads are explicit approximations; this is neither a global optimum nor
+a hard delay constraint. Area mapping remains unchanged. Fanout optimization is
+off by default for delay mode; opt in with `--fanout-opt=true` and evaluate it
+separately. Validate actual output with full STA and formal equivalence.
