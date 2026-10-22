@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generate Lean models from verified XLS block IR.
+//! Generate raw and source-named Lean models from verified XLS block IR.
 //!
 //! [`parse`] checks the package with native XLS and the typed Rust parser.
-//! [`emit`] preserves physical values and clock-step behavior.
+//! [`emit`] preserves physical values, while [`emit_readable`] adds checked
+//! source names, total codecs, and correspondence proof source. Source-map
+//! validation checks metadata against the supplied inputs; it does not prove
+//! that a compiler produced the block from that source.
 //! Emission returns text; it does not invoke Lean or check the generated
 //! proofs.
 
@@ -15,8 +18,10 @@ use xlsynth_pir::{
 };
 
 mod raw;
+mod readable;
 mod source_map;
-pub use raw::emit;
+
+pub use raw::{LeanBlockBundle, emit, emit_readable};
 pub use source_map::{
     Attachment, EnumMember, SourceMap, SourceType, StructField, TypeDecl, ValidatedSourceMap,
     collect_source_map, validate_source_map,

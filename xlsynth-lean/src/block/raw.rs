@@ -17,6 +17,30 @@ use xlsynth_pir::{
 };
 
 use crate::block::Block;
+use crate::block::source_map::ValidatedSourceMap;
+
+/// Five Lean source files relating readable execution to the raw block model.
+///
+/// Emission does not run Lean; callers must elaborate the generated proofs.
+pub struct LeanBlockBundle {
+    /// File names and UTF-8 source in dependency order.
+    ///
+    /// The order is `Generated.lean`, `ReadableTypes.lean`,
+    /// `ReadableGenerated.lean`, `ReadableRepresentation.lean`, then
+    /// `ReadableCorrespondence.lean`.
+    pub files: Vec<(String, String)>,
+}
+
+/// Emit raw and source-shaped models from one validated source map.
+///
+/// The owned block supplies executable equations, physical ports, and assertion
+/// results; source declarations supply names and representations. Unsupported
+/// raw operations or unsupported source identifiers return an error. Validation
+/// alone does not establish that the generated correspondence proofs compile;
+/// callers must check the returned files with Lean before relying on them.
+pub fn emit_readable(source: &ValidatedSourceMap) -> Result<LeanBlockBundle> {
+    crate::block::readable::emit(source)
+}
 
 /// Emit a self-contained Lean module for the arbiter/operator-control subset.
 ///
