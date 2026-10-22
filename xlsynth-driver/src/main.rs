@@ -46,6 +46,7 @@ mod aig_tech_map;
 mod aig_toggle_hotspots;
 mod blif2g8r;
 mod block2fn;
+mod block2lean;
 mod block2sv;
 mod common;
 mod dslx2ir;
@@ -2076,6 +2077,58 @@ fn main() {
                         .long("drop-output-ports")
                         .help("Comma-separated output port names to drop")
                         .required(false)
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("block2lean")
+                .about("Converts an XLS block IR package to Lean without invoking Lean")
+                .arg(
+                    Arg::new("input_file")
+                        .value_name("INPUT_FILE")
+                        .help("Input package-form block IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("NAME")
+                        .help("Raw mode: select a block, overriding the package top")
+                        .conflicts_with_all(["dslx_source", "type_attachment", "output_dir"])
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("FILE")
+                        .help("Raw mode: write to a file instead of stdout")
+                        .conflicts_with_all(["dslx_source", "type_attachment", "output_dir"])
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("dslx_source")
+                        .long("dslx-source")
+                        .value_name("PATH")
+                        .help("Readable mode: DSLX source containing the attached type declarations")
+                        .requires_all(["type_attachment", "output_dir"])
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("type_attachment")
+                        .long("type-attachment")
+                        .value_name("REGISTER=TYPE")
+                        .help("Readable mode: attach a source type to a register; may be repeated")
+                        .value_parser(block2lean::parse_type_attachment)
+                        .requires_all(["dslx_source", "output_dir"])
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("output_dir")
+                        .long("output-dir")
+                        .value_name("NEW_DIR")
+                        .help("Readable mode: write all five modules to a new directory")
+                        .requires_all(["dslx_source", "type_attachment"])
                         .action(ArgAction::Set),
                 ),
         )
@@ -4282,6 +4335,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("block2fn", subm)) => {
             block2fn::handle_block2fn(subm, &config);
+        }
+        Some(("block2lean", subm)) => {
+            if let Err(error) = block2lean::handle_block2lean(subm) {
+                eprintln!("error: {error:#}");
+                std::process::exit(1);
+            }
         }
         Some(("block2sv", subm)) => {
             if let Err(error) = block2sv::handle_block2sv(subm) {
