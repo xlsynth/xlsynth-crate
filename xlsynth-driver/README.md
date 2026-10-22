@@ -410,6 +410,73 @@ xlsynth-driver block2fn \
   --drop-output-ports "unused_out" > ~/my_netlist.fn.ir
 ```
 
+### `block2lean`: Block IR to Lean
+
+Generates a Lean clock-step model from package-form XLS block IR. By default,
+the raw model goes to stdout; `--output` writes it to a file instead. For
+example, this exports the block named `counter`:
+
+```shell
+xlsynth-driver block2lean counter.block.ir --top counter --output Generated.lean
+```
+
+The model takes old register values and current inputs and returns outputs,
+next register values, and assertion results. Register updates are simultaneous:
+if `a` receives `b` and `b` receives `a`, old state `(a=1, b=2)` produces next
+state `(a=2, b=1)`, while an output driven by `a` still reads `1` on that edge.
+
+Flags:
+
+- `--top <NAME>` selects a block, overriding the package top. Without it, the
+  declared block top is selected, or the sole block if no top is declared.
+  Multiple blocks without a top require `--top`; a function top requires an
+  explicit block selection.
+- `--output <FILE>` writes the raw model to this file, replacing existing
+  contents only after successful generation. The default is stdout.
+- `--dslx-source <PATH>` supplies DSLX source containing the local type
+  declarations used by the attachments. Imported source types are unsupported.
+- `--type-attachment <REGISTER=TYPE>` attaches a source type to a physical
+  register. Repeat the option for multiple registers.
+- `--output-dir <NEW_DIR>` writes the readable bundle to a new directory. Its
+  parent must exist; an existing directory is refused.
+
+The three readable options (`--dslx-source`, `--type-attachment`, and
+`--output-dir`) must be supplied together. Readable mode uses the package's
+default block selection and rejects `--top` and `--output`. For example, with
+a DSLX declaration `struct State { count: u8 }` and a matching physical register
+named `state`, generate the bundle with:
+
+```shell
+xlsynth-driver block2lean counter.block.ir \
+  --dslx-source counter.x --type-attachment state=State --output-dir counter-lean
+```
+
+The directory contains `Generated.lean`, `ReadableTypes.lean`,
+`ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
+`ReadableCorrespondence.lean`. All text is generated before any output is
+opened, so invalid inputs leave outputs untouched. A later filesystem write
+error can leave a partial directory.
+
+The supported IR subset includes exact-width bits, nested tuples, tokens,
+registers, synchronous resets, assertions, bitwise operations, addition,
+equality, concatenation, slicing, sign extension, one-hot encoding, and
+ordinary, priority, and bits-valued one-hot selection. Arrays, zero-width bits,
+block instances, asynchronous resets, and unsupported operations are rejected.
+Assertions are reported as results and do not restrict the model's inputs or
+old state. Source types support unsigned bits, Booleans, two-bit enums, aliases,
+and ordered nonempty structs.
+
+Attachments are the caller's assertion that a register represents a source
+type. The library typechecks the source and validates physical shapes and
+retained field-projection names; those checks do not prove that the IR was
+compiled from that source. A matching width alone is insufficient to establish
+source provenance.
+
+Generation does not invoke Lean or check proofs. Compile the generated modules
+with Lean to check the readable correspondence proofs; see
+[`xlsynth-lean`](../xlsynth-lean/README.md) for the library contract and supported
+Lean version.
+
 ### `block2sv`: Block IR to SystemVerilog
 
 Emits an XLS block IR package as synthesizable SystemVerilog using the native
