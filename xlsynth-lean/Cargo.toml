@@ -18,6 +18,7 @@ xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.76.0" }
 xlsynth-ir-value = { path = "../xlsynth-ir-value", version = "0.76.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 tempfile = "3.20"
 thiserror.workspace = true
 
