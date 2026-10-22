@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package machine
+
+top block machine(clk: clock, rst: bits[1], command: (bits[1], bits[1]), incoming: bits[2], telemetry: bits[2]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  reg machine((bits[2], (bits[1], bits[1]), bits[2]), reset_value=(0, (0, 0), 0))
+  rst: bits[1] = input_port(name=rst, id=16)
+  command: (bits[1], bits[1]) = input_port(name=command, id=1)
+  old: (bits[2], (bits[1], bits[1]), bits[2]) = register_read(register=machine, id=2)
+  machine_phase: bits[2] = tuple_index(old, index=0, id=3)
+  machine_flags: (bits[1], bits[1]) = tuple_index(old, index=1, id=4)
+  machine_sample: bits[2] = tuple_index(old, index=2, id=5)
+  machine_flags_armed: bits[1] = tuple_index(machine_flags, index=0, id=6)
+  machine_flags_queued: bits[1] = tuple_index(machine_flags, index=1, id=7)
+  incoming: bits[2] = input_port(name=incoming, id=8)
+  active_encoding: bits[2] = literal(value=2, id=9)
+  phase_is_active: bits[1] = eq(machine_phase, active_encoding, id=10)
+  choose: bits[1] = tuple_index(command, index=0, id=17)
+  picked: bits[1] = sel(choose, cases=[machine_flags_armed, machine_flags_queued], id=18)
+  next_flags: (bits[1], bits[1]) = tuple(picked, machine_flags_queued, id=19)
+  choose_flags: bits[1] = tuple_index(command, index=1, id=20)
+  selected_flags: (bits[1], bits[1]) = sel(choose_flags, cases=[machine_flags, next_flags], id=21)
+  selected_armed: bits[1] = tuple_index(selected_flags, index=0, id=22)
+  selected_sample: bits[2] = sel(selected_armed, cases=[machine_sample, incoming], id=11)
+  next_machine: (bits[2], (bits[1], bits[1]), bits[2]) = tuple(machine_phase, selected_flags, selected_sample, id=12)
+  write: () = register_write(next_machine, register=machine, reset=rst, id=13)
+  telemetry: () = output_port(selected_sample, name=telemetry, id=14)
+}

@@ -7,7 +7,8 @@
 //! evaluates it using a function proved equivalent to Lean's stock AIG
 //! semantics.
 //!
-//! [`block`] separately exports stateful block models as Lean source text.
+//! [`block`] separately exports stateful block models, with optional source
+//! names and typed representations, as Lean source text.
 
 pub mod block;
 
