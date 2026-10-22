@@ -10,7 +10,12 @@ use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
 mod raw;
+mod source_map;
 pub use raw::emit;
+pub use source_map::{
+    Attachment, EnumMember, SourceMap, SourceType, StructField, TypeDecl, ValidatedSourceMap,
+    collect_source_map, validate_source_map,
+};
 
 /// The block and its package-level context used during emission.
 pub(crate) struct BlockContext<'a> {
