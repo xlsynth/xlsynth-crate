@@ -3,6 +3,7 @@
 //! Sample-driven dynamic-power estimation for labeled gate-level netlists.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use serde::Serialize;
 use xlsynth_pir::IrBits;
@@ -228,12 +229,136 @@ enum ResolvedSource {
 struct InstanceTopology {
     cell: usize,
     liberty_pins: Vec<usize>,
-    pin_index_by_name: HashMap<String, usize>,
+    bindings: Arc<PreparedInstanceBindings>,
     pin_sources: Vec<ResolvedSource>,
     output_signals: Vec<Option<SignalId>>,
     is_sequential: bool,
-    has_when_conditions: bool,
     state_aliases: Vec<StateAlias>,
+}
+
+/// Identifies the pin and state-alias layout shared by instances of one cell.
+#[derive(Debug, Hash, PartialEq, Eq)]
+struct BindingLayout {
+    cell: usize,
+    liberty_pins: Vec<usize>,
+    has_state_aliases: bool,
+}
+
+/// Immutable selectors resolved once for instances with the same binding
+/// layout.
+#[derive(Debug)]
+struct PreparedInstanceBindings {
+    conditions: Vec<PreparedCondition>,
+    pins: Vec<PreparedPinBindings>,
+}
+
+/// Timing and power selectors in the owning Liberty pin's original order.
+#[derive(Debug)]
+struct PreparedPinBindings {
+    timing_arcs: Vec<PreparedTimingBinding>,
+    power_groups: Vec<PreparedPowerBinding>,
+}
+
+/// An arc's condition and related pin, including a deferred missing-pin error.
+#[derive(Debug)]
+struct PreparedTimingBinding {
+    condition: Option<usize>,
+    related_pin: Result<usize, StringId>,
+}
+
+/// A group's condition and related pins, retaining duplicates and their order.
+#[derive(Debug)]
+struct PreparedPowerBinding {
+    condition: Option<usize>,
+    related_pins: Result<Vec<usize>, StringId>,
+}
+
+/// A parsed and bound condition, or a parse error reported only if it is
+/// visited.
+#[derive(Debug)]
+struct PreparedCondition {
+    expression: StringId,
+    term: Result<BoundConditionTerm, String>,
+}
+
+/// An indexed leaf in the pin and already-complemented state-alias arrays.
+#[derive(Clone, Copy, Debug)]
+enum ConditionValueSlot {
+    Pin(usize),
+    StateAlias(usize),
+}
+
+/// A condition tree whose unbound leaves retain partial-evaluation semantics.
+#[derive(Debug)]
+enum BoundConditionTerm {
+    Input(Option<ConditionValueSlot>),
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+    Xor(Box<Self>, Box<Self>),
+    Negate(Box<Self>),
+    Constant(bool),
+}
+
+/// Borrowed values for evaluating one instance's indexed conditions.
+#[derive(Clone, Copy)]
+struct ConditionValues<'a> {
+    pins: &'a [bool],
+    state_aliases: &'a [bool],
+}
+
+impl BoundConditionTerm {
+    /// Resolves names once, preserving unknown inputs for partial evaluation.
+    fn bind(term: &Term, slots: &HashMap<&str, ConditionValueSlot>) -> Self {
+        match term {
+            Term::Input(name) => Self::Input(slots.get(name.as_str()).copied()),
+            Term::And(lhs, rhs) => Self::And(
+                Box::new(Self::bind(lhs, slots)),
+                Box::new(Self::bind(rhs, slots)),
+            ),
+            Term::Or(lhs, rhs) => Self::Or(
+                Box::new(Self::bind(lhs, slots)),
+                Box::new(Self::bind(rhs, slots)),
+            ),
+            Term::Xor(lhs, rhs) => Self::Xor(
+                Box::new(Self::bind(lhs, slots)),
+                Box::new(Self::bind(rhs, slots)),
+            ),
+            Term::Negate(inner) => Self::Negate(Box::new(Self::bind(inner, slots))),
+            Term::Constant(value) => Self::Constant(*value),
+        }
+    }
+
+    /// Evaluates with the same three-valued logic as `Term::evaluate_partial`.
+    fn evaluate_partial(&self, values: ConditionValues<'_>) -> Option<bool> {
+        match self {
+            Self::Input(Some(ConditionValueSlot::Pin(index))) => Some(values.pins[*index]),
+            Self::Input(Some(ConditionValueSlot::StateAlias(index))) => {
+                Some(values.state_aliases[*index])
+            }
+            Self::Input(None) => None,
+            Self::And(lhs, rhs) => match lhs.evaluate_partial(values) {
+                Some(false) => Some(false),
+                Some(true) => rhs.evaluate_partial(values),
+                None => match rhs.evaluate_partial(values) {
+                    Some(false) => Some(false),
+                    _ => None,
+                },
+            },
+            Self::Or(lhs, rhs) => match lhs.evaluate_partial(values) {
+                Some(true) => Some(true),
+                Some(false) => rhs.evaluate_partial(values),
+                None => match rhs.evaluate_partial(values) {
+                    Some(true) => Some(true),
+                    _ => None,
+                },
+            },
+            Self::Xor(lhs, rhs) => {
+                Some(lhs.evaluate_partial(values)? ^ rhs.evaluate_partial(values)?)
+            }
+            Self::Negate(inner) => inner.evaluate_partial(values).map(|value| !value),
+            Self::Constant(value) => Some(*value),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -930,6 +1055,7 @@ fn build_topology(
     }
 
     let mut instances = Vec::with_capacity(model.instances.len());
+    let mut prepared_bindings = HashMap::new();
     for (instance_index, instance) in model.instances.iter().enumerate() {
         let cell = *cell_by_name
             .get(instance.cell_type.as_str())
@@ -980,31 +1106,30 @@ fn build_topology(
                 }
             }
         }
-        let pin_index_by_name = instance
-            .pins
-            .iter()
-            .enumerate()
-            .map(|(index, pin)| (pin.pin_name.clone(), index))
-            .collect();
-        let has_when_conditions = liberty_pins.iter().any(|liberty_pin_index| {
-            let pin = &library.cells[cell].pins[*liberty_pin_index];
-            pin.timing_arcs
-                .iter()
-                .any(|arc| !library.resolve_string(&arc.when).is_empty())
-                || pin
-                    .internal_power
-                    .iter()
-                    .any(|group| !library.resolve_string(&group.when).is_empty())
-        });
         let state_aliases = state_aliases_for_instance(instance, &library.cells[cell])?;
+        // The library fixes the alias names and order; only their presence and
+        // the ordered bound pins vary across instances of the same cell.
+        let layout = BindingLayout {
+            cell,
+            liberty_pins: liberty_pins.clone(),
+            has_state_aliases: !state_aliases.is_empty(),
+        };
+        let bindings = Arc::clone(prepared_bindings.entry(layout).or_insert_with(|| {
+            Arc::new(prepare_instance_bindings(
+                library,
+                &library.cells[cell],
+                instance,
+                &liberty_pins,
+                &state_aliases,
+            ))
+        }));
         instances.push(InstanceTopology {
             cell,
             liberty_pins,
-            pin_index_by_name,
+            bindings,
             pin_sources: vec![ResolvedSource::Literal; instance.pins.len()],
             output_signals,
             is_sequential: instance.is_sequential,
-            has_when_conditions,
             state_aliases,
         });
     }
@@ -1069,6 +1194,97 @@ fn build_topology(
         instances,
         instance_order,
     })
+}
+
+/// Binds selector names without making errors in unvisited metadata observable.
+fn prepare_instance_bindings(
+    library: &Library,
+    cell: &Cell,
+    instance: &PowerInstance,
+    liberty_pins: &[usize],
+    state_aliases: &[StateAlias],
+) -> PreparedInstanceBindings {
+    let pin_indices: HashMap<_, _> = instance
+        .pins
+        .iter()
+        .enumerate()
+        .map(|(index, pin)| (pin.pin_name.as_str(), index))
+        .collect();
+    let mut slots: HashMap<_, _> = pin_indices
+        .iter()
+        .map(|(name, index)| (*name, ConditionValueSlot::Pin(*index)))
+        .collect();
+    // Match the previous pin-map insertion order: aliases override pins, and
+    // a later alias wins a collision with an earlier alias.
+    slots.extend(
+        state_aliases
+            .iter()
+            .enumerate()
+            .map(|(index, alias)| (alias.name.as_str(), ConditionValueSlot::StateAlias(index))),
+    );
+    let mut conditions = Vec::new();
+    let mut condition_ids = HashMap::new();
+    let mut prepare_condition = |when: StringId| {
+        let expression = library.resolve_string(&when);
+        if expression.is_empty() {
+            return None;
+        }
+        Some(*condition_ids.entry(when).or_insert_with(|| {
+            let index = conditions.len();
+            let term = parse_formula(expression)
+                .map(|term| BoundConditionTerm::bind(&term, &slots))
+                .map_err(|error| format!("failed to parse Liberty when '{expression}': {error}"));
+            conditions.push(PreparedCondition {
+                expression: when,
+                term,
+            });
+            index
+        }))
+    };
+    let pins = liberty_pins
+        .iter()
+        .enumerate()
+        .map(|(owner_pin_index, liberty_pin_index)| {
+            let pin = &cell.pins[*liberty_pin_index];
+            let timing_arcs = pin
+                .timing_arcs
+                .iter()
+                .map(|arc| PreparedTimingBinding {
+                    condition: prepare_condition(arc.when),
+                    related_pin: pin_indices
+                        .get(library.resolve_string(&arc.related_pin))
+                        .copied()
+                        .ok_or(arc.related_pin),
+                })
+                .collect();
+            let power_groups = pin
+                .internal_power
+                .iter()
+                .map(|group| PreparedPowerBinding {
+                    condition: prepare_condition(group.when),
+                    related_pins: if group.related_pins.is_empty() {
+                        Ok(vec![owner_pin_index])
+                    } else {
+                        group
+                            .related_pins
+                            .iter()
+                            .map(|name| {
+                                pin_indices
+                                    .get(library.resolve_string(name))
+                                    .copied()
+                                    .ok_or(*name)
+                            })
+                            .collect()
+                    },
+                })
+                .collect();
+            PreparedPinBindings {
+                timing_arcs,
+                power_groups,
+            }
+        })
+        .collect();
+    PreparedInstanceBindings { conditions, pins }
 }
 
 /// Builds Liberty state-variable aliases backed by the mapped register Q.
@@ -1318,7 +1534,6 @@ fn observe_ordered_activity(
         ));
     }
     let mut result = ObservedActivity::default();
-    let mut condition_cache = HashMap::new();
     let mut previous = None;
     let live_nodes = vec![true; model.gate_fn.gates.len()];
     let mut nodes = Vec::new();
@@ -1347,7 +1562,6 @@ fn observe_ordered_activity(
                     previous,
                     &current,
                     transition_kinds[sample_index - 1],
-                    &mut condition_cache,
                     &mut result,
                 )?;
             }
@@ -1414,7 +1628,6 @@ fn sample_state(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn observe_transition(
     model: &PowerModelView<'_>,
     library: &Library,
@@ -1422,7 +1635,6 @@ fn observe_transition(
     previous: &SampleState,
     current: &SampleState,
     transition_kind: PowerTransitionKind,
-    condition_cache: &mut HashMap<String, Term>,
     result: &mut ObservedActivity,
 ) -> Result<(), String> {
     for (signal_index, (before, after)) in previous
@@ -1450,22 +1662,15 @@ fn observe_transition(
         let cell = &library.cells[topology_instance.cell];
         let previous_state_alias_values = &previous.state_alias_values[instance_index];
         let current_state_alias_values = &current.state_alias_values[instance_index];
-        let previous_map = topology_instance.has_when_conditions.then(|| {
-            pin_value_map(
-                instance,
-                topology_instance,
-                previous_values,
-                previous_state_alias_values,
-            )
-        });
-        let current_map = topology_instance.has_when_conditions.then(|| {
-            pin_value_map(
-                instance,
-                topology_instance,
-                current_values,
-                current_state_alias_values,
-            )
-        });
+        let previous_condition_values = ConditionValues {
+            pins: previous_values,
+            state_aliases: previous_state_alias_values,
+        };
+        let current_condition_values = ConditionValues {
+            pins: current_values,
+            state_aliases: current_state_alias_values,
+        };
+        let bindings = &topology_instance.bindings;
         for (output_pin_index, output_signal) in
             topology_instance.output_signals.iter().copied().enumerate()
         {
@@ -1479,6 +1684,7 @@ fn observe_transition(
             let output_pin = &cell.pins[topology_instance.liberty_pins[output_pin_index]];
             let mut candidates = Vec::new();
             for (arc_index, arc) in output_pin.timing_arcs.iter().enumerate() {
+                let prepared_arc = &bindings.pins[output_pin_index].timing_arcs[arc_index];
                 let timing_type = arc.timing_type_str(library);
                 let is_sequential_edge_arc =
                     instance.is_sequential && is_sequential_edge_timing_type(timing_type);
@@ -1491,17 +1697,14 @@ fn observe_transition(
                 {
                     continue;
                 }
-                let related_name = library.resolve_string(&arc.related_pin);
-                let Some(&related_pin_index) =
-                    topology_instance.pin_index_by_name.get(related_name)
-                else {
-                    return Err(format!(
+                let related_pin_index = prepared_arc.related_pin.map_err(|name| {
+                    format!(
                         "instance '{}' output '{}' timing arc names unknown related pin '{}'",
                         instance.instance_name,
                         instance.pins[output_pin_index].pin_name,
-                        related_name
-                    ));
-                };
+                        library.resolve_string(&name)
+                    )
+                })?;
                 let source_rise = current_values[related_pin_index];
                 if previous_values[related_pin_index] == source_rise
                     || (!is_sequential_edge_arc
@@ -1512,10 +1715,11 @@ fn observe_transition(
                         ))
                     || !when_is_true(
                         library,
-                        arc.when,
-                        previous_map.as_ref(),
-                        current_map.as_ref(),
-                        condition_cache,
+                        prepared_arc
+                            .condition
+                            .map(|index| &bindings.conditions[index]),
+                        previous_condition_values,
+                        current_condition_values,
                         &mut result.diagnostics,
                     )?
                 {
@@ -1573,61 +1777,49 @@ fn observe_transition(
                 continue;
             }
             let mut candidates = Vec::new();
-            for (group_index, group) in pin.internal_power.iter().enumerate() {
+            for (group_index, prepared_group) in bindings.pins[owner_pin_index]
+                .power_groups
+                .iter()
+                .enumerate()
+            {
                 if !when_is_true(
                     library,
-                    group.when,
-                    previous_map.as_ref(),
-                    current_map.as_ref(),
-                    condition_cache,
+                    prepared_group
+                        .condition
+                        .map(|index| &bindings.conditions[index]),
+                    previous_condition_values,
+                    current_condition_values,
                     &mut result.diagnostics,
                 )? {
                     continue;
                 }
-                let source_pin_indices = if group.related_pins.is_empty() {
-                    vec![owner_pin_index]
-                } else {
-                    group
-                        .related_pins
-                        .iter()
-                        .map(|related| {
-                            let name = library.resolve_string(related);
-                            topology_instance
-                                .pin_index_by_name
-                                .get(name)
-                                .copied()
-                                .ok_or_else(|| {
-                                format!(
-                                    "instance '{}' internal_power on '{}' names unknown related pin '{}'",
-                                    instance.instance_name,
-                                    instance.pins[owner_pin_index].pin_name,
-                                    name
-                                )
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                candidates.extend(
-                    source_pin_indices
-                        .into_iter()
-                        .filter_map(|source_pin_index| {
-                            let source_rise = current_values[source_pin_index];
-                            if previous_values[source_pin_index] == source_rise {
-                                return None;
-                            }
-                            match topology_instance.pin_sources[source_pin_index] {
-                                ResolvedSource::Signal(source) => Some(InternalEventKey {
-                                    instance: instance_index,
-                                    owner_pin: owner_pin_index,
-                                    group: group_index,
-                                    source,
-                                    source_rise,
-                                    owner_output_rise,
-                                }),
-                                ResolvedSource::Literal => None,
-                            }
-                        }),
-                );
+                let source_pin_indices = prepared_group.related_pins.as_ref().map_err(|name| {
+                    format!(
+                        "instance '{}' internal_power on '{}' names unknown related pin '{}'",
+                        instance.instance_name,
+                        instance.pins[owner_pin_index].pin_name,
+                        library.resolve_string(name)
+                    )
+                })?;
+                candidates.extend(source_pin_indices.iter().copied().filter_map(
+                    |source_pin_index| {
+                        let source_rise = current_values[source_pin_index];
+                        if previous_values[source_pin_index] == source_rise {
+                            return None;
+                        }
+                        match topology_instance.pin_sources[source_pin_index] {
+                            ResolvedSource::Signal(source) => Some(InternalEventKey {
+                                instance: instance_index,
+                                owner_pin: owner_pin_index,
+                                group: group_index,
+                                source,
+                                source_rise,
+                                owner_output_rise,
+                            }),
+                            ResolvedSource::Literal => None,
+                        }
+                    },
+                ));
             }
             if candidates.len() > 1 {
                 result.diagnostics.multiply_attributed_internal_event_count += 1;
@@ -1643,60 +1835,31 @@ fn observe_transition(
     Ok(())
 }
 
-fn pin_value_map(
-    instance: &PowerInstance,
-    topology_instance: &InstanceTopology,
-    values: &[bool],
-    state_alias_values: &[bool],
-) -> HashMap<String, bool> {
-    let mut result: HashMap<_, _> = instance
-        .pins
-        .iter()
-        .zip(values)
-        .map(|(pin, value)| (pin.pin_name.clone(), *value))
-        .collect();
-    result.extend(
-        topology_instance
-            .state_aliases
-            .iter()
-            .zip(state_alias_values)
-            .map(|(alias, value)| (alias.name.clone(), *value)),
-    );
-    result
-}
-
+/// Evaluates both states before counting a request and using its previous
+/// value.
 fn when_is_true(
     library: &Library,
-    when: StringId,
-    previous_values: Option<&HashMap<String, bool>>,
-    current_values: Option<&HashMap<String, bool>>,
-    cache: &mut HashMap<String, Term>,
+    condition: Option<&PreparedCondition>,
+    previous_values: ConditionValues<'_>,
+    current_values: ConditionValues<'_>,
     diagnostics: &mut GvDynamicPowerDiagnostics,
 ) -> Result<bool, String> {
-    let expression = library.resolve_string(&when);
-    if expression.is_empty() {
+    let Some(condition) = condition else {
         return Ok(true);
-    }
-    let previous_values = previous_values.ok_or_else(|| {
-        format!("internal error: no previous pin values for Liberty when '{expression}'")
-    })?;
-    let current_values = current_values.ok_or_else(|| {
-        format!("internal error: no current pin values for Liberty when '{expression}'")
-    })?;
-    if !cache.contains_key(expression) {
-        let parsed = parse_formula(expression)
-            .map_err(|error| format!("failed to parse Liberty when '{expression}': {error}"))?;
-        cache.insert(expression.to_string(), parsed);
-    }
-    let term = cache
-        .get(expression)
-        .ok_or_else(|| format!("internal error: no parsed Liberty when for '{expression}'"))?;
-    let previous = term.evaluate_partial(previous_values).ok_or_else(|| {
-        format!("Liberty when '{expression}' could not be evaluated from cell pin values")
-    })?;
-    let current = term.evaluate_partial(current_values).ok_or_else(|| {
-        format!("Liberty when '{expression}' could not be evaluated from cell pin values")
-    })?;
+    };
+    let term = condition.term.as_ref().map_err(Clone::clone)?;
+    let missing_values = || {
+        format!(
+            "Liberty when '{}' could not be evaluated from cell pin values",
+            library.resolve_string(&condition.expression)
+        )
+    };
+    let previous = term
+        .evaluate_partial(previous_values)
+        .ok_or_else(missing_values)?;
+    let current = term
+        .evaluate_partial(current_values)
+        .ok_or_else(missing_values)?;
     diagnostics.when_evaluation_count += 1;
     if previous != current {
         diagnostics.when_changed_during_transition_count += 1;
@@ -2184,6 +2347,238 @@ fn switching_energy(signal: &Signal, voltage_squared: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::liberty_model::{InternalPower, LibraryBuilder, TimingArc};
+
+    #[test]
+    fn indexed_conditions_match_partial_formula_evaluation() {
+        let expressions = [
+            "0",
+            "1",
+            "A",
+            "!A",
+            "A'",
+            "A & B",
+            "B & A",
+            "A | B",
+            "B | A",
+            "A ^ B",
+            "A ^ A",
+            "A & A",
+            "A | A",
+            "0 & MISSING",
+            "MISSING & 0",
+            "1 | MISSING",
+            "MISSING | 1",
+            "(A & B) | (!A & S)",
+            "!(A ^ (B | S))",
+            "(A ^ B) & (B | S)",
+            "A B' + S",
+        ];
+        for expression in expressions {
+            let term = parse_formula(expression).unwrap();
+            // Each input is absent, false, or true. S uses the separate alias
+            // array so the oracle also checks both types of numeric slots.
+            for assignment in 0..27 {
+                let mut remaining = assignment;
+                let mut named_values = HashMap::new();
+                let mut slots = HashMap::new();
+                let mut pins = Vec::new();
+                let mut state_aliases = Vec::new();
+                for name in ["A", "B", "S"] {
+                    let value = remaining % 3;
+                    remaining /= 3;
+                    if value == 0 {
+                        continue;
+                    }
+                    let value = value == 2;
+                    named_values.insert(name.to_string(), value);
+                    let slot = if name == "S" {
+                        state_aliases.push(value);
+                        ConditionValueSlot::StateAlias(state_aliases.len() - 1)
+                    } else {
+                        pins.push(value);
+                        ConditionValueSlot::Pin(pins.len() - 1)
+                    };
+                    slots.insert(name, slot);
+                }
+                let bound = BoundConditionTerm::bind(&term, &slots);
+                assert_eq!(
+                    bound.evaluate_partial(ConditionValues {
+                        pins: &pins,
+                        state_aliases: &state_aliases,
+                    }),
+                    term.evaluate_partial(&named_values),
+                    "expression {expression:?}, assignment {named_values:?}"
+                );
+            }
+        }
+    }
+
+    /// Makes a pin-only cell binding for preparation tests without simulating
+    /// it.
+    fn binding_test_instance(pin_names: &[&str]) -> PowerInstance {
+        PowerInstance {
+            instance_name: "test".to_string(),
+            cell_type: "TEST".to_string(),
+            pins: pin_names
+                .iter()
+                .map(|name| PowerPin {
+                    pin_name: name.to_string(),
+                    direction: PinDirection::Input,
+                    signal: PowerSignal::Clock,
+                    connection: PinConnection::Literal(false),
+                })
+                .collect(),
+            is_sequential: false,
+            state_signal: None,
+        }
+    }
+
+    #[test]
+    fn prepared_conditions_preserve_alias_precedence_and_related_pin_order() {
+        let mut builder = LibraryBuilder::new();
+        let a = builder.intern_string("A").unwrap();
+        let condition = builder.intern_string("A ^ IQN").unwrap();
+        let library = builder.finish();
+        let cell = Cell {
+            name: "TEST".to_string(),
+            pins: vec![Pin {
+                name: a,
+                timing_arcs: vec![TimingArc {
+                    when: condition,
+                    related_pin: a,
+                    ..TimingArc::default()
+                }],
+                internal_power: vec![
+                    InternalPower {
+                        when: condition,
+                        related_pins: vec![a, a],
+                        ..InternalPower::default()
+                    },
+                    InternalPower::default(),
+                ],
+                ..Pin::default()
+            }],
+            ..Cell::default()
+        };
+        let instance = binding_test_instance(&["A"]);
+        // The final alias A must override both the pin A and the earlier alias
+        // A.
+        let aliases: Vec<_> = ["A", "IQN", "A"]
+            .iter()
+            .map(|name| StateAlias {
+                name: name.to_string(),
+                signal: PowerSignal::Clock,
+                complemented: *name == "IQN",
+            })
+            .collect();
+        let prepared = prepare_instance_bindings(&library, &cell, &instance, &[0], &aliases);
+        assert_eq!(prepared.conditions.len(), 1);
+        assert_eq!(prepared.pins[0].timing_arcs[0].condition, Some(0));
+        assert_eq!(prepared.pins[0].power_groups[0].condition, Some(0));
+        assert_eq!(prepared.pins[0].power_groups[1].condition, None);
+        assert_eq!(prepared.pins[0].timing_arcs[0].related_pin, Ok(0));
+        assert_eq!(
+            prepared.pins[0].power_groups[0].related_pins,
+            Ok(vec![0, 0])
+        );
+        assert_eq!(prepared.pins[0].power_groups[1].related_pins, Ok(vec![0]));
+        let reference = parse_formula(library.resolve_string(&condition)).unwrap();
+        for assignment in 0..16 {
+            let pins = [assignment & 1 != 0];
+            let values = [
+                assignment & 2 != 0,
+                assignment & 4 != 0,
+                assignment & 8 != 0,
+            ];
+            let mut named_values = HashMap::from([("A".to_string(), pins[0])]);
+            named_values.extend(
+                aliases
+                    .iter()
+                    .zip(values)
+                    .map(|(alias, value)| (alias.name.clone(), value)),
+            );
+            assert_eq!(
+                prepared.conditions[0]
+                    .term
+                    .as_ref()
+                    .unwrap()
+                    .evaluate_partial(ConditionValues {
+                        pins: &pins,
+                        state_aliases: &values,
+                    }),
+                reference.evaluate_partial(&named_values)
+            );
+        }
+    }
+
+    #[test]
+    fn topology_shares_conditions_only_across_matching_pin_layouts() {
+        let mut builder = LibraryBuilder::new();
+        let a = builder.intern_string("A").unwrap();
+        let b = builder.intern_string("B").unwrap();
+        let when = builder.intern_string("A & !B").unwrap();
+        builder.library_mut().cells.push(Cell {
+            name: "TEST".to_string(),
+            pins: vec![
+                Pin {
+                    name: a,
+                    direction: PinDirection::Input as i32,
+                    internal_power: vec![InternalPower {
+                        when,
+                        ..InternalPower::default()
+                    }],
+                    ..Pin::default()
+                },
+                Pin {
+                    name: b,
+                    direction: PinDirection::Input as i32,
+                    ..Pin::default()
+                },
+            ],
+            ..Cell::default()
+        });
+        let library = builder.finish();
+        let gate_fn = GateFn {
+            name: "test".to_string(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            gates: Vec::new(),
+        };
+        let model = PowerModelView {
+            module_name: "test",
+            gate_fn: &gate_fn,
+            module_ports: Vec::new(),
+            instances: vec![
+                binding_test_instance(&["A", "B"]),
+                binding_test_instance(&["A", "B"]),
+                binding_test_instance(&["B", "A"]),
+            ],
+        };
+        let topology = build_topology(&model, &library, 0.0).unwrap();
+        assert!(Arc::ptr_eq(
+            &topology.instances[0].bindings,
+            &topology.instances[1].bindings
+        ));
+        assert!(!Arc::ptr_eq(
+            &topology.instances[0].bindings,
+            &topology.instances[2].bindings
+        ));
+        for (index, expected) in [(0, false), (2, true)] {
+            let condition = &topology.instances[index].bindings.conditions[0];
+            assert_eq!(
+                condition
+                    .term
+                    .as_ref()
+                    .unwrap()
+                    .evaluate_partial(ConditionValues {
+                        pins: &[false, true],
+                        state_aliases: &[],
+                    }),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn slew_grid_has_fixed_log_buckets_with_arithmetic_midpoints() {
