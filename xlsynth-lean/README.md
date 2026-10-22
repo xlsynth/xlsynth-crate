@@ -1,9 +1,9 @@
 # xlsynth-lean
 
-`xlsynth-lean` exports combinational `GateFn` graphs to Lean and evaluates them
-through Lean, returning the computed output values to Rust. Native `.g8r` and
-`.g8rbin` files can be loaded with the existing `xlsynth-g8r` reader before
-calling this crate.
+`xlsynth-lean` exports combinational `GateFn` graphs and stateful XLS block IR
+to Lean. Gate graphs can also be evaluated through Lean, returning computed
+output values to Rust. Native `.g8r` and `.g8rbin` files can be loaded with the
+existing `xlsynth-g8r` reader before calling the gate-graph API.
 
 The companion Lean library is tested with Lean 4.34.1. Building the Rust crate
 does not require Lean to be installed.
@@ -51,9 +51,84 @@ def eval (inputs : BitVec 3) : BitVec 1 :=
 ```
 
 The native file loader requires a clockless, register-free design for this
-combinational API. Stateful XLS block IR uses the separate API below.
+combinational API. Use the block IR API below for stateful models.
 
-### Interface and graph contract
+## Export XLS block IR
+
+```rust
+use xlsynth_lean::block;
+
+let model = block::parse(&ir_text, None)?;
+let generated_lean = block::emit(&model)?;
+```
+
+`parse` verifies the package with native XLS and the typed Rust IR parser.
+An explicit block name selects that block; otherwise it selects the declared
+top or the sole block. `emit` returns a self-contained module in namespace
+`XlsBlock`. Neither operation invokes Lean.
+
+The generated `eval` takes arbitrary old registers and current inputs and
+returns outputs, next registers, and assertion results. Outputs read old
+registers; all register writes commit together. For example, if `a` is written
+from `b` and `b` from `a`, an old state `(a = 1, b = 2)` produces next state
+`(a = 2, b = 1)`. An output driven by `a` still observes `1` on that edge.
+`reset` activates the declared reset input for one ordinary clock edge. It
+does not invent initial values for registers without reset values.
+
+The supported subset includes exact-width bits, nested tuples, tokens,
+registers, synchronous resets, assertions, bitwise operations, addition,
+equality, concatenation, slicing, sign extension, one-hot encoding, and
+ordinary, priority, and bits-valued one-hot selection. Unsupported nodes,
+arrays, zero-width bits, block instances, and asynchronous resets return
+contextual errors. Parsing can succeed for operations that emission rejects.
+Every assertion remains an observable result, including disconnected ones;
+assertions never constrain the model's input or old-state domain.
+
+### Source names and typed representations
+
+```rust
+use std::path::Path;
+use xlsynth_lean::block::{
+    Attachment, collect_source_map, emit_readable, validate_source_map,
+};
+
+let source_path = Path::new("machine.x");
+let attachments = [Attachment {
+    register: "machine".into(),
+    source_type: "Machine".into(),
+}];
+let map = collect_source_map(&ir_text, &dslx_text, source_path, &attachments)?;
+let checked = validate_source_map(&map, &ir_text, &dslx_text, source_path)?;
+let bundle = emit_readable(&checked)?;
+```
+
+The serializable version-1 source map records the exact block/source hashes,
+native-typechecked leaf declarations, and explicit register attachments.
+Validation rechecks the hashes, declarations, physical shapes, and retained
+projection names. Equal-width fields cannot silently exchange names. An
+attachment is still the caller's assertion about source provenance: these
+checks do not prove which compiler run produced the hardware.
+
+Source types support unsigned bits, Boolean values, two-bit enums, aliases,
+and ordered nonempty structs. The supplied source text is typechecked using
+`source_path` for its module name and import location; it is not reread from
+that path. Enum representations include every physical encoding, including
+unnamed encoding `3`, so arbitrary hardware state remains representable.
+
+`LeanBlockBundle::files` contains these five files in dependency order:
+
+1. `Generated.lean` - the exact raw emission of the authenticated block.
+2. `ReadableTypes.lean` - source types and total physical codecs.
+3. `ReadableGenerated.lean` - executable equations with source names and types.
+4. `ReadableRepresentation.lean` - state and result conversions.
+5. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
+
+Callers choose where to write the files and must compile the generated Lean
+sources to check their proofs. The readable evaluator executes its own graph
+equations; it does not call the raw evaluator. This library does not run block
+simulations or orchestrate application-specific property proofs.
+
+## GateFn interface and graph contract
 
 Inputs and outputs are flattened in port-list order, then least-significant bit
 first within each port. The bundle retains every port name and width, including
@@ -69,35 +144,6 @@ indices. It requires:
 
 Input bindings determine input identity; the name and bit-index metadata on an
 input node do not affect evaluation. Invalid graphs return `LeanError` values.
-
-## Export XLS block IR
-
-```rust
-let block = xlsynth_lean::block::parse(ir_text, None)?;
-let lean_source = xlsynth_lean::block::emit(&block)?;
-```
-
-`parse` verifies the package with native XLS and the typed Rust parser. Pass a
-block name instead of `None` to override the package top; without a top, the
-package must contain exactly one block. `emit` returns a self-contained Lean
-module and does not run Lean.
-
-The generated clock step preserves old-state outputs, simultaneous register
-writes, reset precedence and source assertions. Unsupported operations and
-asynchronous resets return errors. The supported subset covers the arbiter and
-operator-control examples; it is not a general XLS translator.
-
-### Capture source names and types
-
-`block::collect_source_map` captures supported DSLX type declarations and
-explicit register-to-type attachments. `block::validate_source_map` checks the
-map against the supplied block and source, including hashes, names, field order
-and physical shapes. For example, an attachment can bind register `____state`
-to source type `State` without flattening its named fields.
-
-An attachment asserts the compiler's register/type relationship; validation is
-not proof that the block was compiled from that DSLX source. Source-map v1
-retains its serialized representation and rejects stale or incompatible inputs.
 
 ## Evaluate through Lean
 
@@ -188,11 +234,12 @@ Rust export tests run normally:
 cargo test -p xlsynth-lean
 ```
 
-Lean integration tests are explicitly enabled with a toolchain path:
+Lean integration tests for gate evaluation and readable block correspondence
+are explicitly enabled with a toolchain path:
 
 ```sh
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test lean_eval -- --ignored
+  cargo test -p xlsynth-lean --test lean_eval --test block_native -- --ignored
 ```
 
 The differential fuzz target generates bounded graphs, permutes their node
