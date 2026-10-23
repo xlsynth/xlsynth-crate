@@ -42,3 +42,76 @@ fn shared_select_mask_lowering() {
         }
     }
 }
+
+#[test]
+fn shared_select_mask_preserves_provenance_after_dce() {
+    for tracking in [false, true] {
+        for other_consumer in [false, true] {
+            let ret = if other_consumer {
+                "ret pair: (bits[4], bits[4]) = tuple(result, masked, id=8)"
+            } else {
+                "ret out: bits[4] = identity(result, id=8)"
+            };
+            let ty = if other_consumer {
+                "(bits[4], bits[4])"
+            } else {
+                "bits[4]"
+            };
+            let text = format!(
+                r#"fn f(x: bits[4] id=1, en: bits[1] id=2, s: bits[1] id=3) -> {ty} {{
+  mask: bits[4] = sign_ext(en, new_bit_count=4, id=4)
+  masked: bits[4] = and(x, mask, id=5)
+  c: bits[4] = literal(value=0, id=6)
+  result: bits[4] = sel(s, cases=[masked, c], id=7)
+  {ret}
+}}"#
+            );
+            let f = Parser::new(&text).parse_fn().unwrap();
+            let result = gatify_prepared_fn(
+                &f,
+                GatifyOptions {
+                    track_pir_node_ids: tracking,
+                    check_equivalence: cfg!(feature = "has-bitwuzla"),
+                    equivalence_solver: SolverChoice::Bitwuzla,
+                    ..GatifyOptions::all_opts_disabled()
+                },
+            )
+            .unwrap();
+            let live = dce(&result.gate_fn);
+            let ands = live
+                .gates
+                .iter()
+                .filter(|node| matches!(node, xlsynth_g8r::aig::AigNode::And2 { .. }))
+                .collect::<Vec<_>>();
+            assert_eq!(ands.len(), if other_consumer { 9 } else { 5 });
+            if tracking {
+                // The shared enable and four replacement ANDs carry both
+                // operations, even when all original mask ANDs become dead.
+                assert_eq!(
+                    ands.iter()
+                        .filter(|node| {
+                            let ids = node.get_pir_node_ids();
+                            ids.contains(&5) && ids.contains(&7)
+                        })
+                        .count(),
+                    5
+                );
+                assert_eq!(
+                    ands.iter()
+                        .filter(|node| {
+                            let ids = node.get_pir_node_ids();
+                            ids.contains(&5) && !ids.contains(&7)
+                        })
+                        .count(),
+                    if other_consumer { 4 } else { 0 }
+                );
+            } else {
+                assert!(
+                    live.gates
+                        .iter()
+                        .all(|node| node.get_pir_node_ids().is_empty())
+                );
+            }
+        }
+    }
+}

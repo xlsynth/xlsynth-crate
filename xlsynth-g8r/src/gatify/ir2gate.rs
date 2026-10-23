@@ -1154,11 +1154,35 @@ fn try_add_mux2_with_shared_mask(
             return None;
         }
     }
+    // Snapshot before emission: folding/hashing can reuse an existing data
+    // node. Keep bit-specific attribution on its replacement, and only
+    // attribution common to all factored bits on the shared control.
+    let provenance = data
+        .iter_lsb_to_msb()
+        .any(|bit| !gb.gates[bit.node.id].get_pir_node_ids().is_empty())
+        .then(|| {
+            data.iter_lsb_to_msb()
+                .map(|bit| gb.gates[bit.node.id].get_pir_node_ids().to_vec())
+                .collect::<Vec<_>>()
+        });
+    let mut shared_provenance = None;
+    if let Some(ids) = &provenance {
+        for (bit_ids, constant_bit) in ids.iter().zip(constant.iter_lsb_to_msb()) {
+            if gb.is_known_false(*constant_bit) {
+                let shared = shared_provenance.get_or_insert_with(|| bit_ids.clone());
+                shared.retain(|id| bit_ids.contains(id));
+            }
+        }
+    }
     let enable = gb.add_and_binary(select_data, common);
+    if let Some(ids) = shared_provenance {
+        gb.add_pir_node_ids(enable.node, &ids);
+    }
     let bits = data
         .iter_lsb_to_msb()
         .zip(constant.iter_lsb_to_msb())
-        .map(|(bit, constant_bit)| {
+        .enumerate()
+        .map(|(i, (bit, constant_bit))| {
             if gb.is_known_true(*constant_bit) {
                 return gb.add_mux2(select_data, *bit, *constant_bit);
             }
@@ -1166,7 +1190,11 @@ fn try_add_mux2_with_shared_mask(
                 unreachable!("common operand was checked above");
             };
             let value = if a == common { b } else { a };
-            gb.add_and_binary(value, enable)
+            let result = gb.add_and_binary(value, enable);
+            if let Some(ids) = &provenance {
+                gb.add_pir_node_ids(result.node, &ids[i]);
+            }
+            result
         })
         .collect::<Vec<_>>();
     Some(AigBitVector::from_lsb_is_index_0(&bits))
@@ -4966,6 +4994,44 @@ mod tests {
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
+
+    #[test]
+    fn shared_mask_mux_keeps_bit_provenance_separate() {
+        let mut gb = GateBuilder::new("bit_provenance".into(), GateBuilderOptions::opt());
+        let x = gb.add_input("x".into(), 3);
+        let en = *gb.add_input("en".into(), 1).get_lsb(0);
+        let s = *gb.add_input("s".into(), 1).get_lsb(0);
+        let masked = x
+            .iter_lsb_to_msb()
+            .enumerate()
+            .map(|(i, bit)| {
+                let masked = gb.add_and_binary(*bit, en);
+                gb.add_pir_node_ids(masked.node, &[40, 100 + i as u32]);
+                masked
+            })
+            .collect::<Vec<_>>();
+        let data = AigBitVector::from_lsb_is_index_0(&masked);
+        let constant =
+            AigBitVector::from_lsb_is_index_0(&[gb.get_false(), gb.get_false(), gb.get_true()]);
+        gb.set_current_pir_node_id(Some(7));
+        let result = super::gatify_binary_sel(&mut gb, &s, &data, &constant);
+        let enable = gb.add_and_binary(s, en);
+        assert_eq!(gb.gates[enable.node.id].get_pir_node_ids(), &[7, 40]);
+        for i in 0..2 {
+            assert_eq!(
+                gb.gates[result.get_lsb(i).node.id].get_pir_node_ids(),
+                &[7, 40, 100 + i as u32]
+            );
+        }
+        // Neither the other zero bit nor the constant-one bit is attributed to
+        // a replacement that did not use it. Existing masked users stay intact.
+        for (i, bit) in masked.iter().enumerate() {
+            assert_eq!(
+                gb.gates[bit.node.id].get_pir_node_ids(),
+                &[40, 100 + i as u32]
+            );
+        }
+    }
 
     #[test]
     fn shared_mask_mux_preserves_values_and_other_consumers() {
