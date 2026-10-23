@@ -315,6 +315,7 @@ pub fn check(data: &[u8]) -> ResizeReport {
         timing: StaOptions {
             primary_input_transition: [0.0, 0.01, 1.0, 10.0][rng.gen_range(0..4)],
             module_output_load: [0.0, 0.1, 1.0, 10.0][rng.gen_range(0..4)],
+            wire_load: Default::default(),
         },
         max_area_growth: [0.0, 0.02, 0.5][rng.gen_range(0..3)],
         max_upsize_rounds: rng.gen_range(0..=8),

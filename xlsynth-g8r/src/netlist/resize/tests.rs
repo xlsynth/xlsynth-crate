@@ -99,6 +99,7 @@ fn options() -> ResizeOptions {
         timing: StaOptions {
             primary_input_transition: 0.01,
             module_output_load: 10.0,
+            wire_load: Default::default(),
         },
         ..ResizeOptions::default()
     }

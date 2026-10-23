@@ -974,6 +974,36 @@ Key flags:
   `xlsynth_g8r::netlist::sta_trace` log target to emit per-arc timing-candidate
   diagnostics.
 
+#### Optional affine wire capacitance
+
+`gv-sta` accepts `--wire-capacitance-constant-ff` and
+`--wire-capacitance-per-sink-ff`, both defaulting to zero. Parameters must be
+finite and nonnegative; overflow in conversion or total net load is rejected.
+CLI values are in femtofarads, converted to the Liberty capacitance unit.
+The reusable `StaOptions::wire_load` API uses Liberty units and is honored by
+both full and incremental STA.
+
+For each used cell-driven net, add `Cwire = Cconstant + CperSink * F` once
+to each edge's actual Liberty sink-pin capacitance plus external output load.
+`F` counts connected input pin bits, including two pins on the same cell.
+Output ports do not increment `F`; an output-only net receives the constant
+term. Aliased outputs retain their individual external loads but share one
+wire term. Dangling nets receive no wire load. Primary inputs remain ideal
+arrival/slew sources. No fanout cutoff is applied.
+
+This capacitance-only model omits wire resistance, distributed propagation,
+and coupling activity; it does not import Liberty wire-load models.
+
+For illustration, this ASAP7 example uses a constant of `0` fF and
+`0.13` fF per sink. These values are technology- and flow-dependent, not
+universal defaults:
+
+```shell
+xlsynth-driver gv-sta --netlist mapped.gv --liberty_proto asap7.proto \
+  --primary_input_transition 10 --module_output_load 1 \
+  --wire-capacitance-constant-ff 0 --wire-capacitance-per-sink-ff 0.13
+```
+
 ### `gv-area`: gate-level mapped cell area
 
 Reports the summed standard-cell area for one selected gate-level netlist module using per-cell `area` values from a Liberty proto.

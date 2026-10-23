@@ -78,6 +78,7 @@ fn resize_options(matches: &ArgMatches, library: &Library) -> Result<ResizeOptio
                 .copied()
                 .unwrap_or(defaults.timing.primary_input_transition),
             module_output_load: output_load,
+            wire_load: Default::default(),
         },
         max_area_growth: matches
             .get_one::<f64>("max-area-growth")

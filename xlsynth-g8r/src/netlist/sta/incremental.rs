@@ -272,6 +272,7 @@ pub struct IncrementalSta<'lib> {
     capacitances: Vec<EdgeLoadCapacitance>,
     external_load_counts: Vec<usize>,
     module_output_load: f64,
+    wire_load: super::WireLoadModel,
     consumers: Vec<Vec<usize>>,
     positions: Vec<usize>,
     topological: Vec<usize>,
@@ -380,6 +381,7 @@ impl<'lib> IncrementalSta<'lib> {
         register_boundaries: bool,
         validated: Option<BoundaryDelays>,
     ) -> Result<Self> {
+        options.wire_load.validate()?;
         let library = lib.library;
         let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
         let assign = analyze_assign_sources(&normalized, nets, interner)?;
@@ -643,6 +645,7 @@ impl<'lib> IncrementalSta<'lib> {
             capacitances: vec![EdgeLoadCapacitance::default(); n],
             external_load_counts,
             module_output_load: options.module_output_load,
+            wire_load: options.wire_load,
             consumers,
             positions,
             topological,
@@ -817,6 +820,13 @@ impl<'lib> IncrementalSta<'lib> {
         for _ in 0..self.external_load_counts[bit] {
             cap.rise += self.module_output_load;
             cap.fall += self.module_output_load;
+        }
+        if self.drivers[bit].is_some() {
+            self.wire_load.add_to(
+                &mut cap,
+                self.loads[bit].len(),
+                self.external_load_counts[bit] != 0,
+            )?;
         }
         Ok(cap)
     }

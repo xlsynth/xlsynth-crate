@@ -2590,6 +2590,8 @@ fn main() {
                         .help("Additional load capacitance added to module outputs")
                         .action(ArgAction::Set),
                 )
+                .arg(Arg::new("wire-capacitance-constant-ff").long("wire-capacitance-constant-ff").default_value("0").value_parser(clap::value_parser!(f64)).help("Fixed wire capacitance per used cell-driven net, in fF (default: disabled)"))
+                .arg(Arg::new("wire-capacitance-per-sink-ff").long("wire-capacitance-per-sink-ff").default_value("0").value_parser(clap::value_parser!(f64)).help("Additional wire capacitance per sink pin, in fF; no empirical fanout cutoff"))
                 .arg(
                     Arg::new("json_out")
                         .long("json_out")

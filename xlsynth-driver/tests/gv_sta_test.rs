@@ -93,3 +93,106 @@ endmodule
         stdout
     );
 }
+
+#[test]
+fn gv_sta_affine_wire_capacitance_ff_preserves_pin_and_output_loads() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("test.lib");
+    let proto = dir.path().join("test.proto");
+    let net = dir.path().join("test.v");
+    std::fs::write(
+        &lib,
+        r#"
+library(test) {
+ time_unit : "1ns"; capacitive_load_unit(1,pf);
+ lu_table_template(t) { variable_1: total_output_net_capacitance; index_1("0,4"); }
+ cell(BUF) {
+  area:1;
+  pin(A) { direction:input; capacitance:1; }
+  pin(Y) { direction:output; function:"A";
+   timing() { related_pin:"A"; timing_sense:positive_unate;
+    cell_rise(t) { values("0,4"); } cell_fall(t) { values("0,4"); }
+    rise_transition(t) { values("0,4"); } fall_transition(t) { values("0,4"); }
+   }
+  }
+ }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(&net, "module m(a,y); input a; output y; wire n; BUF a0(.A(a),.Y(n)); BUF a1(.A(n),.Y(y)); endmodule").unwrap();
+    let import = Command::new(driver)
+        .args(["lib2proto", "--include-timing", "--output"])
+        .arg(&proto)
+        .arg(&lib)
+        .output()
+        .unwrap();
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let mut baseline = None;
+    for (index, flags, expected) in [
+        (0, vec![], 3.0),
+        (
+            1,
+            vec![
+                "--wire-capacitance-constant-ff=0",
+                "--wire-capacitance-per-sink-ff=0",
+            ],
+            3.0,
+        ),
+        (2, vec!["--wire-capacitance-constant-ff=500"], 4.0),
+        (3, vec!["--wire-capacitance-per-sink-ff=250"], 3.25),
+        (
+            4,
+            vec![
+                "--wire-capacitance-constant-ff=500",
+                "--wire-capacitance-per-sink-ff=250",
+            ],
+            4.25,
+        ),
+    ] {
+        let output = dir.path().join(format!("result{index}.json"));
+        let run = Command::new(driver)
+            .args(["gv-sta", "--netlist"])
+            .arg(&net)
+            .arg("--liberty_proto")
+            .arg(&proto)
+            .args(["--module_output_load=2", "--json_out"])
+            .arg(&output)
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let bytes = std::fs::read(&output).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["worst_output_arrival"].as_f64().unwrap(), expected);
+        if index == 0 {
+            baseline = Some(bytes);
+        } else if index == 1 {
+            assert_eq!(baseline.as_ref().unwrap(), &bytes);
+        }
+    }
+    for flag in [
+        "--wire-capacitance-constant-ff=-1",
+        "--wire-capacitance-per-sink-ff=NaN",
+        "--wire-capacitance-constant-ff=inf",
+    ] {
+        let run = Command::new(driver)
+            .args(["gv-sta", "--netlist"])
+            .arg(&net)
+            .arg("--liberty_proto")
+            .arg(&proto)
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert!(!run.status.success());
+    }
+}
