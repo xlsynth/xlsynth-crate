@@ -2,7 +2,7 @@
 
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::import::{ElectricalDefaults, electrical_value, prepare_cell};
-use crate::liberty::liberty_parser::{Block, BlockMember, Value};
+use crate::liberty::liberty_parser::{Block, BlockMember, ParseWithVisitorError, Value};
 use crate::liberty::model::{
     AxisId, LibraryBuilder, LutTemplateKind, LutVariable, StringId, TimingSense, TimingType,
     timing_table_kind_to_wire,
@@ -1136,272 +1136,255 @@ fn extract_sequential_blocks(
     Ok(sequential)
 }
 
-fn block_to_model_cells(
-    block: &Block,
+/// Converts one cell syntax tree into the compact model.
+fn block_to_model_cell(
+    cell_block: &Block,
     threshold_voltage_group_interner: &mut ThresholdVoltageGroupInterner,
     builder: &mut LibraryBuilder,
     payload_options: LibertyPayloadOptions,
-) -> Result<Vec<Cell>, String> {
-    let mut cells = Vec::new();
-    let electrical_defaults = ElectricalDefaults::from_library(block)?;
-    for member in &block.members {
-        let BlockMember::SubBlock(cell_block) = member else {
-            continue;
-        };
-        if cell_block.block_type != "cell" {
+) -> Result<Cell, String> {
+    let name = cell_block
+        .qualifiers
+        .first()
+        .and_then(qualifier_to_string)
+        .unwrap_or_default();
+    let prepared = prepare_cell(cell_block).map_err(|error| format!("cell '{name}': {error}"))?;
+    let cell_block = prepared.block.as_ref();
+    let mut area = 0.0;
+    let mut threshold_voltage_group_id = 0;
+    let mut dont_use = None;
+    let mut use_for_size_only = None;
+    let mut clocking_pins: HashSet<String> = HashSet::new();
+    let sequential = extract_sequential_blocks(cell_block)?;
+
+    // First pass: gather cell-level scalar properties (like area) and any
+    // clocking pins referenced by sequential blocks via clock expressions.
+    for cell_member in &cell_block.members {
+        if let BlockMember::BlockAttr(attr) = cell_member {
+            if attr.attr_name == "area" {
+                area = electrical_value(&attr.value, "area")?;
+            } else if attr.attr_name == "threshold_voltage_group" {
+                threshold_voltage_group_id = threshold_voltage_group_interner
+                    .intern(value_to_attr_string(&attr.value), None)?;
+            } else if matches!(attr.attr_name.as_str(), "dont_use" | "use_for_size_only") {
+                let policy = if attr.attr_name == "dont_use" {
+                    &mut dont_use
+                } else {
+                    &mut use_for_size_only
+                };
+                if policy.is_some() {
+                    return Err(format!(
+                        "cell '{name}': duplicate {} attribute",
+                        attr.attr_name
+                    ));
+                }
+                *policy =
+                    Some(value_to_bool(&attr.value).ok_or_else(|| {
+                        format!("cell '{name}': invalid {} boolean", attr.attr_name)
+                    })?);
+            }
+        }
+    }
+    for seq in &sequential {
+        if seq.clock_expr.is_empty() {
             continue;
         }
-        let name = cell_block
+        match parse_formula(&seq.clock_expr) {
+            Ok(term) => {
+                for input in term.inputs() {
+                    clocking_pins.insert(input);
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to parse sequential clock expression {:?}: {}",
+                    seq.clock_expr,
+                    e
+                );
+            }
+        }
+    }
+
+    // Second pass: build Pin models, marking pins that are referred to by
+    // any clocked_on attribute in an ff block as clocking pins.
+    let mut pins = Vec::new();
+    let mut clock_gate_clock_pins = Vec::new();
+    let mut clock_gate_output_pins = Vec::new();
+    let mut clock_gate_enable_pins = Vec::new();
+    let mut clock_gate_test_pins = Vec::new();
+    for cell_member in &cell_block.members {
+        let BlockMember::SubBlock(pin_block) = cell_member else {
+            continue;
+        };
+        if pin_block.block_type != "pin" {
+            continue;
+        }
+        // Liberty specifies input as the default pin direction.
+        let mut direction = PinDirection::Input as i32;
+        let mut function = String::new();
+        let pin_name = pin_block
             .qualifiers
             .first()
             .and_then(qualifier_to_string)
             .unwrap_or_default();
-        let prepared =
-            prepare_cell(cell_block).map_err(|error| format!("cell '{name}': {error}"))?;
-        let cell_block = prepared.block.as_ref();
-        let mut area = 0.0;
-        let mut threshold_voltage_group_id = 0;
-        let mut dont_use = None;
-        let mut use_for_size_only = None;
-        let mut clocking_pins: HashSet<String> = HashSet::new();
-        let sequential = extract_sequential_blocks(cell_block)?;
-
-        // First pass: gather cell-level scalar properties (like area) and any
-        // clocking pins referenced by sequential blocks via clock expressions.
-        for cell_member in &cell_block.members {
-            if let BlockMember::BlockAttr(attr) = cell_member {
-                if attr.attr_name == "area" {
-                    area = electrical_value(&attr.value, "area")?;
-                } else if attr.attr_name == "threshold_voltage_group" {
-                    threshold_voltage_group_id = threshold_voltage_group_interner
-                        .intern(value_to_attr_string(&attr.value), None)?;
-                } else if matches!(attr.attr_name.as_str(), "dont_use" | "use_for_size_only") {
-                    let policy = if attr.attr_name == "dont_use" {
-                        &mut dont_use
-                    } else {
-                        &mut use_for_size_only
-                    };
-                    if policy.is_some() {
-                        return Err(format!(
-                            "cell '{name}': duplicate {} attribute",
-                            attr.attr_name
-                        ));
-                    }
-                    *policy = Some(value_to_bool(&attr.value).ok_or_else(|| {
-                        format!("cell '{name}': invalid {} boolean", attr.attr_name)
-                    })?);
-                }
-            }
-        }
-        for seq in &sequential {
-            if seq.clock_expr.is_empty() {
-                continue;
-            }
-            match parse_formula(&seq.clock_expr) {
-                Ok(term) => {
-                    for input in term.inputs() {
-                        clocking_pins.insert(input);
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to parse sequential clock expression {:?}: {}",
-                        seq.clock_expr,
-                        e
-                    );
-                }
-            }
-        }
-
-        // Second pass: build Pin models, marking pins that are referred to by
-        // any clocked_on attribute in an ff block as clocking pins.
-        let mut pins = Vec::new();
-        let mut clock_gate_clock_pins = Vec::new();
-        let mut clock_gate_output_pins = Vec::new();
-        let mut clock_gate_enable_pins = Vec::new();
-        let mut clock_gate_test_pins = Vec::new();
-        for cell_member in &cell_block.members {
-            let BlockMember::SubBlock(pin_block) = cell_member else {
-                continue;
-            };
-            if pin_block.block_type != "pin" {
-                continue;
-            }
-            // Liberty specifies input as the default pin direction.
-            let mut direction = PinDirection::Input as i32;
-            let mut function = String::new();
-            let pin_name = pin_block
-                .qualifiers
-                .first()
-                .and_then(qualifier_to_string)
-                .unwrap_or_default();
-            let mut pin_is_clock_gate_clock = false;
-            let mut pin_is_clock_gate_out = false;
-            let mut pin_is_clock_gate_enable = false;
-            let mut pin_is_clock_gate_test = false;
-            let mut explicit_clock = false;
-            let mut timing_arcs = Vec::new();
-            let mut internal_power = Vec::new();
-            let mut capacitance = None;
-            let mut rise_capacitance = None;
-            let mut fall_capacitance = None;
-            let mut max_capacitance = None;
-            let mut max_transition = None;
-            let mut max_fanout = None;
-            let mut fanout_load = None;
-            for pin_member in &pin_block.members {
-                match pin_member {
-                    BlockMember::BlockAttr(attr) => {
-                        // For an example of these cells see ASAP7 `ICG` cells`.
-                        if attr.attr_name == "direction" {
-                            direction =
-                                direction_from_str(crate::liberty::import::text(&attr.value)?);
-                            if direction == PinDirection::Invalid as i32 {
-                                return Err(format!(
-                                    "cell '{name}' pin '{pin_name}' has invalid direction"
-                                ));
-                            }
-                        } else if attr.attr_name == "clock" {
-                            explicit_clock = value_to_bool(&attr.value).ok_or_else(|| {
-                                format!(
-                                    "cell '{name}' pin '{pin_name}' has invalid clock attribute"
-                                )
-                            })?;
-                        } else if attr.attr_name == "function" {
-                            function = crate::liberty::import::text(&attr.value)?.to_owned();
-                        } else if attr.attr_name == "clock_gate_clock_pin" {
-                            pin_is_clock_gate_clock = value_to_bool(&attr.value).unwrap_or(false);
-                        } else if attr.attr_name == "clock_gate_out_pin" {
-                            pin_is_clock_gate_out = value_to_bool(&attr.value).unwrap_or(false);
-                        } else if attr.attr_name == "clock_gate_enable_pin" {
-                            pin_is_clock_gate_enable = value_to_bool(&attr.value).unwrap_or(false);
-                        } else if attr.attr_name == "clock_gate_test_pin" {
-                            pin_is_clock_gate_test = value_to_bool(&attr.value).unwrap_or(false);
-                        } else if attr.attr_name == "capacitance" {
-                            capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
-                        } else if attr.attr_name == "rise_capacitance" {
-                            rise_capacitance =
-                                Some(electrical_value(&attr.value, &attr.attr_name)?);
-                        } else if attr.attr_name == "fall_capacitance" {
-                            fall_capacitance =
-                                Some(electrical_value(&attr.value, &attr.attr_name)?);
-                        } else if attr.attr_name == "max_capacitance" {
-                            max_capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
-                        } else if attr.attr_name == "max_transition" {
-                            max_transition = Some(electrical_value(&attr.value, &attr.attr_name)?);
-                        } else if attr.attr_name == "max_fanout" {
-                            max_fanout = Some(electrical_value(&attr.value, &attr.attr_name)?);
-                        } else if attr.attr_name == "fanout_load" {
-                            fanout_load = Some(electrical_value(&attr.value, &attr.attr_name)?);
+        let mut pin_is_clock_gate_clock = false;
+        let mut pin_is_clock_gate_out = false;
+        let mut pin_is_clock_gate_enable = false;
+        let mut pin_is_clock_gate_test = false;
+        let mut explicit_clock = false;
+        let mut timing_arcs = Vec::new();
+        let mut internal_power = Vec::new();
+        let mut capacitance = None;
+        let mut rise_capacitance = None;
+        let mut fall_capacitance = None;
+        let mut max_capacitance = None;
+        let mut max_transition = None;
+        let mut max_fanout = None;
+        let mut fanout_load = None;
+        for pin_member in &pin_block.members {
+            match pin_member {
+                BlockMember::BlockAttr(attr) => {
+                    // For an example of these cells see ASAP7 `ICG` cells`.
+                    if attr.attr_name == "direction" {
+                        direction = direction_from_str(crate::liberty::import::text(&attr.value)?);
+                        if direction == PinDirection::Invalid as i32 {
+                            return Err(format!(
+                                "cell '{name}' pin '{pin_name}' has invalid direction"
+                            ));
                         }
+                    } else if attr.attr_name == "clock" {
+                        explicit_clock = value_to_bool(&attr.value).ok_or_else(|| {
+                            format!("cell '{name}' pin '{pin_name}' has invalid clock attribute")
+                        })?;
+                    } else if attr.attr_name == "function" {
+                        function = crate::liberty::import::text(&attr.value)?.to_owned();
+                    } else if attr.attr_name == "clock_gate_clock_pin" {
+                        pin_is_clock_gate_clock = value_to_bool(&attr.value).unwrap_or(false);
+                    } else if attr.attr_name == "clock_gate_out_pin" {
+                        pin_is_clock_gate_out = value_to_bool(&attr.value).unwrap_or(false);
+                    } else if attr.attr_name == "clock_gate_enable_pin" {
+                        pin_is_clock_gate_enable = value_to_bool(&attr.value).unwrap_or(false);
+                    } else if attr.attr_name == "clock_gate_test_pin" {
+                        pin_is_clock_gate_test = value_to_bool(&attr.value).unwrap_or(false);
+                    } else if attr.attr_name == "capacitance" {
+                        capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                    } else if attr.attr_name == "rise_capacitance" {
+                        rise_capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                    } else if attr.attr_name == "fall_capacitance" {
+                        fall_capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                    } else if attr.attr_name == "max_capacitance" {
+                        max_capacitance = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                    } else if attr.attr_name == "max_transition" {
+                        max_transition = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                    } else if attr.attr_name == "max_fanout" {
+                        max_fanout = Some(electrical_value(&attr.value, &attr.attr_name)?);
+                    } else if attr.attr_name == "fanout_load" {
+                        fanout_load = Some(electrical_value(&attr.value, &attr.attr_name)?);
                     }
-                    BlockMember::SubBlock(sub_block) => {
-                        if sub_block.block_type == "timing" && payload_options.include_timing {
-                            timing_arcs.push(parse_timing_arc(sub_block, builder));
-                        } else if sub_block.block_type == "internal_power"
-                            && payload_options.include_power
-                        {
-                            internal_power.push(parse_internal_power(sub_block, builder));
-                        }
+                }
+                BlockMember::SubBlock(sub_block) => {
+                    if sub_block.block_type == "timing" && payload_options.include_timing {
+                        timing_arcs.push(parse_timing_arc(sub_block, builder));
+                    } else if sub_block.block_type == "internal_power"
+                        && payload_options.include_power
+                    {
+                        internal_power.push(parse_internal_power(sub_block, builder));
                     }
                 }
             }
-            if pin_is_clock_gate_clock {
-                clock_gate_clock_pins.push(pin_name.clone());
-            }
-            if pin_is_clock_gate_out {
-                clock_gate_output_pins.push(pin_name.clone());
-            }
-            if pin_is_clock_gate_enable {
-                clock_gate_enable_pins.push(pin_name.clone());
-            }
-            if pin_is_clock_gate_test {
-                clock_gate_test_pins.push(pin_name.clone());
-            }
-            let is_clocking_pin =
-                explicit_clock || clocking_pins.contains(&pin_name) || pin_is_clock_gate_clock;
-            timing_arcs.sort_by(|a, b| {
-                a.related_pin
-                    .cmp(&b.related_pin)
-                    .then(a.timing_type.cmp(&b.timing_type))
-                    .then(a.timing_sense.cmp(&b.timing_sense))
-            });
-            internal_power.sort_by(|a, b| {
-                a.related_pins
-                    .cmp(&b.related_pins)
-                    .then(a.when.cmp(&b.when))
-                    .then(a.related_pg_pin.cmp(&b.related_pg_pin))
-            });
-            let mut pin = Pin {
-                direction,
-                function: builder
-                    .intern_string(function)
-                    .expect("parsed pin function fits in string pool"),
-                name: builder
-                    .intern_string(pin_name)
-                    .expect("parsed pin name fits in string pool"),
-                is_clocking_pin,
-                capacitance,
-                rise_capacitance,
-                fall_capacitance,
-                max_capacitance,
-                max_transition,
-                max_fanout,
-                fanout_load,
-                timing_arcs,
-                internal_power,
-            };
-            electrical_defaults.apply(&mut pin);
-            pins.push(pin);
         }
-        let has_clock_gate_roles = !clock_gate_clock_pins.is_empty()
-            || !clock_gate_output_pins.is_empty()
-            || !clock_gate_enable_pins.is_empty()
-            || !clock_gate_test_pins.is_empty();
-        if clock_gate_clock_pins.len() > 1 {
-            log::warn!(
-                "Cell '{}' has multiple clock_gate_clock_pin pins; selecting first: {:?}",
-                name,
-                clock_gate_clock_pins
-            );
+        if pin_is_clock_gate_clock {
+            clock_gate_clock_pins.push(pin_name.clone());
         }
-        if clock_gate_output_pins.len() > 1 {
-            log::warn!(
-                "Cell '{}' has multiple clock_gate_out_pin pins; selecting first: {:?}",
-                name,
-                clock_gate_output_pins
-            );
+        if pin_is_clock_gate_out {
+            clock_gate_output_pins.push(pin_name.clone());
         }
-        let clock_pin = if let Some(first) = clock_gate_clock_pins.first() {
-            first.clone()
-        } else {
-            String::new()
-        };
-        let output_pin = clock_gate_output_pins.first().cloned().unwrap_or_default();
-        let clock_gate = if has_clock_gate_roles {
-            Some(ClockGate {
-                clock_pin,
-                output_pin,
-                enable_pins: clock_gate_enable_pins,
-                test_pins: clock_gate_test_pins,
-            })
-        } else {
-            None
-        };
-        cells.push(Cell {
-            area,
-            pins,
-            name,
-            sequential,
-            clock_gate,
-            threshold_voltage_group_id,
-            dont_use,
-            use_for_size_only,
-            unsupported_semantics: prepared.unsupported,
+        if pin_is_clock_gate_enable {
+            clock_gate_enable_pins.push(pin_name.clone());
+        }
+        if pin_is_clock_gate_test {
+            clock_gate_test_pins.push(pin_name.clone());
+        }
+        let is_clocking_pin =
+            explicit_clock || clocking_pins.contains(&pin_name) || pin_is_clock_gate_clock;
+        timing_arcs.sort_by(|a, b| {
+            a.related_pin
+                .cmp(&b.related_pin)
+                .then(a.timing_type.cmp(&b.timing_type))
+                .then(a.timing_sense.cmp(&b.timing_sense))
         });
+        internal_power.sort_by(|a, b| {
+            a.related_pins
+                .cmp(&b.related_pins)
+                .then(a.when.cmp(&b.when))
+                .then(a.related_pg_pin.cmp(&b.related_pg_pin))
+        });
+        let pin = Pin {
+            direction,
+            function: builder
+                .intern_string(function)
+                .expect("parsed pin function fits in string pool"),
+            name: builder
+                .intern_string(pin_name)
+                .expect("parsed pin name fits in string pool"),
+            is_clocking_pin,
+            capacitance,
+            rise_capacitance,
+            fall_capacitance,
+            max_capacitance,
+            max_transition,
+            max_fanout,
+            fanout_load,
+            timing_arcs,
+            internal_power,
+        };
+        pins.push(pin);
     }
-    cells.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(cells)
+    let has_clock_gate_roles = !clock_gate_clock_pins.is_empty()
+        || !clock_gate_output_pins.is_empty()
+        || !clock_gate_enable_pins.is_empty()
+        || !clock_gate_test_pins.is_empty();
+    if clock_gate_clock_pins.len() > 1 {
+        log::warn!(
+            "Cell '{}' has multiple clock_gate_clock_pin pins; selecting first: {:?}",
+            name,
+            clock_gate_clock_pins
+        );
+    }
+    if clock_gate_output_pins.len() > 1 {
+        log::warn!(
+            "Cell '{}' has multiple clock_gate_out_pin pins; selecting first: {:?}",
+            name,
+            clock_gate_output_pins
+        );
+    }
+    let clock_pin = if let Some(first) = clock_gate_clock_pins.first() {
+        first.clone()
+    } else {
+        String::new()
+    };
+    let output_pin = clock_gate_output_pins.first().cloned().unwrap_or_default();
+    let clock_gate = if has_clock_gate_roles {
+        Some(ClockGate {
+            clock_pin,
+            output_pin,
+            enable_pins: clock_gate_enable_pins,
+            test_pins: clock_gate_test_pins,
+        })
+    } else {
+        None
+    };
+    Ok(Cell {
+        area,
+        pins,
+        name,
+        sequential,
+        clock_gate,
+        threshold_voltage_group_id,
+        dont_use,
+        use_for_size_only,
+        unsupported_semantics: prepared.unsupported,
+    })
 }
 
 fn apply_template_id_offset(library: &mut Library, offset: u32) {
@@ -1717,7 +1700,13 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
 ) -> Result<Library, String> {
     let compiled_threshold_voltage_group_rules =
         compile_threshold_voltage_group_rules(threshold_voltage_group_rules)?;
-    let mut libraries = Vec::new();
+    let mut merged_library = Library::default();
+    let mut units: Option<LibraryUnits> = None;
+    let mut nominal_voltage: Option<f64> = None;
+    let mut default_threshold_voltage_group: Option<String> = None;
+    let mut saw_library_with_default_threshold_voltage_group = false;
+    let mut saw_no_default_library_with_implicit_threshold_voltage_group = false;
+    let mut threshold_voltage_group_interner = ThresholdVoltageGroupInterner::default();
     for path in paths {
         log::info!("Parsing Liberty file: {}", path.as_ref().display());
         // Log the human-readable file size
@@ -1745,41 +1734,69 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
         };
         let char_reader = CharReader::new(streamer);
         let mut parser = LibertyParser::new_from_iter(char_reader);
-        let library = parser
-            .parse()
-            .map_err(|e| format!("Parse error in {}: {}", path.as_ref().display(), e))?;
-        libraries.push(library);
-    }
-    log::info!("Flattening cells from {} libraries...", libraries.len());
-    let mut merged_library = Library::default();
-    let mut units: Option<LibraryUnits> = None;
-    let mut nominal_voltage: Option<f64> = None;
-    let mut default_threshold_voltage_group: Option<String> = None;
-    let mut saw_library_with_default_threshold_voltage_group = false;
-    let mut saw_no_default_library_with_implicit_threshold_voltage_group = false;
-    let mut threshold_voltage_group_interner = ThresholdVoltageGroupInterner::default();
-    for lib in &libraries {
-        let parsed_default_threshold_voltage_group = parse_default_threshold_voltage_group(lib);
+        let mut builder = LibraryBuilder::new();
+        let lib = parser
+            .parse_with_member_visitor(
+                |parent, child| match (parent, child) {
+                    ("pin" | "bundle", "timing") => payload_options.include_timing,
+                    ("pin" | "bundle", "internal_power") => payload_options.include_power,
+                    _ => true,
+                },
+                |member| {
+                    if let BlockMember::SubBlock(block) = &member {
+                        if block.block_type == "cell" {
+                            let cell = block_to_model_cell(
+                                block,
+                                &mut threshold_voltage_group_interner,
+                                &mut builder,
+                                payload_options,
+                            )?;
+                            builder.library_mut().cells.push(cell);
+                            return Ok(None);
+                        }
+                        let retained_template = block.block_type.ends_with("template")
+                            && (block.block_type != "lu_table_template"
+                                || payload_options.include_timing)
+                            && (block.block_type != "power_lut_template"
+                                || payload_options.include_power);
+                        if !retained_template {
+                            // Other library-level groups are not consumed by
+                            // the model importer.
+                            return Ok(None);
+                        }
+                    }
+                    Ok(Some(member))
+                },
+            )
+            .map_err(|error| match error {
+                ParseWithVisitorError::Syntax(error) => {
+                    format!("Parse error in {}: {}", path.as_ref().display(), error)
+                }
+                ParseWithVisitorError::Visitor(error) => error,
+            })?;
+        let parsed_default_threshold_voltage_group = parse_default_threshold_voltage_group(&lib);
         let parsed_nominal_voltage = if payload_options.include_power {
-            parse_nominal_voltage(lib)?
+            parse_nominal_voltage(&lib)?
         } else {
             None
         };
         if parsed_default_threshold_voltage_group.is_some() {
             saw_library_with_default_threshold_voltage_group = true;
         }
-        let mut builder = LibraryBuilder::new();
         builder.library_mut().nominal_voltage = parsed_nominal_voltage;
         // Field name is historical; this stores all parsed template kinds.
-        let templates = parse_table_templates(lib, &mut builder, payload_options);
+        let templates = parse_table_templates(&lib, &mut builder, payload_options);
         builder.library_mut().lu_table_templates = templates;
-        let cells = block_to_model_cells(
-            lib,
-            &mut threshold_voltage_group_interner,
-            &mut builder,
-            payload_options,
-        )?;
-        builder.library_mut().cells = cells;
+        // Defaults may appear after cells in the source. Apply them only after
+        // all library-level attributes have been collected, before merging.
+        let electrical_defaults = ElectricalDefaults::from_library(&lib)?;
+        let cells = &mut builder.library_mut().cells;
+        for cell in cells.iter_mut() {
+            for pin in &mut cell.pins {
+                electrical_defaults.apply(pin);
+            }
+        }
+        cells.sort_by(|a, b| a.name.cmp(&b.name));
         let mut per_library = builder.finish();
         if parsed_default_threshold_voltage_group.is_none()
             && per_library
@@ -1814,7 +1831,7 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
             .append_cells_and_luts(per_library)
             .map_err(|error| format!("failed merging parsed LUT storage: {error:#}"))?;
 
-        let parsed_units = parse_library_units(lib);
+        let parsed_units = parse_library_units(&lib);
         if library_units_is_populated(&parsed_units) {
             if let Some(existing) = &mut units {
                 let conflicts = merge_library_units(existing, &parsed_units);
@@ -1920,6 +1937,74 @@ mod tests {
     use prost_reflect::{DescriptorPool, DynamicMessage};
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_streamed_syntax_errors_keep_source_context() {
+        let text = "library (example) { cell (BUF) { area : ; } }";
+        let syntax_error = LibertyParser::new_from_iter(text.bytes())
+            .parse()
+            .unwrap_err();
+        let mut source = NamedTempFile::new().unwrap();
+        write!(source, "{text}").unwrap();
+        let import_error = parse_liberty_files(&[source.path()]).unwrap_err();
+        assert_eq!(
+            import_error,
+            format!("Parse error in {}: {syntax_error}", source.path().display())
+        );
+    }
+
+    #[test]
+    fn test_streamed_cells_resolve_following_library_metadata() {
+        let metadata = r#"
+            default_input_pin_cap : 0.05;
+            default_max_transition : 0.2;
+            lu_table_template (delay) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+        "#;
+        let cell = r#"
+            cell (BUF) {
+                area : 1.0;
+                pin (A) { direction : input; }
+                pin (Y) {
+                    direction : output;
+                    function : "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (delay) { values ("0.1, 0.2"); }
+                    }
+                }
+            }
+        "#;
+        let mut protos = Vec::new();
+        for body in [format!("{metadata}{cell}"), format!("{cell}{metadata}")] {
+            let mut source = NamedTempFile::new().unwrap();
+            write!(source, "library (example) {{ {body} }}").unwrap();
+            let library = parse_liberty_files(&[source.path()]).unwrap();
+            let input = library.cells[0]
+                .pins
+                .iter()
+                .find(|pin| library.resolve_string(&pin.name) == "A")
+                .unwrap();
+            assert_eq!(input.capacitance, Some(0.05));
+            let output = library.cells[0]
+                .pins
+                .iter()
+                .find(|pin| library.resolve_string(&pin.name) == "Y")
+                .unwrap();
+            assert_eq!(output.max_transition, Some(0.2));
+            assert_ne!(
+                library
+                    .timing_table_shape(&output.timing_arcs[0].tables[0])
+                    .template_id,
+                0
+            );
+            protos.push(library_to_proto(library).unwrap());
+        }
+        assert_eq!(protos[0], protos[1]);
+    }
 
     #[test]
     fn test_parse_liberty_files_and_pretty_print() {

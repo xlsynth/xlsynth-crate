@@ -39,6 +39,19 @@ pub struct Block {
     pub members: Vec<BlockMember>,
 }
 
+/// Distinguishes syntax failures from errors returned by a root-member visitor.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ParseWithVisitorError {
+    Syntax(String),
+    Visitor(String),
+}
+
+impl From<String> for ParseWithVisitorError {
+    fn from(error: String) -> Self {
+        Self::Syntax(error)
+    }
+}
+
 // LibertyParser owns an AsciiStream (instead of managing byte operations
 // itself).
 pub struct LibertyParser<I: Iterator<Item = u8>> {
@@ -64,13 +77,21 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
         }
     }
 
-    fn parse_block_member(&mut self) -> Result<BlockMember, String> {
+    fn parse_block_member<F>(
+        &mut self,
+        parent_type: &str,
+        retain: bool,
+        retain_subblock: &F,
+    ) -> Result<Option<BlockMember>, String>
+    where
+        F: Fn(&str, &str) -> bool,
+    {
         let attr_name = self.stream.pop_identifier_or_error("attribute name")?;
         log::trace!("attr_name: {:?}", attr_name);
         if self.stream.try_pop(b":")? {
             let value = self.pop_value("attribute value")?;
             self.stream.pop_semi_or_newline("attribute value end")?;
-            Ok(BlockMember::BlockAttr(BlockAttr { attr_name, value }))
+            Ok(retain.then_some(BlockMember::BlockAttr(BlockAttr { attr_name, value })))
         } else {
             log::trace!(
                 "no colon implies block- or tuple-like attribute; name: {:?} rest: {:?}",
@@ -104,22 +125,32 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
                     self.stream.human_pos()
                 )),
                 Some(b'{') => {
-                    let block = self.parse_block_with_type_and_qualifiers(attr_name, qualifiers)?;
-                    Ok(BlockMember::SubBlock(Box::new(block)))
+                    let retain_child = retain && retain_subblock(parent_type, &attr_name);
+                    let block = self.parse_block_with_type_and_qualifiers(
+                        attr_name,
+                        qualifiers,
+                        retain_child,
+                        retain_subblock,
+                    )?;
+                    Ok(block.map(|block| BlockMember::SubBlock(Box::new(block))))
                 }
                 Some(b';') => {
                     assert!(self.stream.try_pop(b";")?);
-                    Ok(BlockMember::BlockAttr(BlockAttr {
-                        attr_name,
-                        value: Value::Tuple(qualifiers.into_iter().map(Box::new).collect()),
+                    Ok(retain.then(|| {
+                        BlockMember::BlockAttr(BlockAttr {
+                            attr_name,
+                            value: Value::Tuple(qualifiers.into_iter().map(Box::new).collect()),
+                        })
                     }))
                 }
                 Some(b'\n') => {
                     // Automatic semicolon insertion.
                     assert!(self.stream.try_consume(1));
-                    Ok(BlockMember::BlockAttr(BlockAttr {
-                        attr_name,
-                        value: Value::Tuple(qualifiers.into_iter().map(Box::new).collect()),
+                    Ok(retain.then(|| {
+                        BlockMember::BlockAttr(BlockAttr {
+                            attr_name,
+                            value: Value::Tuple(qualifiers.into_iter().map(Box::new).collect()),
+                        })
                     }))
                 }
                 Some(c) => Err(format!(
@@ -131,26 +162,48 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
         }
     }
 
-    fn parse_block_with_type_and_qualifiers(
+    fn parse_block_with_type_and_qualifiers<F>(
         &mut self,
         block_type: String,
         qualifiers: Vec<Value>,
-    ) -> Result<Block, String> {
+        retain: bool,
+        retain_subblock: &F,
+    ) -> Result<Option<Block>, String>
+    where
+        F: Fn(&str, &str) -> bool,
+    {
         self.stream.pop_or_error(b"{", "block body start")?;
         let mut members = Vec::new();
         while !self.stream.peek_is(b"}")? {
-            let member = self.parse_block_member()?;
-            members.push(member);
+            if let Some(member) = self.parse_block_member(&block_type, retain, retain_subblock)? {
+                members.push(member);
+            }
         }
         self.stream.pop_or_error(b"}", "block body end")?;
-        Ok(Block {
+        Ok(retain.then_some(Block {
             block_type,
             qualifiers,
             members,
-        })
+        }))
     }
 
-    fn parse_block_with_type(&mut self, block_type: String) -> Result<Block, String> {
+    /// Parses the root block while allowing direct members to be consumed as
+    /// they arrive.
+    ///
+    /// A false `retain_subblock` result discards that subtree after checking
+    /// its syntax. The visitor may consume each retained direct member by
+    /// returning `None`; only returned members are accumulated in the root
+    /// block.
+    pub(crate) fn parse_with_member_visitor<F, V>(
+        &mut self,
+        retain_subblock: F,
+        mut visitor: V,
+    ) -> Result<Block, ParseWithVisitorError>
+    where
+        F: Fn(&str, &str) -> bool,
+        V: FnMut(BlockMember) -> Result<Option<BlockMember>, String>,
+    {
+        let block_type = self.stream.pop_identifier_or_error("block type")?;
         self.stream.pop_or_error(b"(", "block name start")?;
         let mut qualifiers = Vec::new();
         while !self.stream.peek_is(b")")? {
@@ -161,16 +214,30 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
             }
         }
         self.stream.pop_or_error(b")", "block name end")?;
-        self.parse_block_with_type_and_qualifiers(block_type, qualifiers)
-    }
-
-    fn parse_block(&mut self) -> Result<Block, String> {
-        let block_type = self.stream.pop_identifier_or_error("block type")?;
-        self.parse_block_with_type(block_type)
+        self.stream.pop_or_error(b"{", "block body start")?;
+        let mut members = Vec::new();
+        while !self.stream.peek_is(b"}")? {
+            if let Some(member) = self.parse_block_member(&block_type, true, &retain_subblock)?
+                && let Some(member) = visitor(member).map_err(ParseWithVisitorError::Visitor)?
+            {
+                members.push(member);
+            }
+        }
+        self.stream.pop_or_error(b"}", "block body end")?;
+        Ok(Block {
+            block_type,
+            qualifiers,
+            members,
+        })
     }
 
     pub fn parse(&mut self) -> Result<Block, String> {
-        self.parse_block()
+        self.parse_with_member_visitor(|_, _| true, |member| Ok(Some(member)))
+            .map_err(|error| match error {
+                ParseWithVisitorError::Syntax(error) | ParseWithVisitorError::Visitor(error) => {
+                    error
+                }
+            })
     }
 }
 
@@ -410,5 +477,94 @@ mod tests {
         };
         assert_eq!(my_attribute.attr_name, "my_attribute");
         assert_eq!(my_attribute.value, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_member_visitor_consumes_cells_and_discards_selected_subtrees() {
+        let text = r#"
+        library (example) {
+            time_unit : "1ns";
+            cell (BUF) {
+                pin (A) { direction : input; }
+                pin (Y) {
+                    direction : output;
+                    function : "A";
+                    timing () {
+                        related_pin : "A";
+                        cell_rise (scalar) { values ("0.1"); }
+                    }
+                }
+            }
+            cell (INV) { area : 1.0; }
+        }
+        "#;
+        let mut parser = LibertyParser::new_from_iter(text.bytes());
+        let mut cells = Vec::new();
+        let root = parser
+            .parse_with_member_visitor(
+                |parent, child| parent != "pin" || child != "timing",
+                |member| match member {
+                    BlockMember::SubBlock(block) if block.block_type == "cell" => {
+                        cells.push(*block);
+                        Ok(None)
+                    }
+                    member => Ok(Some(member)),
+                },
+            )
+            .unwrap();
+        assert_eq!(root.members.len(), 1);
+        assert_eq!(cells.len(), 2);
+        let BlockMember::SubBlock(output) = &cells[0].members[1] else {
+            panic!("expected output pin");
+        };
+        assert!(output.members.iter().all(|member| {
+            !matches!(member, BlockMember::SubBlock(block) if block.block_type == "timing")
+        }));
+
+        let mut full_parser = LibertyParser::new_from_iter(text.bytes());
+        let full = full_parser.parse().unwrap();
+        assert_eq!(full.members.len(), 3);
+        let BlockMember::SubBlock(full_cell) = &full.members[1] else {
+            panic!("expected full cell");
+        };
+        let BlockMember::SubBlock(full_output) = &full_cell.members[1] else {
+            panic!("expected full output pin");
+        };
+        assert!(full_output.members.iter().any(|member| {
+            matches!(member, BlockMember::SubBlock(block) if block.block_type == "timing")
+        }));
+    }
+
+    #[test]
+    fn test_discarded_subtree_still_requires_valid_syntax() {
+        let text = r#"
+        library (example) {
+            cell (BUF) {
+                pin (Y) {
+                    timing () { related_pin : ; }
+                }
+            }
+        }
+        "#;
+        let mut parser = LibertyParser::new_from_iter(text.bytes());
+        let result = parser.parse_with_member_visitor(
+            |parent, child| parent != "pin" || child != "timing",
+            |member| Ok(Some(member)),
+        );
+        assert!(matches!(result, Err(ParseWithVisitorError::Syntax(_))));
+    }
+
+    #[test]
+    fn test_member_visitor_error_is_distinct_from_syntax_error() {
+        let text = "library (example) { cell (BUF) {} }";
+        let mut parser = LibertyParser::new_from_iter(text.bytes());
+        let result =
+            parser.parse_with_member_visitor(|_, _| true, |_| Err("visitor failure".to_string()));
+        assert_eq!(
+            result,
+            Err(ParseWithVisitorError::Visitor(
+                "visitor failure".to_string()
+            ))
+        );
     }
 }
