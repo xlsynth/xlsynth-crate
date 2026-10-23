@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::aig::mffc::enumerate_mffc_cover;
 use crate::aig::{AigNode, GateFn};
 use crate::aig_sim::gate_simd::{self, Vec256};
 use serde::Serialize;
@@ -95,6 +96,24 @@ pub struct ToggleActivityStats {
     pub aggregate: ToggleStats,
     /// Output-reachable AIG nodes in stable node-id order.
     pub nodes: Vec<NodeToggleStats>,
+}
+
+/// Switching at the distinct input pins and single output of each disjoint
+/// MFFC. An input signal used by multiple cones counts once in each cone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MffcToggleStats {
+    pub cone_count: usize,
+    pub input_pin_count: usize,
+    pub input_pin_toggles: usize,
+    pub output_pin_toggles: usize,
+}
+
+/// Native gate activity with a supplementary, disjoint MFFC pin summary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ToggleActivityWithMffcStats {
+    #[serde(flatten)]
+    pub activity: ToggleActivityStats,
+    pub mffc: MffcToggleStats,
 }
 
 /// Output-reachable activity plus counts for every AIG node.
@@ -451,6 +470,35 @@ pub fn count_toggle_activity(
         &live_node_toggles.live_nodes,
         &live_node_toggles.per_node_toggles,
     )
+}
+
+/// Counts regular AIG activity and MFFC boundary activity in one simulation.
+pub fn count_toggle_activity_with_mffc(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> ToggleActivityWithMffcStats {
+    let activity = count_toggle_activity(gate_fn, batch_inputs);
+    let mut per_node_toggles = vec![0usize; gate_fn.gates.len()];
+    for node in &activity.nodes {
+        per_node_toggles[node.node_id] = node.toggle_count;
+    }
+    let mut mffc = MffcToggleStats {
+        cone_count: 0,
+        input_pin_count: 0,
+        input_pin_toggles: 0,
+        output_pin_toggles: 0,
+    };
+    for cone in enumerate_mffc_cover(gate_fn) {
+        mffc.cone_count += 1;
+        mffc.input_pin_count += cone.input_pins.len();
+        mffc.input_pin_toggles += cone
+            .input_pins
+            .iter()
+            .map(|pin| per_node_toggles[pin.node.id])
+            .sum::<usize>();
+        mffc.output_pin_toggles += per_node_toggles[cone.root_node_id];
+    }
+    ToggleActivityWithMffcStats { activity, mffc }
 }
 
 /// Counts native output-reachable activity and every node in one SIMD pass.
@@ -852,6 +900,58 @@ mod tests {
                         toggle_rate: 1.0 / 256.0,
                     },
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn mffc_pin_toggles_count_only_cone_boundaries() {
+        let mut gb = GateBuilder::new("two_ands".to_string(), GateBuilderOptions::no_opt());
+        let x = gb.add_input("x".to_string(), 3);
+        let first = gb.add_and_binary(*x.get_lsb(0), *x.get_lsb(1));
+        let root = gb.add_and_binary(first, *x.get_lsb(2));
+        gb.add_output("out".to_string(), AigBitVector::from_bit(root));
+        let gate_fn = gb.build();
+        let inputs: Vec<Vec<IrBits>> = [0, 7, 3]
+            .into_iter()
+            .map(|value| vec![IrBits::make_ubits(3, value).unwrap()])
+            .collect();
+
+        let report = count_toggle_activity_with_mffc(&gate_fn, &inputs);
+        assert_eq!(report.activity.aggregate.gate_output_toggles, 3);
+        assert_eq!(
+            report.mffc,
+            MffcToggleStats {
+                cone_count: 1,
+                input_pin_count: 3,
+                input_pin_toggles: 4,
+                output_pin_toggles: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn mffc_counts_both_polarities_at_a_shared_boundary() {
+        let mut gb = GateBuilder::new("opposite_pins".to_string(), GateBuilderOptions::no_opt());
+        let x = gb.add_input("x".to_string(), 2);
+        let shared = gb.add_and_binary(*x.get_lsb(0), *x.get_lsb(1));
+        let root = gb.add_and_binary(shared, shared.negate());
+        gb.add_output("shared".to_string(), AigBitVector::from_bit(shared));
+        gb.add_output("out".to_string(), AigBitVector::from_bit(root));
+        let gate_fn = gb.build();
+        let inputs: Vec<Vec<IrBits>> = [0, 3, 0]
+            .into_iter()
+            .map(|value| vec![IrBits::make_ubits(2, value).unwrap()])
+            .collect();
+
+        let report = count_toggle_activity_with_mffc(&gate_fn, &inputs);
+        assert_eq!(
+            report.mffc,
+            MffcToggleStats {
+                cone_count: 2,
+                input_pin_count: 4,
+                input_pin_toggles: 8,
+                output_pin_toggles: 2,
             }
         );
     }
