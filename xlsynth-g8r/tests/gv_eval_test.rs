@@ -835,6 +835,97 @@ fn dynamic_power_preserves_predecessor_across_simd_batches() {
 }
 
 #[test]
+fn dynamic_power_shared_conditions_preserve_instance_and_transition_values() {
+    let netlist = r#"
+module top (a0, c0, a1, c1, y0, y1);
+  input a0, c0, a1, c1;
+  output y0, y1;
+  BUF first (.A(a0), .C(c0), .Y(y0));
+  BUF second (.A(a1), .C(c1), .Y(y1));
+endmodule
+"#;
+    let (_directory, netlist_path, liberty_path) =
+        write_fixture(netlist, &conditioned_power_liberty("C", "A"));
+    let model =
+        load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default()).unwrap();
+    let mut library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    let output_pin = &mut library.cells[0].pins[2];
+    output_pin.timing_arcs[0].when = output_pin.internal_power[0].when;
+    output_pin
+        .timing_arcs
+        .push(output_pin.timing_arcs[0].clone());
+    output_pin
+        .internal_power
+        .push(output_pin.internal_power[0].clone());
+
+    // Both instances have the same binding layout, but opposite condition
+    // values. Every changing output reaches the condition twice for timing
+    // and twice for power. Repeated samples also leave all pins unchanged.
+    let input_values = [
+        [0, 0, 1, 1],
+        [1, 1, 0, 0],
+        [0, 1, 1, 0],
+        [0, 1, 1, 0],
+        [1, 0, 0, 1],
+        [0, 1, 1, 0],
+        [0, 1, 1, 0],
+    ];
+    let samples = input_values
+        .iter()
+        .map(|[a0, c0, a1, c1]| {
+            IrValue::parse_typed(&format!(
+                "(bits[1]:{a0}, bits[1]:{c0}, bits[1]:{a1}, bits[1]:{c1})"
+            ))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for (sample, [a0, _, a1, _]) in samples.iter().zip(input_values) {
+        assert_eq!(
+            model.evaluate_ir_value(sample).unwrap(),
+            IrValue::parse_typed(&format!("(bits[1]:{a0}, bits[1]:{a1})")).unwrap(),
+        );
+    }
+    let report = model
+        .analyze_dynamic_power(&library, &samples, GvDynamicPowerOptions::default())
+        .unwrap();
+    assert_eq!(report.sample_count, samples.len());
+    assert_eq!(report.transition_count, samples.len() - 1);
+    assert_eq!(report.diagnostics.when_evaluation_count, 32);
+    assert_eq!(report.diagnostics.when_changed_during_transition_count, 24);
+    assert_eq!(report.cell_internal_energy, 10.0);
+    assert_eq!(report.primary_input_switching_energy, 7.0);
+    assert_eq!(report.total_dynamic_energy, 17.0);
+    assert_eq!(
+        report
+            .diagnostics
+            .multiply_attributed_output_transition_count,
+        4
+    );
+    assert_eq!(
+        report.diagnostics.multiply_attributed_internal_event_count,
+        4
+    );
+    assert_eq!(report.diagnostics.unattributed_output_transition_count, 4);
+    assert_eq!(report.instances.len(), 2);
+    // Each polarity has one fallback slew and one table-derived slew beyond
+    // the histogram range, independent of the other instance's conditions.
+    let mut expected_histogram = vec![0.0; GV_POWER_SLEW_BUCKET_COUNT];
+    expected_histogram[GV_POWER_SLEW_BUCKET_COUNT / 2] = 1.0;
+    expected_histogram[GV_POWER_SLEW_BUCKET_COUNT - 1] = 1.0;
+    for (instance, name) in report.instances.iter().zip(["first", "second"]) {
+        assert_eq!(instance.instance_name, name);
+        assert_eq!(instance.internal_energy, 5.0);
+        assert_eq!(instance.outputs.len(), 1);
+        let output = &instance.outputs[0];
+        assert_eq!(output.pin_name, "Y");
+        assert_eq!(output.rise_count, 2);
+        assert_eq!(output.fall_count, 2);
+        assert_eq!(output.slew_histogram.rise, expected_histogram);
+        assert_eq!(output.slew_histogram.fall, expected_histogram);
+    }
+}
+
+#[test]
 fn sequential_dynamic_power_counts_clock_q_and_feedback_safe_slew() {
     let liberty = r#"
 format_magic: 5496997758228255311
@@ -1240,9 +1331,7 @@ endmodule
     assert_eq!(report.instances.len(), 1);
 }
 
-#[test]
-fn sequential_dynamic_power_resolves_state_aliases_in_when_conditions() {
-    let liberty = r#"
+const STATE_CONDITIONED_POWER_LIBERTY: &str = r#"
 format_magic: 5496997758228255311
 units: {
   time_unit: "ns"
@@ -1302,7 +1391,8 @@ cells: {
 lut_shapes: {}
 interned_strings: ["D", "CLK", "Q", "IQ", "IQN"]
 "#;
-    let netlist = r#"
+
+const STATE_CONDITIONED_POWER_NETLIST: &str = r#"
 module top (d, clk, q);
   input d;
   input clk;
@@ -1310,7 +1400,13 @@ module top (d, clk, q);
   DFF state (.D(d), .CLK(clk), .Q(q));
 endmodule
 "#;
-    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+
+#[test]
+fn sequential_dynamic_power_resolves_state_aliases_in_when_conditions() {
+    let (_temp_dir, netlist_path, liberty_path) = write_fixture(
+        STATE_CONDITIONED_POWER_NETLIST,
+        STATE_CONDITIONED_POWER_LIBERTY,
+    );
     let model = load_labeled_sequential_netlist_aig(
         &netlist_path,
         &liberty_path,
@@ -1351,6 +1447,94 @@ endmodule
             .sum::<f64>(),
         1.0
     );
+}
+
+#[test]
+fn sequential_dynamic_power_preserves_aliases_across_simd_batches() {
+    let (_directory, netlist_path, liberty_path) = write_fixture(
+        STATE_CONDITIONED_POWER_NETLIST,
+        STATE_CONDITIONED_POWER_LIBERTY,
+    );
+    let model = load_labeled_sequential_netlist_aig(
+        &netlist_path,
+        &liberty_path,
+        &GvEvalOptions::default(),
+    )
+    .unwrap();
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    // Each cycle expands to three power samples. At cycle 85 the active edge
+    // is sample 256, so its Q rise straddles the SIMD chunk boundary. Holding
+    // the input for two cycles also exercises unchanged data and alias values.
+    // Each clock edge with IQ high beforehand contributes one energy unit.
+    for (cycle_count, expected_energy) in [(85, 84.0), (86, 85.0), (87, 87.0)] {
+        let inputs = (0..cycle_count)
+            .map(|cycle| {
+                let value = usize::from(matches!(cycle % 4, 1 | 2));
+                IrValue::parse_typed(&format!("(bits[1]:{value})")).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let trace = model
+            .simulate_ir_values(
+                &inputs,
+                SequentialState::all_zeros(&model.sequential_gate_fn),
+            )
+            .unwrap();
+        // Functional outputs sample Q before the active edge; power analysis
+        // additionally observes Q after committing the current cycle's D.
+        let expected_outputs = (0..cycle_count)
+            .map(|cycle| vec![IrBits::bool(matches!(cycle % 4, 2 | 3))])
+            .collect::<Vec<_>>();
+        assert_eq!(trace.external_outputs(), expected_outputs);
+        assert_eq!(
+            trace.final_state().values(),
+            [IrBits::bool(matches!((cycle_count - 1) % 4, 1 | 2))],
+        );
+        let report = model
+            .analyze_dynamic_power(
+                &library,
+                &trace,
+                GvSequentialDynamicPowerOptions {
+                    primary_input_transition: 1.0,
+                    clock_transition: 1.0,
+                    module_output_load: 0.0,
+                    cycle_time: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(report.phase_transition_count, 3 * cycle_count - 1);
+        assert_eq!(report.clock_transition_count, 2 * cycle_count);
+        let rises = (cycle_count + 2) / 4;
+        let falls = cycle_count / 4;
+        assert_eq!(report.cell_internal_energy, expected_energy);
+        assert_eq!(report.total_dynamic_energy, expected_energy);
+        // Both IQ-conditioned clock edges and IQN-conditioned output edges
+        // request conditions; each Q change flips both aliases.
+        assert_eq!(
+            report.diagnostics.when_evaluation_count,
+            2 * cycle_count + 2 * (rises + falls)
+        );
+        assert_eq!(
+            report.diagnostics.when_changed_during_transition_count,
+            2 * (rises + falls)
+        );
+        // IQN admits rising Q timing arcs and rejects falling Q timing arcs.
+        assert_eq!(
+            report.diagnostics.unattributed_output_transition_count,
+            falls
+        );
+        assert_eq!(report.instances.len(), 1);
+        let instance = &report.instances[0];
+        assert_eq!(instance.internal_energy, expected_energy);
+        assert_eq!(instance.outputs.len(), 1);
+        let output = &instance.outputs[0];
+        assert_eq!(output.rise_count, rises);
+        assert_eq!(output.fall_count, falls);
+        let mut expected_histogram = vec![0.0; GV_POWER_SLEW_BUCKET_COUNT];
+        expected_histogram[GV_POWER_SLEW_BUCKET_COUNT / 2] = rises as f64;
+        assert_eq!(output.slew_histogram.rise, expected_histogram);
+        expected_histogram[GV_POWER_SLEW_BUCKET_COUNT / 2] = falls as f64;
+        assert_eq!(output.slew_histogram.fall, expected_histogram);
+    }
 }
 
 #[test]
