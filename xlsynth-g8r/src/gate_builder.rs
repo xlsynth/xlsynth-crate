@@ -1015,6 +1015,25 @@ mod tests {
     use pretty_assertions::assert_eq;
     use test_case::test_case;
 
+    #[test]
+    fn vector_mux_keeps_scalar_lowering_for_shared_masks() {
+        let mut gb = GateBuilder::new("ordinary_mux".into(), GateBuilderOptions::opt());
+        let x = gb.add_input("x".into(), 8);
+        let en = *gb.add_input("en".into(), 1).get_lsb(0);
+        let selector = *gb.add_input("s".into(), 1).get_lsb(0);
+        let mask = gb.replicate(en, 8);
+        let masked = gb.add_and_vec(&x, &mask);
+        let zeros = AigBitVector::zeros(8);
+        let mut reference = gb.clone();
+        let got = gb.add_mux2_vec(&selector, &masked, &zeros);
+        let expected = masked
+            .iter_lsb_to_msb()
+            .map(|bit| reference.add_mux2(selector, *bit, reference.get_false()))
+            .collect::<Vec<_>>();
+        assert_eq!(got.iter_lsb_to_msb().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(gb.gates.len(), reference.gates.len());
+    }
+
     fn eval_1bit_output(gate_fn: &GateFn, a: bool, b: bool, c: Option<bool>) -> bool {
         let mut inputs = vec![IrBits::bool(a), IrBits::bool(b)];
         if let Some(c) = c {

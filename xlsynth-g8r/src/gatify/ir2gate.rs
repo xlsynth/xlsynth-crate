@@ -3,7 +3,7 @@
 //! Functionality for converting an IR function into a gate function via
 //! `gatify`.
 
-use crate::aig::gate::{AigBitVector, AigOperand, GateFn, Split};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, GateFn, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::gatify::ir2gate_arithmetic::{
@@ -1084,6 +1084,104 @@ fn gatify_array_update(
     gatify_array_update_dimension(gb, array_ty, array_bits, value_bits, index_bits, None)
 }
 
+/// Factors a common AND operand out of a vector mux's nonconstant arm.
+fn try_add_mux2_with_shared_mask(
+    gb: &mut GateBuilder,
+    select_data: AigOperand,
+    data: &AigBitVector,
+    constant: &AigBitVector,
+) -> Option<AigBitVector> {
+    if data.get_bit_count() < 2 || !constant.iter_lsb_to_msb().all(|bit| bit.node.id == 0) {
+        return None;
+    }
+    let first = *data.get_lsb(0);
+    if first.negated {
+        return None;
+    }
+    let AigNode::And2 { a, b, .. } = gb.gates[first.node.id] else {
+        return None;
+    };
+    // At most two possible common operands; inspect only these immediate
+    // ANDs, without flattening cones or scanning the surrounding function.
+    let common = [a, b].into_iter().find(|candidate| {
+        data.iter_lsb_to_msb().all(|bit| {
+            !bit.negated
+                && matches!(
+                    &gb.gates[bit.node.id],
+                    AigNode::And2 { a, b, .. } if a == candidate || b == candidate
+                )
+        })
+    })?;
+    // Factoring saves a conjunction only on constant-zero bits. Keep
+    // constant-one bits in their original mux form, and require at least
+    // two zeros to amortize the shared enable.
+    if constant
+        .iter_lsb_to_msb()
+        .filter(|bit| gb.is_known_false(**bit))
+        .count()
+        < 2
+    {
+        return None;
+    }
+    let selector_depth = gb.aig_depth(select_data).expect("hashing is enabled");
+    let enable_depth = selector_depth.max(gb.aig_depth(common).expect("hashing is enabled")) + 1;
+    for (bit, constant_bit) in data.iter_lsb_to_msb().zip(constant.iter_lsb_to_msb()) {
+        if gb.is_known_true(*constant_bit) {
+            continue;
+        }
+        let AigNode::And2 { a, b, .. } = gb.gates[bit.node.id] else {
+            unreachable!("common operand was checked above");
+        };
+        let value = if a == common { b } else { a };
+        let factored_depth = enable_depth.max(gb.aig_depth(value).expect("hashing is enabled")) + 1;
+        let original_depth =
+            selector_depth.max(gb.aig_depth(*bit).expect("hashing is enabled")) + 1;
+        if factored_depth > original_depth {
+            return None;
+        }
+    }
+    let enable = gb.add_and_binary(select_data, common);
+    let bits = data
+        .iter_lsb_to_msb()
+        .zip(constant.iter_lsb_to_msb())
+        .map(|(bit, constant_bit)| {
+            if gb.is_known_true(*constant_bit) {
+                return gb.add_mux2(select_data, *bit, *constant_bit);
+            }
+            let AigNode::And2 { a, b, .. } = gb.gates[bit.node.id] else {
+                unreachable!("common operand was checked above");
+            };
+            let value = if a == common { b } else { a };
+            gb.add_and_binary(value, enable)
+        })
+        .collect::<Vec<_>>();
+    Some(AigBitVector::from_lsb_is_index_0(&bits))
+}
+
+/// Lowers a binary IR select, factoring shared masks when locally profitable.
+fn gatify_binary_sel(
+    gb: &mut GateBuilder,
+    selector: &AigOperand,
+    on_true: &AigBitVector,
+    on_false: &AigBitVector,
+) -> AigBitVector {
+    assert_eq!(on_true.get_bit_count(), on_false.get_bit_count());
+    if gb.options.fold && gb.options.hash && selector.node.id != 0 {
+        // sel(s, x & splat(en), C) shares en with the arm selector.
+        // Existing masked values remain intact for any other consumers.
+        if let Some(result) = try_add_mux2_with_shared_mask(gb, *selector, on_true, on_false) {
+            return result;
+        }
+        if let Some(result) =
+            try_add_mux2_with_shared_mask(gb, selector.negate(), on_false, on_true)
+        {
+            return result;
+        }
+    }
+
+    gb.add_mux2_vec(selector, on_true, on_false)
+}
+
 fn gatify_sel(
     gb: &mut GateBuilder,
     selector_bits: &AigBitVector,
@@ -1095,8 +1193,8 @@ fn gatify_sel(
     if case_count == 2 && default_bits.is_none() {
         assert_eq!(selector_bits.get_bit_count(), 1);
         let selector = selector_bits.get_lsb(0);
-        return gb.add_mux2_vec(
-            selector, /* on_true= */ &cases[1], /* on_false= */ &cases[0],
+        return gatify_binary_sel(
+            gb, selector, /* on_true= */ &cases[1], /* on_false= */ &cases[0],
         );
     }
 
@@ -4854,6 +4952,137 @@ mod tests {
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
+
+    #[test]
+    fn shared_mask_mux_preserves_values_and_other_consumers() {
+        for width in [0, 1, 2, 7, 10, 23, 52, 65] {
+            for mask_on_true in [false, true] {
+                for invert_enable in [false, true] {
+                    for constant_pattern in 0..3 {
+                        let mut gb =
+                            GateBuilder::new("masked_mux".into(), GateBuilderOptions::opt());
+                        let x = gb.add_input("x".into(), width);
+                        let en = *gb.add_input("en".into(), 1).get_lsb(0);
+                        let s = *gb.add_input("s".into(), 1).get_lsb(0);
+                        let enable = if invert_enable { en.negate() } else { en };
+                        let masked = x
+                            .iter_lsb_to_msb()
+                            .enumerate()
+                            .map(|(i, bit)| {
+                                // Also exercise commuted AND operands.
+                                if i % 2 == 0 {
+                                    gb.add_and_binary(*bit, enable)
+                                } else {
+                                    gb.add_and_binary(enable, *bit)
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let masked = AigBitVector::from_lsb_is_index_0(&masked);
+                        let constants = (0..width)
+                            .map(|i| match constant_pattern {
+                                0 => false,
+                                1 => true,
+                                _ => i % 3 == 1,
+                            })
+                            .collect::<Vec<_>>();
+                        let constant = AigBitVector::from_lsb_is_index_0(
+                            &constants
+                                .iter()
+                                .map(|b| if *b { gb.get_true() } else { gb.get_false() })
+                                .collect::<Vec<_>>(),
+                        );
+                        let output = if mask_on_true {
+                            super::gatify_binary_sel(&mut gb, &s, &masked, &constant)
+                        } else {
+                            super::gatify_binary_sel(&mut gb, &s, &constant, &masked)
+                        };
+                        gb.add_output("selected".into(), output);
+                        gb.add_output("shared_masked".into(), masked);
+                        let f = gb.build();
+                        for pattern in 0..16 {
+                            let bits = (0..width)
+                                .map(|i| ((pattern >> (i % 4)) & 1) != 0)
+                                .collect::<Vec<_>>();
+                            for en in [false, true] {
+                                for s in [false, true] {
+                                    let masked = bits
+                                        .iter()
+                                        .map(|b| *b && (en ^ invert_enable))
+                                        .collect::<Vec<_>>();
+                                    let expected = if s == mask_on_true {
+                                        &masked
+                                    } else {
+                                        &constants
+                                    };
+                                    let got = gate_sim::eval(
+                                        &f,
+                                        &[
+                                            IrBits::from_lsb_is_0(&bits),
+                                            IrBits::bool(en),
+                                            IrBits::bool(s),
+                                        ],
+                                        gate_sim::Collect::None,
+                                    );
+                                    assert_eq!(
+                                        got.outputs,
+                                        vec![
+                                            IrBits::from_lsb_is_0(expected),
+                                            IrBits::from_lsb_is_0(&masked)
+                                        ]
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_mask_mux_leaves_unmatched_vectors_unchanged() {
+        for options in [GateBuilderOptions::opt(), GateBuilderOptions::no_opt()] {
+            let mut gb = GateBuilder::new("unmatched_mux".into(), options);
+            let x = gb.add_input("x".into(), 8);
+            let y = gb.add_input("y".into(), 8);
+            let s = *gb.add_input("s".into(), 1).get_lsb(0);
+            let mut reference = gb.clone();
+            let result = super::gatify_binary_sel(&mut gb, &s, &x, &y);
+            let expected = x
+                .iter_lsb_to_msb()
+                .zip(y.iter_lsb_to_msb())
+                .map(|(x, y)| reference.add_mux2(s, *x, *y))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                result.iter_lsb_to_msb().copied().collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(gb.gates.len(), reference.gates.len());
+        }
+    }
+
+    #[test]
+    fn shared_mask_mux_keeps_late_selector_depth() {
+        let mut gb = GateBuilder::new("late_selector".into(), GateBuilderOptions::opt());
+        let x = gb.add_input("x".into(), 8);
+        let en = *gb.add_input("en".into(), 1).get_lsb(0);
+        let controls = gb.add_input("controls".into(), 8);
+        let selector = gb.add_and_reduce(&controls, ReductionKind::Tree);
+        let masked = x
+            .iter_lsb_to_msb()
+            .map(|bit| gb.add_and_binary(*bit, en))
+            .collect::<Vec<_>>();
+        let masked = AigBitVector::from_lsb_is_index_0(&masked);
+        let zeros = AigBitVector::zeros(8);
+        let mut reference = gb.clone();
+        let got = super::gatify_binary_sel(&mut gb, &selector, &masked, &zeros);
+        let expected = masked
+            .iter_lsb_to_msb()
+            .map(|bit| reference.add_mux2(selector, *bit, reference.get_false()))
+            .collect::<Vec<_>>();
+        assert_eq!(got.iter_lsb_to_msb().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(gb.gates.len(), reference.gates.len());
+    }
 
     fn ir_value_to_gate_bits(value: &IrValue, ty: &ir::Type) -> IrBits {
         let mut bits = Vec::new();
