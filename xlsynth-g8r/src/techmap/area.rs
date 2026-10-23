@@ -64,6 +64,9 @@ struct Binding {
 /// six inputs. Cells with dont_use, use_for_size_only, unsupported semantics,
 /// clocks, or multiple outputs are excluded, as are cells with unparseable
 /// functions. Invalid areas or unknown function inputs are errors.
+/// Area construction prunes by area/stable index before expansion; the internal
+/// delay construction retains electrical and pin alternatives. Neither changes
+/// the original library or the eligible cell list.
 #[derive(Debug)]
 pub struct AreaMappingLibrary {
     delay_first: bool,
@@ -131,6 +134,8 @@ impl AreaMappingLibrary {
         let mut cells: Vec<Cell> = Vec::new();
         let mut matches: BTreeMap<(usize, u64), Vec<Binding>> = BTreeMap::new();
         let mut six_input_functions = Vec::new();
+        let mut eager_area_representatives = BTreeMap::<(usize, u64), usize>::new();
+        let mut eager_functions = Vec::new();
         let mut excluded_cells = Vec::new();
         let mut missing_policy_coverage = None;
         let mut names = BTreeSet::new();
@@ -260,6 +265,25 @@ impl AreaMappingLibrary {
                 six_input_functions.push((index, tt));
                 continue;
             }
+            if timing.is_none() {
+                // Area-only dominance: identical physical truth tables expand
+                // to the same bindings. Preserve the existing area/index tie.
+                // Delay mode must retain electrical and pin alternatives.
+                let best = eager_area_representatives.entry((n, tt)).or_insert(index);
+                if cells[index]
+                    .area
+                    .total_cmp(&cells[*best].area)
+                    .then(index.cmp(best))
+                    .is_lt()
+                {
+                    *best = index;
+                }
+            } else {
+                eager_functions.push(((n, tt), index));
+            }
+        }
+        eager_functions.extend(eager_area_representatives);
+        for ((n, tt), index) in eager_functions {
             for perm in permutations(n) {
                 for phases in 0..1usize << n {
                     let mut transformed = 0u64;
@@ -1898,5 +1922,80 @@ mod tests {
         lib.cells[wide].use_for_size_only = Some(false);
         lib.cells[wide].area = f64::NAN;
         assert!(AreaMappingLibrary::new(&lib).is_err());
+    }
+    #[test]
+    fn eager_pruning_preserves_area_and_stable_cell_ties() {
+        let lib = library(&[
+            ("INV", &["A"], "!A", 0.1),
+            ("Z_EXPENSIVE", &["A", "B"], "A*B", 3.0),
+            ("B_CHEAP", &["A", "B"], "A*B", 1.0),
+            ("A_CHEAP", &["A", "B"], "A*B", 1.0),
+            ("NAND", &["A", "B"], "!(A*B)", 2.0),
+        ]);
+        for negate in [false, true] {
+            let (mut b, x) = builder();
+            let y = b.add_and_binary(x[1], if negate { x[0].negate() } else { x[0] });
+            b.add_output("out".into(), y.into());
+            let result = verify(&b.build(), &lib);
+            assert_eq!(result.stats.cells_by_type.get("A_CHEAP"), Some(&1));
+            assert!(!result.stats.cells_by_type.contains_key("B_CHEAP"));
+            assert!(!result.stats.cells_by_type.contains_key("Z_EXPENSIVE"));
+        }
+    }
+
+    #[test]
+    fn eager_area_pruning_preserves_asymmetric_pin_bindings() {
+        let lib = library(&[
+            ("INV", &["A"], "!A", 0.1),
+            ("A_EXPENSIVE", &["z", "a", "m"], "a+(m*z)", 3.0),
+            ("C_TIED", &["m", "z", "a"], "a+(m*z)", 1.0),
+            ("B_WINNER", &["z", "m", "a"], "a+(m*z)", 1.0),
+        ]);
+        let original_cells = lib.cells.clone();
+        let index = AreaMappingLibrary::new(&lib).unwrap();
+        assert_eq!(lib.cells, original_cells);
+        assert_eq!(index.cells.len(), original_cells.len());
+        let winner = index
+            .cells
+            .iter()
+            .position(|c| c.name == "B_WINNER")
+            .unwrap();
+        // Pin order is lexical: a, m, z. Check exact stable binding choices,
+        // including the interchangeable product inputs, not just semantics.
+        for (table, perm, phases) in [
+            (0xea, vec![0, 1, 2], 0), // x0 + x1*x2
+            (0x4f, vec![2, 0, 1], 5), // !x2 + !x0*x1
+        ] {
+            assert_eq!(
+                index.matches[&(3, table)],
+                vec![Binding {
+                    cell: winner,
+                    perm,
+                    phases
+                }]
+            );
+        }
+
+        for perm in permutations(3) {
+            for phases in 0..8 {
+                let (mut b, x) = builder();
+                let inputs = (0..3)
+                    .map(|i| {
+                        if phases & (1 << i) != 0 {
+                            x[perm[i]].negate()
+                        } else {
+                            x[perm[i]]
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let product = b.add_and_binary(inputs[1], inputs[2]);
+                let y = b.add_or_binary(inputs[0], product);
+                b.add_output("out".into(), y.into());
+                let result = verify(&b.build(), &lib);
+                assert_eq!(result.stats.cells_by_type.get("B_WINNER"), Some(&1));
+                assert!(!result.stats.cells_by_type.contains_key("C_TIED"));
+                assert!(!result.stats.cells_by_type.contains_key("A_EXPENSIVE"));
+            }
+        }
     }
 }

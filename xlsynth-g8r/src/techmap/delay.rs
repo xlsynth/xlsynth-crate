@@ -139,7 +139,19 @@ mod tests {
             },
         )
         .unwrap();
+        let original_cells = lib.cells.clone();
+        let before_area = format!("{delay:?}");
         let area = AreaMappingLibrary::new(&lib).unwrap();
+        assert_eq!(lib.cells, original_cells);
+        let after_area = DelayMappingLibrary::new(
+            &lib,
+            DelayMappingOptions {
+                reference_transition: 10.0,
+                reference_load: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(format!("{after_area:?}"), before_area);
         for negative in [false, true] {
             let mut b = GateBuilder::new("test".into(), GateBuilderOptions::no_opt());
             let x = *b.add_input("x".into(), 1).get_lsb(0);

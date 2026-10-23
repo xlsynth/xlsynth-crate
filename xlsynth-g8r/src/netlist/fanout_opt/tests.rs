@@ -1165,3 +1165,20 @@ fn common_plan_preserves_baseline_names_bindings_and_topologies() {
         engine.check_loads(&full_graph).unwrap();
     }
 }
+
+#[test]
+fn area_index_does_not_prune_timing_alternatives() {
+    let lib = library(&[
+        Spec::new("A_SLOW", "A*B", 0.1, 10.0),
+        Spec::new("B_FAST", "A*B", 0.2, 1.0),
+    ]);
+    let original_cells = lib.cells.clone();
+    let _area_index = crate::techmap::area::AreaMappingLibrary::new(&lib).unwrap();
+    assert_eq!(lib.cells, original_cells);
+    let names = choices(&lib)
+        .unwrap()
+        .iter()
+        .map(|choice| lib.cells[choice.index].name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["A_SLOW", "B_FAST"]);
+}
