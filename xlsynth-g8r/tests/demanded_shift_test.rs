@@ -173,3 +173,41 @@ fn demanded_shift_unused_intermediate_bits_cannot_be_proved_constant() {
             .all(|p| matches!(p.result, CandidateProofResult::Skipped { .. }))
     );
 }
+
+#[test]
+fn demanded_shift_late_low_control_qor() {
+    // Minimized from frozen BVC five- and seven-operation cones: a late
+    // low control and early high controls select one bit of a left shift.
+    for priority in [false, true] {
+        let width = if priority { 32 } else { 33 };
+        let prefix = if priority {
+            "reversed: bits[32] = reverse(control, id=4)\n  encoded_input: bits[33] = one_hot(reversed, lsb_prio=true, id=5)"
+        } else {
+            "encoded_input: bits[33] = identity(control, id=5)"
+        };
+        let text = format!(
+            r#"fn f(control: bits[{width}] id=1, high: bits[6] id=2, data: bits[33] id=3) -> bits[1] {{
+  {prefix}
+  encoded: bits[6] = encode(encoded_input, id=6)
+  low: bits[1] = bit_slice(encoded, start=0, width=1, id=7)
+  amount: bits[7] = concat(high, low, id=8)
+  shifted: bits[33] = shll(data, amount, id=9)
+  ret result: bits[1] = bit_slice(shifted, start=7, width=1, id=10)
+}}"#
+        );
+        let f = Parser::new(&text).parse_fn().unwrap();
+        let result = gatify_prepared_fn(
+            &f,
+            GatifyOptions {
+                check_equivalence: cfg!(feature = "has-bitwuzla"),
+                equivalence_solver: SolverChoice::Bitwuzla,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap();
+        let stats = xlsynth_g8r::aig::get_summary_stats::get_aig_stats(&result.gate_fn);
+        let (max_nodes, max_depth) = if priority { (108, 16) } else { (40, 7) };
+        assert!(stats.and_nodes <= max_nodes, "{stats:?}");
+        assert!(stats.max_depth <= max_depth, "{stats:?}");
+    }
+}

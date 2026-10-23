@@ -706,7 +706,16 @@ pub(crate) fn gatify_barrel_shifter_with_output_mask(
     if !output_mask.iter().any(|bit| *bit) {
         return AigBitVector::zeros(output_mask.len());
     }
-    let natural_amount_bits = (arg_gates.get_bit_count() as f64).log2().ceil() as usize;
+    // A shift beyond this distance makes every demanded output zero. Combine
+    // those controls before stage-order selection rather than emitting a chain
+    // of fill-only stages, whose cost can hide a better arrival order.
+    let max_shift = match direction {
+        Direction::Left => output_mask.iter().rposition(|bit| *bit).unwrap(),
+        Direction::Right => {
+            output_mask.len() - 1 - output_mask.iter().position(|bit| *bit).unwrap()
+        }
+    };
+    let natural_amount_bits = (usize::BITS - max_shift.leading_zeros()) as usize;
     let amount_can_be_oversize = amount_gates.get_bit_count() > natural_amount_bits;
     // The "amount" value is limited in what it can realistically cause to
     // happen by the number of bits in the arg value. If the number is
@@ -1256,6 +1265,71 @@ mod tests {
 
     use test_case::test_case;
     use xlsynth_pir::IrBits;
+
+    #[test]
+    fn demanded_logical_shift_overflow_matches_full_width_shift() {
+        // Include zero-bit controls, overshifts, boundary-only outputs, holes,
+        // and non-power-of-two widths. The oracle shifts the original input.
+        for width in [1usize, 3, 8, 9, 33, 65] {
+            for direction in [Direction::Left, Direction::Right] {
+                for fold in [false, true] {
+                    for amount_width in [0, 2, xlsynth_pir::math::ceil_log2(width.max(2)) + 1] {
+                        for pattern in 0..5 {
+                            let mask = (0..width)
+                                .map(|i| match pattern {
+                                    0 => false,
+                                    1 => true,
+                                    2 => i == 0,
+                                    3 => i + 1 == width,
+                                    _ => i % 3 == 1,
+                                })
+                                .collect::<Vec<_>>();
+                            let mut gb = GateBuilder::new(
+                                "overflow_shift".into(),
+                                GateBuilderOptions { fold, hash: fold },
+                            );
+                            let data = gb.add_input("x".into(), width);
+                            let amount = gb.add_input("amount".into(), amount_width);
+                            let result = gatify_barrel_shifter_with_output_mask(
+                                &data, &amount, direction, &mask, "test", &mut gb,
+                            );
+                            gb.add_output("result".into(), result);
+                            let f = gb.build();
+                            for shift in 0..(1usize << amount_width) {
+                                let bits = (0..width)
+                                    .map(|i| (i * 13 + shift * 7) % 11 < 5)
+                                    .collect::<Vec<_>>();
+                                let expected = (0..width)
+                                    .map(|j| {
+                                        let source = match direction {
+                                            Direction::Left => j.checked_sub(shift),
+                                            Direction::Right => {
+                                                j.checked_add(shift).filter(|i| *i < width)
+                                            }
+                                        };
+                                        mask[j] && source.is_some_and(|i| bits[i])
+                                    })
+                                    .collect::<Vec<_>>();
+                                let actual = gate_sim::eval(
+                                    &f,
+                                    &[
+                                        IrBits::from_lsb_is_0(&bits),
+                                        IrBits::make_ubits(amount_width, shift as u64).unwrap(),
+                                    ],
+                                    gate_sim::Collect::None,
+                                );
+                                assert_eq!(
+                                    actual.outputs,
+                                    vec![IrBits::from_lsb_is_0(&expected)],
+                                    "width={width} direction={direction:?} amount_width={amount_width} pattern={pattern} shift={shift}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn demanded_shift_masks_preserve_internal_dependencies() {
