@@ -1084,45 +1084,21 @@ fn gatify_array_update(
     gatify_array_update_dimension(gb, array_ty, array_bits, value_bits, index_bits, None)
 }
 
-/// Shares the mask and arm selector across constant-zero bits of a binary
-/// select.
+/// Shares the combined mask and selector across constant-zero select positions.
 ///
-/// Let `take` select the data arm, with `data[i] = x[i] & mask`. For each
-/// position where the other arm has `C[i] = 0`, ordinary compositional lowering
-/// first builds the masked value, then builds the mux around it:
-///
+/// For a data arm `x[i] & enable`, let `selected` mean that arm is chosen:
 /// ```text
-/// before: data[i] = x[i] & mask
-///         out[i]  = take & data[i]
-///
-/// after:  enable  = take & mask       // one node shared across these positions
-///         out[i]  = x[i] & enable
+/// ordinary: (x[i] & enable) & selected
+/// factored: x[i] & (enable & selected)
 /// ```
+/// The selector was already shared; factoring shares `enable & selected` too.
+/// Structural hashing merges identical expressions, but does not reassociate
+/// the ordinary form to expose this common term.
 ///
-/// Structural hashing reuses identical AND expressions; it does not reassociate
-/// `take & (x[i] & mask)` into `x[i] & (take & mask)`. With K distinct zero
-/// positions, the illustrated form can replace 2K conjunctions with K + 1.
-/// This motivates requiring at least two zero positions, but is not an exact
-/// live-area guarantee: existing sharing, folding, and other users affect cost.
-/// Constant-one positions keep their ordinary `mux(take, data[i], 1)` lowering.
-///
-/// Eligibility is deliberately local: equal-width arms (checked by the caller),
-/// width at least two, an entirely constant other arm with at least two zeros,
-/// and every data bit an immediate, non-negated AND output sharing one operand.
-/// Operand order may differ; the shared operand itself may be complemented.
-/// No cones are flattened. The binary-IR-select caller tries both arm
-/// orientations (`take = selector` or its complement) only for a nonconstant
-/// selector with folding and hashing enabled. Hashing is needed here for the
-/// builder's cached depths, not for the Boolean identity or explicit reuse of
-/// `enable`.
-///
-/// Before emitting anything, require, at every zero position:
-/// `max(depth(x[i]), max(depth(take), depth(mask)) + 1) + 1` no greater than
-/// `max(depth(take), depth(data[i])) + 1`. These are local construction-depth
-/// estimates, not a guarantee about final whole-function depth, area, graph LE,
-/// or mapped PPA. On rejection the caller uses ordinary mux construction.
-/// Existing data nodes are not rewritten or removed: other consumers keep them,
-/// and later dead-code elimination can remove any that become unused.
+/// The constant arm may mix zeros and ones. Only zero positions are factored;
+/// one positions retain ordinary mux lowering. Require a common AND operand,
+/// multiple zero positions to amortize the combined control, and no estimated
+/// local depth increase. The caller requires hashing for its cached depths.
 fn try_add_mux2_with_shared_mask(
     gb: &mut GateBuilder,
     select_data: AigOperand,
