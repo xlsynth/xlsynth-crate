@@ -1304,7 +1304,8 @@ pub unsafe extern "C" fn xlsynth_pir_record_trace(
     }
     state.trace_messages.push(TraceMessage {
         node_text_id: site.node_text_id,
-        // SAFETY: the generated caller supplies one pointer per metadata operand.
+        // SAFETY: the generated caller supplies one pointer per metadata
+        // operand.
         message: unsafe {
             format_trace_message(
                 site.format.as_deref().unwrap_or(""),

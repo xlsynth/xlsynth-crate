@@ -87,7 +87,8 @@ impl<D: Clone> NodePairMap<D> {
 /// A data structure collecting nodes which are structurally equivalent.
 /// Specifically, it maps OldNodeRefs to equivalent NewNodeRefs and vice versa.
 struct EquivalentNodeSet {
-    // Equivalence class index for each Old/Node node. Indexed by OldNodeRef/NewNodeRef.index.
+    // Equivalence class index for each Old/Node node. Indexed by
+    // OldNodeRef/NewNodeRef.index.
     old_index_to_equiv_class: NodeVector<OldNodeRef, usize>,
     new_index_to_equiv_class: NodeVector<NewNodeRef, usize>,
     // Vectors of equivalent nodes, indexed by equivalence class index.

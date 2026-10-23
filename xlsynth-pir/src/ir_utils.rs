@@ -51,8 +51,8 @@ pub fn is_structural_payload(payload: &NodePayload) -> bool {
         NodePayload::ZeroExt { .. } => true,
         NodePayload::BitSlice { .. } => true,
         NodePayload::Nary(crate::ir::NaryOp::Concat, _) => true,
-        // Everything else is potentially semantically interesting (boolean logic,
-        // arithmetic, selects, asserts/traces, invokes, etc.).
+        // Everything else is potentially semantically interesting (boolean
+        // logic, arithmetic, selects, asserts/traces, invokes, etc.).
         _ => false,
     }
 }

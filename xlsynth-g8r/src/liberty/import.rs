@@ -182,7 +182,8 @@ fn find_unsupported(block: &Block, path: &str, issues: &mut Vec<UnsupportedSeman
                     "internal_node" | "state_function" => Some(UnsupportedFeature::InternalState),
                     "next_state" | "clocked_on" | "clear" | "preset" | "data_in" | "enable" => None,
                     _ if sequential => Some(UnsupportedFeature::SequentialAttribute),
-                    // Characterization and documentation are not functional equations.
+                    // Characterization and documentation are not functional
+                    // equations.
                     _ => None,
                 };
                 if let Some(feature) = feature {

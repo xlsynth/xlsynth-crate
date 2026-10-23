@@ -235,11 +235,11 @@ impl Default for RewriteOptions {
             // Keep the pass lightweight by default; callers that want a more
             // exhaustive search can increase these.
             max_cuts_per_node: 64,
-            // Run to convergence by default; the rewrite criterion is monotone so
-            // the pass will reach a fixed point.
+            // Run to convergence by default; the rewrite criterion is monotone
+            // so the pass will reach a fixed point.
             //
-            // Callers that need a hard time/effort bound (e.g. fuzz targets) can
-            // set `max_iterations` to a small positive value.
+            // Callers that need a hard time/effort bound (e.g. fuzz targets)
+            // can set `max_iterations` to a small positive value.
             max_iterations: 0,
             verify_area_costing: false,
             verify_delay_costing: false,

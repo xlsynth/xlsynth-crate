@@ -30,11 +30,11 @@ pub enum BlockMember {
 pub struct Block {
     pub block_type: String,
     // Note: blocks can have no qualifiers; e.g. `leakage_power() { ... }`
-    // In that case, it has a `when` attribute that indicates the boolean-valued situation when the
-    // information is applicable.
+    // In that case, it has a `when` attribute that indicates the boolean-valued
+    // situation when the information is applicable.
     //
-    // Many blocks in practice have a single qualifier that is an identifier, like `cell(BLAH) {
-    // ... }`.
+    // Many blocks in practice have a single qualifier that is an identifier,
+    // like `cell(BLAH) { ... }`.
     pub qualifiers: Vec<Value>,
     pub members: Vec<BlockMember>,
 }

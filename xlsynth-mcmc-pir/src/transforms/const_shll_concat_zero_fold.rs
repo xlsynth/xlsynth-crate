@@ -104,7 +104,8 @@ impl PirTransform for ConstShllConcatZeroFoldTransform {
                     });
                 }
 
-                // shll(x, k) -> concat(bit_slice(x, 0, w-k), 0_k) for constant k
+                // shll(x, k) -> concat(bit_slice(x, 0, w-k), 0_k) for constant
+                // k
                 NodePayload::Binop(Binop::Shll, x, k) => {
                     let w = match Self::bits_width(f, nr) {
                         Some(w) => w,
