@@ -991,38 +991,18 @@ term. Aliased outputs retain their individual external loads but share one
 wire term. Dangling nets receive no wire load. Primary inputs remain ideal
 arrival/slew sources. No fanout cutoff is applied.
 
-This is a capacitance-only affine approximation to conventional fanout-based
-wire-load models, not full Liberty wire-load import or resistance/delay support.
-One statistical interpretation is `L = L0 + l * F`, `C = c' * L`: fixed
-overhead plus average incremental capacitance per consumer. Coefficients are
-empirical; they do not imply literal unit areas or identical wire geometry.
-The [Liberty Reference Manual 2007.03, §§1.9.45–1.9.47](https://people.eecs.berkeley.edu/~alanmi/publications/other/liberty07_03.pdf)
-describes fanout-length tables, per-length capacitance/resistance and slope,
-as well as direct fanout-capacitance tables. It does not mandate this affine
-formula. [Boese, Kahng and Mantik, “On the Relevance of Wire Load Models” (2001)](https://vlsicad.ucsd.edu/Publications/Conferences/124/c124.pdf)
-discuss flow-dependent benefits and limitations; WLMs can reduce flow runtime,
-but do not promise universal power, performance or area improvements.
+This capacitance-only model omits wire resistance, distributed propagation,
+and coupling activity; it does not import Liberty wire-load models.
 
-An experimental ASAP7 starting point is constant `0` and coefficient
-`0.13` fF/sink (fitted coefficient approximately `0.1263`); consider
-`0.10 / 0.13 / 0.16` sensitivity runs:
+For illustration, this ASAP7 example uses a constant of `0` fF and
+`0.13` fF per sink. These values are technology- and flow-dependent, not
+universal defaults:
 
 ```shell
 xlsynth-driver gv-sta --netlist mapped.gv --liberty_proto asap7.proto \
   --primary_input_transition 10 --module_output_load 1 \
   --wire-capacitance-constant-ff 0 --wire-capacitance-per-sink-ff 0.13
 ```
-
-This example came from eight dense arithmetic blocks at ASAP7 RVT TT, 0.7 V,
-25°C, using final post-buffering internal nets with fanout 1–10. On matched
-final signal netlists, leave-one-design-out slopes reduced g8r worst-arrival
-MAE against extracted routed reference timing from 347.6 to 114.7 ps, and mean
-absolute relative error from 18.27% to 6.61%. That evaluation excluded IO-lineage
-and fanout-above-10 nets from added model capacitance; the generic CLI has no
-such cutoff. These results are flow-dependent and do not validate extrapolation
-above 10, pre-layout topology transfer, or a positive constant term. Capacitance
-alone omits wire resistance, distributed propagation and coupling activity;
-it is a statistical prior, not a physical per-net prediction.
 
 ### `gv-area`: gate-level mapped cell area
 
