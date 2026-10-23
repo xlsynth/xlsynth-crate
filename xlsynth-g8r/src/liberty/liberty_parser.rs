@@ -39,6 +39,19 @@ pub struct Block {
     pub members: Vec<BlockMember>,
 }
 
+/// Distinguishes syntax failures from errors returned by a root-member visitor.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ParseWithVisitorError {
+    Syntax(String),
+    Visitor(String),
+}
+
+impl From<String> for ParseWithVisitorError {
+    fn from(error: String) -> Self {
+        Self::Syntax(error)
+    }
+}
+
 // LibertyParser owns an AsciiStream (instead of managing byte operations
 // itself).
 pub struct LibertyParser<I: Iterator<Item = u8>> {
@@ -185,7 +198,7 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
         &mut self,
         retain_subblock: F,
         mut visitor: V,
-    ) -> Result<Block, String>
+    ) -> Result<Block, ParseWithVisitorError>
     where
         F: Fn(&str, &str) -> bool,
         V: FnMut(BlockMember) -> Result<Option<BlockMember>, String>,
@@ -205,7 +218,7 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
         let mut members = Vec::new();
         while !self.stream.peek_is(b"}")? {
             if let Some(member) = self.parse_block_member(&block_type, true, &retain_subblock)?
-                && let Some(member) = visitor(member)?
+                && let Some(member) = visitor(member).map_err(ParseWithVisitorError::Visitor)?
             {
                 members.push(member);
             }
@@ -220,6 +233,11 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
 
     pub fn parse(&mut self) -> Result<Block, String> {
         self.parse_with_member_visitor(|_, _| true, |member| Ok(Some(member)))
+            .map_err(|error| match error {
+                ParseWithVisitorError::Syntax(error) | ParseWithVisitorError::Visitor(error) => {
+                    error
+                }
+            })
     }
 }
 
@@ -533,6 +551,20 @@ mod tests {
             |parent, child| parent != "pin" || child != "timing",
             |member| Ok(Some(member)),
         );
-        assert!(result.is_err());
+        assert!(matches!(result, Err(ParseWithVisitorError::Syntax(_))));
+    }
+
+    #[test]
+    fn test_member_visitor_error_is_distinct_from_syntax_error() {
+        let text = "library (example) { cell (BUF) {} }";
+        let mut parser = LibertyParser::new_from_iter(text.bytes());
+        let result =
+            parser.parse_with_member_visitor(|_, _| true, |_| Err("visitor failure".to_string()));
+        assert_eq!(
+            result,
+            Err(ParseWithVisitorError::Visitor(
+                "visitor failure".to_string()
+            ))
+        );
     }
 }

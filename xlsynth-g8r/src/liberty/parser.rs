@@ -2,7 +2,7 @@
 
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::import::{ElectricalDefaults, electrical_value, prepare_cell};
-use crate::liberty::liberty_parser::{Block, BlockMember, Value};
+use crate::liberty::liberty_parser::{Block, BlockMember, ParseWithVisitorError, Value};
 use crate::liberty::model::{
     AxisId, LibraryBuilder, LutTemplateKind, LutVariable, StringId, TimingSense, TimingType,
     timing_table_kind_to_wire,
@@ -1768,7 +1768,12 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
                     Ok(Some(member))
                 },
             )
-            .map_err(|e| format!("Import error in {}: {}", path.as_ref().display(), e))?;
+            .map_err(|error| match error {
+                ParseWithVisitorError::Syntax(error) => {
+                    format!("Parse error in {}: {}", path.as_ref().display(), error)
+                }
+                ParseWithVisitorError::Visitor(error) => error,
+            })?;
         let parsed_default_threshold_voltage_group = parse_default_threshold_voltage_group(&lib);
         let parsed_nominal_voltage = if payload_options.include_power {
             parse_nominal_voltage(&lib)?
@@ -1932,6 +1937,21 @@ mod tests {
     use prost_reflect::{DescriptorPool, DynamicMessage};
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_streamed_syntax_errors_keep_source_context() {
+        let text = "library (example) { cell (BUF) { area : ; } }";
+        let syntax_error = LibertyParser::new_from_iter(text.bytes())
+            .parse()
+            .unwrap_err();
+        let mut source = NamedTempFile::new().unwrap();
+        write!(source, "{text}").unwrap();
+        let import_error = parse_liberty_files(&[source.path()]).unwrap_err();
+        assert_eq!(
+            import_error,
+            format!("Parse error in {}: {syntax_error}", source.path().display())
+        );
+    }
 
     #[test]
     fn test_streamed_cells_resolve_following_library_metadata() {
