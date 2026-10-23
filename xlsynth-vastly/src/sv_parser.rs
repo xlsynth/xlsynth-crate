@@ -162,8 +162,9 @@ impl<'a> Parser<'a> {
                 let _ = self.ifdef_stack.pop();
                 Ok(())
             }
-            // Non-conditional directive: best-effort skip tokens until we see another directive
-            // or endmodule/EOF. This is conservative given we don't track newlines.
+            // Non-conditional directive: best-effort skip tokens until we see
+            // another directive or endmodule/EOF. This is conservative given we
+            // don't track newlines.
             _ => {
                 while self.idx < self.toks.len() {
                     match self.cur() {

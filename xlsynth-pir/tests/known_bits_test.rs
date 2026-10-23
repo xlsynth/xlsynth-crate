@@ -274,7 +274,8 @@ top fn sample(index: bits[129] id=1) -> (bits[4], bits[4], bits[4], bits[4][4], 
         (vec![4, 1], "0011"),
         (vec![4, 2], "0111"),
         (vec![4, 3], "1111"),
-        // There is only one feasible in-bounds index, but OOB writes are no-ops.
+        // There is only one feasible in-bounds index, but OOB writes are
+        // no-ops.
         (vec![5, 0], "00X1"),
         (vec![6, 0], "XXX1"),
         (vec![6, 1], "XX11"),

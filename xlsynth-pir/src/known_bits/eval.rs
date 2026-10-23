@@ -616,7 +616,8 @@ pub(super) fn evaluate(
             KnownValue::Token
         }
         // Sources and opaque calls/instances have no local transfer.
-        // Reset/write data never constrain a register's arbitrary current value.
+        // Reset/write data never constrain a register's arbitrary current
+        // value.
         NodePayload::Nil
         | NodePayload::Param
         | NodePayload::InputPort { .. }

@@ -397,11 +397,88 @@ struct ObservedActivity {
     diagnostics: GvDynamicPowerDiagnostics,
 }
 
+/// One sampled state, with storage fixed by the prepared model and topology.
 #[derive(Clone, Debug)]
 struct SampleState {
     signal_values: Vec<bool>,
     pin_values: Vec<Vec<bool>>,
     state_alias_values: Vec<Vec<bool>>,
+}
+
+impl SampleState {
+    /// Allocates a reusable state buffer without evaluating any signals.
+    fn new(model: &PowerModelView<'_>, topology: &PowerTopology) -> Self {
+        Self {
+            signal_values: vec![false; topology.signals.len()],
+            pin_values: model
+                .instances
+                .iter()
+                .map(|instance| vec![false; instance.pins.len()])
+                .collect(),
+            state_alias_values: topology
+                .instances
+                .iter()
+                .map(|instance| vec![false; instance.state_aliases.len()])
+                .collect(),
+        }
+    }
+}
+
+/// Scratch storage reused sequentially across all instances and transitions.
+struct TransitionScratch {
+    timing_candidates: Vec<TimingCauseKey>,
+    internal_candidates: Vec<InternalEventKey>,
+    conditions: ConditionCache,
+}
+
+impl TransitionScratch {
+    /// Sizes the shared condition cache once for the largest binding layout.
+    fn new(topology: &PowerTopology) -> Self {
+        let condition_count = topology
+            .instances
+            .iter()
+            .map(|instance| instance.bindings.conditions.len())
+            .max()
+            .unwrap_or(0);
+        Self {
+            timing_candidates: Vec::new(),
+            internal_candidates: Vec::new(),
+            conditions: ConditionCache::new(condition_count),
+        }
+    }
+}
+
+/// Successful evaluation of one condition against both transition endpoints.
+#[derive(Clone, Copy, Debug)]
+struct ConditionOutcome {
+    previous: bool,
+    current: bool,
+}
+
+/// Lazy results valid only for the current instance and transition.
+struct ConditionCache {
+    outcomes: Vec<Option<ConditionOutcome>>,
+    #[cfg(test)]
+    hits: usize,
+    #[cfg(test)]
+    evaluated_pairs: usize,
+}
+
+impl ConditionCache {
+    fn new(condition_count: usize) -> Self {
+        Self {
+            outcomes: vec![None; condition_count],
+            #[cfg(test)]
+            hits: 0,
+            #[cfg(test)]
+            evaluated_pairs: 0,
+        }
+    }
+
+    /// Invalidates this instance's indexed entries without changing capacity.
+    fn reset(&mut self, condition_count: usize) {
+        self.outcomes[..condition_count].fill(None);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1534,7 +1611,10 @@ fn observe_ordered_activity(
         ));
     }
     let mut result = ObservedActivity::default();
-    let mut previous = None;
+    let mut previous = SampleState::new(model, topology);
+    let mut current = SampleState::new(model, topology);
+    let mut has_previous = false;
+    let mut scratch = TransitionScratch::new(topology);
     let live_nodes = vec![true; model.gate_fn.gates.len()];
     let mut nodes = Vec::new();
     for chunk_start in (0..batch_inputs.len()).step_by(256) {
@@ -1553,31 +1633,44 @@ fn observe_ordered_activity(
         );
         for lane in 0..chunk_len {
             let sample_index = chunk_start + lane;
-            let current = sample_state(model, topology, &nodes, lane, clock_values[sample_index])?;
-            if let Some(previous) = previous.as_ref() {
+            // A failed fill can leave current partially overwritten, but it is
+            // never observed or promoted to the predecessor in that case.
+            sample_state_into(
+                model,
+                topology,
+                &nodes,
+                lane,
+                clock_values[sample_index],
+                &mut current,
+            )?;
+            if has_previous {
                 observe_transition(
                     model,
                     library,
                     topology,
-                    previous,
+                    &previous,
                     &current,
                     transition_kinds[sample_index - 1],
                     &mut result,
+                    &mut scratch,
                 )?;
             }
-            previous = Some(current);
+            std::mem::swap(&mut previous, &mut current);
+            has_previous = true;
         }
     }
     Ok(result)
 }
 
-fn sample_state(
+/// Fills existing storage in signal, pin, then state-alias evaluation order.
+fn sample_state_into(
     model: &PowerModelView<'_>,
     topology: &PowerTopology,
     nodes: &[gate_simd::Vec256],
     lane: usize,
     clock_value: Option<bool>,
-) -> Result<SampleState, String> {
+    state: &mut SampleState,
+) -> Result<(), String> {
     let operand_value = |operand: AigOperand| {
         nodes
             .get(operand.node.id)
@@ -1591,43 +1684,24 @@ fn sample_state(
             clock_value.ok_or_else(|| "power sample omitted selected clock value".to_string())
         }
     };
-    let signal_values = topology
-        .signals
-        .iter()
-        .map(|signal| signal_value(signal.source))
-        .collect::<Result<Vec<_>, _>>()?;
-    let pin_values = model
-        .instances
-        .iter()
-        .map(|instance| {
-            instance
-                .pins
-                .iter()
-                .map(|pin| signal_value(pin.signal))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let state_alias_values = topology
-        .instances
-        .iter()
-        .map(|instance| {
-            instance
-                .state_aliases
-                .iter()
-                .map(|alias| {
-                    signal_value(alias.signal)
-                        .map(|value| if alias.complemented { !value } else { value })
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(SampleState {
-        signal_values,
-        pin_values,
-        state_alias_values,
-    })
+    for (slot, signal) in state.signal_values.iter_mut().zip(&topology.signals) {
+        *slot = signal_value(signal.source)?;
+    }
+    for (values, instance) in state.pin_values.iter_mut().zip(&model.instances) {
+        for (slot, pin) in values.iter_mut().zip(&instance.pins) {
+            *slot = signal_value(pin.signal)?;
+        }
+    }
+    for (values, instance) in state.state_alias_values.iter_mut().zip(&topology.instances) {
+        for (slot, alias) in values.iter_mut().zip(&instance.state_aliases) {
+            *slot = signal_value(alias.signal)? ^ alias.complemented;
+        }
+    }
+    Ok(())
 }
 
+/// Attributes one transition while preserving selector and accumulation order.
+#[allow(clippy::too_many_arguments)]
 fn observe_transition(
     model: &PowerModelView<'_>,
     library: &Library,
@@ -1636,6 +1710,7 @@ fn observe_transition(
     current: &SampleState,
     transition_kind: PowerTransitionKind,
     result: &mut ObservedActivity,
+    scratch: &mut TransitionScratch,
 ) -> Result<(), String> {
     for (signal_index, (before, after)) in previous
         .signal_values
@@ -1671,6 +1746,9 @@ fn observe_transition(
             state_aliases: current_state_alias_values,
         };
         let bindings = &topology_instance.bindings;
+        // Values are valid across timing and power selection for this instance
+        // only, even when another instance shares the same immutable bindings.
+        scratch.conditions.reset(bindings.conditions.len());
         for (output_pin_index, output_signal) in
             topology_instance.output_signals.iter().copied().enumerate()
         {
@@ -1682,7 +1760,8 @@ fn observe_transition(
                 continue;
             }
             let output_pin = &cell.pins[topology_instance.liberty_pins[output_pin_index]];
-            let mut candidates = Vec::new();
+            let candidates = &mut scratch.timing_candidates;
+            candidates.clear();
             for (arc_index, arc) in output_pin.timing_arcs.iter().enumerate() {
                 let prepared_arc = &bindings.pins[output_pin_index].timing_arcs[arc_index];
                 let timing_type = arc.timing_type_str(library);
@@ -1715,12 +1794,12 @@ fn observe_transition(
                         ))
                     || !when_is_true(
                         library,
-                        prepared_arc
-                            .condition
-                            .map(|index| &bindings.conditions[index]),
+                        prepared_arc.condition,
+                        &bindings.conditions,
                         previous_condition_values,
                         current_condition_values,
                         &mut result.diagnostics,
+                        &mut scratch.conditions,
                     )?
                 {
                     continue;
@@ -1758,7 +1837,7 @@ fn observe_transition(
                         .multiply_attributed_output_transition_count += 1;
                 }
                 let weight = 1.0 / candidates.len() as f64;
-                for candidate in candidates {
+                for candidate in candidates.iter().copied() {
                     *result.timing_causes.entry(candidate).or_default() += weight;
                 }
             }
@@ -1776,7 +1855,8 @@ fn observe_transition(
             if pin.direction == PinDirection::Output as i32 && owner_output_rise.is_none() {
                 continue;
             }
-            let mut candidates = Vec::new();
+            let candidates = &mut scratch.internal_candidates;
+            candidates.clear();
             for (group_index, prepared_group) in bindings.pins[owner_pin_index]
                 .power_groups
                 .iter()
@@ -1784,12 +1864,12 @@ fn observe_transition(
             {
                 if !when_is_true(
                     library,
-                    prepared_group
-                        .condition
-                        .map(|index| &bindings.conditions[index]),
+                    prepared_group.condition,
+                    &bindings.conditions,
                     previous_condition_values,
                     current_condition_values,
                     &mut result.diagnostics,
+                    &mut scratch.conditions,
                 )? {
                     continue;
                 }
@@ -1826,7 +1906,7 @@ fn observe_transition(
             }
             if !candidates.is_empty() {
                 let weight = 1.0 / candidates.len() as f64;
-                for candidate in candidates {
+                for candidate in candidates.iter().copied() {
                     *result.internal_events.entry(candidate).or_default() += weight;
                 }
             }
@@ -1835,36 +1915,56 @@ fn observe_transition(
     Ok(())
 }
 
-/// Evaluates both states before counting a request and using its previous
-/// value.
+/// Lazily evaluates both states, counting every successful request even on
+/// hits.
 fn when_is_true(
     library: &Library,
-    condition: Option<&PreparedCondition>,
+    condition: Option<usize>,
+    conditions: &[PreparedCondition],
     previous_values: ConditionValues<'_>,
     current_values: ConditionValues<'_>,
     diagnostics: &mut GvDynamicPowerDiagnostics,
+    cache: &mut ConditionCache,
 ) -> Result<bool, String> {
-    let Some(condition) = condition else {
+    let Some(index) = condition else {
         return Ok(true);
     };
-    let term = condition.term.as_ref().map_err(Clone::clone)?;
-    let missing_values = || {
-        format!(
-            "Liberty when '{}' could not be evaluated from cell pin values",
-            library.resolve_string(&condition.expression)
-        )
+    let outcome = if let Some(outcome) = cache.outcomes[index] {
+        #[cfg(test)]
+        {
+            cache.hits += 1;
+        }
+        outcome
+    } else {
+        let condition = &conditions[index];
+        let term = condition.term.as_ref().map_err(Clone::clone)?;
+        let missing_values = || {
+            format!(
+                "Liberty when '{}' could not be evaluated from cell pin values",
+                library.resolve_string(&condition.expression)
+            )
+        };
+        let previous = term
+            .evaluate_partial(previous_values)
+            .ok_or_else(missing_values)?;
+        // A false predecessor still requires current-state validation. Errors
+        // leave the entry unevaluated and do not count as successful requests.
+        let current = term
+            .evaluate_partial(current_values)
+            .ok_or_else(missing_values)?;
+        let outcome = ConditionOutcome { previous, current };
+        cache.outcomes[index] = Some(outcome);
+        #[cfg(test)]
+        {
+            cache.evaluated_pairs += 1;
+        }
+        outcome
     };
-    let previous = term
-        .evaluate_partial(previous_values)
-        .ok_or_else(missing_values)?;
-    let current = term
-        .evaluate_partial(current_values)
-        .ok_or_else(missing_values)?;
     diagnostics.when_evaluation_count += 1;
-    if previous != current {
+    if outcome.previous != outcome.current {
         diagnostics.when_changed_during_transition_count += 1;
     }
-    Ok(previous)
+    Ok(outcome.previous)
 }
 
 fn is_sequential_edge_timing_type(timing_type: &str) -> bool {
@@ -2343,6 +2443,9 @@ fn switching_energy(signal: &Signal, voltage_squared: f64) -> f64 {
         * (signal.edges.rise as f64 * signal.load.rise
             + signal.edges.fall as f64 * signal.load.fall)
 }
+
+#[cfg(test)]
+mod cache_tests;
 
 #[cfg(test)]
 mod tests {

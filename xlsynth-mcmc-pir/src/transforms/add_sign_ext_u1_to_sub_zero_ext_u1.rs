@@ -55,7 +55,8 @@ impl AddSignExtU1ToSubZeroExtU1Transform {
                 }
                 Some((*arg, *new_bit_count))
             }
-            // Match `concat(0_{w-1}, b)` form as an alternative zero-extension encoding.
+            // Match `concat(0_{w-1}, b)` form as an alternative zero-extension
+            // encoding.
             NodePayload::Nary(NaryOp::Concat, ops) if ops.len() == 2 => {
                 let hi = ops[0];
                 let lo = ops[1];
@@ -150,7 +151,8 @@ impl PirTransform for AddSignExtU1ToSubZeroExtU1Transform {
                     }
                 }
 
-                // Fold: sub(x, zero_ext(b,w)) (zero_ext can also be concat(0...,b)).
+                // Fold: sub(x, zero_ext(b,w)) (zero_ext can also be
+                // concat(0...,b)).
                 NodePayload::Binop(Binop::Sub, x, zext) => {
                     let w = match Self::bits_width(f, nr) {
                         Some(w) => w,

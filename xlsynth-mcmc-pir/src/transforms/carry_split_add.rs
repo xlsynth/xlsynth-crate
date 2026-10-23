@@ -177,7 +177,8 @@ impl PirTransform for CarrySplitAddTransform {
                 Ok(())
             }
 
-            // Fold: concat(sum_hi,sum_lo) matching our expansion pattern -> add(x,y).
+            // Fold: concat(sum_hi,sum_lo) matching our expansion pattern ->
+            // add(x,y).
             NodePayload::Nary(NaryOp::Concat, ops) => {
                 if ops.len() != 2 {
                     return Err(

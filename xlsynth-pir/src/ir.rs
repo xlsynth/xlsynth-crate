@@ -448,8 +448,8 @@ pub enum NodePayload {
     Encode {
         arg: NodeRef,
     },
-    // Counted for loop: initializes with `init`, runs for `trip_count` times with stride
-    // `stride`, applying the function `body` each iteration.
+    // Counted for loop: initializes with `init`, runs for `trip_count` times
+    // with stride `stride`, applying the function `body` each iteration.
     CountedFor {
         init: NodeRef,
         trip_count: usize,

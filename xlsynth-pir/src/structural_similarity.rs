@@ -995,7 +995,8 @@ fn build_inner_with_union_user_slots(
     extra_passthrough_params: &[(String, Type)],
     // Deterministic slot order: (consumer textual id, operand index)
     slot_order: &[(String, usize)],
-    // For this side only, outbound mapping from slot key -> boundary producer NodeRef.
+    // For this side only, outbound mapping from slot key -> boundary producer
+    // NodeRef.
     side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
 ) -> Fn {
     // 1) Create inner params: union of union_params + extra_passthrough_params,

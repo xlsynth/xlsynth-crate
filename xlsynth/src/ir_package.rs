@@ -73,9 +73,10 @@ impl Drop for IrPackagePtr {
 
 pub struct IrPackage {
     pub(crate) ptr: Arc<RwLock<IrPackagePtr>>,
-    // TODO(cdleary): 2024-06-23 This is the filename that is passed to the "parse package IR"
-    // C API functionality. We should be able to remove this field and recover the value
-    // from the built package if we had the appropriate C API.
+    // TODO(cdleary): 2024-06-23 This is the filename that is passed to the
+    // "parse package IR" C API functionality. We should be able to remove this
+    // field and recover the value from the built package if we had the
+    // appropriate C API.
     pub(crate) filename: Option<String>,
 }
 
