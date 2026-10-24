@@ -265,7 +265,3 @@ path = "fuzz_targets/fuzz_projected_positive_mask.rs"
 test = false
 doc = false
 required-features = ["has-bitwuzla"]
-
-[[example]]
-name = "projected_positive_mask_coverage"
-required-features = ["has-bitwuzla"]
