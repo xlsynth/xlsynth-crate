@@ -1,0 +1,3 @@
+xlsynth-driver: constant-flop validation failed:
+  stage 'foo_cycle0' (index 0), output bit 0 is always 0
+  stage 'foo_cycle1' (index 1), output bit 0 is always 1: stitch error

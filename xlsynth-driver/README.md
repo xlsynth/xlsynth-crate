@@ -3794,8 +3794,19 @@ Supported flags:
 - `--gate_format=<TEMPLATE>` – Verilog template for `gate!` operations in every selected stage. Overrides `[toolchain.codegen].gate_format`; when neither is set, uses the default XLS gate emission. An empty template restores the XLS default even when the toolchain sets a template.
 - `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
 - `--output_module_name=<NAME>` – wrapper module name. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
+- `--validate-no-constant-flops[=<BOOL>]` – prove every registered stage-output bit can take both values; fail before emitting Verilog if any bit is always constant. Defaults to `false`; the bare flag enables validation. Interprets the composed stages with zero-valued pipeline inputs, then proves each bit can differ from its observed value for some pipeline input. This includes constants caused by correlations between preceding stage outputs. The final stage is excluded when `--flop_outputs=false`; input and valid-signal registers are not checked. Diagnostics identify the stage, flattened output-bit index, and constant value.
 
 The usual DSLX-related options (`--dslx_input_file`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are accepted. Entry-point selection is via either `--dslx_top` (implicit discovery) or `--stages` (explicit list) — these are mutually exclusive.
+
+Constant-flop validation follows the emitted wrapper's packed wiring and checks
+DSLX data semantics. Custom `--gate_format` templates must preserve those
+semantics for the proof to apply to the generated hardware.
+
+Proofs across stages and output bits run in batches on the Rayon thread pool,
+reusing a SAT solver within each batch. Up to eight solver workers run at once;
+large graphs and small bit counts reduce this limit. Set `RAYON_NUM_THREADS`
+to limit pool concurrency (`RAYON_NUM_THREADS=1` runs proofs serially).
+Diagnostics remain ordered by stage and output bit regardless of scheduling.
 
 Additional semantics:
 
@@ -3830,6 +3841,11 @@ xlsynth-driver dslx-stitch-pipeline \
 xlsynth-driver dslx-stitch-pipeline \
   --dslx_input_file my_design.x --dslx_top foo \
   --gate_format="assign {output} = {condition} ? {input} : {width}'d0" > foo.sv
+
+# Reject stage registers whose data bits are always constant
+xlsynth-driver dslx-stitch-pipeline \
+  --dslx_input_file my_design.x --dslx_top foo \
+  --validate-no-constant-flops > foo.sv
 ```
 
 ### `dslx-stitch-g8r-pipeline`: Stitch DSLX stages into sequential g8r

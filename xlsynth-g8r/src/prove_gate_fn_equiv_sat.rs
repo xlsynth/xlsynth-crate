@@ -282,7 +282,7 @@ fn add_tseitsin_xor<S: IncrementalSat>(solver: &mut S, a: S::Lit, b: S::Lit, out
 
 /// Returns a mapping from each AigRef in the cone to its corresponding SAT
 /// literal.
-fn build_sat_clauses<S: IncrementalSat>(
+pub(crate) fn build_sat_clauses<S: IncrementalSat>(
     solver: &mut S,
     cone_gates: &[AigRef],
     cone_inputs: &HashSet<AigRef>,

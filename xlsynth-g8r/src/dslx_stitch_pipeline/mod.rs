@@ -20,6 +20,7 @@ use build_pipeline::{
 };
 
 pub mod g8r_pipeline;
+pub mod validate_constant_flops;
 
 mod names;
 use names::{collect_stage_name_infos, validate_stitch_pipeline_names};
@@ -35,6 +36,9 @@ pub struct StitchPipelineOptions<'a> {
     pub search_paths: Vec<&'a Path>,
     pub flop_inputs: bool,
     pub flop_outputs: bool,
+    /// Reject registered stage-output bits that are constant over all pipeline
+    /// inputs.
+    pub validate_no_constant_flops: bool,
     pub input_valid_signal: Option<&'a str>,
     pub output_valid_signal: Option<&'a str>,
     pub reset_signal: Option<&'a str>,
@@ -437,6 +441,31 @@ pub fn stitch_pipeline<'a>(
     let (stage_name_infos, stage_signatures) = collect_stage_name_infos(&ir, &stages)?;
     validate_stitch_pipeline_names(&stage_name_infos, &stage_signatures, opts)?;
 
+    if opts.validate_no_constant_flops {
+        let constant_flops =
+            validate_constant_flops::find_constant_flops(&ir, &stages, flop_outputs).map_err(
+                |error| xlsynth::XlsynthError(format!("constant-flop validation failed: {error}")),
+            )?;
+        if !constant_flops.is_empty() {
+            let details = constant_flops
+                .iter()
+                .map(|flop| {
+                    format!(
+                        "  stage '{}' (index {}), output bit {} is always {}",
+                        flop.stage_name,
+                        flop.stage_index,
+                        flop.output_bit_index,
+                        u8::from(flop.value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(xlsynth::XlsynthError(format!(
+                "constant-flop validation failed:\n{details}"
+            )));
+        }
+    }
+
     // For each stage run codegen immediately so we can parse its port list.
     let mut stage_infos = Vec::with_capacity(stages.len());
     for (stage_unmangled, stage_mangled) in &stages {
@@ -513,6 +542,7 @@ mod tests {
             search_paths: Vec::new(),
             flop_inputs: true,
             flop_outputs: true,
+            validate_no_constant_flops: false,
             input_valid_signal: None,
             output_valid_signal: None,
             reset_signal: None,
@@ -562,6 +592,7 @@ mod tests {
                 search_paths: Vec::new(),
                 flop_inputs: true,
                 flop_outputs: true,
+                validate_no_constant_flops: false,
                 input_valid_signal: None,
                 output_valid_signal: None,
                 reset_signal: None,
@@ -597,6 +628,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 search_paths: Vec::new(),
                 flop_inputs: true,
                 flop_outputs: true,
+                validate_no_constant_flops: false,
                 input_valid_signal: None,
                 output_valid_signal: None,
                 reset_signal: None,
@@ -626,6 +658,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 search_paths: Vec::new(),
                 flop_inputs: true,
                 flop_outputs: true,
+                validate_no_constant_flops: false,
                 input_valid_signal: None,
                 output_valid_signal: None,
                 reset_signal: None,
@@ -660,6 +693,7 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
                 search_paths: Vec::new(),
                 flop_inputs: true,
                 flop_outputs: true,
+                validate_no_constant_flops: false,
                 input_valid_signal: None,
                 output_valid_signal: None,
                 reset_signal: None,
@@ -691,6 +725,7 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
                 search_paths: Vec::new(),
                 flop_inputs: true,
                 flop_outputs: true,
+                validate_no_constant_flops: false,
                 input_valid_signal: Some("input_valid"),
                 output_valid_signal: Some("output_valid"),
                 reset_signal: Some("rst_n"),
@@ -745,6 +780,7 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
                 search_paths: Vec::new(),
                 flop_inputs: true,
                 flop_outputs: true,
+                validate_no_constant_flops: false,
                 input_valid_signal: Some("in_valid"),
                 output_valid_signal: Some("out_valid"),
                 reset_signal: None,
@@ -778,6 +814,7 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
                 search_paths: Vec::new(),
                 flop_inputs: true,
                 flop_outputs: true,
+                validate_no_constant_flops: false,
                 input_valid_signal: None,
                 output_valid_signal: None,
                 reset_signal: None,
