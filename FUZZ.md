@@ -858,3 +858,19 @@ consumers, offset/gapped slices, bitwise NOT, and dead predicates. It proves
 both forced eligible rewrites and the ordinary PIR/sandwich output with
 Bitwuzla, checks cost-tie/error rollback, and audits accepted rewrites in all
 three pipeline modes. Retained arithmetic must reject before gate costing.
+
+### Projected positive-mask preparation
+
+`fuzz_projected_positive_mask` generates valid matching and near-matching PIR,
+checks whether preparation rewrites the comparison, and proves original versus
+prepared equivalence with Bitwuzla. It covers both AND operand orders, direct and
+XOR input expressions, shared comparisons/negations/masks, safely shared final
+ANDs, and constant/source/comparison/extension/slice/AND-shape mismatches.
+The target's initialization runs a deterministic 632-proof audit once before
+random exploration, including in the existing CI fuzz smoke. It covers every
+category at widths 3, 4, 8, 16, 32, 64, 65 and 129, plus width-2 matching/sharing
+and width-1 nonmatching cases. Proofs quantify all input values, including zero
+and signed extrema. This is targeted coverage, not an exhaustive enumeration of
+all IR graphs. Run with
+`cargo fuzz run --sanitizer none fuzz_projected_positive_mask --features with-bitwuzla-built -- -max_total_time=30`
+from `xlsynth-g8r`; use `-runs=0` instead of `-max_total_time=30` to run the audit and existing seed corpus without random exploration.
