@@ -387,6 +387,11 @@ pub fn stitch_pipeline<'a>(
             "output_valid_signal requires input_valid_signal in dslx-stitch-pipeline".to_string(),
         ));
     }
+    if opts.validate_no_constant_flops && !opts.array_index_bounds_checking {
+        return Err(xlsynth::XlsynthError(
+            "constant-flop validation requires array_index_bounds_checking=true".to_string(),
+        ));
+    }
 
     // Extract option fields for backwards-compat ease.
     let verilog_version = opts.verilog_version;

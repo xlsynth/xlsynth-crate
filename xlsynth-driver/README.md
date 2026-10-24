@@ -3801,6 +3801,10 @@ The usual DSLX-related options (`--dslx_input_file`, `--dslx_path`, `--dslx_stdl
 Constant-flop validation follows the emitted wrapper's packed wiring and checks
 DSLX data semantics. Custom `--gate_format` templates must preserve those
 semantics for the proof to apply to the generated hardware.
+Validation requires `--array_index_bounds_checking=true` (the default), so
+out-of-range array accesses have the same behavior in the proof and generated
+hardware. Assertions do not constrain the proof's input domain or stop baseline
+evaluation; they remain unchanged in the generated design.
 
 Proofs across stages and output bits run in batches on the Rayon thread pool,
 reusing a SAT solver within each batch. Up to eight solver workers run at once;

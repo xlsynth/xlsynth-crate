@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use xlsynth::{IrPackage, XlsIrValue, XlsynthError, optimize_ir};
 use xlsynth_pir::ir;
+use xlsynth_pir::ir_fn_rm_asserts::remove_asserts_from_fn;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{
     flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
@@ -81,6 +82,8 @@ struct BitQuery {
 /// varying inputs, and validity/control registers and power-up values are not
 /// part of this analysis. Solver interruption is an error, never a successful
 /// validation. The input package is not modified.
+/// Assertions are removed from the temporary proof model: they neither
+/// constrain the input domain nor prevent evaluating the zero-input baseline.
 ///
 /// Queries across stages and bits run in bounded batches on the current Rayon
 /// pool, respecting its thread count (or `RAYON_NUM_THREADS` for the global
@@ -282,14 +285,21 @@ fn build_prefix_graph(
         // Optimization inlines helper calls and loops before bit blasting.
         let optimized = optimize_ir(ir, ir_name)?;
         let optimized_text = optimized.to_string();
-        let package = Parser::new(&optimized_text)
+        let mut package = Parser::new(&optimized_text)
             .parse_and_validate_package()
             .map_err(|error| XlsynthError(error.to_string()))?;
-        let function = package.get_fn(ir_name).ok_or_else(|| {
+        let function = package.get_fn_mut(ir_name).ok_or_else(|| {
             XlsynthError(format!("optimized pipeline stage '{ir_name}' is missing"))
         })?;
+        // Assertions do not drive data outputs or constrain this all-inputs
+        // proof. Remove them after inlining, including assertions in helpers,
+        // so the arbitrary zero baseline cannot fail a runtime assertion.
+        // Keep this package separate from the original used for codegen.
+        *function = remove_asserts_from_fn(function).rewritten_fn;
+        let data_ir = IrPackage::parse_ir(&package.to_string(), None)?;
+        let function = package.get_fn(ir_name).expect("stage was found above");
         let arguments = stage_arguments(function, baselines.last().map(|value| &value.bits[..]))?;
-        let interpreted = ir.get_function(ir_name)?.interpret(&arguments)?;
+        let interpreted = data_ir.get_function(ir_name)?.interpret(&arguments)?;
         let interpreted = IrValue::parse_typed(&interpreted.to_string())
             .map_err(|error| XlsynthError(error.to_string()))?;
         let mut bits = Vec::with_capacity(function.ret_ty.bit_count());
