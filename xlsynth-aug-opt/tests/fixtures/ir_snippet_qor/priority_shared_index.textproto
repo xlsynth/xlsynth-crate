@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# proto-file: xlsynth-aug-opt/tests/mffc_corpus/corpus.proto
-# proto-message: xlsynth.mffc_regressions.Case
+# proto-file: xlsynth-aug-opt/tests/ir_snippet_qor/corpus.proto
+# proto-message: xlsynth.ir_snippet_qor.Case
 
 sha256: "d43e55367f048fafec60b1de8397584996966b00104a9c16107530228e841c7e"
 # The corpus profile allows reassociation; raw costs are bounded separately.
