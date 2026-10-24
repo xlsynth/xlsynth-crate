@@ -714,6 +714,17 @@ fn main() {
                     "flop_outputs",
                     "Whether to insert output pipeline flops (default true)",
                 )
+                .arg(
+                    Arg::new("validate_no_constant_flops")
+                        .long("validate-no-constant-flops")
+                        .help("Prove every registered stage-output bit can vary over pipeline inputs; fail on constant bits (default false)")
+                        .num_args(0..=1)
+                        .require_equals(true)
+                        .default_value("false")
+                        .default_missing_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .action(ArgAction::Set),
+                )
                 .add_bool_arg(
                     "array_index_bounds_checking",
                     "Whether to emit array index bounds checking",

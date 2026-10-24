@@ -112,6 +112,9 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         search_paths: path_refs.clone(),
         flop_inputs,
         flop_outputs,
+        validate_no_constant_flops: *matches
+            .get_one::<bool>("validate_no_constant_flops")
+            .expect("flag has a default"),
         input_valid_signal: input_valid_signal_opt,
         output_valid_signal: output_valid_signal_opt,
         reset_signal: reset_opt,

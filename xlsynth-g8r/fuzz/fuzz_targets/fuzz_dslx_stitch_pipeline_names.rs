@@ -78,6 +78,7 @@ fn foo_cycle1({c}: u8, {d}: u8) -> u8 {{ {c} - {d} }}"#
         search_paths: Vec::new(),
         flop_inputs: true,
         flop_outputs: true,
+        validate_no_constant_flops: false,
         input_valid_signal: Some("input_valid"),
         output_valid_signal: Some("output_valid"),
         reset_signal: Some("rst"),
