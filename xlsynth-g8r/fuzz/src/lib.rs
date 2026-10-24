@@ -9,6 +9,9 @@ pub mod sequential_cleanup;
 pub mod sequential_legalization;
 pub mod serdes_roundtrip;
 
+#[cfg(feature = "has-bitwuzla")]
+pub mod sentinel_lowering;
+
 use std::time::Duration;
 
 use xlsynth_g8r::aig::GateFn;
