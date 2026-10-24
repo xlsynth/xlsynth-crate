@@ -33,8 +33,11 @@ fn write_power_json<T: serde::Serialize>(path: &str, report: &T) -> Result<(), S
     writeln!(writer).map_err(|e| format!("failed to finalize --power-output-json {}: {}", path, e))
 }
 
-fn dynamic_power_options(matches: &ArgMatches) -> GvDynamicPowerOptions {
-    GvDynamicPowerOptions {
+fn dynamic_power_options(
+    matches: &ArgMatches,
+    library: &xlsynth_g8r::liberty_model::Library,
+) -> Result<GvDynamicPowerOptions, String> {
+    Ok(GvDynamicPowerOptions {
         primary_input_transition: *matches
             .get_one::<f64>("primary_input_transition")
             .expect("primary_input_transition has a default"),
@@ -42,14 +45,19 @@ fn dynamic_power_options(matches: &ArgMatches) -> GvDynamicPowerOptions {
             .get_one::<f64>("module_output_load")
             .expect("module_output_load has a default"),
         cycle_time: matches.get_one::<f64>("cycle_time").copied(),
-    }
+        wire_load: crate::gv_sta::wire_load_from_matches(matches, library)
+            .map_err(|e| e.to_string())?,
+    })
 }
 
-fn sequential_dynamic_power_options(matches: &ArgMatches) -> GvSequentialDynamicPowerOptions {
+fn sequential_dynamic_power_options(
+    matches: &ArgMatches,
+    library: &xlsynth_g8r::liberty_model::Library,
+) -> Result<GvSequentialDynamicPowerOptions, String> {
     let primary_input_transition = *matches
         .get_one::<f64>("primary_input_transition")
         .expect("primary_input_transition has a default");
-    GvSequentialDynamicPowerOptions {
+    Ok(GvSequentialDynamicPowerOptions {
         primary_input_transition,
         clock_transition: matches
             .get_one::<f64>("clock_transition")
@@ -59,7 +67,9 @@ fn sequential_dynamic_power_options(matches: &ArgMatches) -> GvSequentialDynamic
             .get_one::<f64>("module_output_load")
             .expect("module_output_load has a default"),
         cycle_time: matches.get_one::<f64>("cycle_time").copied(),
-    }
+        wire_load: crate::gv_sta::wire_load_from_matches(matches, library)
+            .map_err(|e| e.to_string())?,
+    })
 }
 
 pub fn handle_gv_eval(matches: &ArgMatches) -> Result<(), String> {
@@ -125,7 +135,7 @@ fn handle_combinational_gv_eval(matches: &ArgMatches) -> Result<(), String> {
         write_toggle_activity_json(toggle_output_json, &activity)?;
     }
     if let Some(power_output_json) = matches.get_one::<String>("power_output_json") {
-        let power_options = dynamic_power_options(matches);
+        let power_options = dynamic_power_options(matches, &library)?;
         let report = model.analyze_dynamic_power(&library, &samples, power_options)?;
         write_power_json(power_output_json, &report)?;
     }
@@ -184,7 +194,7 @@ fn handle_sequential_gv_eval(matches: &ArgMatches) -> Result<(), String> {
         let report = model.analyze_dynamic_power(
             &library,
             &trace,
-            sequential_dynamic_power_options(matches),
+            sequential_dynamic_power_options(matches, &library)?,
         )?;
         write_power_json(path, &report)?;
     }

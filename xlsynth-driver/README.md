@@ -745,6 +745,11 @@ Flags:
   Defaults to `--primary-input-transition`.
 - `--module-output-load <CAPACITANCE>`: external load added to every design
   output bit. Defaults to `0` in the Liberty capacitance unit.
+- `--wire-capacitance-constant-ff <FF>` and
+  `--wire-capacitance-per-sink-ff <FF>`: affine wire capacitance, both default
+  to zero. Require `--power-output-json`; apply to combinational and sequential
+  power analysis. Values must be finite and nonnegative and are converted from
+  fF to Liberty capacitance units; conversion and total-load overflow are errors.
 - `--cycle-time <TIME>`: optional time represented by each adjacent
   combinational sample pair or each sequential cycle. When present, the report
   includes average dynamic power.
@@ -759,7 +764,17 @@ Power analysis is edge-based and intentionally excludes leakage and glitches.
 It computes internal energy from Liberty `internal_power` tables and switching
 energy as `0.5 * C * V^2` for each observed rise and fall. Net capacitance is
 the sum of connected cell-input capacitances plus the requested design-output
-load. Internal-power table values already have the Liberty energy scale
+load, plus optional wire capacitance. As in `gv-sta`, each used cell-driven
+net receives `Cconstant + CperSink * F` once, where `F` counts connected
+input pin bits (including multiple pins on the same cell). Output ports do
+not increment `F`; output-only nets receive the constant term and dangling
+nets receive neither term. Aliased outputs retain each external load but share
+one wire term. Primary inputs and clocks retain their pin/output loads without
+added wire capacitance. This adjusted load is used for switching energy,
+slew propagation, and internal-power LUT lookups, without a separate wire-energy
+term. Boolean evaluation and toggle counts are unchanged.
+
+Internal-power table values already have the Liberty energy scale
 (`voltage_unit^2 * capacitance_unit`), so `nominal_voltage` is applied only to
 the explicit capacitive-switching term.
 

@@ -6,7 +6,7 @@ use xlsynth_test_helpers::compare_golden_text;
 
 const COMBINATIONAL_LIBERTY: &str = r#"
 format_magic: 5496997758228255311
-units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
+units: { time_unit: "ns" capacitance_unit: "1pf" voltage_unit: "V" }
 nominal_voltage: 1.0
 cells: {
   name: "AND2"
@@ -41,7 +41,7 @@ interned_strings: ["D", "CLK", "Q", "IQ"]
 
 const SEQUENTIAL_POWER_LIBERTY: &str = r#"
 format_magic: 5496997758228255311
-units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
+units: { time_unit: "ns" capacitance_unit: "1pf" voltage_unit: "V" }
 nominal_voltage: 1.0
 cells: {
   name: "DFF"
@@ -510,4 +510,146 @@ endmodule
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("gv-eval error:"));
     assert!(stderr.contains("sequential cell 'DFF' instance 'state'"));
+}
+
+#[test]
+fn gv_eval_wire_loads_match_sta_net_policy_in_both_modes() {
+    for sequential in [false, true] {
+        let netlist = if sequential {
+            r#"module top(d, clk, q);
+input d, clk;
+output q;
+DFF state (.D(d), .CLK(clk), .Q(q));
+endmodule"#
+        } else {
+            r#"module top(a, y, z);
+input a;
+output y, z;
+wire n;
+INV source (.A(a), .Y(n));
+AND2 sink (.A(n), .B(n), .Y(y));
+INV dangling (.A(a), .Y());
+assign z = y;
+endmodule"#
+        };
+        let temp_dir = write_fixture(
+            netlist,
+            if sequential {
+                SEQUENTIAL_POWER_LIBERTY
+            } else {
+                COMBINATIONAL_LIBERTY
+            },
+        );
+        let samples = temp_dir.path().join("samples.irvals");
+        std::fs::write(
+            &samples,
+            if sequential {
+                "{d: bits[1]:1}\n{d: bits[1]:0}\n"
+            } else {
+                "(bits[1]:0)\n(bits[1]:1)\n(bits[1]:0)\n"
+            },
+        )
+        .unwrap();
+        let report_path = temp_dir.path().join("power.json");
+        let mut args = vec![
+            "--input-irvals",
+            samples.to_str().unwrap(),
+            "--power-output-json",
+            report_path.to_str().unwrap(),
+            "--module-output-load",
+            "1",
+        ];
+        if sequential {
+            args.extend(["--sequential", "--initial-state-all-zeros"]);
+        }
+        let baseline = run_gv_eval(&temp_dir, &args);
+        assert_success(&baseline);
+        let baseline_json = std::fs::read(&report_path).unwrap();
+        for (flags, extra_energy) in [
+            (
+                vec![
+                    "--wire-capacitance-constant-ff=0",
+                    "--wire-capacitance-per-sink-ff=0",
+                ],
+                0.0,
+            ),
+            (
+                vec!["--wire-capacitance-constant-ff=500"],
+                if sequential { 0.5 } else { 1.0 },
+            ),
+            (
+                vec!["--wire-capacitance-per-sink-ff=250"],
+                if sequential { 0.0 } else { 0.5 },
+            ),
+            (
+                vec![
+                    "--wire-capacitance-constant-ff=500",
+                    "--wire-capacitance-per-sink-ff=250",
+                ],
+                if sequential { 0.5 } else { 1.5 },
+            ),
+        ] {
+            let mut with_wire = args.clone();
+            with_wire.extend(flags);
+            let result = run_gv_eval(&temp_dir, &with_wire);
+            assert_success(&result);
+            assert_eq!(result.stdout, baseline.stdout);
+            let bytes = std::fs::read(&report_path).unwrap();
+            if extra_energy == 0.0 {
+                assert_eq!(bytes, baseline_json);
+            }
+            let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                report["primary_input_switching_energy"],
+                if sequential { 0.5 } else { 2.0 }
+            );
+            assert_eq!(
+                report["cell_output_switching_energy"],
+                (if sequential { 1.0 } else { 4.0 }) + extra_energy
+            );
+            assert_eq!(
+                report["cell_internal_energy"],
+                if sequential { 14.0 } else { 0.0 }
+            );
+            if sequential {
+                assert_eq!(report["clock_switching_energy"], 4.0);
+            }
+        }
+        // Explicit wire flags cannot silently disappear in Boolean-only mode.
+        let ignored = run_gv_eval(
+            &temp_dir,
+            &[
+                "--input-irvals",
+                samples.to_str().unwrap(),
+                "--wire-capacitance-constant-ff=500",
+            ],
+        );
+        assert!(!ignored.status.success());
+        for flag in [
+            "--wire-capacitance-constant-ff=-1",
+            "--wire-capacitance-per-sink-ff=NaN",
+            "--wire-capacitance-constant-ff=inf",
+            "--wire-capacitance-per-sink-ff=-1",
+        ] {
+            let mut invalid = args.clone();
+            invalid.push(flag);
+            let result = run_gv_eval(&temp_dir, &invalid);
+            assert!(!result.status.success(), "{flag}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("must be finite and non-negative")
+            );
+        }
+        let library_path = temp_dir.path().join("cells.textproto");
+        let tiny_units = std::fs::read_to_string(&library_path)
+            .unwrap()
+            .replace("1pf", "1af");
+        std::fs::write(&library_path, tiny_units).unwrap();
+        let mut overflow = args.clone();
+        overflow.push("--wire-capacitance-constant-ff=1.7976931348623157e308");
+        let result = run_gv_eval(&temp_dir, &overflow);
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("must be finite and non-negative")
+        );
+    }
 }

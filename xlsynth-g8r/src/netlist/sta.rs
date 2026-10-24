@@ -1162,9 +1162,9 @@ impl<'a> PreparedStaLibrary<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct EdgeLoadCapacitance {
-    rise: f64,
-    fall: f64,
+pub(crate) struct EdgeLoadCapacitance {
+    pub(crate) rise: f64,
+    pub(crate) fall: f64,
 }
 
 #[derive(Clone, Debug)]

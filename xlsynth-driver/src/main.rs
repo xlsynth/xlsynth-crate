@@ -2440,6 +2440,8 @@ fn main() {
                         .help("External capacitive load added to every module-output bit")
                         .action(ArgAction::Set),
                 )
+                .arg(Arg::new("wire-capacitance-constant-ff").long("wire-capacitance-constant-ff").requires("power_output_json").default_value("0").value_parser(clap::value_parser!(f64)).help("Fixed wire capacitance per used cell-driven net, in fF (default: disabled)"))
+                .arg(Arg::new("wire-capacitance-per-sink-ff").long("wire-capacitance-per-sink-ff").requires("power_output_json").default_value("0").value_parser(clap::value_parser!(f64)).help("Additional wire capacitance per sink pin, in fF; no empirical fanout cutoff"))
                 .arg(
                     Arg::new("cycle_time")
                         .long("cycle-time")

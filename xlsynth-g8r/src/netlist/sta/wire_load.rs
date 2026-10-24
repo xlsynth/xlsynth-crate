@@ -57,7 +57,7 @@ impl WireLoadModel {
     }
 
     /// Adds wire load once after real pin and external port loads.
-    pub(super) fn add_to(
+    pub(crate) fn add_to(
         self,
         cap: &mut EdgeLoadCapacitance,
         sink_pins: usize,

@@ -78,15 +78,7 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
         }
     };
 
-    let wire_load = match WireLoadModel::from_femtofarads(
-        *matches
-            .get_one::<f64>("wire-capacitance-constant-ff")
-            .expect("default"),
-        *matches
-            .get_one::<f64>("wire-capacitance-per-sink-ff")
-            .expect("default"),
-        &liberty,
-    ) {
+    let wire_load = match wire_load_from_matches(matches, &liberty) {
         Ok(model) => model,
         Err(e) => {
             eprintln!("gv-sta error: {e}");
@@ -152,4 +144,20 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
             std::process::exit(1);
         }
     }
+}
+
+/// Parses the shared STA/power wire model with explicit femtofarad units.
+pub(crate) fn wire_load_from_matches(
+    matches: &ArgMatches,
+    library: &xlsynth_g8r::liberty_model::Library,
+) -> anyhow::Result<WireLoadModel> {
+    WireLoadModel::from_femtofarads(
+        *matches
+            .get_one::<f64>("wire-capacitance-constant-ff")
+            .expect("default"),
+        *matches
+            .get_one::<f64>("wire-capacitance-per-sink-ff")
+            .expect("default"),
+        library,
+    )
 }

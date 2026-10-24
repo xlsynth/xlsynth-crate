@@ -114,7 +114,7 @@ impl ObservationFixture {
                     } else {
                         SignalOwner::ModuleInput
                     },
-                    load: EdgeValue::default(),
+                    load: EdgeLoadCapacitance::default(),
                     edges: EdgeValue::default(),
                     histogram: EdgeValue::default(),
                 })

@@ -20,6 +20,7 @@ use xlsynth_g8r::netlist::parse::PortDirection;
 use xlsynth_g8r::netlist::power::{
     GV_POWER_SLEW_BUCKET_COUNT, GvDynamicPowerOptions, GvSequentialDynamicPowerOptions,
 };
+use xlsynth_g8r::netlist::sta::WireLoadModel;
 
 fn write_fixture(
     netlist: &str,
@@ -518,6 +519,7 @@ endmodule
         library_to_proto(xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap())
             .unwrap();
     let options = GvDynamicPowerOptions {
+        wire_load: Default::default(),
         primary_input_transition: 1.0,
         module_output_load: 3.0,
         cycle_time: Some(5.0),
@@ -559,6 +561,7 @@ endmodule
             &library,
             &samples,
             GvDynamicPowerOptions {
+                wire_load: Default::default(),
                 primary_input_transition: 1.0,
                 module_output_load: 3.0,
                 cycle_time: Some(5.0),
@@ -593,6 +596,90 @@ endmodule
     );
     assert_eq!(report.diagnostics.when_evaluation_count, 2);
     assert_eq!(report.diagnostics.when_changed_during_transition_count, 2);
+    // A load-dependent LUT exposes both internal-energy and propagated-slew
+    // plumbing; the existing fixture's constant tables cannot detect either.
+    let load_sensitive = liberty
+        .replace(
+            "values: 2.0\n        values: 2.0\n        values: 2.0\n        values: 2.0",
+            "values: 1.0\n        values: 3.0\n        values: 1.0\n        values: 3.0",
+        )
+        .replace(
+            "values: 10.0\n        values: 10.0\n        values: 10.0\n        values: 10.0",
+            "values: 0.0\n        values: 4.0\n        values: 0.0\n        values: 4.0",
+        );
+    let (_dir, _netlist, load_sensitive_path) = write_fixture(netlist, &load_sensitive);
+    let load_sensitive_library =
+        xlsynth_g8r::netlist::io::load_liberty_from_path(&load_sensitive_path).unwrap();
+    let baseline = model
+        .analyze_dynamic_power(&load_sensitive_library, &samples, options)
+        .unwrap();
+    let loaded = model
+        .analyze_dynamic_power(
+            &load_sensitive_library,
+            &samples,
+            GvDynamicPowerOptions {
+                wire_load: WireLoadModel {
+                    constant_capacitance: 0.5,
+                    capacitance_per_sink: 0.25,
+                },
+                ..options
+            },
+        )
+        .unwrap();
+    assert_eq!(baseline.cell_internal_energy, 3.0);
+    assert_eq!(loaded.cell_internal_energy, 3.5);
+    assert_eq!(loaded.cell_output_switching_energy, 14.0);
+    assert_eq!(
+        loaded.primary_input_switching_energy,
+        baseline.primary_input_switching_energy
+    );
+    assert_ne!(
+        loaded.instances[0].outputs[0].slew_histogram.rise,
+        baseline.instances[0].outputs[0].slew_histogram.rise
+    );
+    for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+        for wire_load in [
+            WireLoadModel {
+                constant_capacitance: invalid,
+                ..Default::default()
+            },
+            WireLoadModel {
+                capacitance_per_sink: invalid,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                model
+                    .analyze_dynamic_power(
+                        &library,
+                        &samples,
+                        GvDynamicPowerOptions {
+                            wire_load,
+                            ..options
+                        }
+                    )
+                    .is_err()
+            );
+        }
+    }
+    let overflow = model
+        .analyze_dynamic_power(
+            &library,
+            &samples,
+            GvDynamicPowerOptions {
+                module_output_load: f64::MAX,
+                wire_load: WireLoadModel {
+                    constant_capacitance: f64::MAX,
+                    ..Default::default()
+                },
+                ..options
+            },
+        )
+        .unwrap_err();
+    assert!(
+        overflow.contains("total net capacitance overflow"),
+        "{overflow}"
+    );
 }
 
 #[test]
@@ -643,6 +730,7 @@ endmodule
     let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
         .expect("reload negative-unate power library");
     let options = GvDynamicPowerOptions {
+        wire_load: Default::default(),
         primary_input_transition: 1.0,
         module_output_load: 0.0,
         cycle_time: None,
@@ -1038,6 +1126,7 @@ endmodule
         )
         .expect("simulate sequential power trace");
     let options = GvSequentialDynamicPowerOptions {
+        wire_load: Default::default(),
         primary_input_transition: 1.0,
         clock_transition: 2.0,
         module_output_load: 0.0,
@@ -1205,6 +1294,7 @@ endmodule
     let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path)
         .expect("reload output-owned internal-power library");
     let options = GvSequentialDynamicPowerOptions {
+        wire_load: Default::default(),
         primary_input_transition: 1.0,
         clock_transition: 2.0,
         module_output_load: 0.0,
@@ -1312,6 +1402,7 @@ endmodule
             &library,
             &trace,
             GvSequentialDynamicPowerOptions {
+                wire_load: Default::default(),
                 primary_input_transition: 1.0,
                 clock_transition: 2.0,
                 module_output_load: 0.0,
@@ -1429,6 +1520,7 @@ fn sequential_dynamic_power_resolves_state_aliases_in_when_conditions() {
             &library,
             &trace,
             GvSequentialDynamicPowerOptions {
+                wire_load: Default::default(),
                 primary_input_transition: 1.0,
                 clock_transition: 1.0,
                 module_output_load: 0.0,
@@ -1494,6 +1586,7 @@ fn sequential_dynamic_power_preserves_aliases_across_simd_batches() {
                 &library,
                 &trace,
                 GvSequentialDynamicPowerOptions {
+                    wire_load: Default::default(),
                     primary_input_transition: 1.0,
                     clock_transition: 1.0,
                     module_output_load: 0.0,
