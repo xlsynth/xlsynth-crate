@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package replay_input
+
+top fn __k3_cone_0034ffd5b462116d(leaf_124: bits[161] id=23, leaf_126: bits[1] id=24, leaf_131: bits[161] id=25) -> bits[1] {
+  neg.26: bits[161] = neg(leaf_124, id=26)
+  sel.27: bits[161] = sel(leaf_126, cases=[leaf_124, neg.26], id=27)
+  sign_ext.28: bits[162] = sign_ext(sel.27, new_bit_count=162, id=28)
+  sign_ext.29: bits[162] = sign_ext(leaf_131, new_bit_count=162, id=29)
+  add.30: bits[162] = add(sign_ext.28, sign_ext.29, id=30)
+  bit_slice.31: bits[1] = bit_slice(add.30, start=161, width=1, id=31)
+  literal.32: bits[162] = literal(value=0x0, id=32)
+  eq.33: bits[1] = eq(add.30, literal.32, id=33)
+  not.34: bits[1] = not(bit_slice.31, id=34)
+  ret nor.35: bits[1] = nor(eq.33, not.34, id=35)
+}

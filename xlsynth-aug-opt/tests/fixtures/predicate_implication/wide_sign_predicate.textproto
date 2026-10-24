@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+sha256: "a9e32ef76585af3383f299fddf1d4a91e41861926fa5a5a7a75adc3404f8df61"
+predicate_simplification {
+  expected_simplifications: 1
+  pir_limits { and_nodes_max: 2062 graph_le_max: 139.4184529920222 depth_max: 25 }
+  sandwich_limits { and_nodes_max: 2062 graph_le_max: 139.4184529920222 depth_max: 25 }
+}

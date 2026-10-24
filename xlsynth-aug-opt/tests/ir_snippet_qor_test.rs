@@ -413,8 +413,66 @@ fn check_priority_result_corpus(corpus: ir_snippet_qor::Corpus) {
 /// Keeps corpus exposure and shared-consumer rejection under normal g8r costs.
 #[test]
 fn low_bit_nonzero_corpus_respects_equivalence_and_native_qor_limits() {
-    let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/low_bit_nonzero");
+    check_predicate_corpus("low_bit_nonzero", |stats| stats.low_bit_nonzero_simplified);
+}
+
+/// Checks structural implication and its retained-consumer rejection control.
+#[test]
+fn predicate_implication_corpus_respects_equivalence_and_native_qor_limits() {
+    check_predicate_corpus("predicate_implication", |stats| {
+        stats.predicate_implication_simplified
+    });
+}
+
+/// Distinguishes the real FMA opportunity from a toy already folded by XLS.
+#[test]
+fn predicate_implication_improves_beyond_normal_xls_optimization() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/predicate_implication");
+    let corpus = ir_snippet_qor::load_from_dir(&root).unwrap();
+    for name in ["wide_sign_predicate", "already_optimized"] {
+        let case = corpus.cases.iter().find(|case| case.name == name).unwrap();
+        let package = xlsynth::IrPackage::parse_ir(&case.text, None).unwrap();
+        let first = xlsynth::optimize_ir(&package, &case.original.name).unwrap();
+        let second = xlsynth::optimize_ir(&first, &case.original.name).unwrap();
+        assert_eq!(first.to_string(), second.to_string(), "{name}");
+        let normalized = first.to_string();
+        let result = run_aug_opt_over_ir_text_with_stats(
+            &normalized,
+            Some(&case.original.name),
+            AugOptOptions {
+                enable: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (_, before) =
+            map_and_measure_cost(&normalized, &case.original.name, &corpus.profile).unwrap();
+        let (_, after) =
+            map_and_measure_cost(&result.output_text, &case.original.name, &corpus.profile)
+                .unwrap();
+        if name == "wide_sign_predicate" {
+            assert_eq!(result.rewrite_stats.predicate_implication_simplified, 1);
+            assert!(
+                after.and_nodes < before.and_nodes && after.graph_le < before.graph_le,
+                "normal XLS {before:?}; augmented {after:?}"
+            );
+        } else {
+            assert_eq!(result.rewrite_stats.predicate_implication_simplified, 0);
+            assert_eq!(before.and_nodes, 0);
+            assert_eq!(after.and_nodes, 0);
+        }
+    }
+}
+
+/// Reuses the generic predicate fixture schema for each rewrite's own counter.
+fn check_predicate_corpus(
+    directory: &str,
+    count: impl Fn(&xlsynth_aug_opt::AugOptRewriteStats) -> usize,
+) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(directory);
     let corpus = ir_snippet_qor::load_from_dir(&root).unwrap();
     assert!(!corpus.profile.canonical_options.fraig);
     assert!(corpus.profile.canonical_options.reassociation);
@@ -446,7 +504,8 @@ fn low_bit_nonzero_corpus_respects_equivalence_and_native_qor_limits() {
             )
             .unwrap_or_else(|error| panic!("{context}: {error}"));
             assert_eq!(
-                result.rewrite_stats.low_bit_nonzero_simplified, *expected_simplifications,
+                count(&result.rewrite_stats),
+                *expected_simplifications,
                 "{context}",
             );
             #[cfg(feature = "has-bitwuzla")]
