@@ -6,12 +6,13 @@ use super::EdgeLoadCapacitance;
 use crate::liberty::io_defaults::capacitance_unit_in_ff;
 use crate::liberty_model::Library;
 use anyhow::{Result, anyhow};
+use serde::Serialize;
 
 /// Fixed overhead plus capacitance per sink pin, in Liberty capacitance units.
 /// Output ports do not count as sink pins. An output-only net receives the
 /// constant term; a dangling net receives neither term. Primary-input drivers
 /// remain ideal sources and are not loaded by this policy.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct WireLoadModel {
     pub constant_capacitance: f64,
     pub capacitance_per_sink: f64,
@@ -57,7 +58,7 @@ impl WireLoadModel {
     }
 
     /// Adds wire load once after real pin and external port loads.
-    pub(super) fn add_to(
+    pub(crate) fn add_to(
         self,
         cap: &mut EdgeLoadCapacitance,
         sink_pins: usize,
@@ -110,6 +111,38 @@ mod tests {
             assert_eq!(unused.rise, 0.0);
             model.add_to(&mut unused, 0, true)?;
             assert_eq!(unused.rise, constant);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn converts_bare_and_scaled_units_without_changing_labels() -> Result<()> {
+        let mut lib = make_test_library();
+        for (unit, constant, per_sink) in [
+            ("pf", 0.5, 0.25),
+            ("pF", 0.5, 0.25),
+            ("1pf", 0.5, 0.25),
+            ("1pF", 0.5, 0.25),
+            ("0.5pF", 1.0, 0.5),
+            ("2pF", 0.25, 0.125),
+            ("fF", 500.0, 250.0),
+        ] {
+            lib.units = Some(LibraryUnits {
+                capacitance_unit: unit.into(),
+                ..Default::default()
+            });
+            assert_eq!(
+                WireLoadModel::from_femtofarads(500.0, 250.0, &lib)?,
+                WireLoadModel {
+                    constant_capacitance: constant,
+                    capacitance_per_sink: per_sink,
+                }
+            );
+            assert_eq!(lib.units.as_ref().unwrap().capacitance_unit, unit);
+            assert_eq!(
+                WireLoadModel::from_femtofarads(0.0, 0.0, &lib)?,
+                WireLoadModel::default()
+            );
         }
         Ok(())
     }

@@ -27,6 +27,7 @@ use crate::netlist::gatefn_from_netlist::{
     SequentialClockEdge,
 };
 use crate::netlist::parse::PortDirection;
+use crate::netlist::sta::{EdgeLoadCapacitance, WireLoadModel};
 
 /// The fixed number of logarithmic slew buckets used by dynamic-power analysis.
 pub const GV_POWER_SLEW_BUCKET_COUNT: usize = 32;
@@ -36,6 +37,9 @@ pub const GV_POWER_SLEW_BUCKET_COUNT: usize = 32;
 pub struct GvDynamicPowerOptions {
     pub primary_input_transition: f64,
     pub module_output_load: f64,
+    /// Affine wire capacitance in Liberty units, applied once per used
+    /// cell-driven net.
+    pub wire_load: WireLoadModel,
     pub cycle_time: Option<f64>,
 }
 
@@ -44,6 +48,7 @@ impl Default for GvDynamicPowerOptions {
         Self {
             primary_input_transition: 0.01,
             module_output_load: 0.0,
+            wire_load: WireLoadModel::default(),
             cycle_time: None,
         }
     }
@@ -55,6 +60,9 @@ pub struct GvSequentialDynamicPowerOptions {
     pub primary_input_transition: f64,
     pub clock_transition: f64,
     pub module_output_load: f64,
+    /// Affine wire capacitance in Liberty units, applied once per used
+    /// cell-driven net.
+    pub wire_load: WireLoadModel,
     pub cycle_time: Option<f64>,
 }
 
@@ -64,6 +72,7 @@ impl Default for GvSequentialDynamicPowerOptions {
             primary_input_transition: 0.01,
             clock_transition: 0.01,
             module_output_load: 0.0,
+            wire_load: WireLoadModel::default(),
             cycle_time: None,
         }
     }
@@ -137,6 +146,10 @@ pub struct GvDynamicPowerReport {
     pub nominal_voltage: f64,
     pub primary_input_transition: f64,
     pub module_output_load: f64,
+    /// Applied coefficients in this report's capacitance_unit; absent means
+    /// zero wire load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_load: Option<WireLoadModel>,
     pub cycle_time: Option<f64>,
     pub time_unit: String,
     pub capacitance_unit: String,
@@ -170,6 +183,10 @@ pub struct GvSequentialDynamicPowerReport {
     pub primary_input_transition: f64,
     pub clock_transition: f64,
     pub module_output_load: f64,
+    /// Applied coefficients in this report's capacitance_unit; absent means
+    /// zero wire load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_load: Option<WireLoadModel>,
     pub cycle_time: Option<f64>,
     pub time_unit: String,
     pub capacitance_unit: String,
@@ -214,7 +231,7 @@ enum PowerSignal {
 struct Signal {
     source: PowerSignal,
     owner: SignalOwner,
-    load: EdgeValue<f64>,
+    load: EdgeLoadCapacitance,
     edges: EdgeValue<usize>,
     histogram: EdgeValue<Vec<f64>>,
 }
@@ -686,7 +703,12 @@ pub fn analyze_dynamic_power_bits(
     let nominal_voltage = nominal_voltage(library)?;
 
     let power_model = combinational_power_view(model);
-    let mut topology = build_topology(&power_model, library, options.module_output_load)?;
+    let mut topology = build_topology(
+        &power_model,
+        library,
+        options.module_output_load,
+        options.wire_load,
+    )?;
     let mut activity = observe_activity(&power_model, library, batch_inputs, &mut topology)?;
     let buckets = build_slew_buckets(library, &[options.primary_input_transition])?;
     seed_root_histograms(
@@ -761,6 +783,7 @@ pub fn analyze_dynamic_power_bits(
         nominal_voltage,
         primary_input_transition: options.primary_input_transition,
         module_output_load: options.module_output_load,
+        wire_load: (options.wire_load != WireLoadModel::default()).then_some(options.wire_load),
         cycle_time: options.cycle_time,
         time_unit,
         capacitance_unit,
@@ -831,7 +854,12 @@ pub fn analyze_sequential_dynamic_power(
         .collect::<Vec<_>>();
 
     let power_model = sequential_power_view(model)?;
-    let mut topology = build_topology(&power_model, library, options.module_output_load)?;
+    let mut topology = build_topology(
+        &power_model,
+        library,
+        options.module_output_load,
+        options.wire_load,
+    )?;
     let mut activity = observe_ordered_activity(
         &power_model,
         library,
@@ -922,6 +950,7 @@ pub fn analyze_sequential_dynamic_power(
         primary_input_transition: options.primary_input_transition,
         clock_transition: options.clock_transition,
         module_output_load: options.module_output_load,
+        wire_load: (options.wire_load != WireLoadModel::default()).then_some(options.wire_load),
         cycle_time: options.cycle_time,
         time_unit,
         capacitance_unit,
@@ -944,6 +973,7 @@ pub fn analyze_sequential_dynamic_power(
 }
 
 fn validate_options(options: GvDynamicPowerOptions) -> Result<(), String> {
+    options.wire_load.validate().map_err(|e| e.to_string())?;
     validate_common_options(
         options.primary_input_transition,
         options.module_output_load,
@@ -952,6 +982,7 @@ fn validate_options(options: GvDynamicPowerOptions) -> Result<(), String> {
 }
 
 fn validate_sequential_options(options: GvSequentialDynamicPowerOptions) -> Result<(), String> {
+    options.wire_load.validate().map_err(|e| e.to_string())?;
     validate_common_options(
         options.primary_input_transition,
         options.module_output_load,
@@ -1096,6 +1127,7 @@ fn build_topology(
     model: &PowerModelView<'_>,
     library: &Library,
     module_output_load: f64,
+    wire_load: WireLoadModel,
 ) -> Result<PowerTopology, String> {
     let cell_by_name: HashMap<_, _> = library
         .cells
@@ -1211,6 +1243,8 @@ fn build_topology(
         });
     }
 
+    let mut sink_pins = vec![0; signals.len()];
+    let mut drives_output = vec![false; signals.len()];
     for (instance_index, instance) in model.instances.iter().enumerate() {
         for (pin_index, pin) in instance.pins.iter().enumerate() {
             if let Some(signal_id) = instances[instance_index].output_signals[pin_index] {
@@ -1237,6 +1271,7 @@ fn build_topology(
                 let liberty_pin = &library.cells[instances[instance_index].cell].pins
                     [instances[instance_index].liberty_pins[pin_index]];
                 let capacitance = effective_input_capacitance(liberty_pin, &pin.pin_name)?;
+                sink_pins[signal_id.0] += 1;
                 signals[signal_id.0].load.rise += capacitance.rise;
                 signals[signal_id.0].load.fall += capacitance.fall;
             }
@@ -1260,9 +1295,19 @@ fn build_topology(
                 clock_signal,
                 &format!("module output '{}[{}]'", port.name, bit.bit_number),
             )? {
+                drives_output[signal_id.0] = true;
                 signals[signal_id.0].load.rise += module_output_load;
                 signals[signal_id.0].load.fall += module_output_load;
             }
+        }
+    }
+    // Add wire once after pin and external loads; all energy and slew queries
+    // consume this same load. Primary inputs and clocks retain their pin loads.
+    for (index, signal) in signals.iter_mut().enumerate() {
+        if matches!(signal.owner, SignalOwner::CellOutput { .. }) {
+            wire_load
+                .add_to(&mut signal.load, sink_pins[index], drives_output[index])
+                .map_err(|e| e.to_string())?;
         }
     }
     let instance_order = topological_instance_order(&instances, &signals)?;
@@ -1419,7 +1464,7 @@ fn add_signal(
     signals.push(Signal {
         source,
         owner,
-        load: EdgeValue::default(),
+        load: EdgeLoadCapacitance::default(),
         edges: EdgeValue::default(),
         histogram: EdgeValue::default(),
     });
@@ -2658,7 +2703,7 @@ mod tests {
                 binding_test_instance(&["B", "A"]),
             ],
         };
-        let topology = build_topology(&model, &library, 0.0).unwrap();
+        let topology = build_topology(&model, &library, 0.0, WireLoadModel::default()).unwrap();
         assert!(Arc::ptr_eq(
             &topology.instances[0].bindings,
             &topology.instances[1].bindings
