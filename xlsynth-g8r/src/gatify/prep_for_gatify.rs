@@ -1308,6 +1308,7 @@ fn rewrite_nary_adds_to_fixed_point(f: &mut ir::Fn) -> usize {
 /// the `x != 0` predicate is redundant because `x[k] == 1` implies non-zero.
 /// So the mask collapses to just `!sign(x)` for that projected bit.
 fn rewrite_projected_positive_mask_to_sign_test(f: &mut ir::Fn) -> usize {
+    let use_counts = get_use_counts(f);
     let mut rewrites: usize = 0;
     let original_len = f.nodes.len();
 
@@ -1385,6 +1386,22 @@ fn rewrite_projected_positive_mask_to_sign_test(f: &mut ir::Fn) -> usize {
             continue;
         }
         if is_ubits_literal_0_or_1_of_width(f, rhs, x_w) != Some(false) {
+            continue;
+        }
+
+        let mask_nr = if matches!(f.nodes[first.index].payload, NodePayload::SignExt { .. }) {
+            first
+        } else {
+            second
+        };
+        // At x == 0 the predicate changes, although every masked data bit
+        // stays zero. Only mutate the chain when no other consumer observes
+        // the comparison, its negation, or the replicated mask. Sharing the
+        // final AND is safe because its entire value is preserved.
+        if [sle_nr, pred_nr, mask_nr]
+            .iter()
+            .any(|nr| use_counts[nr.index] != 1)
+        {
             continue;
         }
 
@@ -3481,6 +3498,43 @@ fn cone(x: bits[13] id=1) -> bits[1] {
                 FnEvalResult::Failure(f) => panic!("unexpected eval failure: {:?}", f),
             };
             assert_eq!(got_orig, got_opt, "mismatch at x={}", x);
+        }
+    }
+    #[test]
+    fn projected_positive_mask_preserves_shared_predicate_consumers() {
+        for shared in ["le0", "gt0", "m"] {
+            for operands in ["low, m", "m, low"] {
+                let shared_width = if shared == "m" { 3 } else { 1 };
+                let text = format!(
+                    r#"package shared_mask
+top fn cone(x: bits[4] id=1) -> (bits[1], bits[{shared_width}]) {{
+  z: bits[4] = literal(value=0, id=2)
+  le0: bits[1] = sle(x, z, id=3)
+  gt0: bits[1] = not(le0, id=4)
+  low: bits[3] = bit_slice(x, start=0, width=3, id=5)
+  m: bits[3] = sign_ext(gt0, new_bit_count=3, id=6)
+  gated: bits[3] = and({operands}, id=7)
+  out: bits[1] = bit_slice(gated, start=2, width=1, id=8)
+  ret result: (bits[1], bits[{shared_width}]) = tuple(out, {shared}, id=9)
+}}
+"#
+                );
+                let f = parse_test_fn(&text);
+                let optimized = prep_for_gatify(&f, None, PrepForGatifyOptions::default());
+                for x in 0..16 {
+                    let args = [IrValue::make_ubits(4, x).unwrap()];
+                    let FnEvalResult::Success(before) = eval_fn(&f, &args) else {
+                        panic!("original evaluation failed");
+                    };
+                    let FnEvalResult::Success(after) = eval_fn(&optimized, &args) else {
+                        panic!("prepared evaluation failed");
+                    };
+                    assert_eq!(
+                        before.value, after.value,
+                        "shared={shared}, operands={operands}, x={x}"
+                    );
+                }
+            }
         }
     }
 }
