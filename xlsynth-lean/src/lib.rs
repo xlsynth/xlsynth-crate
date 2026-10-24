@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exports combinational XLSynth gate graphs to Lean and evaluates them there.
+//! Exports XLSynth gate graphs and XLS block IR to Lean.
 //!
 //! The Rust exporter and native g8r reader are part of the conversion trust
 //! boundary. The companion Lean library checks the exported graph structure and
 //! evaluates it using a function proved equivalent to Lean's stock AIG
 //! semantics.
+//!
+//! [`block`] separately exports stateful block models as Lean source text.
+
+pub mod block;
 
 mod error;
 mod evaluate;
