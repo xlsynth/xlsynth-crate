@@ -51,7 +51,7 @@ def eval (inputs : BitVec 3) : BitVec 1 :=
 ```
 
 The native file loader requires a clockless, register-free design for this
-combinational API. Stateful export is future work.
+combinational API. Stateful XLS block IR uses the separate API below.
 
 ### Interface and graph contract
 
@@ -69,6 +69,23 @@ indices. It requires:
 
 Input bindings determine input identity; the name and bit-index metadata on an
 input node do not affect evaluation. Invalid graphs return `LeanError` values.
+
+## Export XLS block IR
+
+```rust
+let block = xlsynth_lean::block::parse(ir_text, None)?;
+let lean_source = xlsynth_lean::block::emit(&block)?;
+```
+
+`parse` verifies the package with native XLS and the typed Rust parser. Pass a
+block name instead of `None` to override the package top; without a top, the
+package must contain exactly one block. `emit` returns a self-contained Lean
+module and does not run Lean.
+
+The generated clock step preserves old-state outputs, simultaneous register
+writes, reset precedence and source assertions. Unsupported operations and
+asynchronous resets return errors. The supported subset covers the arbiter and
+operator-control examples; it is not a general XLS translator.
 
 ## Evaluate through Lean
 
