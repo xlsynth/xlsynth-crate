@@ -84,7 +84,7 @@ pub fn default_output_load_ff(library: &Library) -> Result<f64, String> {
     Ok(result)
 }
 
-/// Converts an explicitly scaled Liberty capacitance unit to femtofarads.
+/// Converts a Liberty capacitance unit to femtofarads; omitted scales mean one.
 pub(crate) fn capacitance_unit_in_ff(unit: &str) -> Result<f64, String> {
     let normalized = unit.trim().to_ascii_lowercase();
     for (suffix, scale) in [
@@ -97,11 +97,15 @@ pub(crate) fn capacitance_unit_in_ff(unit: &str) -> Result<f64, String> {
         ("f", 1e15),
     ] {
         if let Some(coefficient) = normalized.strip_suffix(suffix) {
-            let value = coefficient
-                .trim()
-                .parse::<f64>()
-                .map_err(|_| format!("invalid Liberty capacitance unit '{unit}'"))?
-                * scale;
+            let coefficient = coefficient.trim();
+            let magnitude = if coefficient.is_empty() {
+                1.0
+            } else {
+                coefficient
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid Liberty capacitance unit '{unit}'"))?
+            };
+            let value = magnitude * scale;
             if value.is_finite() && value > 0.0 {
                 return Ok(value);
             }
@@ -139,6 +143,11 @@ mod tests {
         assert_eq!(default_output_load(&lib).unwrap(), 0.004);
         assert_eq!(default_output_load_ff(&lib).unwrap(), 4.0);
         for (unit, expected) in [
+            ("pf", 1000.0),
+            ("pF", 1000.0),
+            ("1pf", 1000.0),
+            ("1pF", 1000.0),
+            (" fF ", 1.0),
             ("1ff", 1.0),
             (" 0.001 pF ", 1.0),
             ("1e-3nf", 1000.0),
@@ -206,7 +215,7 @@ mod tests {
             lib.default_output_load = cap;
             assert!(default_output_load_ff(&lib).is_err());
         }
-        for unit in ["", "pf", "0pf", "-1pf", "NaNpf", "infpf", "1ps"] {
+        for unit in ["", "0pf", "-1pf", "NaNpf", "infpf", "1ps", "watts", "+pf"] {
             assert!(capacitance_unit_in_ff(unit).is_err());
             let mut lib = library();
             lib.units.as_mut().unwrap().capacitance_unit = unit.into();

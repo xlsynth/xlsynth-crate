@@ -115,6 +115,38 @@ mod tests {
     }
 
     #[test]
+    fn converts_bare_and_scaled_units_without_changing_labels() -> Result<()> {
+        let mut lib = make_test_library();
+        for (unit, constant, per_sink) in [
+            ("pf", 0.5, 0.25),
+            ("pF", 0.5, 0.25),
+            ("1pf", 0.5, 0.25),
+            ("1pF", 0.5, 0.25),
+            ("0.5pF", 1.0, 0.5),
+            ("2pF", 0.25, 0.125),
+            ("fF", 500.0, 250.0),
+        ] {
+            lib.units = Some(LibraryUnits {
+                capacitance_unit: unit.into(),
+                ..Default::default()
+            });
+            assert_eq!(
+                WireLoadModel::from_femtofarads(500.0, 250.0, &lib)?,
+                WireLoadModel {
+                    constant_capacitance: constant,
+                    capacitance_per_sink: per_sink,
+                }
+            );
+            assert_eq!(lib.units.as_ref().unwrap().capacitance_unit, unit);
+            assert_eq!(
+                WireLoadModel::from_femtofarads(0.0, 0.0, &lib)?,
+                WireLoadModel::default()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn validates_units_coefficients_and_overflow() -> Result<()> {
         let mut lib = make_test_library();
         lib.units = None;

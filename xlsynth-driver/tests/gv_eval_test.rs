@@ -6,7 +6,7 @@ use xlsynth_test_helpers::compare_golden_text;
 
 const COMBINATIONAL_LIBERTY: &str = r#"
 format_magic: 5496997758228255311
-units: { time_unit: "ns" capacitance_unit: "1pf" voltage_unit: "V" }
+units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
 nominal_voltage: 1.0
 cells: {
   name: "AND2"
@@ -41,7 +41,7 @@ interned_strings: ["D", "CLK", "Q", "IQ"]
 
 const SEQUENTIAL_POWER_LIBERTY: &str = r#"
 format_magic: 5496997758228255311
-units: { time_unit: "ns" capacitance_unit: "1pf" voltage_unit: "V" }
+units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
 nominal_voltage: 1.0
 cells: {
   name: "DFF"
@@ -599,6 +599,8 @@ endmodule"#
                 assert_eq!(bytes, baseline_json);
             }
             let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(report["capacitance_unit"], "pf");
+            assert_eq!(report["energy_unit"], "V^2*pf");
             assert_eq!(
                 report["primary_input_switching_energy"],
                 if sequential { 0.5 } else { 2.0 }
@@ -642,7 +644,7 @@ endmodule"#
         let library_path = temp_dir.path().join("cells.textproto");
         let tiny_units = std::fs::read_to_string(&library_path)
             .unwrap()
-            .replace("1pf", "1af");
+            .replace("pf", "1af");
         std::fs::write(&library_path, tiny_units).unwrap();
         let mut overflow = args.clone();
         overflow.push("--wire-capacitance-constant-ff=1.7976931348623157e308");
