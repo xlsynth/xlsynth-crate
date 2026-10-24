@@ -128,3 +128,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "has-bitwuzla")]
+pub mod projected_positive_mask;

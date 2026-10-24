@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+use xlsynth_g8r_fuzz::projected_positive_mask::{KINDS, check_case};
+
+fuzz_target!(|data: [u8; 4]| {
+    let width = 3 + usize::from(data[0]);
+    check_case(
+        width,
+        usize::from(data[1]) % KINDS.len(),
+        data[2] & 1 != 0,
+        data[3] & 1 != 0,
+    );
+});
