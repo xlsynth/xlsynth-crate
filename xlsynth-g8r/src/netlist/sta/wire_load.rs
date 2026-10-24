@@ -6,12 +6,13 @@ use super::EdgeLoadCapacitance;
 use crate::liberty::io_defaults::capacitance_unit_in_ff;
 use crate::liberty_model::Library;
 use anyhow::{Result, anyhow};
+use serde::Serialize;
 
 /// Fixed overhead plus capacitance per sink pin, in Liberty capacitance units.
 /// Output ports do not count as sink pins. An output-only net receives the
 /// constant term; a dangling net receives neither term. Primary-input drivers
 /// remain ideal sources and are not loaded by this policy.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct WireLoadModel {
     pub constant_capacitance: f64,
     pub capacitance_per_sink: f64,

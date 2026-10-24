@@ -754,6 +754,12 @@ Flags:
   combinational sample pair or each sequential cycle. When present, the report
   includes average dynamic power.
 
+Power JSON reports include a `wire_load` object whenever either applied
+coefficient is nonzero. Its `constant_capacitance` and
+`capacitance_per_sink` are expressed in the report's `capacitance_unit`,
+after conversion from the CLI's fF values. An absent `wire_load` means both
+coefficients are zero, preserving the JSON format for disabled wire load.
+
 Sequential toggle reports preserve clock ports and pins as explicit
 `kind: "clock"` entries with two assumed transitions per cycle: one
 inactive-to-active edge and one active-to-inactive edge. These clock

@@ -146,6 +146,10 @@ pub struct GvDynamicPowerReport {
     pub nominal_voltage: f64,
     pub primary_input_transition: f64,
     pub module_output_load: f64,
+    /// Applied coefficients in this report's capacitance_unit; absent means
+    /// zero wire load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_load: Option<WireLoadModel>,
     pub cycle_time: Option<f64>,
     pub time_unit: String,
     pub capacitance_unit: String,
@@ -179,6 +183,10 @@ pub struct GvSequentialDynamicPowerReport {
     pub primary_input_transition: f64,
     pub clock_transition: f64,
     pub module_output_load: f64,
+    /// Applied coefficients in this report's capacitance_unit; absent means
+    /// zero wire load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_load: Option<WireLoadModel>,
     pub cycle_time: Option<f64>,
     pub time_unit: String,
     pub capacitance_unit: String,
@@ -775,6 +783,7 @@ pub fn analyze_dynamic_power_bits(
         nominal_voltage,
         primary_input_transition: options.primary_input_transition,
         module_output_load: options.module_output_load,
+        wire_load: (options.wire_load != WireLoadModel::default()).then_some(options.wire_load),
         cycle_time: options.cycle_time,
         time_unit,
         capacitance_unit,
@@ -941,6 +950,7 @@ pub fn analyze_sequential_dynamic_power(
         primary_input_transition: options.primary_input_transition,
         clock_transition: options.clock_transition,
         module_output_load: options.module_output_load,
+        wire_load: (options.wire_load != WireLoadModel::default()).then_some(options.wire_load),
         cycle_time: options.cycle_time,
         time_unit,
         capacitance_unit,
