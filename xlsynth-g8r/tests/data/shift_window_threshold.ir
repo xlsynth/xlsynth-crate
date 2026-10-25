@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+package shift_window_threshold
+
+top fn f(x: bits[33] id=1, a: bits[5] id=2, b: bits[1] id=3) -> bits[1] {
+  wide: bits[6] = zero_ext(a, new_bit_count=6, id=4)
+  one: bits[6] = literal(value=1, id=5)
+  sum: bits[6] = add(wide, one, id=6)
+  amount: bits[7] = concat(sum, b, id=7)
+  shift: bits[33] = shll(x, amount, id=8)
+  slice: bits[5] = bit_slice(shift, start=2, width=5, id=9)
+  ret result: bits[1] = or_reduce(slice, id=10)
+}
