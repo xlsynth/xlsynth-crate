@@ -28,6 +28,7 @@ use crate::split_adder::rewrite_split_adders;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::desugar_extensions::{self, ExtensionEmitMode};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use xlsynth_pir::ir_match::{MatchCtx, any, exact};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_rebase_ids::package_max_emitted_node_id;
@@ -79,6 +80,8 @@ pub struct AugOptRewriteStats {
     pub eq_priority_sel_to_selector_predicate: usize,
     pub eq_add_zero_to_eq_rhs_sub: usize,
     pub ne_add_all_ones_to_ne_not: usize,
+    /// Signed modular increments compared strictly greater than zero.
+    pub signed_increment_positive: usize,
     pub ne_shrl_slice_known_one_shift_nonzero: usize,
     pub predicate_hoist_across_select: usize,
     pub umod_distribute_across_select: usize,
@@ -100,6 +103,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.eq_priority_sel_to_selector_predicate)
             .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
             .saturating_add(self.ne_add_all_ones_to_ne_not)
+            .saturating_add(self.signed_increment_positive)
             .saturating_add(self.ne_shrl_slice_known_one_shift_nonzero)
             .saturating_add(self.predicate_hoist_across_select)
             .saturating_add(self.umod_distribute_across_select)
@@ -142,6 +146,9 @@ impl AugOptRewriteStats {
         self.ne_add_all_ones_to_ne_not = self
             .ne_add_all_ones_to_ne_not
             .saturating_add(other.ne_add_all_ones_to_ne_not);
+        self.signed_increment_positive = self
+            .signed_increment_positive
+            .saturating_add(other.signed_increment_positive);
         self.ne_shrl_slice_known_one_shift_nonzero = self
             .ne_shrl_slice_known_one_shift_nonzero
             .saturating_add(other.ne_shrl_slice_known_one_shift_nonzero);
@@ -557,6 +564,7 @@ fn apply_basis_rewrites_to_fn(
         rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
     stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
     stats.ne_add_all_ones_to_ne_not = rewrite_ne_add_all_ones_to_ne_not(&mut cloned);
+    stats.signed_increment_positive = rewrite_signed_increment_positive(&mut cloned);
     // Distribute unsigned mod across selectors so each arm can be folded by
     // downstream optimization (e.g. when divisors are constants).
     stats.umod_distribute_across_select = rewrite_umod_distribute_across_select(&mut cloned);
@@ -1920,6 +1928,83 @@ fn rewrite_eq_priority_sel_to_selector_predicate(
         rewrites += 1;
     }
 
+    rewrites
+}
+
+/// Replaces signed `(x + 1) > 0` with a sign test excluding positive overflow.
+/// Only the comparison changes: other consumers retain the modular sum.
+fn rewrite_signed_increment_positive(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0;
+    let mut text_id = next_text_id(f);
+    let mut append = |f: &mut ir::Fn, ty, payload| {
+        let result = NodeRef {
+            index: f.nodes.len(),
+        };
+        f.nodes.push(ir::Node {
+            text_id,
+            name: None,
+            ty,
+            payload,
+            pos: None,
+        });
+        text_id = text_id.checked_add(1).expect("IR node ID overflow");
+        result
+    };
+    for idx in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Sgt, sum, zero) = f.nodes[idx].payload else {
+            continue;
+        };
+        if !matches!(&f.get_node(zero).payload, NodePayload::Literal(v) if v.bits_equals_u64_value(0))
+        {
+            continue;
+        }
+        let NodePayload::Binop(Binop::Add, lhs, rhs) = f.get_node(sum).payload else {
+            continue;
+        };
+        let Some(one) = [lhs, rhs].into_iter().find(|&operand| {
+            matches!(&f.get_node(operand).payload, NodePayload::Literal(v) if v.bits_equals_u64_value(1))
+        }) else {
+            continue;
+        };
+        let ctx = MatchCtx::new(f);
+        let Some(bindings) = ctx.commutative_binop_pair(sum, Binop::Add, exact(one), any("x"))
+        else {
+            continue;
+        };
+        let x = bindings.get_node("x").expect("matched increment operand");
+        let width = ctx.bits_width(x).expect("validated add has bits operands");
+        if width == 0 {
+            continue;
+        }
+        if width == 1 {
+            // Signed bits[1] has only -1 and 0, so no sum can be positive.
+            f.nodes[idx].payload = NodePayload::Literal(IrValue::make_ubits(1, 0).unwrap());
+        } else {
+            let sign = append(
+                f,
+                Type::Bits(1),
+                NodePayload::BitSlice {
+                    arg: x,
+                    start: width - 1,
+                    width: 1,
+                },
+            );
+            let low = append(
+                f,
+                Type::Bits(width - 1),
+                NodePayload::BitSlice {
+                    arg: x,
+                    start: 0,
+                    width: width - 1,
+                },
+            );
+            let all_ones = append(f, Type::Bits(1), NodePayload::Unop(Unop::AndReduce, low));
+            // Nonnegative x stays positive after increment except at
+            // MAX_SIGNED.
+            f.nodes[idx].payload = NodePayload::Nary(NaryOp::Nor, vec![sign, all_ones]);
+        }
+        rewrites += 1;
+    }
     rewrites
 }
 
