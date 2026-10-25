@@ -254,3 +254,13 @@ two equality tests exposed by bounded shift expansion can use one-hot bits
 directly. A retained numeric count or shift amount blocks that group; the
 whole-function AND/graph-LE profitability check still applies. Dead count users
 do not block a live group. Decoder sharing rules are unchanged.
+
+### Signed increment positivity
+
+For a width-`N` modular addition, `sgt(add(x, 1), 0)` becomes
+`nor(x[N-1], and_reduce(x[0:N-1]))`. This excludes both negative inputs
+and the maximum positive input, whose increment overflows. At width one,
+the predicate is always false. Either addition operand may hold the
+width-matched literal one. Only the comparison is replaced, preserving
+any numeric consumers of the addition. This rewrite also runs in PIR-only
+mode and does not require downstream AIG optimization.
