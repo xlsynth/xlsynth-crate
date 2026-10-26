@@ -27,6 +27,7 @@ enum Plan {
     Shift {
         data: NodeRef,
         amount: NodeRef,
+        low_width: usize,
         max: usize,
         terms: Vec<Term>,
     },
@@ -45,13 +46,84 @@ struct Budget {
     shifts: usize,
 }
 
+/// Finds one-hot producers through wiring and polarity wrappers. Exhausting the
+/// shared admission budget conservatively declines the new wide-amount match.
+fn has_one_hot_source(f: &ir::Fn, value: NodeRef, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+    match &f.get_node(value).payload {
+        NodePayload::OneHot { .. } => true,
+        NodePayload::Unop(Unop::Identity | Unop::Not, arg)
+        | NodePayload::BitSlice { arg, .. }
+        | NodePayload::ZeroExt { arg, .. }
+        | NodePayload::SignExt { arg, .. } => has_one_hot_source(f, *arg, budget),
+        NodePayload::Nary(NaryOp::Concat, args) => {
+            args.iter().any(|&arg| has_one_hot_source(f, arg, budget))
+        }
+        _ => false,
+    }
+}
+
+/// Conservatively detects constant wiring or literal-fed bitwise controls in
+/// a low amount bit. Arithmetic is opaque; this is a bounded admission check,
+/// not a general known-bits analysis or a change to the narrow-path estimate.
+fn amount_bit_has_constant(f: &ir::Fn, value: NodeRef, bit: usize, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+    match &f.get_node(value).payload {
+        NodePayload::Literal(_) => true,
+        NodePayload::Unop(Unop::Identity | Unop::Not, arg) => {
+            amount_bit_has_constant(f, *arg, bit, budget)
+        }
+        NodePayload::BitSlice { arg, start, .. } => {
+            amount_bit_has_constant(f, *arg, start + bit, budget)
+        }
+        NodePayload::ZeroExt { arg, .. } => {
+            bit >= f.get_node(*arg).ty.bit_count() || amount_bit_has_constant(f, *arg, bit, budget)
+        }
+        NodePayload::SignExt { arg, .. } => {
+            let width = f.get_node(*arg).ty.bit_count();
+            width == 0 || amount_bit_has_constant(f, *arg, bit.min(width - 1), budget)
+        }
+        NodePayload::Nary(NaryOp::Concat, args) => {
+            let mut offset = bit;
+            for &arg in args.iter().rev() {
+                if *budget == 0 {
+                    return true;
+                }
+                *budget -= 1;
+                let width = f.get_node(arg).ty.bit_count();
+                if offset < width {
+                    return amount_bit_has_constant(f, arg, offset, budget);
+                }
+                offset -= width;
+            }
+            true
+        }
+        NodePayload::Nary(
+            NaryOp::And | NaryOp::Or | NaryOp::Xor | NaryOp::Nand | NaryOp::Nor,
+            args,
+        ) => args
+            .iter()
+            .any(|&arg| amount_bit_has_constant(f, arg, bit, budget)),
+        _ => false,
+    }
+}
+
 /// Plans a survival predicate using a bounded structural gate estimate.
 ///
 /// For a left shift, input bit i contributes iff start <= i + amount < end;
 /// for a right shift, iff start <= i - amount < end. Intersecting that interval
 /// with the amount's unsigned range handles zero fill and overshifts exactly.
 /// Common unconditional bits become one reduction. At most 64 groups, 32 plan
-/// nodes, 256 source bits and five amount bits are considered per predicate.
+/// nodes, 256 source bits and five effective amount bits are considered per
+/// predicate. Wider amounts use a high-bits-zero guard for whole-word tests
+/// when the source width needs at most five low bits. The intervals still
+/// reject low-bit overshifts for non-power-of-two widths.
 /// The estimate compares boundary comparisons/reductions with the demanded
 /// barrel-shifter muxes; it never constructs or scores competing AIGs.
 fn shift_plan(
@@ -66,14 +138,28 @@ fn shift_plan(
     let ctx = MatchCtx::new(f);
     let n = ctx.bits_width(data)?;
     let aw = ctx.bits_width(amount)?;
+    let low_width = if aw > 5 { ceil_log2(n) } else { aw };
+    // Keep newly supported matches within the structural estimate's scope.
+    // All checks share a small budget and leave the existing narrow path alone.
+    if aw > 5 {
+        let mut admission_budget = 32;
+        if start != 0
+            || width != n
+            || has_one_hot_source(f, data, &mut admission_budget)
+            || (0..low_width)
+                .any(|bit| amount_bit_has_constant(f, amount, bit, &mut admission_budget))
+        {
+            return None;
+        }
+    }
     if n > 256
-        || !(1..=5).contains(&aw)
+        || !(1..=5).contains(&low_width)
         || matches!(f.get_node(data).payload, NodePayload::Literal(_))
         || matches!(f.get_node(amount).payload, NodePayload::Literal(_))
     {
         return None;
     }
-    let max = (1usize << aw) - 1;
+    let max = (1usize << low_width) - 1;
     let end = start.checked_add(width)?;
     let mut terms: Vec<Term> = Vec::new();
     for i in 0..n {
@@ -113,14 +199,18 @@ fn shift_plan(
         .iter()
         .map(|term| {
             term.width - 1
-                + usize::from(term.low > 0) * 2 * aw
-                + usize::from(term.high < max) * 2 * aw
+                + usize::from(term.low > 0) * 2 * low_width
+                + usize::from(term.high < max) * 2 * low_width
                 + usize::from(term.low > 0 || term.high < max)
         })
         .sum::<usize>()
         + terms.len()
-        - 1;
-    let original = 3 * width * aw.min(ceil_log2(n)) + width - 1;
+        - 1
+        + usize::from(low_width < aw);
+    // Both forms reduce the high amount bits to detect overshifts. Cancel that
+    // common cost, charging the replacement's final guard AND without taking
+    // credit for the original shifter's per-output overflow masking.
+    let original = 3 * width * low_width.min(ceil_log2(n)) + width - 1;
     if replacement >= original {
         return None;
     }
@@ -129,6 +219,7 @@ fn shift_plan(
     Some(Plan::Shift {
         data,
         amount,
+        low_width,
         max,
         terms,
     })
@@ -265,24 +356,46 @@ impl NodeAppender<'_> {
             Plan::Shift {
                 data,
                 amount,
+                low_width,
                 max,
                 terms,
             } => {
                 let aw = self.f.get_node(amount).ty.bit_count();
+                let low_amount = if low_width < aw {
+                    self.push(
+                        low_width,
+                        NodePayload::BitSlice {
+                            arg: amount,
+                            start: 0,
+                            width: low_width,
+                        },
+                    )
+                } else {
+                    amount
+                };
                 let mut outputs = Vec::new();
                 for term in terms {
                     let mut factors = vec![self.reduce(data, term.start, term.width)];
                     if term.low > 0 {
-                        let bound = self.literal(aw, term.low);
-                        factors.push(self.push(1, NodePayload::Binop(Binop::Uge, amount, bound)));
+                        let bound = self.literal(low_width, term.low);
+                        factors
+                            .push(self.push(1, NodePayload::Binop(Binop::Uge, low_amount, bound)));
                     }
                     if term.high < max {
-                        let bound = self.literal(aw, term.high);
-                        factors.push(self.push(1, NodePayload::Binop(Binop::Ule, amount, bound)));
+                        let bound = self.literal(low_width, term.high);
+                        factors
+                            .push(self.push(1, NodePayload::Binop(Binop::Ule, low_amount, bound)));
                     }
                     outputs.push(self.combine(NaryOp::And, factors));
                 }
-                self.combine(NaryOp::Or, outputs)
+                let survives = self.combine(NaryOp::Or, outputs);
+                if low_width < aw {
+                    let high_nonzero = self.reduce(amount, low_width, aw - low_width);
+                    let in_range = self.push(1, NodePayload::Unop(Unop::Not, high_nonzero));
+                    self.combine(NaryOp::And, vec![in_range, survives])
+                } else {
+                    survives
+                }
             }
         }
     }
@@ -397,7 +510,15 @@ top fn main(x: bits[{n}] id=1, k: bits[{aw}] id=2) -> {ret_ty} {{
                 (65, 3, 0, 65, 1),
                 (256, 3, 0, 256, 1),
                 (257, 3, 0, 257, 0),
-                (23, 6, 0, 23, 0),
+                (23, 6, 0, 23, 1),
+                (2, 65, 0, 2, 1),
+                (22, 32, 0, 22, 1),
+                (31, 129, 0, 31, 1),
+                (32, 32, 0, 32, 1),
+                (32, 65, 1, 31, 0),
+                (7, 9, 0, 6, 0),
+                (33, 6, 0, 33, 0),
+                (65, 65, 0, 65, 0),
                 (32, 5, 0, 1, usize::from(op == "shll")),
             ] {
                 let mut f = case(n, aw, op, start, width, false, false);

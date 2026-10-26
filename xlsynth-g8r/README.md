@@ -503,8 +503,14 @@ Single-use slices and binary selects can carry the scalar test to the shift.
 Shared numeric consumers block removal; shared boolean results are allowed.
 
 The rule uses a bounded structural estimate, not speculative AIG construction:
-source width at most 256, amount width at most five bits, at most 32 traversed
+source width at most 256, at most five effective amount bits, at most 32 traversed
 plan nodes and 64 emitted input groups per predicate. Arithmetic right shifts,
 constant data/amounts, and shapes that fail the estimated area benefit stay with
-the existing lowering. This is separate from the bounded affine amount/window
-rewrite, which runs first and can reason about much wider shift amounts.
+the existing lowering. For whole-word tests on data of at most 32 bits, wider
+amounts use one upper-bits-zero guard and the low `ceil(log2(width))` bits. The
+surviving-bit conditions still reject low-bit overshifts for non-power-of-two widths. The wide
+path declines partial windows, wrapped one-hot data, and visible constant low
+control bits to preserve native simplifications that the generic cost estimate
+does not model. These admission checks share a 32-step bound; they leave the
+existing narrow-amount rule unchanged. This is separate from the bounded affine
+amount/window rewrite, which runs first and can reason about much wider shift amounts.
