@@ -288,6 +288,15 @@ priority direction, and checks width/wrap/sentinel/sharing controls. CI's Fuzz S
 Test job requires this standalone audit to pass before the short mutation smoke
 test and retains the coverage counts in its log.
 
+The existing target also runs a bounded scalar-bit proof matrix during
+initialization, before random mutation, with no additional binary or CI step.
+It covers bare count bits, nested reductions/comparisons, independent and dependent
+predicate groups, separately observed slices, retained count/amount users, and
+unsupported multibit/truncated/variable/arbitrary-encode inputs. Exact forced
+rewrite counts prevent a missed match from passing on equivalence alone.
+Widths, both priorities, zero sentinels and wrapping/widening arithmetic vary in
+the byte grammar; startup requires proved acceptance and rejection coverage.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs
 
 Generates small two-stage DSLX stitch-pipeline samples with parameter names

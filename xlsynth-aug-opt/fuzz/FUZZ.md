@@ -109,6 +109,21 @@ directions and all three optimizer modes. The audit requires proved real-cost
 acceptance for live groups and groups with a dead count user. Retaining the count
 as an output remains a rejection control, including when other users are eligible.
 
+Scalar count-bit cases additionally exercise bare slices, slices nested in
+reductions or comparisons, overlapping live roots, independent and dependent
+priority groups, separately observed slice results, and retained numeric users.
+Near misses include multibit slices, wider truncation before arithmetic, variable
+arithmetic and encodes of arbitrary inputs. Each case checks an exact forced
+rewrite count as well as direct SMT equivalence and real-cost pipeline behavior.
+
+A compact scalar-bit matrix runs in the existing target's initialization before
+mutation, including the existing CI smoke invocation. It requires proved
+acceptance and rejection coverage; no extra binary or CI step is needed. Startup
+failures include replay bytes. The focused grammar remains separate from the
+generic augmented-optimizer fuzzer. A malformed decoder may still contain valid
+scalar-bit rewrites: masked decoder controls and wider truncations continue to
+check whole-pass rejection, while supported scalar subexpressions must fire.
+
 ## fuzz_low_bit_nonzero
 
 Focused mutation target for contiguous low-bit nonzero tests through negation or conditional negation. It proves forced candidates and real-cost PIR-only and one/three-round pipelines with Bitwuzla, checks retained numeric consumers, reversed selector arms, decomposed reductions, and rejects offset/gapped slices, bitwise complement, and dead predicates. Cost ties/errors must preserve the input. Inconclusive proofs fail the bounded campaign. The deterministic fuzz-library audit requires actual proved acceptance in every pipeline for the conditional-negation families. Run with sanitizer none; optional XLSYNTH_FUZZ_REPORT_SAMPLES=1 records exact bytes and proved acceptance for mutation-versus-seed auditing.
