@@ -10,7 +10,7 @@ use xlsynth_pir::ir_verify::verify_function;
 use xlsynth_pir::math::ceil_log2;
 use xlsynth_pir::{IrBits, IrValue};
 
-pub const CASE_NAMES: [&str; 38] = [
+pub const CASE_NAMES: [&str; 51] = [
     "decode",
     "one_shift",
     "expanded_concat",
@@ -49,6 +49,19 @@ pub const CASE_NAMES: [&str; 38] = [
     "scalar_group",
     "scalar_group_retained",
     "scalar_group_dead_user",
+    "scalar_bit",
+    "scalar_bit_reduction",
+    "scalar_bit_comparison",
+    "scalar_bit_independent",
+    "scalar_bit_shared_count",
+    "scalar_bit_shared_amount",
+    "scalar_bit_shared_view",
+    "scalar_bit_truncated",
+    "scalar_bit_unknown_hot",
+    "scalar_bit_dependent",
+    "scalar_bit_multibit",
+    "scalar_bit_variable_index",
+    "scalar_bit_retained_independent",
 ];
 pub const SCALAR_DIRECTIONS: [[&str; 2]; 9] = [
     ["scalar_or_msb", "scalar_or_lsb"],
@@ -81,6 +94,8 @@ pub struct Sample {
     pub pipeline: usize,
     pub must_reject: bool,
     pub may_decline: bool,
+    /// Exact initially-live root count for the scalar-bit grammar.
+    pub expected_fusions: Option<usize>,
     pub features: BTreeSet<&'static str>,
 }
 
@@ -584,8 +599,15 @@ pub fn generate_sample(data: &[u8]) -> Result<Sample, String> {
         function: f,
         case,
         pipeline,
-        must_reject: matches!(case, 4..=9 | 13 | 15),
+        // A one-bit truncation or an unmasked malformed decoder can now
+        // contain valid scalar-bit rewrites, even though decoding itself
+        // still does not match. Wider truncations and masked malformed
+        // decoders remain whole-pass rejection controls.
+        must_reject: matches!(case, 4 | 5 | 9 | 13 | 15)
+            || (case == 6 && count_width > 2)
+            || (matches!(case, 7 | 8) && flags & 2 != 0),
         may_decline: matches!(case, 2 | 3),
+        expected_fusions: None,
         features,
     })
 }
@@ -593,8 +615,9 @@ pub fn generate_sample(data: &[u8]) -> Result<Sample, String> {
 /// Builds only scalar consumers, so a fusion hit cannot come from a decoder.
 fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
     let mut n = SCALAR_WIDTHS[usize::from(bytes.next()) % SCALAR_WIDTHS.len()];
-    if case == 30 {
-        n = n.max(3); // Keep the truncated near-miss index nonempty.
+    if matches!(case, 30 | 45 | 48) {
+        // Keep near-miss truncations wider than a newly supported scalar bit.
+        n = n.max(7);
     }
     let flags = bytes.next();
     let steps = bytes.next() % 7;
@@ -604,7 +627,11 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
     let slice_width = usize::from(bytes.next());
     let family = if case < 25 { case - 16 } else { 0 };
     let mut features = BTreeSet::from([
-        SCALAR_DIRECTIONS[family][usize::from(flags & 1)],
+        if case >= 38 {
+            ["scalar_bit_msb", "scalar_bit_lsb"][usize::from(flags & 1)]
+        } else {
+            SCALAR_DIRECTIONS[family][usize::from(flags & 1)]
+        },
         ["pir_only", "sandwich_1", "sandwich_3"][pipeline],
         if n > 64 {
             "scalar_wide_input"
@@ -627,7 +654,7 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
     } else {
         x
     };
-    let hot = if case == 33 {
+    let hot = if matches!(case, 33 | 46) {
         parameter(&mut f, n + 1, "arbitrary_hot")
     } else {
         features.insert("scalar_sentinel");
@@ -644,7 +671,7 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
     let count = push_node(&mut f, Type::Bits(cw), NodePayload::Encode { arg: hot });
     let mut amount = count;
     let mut width = cw;
-    if case == 30 {
+    if matches!(case, 30 | 45) {
         width -= 1;
         amount = slice(&mut f, amount, 0, width);
         // A final sliced reduction is supported; arithmetic AFTER truncation
@@ -718,9 +745,49 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
             NodePayload::Nary(NaryOp::And, vec![amount, mask]),
         );
     }
+    if case == 49 {
+        let variable = parameter(&mut f, width, "variable");
+        amount = push_node(
+            &mut f,
+            Type::Bits(width),
+            NodePayload::Binop(Binop::Add, amount, variable),
+        );
+    }
     // Shared-amount controls always retain the pre-slice intermediate.
     let shared_amount = amount;
-    let mut output = if family < 3 && case != 32 {
+    let mut bit_view = None;
+    let mut output = if case >= 38 {
+        let size = if case == 48 { 2 } else { 1 };
+        let start = slice_start % (width - size + 1);
+        let view = slice(&mut f, amount, start, size);
+        bit_view = Some(view);
+        features.insert("scalar_bit_slice");
+        features.insert(if start == 0 {
+            "scalar_bit_low"
+        } else {
+            "scalar_bit_high"
+        });
+        if matches!(case, 39 | 41 | 44 | 50) {
+            features.insert("scalar_bit_overlap");
+            push_node(
+                &mut f,
+                Type::Bits(1),
+                NodePayload::Unop(
+                    [Unop::OrReduce, Unop::AndReduce, Unop::XorReduce][usize::from(flags >> 4) % 3],
+                    view,
+                ),
+            )
+        } else if case == 40 {
+            let constant = small_literal(&mut f, 1, usize::from(flags & 4 != 0));
+            push_node(
+                &mut f,
+                Type::Bits(1),
+                NodePayload::Binop(Binop::Eq, view, constant),
+            )
+        } else {
+            view
+        }
+    } else if family < 3 && case != 32 {
         if flags & 2 != 0 {
             let start = slice_start % width;
             let size = 1 + slice_width % (width - start);
@@ -760,7 +827,7 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
         };
         push_node(&mut f, Type::Bits(1), NodePayload::Binop(op, a, b))
     };
-    if case >= 35 {
+    if (35..=37).contains(&case) {
         let k = constant(&mut f, width, n, n + 1, bytes);
         let second = push_node(
             &mut f,
@@ -792,8 +859,53 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
             );
         }
     }
+    if matches!(case, 41 | 47 | 50) {
+        // Separate groups and a one-hot boundary depending on an earlier
+        // predicate exercise replacement order across the original graph.
+        let other_input = if case == 47 {
+            features.insert("scalar_bit_dependent");
+            bit_view.expect("scalar bit")
+        } else {
+            features.insert("scalar_bit_independent");
+            parameter(&mut f, n, "other")
+        };
+        let other_width = f.get_node(other_input).ty.bit_count();
+        let other_hot = push_node(
+            &mut f,
+            Type::Bits(other_width + 1),
+            NodePayload::OneHot {
+                arg: other_input,
+                lsb_prio: flags & 1 == 0,
+            },
+        );
+        let other_cw = ceil_log2(other_width + 1);
+        let other_count = push_node(
+            &mut f,
+            Type::Bits(other_cw),
+            NodePayload::Encode { arg: other_hot },
+        );
+        let zero = small_literal(&mut f, other_cw, 0);
+        let reflected = push_node(
+            &mut f,
+            Type::Bits(other_cw),
+            NodePayload::Binop(Binop::Sub, zero, other_count),
+        );
+        let other_bit = slice(&mut f, reflected, other_cw - 1, 1);
+        let outputs = if flags & 4 == 0 {
+            vec![output, other_bit]
+        } else {
+            vec![other_bit, output]
+        };
+        output = push_node(
+            &mut f,
+            Type::Tuple(vec![Box::new(Type::Bits(1)); 2]),
+            NodePayload::Tuple(outputs),
+        );
+    }
     let retained = match case {
-        25 | 36 => Some(count),
+        25 | 36 | 42 | 50 => Some(count),
+        43 => Some(shared_amount),
+        44 => bit_view,
         26 => Some(shared_amount),
         27 => Some(hot),
         28 => Some(x),
@@ -816,8 +928,15 @@ fn scalar_sample(case: usize, bytes: &mut Choices) -> Result<Sample, String> {
         function: f,
         case,
         pipeline,
-        must_reject: matches!(case, 25 | 26 | 30..=33 | 36),
+        must_reject: matches!(case, 25 | 26 | 30..=33 | 36 | 42 | 43 | 45 | 46 | 48 | 49),
         may_decline: false,
+        expected_fusions: match case {
+            38 | 40 | 50 => Some(1),
+            39 | 44 | 47 => Some(2),
+            41 => Some(3),
+            42 | 43 | 45 | 46 | 48 | 49 => Some(0),
+            _ => None,
+        },
         features,
     })
 }
@@ -873,5 +992,29 @@ pub fn validation_inputs() -> Vec<Vec<u8>> {
     }
     // Nontrivial randomized-grammar sequence; also includes an 80-bit constant.
     inputs.push(vec![18, 18, 3, 4, 2, 6, 0, 1, 1, 0, 1, 4, 2, 3, 4, 5, 1]);
+    inputs
+}
+
+/// Small deterministic coverage for the scalar-bit grammar, also run at fuzz
+/// startup.
+pub fn scalar_bit_validation_inputs() -> Vec<Vec<u8>> {
+    let mut inputs = Vec::new();
+    for case in 38..CASE_NAMES.len() {
+        for direction in 0..2 {
+            for pipeline in 0..3 {
+                // Reflection makes the high bit a profitable scalar predicate.
+                inputs.push(vec![case as u8, 10, direction, 0, pipeline, 3, 5, 0]);
+            }
+        }
+    }
+    for width in [0, 2, 4, 10, 14, 17, 18] {
+        for form in [0, 1, 5, 6] {
+            for direction in 0..2 {
+                for start in [0, 255] {
+                    inputs.push(vec![39, width, direction, 0, form % 3, form, start, 0]);
+                }
+            }
+        }
+    }
     inputs
 }

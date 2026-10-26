@@ -5,13 +5,18 @@
 use std::sync::{Mutex, Once, OnceLock};
 
 use libfuzzer_sys::fuzz_target;
-use xlsynth_aug_opt_fuzz::priority_result_fusion::{CoverageReport, check_input};
+use xlsynth_aug_opt_fuzz::priority_result_fusion::{
+    CoverageReport, check_input, scalar_bit_initialization,
+};
 
 static LOGGER: Once = Once::new();
 static REPORT_SAMPLES: OnceLock<bool> = OnceLock::new();
 static TOTALS: OnceLock<Mutex<CoverageReport>> = OnceLock::new();
 
-fuzz_target!(|data: &[u8]| {
+fuzz_target!(init: {
+    let report = scalar_bit_initialization().expect("scalar-bit startup proof coverage");
+    eprintln!("priority_scalar_bit_startup {report:?}");
+}, |data: &[u8]| {
     LOGGER.call_once(|| {
         let _ = env_logger::builder().is_test(true).try_init();
     });

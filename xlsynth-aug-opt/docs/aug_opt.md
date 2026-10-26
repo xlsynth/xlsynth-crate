@@ -248,6 +248,11 @@ The [integration tests](../tests/) include `aug_opt_*` tests
 for equivalence and mapped quality, including local cost decisions and their
 composition with XLS optimization.
 
+Single-bit slices of a priority count or its supported affine arithmetic are
+scalar predicates too, including slices left after XLS removes a redundant
+reduction. They use the same reachable-ordinal evaluation, including the
+all-zero input sentinel and each arithmetic operation's original width.
+
 Scalar priority predicates that share a count are rewritten as a group only
 when every live use of the intervening count arithmetic is removed. For example,
 two equality tests exposed by bounded shift expansion can use one-hot bits

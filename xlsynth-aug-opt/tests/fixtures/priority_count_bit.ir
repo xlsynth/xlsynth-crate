@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// Minimized from BVC k3-cone-fcb3c8cf38c48d32-aef62692c3d9.
+// Bit 5 of zero-on-zero ceil(log2(x)); x-1 wraps at the input width.
+package priority_count_bit
+
+top fn main(x: bits[32] id=1) -> bits[1] {
+  minus_one: bits[32] = literal(value=4294967295, id=2)
+  previous: bits[32] = add(x, minus_one, id=3)
+  reversed: bits[32] = reverse(previous, id=4)
+  hot: bits[33] = one_hot(reversed, lsb_prio=true, id=5)
+  count: bits[6] = encode(hot, id=6)
+  wide_count: bits[7] = zero_ext(count, new_bit_count=7, id=7)
+  width: bits[7] = literal(value=32, id=8)
+  logarithm: bits[7] = sub(width, wide_count, id=9)
+  high_bit: bits[1] = bit_slice(logarithm, start=5, width=1, id=10)
+  nonzero: bits[1] = or_reduce(x, id=11)
+  ret result: bits[1] = and(high_bit, nonzero, id=12)
+}
