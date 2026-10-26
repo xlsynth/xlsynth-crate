@@ -1444,6 +1444,59 @@ fn next_text_id(f: &ir::Fn) -> usize {
         .saturating_add(1)
 }
 
+/// Matches a nonzero/zero test, returning its word and whether to invert it.
+fn match_zero_test(f: &ir::Fn, root: NodeRef) -> Option<(NodeRef, bool)> {
+    match f.get_node(root).payload {
+        NodePayload::Unop(Unop::OrReduce, arg) => Some((arg, false)),
+        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
+            let zero = [lhs, rhs].into_iter().find(|&n|
+                matches!(&f.get_node(n).payload, NodePayload::Literal(v) if v.bits_equals_u64_value(0)))?;
+            let ctx = MatchCtx::new(f);
+            let bindings = ctx.commutative_binop_pair(
+                root,
+                op,
+                ir_match::any("value"),
+                ir_match::exact(zero),
+            )?;
+            Some((bindings.get_node("value")?, op == Binop::Eq))
+        }
+        _ => None,
+    }
+}
+
+/// Appends a bounded replacement without rescanning the function for text IDs.
+struct NodeAppender<'a> {
+    f: &'a mut ir::Fn,
+    next_id: usize,
+}
+
+impl NodeAppender<'_> {
+    fn push(&mut self, width: usize, payload: NodePayload) -> NodeRef {
+        let result = NodeRef {
+            index: self.f.nodes.len(),
+        };
+        self.f.nodes.push(ir::Node {
+            text_id: self.next_id,
+            name: None,
+            ty: Type::Bits(width),
+            payload,
+            pos: None,
+        });
+        self.next_id += 1;
+        result
+    }
+
+    fn literal(&mut self, width: usize, value: usize) -> NodeRef {
+        self.push(
+            width,
+            NodePayload::Literal(
+                IrValue::make_ubits(width, value as u64)
+                    .expect("bounded literal fits its IR width"),
+            ),
+        )
+    }
+}
+
 fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
     let text_id = next_text_id(f);
     let idx = f.nodes.len();

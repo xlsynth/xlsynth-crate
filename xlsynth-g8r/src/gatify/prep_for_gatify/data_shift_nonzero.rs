@@ -3,9 +3,9 @@
 //! Nonzero tests of bounded logical shifts, without materializing shifted
 //! words.
 
-use xlsynth_pir::IrValue;
+use super::{NodeAppender, match_zero_test};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
-use xlsynth_pir::ir_match::{self, MatchCtx};
+use xlsynth_pir::ir_match::MatchCtx;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::math::ceil_log2;
 
@@ -203,59 +203,14 @@ struct Rewrite {
 /// Recognizes OR reductions and comparisons with zero, independent of operand
 /// order.
 fn recognize(f: &ir::Fn, uses: &[usize], root: NodeRef) -> Option<Rewrite> {
-    let (value, invert) = match f.get_node(root).payload {
-        NodePayload::Unop(Unop::OrReduce, arg) => (arg, false),
-        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
-            let zero = [lhs, rhs].into_iter().find(|&n|
-                matches!(&f.get_node(n).payload, NodePayload::Literal(v) if v.bits_equals_u64_value(0)))?;
-            let ctx = MatchCtx::new(f);
-            let bindings = ctx.commutative_binop_pair(
-                root,
-                op,
-                ir_match::any("value"),
-                ir_match::exact(zero),
-            )?;
-            (bindings.get_node("value")?, op == Binop::Eq)
-        }
-        _ => return None,
-    };
+    let (value, invert) = match_zero_test(f, root)?;
     let width = MatchCtx::new(f).bits_width(value)?;
     let mut budget = Budget::default();
     let plan = plan(f, uses, value, 0, width, &mut budget)?;
     (budget.shifts > 0).then_some(Rewrite { root, invert, plan })
 }
 
-/// Emits a previously bounded plan with one text-ID scan for the whole pass.
-struct Builder<'a> {
-    f: &'a mut ir::Fn,
-    next_id: usize,
-}
-
-impl Builder<'_> {
-    fn push(&mut self, width: usize, payload: NodePayload) -> NodeRef {
-        let result = NodeRef {
-            index: self.f.nodes.len(),
-        };
-        self.f.nodes.push(ir::Node {
-            text_id: self.next_id,
-            name: None,
-            ty: Type::Bits(width),
-            payload,
-            pos: None,
-        });
-        self.next_id += 1;
-        result
-    }
-
-    fn literal(&mut self, width: usize, value: usize) -> NodeRef {
-        self.push(
-            width,
-            NodePayload::Literal(
-                IrValue::make_ubits(width, value as u64).expect("bounded shift literal"),
-            ),
-        )
-    }
-
+impl NodeAppender<'_> {
     fn reduce(&mut self, value: NodeRef, start: usize, width: usize) -> NodeRef {
         let slice = if start == 0 && self.f.get_node(value).ty == Type::Bits(width) {
             value
@@ -368,7 +323,7 @@ pub(super) fn rewrite(f: &mut ir::Fn) -> usize {
         .collect();
     let count = rewrites.len();
     let next_id = super::next_text_id(f);
-    let mut builder = Builder { f, next_id };
+    let mut builder = NodeAppender { f, next_id };
     for rewrite in rewrites {
         let result = builder.emit(rewrite.plan);
         builder.f.nodes[rewrite.root.index].payload = if rewrite.invert {
@@ -465,7 +420,7 @@ top fn main(x: bits[{n}] id=1, k: bits[{aw}] id=2) -> {ret_ty} {{
                 let width = f.get_node(arg).ty.bit_count();
                 // Add a literal rather than replacing a signature parameter.
                 let next_id = super::super::next_text_id(&f);
-                let mut builder = Builder { f: &mut f, next_id };
+                let mut builder = NodeAppender { f: &mut f, next_id };
                 let literal = builder.literal(width, value);
                 let shifted = builder
                     .f

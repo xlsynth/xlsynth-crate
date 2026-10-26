@@ -3,8 +3,9 @@
 //! Bounded predicates over the low bits of an affine left shift.
 
 use std::collections::BTreeMap;
-use xlsynth_pir::IrValue;
-use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+
+use super::{NodeAppender, match_zero_test};
+use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Unop};
 use xlsynth_pir::ir_match::{self, MatchCtx};
 
 /// A single-use shift cone whose observed source windows are short prefixes.
@@ -37,22 +38,7 @@ fn bounded_literal(f: &ir::Fn, n: NodeRef, bound: usize) -> Option<usize> {
 /// Single-use interior nodes ensure the rewrite can remove the barrel shifter.
 fn recognize(f: &ir::Fn, uses: &[usize], root: NodeRef) -> Option<Window> {
     let ctx = MatchCtx::new(f);
-    let (slice, invert) = match f.get_node(root).payload {
-        NodePayload::Unop(Unop::OrReduce, arg) => (arg, false),
-        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
-            let zero = [lhs, rhs]
-                .into_iter()
-                .find(|&n| bounded_literal(f, n, 0) == Some(0))?;
-            let bindings = ctx.commutative_binop_pair(
-                root,
-                op,
-                ir_match::any("slice"),
-                ir_match::exact(zero),
-            )?;
-            (bindings.get_node("slice")?, op == Binop::Eq)
-        }
-        _ => return None,
-    };
+    let (slice, invert) = match_zero_test(f, root)?;
     let NodePayload::BitSlice {
         arg: shift,
         start,
@@ -131,38 +117,7 @@ fn recognize(f: &ir::Fn, uses: &[usize], root: NodeRef) -> Option<Window> {
     })
 }
 
-/// Appends a bounded replacement without rescanning the function for text IDs.
-struct Builder<'a> {
-    f: &'a mut ir::Fn,
-    next_id: usize,
-}
-
-impl Builder<'_> {
-    fn push(&mut self, width: usize, payload: NodePayload) -> NodeRef {
-        let result = NodeRef {
-            index: self.f.nodes.len(),
-        };
-        self.f.nodes.push(ir::Node {
-            text_id: self.next_id,
-            name: None,
-            ty: Type::Bits(width),
-            payload,
-            pos: None,
-        });
-        self.next_id += 1;
-        result
-    }
-
-    fn literal(&mut self, width: usize, value: usize) -> NodeRef {
-        self.push(
-            width,
-            NodePayload::Literal(
-                IrValue::make_ubits(width, value as u64)
-                    .expect("bounded literal fits its IR width"),
-            ),
-        )
-    }
-
+impl NodeAppender<'_> {
     fn or(&mut self, terms: Vec<NodeRef>) -> NodeRef {
         match terms.as_slice() {
             [] => self.literal(1, 0),
@@ -243,7 +198,7 @@ pub(super) fn rewrite(f: &mut ir::Fn) -> usize {
         .collect();
     let count = candidates.len();
     let next_id = super::next_text_id(f);
-    let mut builder = Builder { f, next_id };
+    let mut builder = NodeAppender { f, next_id };
     for candidate in candidates {
         builder.replace(candidate);
     }
@@ -273,7 +228,7 @@ mod tests {
         assert_eq!(rewrite(&mut f), 1);
         let mut f = fixture();
         let root = f.ret_node_ref.unwrap();
-        let mut b = Builder {
+        let mut b = NodeAppender {
             next_id: super::super::next_text_id(&f),
             f: &mut f,
         };
@@ -292,7 +247,7 @@ mod tests {
                 .position(|n| n.name.as_deref() == Some(name))
                 .expect(name);
             let root = f.ret_node_ref.unwrap();
-            let mut b = Builder {
+            let mut b = NodeAppender {
                 next_id: super::super::next_text_id(&f),
                 f: &mut f,
             };
