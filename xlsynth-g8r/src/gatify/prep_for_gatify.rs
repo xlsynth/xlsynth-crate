@@ -18,6 +18,7 @@
 //! that need analysis should project to the XLS basis ops separately (see
 //! `xlsynth_pir::desugar_extensions`).
 
+mod data_shift_nonzero;
 mod shifted_nonzero;
 
 use xlsynth_pir::IrValue;
@@ -2594,6 +2595,7 @@ pub fn prep_for_gatify(
 ) -> ir::Fn {
     let mut cloned = f.clone();
     shifted_nonzero::rewrite(&mut cloned);
+    data_shift_nonzero::rewrite(&mut cloned);
     combine_or_reduces(&mut cloned);
     let _rewrites = rewrite_add_xor_and_to_or(&mut cloned);
     if options.enable_rewrite_small_shift_choices {

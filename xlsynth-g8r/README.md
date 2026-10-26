@@ -490,3 +490,21 @@ Run the synthetic netlist-parse microbenchmark with:
 ```shell
 cargo bench -p xlsynth-g8r --bench netlist_parse_bench -- --verbose
 ```
+
+### Nonzero predicates on bounded logical shifts
+
+Preparation replaces a nonzero/zero test of a logical shift or a contiguous
+window of it with predicates on the input bits that survive. For example, for
+`x: u23` and `k: u3`, `or_reduce(x << k)` becomes
+`or_reduce(x[0:16]) | OR(i=16..22, x[i] & (k <= 22-i))`.
+The common bits need one reduction; only the boundary bits need conditions.
+Left and right logical shifts preserve zero-fill and overshift behavior.
+Single-use slices and binary selects can carry the scalar test to the shift.
+Shared numeric consumers block removal; shared boolean results are allowed.
+
+The rule uses a bounded structural estimate, not speculative AIG construction:
+source width at most 256, amount width at most five bits, at most 32 traversed
+plan nodes and 64 emitted input groups per predicate. Arithmetic right shifts,
+constant data/amounts, and shapes that fail the estimated area benefit stay with
+the existing lowering. This is separate from the bounded affine amount/window
+rewrite, which runs first and can reason about much wider shift amounts.

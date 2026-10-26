@@ -283,3 +283,15 @@ Omit replay arguments to audit the built-in matrix. Run this standalone audit
 in addition to the mutation smoke target; CI wiring is pending. Per-sample reporting records exact input bytes
 and lowering/proof counts; retain logs, seeds and libFuzzer artifacts for replay.
 `with-bitwuzla-system` is also supported.
+
+### `fuzz_shift_nonzero`
+
+Targeted equivalence and decision checks for prep-for-gatify's bounded logical
+shift survival predicates. A deterministic startup matrix and byte-driven cases
+cover left/right shifts, windows, overshifts, wrapping amounts, binary selects,
+nested/independent predicates, retained numeric consumers and shared boolean
+results. Negative cases exercise arithmetic shifts, unsupported bounds, other
+comparisons and traversal limits. Every case asserts removal or retention of the
+shift and proves equivalence for all symbolic inputs under both prep option sets.
+Run through the existing cargo-fuzz workflow with `--sanitizer none` and
+`--features with-bitwuzla-built`; no separate CI step is required.
