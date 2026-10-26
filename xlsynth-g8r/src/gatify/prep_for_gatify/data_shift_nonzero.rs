@@ -3,7 +3,7 @@
 //! Nonzero tests of bounded logical shifts, without materializing shifted
 //! words.
 
-use super::{NodeAppender, match_zero_test};
+use super::helpers::{NodeAppender, match_zero_test, next_text_id};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_match::MatchCtx;
 use xlsynth_pir::ir_utils;
@@ -322,7 +322,7 @@ pub(super) fn rewrite(f: &mut ir::Fn) -> usize {
         .filter_map(|index| recognize(f, &uses, NodeRef { index }))
         .collect();
     let count = rewrites.len();
-    let next_id = super::next_text_id(f);
+    let next_id = next_text_id(f);
     let mut builder = NodeAppender { f, next_id };
     for rewrite in rewrites {
         let result = builder.emit(rewrite.plan);
@@ -419,7 +419,7 @@ top fn main(x: bits[{n}] id=1, k: bits[{aw}] id=2) -> {ret_ty} {{
                 let arg = f.params[parameter];
                 let width = f.get_node(arg).ty.bit_count();
                 // Add a literal rather than replacing a signature parameter.
-                let next_id = super::super::next_text_id(&f);
+                let next_id = next_text_id(&f);
                 let mut builder = NodeAppender { f: &mut f, next_id };
                 let literal = builder.literal(width, value);
                 let shifted = builder

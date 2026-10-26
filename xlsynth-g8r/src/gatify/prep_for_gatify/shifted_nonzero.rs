@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{NodeAppender, match_zero_test};
+use super::helpers::{NodeAppender, get_use_counts, match_zero_test, next_text_id};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Unop};
 use xlsynth_pir::ir_match::{self, MatchCtx};
 
@@ -192,12 +192,12 @@ impl NodeAppender<'_> {
 /// Existing prep-for-gatify cleanup removes dead shift cones and unused helper
 /// roots.
 pub(super) fn rewrite(f: &mut ir::Fn) -> usize {
-    let uses = super::get_use_counts(f);
+    let uses = get_use_counts(f);
     let candidates: Vec<_> = (0..f.nodes.len())
         .filter_map(|index| recognize(f, &uses, NodeRef { index }))
         .collect();
     let count = candidates.len();
-    let next_id = super::next_text_id(f);
+    let next_id = next_text_id(f);
     let mut builder = NodeAppender { f, next_id };
     for candidate in candidates {
         builder.replace(candidate);
@@ -229,7 +229,7 @@ mod tests {
         let mut f = fixture();
         let root = f.ret_node_ref.unwrap();
         let mut b = NodeAppender {
-            next_id: super::super::next_text_id(&f),
+            next_id: next_text_id(&f),
             f: &mut f,
         };
         let tuple = b.push(1, NodePayload::Nary(NaryOp::And, vec![root, root]));
@@ -248,7 +248,7 @@ mod tests {
                 .expect(name);
             let root = f.ret_node_ref.unwrap();
             let mut b = NodeAppender {
-                next_id: super::super::next_text_id(&f),
+                next_id: next_text_id(&f),
                 f: &mut f,
             };
             let shared = b.push(1, NodePayload::Unop(Unop::OrReduce, NodeRef { index: n }));

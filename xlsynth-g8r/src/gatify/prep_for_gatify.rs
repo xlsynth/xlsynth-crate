@@ -19,9 +19,13 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod data_shift_nonzero;
+mod helpers;
 mod shifted_nonzero;
 
-use xlsynth_pir::IrValue;
+use self::helpers::{
+    get_or_insert_bits1_literal, get_or_insert_ubits_literal, get_use_counts, next_text_id,
+    nil_out_node, push_node,
+};
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_match;
 use xlsynth_pir::ir_match::MatchCtx;
@@ -87,20 +91,6 @@ impl PrepForGatifyOptions {
             enable_rewrite_normalize_left: false,
         }
     }
-}
-
-/// Returns per-node use counts for the provided function.
-fn get_use_counts(f: &ir::Fn) -> Vec<usize> {
-    let mut use_counts = vec![0usize; f.nodes.len()];
-    for node in &f.nodes {
-        for operand in ir_utils::operands(&node.payload) {
-            use_counts[operand.index] += 1;
-        }
-    }
-    if let Some(ret) = f.ret_node_ref {
-        use_counts[ret.index] += 1;
-    }
-    use_counts
 }
 
 /// Convert `or(or_reduce(a), or_reduce(b), ...)` into
@@ -1429,112 +1419,6 @@ fn rewrite_projected_positive_mask_to_sign_test(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
-fn nil_out_node(f: &mut ir::Fn, node_ref: ir::NodeRef) {
-    let node = &mut f.nodes[node_ref.index];
-    node.payload = NodePayload::Nil;
-    node.ty = Type::nil();
-}
-
-fn next_text_id(f: &ir::Fn) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
-}
-
-/// Matches a nonzero/zero test, returning its word and whether to invert it.
-fn match_zero_test(f: &ir::Fn, root: NodeRef) -> Option<(NodeRef, bool)> {
-    match f.get_node(root).payload {
-        NodePayload::Unop(Unop::OrReduce, arg) => Some((arg, false)),
-        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
-            let zero = [lhs, rhs].into_iter().find(|&n|
-                matches!(&f.get_node(n).payload, NodePayload::Literal(v) if v.bits_equals_u64_value(0)))?;
-            let ctx = MatchCtx::new(f);
-            let bindings = ctx.commutative_binop_pair(
-                root,
-                op,
-                ir_match::any("value"),
-                ir_match::exact(zero),
-            )?;
-            Some((bindings.get_node("value")?, op == Binop::Eq))
-        }
-        _ => None,
-    }
-}
-
-/// Appends a bounded replacement without rescanning the function for text IDs.
-struct NodeAppender<'a> {
-    f: &'a mut ir::Fn,
-    next_id: usize,
-}
-
-impl NodeAppender<'_> {
-    fn push(&mut self, width: usize, payload: NodePayload) -> NodeRef {
-        let result = NodeRef {
-            index: self.f.nodes.len(),
-        };
-        self.f.nodes.push(ir::Node {
-            text_id: self.next_id,
-            name: None,
-            ty: Type::Bits(width),
-            payload,
-            pos: None,
-        });
-        self.next_id += 1;
-        result
-    }
-
-    fn literal(&mut self, width: usize, value: usize) -> NodeRef {
-        self.push(
-            width,
-            NodePayload::Literal(
-                IrValue::make_ubits(width, value as u64)
-                    .expect("bounded literal fits its IR width"),
-            ),
-        )
-    }
-}
-
-fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = next_text_id(f);
-    let idx = f.nodes.len();
-    f.nodes.push(ir::Node {
-        text_id,
-        name: None,
-        ty,
-        payload,
-        pos: None,
-    });
-    NodeRef { index: idx }
-}
-
-fn get_or_insert_bits1_literal(f: &mut ir::Fn, value: bool) -> NodeRef {
-    // Prefer reusing an existing bits[1] literal to keep node count stable.
-    for (idx, n) in f.nodes.iter().enumerate() {
-        if let NodePayload::Literal(lit) = &n.payload {
-            if n.ty.bit_count() == 1 && lit.to_bool().ok() == Some(value) {
-                return NodeRef { index: idx };
-            }
-        }
-    }
-    let lit = IrValue::make_ubits(1, if value { 1 } else { 0 }).expect("bits[1] literal");
-    push_node(f, Type::Bits(1), NodePayload::Literal(lit))
-}
-
-fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> NodeRef {
-    for (idx, n) in f.nodes.iter().enumerate() {
-        if let NodePayload::Literal(lit) = &n.payload {
-            if n.ty.bit_count() == bit_count && lit.to_u64().ok() == Some(value) {
-                return NodeRef { index: idx };
-            }
-        }
-    }
-    let lit = IrValue::make_ubits(bit_count, value).expect("ubits literal");
-    push_node(f, Type::Bits(bit_count), NodePayload::Literal(lit))
-}
-
 fn is_ubits_literal_0_or_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> Option<bool> {
     let node = f.get_node(nr);
     if node.ty.bit_count() != w {
@@ -2688,6 +2572,7 @@ pub fn prep_for_gatify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser::Parser;
     use xlsynth_pir::ir_range_info::IrRangeInfo;
