@@ -74,6 +74,7 @@ mod g8r_cli;
 mod g8r_equiv;
 mod g8r_eval;
 mod g8r_ir_equiv;
+mod g8r_lean;
 mod g8r_optimize;
 mod g8r_stitch_pipeline;
 mod g8r_table;
@@ -2236,79 +2237,8 @@ fn main() {
                         .action(ArgAction::Set),
                 )
         )
-        .subcommand(
-            clap::Command::new("gv2aig")
-                .about("Converts GV cells and wiring to AIGER using Liberty")
-                .arg(
-                    Arg::new("netlist")
-                        .long("netlist")
-                        .help("Input GV cell netlist (.gv, .v, or gzip-compressed)")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("liberty_proto")
-                        .long("liberty_proto")
-                        .help("Required Liberty proto (.proto, .textproto, or gzip-compressed); use ugv2aig for unmapped gate Verilog")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("aiger_out")
-                        .long("aiger-out")
-                        .value_name("PATH")
-                        .help("Path to write AIGER output; use .aag for ASCII or .aig for binary")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("module_name")
-                        .long("module_name")
-                        .value_name("MODULE")
-                        .help("Optional module name to select when netlist contains multiple modules")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("collapse_sequential")
-                        .long("collapse_sequential")
-                        .value_name("BOOL")
-                        .default_value("true")
-                        .value_parser(clap::value_parser!(bool))
-                        .help("If true, collapse sequential state variables by substituting next_state.")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("collapse_load_enable_feedback")
-                        .long("collapse_load_enable_feedback")
-                        .help("Collapse recognized load-enable feedback loops, assuming prior Q is zero (disabled by default)")
-                        .action(ArgAction::SetTrue),
-                )
-                .arg(
-                    Arg::new("cone_boundary_file")
-                        .long("cone_boundary_file")
-                        .value_name("PATH")
-                        .help("Extract cones using compact source/sink selectors from a JSON file")
-                        .conflicts_with_all(["cone_sources", "cone_sinks"])
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("cone_sources")
-                        .long("cone_sources")
-                        .value_name("SELECTOR")
-                        .help("Add a compact source selector; repeat for multiple selectors")
-                        .requires("cone_sinks")
-                        .conflicts_with("cone_boundary_file")
-                        .action(ArgAction::Append),
-                )
-                .arg(
-                    Arg::new("cone_sinks")
-                        .long("cone_sinks")
-                        .value_name("SELECTOR")
-                        .help("Add a compact sink selector; repeat for multiple selectors")
-                        .conflicts_with("cone_boundary_file")
-                        .action(ArgAction::Append),
-                ),
-        )
+        .subcommand(netlist2aig::gv2aig_command())
+        .subcommand(netlist2aig::gv2g8r_command())
         .subcommand(
             clap::Command::new("ugv2aig")
                 .about("Converts combinational unmapped gate Verilog to AIGER")
@@ -2777,6 +2707,8 @@ fn main() {
                 ),
         )
         .subcommand(g8r2gv::command())
+        .subcommand(g8r_lean::prepare_command())
+        .subcommand(g8r_lean::check_command())
         .subcommand(gv_resize::command())
         .subcommand(
             clap::Command::new("g8r2ugv")
@@ -4313,6 +4245,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("gv2aig", subm)) => {
             netlist2aig::handle_gv2aig(subm);
         }
+        Some(("gv2g8r", subm)) => {
+            if let Err(error) = netlist2aig::handle_gv2g8r(subm) {
+                report_cli_error::report_cli_error_and_exit(&error, Some("gv2g8r"), vec![]);
+            }
+        }
         Some(("ugv2aig", subm)) => {
             netlist2aig::handle_ugv2aig(subm);
         }
@@ -4343,6 +4280,16 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("g8r2gv", subm)) => {
             if let Err(e) = g8r2gv::handle(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, Some("g8r2gv"), vec![]);
+            }
+        }
+        Some(("g8r-lean-prepare", subm)) => {
+            if let Err(e) = g8r_lean::handle_prepare(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-prepare"), vec![]);
+            }
+        }
+        Some(("g8r-lean-check", subm)) => {
+            if let Err(e) = g8r_lean::handle_check(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-check"), vec![]);
             }
         }
         Some(("gv-resize", subm)) => {

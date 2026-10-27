@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
 
+use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
@@ -106,7 +107,7 @@ fn run_netlist2aig_with_options(
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
-        "netlist-to-AIG failed: status={:?}\nstdout={}\nstderr={}",
+        "netlist conversion failed: status={:?}\nstdout={}\nstderr={}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -155,6 +156,48 @@ endmodule
         !loaded.gate_fn.gates.is_empty(),
         "expected non-empty GateFn"
     );
+}
+
+#[test]
+fn gv2g8r_emits_native_text_and_optional_binary() {
+    let directory = tempfile::tempdir().unwrap();
+    let netlist = directory.path().join("and2.gv");
+    let liberty = directory.path().join("cells.textproto");
+    std::fs::write(
+        &netlist,
+        "module top(input a, input b, output y); AND2 gate(.A(a), .B(b), .Y(y)); endmodule\n",
+    )
+    .unwrap();
+    std::fs::write(&liberty, CONE_TEST_LIBERTY).unwrap();
+    let text_path = directory.path().join("and2.g8r");
+    let binary_path = directory.path().join("and2.g8rbin");
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("gv2g8r")
+        .arg("--netlist")
+        .arg(&netlist)
+        .arg("--liberty_proto")
+        .arg(&liberty)
+        .arg("--bin-out")
+        .arg(&binary_path)
+        .arg("--collapse_sequential")
+        .arg("false")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    std::fs::write(&text_path, output.stdout).unwrap();
+    for output_path in [text_path, binary_path] {
+        let graph = load_gate_fn_from_path(&output_path).unwrap();
+        let mut simulator = PreparedGateSim::new(&graph);
+        for bits in 0..4 {
+            assert_eq!(
+                simulator.eval_outputs(&[
+                    IrBits::make_ubits(1, bits & 1).unwrap(),
+                    IrBits::make_ubits(1, (bits >> 1) & 1).unwrap(),
+                ]),
+                vec![IrBits::make_ubits(1, (bits & 1) & ((bits >> 1) & 1)).unwrap()]
+            );
+        }
+    }
 }
 
 #[test]

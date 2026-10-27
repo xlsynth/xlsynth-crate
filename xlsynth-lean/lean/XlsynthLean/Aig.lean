@@ -169,6 +169,10 @@ def Circuit.denote (circuit : Circuit inputCount outputCount) (inputs : BitVec i
   bitsToBitVec fun index =>
     AIG.denote inputs.getLsbD ⟨circuit.aig, circuit.outputs.get index.val index.isLt⟩
 
+/-- Two circuits are equivalent when their outputs agree for every input vector. -/
+def Circuit.Equivalent (lhs rhs : Circuit inputCount outputCount) : Prop :=
+  ∀ inputs, lhs.denote inputs = rhs.denote inputs
+
 /-- The topological evaluator computes the stock AIG semantics. -/
 theorem Circuit.eval_eq_denote (circuit : Circuit inputCount outputCount)
     (inputs : BitVec inputCount) : circuit.eval inputs = circuit.denote inputs := by
