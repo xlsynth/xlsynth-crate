@@ -20,7 +20,11 @@ Use `ScriptReport::is_complete()` to determine whether the proof is finished.
 An empty script or successful subset of obligations is insufficient. Failed
 children can reopen their parent, so `solved` records successful attempts while
 `unresolved` describes unproved leaves in the surviving tree. Repeated calls
-can continue working on the same tree.
+can continue working on the same tree. An accepted runner report consumes its
+`Solve` requests, including those with missing or inconclusive results. An empty
+follow-up script reports the existing proof state; explicitly select `Solve`
+again to retry an obligation. Runner errors or invalid result IDs leave requests
+queued for retry.
 
 Nested `Focus` and `Cosliced` decompositions allocate fresh solver symbols
 against both sides' inherited mappings. Distinct function pairs must retain

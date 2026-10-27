@@ -53,6 +53,7 @@ pub struct OblNode {
     pub selector: Selector,
     pub kind: NodeKind,
     pub status: NodeStatus,
+    /// A queued proof request, consumed when its runner report is accepted.
     pub solve: bool,
 }
 
@@ -270,17 +271,20 @@ fn update_from_outcome(
     task: Option<&ReportedTask<'_>>,
     report: &mut ScriptReport,
 ) {
-    match task.and_then(|task| task.status) {
+    let status = task.and_then(|task| task.status);
+    if let Some(node) = OblTree::find_mut(&mut tree.root, &sel) {
+        node.solve = false;
+        node.status = match status {
+            Some(TaskSimple::Success) => NodeStatus::Solved,
+            Some(TaskSimple::Failure) => NodeStatus::Failed,
+            Some(TaskSimple::Indefinite) | None => NodeStatus::Pending,
+        };
+    }
+    match status {
         Some(TaskSimple::Success) => {
-            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                n.status = NodeStatus::Solved;
-            }
             report.solved.push(sel);
         }
         Some(TaskSimple::Failure) => {
-            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                n.status = NodeStatus::Failed;
-            }
             if let Some(task) = task {
                 report.failed.push(TaskLogEntry {
                     selector: sel.clone(),
@@ -305,9 +309,6 @@ fn update_from_outcome(
             }
         }
         Some(TaskSimple::Indefinite) => {
-            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                n.status = NodeStatus::Pending;
-            }
             if let Some(task) = task {
                 report.indefinite.push(TaskLogEntry {
                     selector: sel,
@@ -317,9 +318,7 @@ fn update_from_outcome(
             }
         }
         None => {
-            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                n.status = NodeStatus::Pending;
-            }
+            // Missing outcomes leave the node pending without attempt history.
         }
     }
 }
@@ -399,6 +398,11 @@ pub fn parse_script_steps_from_jsonl_str(input: &str) -> Result<Vec<ScriptStep>,
 /// are errors. The runner is not called when no leaves are selected. Applying
 /// script steps precedes running proofs, so an error does not undo successfully
 /// applied steps.
+///
+/// Accepting a report consumes all selected Solve requests, including those
+/// with missing or inconclusive results. A later call must explicitly Solve a
+/// leaf again to retry it. Runner errors or invalid result IDs leave requests
+/// queued, without committing outcomes.
 pub fn execute_script_with_runner(
     tree: &mut OblTree,
     steps: &[ScriptStep],
@@ -549,6 +553,30 @@ mod tests {
         execute_script_with_runner(tree, steps, run_test_obligations)
     }
 
+    /// Returns success for every supplied obligation in fake-runner tests.
+    fn accept_all_obligations(
+        obligations: &[(String, ProverObligation)],
+        _config: &OblTreeConfig,
+    ) -> Result<ProverReport, String> {
+        Ok(ProverReport {
+            success: true,
+            plan: ProverReportNode::Group {
+                kind: GroupKind::All,
+                outcome: Some(TaskOutcome::Normal { success: true }),
+                tasks: obligations
+                    .iter()
+                    .map(|(id, _)| ProverReportNode::Task {
+                        task_id: Some(id.clone()),
+                        cmdline: None,
+                        outcome: Some(TaskOutcome::Normal { success: true }),
+                        stdout: None,
+                        stderr: None,
+                    })
+                    .collect(),
+            },
+        })
+    }
+
     fn sel(parts: &[&str]) -> Selector {
         parts.iter().map(|s| s.to_string()).collect()
     }
@@ -656,12 +684,22 @@ fn main(x: u8) -> u8 { helper(x) }
         assert!(!partial.is_complete());
         assert_eq!(partial.unresolved, vec![sel(&["root", remaining])]);
 
-        let complete = execute_script(
+        let complete = execute_script_with_runner(
             &mut tree,
             &[ScriptStep {
                 selector: sel(&["root", remaining]),
                 command: Command::Solve,
             }],
+            |obligations, config| {
+                assert_eq!(
+                    obligations
+                        .iter()
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![format!("root/{remaining}")]
+                );
+                run_test_obligations(obligations, config)
+            },
         )
         .unwrap();
         assert!(complete.is_complete(), "incomplete proof: {complete:?}");
@@ -956,6 +994,96 @@ fn b(x: u8) -> u8 { !a(x) }
         .unwrap_err();
         assert_eq!(error, expected);
         assert_eq!(tree.root.status, NodeStatus::Open);
+        let retried = execute_script_with_runner(&mut tree, &[], |obligations, config| {
+            assert_eq!(obligations.len(), 1);
+            assert_eq!(obligations[0].0, "root");
+            accept_all_obligations(obligations, config)
+        })
+        .unwrap();
+        assert!(retried.is_complete());
+        assert_eq!(retried.solved, vec![root_selector()]);
+    }
+
+    #[test_case(Some(TaskOutcome::Normal { success: true }), NodeStatus::Solved; "success")]
+    #[test_case(Some(TaskOutcome::Normal { success: false }), NodeStatus::Failed; "failure")]
+    #[test_case(Some(TaskOutcome::Indefinite { reason: IndefiniteReason::Timeout }), NodeStatus::Pending; "indefinite")]
+    #[test_case(None, NodeStatus::Pending; "missing")]
+    fn accepted_results_consume_selections_until_explicit_solve(
+        outcome: Option<TaskOutcome>,
+        expected_status: NodeStatus,
+    ) {
+        let mut tree = OblTree::new(base_obligation(), base_config());
+        let solve = [ScriptStep {
+            selector: root_selector(),
+            command: Command::Solve,
+        }];
+        let first = execute_script_with_runner(&mut tree, &solve, |_, _| {
+            Ok(ProverReport {
+                success: matches!(outcome, Some(TaskOutcome::Normal { success: true })),
+                plan: ProverReportNode::Group {
+                    kind: GroupKind::All,
+                    outcome,
+                    tasks: outcome
+                        .into_iter()
+                        .map(|outcome| ProverReportNode::Task {
+                            task_id: Some("root".to_string()),
+                            cmdline: None,
+                            outcome: Some(outcome),
+                            stdout: None,
+                            stderr: None,
+                        })
+                        .collect(),
+                },
+            })
+        })
+        .unwrap();
+        assert_eq!(tree.root.status, expected_status);
+
+        let unchanged = execute_script_with_runner(&mut tree, &[], |_, _| {
+            panic!("accepted requests must not be resubmitted by an empty followup")
+        })
+        .unwrap();
+        assert_eq!(tree.root.status, expected_status);
+        assert_eq!(unchanged.is_complete(), first.is_complete());
+        assert_eq!(unchanged.unresolved, first.unresolved);
+        assert!(unchanged.solved.is_empty());
+        assert!(unchanged.failed.is_empty());
+        assert!(unchanged.indefinite.is_empty());
+
+        let mut reran = false;
+        let retried = execute_script_with_runner(&mut tree, &solve, |obligations, config| {
+            reran = true;
+            assert_eq!(obligations.len(), 1);
+            assert_eq!(obligations[0].0, "root");
+            accept_all_obligations(obligations, config)
+        })
+        .unwrap();
+        assert!(reran);
+        assert!(retried.is_complete());
+        assert_eq!(retried.solved, vec![root_selector()]);
+    }
+
+    #[test]
+    fn runner_error_preserves_selection_for_retry() {
+        let mut tree = OblTree::new(base_obligation(), base_config());
+        let error = execute_script_with_runner(
+            &mut tree,
+            &[ScriptStep {
+                selector: root_selector(),
+                command: Command::Solve,
+            }],
+            |_, _| Err("runner unavailable".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "runner unavailable");
+        let retried = execute_script_with_runner(&mut tree, &[], |obligations, config| {
+            assert_eq!(obligations.len(), 1);
+            assert_eq!(obligations[0].0, "root");
+            accept_all_obligations(obligations, config)
+        })
+        .unwrap();
+        assert!(retried.is_complete());
+        assert_eq!(retried.solved, vec![root_selector()]);
     }
 
     #[test]
@@ -1037,9 +1165,21 @@ fn b(x: u8) -> u8 { !a(x) }
     #[test]
     fn repeated_completion_reports_follow_new_children_of_solved_leaf() {
         let mut tree = OblTree::new(base_obligation(), base_config());
-        tree.root.status = NodeStatus::Solved;
+        let initial = execute_script_with_runner(
+            &mut tree,
+            &[ScriptStep {
+                selector: root_selector(),
+                command: Command::Solve,
+            }],
+            accept_all_obligations,
+        )
+        .unwrap();
+        assert!(initial.is_complete());
         for _ in 0..2 {
-            let completion = execute_script(&mut tree, &[]).unwrap();
+            let completion = execute_script_with_runner(&mut tree, &[], |_, _| {
+                panic!("completed leaves must not be resubmitted")
+            })
+            .unwrap();
             assert!(completion.is_complete());
             assert!(completion.solved.is_empty());
         }
