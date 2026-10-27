@@ -288,8 +288,8 @@ fn remove_runtime(value: &mut serde_json::Value) {
     }
 }
 
-/// Loads inputs, dispatches mapping and optional fanout optimization, and
-/// writes outputs.
+/// Maps the AIG, composes enabled native netlist optimizations, and writes
+/// outputs.
 fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let aig_input_file = matches.get_one::<String>("aig_input_file").unwrap();
     let liberty_proto_path = Path::new(matches.get_one::<String>("liberty_proto").unwrap());
@@ -301,10 +301,38 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         .get_one::<bool>("fanout_opt")
         .copied()
         .unwrap_or(strategy == "area");
+    let timing_sizing = matches
+        .get_one::<bool>("timing-sizing")
+        .copied()
+        .unwrap_or(false);
+    ensure!(
+        !timing_sizing || strategy == "area",
+        "--timing-sizing requires --strategy area"
+    );
+    ensure!(
+        timing_sizing
+            || [
+                "timing-sizing-max-area-growth",
+                "timing-sizing-rounds",
+                "timing-sizing-evaluation-budget"
+            ]
+            .iter()
+            .all(|name| matches.value_source(name) != Some(ValueSource::CommandLine)),
+        "timing sizing tuning options require --timing-sizing=true"
+    );
+    let sizing_defaults = ResizeOptions::default();
+    let sizing_area_growth = matches
+        .get_one::<f64>("timing-sizing-max-area-growth")
+        .copied()
+        .unwrap_or(sizing_defaults.max_area_growth);
+    ensure!(
+        sizing_area_growth.is_finite() && sizing_area_growth >= 0.0,
+        "--timing-sizing-max-area-growth must be finite and nonnegative"
+    );
     let area_recovery = matches
         .get_one::<bool>("area-recovery")
         .copied()
-        .unwrap_or(strategy == "delay");
+        .unwrap_or(strategy == "delay" || timing_sizing);
     ensure!(
         !area_recovery || strategy == "area" || strategy == "delay",
         "--area-recovery requires --strategy area or delay"
@@ -318,6 +346,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     );
     ensure!(
         fanout_opt
+            || timing_sizing
             || area_recovery
             || [
                 "wire-capacitance-constant-ff",
@@ -325,7 +354,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             ]
             .iter()
             .all(|name| matches.value_source(name) != Some(ValueSource::CommandLine)),
-        "wire capacitance options require fanout optimization or area recovery"
+        "wire capacitance options require post-mapping optimization"
     );
     ensure!(
         !fanout_opt || strategy == "area" || strategy == "delay",
@@ -333,6 +362,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     );
     ensure!(
         fanout_opt
+            || timing_sizing
             || area_recovery
             || strategy == "delay"
             || [
@@ -371,7 +401,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load AIG '{aig_input_file}'"))?
             .gate_fn;
-    let load = if fanout_opt || area_recovery || strategy == "delay" {
+    let load = if fanout_opt || timing_sizing || area_recovery || strategy == "delay" {
         load_liberty_with_timing_data_from_path
     } else {
         load_liberty_from_path
@@ -387,16 +417,16 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         }
     })?;
 
-    // Resolve one model for both post-mapping stages. Delay covering still uses
+    // Resolve one model for all post-mapping stages. Delay covering still uses
     // its explicitly supplied frozen reference load, not a fanout estimate.
-    let timing = if fanout_opt || area_recovery {
+    let timing = if fanout_opt || timing_sizing || area_recovery {
         Some(StaOptions {
             primary_input_transition: matches.get_one::<f64>("primary_input_transition")
                 .copied().unwrap_or(FanoutOptimizationOptions::default().primary_input_transition),
             module_output_load: match matches.get_one::<f64>("module_output_load") {
                 Some(load) => *load,
                 None => default_output_load(&lib).map_err(anyhow::Error::msg)
-                    .context("post-mapping optimization requires an output load; supply --module-output-load, or disable optimization with --fanout-opt=false --area-recovery=false")?,
+                    .context("post-mapping optimization requires an output load; supply --module-output-load, or disable optimization with --fanout-opt=false --timing-sizing=false --area-recovery=false")?,
             },
             wire_load: WireLoadModel::from_femtofarads(
                 matches.get_one::<f64>("wire-capacitance-constant-ff").copied().unwrap_or(0.0),
@@ -496,36 +526,74 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         report["fanout_optimization"] = serde_json::to_value(optimized)?;
         remove_runtime(&mut report["fanout_optimization"]);
     }
-    if area_recovery {
-        let defaults = ResizeOptions::default();
+    if timing_sizing || area_recovery {
+        // One call preserves the timing-phase checkpoint for recovery. The
+        // growth cap is relative to this post-fanout input, not compounded.
         let options = ResizeOptions {
             timing: timing.unwrap(),
-            max_area_growth: 0.0,
-            max_upsize_rounds: 0,
-            timing_evaluation_budget: Some(0),
-            max_downsize_rounds: matches
-                .get_one::<usize>("area-recovery-rounds")
-                .copied()
-                .unwrap_or(defaults.max_downsize_rounds),
+            max_area_growth: if timing_sizing {
+                sizing_area_growth
+            } else {
+                0.0
+            },
+            max_upsize_rounds: if timing_sizing {
+                matches
+                    .get_one::<usize>("timing-sizing-rounds")
+                    .copied()
+                    .unwrap_or(sizing_defaults.max_upsize_rounds)
+            } else {
+                0
+            },
+            timing_evaluation_budget: if timing_sizing {
+                matches
+                    .get_one::<usize>("timing-sizing-evaluation-budget")
+                    .copied()
+                    .or(sizing_defaults.timing_evaluation_budget)
+            } else {
+                Some(0)
+            },
+            max_downsize_rounds: if area_recovery {
+                matches
+                    .get_one::<usize>("area-recovery-rounds")
+                    .copied()
+                    .unwrap_or(sizing_defaults.max_downsize_rounds)
+            } else {
+                0
+            },
             recovery_evaluation_budget: matches
                 .get_one::<usize>("area-recovery-evaluation-budget")
                 .copied(),
-            ..defaults
+            ..sizing_defaults
         };
-        let recovered = resize_netlist(
+        let resized = resize_netlist(
             &mut mapped.module,
             &mapped.nets,
             &mut mapped.interner,
             &lib,
             &options,
         )
-        .context("mapped area recovery failed")?;
-        summary.push_str(&format!(
-            "; area recovery {} -> {}",
-            recovered.initial_area, recovered.final_area
-        ));
-        report["area_recovery"] = serde_json::to_value(recovered)?;
-        report["area_recovery_rounds"] = options.max_downsize_rounds.into();
+        .context("mapped cell resizing failed")?;
+        if timing_sizing {
+            summary.push_str(&format!(
+                "; timing sizing area {} -> {}, delay {:?} -> {:?}",
+                resized.initial_area,
+                resized.final_area,
+                resized.initial_delay,
+                resized.final_delay
+            ));
+            report["timing_sizing"] = serde_json::to_value(resized)?;
+            report["timing_sizing_max_area_growth"] = options.max_area_growth.into();
+            report["timing_sizing_rounds"] = options.max_upsize_rounds.into();
+        } else {
+            summary.push_str(&format!(
+                "; area recovery {} -> {}",
+                resized.initial_area, resized.final_area
+            ));
+            report["area_recovery"] = serde_json::to_value(resized)?;
+        }
+        if area_recovery {
+            report["area_recovery_rounds"] = options.max_downsize_rounds.into();
+        }
     }
     if let Some(timing) = timing {
         report["post_mapping_timing"] = serde_json::json!({

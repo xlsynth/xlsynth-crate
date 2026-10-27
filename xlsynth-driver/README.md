@@ -893,6 +893,36 @@ xlsynth-driver aig-tech-map my_design.aig --strategy area \
   --json_out mapping.json
 ```
 
+Area mapping can opt into critical-path cell sizing with `--timing-sizing`.
+The order is covering, optional fanout repair, timing sizing, then area recovery.
+This reuses `gv-resize`'s bounded greedy cell substitutions: rejected local trials
+restore their state; accepted decisions are not backtracked. Timing search
+improves worst or near-critical delay under the native STA model, within an area
+allowance. Recovery may spend subsequent timing improvements back to the fixed
+post-sizing checkpoint. It can resize a cell again, including undoing an upsize,
+without exceeding that checkpoint. These are model-based bounds, not physical
+timing guarantees; the AIG cover and netlist connectivity remain fixed.
+
+- `--timing-sizing[=true|false]`: default false; supported only for `area`.
+- `--timing-sizing-max-area-growth <FRACTION>`: default 0.02, relative to the
+  netlist **after fanout repair**. This is independent of the fanout growth cap;
+  the allowances can compound across the two stages. Zero forbids sizing growth.
+- `--timing-sizing-rounds <COUNT>`: default 4; zero disables timing search.
+- `--timing-sizing-evaluation-budget <COUNT>`: propagation visits across all
+  timing rounds; default `max(50000, 4 * N)` for N post-fanout instances.
+  Zero permits no timing search work. Recovery has its own independent budget.
+
+Sizing tuning flags require `--timing-sizing=true`. Area recovery defaults on
+when sizing is enabled; `--area-recovery=false` disables only recovery. Omitting
+sizing (or passing `--timing-sizing=false`) preserves existing mapping defaults.
+
+```shell
+xlsynth-driver aig-tech-map design.aig --strategy area --timing-sizing \
+  --timing-sizing-max-area-growth 0.02 --timing-sizing-evaluation-budget 50000 \
+  --area-recovery-evaluation-budget 100000 \
+  --liberty_proto cells.proto --netlist_out sized.gv --json_out mapping.json
+```
+
 The experimental `delay` strategy reuses the same cuts and emission, retaining
 cell and pin alternatives and minimizing estimated arrival before area. It requires
 explicit `--primary-input-transition` and `--module-output-load` values in Liberty
@@ -909,16 +939,16 @@ without increasing the boundary delay reached before recovery, and allows no
 area growth. It does not repeat the timing-search phase or change the cover.
 Use `--area-recovery=false` for the original raw delay cover, or combine it with
 `--fanout-opt=false` to disable both post-mapping stages. Area recovery is off
-by default for area mode and unsupported for nand2.
+by default for area mode unless timing sizing is enabled, and unsupported for nand2.
 
-- `--area-recovery[=true|false]`: default true for delay, false otherwise.
+- `--area-recovery[=true|false]`: default true for delay or timing sizing, false otherwise.
 - `--area-recovery-rounds <COUNT>`: default 2; zero disables recovery search.
 - `--area-recovery-evaluation-budget <COUNT>`: propagation visits across all
   recovery rounds; default `max(100000, 8 * N)` for N mapped instances after
   fanout optimization. Zero permits no search work. A budget stop retains
   completed, verified substitutions; it does not imply convergence.
 - `--wire-capacitance-constant-ff <VALUE>`,
-  `--wire-capacitance-per-sink-ff <VALUE>`: default 0 each. Both post-mapping
+  `--wire-capacitance-per-sink-ff <VALUE>`: default 0 each. All post-mapping
   stages share these affine lumped wire-capacitance terms, the input slew and
   output load. Output ports are not sink pins; output-only driven nets receive
   the constant term, dangling nets neither. Primary inputs remain ideal sources.
@@ -929,7 +959,11 @@ Recovery tuning flags require recovery to be enabled. The JSON summary keeps
 covering `stats` unchanged and adds `area_recovery` with final area/delay,
 accepted substitutions, resolved budgets and stopping reasons,
 `area_recovery_rounds`, and `post_mapping_timing` with the shared resolved
-model. Fanout results remain under `fanout_optimization`.
+model. With timing sizing enabled, `timing_sizing` instead contains the combined
+resize report (including recovery), alongside `timing_sizing_max_area_growth`
+and `timing_sizing_rounds`. In that report, `upsize` describes timing search in
+either size direction, and `downsize` describes recovery. Covering `stats` remain
+pre-optimization values. Fanout results remain under `fanout_optimization`.
 
 Key flags:
 

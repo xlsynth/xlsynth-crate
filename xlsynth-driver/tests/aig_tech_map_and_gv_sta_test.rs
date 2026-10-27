@@ -1826,7 +1826,7 @@ fn recovery_flags_reject_inapplicable_stages_before_outputs() {
         ),
         (
             vec!["--wire-capacitance-constant-ff", "0"],
-            "wire capacitance options require fanout optimization or area recovery",
+            "wire capacitance options require post-mapping optimization",
         ),
         (
             vec![
