@@ -9,7 +9,7 @@ use crate::dslx_tactics::obligations::{
     Edit, ObligationPayload, ProverObligation, Side, SourceFile,
 };
 use crate::dslx_tactics::tactics::IsTactic;
-use crate::dslx_tactics::tactics::utils::is_valid_ident;
+use crate::dslx_tactics::tactics::utils::{fresh_uf_aliases, is_valid_ident};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -167,10 +167,10 @@ impl IsTactic for CoslicedTactic {
                     source: file2_composed.code.clone(),
                 },
             )?;
-            for i in 0..k {
+            let aliases = fresh_uf_aliases(&lec, "__uf_", 0, k);
+            for (i, u) in aliases.into_iter().enumerate() {
                 let name1 = file1_slices[i].func_name.clone();
                 let name2 = file2_slices[i].func_name.clone();
-                let u = format!("__uf_{}", i);
                 lec.set_uf_alias(&name1, &name2, &u);
             }
 
@@ -232,6 +232,7 @@ mod tests {
         FileWithHistory, LecObligation, LecSide, ObligationPayload, ProverObligation, SourceFile,
     };
     use crate::dslx_tactics::tactics::IsTactic;
+    use test_case::test_case;
 
     fn base_obligation_with(sel: Option<&str>) -> ProverObligation {
         let lhs = LecSide {
@@ -305,9 +306,17 @@ mod tests {
         assert!(t.apply(&base).is_err());
     }
 
-    #[test]
-    fn builds_expected_obligations_with_composed() {
-        let base = base_obligation_with(Some("cosliced"));
+    #[test_case(false; "fresh_aliases")]
+    #[test_case(true; "inherited_aliases")]
+    fn builds_expected_obligations_with_composed(inherited_aliases: bool) {
+        let mut base = base_obligation_with(Some("cosliced"));
+        if inherited_aliases {
+            let ObligationPayload::Lec(lec) = &mut base.payload else {
+                panic!("expected Lec payload");
+            };
+            lec.lhs.uf_map.insert("outer_lhs".into(), "__uf_0".into());
+            lec.rhs.uf_map.insert("outer_rhs".into(), "__uf_2".into());
+        }
         let (s1, s2) = slices_pair_2();
         let c1 = NamedSlice {
             func_name: "f1_comp".to_string(),
@@ -403,22 +412,29 @@ mod tests {
         let rhs_appends = skel_payload.rhs.file.edits.len();
         assert_eq!(lhs_appends, 3);
         assert_eq!(rhs_appends, 3);
-        // UF mapping across slice pairs (indices start at 0)
+        // New aliases must avoid inherited symbols from either side.
+        let expected = if inherited_aliases {
+            assert_eq!(skel_payload.lhs.uf_map["outer_lhs"], "__uf_0");
+            assert_eq!(skel_payload.rhs.uf_map["outer_rhs"], "__uf_2");
+            ["__uf_1", "__uf_3"]
+        } else {
+            ["__uf_0", "__uf_1"]
+        };
         assert_eq!(
             skel_payload.lhs.uf_map.get("f1_s1").map(|s| s.as_str()),
-            Some("__uf_0"),
+            Some(expected[0]),
         );
         assert_eq!(
             skel_payload.lhs.uf_map.get("f1_s2").map(|s| s.as_str()),
-            Some("__uf_1"),
+            Some(expected[1]),
         );
         assert_eq!(
             skel_payload.rhs.uf_map.get("f2_s1").map(|s| s.as_str()),
-            Some("__uf_0"),
+            Some(expected[0]),
         );
         assert_eq!(
             skel_payload.rhs.uf_map.get("f2_s2").map(|s| s.as_str()),
-            Some("__uf_1"),
+            Some(expected[1]),
         );
     }
 

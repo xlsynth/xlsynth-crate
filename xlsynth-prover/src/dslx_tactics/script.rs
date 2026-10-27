@@ -726,6 +726,85 @@ fn main(x: u8) -> u8 { helper(x) }
         );
     }
 
+    #[cfg(feature = "has-bitwuzla")]
+    #[test_case(false; "distinct_helpers_remain_inequivalent")]
+    #[test_case(true; "matching_helpers_remain_equivalent")]
+    fn nested_focus_preserves_distinct_helper_assumptions(equivalent: bool) {
+        let helpers = r#"
+fn a(x: u8) -> u8 { x }
+fn b(x: u8) -> u8 { !a(x) }
+"#;
+        let lhs_result = if equivalent {
+            "b(x) - a(x)"
+        } else {
+            "a(x) - b(x)"
+        };
+        let lhs = format!("{helpers}\nfn main(x: u8) -> u8 {{ {lhs_result} }}");
+        let rhs = format!("{helpers}\nfn main(x: u8) -> u8 {{ b(x) - a(x) }}");
+
+        let mut direct_tree = bitwuzla_lec_tree(&lhs, &rhs);
+        let direct = execute_script(
+            &mut direct_tree,
+            &[ScriptStep {
+                selector: root_selector(),
+                command: Command::Solve,
+            }],
+        )
+        .unwrap();
+        assert_eq!(direct.is_complete(), equivalent);
+        assert_eq!(direct.failed.len(), usize::from(!equivalent));
+
+        // Both helper pairs are individually equivalent across the two sides,
+        // but a and b must retain distinct UF assumptions in nested skeletons.
+        let mut nested_tree = bitwuzla_lec_tree(&lhs, &rhs);
+        let nested = execute_script(
+            &mut nested_tree,
+            &[
+                ScriptStep {
+                    selector: root_selector(),
+                    command: Command::Apply(Tactic::Focus(FocusTactic {
+                        pairs: vec![FocusPair {
+                            lhs: "a".to_string(),
+                            rhs: "a".to_string(),
+                        }],
+                    })),
+                },
+                ScriptStep {
+                    selector: sel(&["root", "skeleton"]),
+                    command: Command::Apply(Tactic::Focus(FocusTactic {
+                        pairs: vec![FocusPair {
+                            lhs: "b".to_string(),
+                            rhs: "b".to_string(),
+                        }],
+                    })),
+                },
+                ScriptStep {
+                    selector: sel(&["root", "pair_1"]),
+                    command: Command::Solve,
+                },
+                ScriptStep {
+                    selector: sel(&["root", "skeleton", "pair_1"]),
+                    command: Command::Solve,
+                },
+                ScriptStep {
+                    selector: sel(&["root", "skeleton", "skeleton"]),
+                    command: Command::Solve,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(nested.is_complete(), equivalent, "{nested:?}");
+        assert_eq!(nested.failed.len(), usize::from(!equivalent));
+        assert_eq!(
+            nested.unresolved,
+            if equivalent {
+                vec![]
+            } else {
+                vec![sel(&["root", "skeleton"])]
+            }
+        );
+    }
+
     #[test]
     fn rollback_stays_incomplete_after_discarded_sibling_succeeds() {
         let mut tree = OblTree::new(base_obligation(), base_config());
@@ -861,7 +940,7 @@ fn main(x: u8) -> u8 { helper(x) }
                                     tasks: vec![ProverReportNode::Task {
                                         task_id: id.map(str::to_owned),
                                         cmdline: None,
-                                        // A missing outcome still reserves its task ID.
+                                        // Reserve IDs even without an outcome.
                                         outcome: (index == 0)
                                             .then_some(TaskOutcome::Normal { success: true }),
                                         stdout: None,

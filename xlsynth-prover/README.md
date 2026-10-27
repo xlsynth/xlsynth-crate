@@ -22,6 +22,10 @@ children can reopen their parent, so `solved` records successful attempts while
 `unresolved` describes unproved leaves in the surviving tree. Repeated calls
 can continue working on the same tree.
 
+Nested `Focus` and `Cosliced` decompositions allocate fresh solver symbols
+against both sides' inherited mappings. Distinct function pairs must retain
+independent symbols; accidentally sharing one can produce a false proof.
+
 ## Process backend
 
 On Unix, `dslx_tactics::process::execute_script` runs the same engine using an

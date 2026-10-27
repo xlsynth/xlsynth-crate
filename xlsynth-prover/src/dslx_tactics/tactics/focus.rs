@@ -5,7 +5,7 @@
 
 use crate::dslx_tactics::obligations::{ObligationPayload, ProverObligation, Side};
 use crate::dslx_tactics::tactics::IsTactic;
-use crate::dslx_tactics::tactics::utils::is_valid_ident;
+use crate::dslx_tactics::tactics::utils::{fresh_uf_aliases, is_valid_ident};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,8 +64,8 @@ impl IsTactic for FocusTactic {
                 payload: ObligationPayload::Lec(base_lec.clone()),
             };
             if let ObligationPayload::Lec(lec) = &mut ob.payload {
-                for (idx, p) in self.pairs.iter().enumerate() {
-                    let uf = format!("__uf_focus_{}", idx + 1);
+                let aliases = fresh_uf_aliases(lec, "__uf_focus_", 1, self.pairs.len());
+                for (p, uf) in self.pairs.iter().zip(aliases) {
                     lec.set_uf_alias(&p.lhs, &p.rhs, &uf);
                 }
             }
