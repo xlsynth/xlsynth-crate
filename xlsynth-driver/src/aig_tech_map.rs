@@ -304,7 +304,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let timing_sizing = matches
         .get_one::<bool>("timing-sizing")
         .copied()
-        .unwrap_or(false);
+        .unwrap_or(strategy == "area");
     ensure!(
         !timing_sizing || strategy == "area",
         "--timing-sizing requires --strategy area"
@@ -409,7 +409,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let lib = load(liberty_proto_path).with_context(|| {
         if fanout_opt {
             format!(
-                "failed to load timing-enabled Liberty proto '{}' for area fanout optimization; use --fanout-opt=false for raw mapping",
+                "failed to load timing-enabled Liberty proto '{}' for area fanout optimization; use --fanout-opt=false --timing-sizing=false --area-recovery=false for raw mapping",
                 liberty_proto_path.display()
             )
         } else {
@@ -514,7 +514,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         };
         let optimized =
             optimize_fanout(&mut mapped, &lib, options).context(
-                "area fanout optimization failed; provide usable timing data or use --fanout-opt=false for raw mapping",
+                "area fanout optimization failed; provide usable timing data or use --fanout-opt=false --timing-sizing=false --area-recovery=false for raw mapping",
             )?;
         summary.push_str(&format!(
             "; fanout delay {} -> {}, area {} -> {}",

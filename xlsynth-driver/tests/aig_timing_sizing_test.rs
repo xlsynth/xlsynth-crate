@@ -137,16 +137,13 @@ fn check_and(dir: &Path, text: &str) -> anyhow::Result<()> {
 fn timing_sizing_defaults_caps_budgets_and_phase_optouts() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     write_fixture(dir.path())?;
-    let (raw, raw_report) = map(dir.path(), "raw", false, &[])?;
-    let (disabled, disabled_report) =
-        map(dir.path(), "disabled", false, &["--timing-sizing=false"])?;
-    assert_eq!(
-        (raw.clone(), raw_report.clone()),
-        (disabled, disabled_report)
-    );
+    let (raw, raw_report) = map(dir.path(), "raw", false, &["--timing-sizing=false"])?;
     assert!(raw_report.get("timing_sizing").is_none());
     assert!(raw_report.get("area_recovery").is_none());
-    let (sized, report) = map(dir.path(), "sized", false, &["--timing-sizing"])?;
+    let (sized, report) = map(dir.path(), "default", false, &[])?;
+    let (explicit, explicit_report) = map(dir.path(), "explicit", false, &["--timing-sizing"])?;
+    assert_eq!(sized, explicit);
+    assert_eq!(report, explicit_report);
     let r = &report["timing_sizing"];
     assert_eq!(report["timing_sizing_max_area_growth"], 0.02);
     assert_eq!(report["timing_sizing_rounds"], 4);
@@ -166,7 +163,7 @@ fn timing_sizing_defaults_caps_budgets_and_phase_optouts() -> anyhow::Result<()>
         dir.path(),
         "cap",
         false,
-        &["--timing-sizing", "--timing-sizing-max-area-growth", "0"],
+        &["--timing-sizing-max-area-growth", "0"],
     )?;
     assert_eq!(cap["timing_sizing"]["upsize"]["accepted"], 0);
     assert!(cap["timing_sizing"]["final_area"].as_f64().unwrap() <= 3.0);
@@ -226,7 +223,7 @@ fn timing_sizing_matches_explicit_resize_after_optional_repair_with_shared_model
     let dir = tempfile::tempdir()?;
     write_fixture(dir.path())?;
     for repair in [false, true] {
-        let (before, _) = map(dir.path(), "before", repair, &[])?;
+        let (before, _) = map(dir.path(), "before", repair, &["--timing-sizing=false"])?;
         std::fs::write(dir.path().join("before.gv"), before)?;
         let mut previous_delay = 0.0;
         for wire in ["0", "500"] {
@@ -255,7 +252,9 @@ fn timing_sizing_matches_explicit_resize_after_optional_repair_with_shared_model
             // Repair and sizing must use the same model; obtain the actual
             // repaired input under that model before checking composition.
             if repair {
-                let (before, _) = map(dir.path(), "before", true, &flags[1..9])?;
+                let mut repair_flags = vec!["--timing-sizing=false"];
+                repair_flags.extend_from_slice(&flags[1..9]);
+                let (before, _) = map(dir.path(), "before", true, &repair_flags)?;
                 std::fs::write(dir.path().join("before.gv"), before)?;
             }
             let explicit = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))

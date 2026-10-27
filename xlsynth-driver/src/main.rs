@@ -2485,7 +2485,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Liberty proto (.proto, .textproto, or either with .gz); nand2 requires INV/NAND2 functions; area requires cell functions and positive areas, plus timing and output load unless --fanout-opt=false")
+                        .help("Liberty proto (.proto, .textproto, or either with .gz); nand2 requires INV/NAND2 functions; area requires cell functions and positive areas, plus timing and output load unless --fanout-opt=false --timing-sizing=false --area-recovery=false")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2556,7 +2556,7 @@ fn main() {
                 .arg(Arg::new("timing-sizing").long("timing-sizing").num_args(0..=1)
                     .require_equals(true).default_missing_value("true")
                     .value_parser(clap::value_parser!(bool)).action(ArgAction::Set)
-                    .help("Opt-in critical-path cell sizing for area mapping, after optional fanout repair and before recovery (default: false)"))
+                    .help("Critical-path cell sizing after optional fanout repair and before recovery (default: true for area, false otherwise); false disables sizing"))
                 .arg(Arg::new("timing-sizing-max-area-growth").long("timing-sizing-max-area-growth")
                     .value_parser(clap::value_parser!(f64)).help("Sizing area-growth fraction relative to the post-fanout netlist (default: 0.02); zero forbids growth"))
                 .arg(Arg::new("timing-sizing-rounds").long("timing-sizing-rounds")

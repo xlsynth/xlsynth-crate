@@ -61,7 +61,7 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
         if strategy == "area" {
             // Exercise legacy mapping policy independently of timing
             // requirements.
-            command.arg("--fanout-opt=false");
+            command.args(["--fanout-opt=false", "--timing-sizing=false"]);
         }
         if let Some(policy) = policy {
             command.args(["--cell_policy", policy]);

@@ -445,6 +445,7 @@ library (test) {{
                 "--strategy",
                 "area",
                 "--fanout-opt=false",
+                "--timing-sizing=false",
                 "--liberty_proto",
             ])
             .arg(&liberty_path)
@@ -552,7 +553,7 @@ fn assert_mapping_equivalent(aig: &GateFn, text: &str, aig_path: &Path, liberty_
 }
 
 #[test]
-fn strategies_preserve_default_and_cli_semantics() {
+fn strategies_select_expected_defaults_and_cli_semantics() {
     let dir = tempfile::tempdir().unwrap();
     let aig_path = dir.path().join("input.aag");
     let lib_path = dir.path().join("cells.textproto");
@@ -608,6 +609,8 @@ fn strategies_preserve_default_and_cli_semantics() {
         assert!(report.get("library_s").is_none());
         assert!(report.get("mapping_s").is_none());
         if strategy == Some("area") {
+            assert!(report.get("timing_sizing").is_some());
+            assert_eq!(report["area_recovery_rounds"], 2);
             assert_eq!(report["stats"]["cell_area"], 2.0);
             assert_eq!(
                 report["stats"]["cells_by_type"],
@@ -673,7 +676,12 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
         command
             .arg("aig-tech-map")
             .arg(&aig_path)
-            .args(["--strategy", "area", "--liberty_proto"])
+            .args([
+                "--strategy",
+                "area",
+                "--timing-sizing=false",
+                "--liberty_proto",
+            ])
             .arg(&lib_path)
             .arg("--netlist_out")
             .arg(&netlist_path)
@@ -754,6 +762,7 @@ fn area_fanout_cli_rejects_options_without_area_optimization() {
                 "--strategy",
                 "area",
                 "--fanout-opt=false",
+                "--timing-sizing=false",
                 "--module_output_load",
                 "0",
             ],
@@ -869,7 +878,12 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("aig-tech-map")
         .arg(&aig_path)
-        .args(["--strategy", "area", "--fanout-opt=false"])
+        .args([
+            "--strategy",
+            "area",
+            "--fanout-opt=false",
+            "--timing-sizing=false",
+        ])
         .arg("--liberty_proto")
         .arg(&lib_path)
         .args(["--netlist_out", "-"])
@@ -970,7 +984,12 @@ interned_strings: ["A", "Y", "!A", "B", "A*B", "C", "D", "E", "F", "A*B*C*D*E*F"
     let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("aig-tech-map")
         .arg(&aig_path)
-        .args(["--strategy", "area", "--fanout-opt=false"])
+        .args([
+            "--strategy",
+            "area",
+            "--fanout-opt=false",
+            "--timing-sizing=false",
+        ])
         .arg("--liberty_proto")
         .arg(&lib_path)
         .args(["--netlist_out", "-"])
@@ -1530,7 +1549,7 @@ fn cli_rejects_hard_linked_output_aliases() {
 
 /// Default optimization must fail visibly when its required data is absent.
 #[test]
-fn area_fanout_requires_timing_and_load_unless_disabled() {
+fn area_optimization_requires_timing_and_load_unless_disabled() {
     let dir = tempfile::tempdir().unwrap();
     let aig = dir.path().join("input.aag");
     let lib = dir.path().join("library.textproto");
@@ -1597,6 +1616,7 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
                 "--strategy",
                 "area",
                 "--fanout-opt=false",
+                "--timing-sizing=false",
                 "--liberty_proto",
             ])
             .arg(&lib)
