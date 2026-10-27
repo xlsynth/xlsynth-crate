@@ -9,6 +9,9 @@ pub mod dslx_utils;
 pub mod ir_equiv;
 pub mod ir_operand_gate;
 pub mod ir_utils;
+#[doc(hidden)]
+pub mod obsolete_options;
+pub mod proof_plan;
 pub mod prover;
 pub mod solver;
 pub mod toolchain_shim;

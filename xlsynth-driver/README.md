@@ -3308,7 +3308,7 @@ UF semantics:
 
 #### Tactic Scripts
 
-When two DSLX top functions are equivalent but a direct whole-design proof is too heavy or times out, **tactic scripts** let you describe a structured proof plan. The driver turns that plan into an obligation tree and discharges the leaves with SMT.
+When two DSLX top functions are equivalent but a direct whole-design proof is too heavy or times out, **tactic scripts** let you describe a structured proof plan. The driver invokes the [xlsynth-prover tactic engine](../xlsynth-prover/README.md), which owns the obligation tree and discharges the leaves with SMT.
 
 ##### Workflow
 

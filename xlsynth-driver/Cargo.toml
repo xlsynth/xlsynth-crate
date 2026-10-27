@@ -41,8 +41,6 @@ regex = "1.11.1"
 same-file = "1.0.6"
 anyhow = "1.0"
 which.workspace = true
-libc = "0.2"
-signal-hook = "0.3"
 flate2.workspace = true
 comfy-table = "7.2"
 csv = "1"
@@ -111,4 +109,4 @@ with-bitwuzla-built = [
     "has-bitwuzla",
 ]
 # Enable a fake task kind and lightweight shell-based worker for scheduler fuzzing and testing.
-enable-fake-task = []
+enable-fake-task = ["xlsynth-prover/enable-fake-task"]
