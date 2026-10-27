@@ -170,6 +170,23 @@ fn collect_solve_targets(node: &OblNode, out: &mut Vec<(Selector, ProverObligati
     }
 }
 
+/// Collects unproved leaves from the surviving tree in deterministic tree
+/// order.
+fn collect_unresolved(node: &OblNode, out: &mut Vec<Selector>) {
+    match &node.kind {
+        NodeKind::Leaf(_) => {
+            if node.status != NodeStatus::Solved {
+                out.push(node.selector.clone());
+            }
+        }
+        NodeKind::Internal { children, .. } => {
+            for child in children {
+                collect_unresolved(child, out);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum TaskSimple {
     Success,
@@ -298,12 +315,24 @@ pub struct RollbackEntry {
     pub reason_selector: Selector,
 }
 
+/// Attempt outcomes and unresolved obligations after all tactic rollbacks.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScriptReport {
     pub solved: Vec<Selector>,
     pub indefinite: Vec<TaskLogEntry>,
     pub failed: Vec<TaskLogEntry>,
     pub rolled_back: Vec<RollbackEntry>,
+    /// Final leaves that are not proved, including unselected and reopened
+    /// leaves.
+    pub unresolved: Vec<Selector>,
+}
+
+impl ScriptReport {
+    /// Whether the entire proof is discharged without failed or indefinite
+    /// tasks.
+    pub fn is_complete(&self) -> bool {
+        self.unresolved.is_empty() && self.failed.is_empty() && self.indefinite.is_empty()
+    }
 }
 
 /// Parses a tactic script from a string as a JSON array of ScriptStep objects.
@@ -365,6 +394,8 @@ pub fn read_script_steps_from_jsonl_path(path: &str) -> Result<Vec<ScriptStep>, 
     parse_script_steps_from_jsonl_str(&text)
 }
 
+/// Executes selected proofs and reports completion against the final obligation
+/// tree.
 pub fn execute_script(tree: &mut OblTree, steps: &[ScriptStep]) -> Result<ScriptReport, String> {
     // 1) Apply all tactics except Solve; mark Solve flags only.
     for step in steps {
@@ -399,11 +430,14 @@ pub fn execute_script(tree: &mut OblTree, steps: &[ScriptStep]) -> Result<Script
     log::debug!("obligations_to_solve={}", obligations_with_ids.len());
 
     if obligations_with_ids.is_empty() {
+        let mut unresolved = Vec::new();
+        collect_unresolved(&tree.root, &mut unresolved);
         return Ok(ScriptReport {
             solved: vec![],
             indefinite: vec![],
             failed: vec![],
             rolled_back: vec![],
+            unresolved,
         });
     }
 
@@ -451,29 +485,37 @@ pub fn execute_script(tree: &mut OblTree, steps: &[ScriptStep]) -> Result<Script
         );
     }
 
+    // Outcomes for discarded children remain useful attempt history, but only
+    // the surviving tree determines which obligations still need proof.
+    let mut unresolved = Vec::new();
+    collect_unresolved(&tree.root, &mut unresolved);
     Ok(ScriptReport {
         solved,
         indefinite: indefinite_logs,
         failed: failed_logs,
         rolled_back,
+        unresolved,
     })
 }
 
 #[cfg(test)]
-#[cfg(feature = "has-bitwuzla")]
 mod tests {
     use super::*;
     use crate::proofs::obligations::{
-        FileWithHistory, LecObligation, ObligationPayload, ProverObligation, SourceFile,
+        FileWithHistory, LecObligation, LecSide, ObligationPayload, ProverObligation, SourceFile,
     };
+    #[cfg(feature = "has-bitwuzla")]
     use crate::proofs::tactics::cosliced::{CoslicedTactic, NamedSlice};
+    use crate::proofs::tactics::focus::{FocusPair, FocusTactic};
+    use crate::prover_config::GroupKind;
+    #[cfg(feature = "has-bitwuzla")]
+    use test_case::test_case;
 
     fn sel(parts: &[&str]) -> Selector {
         parts.iter().map(|s| s.to_string()).collect()
     }
 
     fn base_obligation() -> ProverObligation {
-        use crate::proofs::obligations::LecSide;
         let dslx = "pub fn f(x: u8) -> u8 { x + u8:3 }".to_string();
         let lhs = LecSide {
             top_func: "f".to_string(),
@@ -501,19 +543,280 @@ mod tests {
     }
 
     fn base_config() -> OblTreeConfig {
-        let mut cfg = OblTreeConfig {
+        OblTreeConfig {
             dslx_stdlib_path: None,
             dslx_paths: vec![],
             solver: None,
             timeout_ms: None,
+        }
+    }
+
+    /// Creates a main-function equivalence tree with Bitwuzla as its solver.
+    #[cfg(feature = "has-bitwuzla")]
+    fn bitwuzla_lec_tree(lhs: &str, rhs: &str) -> OblTree {
+        let obligation = ProverObligation {
+            selector_segment: "root".to_string(),
+            description: None,
+            payload: ObligationPayload::Lec(LecObligation {
+                lhs: LecSide::from_text("main", lhs),
+                rhs: LecSide::from_text("main", rhs),
+            }),
         };
-        cfg.solver = Some(SolverChoice::Bitwuzla);
-        cfg
+        let mut config = base_config();
+        config.solver = Some(SolverChoice::Bitwuzla);
+        OblTree::new(obligation, config)
+    }
+
+    #[cfg(feature = "has-bitwuzla")]
+    #[test_case("pair_1", "skeleton"; "pair_then_skeleton")]
+    #[test_case("skeleton", "pair_1"; "skeleton_then_pair")]
+    fn focus_requires_all_leaves_across_executions(first: &str, remaining: &str) {
+        let mut tree = bitwuzla_lec_tree(
+            r#"
+fn helper(x: u8) -> u8 { x + u8:1 }
+fn main(x: u8) -> u8 { helper(x) }
+"#,
+            r#"
+fn helper(x: u8) -> u8 { u8:1 + x }
+fn main(x: u8) -> u8 { helper(x) }
+"#,
+        );
+        let empty = execute_script(&mut tree, &[]).unwrap();
+        assert!(!empty.is_complete());
+        assert_eq!(empty.unresolved, vec![root_selector()]);
+
+        let applied = execute_script(
+            &mut tree,
+            &[ScriptStep {
+                selector: root_selector(),
+                command: Command::Apply(Tactic::Focus(FocusTactic {
+                    pairs: vec![FocusPair {
+                        lhs: "helper".to_string(),
+                        rhs: "helper".to_string(),
+                    }],
+                })),
+            }],
+        )
+        .unwrap();
+        assert!(!applied.is_complete());
+        assert_eq!(
+            applied.unresolved,
+            vec![sel(&["root", "pair_1"]), sel(&["root", "skeleton"])]
+        );
+
+        let partial = execute_script(
+            &mut tree,
+            &[ScriptStep {
+                selector: sel(&["root", first]),
+                command: Command::Solve,
+            }],
+        )
+        .unwrap();
+        assert_eq!(partial.solved, vec![sel(&["root", first])]);
+        assert!(partial.failed.is_empty());
+        assert!(partial.indefinite.is_empty());
+        assert!(!partial.is_complete());
+        assert_eq!(partial.unresolved, vec![sel(&["root", remaining])]);
+
+        let complete = execute_script(
+            &mut tree,
+            &[ScriptStep {
+                selector: sel(&["root", remaining]),
+                command: Command::Solve,
+            }],
+        )
+        .unwrap();
+        assert!(complete.is_complete(), "incomplete proof: {complete:?}");
+        assert_eq!(complete.unresolved, Vec::<Selector>::new());
     }
 
     #[test]
-    fn cosliced_then_solve_all_succeeds() {
+    #[cfg(feature = "has-bitwuzla")]
+    fn successful_focus_skeleton_does_not_prove_inequivalent_helpers() {
+        let mut tree = bitwuzla_lec_tree(
+            r#"
+fn helper(x: u8) -> u8 { x + u8:1 }
+fn main(x: u8) -> u8 { helper(x) }
+"#,
+            r#"
+fn helper(x: u8) -> u8 { x + u8:2 }
+fn main(x: u8) -> u8 { helper(x) }
+"#,
+        );
+        let partial = execute_script(
+            &mut tree,
+            &[
+                ScriptStep {
+                    selector: root_selector(),
+                    command: Command::Apply(Tactic::Focus(FocusTactic {
+                        pairs: vec![FocusPair {
+                            lhs: "helper".to_string(),
+                            rhs: "helper".to_string(),
+                        }],
+                    })),
+                },
+                ScriptStep {
+                    selector: sel(&["root", "skeleton"]),
+                    command: Command::Solve,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(partial.solved, vec![sel(&["root", "skeleton"])]);
+        assert!(partial.failed.is_empty());
+        assert!(partial.indefinite.is_empty());
+        assert!(!partial.is_complete());
+        assert_eq!(partial.unresolved, vec![sel(&["root", "pair_1"])]);
+
+        let failed = execute_script(
+            &mut tree,
+            &[ScriptStep {
+                selector: sel(&["root", "pair_1"]),
+                command: Command::Solve,
+            }],
+        )
+        .unwrap();
+        assert!(!failed.is_complete());
+        assert_eq!(failed.unresolved, vec![root_selector()]);
+        assert_eq!(failed.failed.len(), 1);
+        assert_eq!(failed.failed[0].selector, sel(&["root", "pair_1"]));
+        assert_eq!(failed.rolled_back.len(), 1);
+        assert_eq!(failed.rolled_back[0].selector, root_selector());
+        assert_eq!(
+            failed.rolled_back[0].reason_selector,
+            sel(&["root", "pair_1"])
+        );
+    }
+
+    #[test]
+    fn rollback_stays_incomplete_after_discarded_sibling_succeeds() {
         let mut tree = OblTree::new(base_obligation(), base_config());
+        execute_script(
+            &mut tree,
+            &[ScriptStep {
+                selector: root_selector(),
+                command: Command::Apply(Tactic::Focus(FocusTactic {
+                    pairs: vec![FocusPair {
+                        lhs: "f".to_string(),
+                        rhs: "f".to_string(),
+                    }],
+                })),
+            }],
+        )
+        .unwrap();
+        let report = ProverReport {
+            success: false,
+            plan: ProverReportNode::Group {
+                kind: GroupKind::All,
+                outcome: Some(TaskOutcome::Normal { success: false }),
+                tasks: [("root/pair_1", false), ("root/skeleton", true)]
+                    .into_iter()
+                    .map(|(path, success)| ProverReportNode::Task {
+                        task_id: Some(path.to_string()),
+                        cmdline: None,
+                        outcome: Some(TaskOutcome::Normal { success }),
+                        stdout: None,
+                        stderr: None,
+                    })
+                    .collect(),
+            },
+        };
+        let outcomes = collect_outcomes(&report.plan);
+        let mut solved = Vec::new();
+        let mut failed = Vec::new();
+        let mut indefinite = Vec::new();
+        let mut rolled_back = Vec::new();
+        for segment in ["pair_1", "skeleton"] {
+            let path = format!("root/{segment}");
+            update_from_outcome(
+                &mut tree,
+                &report,
+                sel(&["root", segment]),
+                &path,
+                outcomes.get(&path).cloned(),
+                &mut solved,
+                &mut failed,
+                &mut indefinite,
+                &mut rolled_back,
+            );
+        }
+        assert_eq!(solved, vec![sel(&["root", "skeleton"])]);
+        assert_eq!(rolled_back.len(), 1);
+        assert_eq!(rolled_back[0].selector, root_selector());
+
+        // A later report has no failed attempts, but the restored root still
+        // needs proof; the discarded sibling's success cannot discharge it.
+        let completion = execute_script(&mut tree, &[]).unwrap();
+        assert!(completion.failed.is_empty());
+        assert!(!completion.is_complete());
+        assert_eq!(completion.unresolved, vec![root_selector()]);
+    }
+
+    #[test]
+    fn missing_task_outcome_keeps_leaf_unresolved() {
+        let mut tree = OblTree::new(base_obligation(), base_config());
+        let report = ProverReport {
+            success: false,
+            plan: ProverReportNode::Task {
+                task_id: Some("root".to_string()),
+                cmdline: None,
+                outcome: None,
+                stdout: None,
+                stderr: None,
+            },
+        };
+        let outcomes = collect_outcomes(&report.plan);
+        update_from_outcome(
+            &mut tree,
+            &report,
+            root_selector(),
+            "root",
+            outcomes.get("root").cloned(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(tree.root.status, NodeStatus::Pending);
+        let completion = execute_script(&mut tree, &[]).unwrap();
+        assert!(completion.failed.is_empty());
+        assert!(completion.indefinite.is_empty());
+        assert!(!completion.is_complete());
+        assert_eq!(completion.unresolved, vec![root_selector()]);
+    }
+
+    #[test]
+    fn repeated_completion_reports_follow_new_children_of_solved_leaf() {
+        let mut tree = OblTree::new(base_obligation(), base_config());
+        tree.root.status = NodeStatus::Solved;
+        for _ in 0..2 {
+            let completion = execute_script(&mut tree, &[]).unwrap();
+            assert!(completion.is_complete());
+            assert!(completion.solved.is_empty());
+        }
+
+        let completion = execute_script(
+            &mut tree,
+            &[ScriptStep {
+                selector: root_selector(),
+                command: Command::Apply(Tactic::Focus(FocusTactic { pairs: vec![] })),
+            }],
+        )
+        .unwrap();
+        assert!(!completion.is_complete());
+        assert_eq!(completion.unresolved, vec![sel(&["root", "skeleton"])]);
+
+        let child = OblTree::find_mut(&mut tree.root, &sel(&["root", "skeleton"])).unwrap();
+        child.status = NodeStatus::Solved;
+        assert!(execute_script(&mut tree, &[]).unwrap().is_complete());
+    }
+
+    #[test]
+    #[cfg(feature = "has-bitwuzla")]
+    fn cosliced_then_solve_all_succeeds() {
+        let mut config = base_config();
+        config.solver = Some(SolverChoice::Bitwuzla);
+        let mut tree = OblTree::new(base_obligation(), config);
         let s1 = vec![
             NamedSlice {
                 func_name: "f_slice_1".to_string(),
@@ -564,7 +867,8 @@ mod tests {
             });
         }
 
-        execute_script(&mut tree, &steps).expect("execute_script");
+        let report = execute_script(&mut tree, &steps).expect("execute_script");
+        assert!(report.is_complete(), "incomplete proof: {report:?}");
         // Gather statuses from the tree
         fn walk(
             n: &OblNode,

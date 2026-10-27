@@ -3317,6 +3317,15 @@ When two DSLX top functions are equivalent but a direct whole-design proof is to
 1. Mark leaves with `Solve` – those leaves are proved directly.
 1. Succeed when all leaves succeed.
 
+Every leaf must be marked with `Solve` and proved before the command reports
+success. An empty script, an apply-only script, or a script that solves only
+some leaves exits with status 1 and lists the unresolved obligation paths.
+With `--output_json`, `report.unresolved` contains those paths as selector
+arrays, including obligations reopened by a failed tactic. `report.solved`
+records successful attempts; it does not establish whole-proof completion
+because a rollback may discard those children. These rules also apply to
+`prove-quickcheck` tactic scripts.
+
 Provide the plan via `--tactic_json` for a JSON array, or `--tactic_jsonl` for JSONL (one JSON object per line).
 
 ```shell

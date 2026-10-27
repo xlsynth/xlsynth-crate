@@ -214,7 +214,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             }
         };
         let dur = start.elapsed();
-        let success = report.failed.is_empty() && report.indefinite.is_empty();
+        let success = report.is_complete();
         if let Some(path) = output_json {
             let json = serde_json::json!({
                 "success": success,
@@ -229,6 +229,13 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         } else {
             eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
             eprintln!("[{}] failure", SUBCOMMAND);
+            for selector in &report.unresolved {
+                eprintln!(
+                    "[{}] unresolved obligation: {}",
+                    SUBCOMMAND,
+                    selector.join("/")
+                );
+            }
             std::process::exit(1);
         }
     } else {

@@ -292,7 +292,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             }
         };
         let dur = start.elapsed();
-        let success = report.failed.is_empty() && report.indefinite.is_empty();
+        let success = report.is_complete();
         if let Some(path) = output_json.as_ref() {
             let json = serde_json::json!({
                 "success": success,
@@ -307,6 +307,13 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         } else {
             eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
             eprintln!("[{}] failure", SUBCOMMAND);
+            for selector in &report.unresolved {
+                eprintln!(
+                    "[{}] unresolved obligation: {}",
+                    SUBCOMMAND,
+                    selector.join("/")
+                );
+            }
             std::process::exit(1);
         }
     }
