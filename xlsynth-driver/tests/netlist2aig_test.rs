@@ -179,6 +179,7 @@ fn gv2g8r_emits_native_text_and_optional_binary() {
         .arg(&liberty)
         .arg("--bin-out")
         .arg(&binary_path)
+        // Exercise the previous spelling retained as a compatibility alias.
         .arg("--collapse_sequential")
         .arg("false")
         .output()
@@ -243,6 +244,20 @@ endmodule
     assert!(!default_output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&default_output.stderr),
+        include_str!("golden/gv2aig_sequential_cells_disabled.golden.txt")
+    );
+
+    let (_feedback_dir, _feedback_path, feedback_output) = run_netlist2aig_with_options(
+        "gv2aig",
+        netlist_text,
+        Some(liberty_text),
+        None,
+        None,
+        &["--collapse_sequential_cells", "true"],
+    );
+    assert!(!feedback_output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&feedback_output.stderr),
         include_str!("golden/gv2aig_load_enable_feedback.golden.txt")
     );
 
@@ -252,7 +267,11 @@ endmodule
         Some(liberty_text),
         None,
         None,
-        &["--collapse_load_enable_feedback"],
+        &[
+            "--collapse_sequential_cells",
+            "true",
+            "--collapse_load_enable_feedback",
+        ],
     );
     assert_success(&enabled_output);
     let loaded = load_aiger_auto_from_path(&enabled_path, GateBuilderOptions::no_opt())

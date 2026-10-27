@@ -501,8 +501,8 @@ Flags:
 - `--liberty_proto <PATH>` – required Liberty proto, optionally gzip-compressed.
 - `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
 - `--module_name <MODULE>` – select the module when the input contains multiple modules.
-- `--collapse_sequential <BOOL>` – if true (default), collapse reached flops by substituting their next-state formulas. If false, reaching a flop that is not a source boundary is an error.
-- `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential true`.
+- `--collapse_sequential_cells <BOOL>` – if true, collapse reached flops by substituting their next-state formulas. Defaults to false; reaching a flop that is not a source boundary is then an error. The previous `--collapse_sequential` spelling remains accepted as an alias.
+- `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential_cells true`.
 - `--cone_sources <SELECTOR>` – add a compact source selector; repeat the flag for multiple selectors.
 - `--cone_sinks <SELECTOR>` – add a compact sink selector; repeat the flag for multiple selectors.
 - `--cone_boundary_file <PATH>` – read compact source and sink selectors from a JSON file. This cannot be combined with `--cone_sources` or `--cone_sinks`.
@@ -548,7 +548,7 @@ xlsynth-driver gv2aig \
   --liberty_proto cells.proto \
   --module_name top \
   --cone_boundary_file boundaries.json \
-  --collapse_sequential true \
+  --collapse_sequential_cells true \
   --aiger-out datapath.aig
 ```
 
@@ -562,6 +562,7 @@ xlsynth-driver gv2aig \
   --cone_sources 'input_port:data' \
   --cone_sources 'cell_output_regex:u_state_reg_[0-9]+:Q' \
   --cone_sinks 'output_port:result' \
+  --collapse_sequential_cells true \
   --aiger-out datapath.aig
 ```
 
@@ -583,9 +584,9 @@ Selectors use `[<aig-name>=]<kind>:<endpoint-or-regexp>`:
 - The file's `sources` and `sinks` arrays are both required. Sources accept input-port and cell-output selectors; sinks accept output-port selectors. Cone extraction requires at least one sink. Direct CLI selectors and `--cone_boundary_file` are mutually exclusive.
 - A module input source selects the entire port. A cell output source selects one connected scalar output pin of a mapped leaf cell, whether combinational or sequential. A sink selects an entire module output port. Sources cut the selected signal, including any `tran` aliases of it. Other outputs of the same cell are evaluated normally unless selected. Multiple selected outputs become independent AIG inputs, so relationships between those outputs are omitted from the extracted graph.
 - Selector order determines AIG interface order, with each regexp's matches sorted lexicographically by canonical endpoint text. Names must be unique within each list, and selected source net bits must not overlap. Vector bits are emitted least-significant bit first, with AIGER symbols such as `data_0`, `data_1`. Every declared source remains an input, including unused sources.
-- With `--collapse_sequential true` (the default), reached flops that are not sources are replaced by their Liberty `next_state` expressions. Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`.
+- With `--collapse_sequential_cells true`, reached flops that are not sources are replaced by their Liberty `next_state` expressions. Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`.
 - With `--collapse_load_enable_feedback`, a direct Q feedback connection implementing `(old_q & !enable) | (data & enable)` is collapsed with the prior Q value assumed zero. The enable signals may differ by one external inverter, and constant cell inputs such as disabled scan controls are folded when recognizing this pattern. This zero-prior-state assumption applies only to collapsed flops; explicitly selected `cell_output` sources retain their arbitrary input values. No implicit inputs are added. Asynchronous clear/preset, Liberty-internal state-dependent `next_state` formulas, and other feedback patterns remain unsupported. The result is a combinational AIG with no latches under the stated zero-prior-state assumption.
-- With `--collapse_sequential false`, reaching an unselected sequential cell is an error. Reaching an unselected top-module input, an undriven or multiply driven signal, an unknown value, or a dependency cycle is also an error. This requires the source list to cover every terminal signal needed by the selected sinks.
+- With `--collapse_sequential_cells false` (the default), reaching an unselected sequential cell is an error. Reaching an unselected top-module input, an undriven or multiply driven signal, an unknown value, or a dependency cycle is also an error. This requires the source list to cover every terminal signal needed by the selected sinks.
 - Without any cone flags, the source and sink lists contain all top-module inputs and outputs, preserving their names and declaration order. The same traversal and flop-collapsing logic handles default and explicit boundaries.
 
 ### `ugv2aig`: combinational UGV to AIGER

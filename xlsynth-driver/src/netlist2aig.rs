@@ -48,9 +48,10 @@ fn gv_conversion_command(name: &'static str, about: &'static str) -> Command {
         )
         .arg(
             Arg::new("collapse_sequential")
-                .long("collapse_sequential")
+                .long("collapse_sequential_cells")
+                .alias("collapse_sequential")
                 .value_name("BOOL")
-                .default_value("true")
+                .default_value("false")
                 .value_parser(clap::value_parser!(bool))
                 .help("If true, collapse sequential state variables by substituting next_state.")
                 .action(ArgAction::Set),
@@ -142,7 +143,7 @@ fn convert_gv(matches: &ArgMatches) -> Result<GateFn, anyhow::Error> {
     let collapse_sequential = matches
         .get_one::<bool>("collapse_sequential")
         .copied()
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let opts = Gv2AigOptions {
         module_name,

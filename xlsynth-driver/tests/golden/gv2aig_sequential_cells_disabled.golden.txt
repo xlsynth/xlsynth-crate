@@ -1,0 +1,1 @@
+Failed to convert GV to AIG: while extracting sink 'y': reached sequential cell 'DFFEN' instance 'u_pipe' output 'Q'; select it as a source or set collapse_sequential=true (CLI: --collapse_sequential_cells true)
