@@ -5,8 +5,9 @@
 //!
 //! Scalar combinational GV only. Output aliases and literal inputs are
 //! preserved; external output loads stay on the original driver. Every trial is
-//! evaluated with propagated changes to upstream input loading. No
-//! physical wire model or Boolean remapping is introduced.
+//! evaluated with propagated changes to upstream input loading. Optional affine
+//! wire capacitance follows the shared STA load model; no wire propagation
+//! delay or Boolean remapping is introduced.
 
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Library, Pin, PinDirection};
@@ -16,7 +17,9 @@ use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, PortDirection,
 };
 use crate::netlist::report::build_area_report;
-use crate::netlist::sta::{StaOptions, StaReport, TimingQueryDiagnosticCounts};
+use crate::netlist::sta::{
+    EdgeLoadCapacitance, StaOptions, StaReport, TimingQueryDiagnosticCounts, WireLoadModel,
+};
 use anyhow::{Result, anyhow, ensure};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -35,6 +38,8 @@ pub struct FanoutOptimizationOptions {
     pub area_weight: f64,
     pub primary_input_transition: f64,
     pub module_output_load: f64,
+    /// Affine wire capacitance shared by ranking, full STA and incremental STA.
+    pub wire_load: WireLoadModel,
 }
 impl Default for FanoutOptimizationOptions {
     fn default() -> Self {
@@ -48,6 +53,7 @@ impl Default for FanoutOptimizationOptions {
             area_weight: 0.5,
             primary_input_transition: StaOptions::default().primary_input_transition,
             module_output_load: 1.0,
+            wire_load: WireLoadModel::default(),
         }
     }
 }
@@ -457,7 +463,9 @@ fn graph(
                 sinks.entry(n).or_default().push(Sink {
                     instance: i,
                     connection: j,
-                    capacitance: cap[0].max(cap[1]),
+                    // Each moved sink carries its affine wire contribution.
+                    // The constant term is common to all used group outputs.
+                    capacitance: cap[0].max(cap[1]) + options.wire_load.capacitance_per_sink,
                 });
                 let load = loads.entry(n).or_insert([0.0; 2]);
                 load[0] += cap[0];
@@ -513,6 +521,14 @@ fn graph(
         d.load = loads.get(&d.net).copied().unwrap_or_default();
         d.output_ports = ports.get(&d.net).copied().unwrap_or_default();
         d.fixed_output_load = d.output_ports as f64 * options.module_output_load;
+        let mut load = EdgeLoadCapacitance {
+            rise: d.load[0],
+            fall: d.load[1],
+        };
+        options
+            .wire_load
+            .add_to(&mut load, d.sinks.len(), d.output_ports != 0)?;
+        d.load = [load.rise, load.fall];
         d.slew_bound = slew_bounds.get(&d.net).copied().unwrap_or(f64::INFINITY);
     }
     Ok(Graph {
@@ -570,7 +586,7 @@ fn measure_prepared(
             StaOptions {
                 primary_input_transition: options.primary_input_transition,
                 module_output_load: options.module_output_load,
-                wire_load: Default::default(),
+                wire_load: options.wire_load,
             },
         )
         .map_err(CandidateTimingError)?;
@@ -817,6 +833,7 @@ pub fn optimize_fanout(
     library: &Library,
     options: FanoutOptimizationOptions,
 ) -> Result<FanoutOptimizationReport> {
+    options.wire_load.validate()?;
     ensure!(
         !(options.full_sta && options.verify_incremental),
         "full STA and incremental oracle modes are mutually exclusive"
@@ -973,7 +990,7 @@ pub fn optimize_fanout(
                             StaOptions {
                                 primary_input_transition: options.primary_input_transition,
                                 module_output_load: options.module_output_load,
-                                wire_load: Default::default(),
+                                wire_load: options.wire_load,
                             },
                         )
                         .map_err(CandidateTimingError)

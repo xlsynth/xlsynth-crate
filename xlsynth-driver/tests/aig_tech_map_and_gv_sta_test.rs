@@ -1665,3 +1665,192 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
         }
     }
 }
+
+/// Composed recovery must match an explicit native resize with the same model.
+#[test]
+fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let aig = dir.path().join("input.aag");
+    let lib = dir.path().join("library.textproto");
+    std::fs::write(&aig, make_two_input_and_aig()).unwrap();
+    let text = make_timing_enabled_inv_nand2_liberty_textproto();
+    // A size-only cell is deliberately unavailable to covering, but recovery
+    // must select its smaller, equally fast implementation.
+    let recovery_cell = text
+        .split("cells: {")
+        .nth(2)
+        .unwrap()
+        .split("default_output_load:")
+        .next()
+        .unwrap()
+        .replace(
+            "name: \"NAND2\"",
+            "name: \"NAND2_SMALL\" use_for_size_only: true",
+        )
+        .replace("area: 2.0", "area: 1.0");
+    std::fs::write(&lib, format!("{text}\ncells: {{{recovery_cell}")).unwrap();
+    for repair in [false, true] {
+        let run_map = |name: &str, extra: &[&str]| {
+            let netlist = dir.path().join(format!("{name}.gv"));
+            let report = dir.path().join(format!("{name}.json"));
+            let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+                .arg("aig-tech-map")
+                .arg(&aig)
+                .args(["--strategy", "delay", "--liberty_proto"])
+                .arg(&lib)
+                .arg(format!("--fanout-opt={repair}"))
+                .args([
+                    "--primary-input-transition",
+                    "0.03",
+                    "--module-output-load",
+                    "0.02",
+                    "--netlist_out",
+                ])
+                .arg(&netlist)
+                .arg("--json_out")
+                .arg(&report)
+                .args(extra)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+            (netlist, json)
+        };
+        let (raw, raw_report) = run_map("raw", &["--area-recovery=false"]);
+        assert!(raw_report.get("area_recovery").is_none());
+        let (zero, zero_report) = run_map("zero", &["--area-recovery-evaluation-budget", "0"]);
+        assert_eq!(std::fs::read(&raw).unwrap(), std::fs::read(zero).unwrap());
+        assert_eq!(
+            zero_report["area_recovery"]["work_limits"]["recovery_evaluations"],
+            0
+        );
+        assert_eq!(
+            zero_report["area_recovery"]["downsize"]["propagated_instances"],
+            0
+        );
+        let (_, rounds_report) = run_map("rounds", &["--area-recovery-rounds", "0"]);
+        assert_eq!(
+            rounds_report["area_recovery"]["downsize"]["stop_reason"],
+            "disabled"
+        );
+
+        let wire = [
+            "--wire-capacitance-constant-ff",
+            "500",
+            "--wire-capacitance-per-sink-ff",
+            "250",
+        ];
+        let (before, _) = if repair {
+            run_map(
+                "before",
+                &["--area-recovery=false", wire[0], wire[1], wire[2], wire[3]],
+            )
+        } else {
+            (raw, raw_report)
+        };
+        let (after, report) = run_map("after", &wire);
+        let explicit = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("gv-resize")
+            .arg("--netlist")
+            .arg(before)
+            .arg("--liberty_proto")
+            .arg(&lib)
+            .args([
+                "--primary_input_transition",
+                "0.03",
+                "--module_output_load",
+                "0.02",
+                "--upsize-rounds",
+                "0",
+                "--max-area-growth",
+                "0",
+            ])
+            .args(wire)
+            .output()
+            .unwrap();
+        assert!(
+            explicit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&explicit.stderr)
+        );
+        assert_eq!(std::fs::read(after).unwrap(), explicit.stdout);
+        assert_eq!(
+            report["post_mapping_timing"]["wire_load"]["constant_capacitance"],
+            0.5
+        );
+        assert_eq!(
+            report["post_mapping_timing"]["wire_load"]["capacitance_per_sink"],
+            0.25
+        );
+        assert_eq!(report["area_recovery_rounds"], 2);
+        assert_eq!(report["area_recovery"]["initial_area"], 3.0);
+        assert_eq!(report["area_recovery"]["final_area"], 2.0);
+        assert_eq!(report["area_recovery"]["downsize"]["accepted"], 1);
+        assert_eq!(report["area_recovery"]["upsize"]["stop_reason"], "disabled");
+        assert_eq!(
+            report["area_recovery"]["work_limits"]["timing_evaluations"],
+            0
+        );
+        if repair {
+            assert_eq!(
+                report["fanout_optimization"]["options"]["wire_load"],
+                report["post_mapping_timing"]["wire_load"]
+            );
+            assert_eq!(
+                report["fanout_optimization"]["after"]["area"],
+                report["area_recovery"]["initial_area"]
+            );
+        }
+        let (_, repeated) = run_map("repeat", &wire);
+        assert_eq!(report, repeated);
+    }
+}
+
+#[test]
+fn recovery_flags_reject_inapplicable_stages_before_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let aig = dir.path().join("unused.aag");
+    for (extra, error) in [
+        (
+            vec!["--area-recovery=true"],
+            "--area-recovery requires --strategy area or delay",
+        ),
+        (
+            vec!["--area-recovery-rounds", "0"],
+            "area recovery tuning options require --area-recovery=true",
+        ),
+        (
+            vec!["--wire-capacitance-constant-ff", "0"],
+            "wire capacitance options require fanout optimization or area recovery",
+        ),
+        (
+            vec![
+                "--strategy",
+                "delay",
+                "--area-recovery=false",
+                "--area-recovery-evaluation-budget",
+                "1",
+            ],
+            "area recovery tuning options require --area-recovery=true",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("aig-tech-map")
+            .arg(&aig)
+            .args(["--liberty_proto", "unused.proto", "--netlist_out", "-"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("aig-tech-map error: {error}\n")
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
