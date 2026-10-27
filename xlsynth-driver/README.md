@@ -903,6 +903,34 @@ both output edges; complementary rise/fall arcs are combined. Validate the emitt
 network with `gv-sta` and formal equivalence. Fanout optimization is off by default
 for delay mode; enable it explicitly with `--fanout-opt=true`.
 
+Delay mode follows covering (and optional fanout optimization) with bounded
+area recovery using the native resizer. It substitutes cheaper equivalent cells
+without increasing the boundary delay reached before recovery, and allows no
+area growth. It does not repeat the timing-search phase or change the cover.
+Use `--area-recovery=false` for the original raw delay cover, or combine it with
+`--fanout-opt=false` to disable both post-mapping stages. Area recovery is off
+by default for area mode and unsupported for nand2.
+
+- `--area-recovery[=true|false]`: default true for delay, false otherwise.
+- `--area-recovery-rounds <COUNT>`: default 2; zero disables recovery search.
+- `--area-recovery-evaluation-budget <COUNT>`: propagation visits across all
+  recovery rounds; default `max(100000, 8 * N)` for N mapped instances after
+  fanout optimization. Zero permits no search work. A budget stop retains
+  completed, verified substitutions; it does not imply convergence.
+- `--wire-capacitance-constant-ff <VALUE>`,
+  `--wire-capacitance-per-sink-ff <VALUE>`: default 0 each. Both post-mapping
+  stages share these affine lumped wire-capacitance terms, the input slew and
+  output load. Output ports are not sink pins; output-only driven nets receive
+  the constant term, dangling nets neither. Primary inputs remain ideal sources.
+  These options require at least one post-mapping stage. They do not change the
+  delay cover's frozen reference load or model wire propagation delay.
+
+Recovery tuning flags require recovery to be enabled. The JSON summary keeps
+covering `stats` unchanged and adds `area_recovery` with final area/delay,
+accepted substitutions, resolved budgets and stopping reasons,
+`area_recovery_rounds`, and `post_mapping_timing` with the shared resolved
+model. Fanout results remain under `fanout_optimization`.
+
 Key flags:
 
 - `--strategy <nand2|area|delay>`: mapping strategy (default: `nand2`).
@@ -933,7 +961,7 @@ With `--strategy area`, fanout optimization is enabled by default: a bounded
 post-mapping pass tries equivalent
 cell upsizing, buffering, and replication. Each accepted edit improves modeled
 worst delay and the delay/area score. The pass requires timing-enabled Liberty;
-timing uses pin capacitances and excludes interconnect parasitics. Use
+timing uses pin capacitances plus optional affine wire capacitance. Use
 `--fanout-opt=false` for raw area mapping without timing requirements. Bare
 `--fanout-opt` and `--fanout-opt=true` explicitly enable the pass. The default
 `nand2` and `delay` strategies leave it disabled. Enabling it requires
@@ -1320,6 +1348,10 @@ timing conditions are skipped.
   default `0.01`. This is a fixed slew, not ABC's virtual driving-cell model.
 - `--module_output_load <VALUE>`: output capacitance in library units;
   defaults to the proto's `default_output_load`. Explicit `0` is supported.
+- `--wire-capacitance-constant-ff <VALUE>`,
+  `--wire-capacitance-per-sink-ff <VALUE>`: affine lumped wire capacitance,
+  default 0 each, with the same units and semantics as `gv-sta` and
+  `aig-tech-map`. Use identical timing/load settings across these tools.
 - `--max-area-growth <FRACTION>`: noncompounding growth relative to input area;
   default `0.02` (2%).
 - `--timing-evaluation-budget <COUNT>`: instance evaluation visits across all

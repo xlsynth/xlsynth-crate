@@ -15,6 +15,8 @@ use xlsynth_g8r::liberty::io_defaults::default_output_load;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::fanout_opt::{FanoutOptimizationOptions, optimize_fanout};
 use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_data_from_path};
+use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
+use xlsynth_g8r::netlist::sta::{StaOptions, WireLoadModel};
 use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
 use xlsynth_g8r::techmap::delay::{
     DelayMappingLibrary, DelayMappingOptions, map_gatefn_to_delay_netlist,
@@ -299,12 +301,39 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         .get_one::<bool>("fanout_opt")
         .copied()
         .unwrap_or(strategy == "area");
+    let area_recovery = matches
+        .get_one::<bool>("area-recovery")
+        .copied()
+        .unwrap_or(strategy == "delay");
+    ensure!(
+        !area_recovery || strategy == "area" || strategy == "delay",
+        "--area-recovery requires --strategy area or delay"
+    );
+    ensure!(
+        area_recovery
+            || ["area-recovery-rounds", "area-recovery-evaluation-budget"]
+                .iter()
+                .all(|name| matches.value_source(name) != Some(ValueSource::CommandLine)),
+        "area recovery tuning options require --area-recovery=true"
+    );
+    ensure!(
+        fanout_opt
+            || area_recovery
+            || [
+                "wire-capacitance-constant-ff",
+                "wire-capacitance-per-sink-ff"
+            ]
+            .iter()
+            .all(|name| matches.value_source(name) != Some(ValueSource::CommandLine)),
+        "wire capacitance options require fanout optimization or area recovery"
+    );
     ensure!(
         !fanout_opt || strategy == "area" || strategy == "delay",
         "--fanout-opt requires --strategy area or delay"
     );
     ensure!(
         fanout_opt
+            || area_recovery
             || strategy == "delay"
             || [
                 "primary_input_transition",
@@ -342,7 +371,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load AIG '{aig_input_file}'"))?
             .gate_fn;
-    let load = if fanout_opt || strategy == "delay" {
+    let load = if fanout_opt || area_recovery || strategy == "delay" {
         load_liberty_with_timing_data_from_path
     } else {
         load_liberty_from_path
@@ -358,6 +387,25 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         }
     })?;
 
+    // Resolve one model for both post-mapping stages. Delay covering still uses
+    // its explicitly supplied frozen reference load, not a fanout estimate.
+    let timing = if fanout_opt || area_recovery {
+        Some(StaOptions {
+            primary_input_transition: matches.get_one::<f64>("primary_input_transition")
+                .copied().unwrap_or(FanoutOptimizationOptions::default().primary_input_transition),
+            module_output_load: match matches.get_one::<f64>("module_output_load") {
+                Some(load) => *load,
+                None => default_output_load(&lib).map_err(anyhow::Error::msg)
+                    .context("post-mapping optimization requires an output load; supply --module-output-load, or disable optimization with --fanout-opt=false --area-recovery=false")?,
+            },
+            wire_load: WireLoadModel::from_femtofarads(
+                matches.get_one::<f64>("wire-capacitance-constant-ff").copied().unwrap_or(0.0),
+                matches.get_one::<f64>("wire-capacitance-per-sink-ff").copied().unwrap_or(0.0),
+                &lib)?,
+        })
+    } else {
+        None
+    };
     let (mut mapped, mut report, mut summary) = match strategy {
         "nand2" => {
             let policy = match matches.get_one::<String>("cell_policy").unwrap().as_str() {
@@ -425,16 +473,9 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     if fanout_opt {
         let defaults = FanoutOptimizationOptions::default();
         let options = FanoutOptimizationOptions {
-            primary_input_transition: matches
-                .get_one::<f64>("primary_input_transition")
-                .copied()
-                .unwrap_or(defaults.primary_input_transition),
-            module_output_load: match matches.get_one::<f64>("module_output_load") {
-                Some(load) => *load,
-                None => default_output_load(&lib).map_err(anyhow::Error::msg).context(
-                    "area fanout optimization requires an output load; supply --module-output-load or use --fanout-opt=false for raw mapping",
-                )?,
-            },
+            primary_input_transition: timing.unwrap().primary_input_transition,
+            module_output_load: timing.unwrap().module_output_load,
+            wire_load: timing.unwrap().wire_load,
             area_growth_limit: matches
                 .get_one::<f64>("fanout_max_area_growth")
                 .copied()
@@ -454,6 +495,44 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         ));
         report["fanout_optimization"] = serde_json::to_value(optimized)?;
         remove_runtime(&mut report["fanout_optimization"]);
+    }
+    if area_recovery {
+        let defaults = ResizeOptions::default();
+        let options = ResizeOptions {
+            timing: timing.unwrap(),
+            max_area_growth: 0.0,
+            max_upsize_rounds: 0,
+            timing_evaluation_budget: Some(0),
+            max_downsize_rounds: matches
+                .get_one::<usize>("area-recovery-rounds")
+                .copied()
+                .unwrap_or(defaults.max_downsize_rounds),
+            recovery_evaluation_budget: matches
+                .get_one::<usize>("area-recovery-evaluation-budget")
+                .copied(),
+            ..defaults
+        };
+        let recovered = resize_netlist(
+            &mut mapped.module,
+            &mapped.nets,
+            &mut mapped.interner,
+            &lib,
+            &options,
+        )
+        .context("mapped area recovery failed")?;
+        summary.push_str(&format!(
+            "; area recovery {} -> {}",
+            recovered.initial_area, recovered.final_area
+        ));
+        report["area_recovery"] = serde_json::to_value(recovered)?;
+        report["area_recovery_rounds"] = options.max_downsize_rounds.into();
+    }
+    if let Some(timing) = timing {
+        report["post_mapping_timing"] = serde_json::json!({
+            "primary_input_transition": timing.primary_input_transition,
+            "module_output_load": timing.module_output_load,
+            "wire_load": timing.wire_load
+        });
     }
     report["strategy"] = strategy.into();
     report["module"] = mapped.interner.resolve(mapped.module.name).unwrap().into();
