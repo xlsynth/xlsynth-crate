@@ -979,8 +979,7 @@ def eval (q : State) (x : Input) : Evaluation :=
 
     /// Emit total state/result conversions and their round-trip proof source.
     ///
-    /// Stateful inputs and outputs use their source codecs and the block's
-    /// port names. Proc inputs and outputs retain their raw types.
+    /// Inputs and outputs use their source codecs and the block's port names.
     fn representation(&self) -> Result<String> {
         let mut out = String::from("import ReadableGenerated\n\nnamespace XlsReadable\n\n");
         let encoded = self
