@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +15,8 @@ use super::types::{
 use crate::dslx_utils::join_dslx_search_paths;
 use crate::toolchain_shim::run_prove_quickcheck_main;
 use regex::escape;
+use xlsynth_pir::ir::emit_fn;
+use xlsynth_pir::ir_inline::package_with_reachable_callees;
 use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 
 const MAX_TOOLCHAIN_MESSAGE: usize = 512;
@@ -140,18 +141,14 @@ impl Prover for ExternalProver {
                         "External provers do not support flattening".to_string(),
                     );
                 }
-                let lhs_pkg = match lhs.pkg_ref {
-                    Some(pkg) => pkg.to_string(),
-                    None => format!("package lhs\n\ntop {}\n", lhs.fn_ref.to_string()),
-                };
-                let rhs_pkg = match rhs.pkg_ref {
-                    Some(pkg) => pkg.to_string(),
-                    None => format!("package rhs\n\ntop {}\n", rhs.fn_ref.to_string()),
-                };
-                let (lhs_unified, rhs_unified, unified_top) =
-                    unify_toolchain_tops(&lhs_pkg, &rhs_pkg, &lhs.fn_ref.name, &rhs.fn_ref.name);
-
-                self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
+                match (toolchain_input(lhs), toolchain_input(rhs)) {
+                    (Ok(lhs_pkg), Ok(rhs_pkg)) => {
+                        // Each package marks its own entry, even when the names
+                        // differ.
+                        self.prove_ir_pkg_text_equiv(&lhs_pkg, &rhs_pkg, None)
+                    }
+                    (Err(e), _) | (_, Err(e)) => EquivResult::Error(e),
+                }
             }
             EquivParallelism::OutputBits => {
                 if assert_label_filter.is_some() {
@@ -293,22 +290,13 @@ impl From<ToolchainEquivResult> for EquivResult {
     }
 }
 
-fn unify_toolchain_tops<'a>(
-    lhs_ir: &'a str,
-    rhs_ir: &'a str,
-    lhs_top: &str,
-    rhs_top: &str,
-) -> (Cow<'a, str>, Cow<'a, str>, String) {
-    if lhs_top == rhs_top {
-        return (
-            Cow::Borrowed(lhs_ir),
-            Cow::Borrowed(rhs_ir),
-            lhs_top.to_string(),
-        );
+/// Sends the requested function, including signature edits, with its helper
+/// definitions.
+fn toolchain_input(entry: &ProverFn<'_>) -> Result<String, String> {
+    match entry.pkg_ref {
+        Some(pkg) => Ok(package_with_reachable_callees(pkg, entry.fn_ref)?.to_string()),
+        None => Ok(format!("package proof\n\n{}", emit_fn(entry.fn_ref, true))),
     }
-    let unified = lhs_top.to_string();
-    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
-    (Cow::Borrowed(lhs_ir), Cow::Owned(rhs_rewritten), unified)
 }
 
 #[cfg(test)]
@@ -318,6 +306,35 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use test_case::test_case;
     use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn external_checker_receives_the_edited_entry_and_its_callees() {
+        let ir = r#"package source
+fn helper(x: bits[1] id=1) -> bits[1] {
+  ret y: bits[1] = not(x, id=2)
+}
+fn selected(x: bits[1] id=3, unused: bits[1] id=4) -> bits[1] {
+  ret y: bits[1] = invoke(x, to_apply=helper, id=5)
+}
+top fn original(x: bits[1] id=6) -> bits[1] {
+  ret y: bits[1] = invoke(x, x, to_apply=selected, id=7)
+}"#;
+        let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+        let selected = pkg
+            .get_fn("selected")
+            .unwrap()
+            .clone()
+            .drop_params(&["unused".to_string()])
+            .unwrap();
+        let input = toolchain_input(&ProverFn::new(&selected, Some(&pkg))).unwrap();
+        let sent = Parser::new(&input).parse_and_validate_package().unwrap();
+        assert_eq!(sent.get_top_fn().unwrap().to_string(), selected.to_string());
+        assert_eq!(
+            sent.get_fn("helper").unwrap().to_string(),
+            pkg.get_fn("helper").unwrap().to_string()
+        );
+        assert!(sent.get_fn("original").is_none());
+    }
 
     #[test_case(None; "ir_quickcheck")]
     #[test_case(Some("label"); "assertion_filter")]

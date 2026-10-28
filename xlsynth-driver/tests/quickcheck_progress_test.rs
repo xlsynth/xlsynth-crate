@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "has-bitwuzla")]
+#[cfg(any(feature = "has-bitwuzla", feature = "with-z3-binary-test"))]
 use serde_json::Value;
 use std::process::Command;
 
@@ -33,6 +33,42 @@ fn quickcheck_uf_requires_explicit_opt_false() {
             include_str!("testdata/quickcheck/uf_opt_error.golden.txt")
         );
     }
+}
+
+/// A UF alias containing SMT commands must not turn a false property into a
+/// proof, even when it includes the responses expected by the SMT client.
+#[cfg(feature = "with-z3-binary-test")]
+#[test]
+fn quickcheck_uf_alias_cannot_inject_solver_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("qc.x"),
+        r#"fn helper(x: u1) -> u1 { x }
+#[quickcheck] fn p() -> bool { false }
+"#,
+    )
+    .unwrap();
+    let alias = r#"F ((_ BitVec 1)) (_ BitVec 1)) (set-option :print-success false) (assert false) (echo "success") (echo "success") (echo "success") (echo "success") ;"#;
+    let output = xlsynth::external_tool::run_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .current_dir(dir.path())
+            .args([
+                "prove-quickcheck",
+                "--dslx_input_file=qc.x",
+                "--opt=false",
+                "--solver=z3-binary",
+                "--output_json=result.json",
+            ])
+            .arg(format!("--uf=helper:{alias}")),
+        dir.path(),
+        "quickcheck",
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("result.json")).unwrap()).unwrap();
+    assert_eq!(report["status"], "disproved", "{output:?}");
+    assert_eq!(output.status.code(), Some(1));
 }
 
 /// Default/explicit optimization and unoptimized proofs have the same readable

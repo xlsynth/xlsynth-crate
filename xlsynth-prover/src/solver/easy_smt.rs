@@ -4,6 +4,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     io,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
@@ -118,6 +119,16 @@ pub struct EasySmtSolver {
 
 impl SolverConfig for EasySmtConfig {
     type Solver = EasySmtSolver;
+}
+
+/// Encodes a named declaration as one SMT atom, disjoint from cached terms.
+/// SMT-LIB punctuation in a caller's name must never reach the command stream.
+fn declaration_symbol(prefix: &str, name: &str) -> String {
+    let mut symbol = String::from(prefix);
+    for byte in name.bytes() {
+        write!(symbol, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    symbol
 }
 
 impl EasySmtSolver {
@@ -300,8 +311,8 @@ impl Solver for EasySmtSolver {
         })
     }
 
-    fn fresh_symbol(&mut self, name: &str) -> io::Result<String> {
-        let symbol = format!("__easy_smt_fresh_{}_{}", name, self.fresh_counter);
+    fn fresh_symbol(&mut self, _name: &str) -> io::Result<String> {
+        let symbol = format!("fresh_{}", self.fresh_counter);
         self.fresh_counter += 1;
         Ok(symbol)
     }
@@ -315,7 +326,7 @@ impl Solver for EasySmtSolver {
         let mut context = shared.lock().unwrap();
         let width_numeral = context.numeral(width as i64);
         let sort = context.bit_vec_sort(width_numeral);
-        let rep = context.declare_const(format!("_{}", name), sort)?;
+        let rep = context.declare_const(declaration_symbol("v_", name), sort)?;
         Ok(self.cache_term(BitVec::BitVec { width, rep }, &mut context))
     }
 
@@ -344,7 +355,8 @@ impl Solver for EasySmtSolver {
                 .map(|w| context.bit_vec_sort(w.clone()))
                 .collect();
             let result_sort = context.bit_vec_sort(context.numeral(result_width as i64));
-            let rep = context.declare_fun(name, arg_sorts, result_sort)?;
+            let rep =
+                context.declare_fun(declaration_symbol("uf_", name), arg_sorts, result_sort)?;
             Ok(Uf::Uf {
                 rep,
                 arg_widths: arg_widths.to_vec(),

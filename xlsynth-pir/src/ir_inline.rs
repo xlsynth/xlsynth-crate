@@ -11,7 +11,7 @@
 use crate::ir::{MemberType, NodePayload, Package, PackageMember};
 use crate::ir_parser::Parser;
 use crate::ir_verify;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -123,7 +123,7 @@ fn run_ir_inline_over_ir_text_via_toolchain(
         ));
     }
 
-    let reachable_pkg = retain_reachable_functions(&output_pkg, top_name)?;
+    let reachable_pkg = package_with_reachable_callees(&output_pkg, output_top)?;
     ir_verify::verify_package(&reachable_pkg)
         .map_err(|e| format!("ir_inline: retained package validation failed: {e}"))?;
     Ok(reachable_pkg.to_string())
@@ -223,16 +223,34 @@ fn direct_callee_names(f: &crate::ir::Fn) -> BTreeSet<String> {
     names
 }
 
-fn retain_reachable_functions(pkg: &Package, top_name: &str) -> Result<Package, String> {
+/// Builds a package for this exact entry function, resolving only its callees
+/// from `pkg`. The entry may be an edited copy of a function in the package.
+pub fn package_with_reachable_callees(
+    pkg: &Package,
+    entry: &crate::ir::Fn,
+) -> Result<Package, String> {
+    let mut functions = HashMap::new();
+    for member in &pkg.members {
+        if let PackageMember::Function(f) = member {
+            if functions.insert(f.name.as_str(), f).is_some() {
+                return Err(format!("ambiguous function name {:?} in package", f.name));
+            }
+        }
+    }
     let mut reachable = BTreeSet::new();
-    let mut worklist = vec![top_name.to_string()];
+    let mut worklist: Vec<_> = direct_callee_names(entry).into_iter().collect();
     while let Some(name) = worklist.pop() {
+        if name == entry.name {
+            return Err(format!(
+                "entry function {name:?} is also reachable as a callee"
+            ));
+        }
         if !reachable.insert(name.clone()) {
             continue;
         }
-        let f = pkg.get_fn(&name).ok_or_else(|| {
-            format!("ir_inline: reachable function '{name}' is missing from output package")
-        })?;
+        let f = functions
+            .get(name.as_str())
+            .ok_or_else(|| format!("reachable function '{name}' is missing from package"))?;
         for callee in direct_callee_names(f) {
             if !reachable.contains(&callee) {
                 worklist.push(callee);
@@ -240,7 +258,7 @@ fn retain_reachable_functions(pkg: &Package, top_name: &str) -> Result<Package, 
         }
     }
 
-    let members = pkg
+    let mut members = pkg
         .members
         .iter()
         .filter_map(|member| match member {
@@ -249,17 +267,13 @@ fn retain_reachable_functions(pkg: &Package, top_name: &str) -> Result<Package, 
         })
         .collect::<Vec<_>>();
 
-    if members.is_empty() {
-        return Err(format!(
-            "ir_inline: no reachable function members found for top '{top_name}'"
-        ));
-    }
+    members.push(PackageMember::Function(entry.clone()));
 
     Ok(Package {
         name: pkg.name.clone(),
         file_table: pkg.file_table.clone(),
         members,
-        top: Some((top_name.to_string(), MemberType::Function)),
+        top: Some((entry.name.clone(), MemberType::Function)),
     })
 }
 

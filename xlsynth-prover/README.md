@@ -147,6 +147,9 @@ after cancellation.
 rejects settings it cannot represent without changing the claim. For example,
 one `drop_params` entry `"a,b"` cannot stand for two parameter names, and UF
 symbols `"F"` and `"F "` cannot silently become the same symbol.
+Executable SMT backends generate their own identifiers, so punctuation in a
+UF name cannot change a solver command. The external XLS checker receives
+each selected function with its edited signature and the helpers it calls.
 
 Inconclusive results and execution errors are indefinite scheduler outcomes:
 they cannot win a `first` group or trigger tactic rollback. Native solver

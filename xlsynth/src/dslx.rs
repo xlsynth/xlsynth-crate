@@ -1608,7 +1608,8 @@ impl InterpValue {
     }
 
     pub fn from_string(text: &str) -> Result<Self, crate::XlsynthError> {
-        let c_text = std::ffi::CString::new(text).unwrap();
+        let c_text = std::ffi::CString::new(text)
+            .map_err(|_| XlsynthError("DSLX interpreter value text contains a NUL byte".into()))?;
         let c_stdlib = std::ffi::CString::new(sys::DSLX_STDLIB_PATH).unwrap();
         unsafe {
             let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -1960,6 +1961,12 @@ mod param_env_and_interp_value_tests {
         let iv = InterpValue::from_string("u32:42").expect("parse success");
         let ir = iv.convert_to_ir().expect("convert to IR");
         assert_eq!(ir.to_string(), "bits[32]:42");
+    }
+
+    #[test]
+    fn interp_value_text_with_nul_returns_an_error() {
+        let err = InterpValue::from_string("u32:1\0x").err().unwrap();
+        assert_eq!(err.0, "DSLX interpreter value text contains a NUL byte");
     }
 
     #[test]

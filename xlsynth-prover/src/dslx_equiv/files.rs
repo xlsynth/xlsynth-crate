@@ -97,6 +97,11 @@ pub struct DslxEquivFiles<'a> {
 impl DslxEquivFiles<'_> {
     /// Checks file and parameter names before either proof path starts.
     fn validate_request(&self) -> Result<(), String> {
+        for (side, top) in [("LHS", self.lhs.top), ("RHS", self.rhs.top)] {
+            if top.contains('\0') {
+                return Err(format!("{side} DSLX top specification contains a NUL byte"));
+            }
+        }
         validate_drop_params(&self.options.drop_params)?;
         validate_dslx_uf_map(&self.lhs.uf_map)?;
         validate_dslx_uf_map(&self.rhs.uf_map)?;
@@ -207,6 +212,37 @@ mod tests {
         assert_eq!(outcome.conclusion.status, ProofStatus::ExecutionError);
         assert_eq!(outcome.error_str.as_ref(), Some(&message));
         assert_eq!(request().into_tactic_tree().unwrap_err(), message);
+    }
+
+    #[test]
+    fn neither_proof_path_accepts_nul_in_a_top_name_or_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("entry.x");
+        std::fs::write(&path, "fn main<N: u32>(x: u32) -> u32 { x + N }").unwrap();
+        let side = |top| DslxEquivFile {
+            path: &path,
+            top,
+            uf_map: HashMap::new(),
+            fixed_implicit_activation: false,
+        };
+        for (lhs, rhs, invalid) in [
+            ("main<u32:1\0x>", "main<u32:1>", "LHS"),
+            ("main<u32:1>", "ma\0in<u32:1>", "RHS"),
+        ] {
+            let request = || DslxEquivFiles {
+                lhs: side(lhs),
+                rhs: side(rhs),
+                options: LecProofOptions::default(),
+                solver: None,
+                dslx_stdlib_path: None,
+                additional_search_paths: Vec::new(),
+            };
+            let expected = format!("{invalid} DSLX top specification contains a NUL byte");
+            let direct = request().prove(None, None, None);
+            assert_eq!(direct.conclusion.status, ProofStatus::ExecutionError);
+            assert_eq!(direct.error_str.as_ref(), Some(&expected));
+            assert_eq!(request().into_tactic_tree().unwrap_err(), expected);
+        }
     }
 
     #[test]
