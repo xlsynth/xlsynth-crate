@@ -3,7 +3,59 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
+
+/// Toolchain loading happens after argument parsing and must produce the same
+/// execution-error report as setup inside a proof command.
+#[test]
+fn toolchain_setup_failures_write_proof_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(std::ffi::OsStr::from_bytes(b"proof-\xff"));
+    fs::create_dir(&path).unwrap();
+    fs::write(path.join("xlsynth-toolchain.toml"), "[toolchain\n").unwrap();
+    fs::write(path.join("type.toml"), "[toolchain]\ntool_path = true\n").unwrap();
+    fs::create_dir(path.join("directory.toml")).unwrap();
+    for (args, toolchain) in [
+        (&["ir-equiv", "lhs.ir", "rhs.ir"][..], Some("missing.toml")),
+        (
+            &["dslx-equiv", "lhs.x", "rhs.x", "--dslx_top=main"][..],
+            None,
+        ),
+        (
+            &["prove-quickcheck", "--dslx_input_file=qc.x"][..],
+            Some("type.toml"),
+        ),
+        (
+            &[
+                "dslx-fn-prove-assertions",
+                "--dslx_input_file=entry.x",
+                "--dslx_top=main",
+            ][..],
+            Some("directory.toml"),
+        ),
+    ] {
+        let result_path = path.join("result.json");
+        fs::write(&result_path, r#"{"status":"proved","success":true}"#).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        cmd.current_dir(&path).args(args);
+        if let Some(toolchain) = toolchain {
+            cmd.args(["--toolchain", toolchain]);
+        }
+        let output = cmd.arg("--output_json=result.json").output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
+        assert_eq!(report["status"], "execution-error", "{args:?}: {report}");
+        assert_eq!(report["success"], false);
+        assert!(
+            report["error_str"]
+                .as_str()
+                .unwrap()
+                .contains(toolchain.unwrap_or("xlsynth-toolchain.toml"))
+        );
+    }
+}
 
 /// A directory in a TOML or JSON list is a single import root even when its
 /// name contains the driver's CLI separator.
