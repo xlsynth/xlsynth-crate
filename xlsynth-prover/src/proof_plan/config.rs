@@ -21,7 +21,7 @@
 //! See the driver README section "Prover configuration JSON (task-spec DSL)"
 //! for the full schema and examples.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -41,8 +41,21 @@ fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<()
     ))
 }
 
+/// Keeps a leading dash in a value from being parsed as another option.
 fn add_flag(cmd: &mut Command, name: &str, value: impl AsRef<OsStr>) {
-    cmd.arg(format!("--{}", name)).arg(value);
+    let mut arg = OsString::from(format!("--{name}="));
+    arg.push(value);
+    cmd.arg(arg);
+}
+
+/// Disambiguates positional filenames from options while allowing the
+/// scheduler to append more options after the filenames.
+fn add_positional_path(cmd: &mut Command, path: &Path) {
+    if path.as_os_str().as_encoded_bytes().starts_with(b"-") {
+        cmd.arg(Path::new(".").join(path));
+    } else {
+        cmd.arg(path);
+    }
 }
 
 /// Encodes a typed parameter list without changing which inputs are dropped.
@@ -215,7 +228,7 @@ impl ProofDriver {
     pub(super) fn command_for(&self, task: &ProverTask) -> io::Result<Command> {
         let mut command = task.to_command_with_driver(&self.executable)?;
         if let Some(path) = &self.toolchain {
-            command.arg("--toolchain").arg(path);
+            add_flag(&mut command, "toolchain", path);
         }
         Ok(command)
     }
@@ -237,8 +250,8 @@ impl ToDriverCommand for IrEquivConfig {
     fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("ir-equiv");
-        cmd.arg(self.lhs_ir_file.as_os_str());
-        cmd.arg(self.rhs_ir_file.as_os_str());
+        add_positional_path(&mut cmd, &self.lhs_ir_file);
+        add_positional_path(&mut cmd, &self.rhs_ir_file);
         if let Some(top) = &self.top {
             add_flag(&mut cmd, "top", top);
         }
@@ -281,8 +294,8 @@ impl ToDriverCommand for DslxEquivConfig {
     fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("dslx-equiv");
-        cmd.arg(self.lhs_dslx_file.as_os_str());
-        cmd.arg(self.rhs_dslx_file.as_os_str());
+        add_positional_path(&mut cmd, &self.lhs_dslx_file);
+        add_positional_path(&mut cmd, &self.rhs_dslx_file);
 
         if let Some(top) = &self.dslx_top {
             add_flag(&mut cmd, "dslx_top", top);
@@ -622,6 +635,8 @@ impl<'de> Deserialize<'de> for ProverPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
 
     #[test]
     fn dslx_equiv_config_rejects_removed_type_inference_key_for_any_value() {
@@ -669,6 +684,24 @@ mod tests {
             assert_eq!(command.get_program(), driver.as_os_str());
             assert_eq!(args_of(command), args_of(task.to_command().unwrap()));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_preserves_toolchain_path_bytes() {
+        let driver = ProofDriver {
+            executable: "xlsynth-driver".into(),
+            toolchain: Some(OsStr::from_bytes(b"-tools\xff.toml").into()),
+        };
+        let command = driver
+            .command_for(&ProverTask::ProveQuickcheck {
+                config: ProveQuickcheckConfig::default(),
+            })
+            .unwrap();
+        assert_eq!(
+            command.get_args().last(),
+            Some(OsStr::from_bytes(b"--toolchain=-tools\xff.toml"))
+        );
     }
 
     #[test]
@@ -723,7 +756,7 @@ mod tests {
     #[test]
     fn test_ir_equiv_to_command_args() {
         let cfg = IrEquivConfig {
-            lhs_ir_file: "lhs.ir".into(),
+            lhs_ir_file: "-lhs.ir".into(),
             rhs_ir_file: "rhs.ir".into(),
             top: Some("main".to_string()),
             solver: Some(SolverChoice::Toolchain),
@@ -739,22 +772,15 @@ mod tests {
             got,
             vec![
                 "ir-equiv",
-                "lhs.ir",
+                &format!(".{}-lhs.ir", std::path::MAIN_SEPARATOR),
                 "rhs.ir",
-                "--top",
-                "main",
-                "--solver",
-                "toolchain",
-                "--flatten_aggregates",
-                "true",
-                "--drop_params",
-                "p0,p1",
-                "--parallelism-strategy",
-                "output-bits",
-                "--assertion-semantics",
-                "same",
-                "--json",
-                "true",
+                "--top=main",
+                "--solver=toolchain",
+                "--flatten_aggregates=true",
+                "--drop_params=p0,p1",
+                "--parallelism-strategy=output-bits",
+                "--assertion-semantics=same",
+                "--json=true",
             ]
         );
     }
@@ -763,7 +789,7 @@ mod tests {
     fn test_dslx_equiv_to_command_args() {
         let cfg = DslxEquivConfig {
             lhs_dslx_file: "lhs.x".into(),
-            rhs_dslx_file: "rhs.x".into(),
+            rhs_dslx_file: "--rhs.x".into(),
             dslx_top: Some("foo".into()),
             dslx_path: Some(vec!["a".into(), "b".into()]),
             dslx_stdlib_path: Some("stdlib".into()),
@@ -783,29 +809,18 @@ mod tests {
             vec![
                 "dslx-equiv",
                 "lhs.x",
-                "rhs.x",
-                "--dslx_top",
-                "foo",
-                "--dslx_stdlib_path",
-                "stdlib",
-                "--dslx_path",
-                "a;b",
-                "--solver",
-                "toolchain",
-                "--flatten_aggregates",
-                "false",
-                "--parallelism-strategy",
-                "single-threaded",
-                "--assertion-semantics",
-                "assume",
-                "--lhs_fixed_implicit_activation",
-                "true",
-                "--rhs_fixed_implicit_activation",
-                "false",
-                "--assume-enum-in-bound",
-                "true",
-                "--json",
-                "true",
+                &format!(".{}--rhs.x", std::path::MAIN_SEPARATOR),
+                "--dslx_top=foo",
+                "--dslx_stdlib_path=stdlib",
+                "--dslx_path=a;b",
+                "--solver=toolchain",
+                "--flatten_aggregates=false",
+                "--parallelism-strategy=single-threaded",
+                "--assertion-semantics=assume",
+                "--lhs_fixed_implicit_activation=true",
+                "--rhs_fixed_implicit_activation=false",
+                "--assume-enum-in-bound=true",
+                "--json=true",
             ]
         );
     }
@@ -827,20 +842,13 @@ mod tests {
             got,
             vec![
                 "prove-quickcheck",
-                "--dslx_input_file",
-                "qc.x",
-                "--dslx_path",
-                "a;b",
-                "--dslx_stdlib_path",
-                "stdlib",
-                "--test_filter",
-                ".*mytest",
-                "--solver",
-                "toolchain",
-                "--assertion-semantics",
-                "assume",
-                "--json",
-                "true",
+                "--dslx_input_file=qc.x",
+                "--dslx_path=a;b",
+                "--dslx_stdlib_path=stdlib",
+                "--test_filter=.*mytest",
+                "--solver=toolchain",
+                "--assertion-semantics=assume",
+                "--json=true",
             ]
         );
     }
@@ -862,22 +870,14 @@ mod tests {
             got,
             vec![
                 "dslx-fn-prove-assertions",
-                "--dslx_input_file",
-                "assertions.x",
-                "--dslx_top",
-                "main",
-                "--dslx_path",
-                "a;b",
-                "--dslx_stdlib_path",
-                "stdlib",
-                "--solver",
-                "bitwuzla",
-                "--assert-label-filter",
-                "red|blue",
-                "--assume-enum-in-bound",
-                "false",
-                "--uf",
-                "helper:F",
+                "--dslx_input_file=assertions.x",
+                "--dslx_top=main",
+                "--dslx_path=a;b",
+                "--dslx_stdlib_path=stdlib",
+                "--solver=bitwuzla",
+                "--assert-label-filter=red|blue",
+                "--assume-enum-in-bound=false",
+                "--uf=helper:F",
             ]
         );
     }

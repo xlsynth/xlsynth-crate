@@ -52,26 +52,54 @@ pub(crate) fn join_dslx_search_paths(paths: &[&Path], separator: char) -> Result
     Ok(joined)
 }
 
-/// Checks that each DSLX mapping has an unambiguous `function:symbol` spelling
-/// for saved plans and tactic workers.
+/// Checks a DSLX mapping before it crosses a worker or solver boundary.
+fn validate_dslx_uf_entry(function: &str, symbol: &str) -> Result<(), String> {
+    if function.contains('\0') {
+        return Err("xlsynth error: DSLX function name contains a NUL byte".into());
+    }
+    if function.is_empty() || function.trim() != function || function.contains(':') {
+        return Err(format!(
+            "Invalid DSLX function name in UF mapping: {function:?}"
+        ));
+    }
+    if symbol.is_empty() || symbol.trim() != symbol {
+        return Err(format!("Invalid uninterpreted function symbol: {symbol:?}"));
+    }
+    validate_uf_symbol(symbol)
+}
+
+/// Parses repeated `function:symbol` entries without letting later entries
+/// hide malformed or conflicting proof assumptions.
+pub fn parse_dslx_uf_specs<'a>(
+    specs: impl IntoIterator<Item = &'a str>,
+) -> Result<HashMap<String, String>, String> {
+    let mut map = HashMap::new();
+    for spec in specs {
+        let (function, symbol) = spec.split_once(':')
+            .filter(|(function, symbol)| !function.is_empty() && !symbol.is_empty())
+            .ok_or_else(|| format!(
+                "invalid uninterpreted function specification '{spec}'; expected <function-name>:<uf-name>"
+            ))?;
+        validate_dslx_uf_entry(function, symbol)?;
+        if let Some(previous) = map.insert(function.to_owned(), symbol.to_owned()) {
+            if previous != symbol {
+                return Err(format!(
+                    "Conflicting UF mappings for {function:?}: {previous:?} and {symbol:?}"
+                ));
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Validates an existing typed mapping in deterministic order.
 pub(crate) fn validate_dslx_uf_map<'a>(
     entries: impl IntoIterator<Item = (&'a String, &'a String)>,
 ) -> Result<(), String> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_unstable();
     for (function, symbol) in entries {
-        if function.contains('\0') {
-            return Err("xlsynth error: DSLX function name contains a NUL byte".into());
-        }
-        if function.is_empty() || function.trim() != function || function.contains(':') {
-            return Err(format!(
-                "Invalid DSLX function name in UF mapping: {function:?}"
-            ));
-        }
-        if symbol.is_empty() || symbol.trim() != symbol {
-            return Err(format!("Invalid uninterpreted function symbol: {symbol:?}"));
-        }
-        validate_uf_symbol(symbol)?;
+        validate_dslx_uf_entry(function, symbol)?;
     }
     Ok(())
 }
@@ -237,6 +265,15 @@ mod tests {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
     use super::*;
+
+    #[test]
+    fn repeated_uf_specs_must_agree_and_each_be_valid() {
+        let valid = HashMap::from([("f".to_owned(), "F".to_owned())]);
+        assert_eq!(parse_dslx_uf_specs(["f:F", "f:F"]), Ok(valid));
+        for specs in [["f:F ", "f:F"], ["f:F", "f:F "], ["f:F", "f:G"]] {
+            assert!(parse_dslx_uf_specs(specs).is_err(), "{specs:?}");
+        }
+    }
 
     #[test]
     fn search_path_encoding_preserves_directory_names() {

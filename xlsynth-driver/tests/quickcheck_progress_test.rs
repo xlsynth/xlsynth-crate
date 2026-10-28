@@ -220,6 +220,7 @@ fn quickcheck_preparation_cli_goldens() {
 #[test]
 fn quickcheck_tactic_workers_preserve_assertions_and_uf_assumptions() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("-tools.toml"), "[toolchain]\n").unwrap();
     std::fs::write(
         dir.path().join("qc.x"),
         r#"
@@ -243,7 +244,7 @@ fn h(x: u8) -> u8 { x + u8:2 }
         ("assertions", vec!["--assertion-semantics=ignore"], "proved"),
         (
             "assertions",
-            vec!["--assert-label-filter=other_label"],
+            vec!["--assert-label-filter=--skip", "--toolchain=-tools.toml"],
             "proved",
         ),
         ("abstract_eq", vec!["--uf=g:F", "--uf=h:F"], "proved"),

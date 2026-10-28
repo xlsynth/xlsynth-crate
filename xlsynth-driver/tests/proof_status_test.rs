@@ -64,6 +64,19 @@ fn right(x: u8) -> u8 { h(x) }
             assert_saved_plan_outcome(dir.path(), &plan, expected);
         }
     }
+    for (specs, expected) in [
+        (["g:F", "g:F"], "proved"),
+        (["g:F ", "g:F"], "execution-error"),
+        (["g:G", "g:F"], "execution-error"),
+    ] {
+        let plan = serde_json::json!({
+            "kind": "dslx-equiv", "solver": "bitwuzla",
+            "lhs_dslx_file": "helpers.x", "rhs_dslx_file": "helpers.x",
+            "lhs_dslx_top": "left", "rhs_dslx_top": "right",
+            "lhs_uf": specs, "rhs_uf": ["h:F"],
+        });
+        assert_saved_plan_outcome(dir.path(), &plan, expected);
+    }
 }
 
 /// A saved plan must never drop two parameters when it names just one.

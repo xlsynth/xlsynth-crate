@@ -3304,7 +3304,7 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
 UF semantics:
 
 - Functions mapped to the same uf_name are treated as the same uninterpreted symbol and are assumed equivalent at call sites.
-- In `func_name:uf_name`, both names must be nonempty and have no leading or trailing whitespace. The first colon separates the DSLX function name from the UF symbol.
+- In `func_name:uf_name`, both names must be nonempty and have no leading or trailing whitespace. The first colon separates the DSLX function name from the UF symbol. Repeating a function on the same side is allowed only if its mappings agree.
 - Assertions inside uninterpreted functions are ignored during proving.
 
 #### Tactic Scripts
@@ -3552,7 +3552,7 @@ xlsynth-driver dslx-fn-prove-assertions \
 - Backend: `--solver <...>` selects the SMT backend. The default is `bitwuzla`, which requires an in-process Bitwuzla build feature. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
 - Assertion filter: `--assert-label-filter <REGEX>` includes only assertions whose label matches the regex.
 - Enum inputs: `--assume-enum-in-bound <BOOL>` defaults to `true`, constraining enum-typed top parameters to declared enum members instead of all lowered bit patterns.
-- UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace. Assertions inside UF-mapped functions are ignored during proving.
+- UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace. Repeated mappings for a function must agree. Assertions inside UF-mapped functions are ignored during proving.
 - Output: `--output_json <PATH>` writes a structured proof result.
 
 On success the command exits `0` and prints that all selected assertions were
@@ -3594,7 +3594,7 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Backend: `--solver <...>` selects the solver/toolchain. The default is `bitwuzla`.
 - Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
-- UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace.
+- UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace. Repeated mappings for a function must agree.
 - Output: `--output_json <PATH>` to write results as JSON.
 - Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Use `--opt=false` for unoptimized IR. Direct proofs using `--uf` require explicit `--opt=false` because optimization can inline the calls. Tactic and proof-plan workers select unoptimized IR automatically when given UF mappings. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
 - Progress: direct proofs write `[ RUN QUICKCHECK ... ]` before each property's optimization/solving and `[ OK ... ]` or `[ FAILED ... ]` immediately afterward to stderr. Failures use rustc-style diagnostics, highlighting the QuickCheck function name when it can be located reliably (otherwise showing just the filename). Notes include named counterexample inputs, the return value, and any violated assertion; implicit IR token/activation arguments are hidden. Diagnostics use color on terminals unless `NO_COLOR` is set; redirected output is plain text. Inconclusive results and execution errors are distinguished from counterexamples. Shared parsing/conversion precedes these boundaries; preparation failures are reported separately before any property starts; tactic-script reporting is unchanged.

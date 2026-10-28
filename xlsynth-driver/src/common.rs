@@ -659,14 +659,9 @@ pub fn get_function_enum_param_domains(
 pub fn parse_dslx_uf_spec(
     matches: Option<clap::parser::ValuesRef<String>>,
 ) -> Result<HashMap<String, String>, String> {
-    matches.into_iter().flatten().map(|value| {
-        value.split_once(':')
-            .filter(|(function, symbol)| !function.is_empty() && !symbol.is_empty())
-            .map(|(function, symbol)| (function.to_owned(), symbol.to_owned()))
-            .ok_or_else(|| format!(
-                "invalid uninterpreted function specification '{value}'; expected <function-name>:<uf-name>"
-            ))
-    }).collect()
+    xlsynth_prover::dslx_utils::parse_dslx_uf_specs(
+        matches.into_iter().flatten().map(String::as_str),
+    )
 }
 
 #[cfg(test)]
