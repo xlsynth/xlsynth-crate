@@ -441,11 +441,12 @@ while [ $# -gt 0 ]; do
 done
 if [ -n "$out" ]; then
   if [ "${FAKE_SUCCESS:-1}" -eq 1 ]; then
-    printf '{"success":true}\n' > "$out"
+    printf '{"status":"proved","success":true}\n' > "$out"
   else
-    printf '{"success":false}\n' > "$out"
+    printf '{"status":"disproved","success":false}\n' > "$out"
   fi
 fi
+if [ "${FAKE_SUCCESS:-1}" -eq 1 ]; then exit 0; else exit 1; fi
 "#;
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(script).arg("sh");

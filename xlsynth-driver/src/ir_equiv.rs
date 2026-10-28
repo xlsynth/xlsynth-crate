@@ -3,17 +3,21 @@
 use crate::toolchain_config::ToolchainConfig;
 use serde::Serialize;
 use std::path::Path;
+use std::time::Duration;
 use xlsynth_prover::ir_equiv::run_ir_equiv as prover_run_ir_equiv;
 pub use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule};
+use xlsynth_prover::proof_outcome::ProofStatus;
 use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::prover::types::EquivParallelism;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivReport};
 
 const SUBCOMMAND: &str = "ir-equiv";
 
+/// CLI representation of an equivalence result and its diagnostic.
 #[derive(Debug, Serialize, Clone)]
 pub struct EquivOutcome {
     pub time_micros: u128,
+    pub status: ProofStatus,
     pub success: bool,
     pub error_str: Option<String>,
 }
@@ -113,24 +117,34 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
 
 pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> EquivOutcome {
     log::info!(
-        "dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
+        "[{subcommand}] dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
         request.solver,
         request.tool_path
     );
+    let start = std::time::Instant::now();
     match prover_run_ir_equiv(request) {
         Ok(report) => outcome_from_report(report),
-        Err(err) => {
-            eprintln!("[{}] {}", subcommand, err);
-            std::process::exit(1);
-        }
+        Err(err) => outcome_from_error(start.elapsed(), err),
     }
 }
 
 pub fn outcome_from_report(report: EquivReport) -> EquivOutcome {
+    let status = ProofStatus::from(&report.result);
     EquivOutcome {
         time_micros: report.duration.as_micros(),
-        success: report.is_success(),
+        status,
+        success: status.is_proved(),
         error_str: report.error_str(),
+    }
+}
+
+/// Reports a failed proof invocation without claiming a counterexample.
+pub fn outcome_from_error(duration: Duration, error: String) -> EquivOutcome {
+    EquivOutcome {
+        time_micros: duration.as_micros(),
+        status: ProofStatus::ExecutionError,
+        success: false,
+        error_str: Some(error),
     }
 }
 
@@ -146,7 +160,6 @@ pub fn emit_equiv_outcome_and_exit(
     if outcome.success {
         println!("[{}] Time taken: {:?}", subcommand, dur);
         println!("[{}] success: Solver proved equivalence", subcommand);
-        std::process::exit(0);
     } else {
         eprintln!("[{}] Time taken: {:?}", subcommand, dur);
         if let Some(err) = outcome.error_str.as_ref() {
@@ -154,6 +167,48 @@ pub fn emit_equiv_outcome_and_exit(
         } else {
             eprintln!("[{}] failure", subcommand);
         }
-        std::process::exit(1);
+    }
+    std::process::exit(outcome.status.exit_code());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_prover::prover::types::EquivResult;
+
+    #[test]
+    fn equivalence_json_preserves_non_counterexample_results() {
+        for (result, status, error) in [
+            (EquivResult::Proved, "proved", None),
+            (
+                EquivResult::Inconclusive("unknown".into()),
+                "inconclusive",
+                Some("unknown"),
+            ),
+            (
+                EquivResult::Error("solver failed".into()),
+                "execution-error",
+                Some("solver failed"),
+            ),
+            (
+                EquivResult::ToolchainDisproved("tool failed".into()),
+                "execution-error",
+                Some("tool failed"),
+            ),
+        ] {
+            let outcome = outcome_from_report(EquivReport {
+                duration: Duration::ZERO,
+                result,
+            });
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!({
+                    "time_micros": 0,
+                    "status": status,
+                    "success": status == "proved",
+                    "error_str": error,
+                }),
+            );
+        }
     }
 }

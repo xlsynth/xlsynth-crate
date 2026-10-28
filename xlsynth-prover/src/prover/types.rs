@@ -343,6 +343,9 @@ pub enum EquivResult {
         lhs_output: FnOutput,
         rhs_output: FnOutput,
     },
+    /// Legacy external-tool failure without structured counterexample evidence.
+    /// The external adapter now returns `Error`; consumers must treat this
+    /// legacy variant as an execution error, not an established disproof.
     ToolchainDisproved(String),
     Error(String),
 }
@@ -419,11 +422,9 @@ pub enum BoolPropertyResult {
         /// counter-example.
         output: FnOutput,
     },
-    /// External toolchain reported failure without a structured counterexample.
-    ///
-    /// This is used by the `ExternalProver` implementation where the
-    /// external tools (e.g. `check_ir_equivalence_main`) do not provide a
-    /// machine-readable counterexample for QuickCheck-style properties.
+    /// Legacy external-tool failure without structured counterexample evidence.
+    /// The external adapter now returns `Error`; consumers must treat this
+    /// legacy variant as an execution error, not an established disproof.
     ToolchainDisproved(String),
     /// Internal error encountered before invoking the prover (e.g. package
     /// instrumentation issues). Carries a human-readable explanation.

@@ -3326,6 +3326,10 @@ records successful attempts; it does not establish whole-proof completion
 because a rollback may discard those children. These rules also apply to
 `prove-quickcheck` tactic scripts.
 
+Only definite counterexamples trigger decomposition rollback. Inconclusive
+results and execution errors leave obligations unresolved; they do not discard
+the decomposition.
+
 For `dslx-equiv`, a root-only `Solve` honors the same proof settings as direct
 equivalence, including `--assertion-semantics` (default `ignore`),
 `--assert-label-filter`, `--assume-enum-in-bound` (default `true`),
@@ -3551,14 +3555,16 @@ xlsynth-driver dslx-fn-prove-assertions \
 - Output: `--output_json <PATH>` writes a structured proof result.
 
 On success the command exits `0` and prints that all selected assertions were
-proved. On failure it exits nonzero and reports one solver-found counterexample,
+proved. On disproof it exits `1` and reports one solver-found counterexample,
 including concrete top inputs and the violated assertion label/message when
-available.
+available. Inconclusive results and execution errors also exit `1`, with their
+distinct status and diagnostic instead of a counterexample.
 
 JSON output has the form:
 
 ```json
 {
+  "status": "disproved",
   "success": false,
   "time_micros": 1234,
   "counterexample": {
@@ -3591,7 +3597,7 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Output: `--output_json <PATH>` to write results as JSON.
 - Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Each selected property is optimized with the XLS IR pipeline before solving. Use `--opt=false` to prove unoptimized IR. `--uf` requires explicit `--opt=false`: optimization would inline calls and erase UF abstraction boundaries. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
 - Progress: direct proofs write `[ RUN QUICKCHECK ... ]` before each property's optimization/solving and `[ OK ... ]` or `[ FAILED ... ]` immediately afterward to stderr. Failures use rustc-style diagnostics, highlighting the QuickCheck function name when it can be located reliably (otherwise showing just the filename). Notes include named counterexample inputs, the return value, and any violated assertion; implicit IR token/activation arguments are hidden. Diagnostics use color on terminals unless `NO_COLOR` is set; redirected output is plain text. Inconclusive results and execution errors are distinguished from counterexamples. Shared parsing/conversion precedes these boundaries; preparation failures are reported separately before any property starts; tactic-script reporting is unchanged.
-- JSON compatibility: the existing `--output_json` schema and counterexample string format are unchanged; the file is written after all selected properties finish.
+- JSON: `--output_json` includes a `status` alongside `success`, both overall and for each property; the counterexample string format is unchanged. The file is written after all selected properties finish. See the [proof subprocess result protocol](#proof-subprocess-result-protocol).
 
 UF semantics:
 
@@ -3617,9 +3623,29 @@ Runs a prover plan described by a JSON file with a process-based scheduler.
 - Concurrency: `--cores <N>` controls maximum concurrent processes.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
 - Output: `--output_json <PATH>` writes a full JSON report:
-  - Top-level `{ "success": <bool>, "plan": <tree> }`.
+  - Top-level `{ "status": <proof status>, "success": <bool>, "plan": <tree> }`.
   - Each task node includes `cmdline`, `outcome`, `stdout`, `stderr`, and `task_id` (when provided).
-  - `outcome` is one of `Success`, `Failed`, or an indefinite reason such as `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
+  - `outcome` is `Success` (proved), `Failed` (disproved), or an indefinite reason: `Inconclusive`, `ExecutionError`, `ProtocolError`, `ProcessFailure`, `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
+
+#### Proof subprocess result protocol
+
+The scheduler requires child results from `ir-equiv`, `dslx-equiv`,
+`prove-quickcheck`, and `dslx-fn-prove-assertions` to contain both `status` and
+`success`. For example, a proved result includes
+`{ "status": "proved", "success": true }` and exits `0`. The statuses
+`disproved`, `inconclusive`, and `execution-error` require `success: false` and
+exit `1`. Results may also contain command-specific diagnostics.
+
+Missing or malformed JSON, unknown statuses, and contradictory fields are
+`ProtocolError`. Abnormal termination or an unexpected exit code is
+`ProcessFailure`, even if successful JSON was written first. Legacy results
+containing only `success` are rejected. Captured output is retained for diagnosis,
+including when a task is canceled.
+
+Errors and inconclusive results cannot win a `first` group or cause tactic
+rollback. A native solver counterexample is `disproved`; an external-tool
+failure without structured counterexample evidence is conservatively
+`execution-error`, since a nonzero exit alone does not establish disproof.
 
 ### Equivalence/proving flags: meanings
 
@@ -3687,13 +3713,13 @@ Groups: all / any / first
 
 - `all`: overall success if and only if all children succeed.
 - `any`: overall success if at least one child succeeds.
-- `first`: the first finished children dominates the result.
+- `first`: the first child to produce a definite proof or disproof determines the result; inconclusive results and execution errors do not win the race.
 
 Timeouts
 
 - Any task may specify `"timeout_ms": <milliseconds>`.
 - When the deadline elapses, the scheduler cancels the task’s process group and marks the task outcome as `"Timeout"` (an indefinite outcome).
-- Group semantics with timeouts (indefinite outcomes):
+- Group semantics with indefinite outcomes (timeouts, inconclusive results, or execution errors):
   - `any`: resolves `Success` as soon as any child succeeds; if all children finish without a success and at least one is indefinite (e.g., `Timeout`), the group resolves to `IndefiniteChildren`.
   - `all`: resolves `Failed` if any child fails; if none failed but at least one is indefinite, resolves to `IndefiniteChildren`; otherwise `Success`.
   - `first`: only the first non-indefinite child determines the result; timeouts do not resolve the group. If all children finish and none produced a definite result, the group resolves to `IndefiniteChildren`.

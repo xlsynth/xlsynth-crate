@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use xlsynth_prover::dslx_assertions::{DslxAssertionsRequest, run_dslx_assertions};
+use xlsynth_prover::proof_outcome::ProofStatus;
 use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::prover::types::{BoolPropertyResult, FnInput, FnOutput};
 
@@ -34,8 +36,10 @@ struct SerializedCounterexample {
     output: SerializedOutput,
 }
 
+/// CLI representation of an assertion proof with any counterexample or error.
 #[derive(Debug, Serialize)]
 struct AssertionsOutcome {
+    status: ProofStatus,
     success: bool,
     time_micros: u128,
     counterexample: Option<SerializedCounterexample>,
@@ -98,7 +102,7 @@ fn emit_outcome_and_exit(outcome: AssertionsOutcome, output_json: Option<&String
     if outcome.success {
         println!("[{}] Time taken: {:?}", SUBCOMMAND, duration);
         println!("[{}] success: All selected assertions proved", SUBCOMMAND);
-        std::process::exit(0);
+        std::process::exit(outcome.status.exit_code());
     }
 
     eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, duration);
@@ -120,7 +124,33 @@ fn emit_outcome_and_exit(outcome: AssertionsOutcome, output_json: Option<&String
     } else {
         eprintln!("[{}] failure", SUBCOMMAND);
     }
-    std::process::exit(1);
+    std::process::exit(outcome.status.exit_code());
+}
+
+/// Keeps execution errors and inconclusive results separate from
+/// counterexamples.
+fn outcome_from_result(result: BoolPropertyResult, duration: Duration) -> AssertionsOutcome {
+    let status = ProofStatus::from(&result);
+    let (counterexample, error_str) = match result {
+        BoolPropertyResult::Proved => (None, None),
+        BoolPropertyResult::Disproved { inputs, output } => (
+            Some(SerializedCounterexample {
+                inputs: serialize_inputs(&inputs),
+                output: serialize_output(&output),
+            }),
+            None,
+        ),
+        BoolPropertyResult::Inconclusive(msg)
+        | BoolPropertyResult::ToolchainDisproved(msg)
+        | BoolPropertyResult::Error(msg) => (None, Some(msg)),
+    };
+    AssertionsOutcome {
+        status,
+        success: status.is_proved(),
+        time_micros: duration.as_micros(),
+        counterexample,
+        error_str,
+    }
 }
 
 /// Implements the `dslx-fn-prove-assertions` sub-command.
@@ -182,38 +212,50 @@ pub fn handle_dslx_fn_prove_assertions(
         uf_map,
     };
 
-    let report = match run_dslx_assertions(&request) {
-        Ok(report) => report,
-        Err(err) => {
-            report_cli_error_and_exit(&err, Some(SUBCOMMAND), vec![("file", input_file.as_str())]);
-        }
-    };
-
-    let outcome = match report.result {
-        BoolPropertyResult::Proved => AssertionsOutcome {
-            success: true,
-            time_micros: report.duration.as_micros(),
-            counterexample: None,
-            error_str: None,
-        },
-        BoolPropertyResult::Disproved { inputs, output } => AssertionsOutcome {
-            success: false,
-            time_micros: report.duration.as_micros(),
-            counterexample: Some(SerializedCounterexample {
-                inputs: serialize_inputs(&inputs),
-                output: serialize_output(&output),
-            }),
-            error_str: None,
-        },
-        BoolPropertyResult::Inconclusive(msg)
-        | BoolPropertyResult::ToolchainDisproved(msg)
-        | BoolPropertyResult::Error(msg) => AssertionsOutcome {
-            success: false,
-            time_micros: report.duration.as_micros(),
-            counterexample: None,
-            error_str: Some(msg),
-        },
+    let start = Instant::now();
+    let outcome = match run_dslx_assertions(&request) {
+        Ok(report) => outcome_from_result(report.result, report.duration),
+        Err(err) => outcome_from_result(BoolPropertyResult::Error(err), start.elapsed()),
     };
 
     emit_outcome_and_exit(outcome, output_json);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assertion_json_does_not_conflate_errors_with_counterexamples() {
+        for (result, status, error) in [
+            (BoolPropertyResult::Proved, "proved", None),
+            (
+                BoolPropertyResult::Inconclusive("unknown".into()),
+                "inconclusive",
+                Some("unknown"),
+            ),
+            (
+                BoolPropertyResult::Error("solver failed".into()),
+                "execution-error",
+                Some("solver failed"),
+            ),
+            (
+                BoolPropertyResult::ToolchainDisproved("tool failed".into()),
+                "execution-error",
+                Some("tool failed"),
+            ),
+        ] {
+            let outcome = outcome_from_result(result, Duration::ZERO);
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!({
+                    "time_micros": 0,
+                    "status": status,
+                    "success": status == "proved",
+                    "counterexample": null,
+                    "error_str": error,
+                }),
+            );
+        }
+    }
 }

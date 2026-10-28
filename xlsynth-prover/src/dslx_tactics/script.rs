@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use crate::dslx_tactics::obligations::ProverObligation;
 use crate::dslx_tactics::tactics::{IsTactic, Tactic};
-use crate::proof_plan::report::{ProverReport, ProverReportNode, TaskOutcome};
+use crate::proof_outcome::ProofStatus;
+use crate::proof_plan::report::{IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome};
 use crate::prover::SolverChoice;
 use serde::{Deserialize, Serialize};
 
@@ -202,7 +203,7 @@ fn collect_unresolved(node: &OblNode, out: &mut Vec<Selector>) {
 enum TaskSimple {
     Success,
     Failure,
-    Indefinite,
+    Indefinite(IndefiniteReason),
 }
 
 /// One validated runner result, borrowing captured diagnostics from its report.
@@ -240,7 +241,7 @@ fn collect_outcomes<'a>(
                 let status = outcome.as_ref().map(|outcome| match outcome {
                     TaskOutcome::Normal { success: true } => TaskSimple::Success,
                     TaskOutcome::Normal { success: false } => TaskSimple::Failure,
-                    TaskOutcome::Indefinite { .. } => TaskSimple::Indefinite,
+                    TaskOutcome::Indefinite { reason } => TaskSimple::Indefinite(*reason),
                 });
                 let task = ReportedTask {
                     status,
@@ -277,7 +278,7 @@ fn update_from_outcome(
         node.status = match status {
             Some(TaskSimple::Success) => NodeStatus::Solved,
             Some(TaskSimple::Failure) => NodeStatus::Failed,
-            Some(TaskSimple::Indefinite) | None => NodeStatus::Pending,
+            Some(TaskSimple::Indefinite(_)) | None => NodeStatus::Pending,
         };
     }
     match status {
@@ -287,6 +288,7 @@ fn update_from_outcome(
         Some(TaskSimple::Failure) => {
             if let Some(task) = task {
                 report.failed.push(TaskLogEntry {
+                    reason: None,
                     selector: sel.clone(),
                     stdout: task.stdout.map(str::to_owned),
                     stderr: task.stderr.map(str::to_owned),
@@ -308,9 +310,10 @@ fn update_from_outcome(
                 }
             }
         }
-        Some(TaskSimple::Indefinite) => {
+        Some(TaskSimple::Indefinite(reason)) => {
             if let Some(task) = task {
                 report.indefinite.push(TaskLogEntry {
+                    reason: Some(reason),
                     selector: sel,
                     stdout: task.stdout.map(str::to_owned),
                     stderr: task.stderr.map(str::to_owned),
@@ -329,6 +332,9 @@ pub struct TaskLogEntry {
     pub selector: Selector,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
+    /// Why an attempt remained unresolved; absent for actual disproofs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<IndefiniteReason>,
 }
 
 /// A restored parent obligation and the failed child that caused its rollback.
@@ -352,13 +358,42 @@ pub struct ScriptReport {
     /// intentionally unsupported: absence means completion is unknown, while an
     /// empty list asserts that no unproved leaves remain. Do not default it.
     pub unresolved: Vec<Selector>,
+    /// Whether the surviving root leaf is disproved, including prior calls.
+    /// Failed decomposition children are not counterexamples to the root.
+    pub root_disproved: bool,
 }
 
 impl ScriptReport {
+    /// Classifies the original obligation, distinguishing failed decompositions
+    /// from counterexamples to the root itself.
+    pub fn proof_status(&self) -> ProofStatus {
+        if self.is_complete() {
+            ProofStatus::Proved
+        } else if self.root_disproved {
+            ProofStatus::Disproved
+        } else if self.indefinite.iter().any(|entry| {
+            matches!(
+                entry.reason,
+                Some(
+                    IndefiniteReason::ExecutionError
+                        | IndefiniteReason::ProtocolError
+                        | IndefiniteReason::ProcessFailure
+                )
+            )
+        }) {
+            ProofStatus::ExecutionError
+        } else {
+            ProofStatus::Inconclusive
+        }
+    }
+
     /// Whether the entire proof is discharged without failed or indefinite
     /// tasks.
     pub fn is_complete(&self) -> bool {
-        self.unresolved.is_empty() && self.failed.is_empty() && self.indefinite.is_empty()
+        !self.root_disproved
+            && self.unresolved.is_empty()
+            && self.failed.is_empty()
+            && self.indefinite.is_empty()
     }
 }
 
@@ -463,6 +498,8 @@ pub fn execute_script_with_runner(
     // Outcomes for discarded children remain useful attempt history, but only
     // the surviving tree determines which obligations still need proof.
     collect_unresolved(&tree.root, &mut completion.unresolved);
+    completion.root_disproved =
+        matches!(tree.root.kind, NodeKind::Leaf(_)) && tree.root.status == NodeStatus::Failed;
     Ok(completion)
 }
 
@@ -476,9 +513,9 @@ mod tests {
     #[cfg(feature = "has-bitwuzla")]
     use crate::dslx_tactics::tactics::cosliced::{CoslicedTactic, NamedSlice};
     use crate::dslx_tactics::tactics::focus::{FocusPair, FocusTactic};
+    use crate::proof_outcome::aggregate_proof_statuses;
     use crate::proof_plan::config::GroupKind;
     use crate::proof_plan::report::IndefiniteReason;
-    use crate::prover::types::EquivResult;
     use std::path::Path;
     use test_case::test_case;
 
@@ -488,7 +525,7 @@ mod tests {
         config: &OblTreeConfig,
     ) -> Result<ProverReport, String> {
         let mut tasks = Vec::new();
-        let mut all_success = true;
+        let mut statuses = Vec::new();
         for (id, obligation) in obligations {
             let ObligationPayload::Lec(lec) = &obligation.payload else {
                 return Err("test runner requires equivalence obligations".to_string());
@@ -532,29 +569,22 @@ mod tests {
                 .with_dslx_stdlib_path(config.dslx_stdlib_path.as_deref())
                 .with_additional_search_paths(config.dslx_paths.clone());
             let proof = run_dslx_equiv(&request)?;
-            let success = match &proof.result {
-                EquivResult::Proved => true,
-                EquivResult::Disproved { .. } | EquivResult::ToolchainDisproved(_) => false,
-                EquivResult::Error(message) | EquivResult::Inconclusive(message) => {
-                    return Err(message.clone());
-                }
-            };
-            all_success &= success;
+            let status = ProofStatus::from(&proof.result);
+            statuses.push(status);
             tasks.push(ProverReportNode::Task {
                 task_id: Some(id.clone()),
                 cmdline: None,
-                outcome: Some(TaskOutcome::Normal { success }),
+                outcome: Some(status.into()),
                 stdout: None,
                 stderr: proof.error_str(),
             });
         }
+        let status = aggregate_proof_statuses(statuses);
         Ok(ProverReport {
-            success: all_success,
+            success: status.is_proved(),
             plan: ProverReportNode::Group {
                 kind: GroupKind::All,
-                outcome: Some(TaskOutcome::Normal {
-                    success: all_success,
-                }),
+                outcome: Some(status.into()),
                 tasks,
             },
         })
@@ -936,6 +966,9 @@ fn b(x: u8) -> u8 { !a(x) }
         assert_eq!(error.to_string(), "missing field `unresolved`");
 
         encoded["unresolved"] = serde_json::json!([["root"]]);
+        let error = serde_json::from_value::<ScriptReport>(encoded.clone()).unwrap_err();
+        assert_eq!(error.to_string(), "missing field `root_disproved`");
+        encoded["root_disproved"] = serde_json::json!(false);
         let pending = serde_json::from_value::<ScriptReport>(encoded.clone()).unwrap();
         assert!(!pending.is_complete());
         assert_eq!(pending.unresolved, vec![root_selector()]);
@@ -988,7 +1021,8 @@ fn b(x: u8) -> u8 { !a(x) }
                 "failed": [],
                 "indefinite": [],
                 "rolled_back": [],
-                "unresolved": [["root"]]
+                "unresolved": [["root"]],
+                "root_disproved": false
             })
         );
     }
@@ -1087,6 +1121,10 @@ fn b(x: u8) -> u8 { !a(x) }
         .unwrap();
         assert_eq!(tree.root.status, expected_status);
         assert_eq!(unchanged.is_complete(), first.is_complete());
+        assert_eq!(unchanged.proof_status(), first.proof_status());
+        let roundtrip: ScriptReport =
+            serde_json::from_value(serde_json::to_value(&unchanged).unwrap()).unwrap();
+        assert_eq!(roundtrip.proof_status(), first.proof_status());
         assert_eq!(unchanged.unresolved, first.unresolved);
         assert!(unchanged.solved.is_empty());
         assert!(unchanged.failed.is_empty());
@@ -1187,11 +1225,14 @@ fn b(x: u8) -> u8 { !a(x) }
         )
         .unwrap();
         assert!(!completion.is_complete());
-        let log = serde_json::json!([{
+        let mut log = serde_json::json!([{
             "selector": ["root"],
             "stdout": "proof output",
             "stderr": "proof diagnostic"
         }]);
+        if indefinite {
+            log[0]["reason"] = serde_json::json!("Timeout");
+        }
         assert_eq!(
             serde_json::to_value(completion).unwrap(),
             serde_json::json!({
@@ -1199,7 +1240,8 @@ fn b(x: u8) -> u8 { !a(x) }
                 "failed": if indefinite { serde_json::json!([]) } else { log.clone() },
                 "indefinite": if indefinite { log } else { serde_json::json!([]) },
                 "rolled_back": [],
-                "unresolved": [["root"]]
+                "unresolved": [["root"]],
+                "root_disproved": !indefinite
             })
         );
     }

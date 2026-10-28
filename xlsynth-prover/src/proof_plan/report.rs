@@ -2,17 +2,27 @@
 
 //! Typed outcomes and captured diagnostics from proof-plan execution.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::proof_outcome::ProofStatus;
 
 use super::config::GroupKind;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 /// Explains why a proof task did not produce a definite logical result.
 pub enum IndefiniteReason {
     GroupCriteriaAlreadyMet,
     IndefiniteChildren,
     Timeout,
     Cleanup,
+    /// The solver returned no proof or counterexample.
+    Inconclusive,
+    /// The proof command reported a failure to execute the proof.
+    ExecutionError,
+    /// The command did not produce a valid, internally consistent result.
+    ProtocolError,
+    /// The subprocess did not terminate with the result's required exit code.
+    ProcessFailure,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -23,6 +33,22 @@ pub enum TaskOutcome {
 }
 
 impl TaskOutcome {
+    /// Returns the logical status without treating infrastructure failures as
+    /// disproofs.
+    pub fn proof_status(&self) -> ProofStatus {
+        match self {
+            Self::Normal { success: true } => ProofStatus::Proved,
+            Self::Normal { success: false } => ProofStatus::Disproved,
+            Self::Indefinite {
+                reason:
+                    IndefiniteReason::ExecutionError
+                    | IndefiniteReason::ProtocolError
+                    | IndefiniteReason::ProcessFailure,
+            } => ProofStatus::ExecutionError,
+            Self::Indefinite { .. } => ProofStatus::Inconclusive,
+        }
+    }
+
     pub(super) fn normal(success: bool) -> Self {
         TaskOutcome::Normal { success }
     }
@@ -66,6 +92,17 @@ impl TaskOutcome {
     }
 }
 
+impl From<ProofStatus> for TaskOutcome {
+    fn from(status: ProofStatus) -> Self {
+        match status {
+            ProofStatus::Proved => Self::success(),
+            ProofStatus::Disproved => Self::failed(),
+            ProofStatus::Inconclusive => Self::indefinite(IndefiniteReason::Inconclusive),
+            ProofStatus::ExecutionError => Self::indefinite(IndefiniteReason::ExecutionError),
+        }
+    }
+}
+
 impl serde::Serialize for TaskOutcome {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -79,6 +116,10 @@ impl serde::Serialize for TaskOutcome {
                 IndefiniteReason::IndefiniteChildren => "IndefiniteChildren",
                 IndefiniteReason::Timeout => "Timeout",
                 IndefiniteReason::Cleanup => "Cleanup",
+                IndefiniteReason::Inconclusive => "Inconclusive",
+                IndefiniteReason::ExecutionError => "ExecutionError",
+                IndefiniteReason::ProtocolError => "ProtocolError",
+                IndefiniteReason::ProcessFailure => "ProcessFailure",
             },
         };
         serializer.serialize_str(label)
@@ -104,6 +145,36 @@ pub enum ProverReportNode {
 }
 
 impl ProverReportNode {
+    /// Returns the resolved logical result, preserving errors in unresolved
+    /// groups.
+    pub fn proof_status(&self) -> ProofStatus {
+        match self {
+            Self::Task { outcome, .. } => outcome
+                .map(|o| o.proof_status())
+                .unwrap_or(ProofStatus::Inconclusive),
+            Self::Group {
+                outcome: Some(TaskOutcome::Normal { success }),
+                ..
+            } => {
+                if *success {
+                    ProofStatus::Proved
+                } else {
+                    ProofStatus::Disproved
+                }
+            }
+            Self::Group { tasks, .. } => {
+                if tasks
+                    .iter()
+                    .any(|t| t.proof_status() == ProofStatus::ExecutionError)
+                {
+                    ProofStatus::ExecutionError
+                } else {
+                    ProofStatus::Inconclusive
+                }
+            }
+        }
+    }
+
     /// Finds a task by its caller-assigned identifier in deterministic tree
     /// order.
     pub fn find_task_node<'a>(&'a self, task_id: &str) -> Option<&'a ProverReportNode> {
@@ -128,9 +199,29 @@ impl ProverReportNode {
     }
 }
 
-#[derive(Serialize)]
 /// Overall plan outcome together with the complete report tree.
 pub struct ProverReport {
     pub success: bool,
     pub plan: ProverReportNode,
+}
+
+impl Serialize for ProverReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        /// Wire report with the status derived from the resolved plan.
+        struct Report<'a> {
+            status: ProofStatus,
+            success: bool,
+            plan: &'a ProverReportNode,
+        }
+        Report {
+            status: self.plan.proof_status(),
+            success: self.success,
+            plan: &self.plan,
+        }
+        .serialize(serializer)
+    }
 }

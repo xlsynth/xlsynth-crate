@@ -9,6 +9,7 @@ use crate::prover_config::ProverPlan;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use log::{info, warn};
+use xlsynth_prover::proof_outcome::ProofStatus;
 
 // These compatibility exports are also consumed outside the CLI binary.
 #[allow(unused_imports)]
@@ -22,8 +23,8 @@ pub use xlsynth_prover::proof_plan::scheduler::{
 
 /// Best-effort: write a minimal error JSON if `--output_json` was requested.
 /// Shape:
-/// { "success": false, "error": { "message": <msg>, "exception": <exc>,
-/// "stage": <stage> } }
+/// { "status": "execution-error", "success": false, "error": { "message":
+/// <msg>, "exception": <exc>, "stage": <stage> } }
 fn write_error_json(
     output_json_path: &Option<String>,
     message: &str,
@@ -32,6 +33,7 @@ fn write_error_json(
 ) {
     if let Some(path) = output_json_path {
         let obj = serde_json::json!({
+            "status": ProofStatus::ExecutionError,
             "success": false,
             "error": {
                 "message": message,

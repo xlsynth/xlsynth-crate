@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::{parse_dslx_uf_spec, parse_uf_spec};
-use crate::ir_equiv::outcome_from_report;
+use crate::ir_equiv::{emit_equiv_outcome_and_exit, outcome_from_error, outcome_from_report};
 use crate::proofs::obligations::{
     LecObligation, LecProofOptions, LecSide, ObligationPayload, ProverObligation,
 };
@@ -215,14 +215,21 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         let report = match execute_script(&mut tree, &steps) {
             Ok(r) => r,
             Err(e) => {
+                let outcome =
+                    outcome_from_error(start.elapsed(), format!("execute_script error: {e}"));
+                if let Some(path) = output_json {
+                    std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
+                }
                 eprintln!("[{}] execute_script error: {}", SUBCOMMAND, e);
-                std::process::exit(2);
+                std::process::exit(outcome.status.exit_code());
             }
         };
         let dur = start.elapsed();
-        let success = report.is_complete();
+        let status = report.proof_status();
+        let success = status.is_proved();
         if let Some(path) = output_json {
             let json = serde_json::json!({
+                "status": status,
                 "success": success,
                 "report": report,
             });
@@ -231,7 +238,6 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         if success {
             println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
             println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
-            std::process::exit(0);
         } else {
             eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
             eprintln!("[{}] failure", SUBCOMMAND);
@@ -242,8 +248,8 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
                     selector.join("/")
                 );
             }
-            std::process::exit(1);
         }
+        std::process::exit(status.exit_code());
     } else {
         // Original direct prover path (now via library API).
         let lhs_uf_map = parse_uf_spec(lhs_module_name, matches.get_many::<String>("lhs_uf"));
@@ -334,32 +340,11 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             .with_enable_warnings(enable_warnings)
             .with_disable_warnings(disable_warnings);
 
-        let report = match run_dslx_equiv(&request) {
-            Ok(r) => r,
-            Err(err) => {
-                eprintln!("[{}] {}", SUBCOMMAND, err);
-                std::process::exit(1);
-            }
+        let start = std::time::Instant::now();
+        let outcome = match run_dslx_equiv(&request) {
+            Ok(report) => outcome_from_report(report),
+            Err(err) => outcome_from_error(start.elapsed(), err),
         };
-
-        let outcome = outcome_from_report(report);
-
-        if let Some(path) = output_json {
-            std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
-        }
-        let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-        if outcome.success {
-            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
-            std::process::exit(0);
-        } else {
-            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            if let Some(err) = outcome.error_str.as_ref() {
-                eprintln!("[{}] failure: {}", SUBCOMMAND, err);
-            } else {
-                eprintln!("[{}] failure", SUBCOMMAND);
-            }
-            std::process::exit(1);
-        }
+        emit_equiv_outcome_and_exit(&outcome, SUBCOMMAND, output_json);
     }
 }

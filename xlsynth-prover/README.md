@@ -23,8 +23,10 @@ children can reopen their parent, so `solved` records successful attempts while
 can continue working on the same tree. An accepted runner report consumes its
 `Solve` requests, including those with missing or inconclusive results. An empty
 follow-up script reports the existing proof state; explicitly select `Solve`
-again to retry an obligation. Runner errors or invalid result IDs leave requests
-queued for retry.
+again to retry an obligation. If the runner returns an error or reports invalid
+result IDs, requests remain queued for retry. Only a definite counterexample can
+trigger a decomposition rollback; inconclusive results and execution errors
+leave the selected obligations unresolved.
 
 Persisted tactic reports do not have a backward-compatibility guarantee.
 Deserializing a `ScriptReport` requires an explicit `unresolved` field; reports
@@ -32,6 +34,11 @@ from older versions without it are intentionally rejected. Missing completion
 information cannot be interpreted as an empty list of unproved obligations:
 even an old empty-script report could otherwise appear complete. Regenerate
 legacy reports with the current engine instead of adding a default value.
+
+`root_disproved` records a counterexample to the surviving root, including one
+found in an earlier call. `ScriptReport::proof_status()` preserves that conclusion
+across empty follow-up calls; failed decomposition children only justify rollback,
+not a root disproof. Reports require this field as well as `unresolved`.
 
 Nested `Focus` and `Cosliced` decompositions allocate fresh solver symbols
 against both sides' inherited mappings. Distinct function pairs must retain
@@ -71,6 +78,30 @@ caller-supplied driver path and concurrency limit. `Scheduler::new_with_driver`
 also accepts a caller-owned cancellation flag. The convenience plan runner
 temporarily installs Unix signal handlers; use `Scheduler` directly when the
 embedding application owns signal handling.
+
+`proof_outcome::ProofStatus` distinguishes `proved`, `disproved`, `inconclusive`,
+and `execution-error`. Child commands must write JSON containing both `status`
+and `success`, with the following values and normal process exit codes:
+
+| `status` | `success` | Exit code |
+| --- | --- | --- |
+| `proved` | `true` | `0` |
+| `disproved` | `false` | `1` |
+| `inconclusive` | `false` | `1` |
+| `execution-error` | `false` | `1` |
+
+Additional diagnostic fields are allowed. Missing, malformed, or contradictory
+results are protocol errors; signals and unexpected exit codes are process
+failures, even if the child wrote successful JSON first. Neither establishes a
+proof or counterexample. Legacy JSON containing only `success` is intentionally
+rejected. Captured stdout/stderr remain available in task reports, including
+after cancellation.
+
+Inconclusive results and execution errors are indefinite scheduler outcomes:
+they cannot win a `first` group or trigger tactic rollback. Native solver
+counterexamples remain `disproved`. External-tool failures without structured
+counterexample evidence are conservatively `execution-error`, because a
+nonzero exit alone cannot distinguish disproof from a broken invocation.
 
 The driver handles files/stdin, CLI arguments, diagnostic presentation, and
 exit codes. Engine tests live in this crate; driver integration tests cover

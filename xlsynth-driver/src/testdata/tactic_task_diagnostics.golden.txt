@@ -1,0 +1,42 @@
+FAILED TASK id=Some("counterexample")
+cmd=driver prove-counterexample
+stdout=
+counterexample output
+stderr=
+counterexample diagnostic
+
+ERROR TASK id=Some("ExecutionError") reason=ExecutionError
+cmd=driver prove-property
+stdout=
+captured output
+stderr=
+captured diagnostic
+
+ERROR TASK id=Some("ProtocolError") reason=ProtocolError
+cmd=driver prove-property
+stdout=
+captured output
+stderr=
+captured diagnostic
+
+ERROR TASK id=Some("ProcessFailure") reason=ProcessFailure
+cmd=driver prove-property
+stdout=
+captured output
+stderr=
+captured diagnostic
+
+INCONCLUSIVE TASK id=Some("Inconclusive") reason=Inconclusive
+cmd=driver prove-property
+stdout=
+captured output
+stderr=
+captured diagnostic
+
+INCONCLUSIVE TASK id=Some("Timeout") reason=Timeout
+cmd=driver prove-property
+stdout=
+captured output
+stderr=
+captured diagnostic
+

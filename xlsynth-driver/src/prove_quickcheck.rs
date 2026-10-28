@@ -5,6 +5,7 @@
 //! returns `true` for every possible input using an SMT solver.
 
 use crate::common::parse_uf_spec;
+use crate::ir_equiv::outcome_from_error;
 use crate::proofs::obligations::{
     FileWithHistory, ObligationPayload, ProverObligation, QcObligation,
 };
@@ -21,6 +22,7 @@ use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use xlsynth_prover::proof_outcome::{ProofStatus, aggregate_proof_statuses};
 use xlsynth_prover::prover::types::{
     BoolPropertyResult, QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult,
 };
@@ -28,18 +30,46 @@ use xlsynth_prover::prover::{Prover, SolverChoice, discover_quickcheck_tests};
 
 const SUBCOMMAND: &str = "prove-quickcheck";
 
+/// CLI result for one QuickCheck property.
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckTestOutcome {
     pub name: String,
     pub time_micros: u128,
+    pub status: ProofStatus,
     pub success: bool,
     pub counterexample: Option<String>,
+    pub error_str: Option<String>,
 }
 
+/// CLI result for all selected QuickCheck properties.
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckOutcome {
+    pub status: ProofStatus,
     pub success: bool,
     pub tests: Vec<QuickCheckTestOutcome>,
+}
+
+/// Serializes solver conclusions without presenting errors as counterexamples.
+fn outcome_from_run(run: QuickCheckRunResult) -> QuickCheckTestOutcome {
+    let status = ProofStatus::from(&run.result);
+    let (counterexample, error_str) = match run.result {
+        BoolPropertyResult::Proved => (None, None),
+        BoolPropertyResult::Disproved { inputs, output } => (
+            Some(format!("inputs: {:?}, output: {:?}", inputs, output)),
+            None,
+        ),
+        BoolPropertyResult::Inconclusive(msg)
+        | BoolPropertyResult::ToolchainDisproved(msg)
+        | BoolPropertyResult::Error(msg) => (None, Some(msg)),
+    };
+    QuickCheckTestOutcome {
+        name: run.name,
+        time_micros: run.duration.as_micros(),
+        status,
+        success: status.is_proved(),
+        counterexample,
+        error_str,
+    }
 }
 
 /// Flushes the start boundary before the caller begins optimization/solving.
@@ -287,14 +317,21 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         let report = match execute_script(&mut tree, &steps) {
             Ok(r) => r,
             Err(e) => {
+                let outcome =
+                    outcome_from_error(start.elapsed(), format!("execute_script error: {e}"));
+                if let Some(path) = output_json.as_ref() {
+                    std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
+                }
                 eprintln!("[{}] execute_script error: {}", SUBCOMMAND, e);
-                std::process::exit(2);
+                std::process::exit(outcome.status.exit_code());
             }
         };
         let dur = start.elapsed();
-        let success = report.is_complete();
+        let status = report.proof_status();
+        let success = status.is_proved();
         if let Some(path) = output_json.as_ref() {
             let json = serde_json::json!({
+                "status": status,
                 "success": success,
                 "report": report,
             });
@@ -303,7 +340,6 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         if success {
             println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
             println!("[{}] success: QuickCheck obligations proved", SUBCOMMAND);
-            std::process::exit(0);
         } else {
             eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
             eprintln!("[{}] failure", SUBCOMMAND);
@@ -314,8 +350,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                     selector.join("/")
                 );
             }
-            std::process::exit(1);
         }
+        std::process::exit(status.exit_code());
     }
     let optimize = *matches.get_one::<bool>("opt").expect("opt default");
     if optimize && !uf_map.is_empty() {
@@ -401,27 +437,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             runs.push(run);
         }
 
-        runs.into_iter()
-            .map(|run| {
-                let (success, counterexample) = match run.result {
-                    BoolPropertyResult::Proved => (true, None),
-                    BoolPropertyResult::Disproved { inputs, output } => {
-                        let cex_str = format!("inputs: {:?}, output: {:?}", inputs, output);
-                        (false, Some(cex_str))
-                    }
-                    BoolPropertyResult::Inconclusive(msg)
-                    | BoolPropertyResult::ToolchainDisproved(msg)
-                    | BoolPropertyResult::Error(msg) => (false, Some(msg)),
-                };
-
-                QuickCheckTestOutcome {
-                    name: run.name,
-                    time_micros: run.duration.as_micros(),
-                    success,
-                    counterexample,
-                }
-            })
-            .collect()
+        runs.into_iter().map(outcome_from_run).collect()
     }
 
     let solver_choice = solver_choice_opt.unwrap_or(SolverChoice::Bitwuzla);
@@ -450,10 +466,11 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         );
     }
 
-    let all_passed = results.iter().all(|r| r.success);
+    let status = aggregate_proof_statuses(results.iter().map(|r| r.status));
 
     let outcome = QuickCheckOutcome {
-        success: all_passed,
+        status,
+        success: status.is_proved(),
         tests: results,
     };
 
@@ -461,13 +478,12 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
     }
 
-    if all_passed {
+    if status.is_proved() {
         println!("Success: All QuickChecks proved");
-        std::process::exit(0);
     } else {
         println!("Failure: Some QuickChecks did not succeed");
-        std::process::exit(1);
     }
+    std::process::exit(status.exit_code());
 }
 
 #[cfg(test)]
@@ -479,6 +495,63 @@ mod tests {
         AssertionViolation, FnInput, FnOutput, QuickCheckRunResult,
     };
     use xlsynth_test_helpers::compare_golden_text;
+
+    #[test]
+    fn quickcheck_json_does_not_conflate_errors_with_counterexamples() {
+        for (result, status, counterexample, error) in [
+            (BoolPropertyResult::Proved, "proved", None, None),
+            (
+                BoolPropertyResult::Disproved {
+                    inputs: vec![],
+                    output: FnOutput {
+                        value: IrValue::make_ubits(1, 0).unwrap(),
+                        assertion_violation: None,
+                    },
+                },
+                "disproved",
+                Some(
+                    "inputs: [], output: FnOutput { value: bits[1]:0, assertion_violation: None }",
+                ),
+                None,
+            ),
+            (
+                BoolPropertyResult::Inconclusive("unknown".into()),
+                "inconclusive",
+                None,
+                Some("unknown"),
+            ),
+            (
+                BoolPropertyResult::Error("solver failed".into()),
+                "execution-error",
+                None,
+                Some("solver failed"),
+            ),
+            (
+                BoolPropertyResult::ToolchainDisproved("tool failed".into()),
+                "execution-error",
+                None,
+                Some("tool failed"),
+            ),
+        ] {
+            let outcome = outcome_from_run(QuickCheckRunResult {
+                name: "property".into(),
+                implicit_token: false,
+                duration: Duration::ZERO,
+                result,
+            });
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!({
+                    "name": "property",
+                    "time_micros": 0,
+                    "status": status,
+                    "success": status == "proved",
+                    "counterexample": counterexample,
+                    "error_str": error,
+                }),
+            );
+        }
+    }
 
     /// Golden output covers all result kinds without solver-dependent models.
     #[test]
