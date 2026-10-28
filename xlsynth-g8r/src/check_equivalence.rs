@@ -157,10 +157,10 @@ fn map_equiv_result(result: EquivResult) -> IrCheckResult {
     match result {
         EquivResult::Proved => IrCheckResult::Equivalent,
         EquivResult::Inconclusive(_) => IrCheckResult::TimedOutOrInterrupted,
-        EquivResult::Disproved { .. } | EquivResult::ToolchainDisproved(_) => {
-            IrCheckResult::NotEquivalent
+        EquivResult::Disproved { .. } => IrCheckResult::NotEquivalent,
+        EquivResult::ToolchainDisproved(msg) | EquivResult::Error(msg) => {
+            IrCheckResult::OtherProcessError(msg)
         }
-        EquivResult::Error(msg) => IrCheckResult::OtherProcessError(msg),
     }
 }
 
@@ -223,6 +223,16 @@ mod tests {
     use xlsynth_pir::ir_parser;
 
     use super::*;
+
+    #[test]
+    fn legacy_toolchain_failure_is_not_a_counterexample() {
+        assert_eq!(
+            map_equiv_result(EquivResult::ToolchainDisproved(
+                "external tool exited with status 23".into()
+            )),
+            IrCheckResult::OtherProcessError("external tool exited with status 23".into())
+        );
+    }
 
     #[test]
     fn test_validate_same_signature_simple_one_bit() {

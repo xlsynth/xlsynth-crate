@@ -7,8 +7,10 @@ use std::io::Read;
 
 use crate::prover_config::ProverPlan;
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::ToolchainConfig;
+use crate::toolchain_config::{ToolchainConfig, proof_driver};
 use log::{info, warn};
+use serde::Serialize;
+use xlsynth_prover::proof_outcome::{ProofResultHeader, ProofStatus};
 
 // These compatibility exports are also consumed outside the CLI binary.
 #[allow(unused_imports)]
@@ -22,24 +24,31 @@ pub use xlsynth_prover::proof_plan::scheduler::{
 
 /// Best-effort: write a minimal error JSON if `--output_json` was requested.
 /// Shape:
-/// { "success": false, "error": { "message": <msg>, "exception": <exc>,
-/// "stage": <stage> } }
-fn write_error_json(
-    output_json_path: &Option<String>,
-    message: &str,
-    exception: &str,
-    stage: &str,
-) {
+/// { "status": "execution-error", "success": false, "error": { "message":
+/// <msg>, "exception": <exc>, "stage": <stage> } }
+fn write_error_json(output_json_path: Option<&str>, message: &str, exception: &str, stage: &str) {
     if let Some(path) = output_json_path {
-        let obj = serde_json::json!({
-            "success": false,
-            "error": {
-                "message": message,
-                "exception": exception,
-                "stage": stage,
-            }
-        });
-        if let Err(write_err) = std::fs::write(path, obj.to_string()) {
+        #[derive(Serialize)]
+        struct PlanInputError<'a> {
+            #[serde(flatten)]
+            conclusion: ProofResultHeader,
+            error: ErrorDetails<'a>,
+        }
+        #[derive(Serialize)]
+        struct ErrorDetails<'a> {
+            message: &'a str,
+            exception: &'a str,
+            stage: &'a str,
+        }
+        let outcome = PlanInputError {
+            conclusion: ProofStatus::ExecutionError.into(),
+            error: ErrorDetails {
+                message,
+                exception,
+                stage,
+            },
+        };
+        if let Err(write_err) = std::fs::write(path, serde_json::to_vec(&outcome).unwrap()) {
             warn!(
                 "prover: failed writing output_json error to {}: {}",
                 path, write_err
@@ -49,8 +58,8 @@ fn write_error_json(
 }
 
 /// Helper to both emit JSON (when requested) and print CLI error then exit.
-fn fail_and_exit(
-    output_json_path: &Option<String>,
+pub(crate) fn fail_and_exit(
+    output_json_path: Option<&str>,
     stage: &str,
     message: &str,
     exception: &str,
@@ -80,9 +89,7 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
     let plan_path = matches
         .get_one::<String>("plan_json_file")
         .expect("plan_json_file arg missing");
-    let output_json_path = matches
-        .get_one::<String>("output_json")
-        .map(|s| s.to_string());
+    let output_json_path = matches.get_one::<String>("output_json").map(String::as_str);
 
     info!(
         "prover: starting with cores={} plan_source= {}",
@@ -94,7 +101,7 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
         let mut buf = String::new();
         if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
             fail_and_exit(
-                &output_json_path,
+                output_json_path,
                 "read-plan",
                 "Failed to read plan from stdin",
                 &e.to_string(),
@@ -107,7 +114,7 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
             Ok(s) => s,
             Err(e) => {
                 fail_and_exit(
-                    &output_json_path,
+                    output_json_path,
                     "read-plan",
                     "Failed to read plan JSON file",
                     &e.to_string(),
@@ -121,7 +128,7 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
         Ok(p) => p,
         Err(e) => {
             fail_and_exit(
-                &output_json_path,
+                output_json_path,
                 "parse-plan",
                 "Failed to parse ProverPlan JSON",
                 &e.to_string(),
@@ -130,9 +137,9 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
         }
     };
 
-    match run_prover_plan(plan, cores) {
+    match run_prover_plan_with_driver(plan, cores, proof_driver(matches)) {
         Ok(report) => {
-            if let Some(path) = &output_json_path {
+            if let Some(path) = output_json_path {
                 // Write full report including plan tree and captured outputs;
                 // do not print per-task outputs.
                 let s = serde_json::to_string(&report).unwrap();
@@ -175,18 +182,18 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
                 }
                 print_task_outputs(&report.plan);
             }
-            if report.success {
+            let status = report.plan.proof_status();
+            if status.is_proved() {
                 println!("Overall: success");
-                std::process::exit(0)
             } else {
                 println!("Overall: failure");
-                std::process::exit(1)
             }
+            std::process::exit(status.exit_code())
         }
         Err(e) => {
             let exc = e.to_string();
             // Best-effort JSON + CLI error with context, then exit.
-            fail_and_exit(&output_json_path, "run", "prover run failed", &exc, &[]);
+            fail_and_exit(output_json_path, "run", "prover run failed", &exc, &[]);
         }
     }
 }

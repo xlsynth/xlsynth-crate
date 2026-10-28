@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use crate::dslx_utils::join_dslx_search_paths;
 use log::info;
 use tempfile::NamedTempFile;
 
@@ -34,9 +35,7 @@ pub fn run_ir_converter_main(
     if let Some(stdlib) = dslx_stdlib_path {
         command.arg("--dslx_stdlib_path").arg(stdlib);
     }
-    if let Some(joined) = join_paths(additional_search_paths) {
-        command.arg("--dslx_path").arg(joined);
-    }
+    add_dslx_search_paths(&mut command, additional_search_paths)?;
     if let Some(enable) = enable_warnings {
         if !enable.is_empty() {
             command.arg("--enable_warnings").arg(enable.join(","));
@@ -97,9 +96,7 @@ pub fn run_prove_quickcheck_main(
     if let Some(stdlib) = dslx_stdlib_path {
         cmd.arg("--dslx_stdlib_path").arg(stdlib);
     }
-    if let Some(joined) = join_paths(additional_search_paths) {
-        cmd.arg("--dslx_path").arg(joined);
-    }
+    add_dslx_search_paths(&mut cmd, additional_search_paths)?;
 
     let output = run_command(&mut cmd, "prove_quickcheck_main")?;
     if output.status.success() {
@@ -119,16 +116,12 @@ pub fn run_prove_quickcheck_main(
     }
 }
 
-fn join_paths(paths: &[&Path]) -> Option<String> {
-    if paths.is_empty() {
-        None
-    } else {
-        Some(
-            paths
-                .iter()
-                .map(|p| p.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(";"),
-        )
+/// Both XLS binaries split --dslx_path at every colon without escaping.
+fn add_dslx_search_paths(command: &mut Command, paths: &[&Path]) -> Result<(), String> {
+    if !paths.is_empty() {
+        command
+            .arg("--dslx_path")
+            .arg(join_dslx_search_paths(paths, ':')?);
     }
+    Ok(())
 }

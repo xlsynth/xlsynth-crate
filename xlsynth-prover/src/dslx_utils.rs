@@ -1,8 +1,126 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared helpers for working with DSLX entry points and parametric metadata.
 
-use xlsynth::XlsynthError;
+use std::collections::HashMap;
+use std::path::Path;
+
 use xlsynth::dslx::{Function, InterpValue, ParametricBinding, ParametricEnv};
+use xlsynth::{XlsynthError, mangle_dslx_name};
+
+use crate::prover::uf::validate_uf_symbol;
+
+/// Returns the path text representable by the DSLX C API.
+fn dslx_path_text(path: &Path) -> Result<&str, String> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| format!("DSLX path is not UTF-8: {path:?}"))?;
+    if text.contains('\0') {
+        return Err(format!("DSLX path contains a NUL byte: {path:?}"));
+    }
+    Ok(text)
+}
+
+/// Reject paths the DSLX C API cannot represent before passing them to libxls.
+pub(crate) fn validate_dslx_paths<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> Result<(), String> {
+    for path in paths {
+        dslx_path_text(path)?;
+    }
+    Ok(())
+}
+
+/// Encodes search paths only when the receiving tool can split them back into
+/// the same directories, in the same order.
+pub(crate) fn join_dslx_search_paths(paths: &[&Path], separator: char) -> Result<String, String> {
+    let mut joined = String::new();
+    for path in paths {
+        let text = dslx_path_text(path)?;
+        if text.is_empty() {
+            return Err("DSLX search path contains an empty directory name".into());
+        }
+        if text.contains(separator) {
+            return Err(format!(
+                "DSLX search path contains the separator {separator:?}: {path:?}"
+            ));
+        }
+        if !joined.is_empty() {
+            joined.push(separator);
+        }
+        joined.push_str(text);
+    }
+    Ok(joined)
+}
+
+/// Checks a DSLX mapping before it crosses a worker or solver boundary.
+fn validate_dslx_uf_entry(function: &str, symbol: &str) -> Result<(), String> {
+    if function.contains('\0') {
+        return Err("xlsynth error: DSLX function name contains a NUL byte".into());
+    }
+    if function.is_empty() || function.trim() != function || function.contains(':') {
+        return Err(format!(
+            "Invalid DSLX function name in UF mapping: {function:?}"
+        ));
+    }
+    if symbol.is_empty() || symbol.trim() != symbol {
+        return Err(format!("Invalid uninterpreted function symbol: {symbol:?}"));
+    }
+    validate_uf_symbol(symbol)
+}
+
+/// Parses repeated `function:symbol` entries without letting later entries
+/// hide malformed or conflicting proof assumptions.
+pub fn parse_dslx_uf_specs<'a>(
+    specs: impl IntoIterator<Item = &'a str>,
+) -> Result<HashMap<String, String>, String> {
+    let mut map = HashMap::new();
+    for spec in specs {
+        let (function, symbol) = spec.split_once(':')
+            .filter(|(function, symbol)| !function.is_empty() && !symbol.is_empty())
+            .ok_or_else(|| format!(
+                "invalid uninterpreted function specification '{spec}'; expected <function-name>:<uf-name>"
+            ))?;
+        validate_dslx_uf_entry(function, symbol)?;
+        if let Some(previous) = map.insert(function.to_owned(), symbol.to_owned()) {
+            if previous != symbol {
+                return Err(format!(
+                    "Conflicting UF mappings for {function:?}: {previous:?} and {symbol:?}"
+                ));
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Validates an existing typed mapping in deterministic order.
+pub(crate) fn validate_dslx_uf_map<'a>(
+    entries: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Result<(), String> {
+    let mut entries: Vec<_> = entries.into_iter().collect();
+    entries.sort_unstable();
+    for (function, symbol) in entries {
+        validate_dslx_uf_entry(function, symbol)?;
+    }
+    Ok(())
+}
+
+/// Translates DSLX function names to the IR names the solver sees, retaining
+/// shared UF symbols.
+pub fn mangle_dslx_uf_map(
+    module_name: &str,
+    uf_map: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    validate_dslx_uf_map(uf_map)?;
+    uf_map
+        .iter()
+        .map(|(name, symbol)| {
+            Ok((
+                mangle_dslx_name(module_name, name).map_err(|e| e.to_string())?,
+                symbol.clone(),
+            ))
+        })
+        .collect()
+}
 
 /// Parsed description of a DSLX top reference, including optional positional
 /// param bindings.
@@ -143,8 +261,35 @@ pub fn resolve_parametric_env(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
     use super::*;
+
+    #[test]
+    fn repeated_uf_specs_must_agree_and_each_be_valid() {
+        let valid = HashMap::from([("f".to_owned(), "F".to_owned())]);
+        assert_eq!(parse_dslx_uf_specs(["f:F", "f:F"]), Ok(valid));
+        for specs in [["f:F ", "f:F"], ["f:F", "f:F "], ["f:F", "f:G"]] {
+            assert!(parse_dslx_uf_specs(specs).is_err(), "{specs:?}");
+        }
+    }
+
+    #[test]
+    fn search_path_encoding_preserves_directory_names() {
+        let paths = [Path::new("second dir"), Path::new("./first;dir")];
+        assert_eq!(
+            join_dslx_search_paths(&paths, ':').unwrap(),
+            "second dir:./first;dir"
+        );
+        assert_eq!(join_dslx_search_paths(&[], ';').unwrap(), "");
+        for path in [paths[1], Path::new(""), Path::new("dir\0name")] {
+            assert!(join_dslx_search_paths(&[path], ';').is_err(), "{path:?}");
+        }
+        #[cfg(unix)]
+        assert!(join_dslx_search_paths(&[Path::new(OsStr::from_bytes(b"dir\xff"))], ';').is_err());
+    }
+
     fn parse_function_source(source: &str, name: &str) -> Function {
         use xlsynth::dslx::{ImportData, MatchableModuleMember, parse_and_typecheck};
 

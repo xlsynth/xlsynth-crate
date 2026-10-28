@@ -230,7 +230,8 @@ pub fn prove_array_index_update_aliases<S: Solver>(
 ) -> Result<ArrayAliasAnalysis, String> {
     let mut solver = S::new(solver_config).map_err(|error| error.to_string())?;
     let prover_fn = ProverFn::new(function, Some(package));
-    let function_inputs = get_fn_inputs(&mut solver, prover_fn, None);
+    let function_inputs =
+        get_fn_inputs(&mut solver, prover_fn, None).map_err(|error| error.to_string())?;
     let uf_map = HashMap::new();
     let uf_registry = UfRegistry {
         ufs: HashMap::new(),

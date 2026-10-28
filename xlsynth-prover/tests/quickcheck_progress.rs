@@ -246,6 +246,13 @@ fn helper(x: u8) -> bool {
                 assert_eq!(inputs.len(), 3, "raw IR/JSON retains implicit inputs");
                 assert_eq!(inputs[2].name, "x");
                 assert!(inputs[2].value.bits_equals_u64_value(0));
+                let witness = runs[0].dslx_counterexample().expect("DSLX counterexample");
+                assert_eq!(witness.inputs, &inputs[2..]);
+                assert!(witness.return_value.bits_equals_u64_value(1));
+                assert_eq!(
+                    witness.assertion_violation,
+                    output.assertion_violation.as_ref()
+                );
             } else {
                 assert_eq!(
                     runs[0].result,

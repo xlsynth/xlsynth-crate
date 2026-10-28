@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::io;
 
 use xlsynth_pir::IrValue;
 
@@ -46,11 +47,12 @@ const fn min_bits_u128(n: u128) -> usize {
     (u128::BITS - n.leading_zeros()) as usize
 }
 
+/// Declares the free inputs of a function, propagating solver failures.
 pub fn get_fn_inputs<'a, S: Solver>(
     solver: &mut S,
     prover_fn: ProverFn<'a>,
     name_prefix: Option<&str>,
-) -> FnInputs<'a, S::Term> {
+) -> io::Result<FnInputs<'a, S::Term>> {
     let mut params_iter = prover_fn.fn_ref.param_nodes();
     let mut inputs = HashMap::new();
     let prefix_name = |name: &str| match name_prefix {
@@ -70,7 +72,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
         let iact = params_iter.next().unwrap();
         assert_eq!(iact.ty, ir::Type::Bits(1));
         inputs.insert(
-            prefix_name(iact.param_name()),
+            iact.param_name().to_string(),
             IrTypedBitVec {
                 ir_type: &iact.ty,
                 bitvec: solver.one(1),
@@ -79,9 +81,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
     }
     for p in params_iter {
         let name = prefix_name(p.param_name());
-        let bv = solver
-            .declare_fresh(&name, p.ty.bit_count() as usize)
-            .unwrap();
+        let bv = solver.declare_fresh(&name, p.ty.bit_count())?;
         inputs.insert(
             p.param_name().to_string(),
             IrTypedBitVec {
@@ -90,7 +90,36 @@ pub fn get_fn_inputs<'a, S: Solver>(
             },
         );
     }
-    FnInputs { prover_fn, inputs }
+    Ok(FnInputs { prover_fn, inputs })
+}
+
+/// Restricts each constrained parameter to one of its permitted values.
+pub(crate) fn assert_param_domains<S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'_, S::Term>,
+) -> io::Result<()> {
+    let Some(domains) = &inputs.prover_fn.domains else {
+        return Ok(());
+    };
+    for param in inputs.params() {
+        let Some(values) = domains.get(param.param_name()) else {
+            continue;
+        };
+        let symbol = &inputs.inputs[param.param_name()].bitvec;
+        let mut constraint = None;
+        for value in values {
+            let constant = ir_value_to_bv(solver, value, &param.ty);
+            let equal = solver.eq(symbol, &constant.bitvec);
+            constraint = Some(match constraint {
+                None => equal,
+                Some(prev) => solver.or(&prev, &equal),
+            });
+        }
+        if let Some(constraint) = constraint {
+            solver.assert(&constraint)?;
+        }
+    }
+    Ok(())
 }
 
 fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(

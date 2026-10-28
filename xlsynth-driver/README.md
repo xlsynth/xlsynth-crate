@@ -3370,13 +3370,14 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--assume-enum-in-bound=<BOOL>`
   - `--lhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--rhs_uf <func_name:uf_name>` (may be specified multiple times)
-  - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). When present, the driver builds a tactic obligation tree and executes it instead of direct equivalence.
+  - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). The prover executes the script on the requested equivalence property.
   - `--tactic_jsonl <PATH>` Provide a tactic script as JSONL (one `ScriptStep` per line; `#` comments and blank lines allowed).
   - `--output_json <PATH>`
 
 UF semantics:
 
 - Functions mapped to the same uf_name are treated as the same uninterpreted symbol and are assumed equivalent at call sites.
+- In `func_name:uf_name`, both names must be nonempty and have no leading or trailing whitespace. The first colon separates the DSLX function name from the UF symbol. Repeating a function on the same side is allowed only if its mappings agree.
 - Assertions inside uninterpreted functions are ignored during proving.
 
 #### Tactic Scripts
@@ -3398,6 +3399,10 @@ arrays, including obligations reopened by a failed tactic. `report.solved`
 records successful attempts; it does not establish whole-proof completion
 because a rollback may discard those children. These rules also apply to
 `prove-quickcheck` tactic scripts.
+
+Only definite counterexamples trigger decomposition rollback. Inconclusive
+results and execution errors leave obligations unresolved; they do not discard
+the decomposition.
 
 For `dslx-equiv`, a root-only `Solve` honors the same proof settings as direct
 equivalence, including `--assertion-semantics` (default `ignore`),
@@ -3620,18 +3625,20 @@ xlsynth-driver dslx-fn-prove-assertions \
 - Backend: `--solver <...>` selects the SMT backend. The default is `bitwuzla`, which requires an in-process Bitwuzla build feature. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
 - Assertion filter: `--assert-label-filter <REGEX>` includes only assertions whose label matches the regex.
 - Enum inputs: `--assume-enum-in-bound <BOOL>` defaults to `true`, constraining enum-typed top parameters to declared enum members instead of all lowered bit patterns.
-- UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Assertions inside UF-mapped functions are ignored during proving.
+- UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace. Repeated mappings for a function must agree. Assertions inside UF-mapped functions are ignored during proving.
 - Output: `--output_json <PATH>` writes a structured proof result.
 
 On success the command exits `0` and prints that all selected assertions were
-proved. On failure it exits nonzero and reports one solver-found counterexample,
+proved. On disproof it exits `1` and reports one solver-found counterexample,
 including concrete top inputs and the violated assertion label/message when
-available.
+available. Inconclusive results and execution errors also exit `1`, with their
+distinct status and diagnostic instead of a counterexample.
 
 JSON output has the form:
 
 ```json
 {
+  "status": "disproved",
   "success": false,
   "time_micros": 1234,
   "counterexample": {
@@ -3655,16 +3662,16 @@ For successful proofs, `counterexample` is `null`.
 Proves that DSLX `#[quickcheck]` functions always return true.
 
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
-- Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) switches to the tactic/script-driven workflow so you can edit QuickCheck obligations before solving.
+- Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) selects the tactic workflow. A root `Solve` uses the same property selection, assertion semantics, label filter, and UF mappings as a direct proof.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain. The default is `bitwuzla`.
 - Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
-- UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
+- UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace. Repeated mappings for a function must agree.
 - Output: `--output_json <PATH>` to write results as JSON.
-- Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Each selected property is optimized with the XLS IR pipeline before solving. Use `--opt=false` to prove unoptimized IR. `--uf` requires explicit `--opt=false`: optimization would inline calls and erase UF abstraction boundaries. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
+- Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Use `--opt=false` for unoptimized IR. Direct proofs using `--uf` require explicit `--opt=false` because optimization can inline the calls. Tactic and proof-plan workers select unoptimized IR automatically when given UF mappings. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
 - Progress: direct proofs write `[ RUN QUICKCHECK ... ]` before each property's optimization/solving and `[ OK ... ]` or `[ FAILED ... ]` immediately afterward to stderr. Failures use rustc-style diagnostics, highlighting the QuickCheck function name when it can be located reliably (otherwise showing just the filename). Notes include named counterexample inputs, the return value, and any violated assertion; implicit IR token/activation arguments are hidden. Diagnostics use color on terminals unless `NO_COLOR` is set; redirected output is plain text. Inconclusive results and execution errors are distinguished from counterexamples. Shared parsing/conversion precedes these boundaries; preparation failures are reported separately before any property starts; tactic-script reporting is unchanged.
-- JSON compatibility: the existing `--output_json` schema and counterexample string format are unchanged; the file is written after all selected properties finish.
+- JSON: `--output_json` includes a `status` alongside `success`, both overall and for each property. If preparation fails before proving starts, the file reports `execution-error` and includes the diagnostic. See the [proof subprocess result protocol](#proof-subprocess-result-protocol).
 
 UF semantics:
 
@@ -3686,13 +3693,48 @@ The command converts the DSLX module to unoptimized IR, injects Boolean guards f
 ### `prover`
 
 Runs a prover plan described by a JSON file with a process-based scheduler.
+Proof-plan and tactic workers inherit the parent command’s `--toolchain` file, including its tool directory and DSLX settings.
+If `prover` cannot load the toolchain, it exits with code `1` and writes an `execution-error` report to `--output_json` with `error.stage` set to `toolchain`.
 
 - Concurrency: `--cores <N>` controls maximum concurrent processes.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
 - Output: `--output_json <PATH>` writes a full JSON report:
-  - Top-level `{ "success": <bool>, "plan": <tree> }`.
+  - Top-level `{ "status": <proof status>, "success": <bool>, "plan": <tree> }`.
   - Each task node includes `cmdline`, `outcome`, `stdout`, `stderr`, and `task_id` (when provided).
-  - `outcome` is one of `Success`, `Failed`, or an indefinite reason such as `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
+  - `outcome` is `Success` (proved), `Failed` (disproved), or an indefinite reason: `Inconclusive`, `ExecutionError`, `ProtocolError`, `ProcessFailure`, `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
+
+#### Proof subprocess result protocol
+
+The driver and its proof workers must be built from the same revision; see the
+[proof engine's revision compatibility policy](../xlsynth-prover/README.md#revision-compatibility).
+
+The scheduler requires child results from `ir-equiv`, `dslx-equiv`,
+`prove-quickcheck`, and `dslx-fn-prove-assertions` to contain both `status` and
+`success`. For example, a proved result includes
+`{ "status": "proved", "success": true }` and exits `0`. The statuses
+`disproved`, `inconclusive`, and `execution-error` require `success: false` and
+exit `1`. Results may also contain command-specific diagnostics.
+Once a proof command has parsed its arguments, errors such as conflicting tops
+or a malformed UF mapping also write an `execution-error` report.
+
+Proof workers reject a DSLX search directory containing `;`, the driver's
+path-list separator. External XLS tools likewise cannot represent a directory
+containing `:`. These cases report an error so a proof cannot silently import
+a different module. Direct native proofs accept literal directory names from
+the toolchain TOML array. Omitting the search path inherits the toolchain
+setting; `--dslx_path=` (or `"dslx_path": []` in a plan) explicitly clears it,
+including for tactic workers.
+
+Missing or malformed JSON, unknown statuses, and contradictory fields are
+`ProtocolError`. Abnormal termination or an unexpected exit code is
+`ProcessFailure`, even if successful JSON was written first. Legacy results
+containing only `success` are rejected. Captured output is retained for diagnosis,
+including when a task is canceled.
+
+Errors and inconclusive results cannot win a `first` group or cause tactic
+rollback. A native solver counterexample is `disproved`; an external-tool
+failure without structured counterexample evidence is conservatively
+`execution-error`, since a nonzero exit alone does not establish disproof.
 
 ### Equivalence/proving flags: meanings
 
@@ -3760,13 +3802,13 @@ Groups: all / any / first
 
 - `all`: overall success if and only if all children succeed.
 - `any`: overall success if at least one child succeeds.
-- `first`: the first finished children dominates the result.
+- `first`: the first child to produce a definite proof or disproof determines the result; inconclusive results and execution errors do not win the race.
 
 Timeouts
 
 - Any task may specify `"timeout_ms": <milliseconds>`.
 - When the deadline elapses, the scheduler cancels the task’s process group and marks the task outcome as `"Timeout"` (an indefinite outcome).
-- Group semantics with timeouts (indefinite outcomes):
+- Group semantics with indefinite outcomes (timeouts, inconclusive results, or execution errors):
   - `any`: resolves `Success` as soon as any child succeeds; if all children finish without a success and at least one is indefinite (e.g., `Timeout`), the group resolves to `IndefiniteChildren`.
   - `all`: resolves `Failed` if any child fails; if none failed but at least one is indefinite, resolves to `IndefiniteChildren`; otherwise `Success`.
   - `first`: only the first non-indefinite child determines the result; timeouts do not resolve the group. If all children finish and none produced a definite result, the group resolves to `IndefiniteChildren`.
@@ -3833,7 +3875,7 @@ Schema details
   - Optional:
     - `solver`: one of `toolchain`, `bitwuzla`, `boolector`, `z3-binary`, `bitwuzla-binary`, `boolector-binary` (availability gated by build features)
     - `flatten_aggregates`: bool
-    - `drop_params`: array of strings (joined with commas for the CLI)
+    - `drop_params`: array of individual parameter names, e.g. `["a", "b"]`. Empty names, commas, NULs, and surrounding whitespace are rejected.
     - `parallelism_strategy`: one of `single-threaded`, `output-bits`, `input-bit-split`
     - `assertion_semantics`: one of `ignore`, `never`, `same`, `assume`, `implies`
     - `lhs_fixed_implicit_activation`: bool
@@ -3851,7 +3893,7 @@ Schema details
   - Optional behavior flags:
     - `solver`: same values as above
     - `flatten_aggregates`: bool
-    - `drop_params`: array of strings
+    - `drop_params`: array of individual parameter names, with the same restrictions as `ir-equiv`
     - `parallelism_strategy`: `single-threaded` | `output-bits` | `input-bit-split`
     - `assertion_semantics`: `ignore` | `never` | `same` | `assume` | `implies`
     - `lhs_fixed_implicit_activation`: bool

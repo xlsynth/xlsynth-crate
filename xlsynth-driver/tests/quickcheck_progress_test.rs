@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "has-bitwuzla")]
+#[cfg(any(feature = "has-bitwuzla", feature = "with-z3-binary-test"))]
 use serde_json::Value;
 use std::process::Command;
 
@@ -15,6 +15,7 @@ fn quickcheck_uf_requires_explicit_opt_false() {
             "prove-quickcheck",
             "--dslx_input_file=qc.x",
             "--uf=g:F",
+            "--output_json=result.json",
         ]);
         if let Some(opt) = opt {
             command.arg(opt);
@@ -22,11 +23,52 @@ fn quickcheck_uf_requires_explicit_opt_false() {
         let output = command.output().unwrap();
         assert_eq!(output.status.code(), Some(1));
         assert_eq!(output.stdout, b"");
+        let result: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("result.json")).unwrap())
+                .unwrap();
+        assert_eq!(result["status"], "execution-error");
+        assert_eq!(result["success"], false);
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
             include_str!("testdata/quickcheck/uf_opt_error.golden.txt")
         );
     }
+}
+
+/// A UF alias containing SMT commands must not turn a false property into a
+/// proof, even when it includes the responses expected by the SMT client.
+#[cfg(feature = "with-z3-binary-test")]
+#[test]
+fn quickcheck_uf_alias_cannot_inject_solver_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("qc.x"),
+        r#"fn helper(x: u1) -> u1 { x }
+#[quickcheck] fn p() -> bool { false }
+"#,
+    )
+    .unwrap();
+    let alias = r#"F ((_ BitVec 1)) (_ BitVec 1)) (set-option :print-success false) (assert false) (echo "success") (echo "success") (echo "success") (echo "success") ;"#;
+    let output = xlsynth::external_tool::run_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .current_dir(dir.path())
+            .args([
+                "prove-quickcheck",
+                "--dslx_input_file=qc.x",
+                "--opt=false",
+                "--solver=z3-binary",
+                "--output_json=result.json",
+            ])
+            .arg(format!("--uf=helper:{alias}")),
+        dir.path(),
+        "quickcheck",
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("result.json")).unwrap()).unwrap();
+    assert_eq!(report["status"], "disproved", "{output:?}");
+    assert_eq!(output.status.code(), Some(1));
 }
 
 /// Default/explicit optimization and unoptimized proofs have the same readable
@@ -169,5 +211,78 @@ fn quickcheck_preparation_cli_goldens() {
             &stderr,
             &format!("tests/testdata/quickcheck/{golden}.golden.txt"),
         );
+    }
+}
+
+/// Running the root obligation in a worker must prove the same property as a
+/// direct run.
+#[cfg(all(unix, feature = "has-bitwuzla"))]
+#[test]
+fn quickcheck_tactic_workers_preserve_assertions_and_uf_assumptions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("-tools.toml"), "[toolchain]\n").unwrap();
+    std::fs::write(
+        dir.path().join("qc.x"),
+        r#"
+fn g(x: u8) -> u8 { x + u8:1 }
+fn h(x: u8) -> u8 { x + u8:2 }
+#[quickcheck] fn assertions(x: u8) -> bool {
+    if x == u8:0 { fail!("reject_zero", true) } else { true }
+}
+#[quickcheck] fn abstract_eq(x: u8) -> bool { g(x) == h(x) }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("solve.json"),
+        r#"[{"selector":["root"],"command":"Solve"}]"#,
+    )
+    .unwrap();
+
+    for (case, (property, flags, expected)) in [
+        ("assertions", vec![], "disproved"),
+        ("assertions", vec!["--assertion-semantics=ignore"], "proved"),
+        (
+            "assertions",
+            vec!["--assert-label-filter=--skip", "--toolchain=-tools.toml"],
+            "proved",
+        ),
+        ("abstract_eq", vec!["--uf=g:F", "--uf=h:F"], "proved"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for scripted in [false, true] {
+            let result_path = dir
+                .path()
+                .join(format!("case_{case}_scripted_{scripted}.json"));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+            command
+                .current_dir(dir.path())
+                .args([
+                    "prove-quickcheck",
+                    "--dslx_input_file=qc.x",
+                    "--solver=bitwuzla",
+                    "--test_filter",
+                    property,
+                ])
+                .args(&flags)
+                .arg("--output_json")
+                .arg(&result_path);
+            if scripted {
+                command.arg("--tactic_json=solve.json");
+            } else if property == "abstract_eq" {
+                command.arg("--opt=false");
+            }
+            let output = command.output().unwrap();
+            let report: Value =
+                serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
+            assert_eq!(report["status"], expected, "{command:?}: {report}");
+            assert_eq!(
+                output.status.success(),
+                expected == "proved",
+                "{command:?}: {report}"
+            );
+        }
     }
 }

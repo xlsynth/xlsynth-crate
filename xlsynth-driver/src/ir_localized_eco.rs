@@ -20,6 +20,7 @@ use xlsynth_pir::ir_parser::{self, emit_block};
 use xlsynth_pir::random_inputs::{
     BitValuePattern, generate_mixed_arguments_with_rng, generate_pattern_arguments,
 };
+use xlsynth_prover::proof_outcome::ProofStatus;
 use xlsynth_prover::prover::SolverChoice;
 
 #[derive(serde::Serialize)]
@@ -339,8 +340,18 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     .with_tool_path(tool_path);
 
     let outcome = dispatch_ir_equiv(&request, "ir-localized-eco");
+    if outcome.conclusion.status == ProofStatus::ExecutionError {
+        report_cli_error_and_exit(
+            outcome
+                .error_str
+                .as_deref()
+                .unwrap_or("equivalence proof could not run"),
+            Some("ir-localized-eco"),
+            vec![],
+        );
+    }
     let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
+    if outcome.conclusion.status.is_proved() {
         println!("  Equivalence: proved (patched(old) ≡ new) in {:?}", dur);
     } else {
         println!("  Equivalence: FAILED (patched(old) vs new) in {:?}", dur);

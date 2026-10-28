@@ -2,6 +2,8 @@
 
 use clap::ArgMatches;
 use serde::Deserialize;
+use std::path::PathBuf;
+use xlsynth_prover::proof_plan::config::{ProofDriver, resolve_driver_exe};
 
 /// Rejects the removed key instead of letting Serde ignore it as unknown.
 fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
@@ -79,5 +81,36 @@ pub fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> 
         Some(dslx_path.join(";"))
     } else {
         None
+    }
+}
+
+/// Preserves each TOML directory literally; only the CLI flag is a delimited
+/// list.
+pub fn get_dslx_search_paths(
+    matches: &ArgMatches,
+    config: &Option<ToolchainConfig>,
+) -> Vec<PathBuf> {
+    if let Some(paths) = matches.get_one::<String>("dslx_path") {
+        paths
+            .split(';')
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .collect()
+    } else {
+        config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.dslx_path.as_ref())
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .collect()
+    }
+}
+
+/// Selects the same toolchain TOML for proof workers as for the outer command.
+pub(crate) fn proof_driver(matches: &ArgMatches) -> ProofDriver {
+    ProofDriver {
+        executable: resolve_driver_exe(),
+        toolchain: matches.get_one::<String>("toolchain").map(Into::into),
     }
 }

@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::prover::types::{AssertionSemantics, EquivParallelism};
+use crate::prover::types::{AssertionSemantics, EquivParallelism, QuickCheckAssertionSemantics};
 
 pub use crate::dslx_tactics::source::{Edit, FileWithHistory, SourceFile};
 
@@ -92,11 +92,16 @@ pub struct LecObligation {
     pub options: LecProofOptions,
 }
 
+/// Selected DSLX properties and the assertion/UF interpretation under which
+/// they must hold.
 #[derive(Clone, Debug)]
 pub struct QcObligation {
     pub file: FileWithHistory,
     pub tests: Vec<String>,
+    /// DSLX helper names (not mangled IR names) mapped to shared symbols.
     pub uf_map: BTreeMap<String, String>,
+    pub assertion_semantics: QuickCheckAssertionSemantics,
+    pub assert_label_filter: Option<String>,
 }
 
 #[derive(Clone, Debug)]

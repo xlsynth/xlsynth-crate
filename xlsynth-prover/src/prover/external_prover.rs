@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -13,8 +12,11 @@ use super::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckOptions,
 };
+use crate::dslx_utils::join_dslx_search_paths;
 use crate::toolchain_shim::run_prove_quickcheck_main;
 use regex::escape;
+use xlsynth_pir::ir::emit_fn;
+use xlsynth_pir::ir_inline::package_with_reachable_callees;
 use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 
 const MAX_TOOLCHAIN_MESSAGE: usize = 512;
@@ -139,18 +141,14 @@ impl Prover for ExternalProver {
                         "External provers do not support flattening".to_string(),
                     );
                 }
-                let lhs_pkg = match lhs.pkg_ref {
-                    Some(pkg) => pkg.to_string(),
-                    None => format!("package lhs\n\ntop {}\n", lhs.fn_ref.to_string()),
-                };
-                let rhs_pkg = match rhs.pkg_ref {
-                    Some(pkg) => pkg.to_string(),
-                    None => format!("package rhs\n\ntop {}\n", rhs.fn_ref.to_string()),
-                };
-                let (lhs_unified, rhs_unified, unified_top) =
-                    unify_toolchain_tops(&lhs_pkg, &rhs_pkg, &lhs.fn_ref.name, &rhs.fn_ref.name);
-
-                self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
+                match (toolchain_input(lhs), toolchain_input(rhs)) {
+                    (Ok(lhs_pkg), Ok(rhs_pkg)) => {
+                        // Each package marks its own entry, even when the names
+                        // differ.
+                        self.prove_ir_pkg_text_equiv(&lhs_pkg, &rhs_pkg, None)
+                    }
+                    (Err(e), _) | (_, Err(e)) => EquivResult::Error(e),
+                }
             }
             EquivParallelism::OutputBits => {
                 if assert_label_filter.is_some() {
@@ -182,11 +180,11 @@ impl Prover for ExternalProver {
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
         if assert_label_filter.is_some() {
-            return BoolPropertyResult::ToolchainDisproved(
+            return BoolPropertyResult::Error(
                 "External provers do not support assertion label filters".to_string(),
             );
         }
-        BoolPropertyResult::ToolchainDisproved(
+        BoolPropertyResult::Error(
             "External provers do not support IR-level quickcheck; use prove_dslx_quickcheck"
                 .to_string(),
         )
@@ -214,6 +212,8 @@ impl Prover for ExternalProver {
         } else {
             resolve_tool_path(self, "prove_quickcheck_main")
         }.map_err(|message| QuickCheckError::new(QuickCheckErrorKind::Configuration, message))?;
+        join_dslx_search_paths(additional_search_paths, ':')
+            .map_err(|message| QuickCheckError::new(QuickCheckErrorKind::Configuration, message))?;
         let context = load_quickcheck_context(
             entry_file,
             dslx_stdlib_path,
@@ -256,7 +256,9 @@ impl PreparedQuickCheckBackend for ExternalQuickChecks {
                     &filter,
                 ) {
                     Ok(_) => BoolPropertyResult::Proved,
-                    Err(message) => BoolPropertyResult::ToolchainDisproved(
+                    // The tool's textual failure does not distinguish a
+                    // counterexample from a failed invocation or solver.
+                    Err(message) => BoolPropertyResult::Error(
                         message.chars().take(MAX_TOOLCHAIN_MESSAGE).collect(),
                     ),
                 }
@@ -279,35 +281,162 @@ impl From<ToolchainEquivResult> for EquivResult {
     fn from(result: ToolchainEquivResult) -> Self {
         match result {
             ToolchainEquivResult::Proved => EquivResult::Proved,
-            ToolchainEquivResult::Disproved(msg) => EquivResult::ToolchainDisproved(msg),
+            // This legacy result is inferred from a nonzero process exit, not
+            // a structured counterexample. It cannot establish disproof.
+            ToolchainEquivResult::Disproved(msg) => EquivResult::Error(msg),
             ToolchainEquivResult::TimedOutOrInterrupted(msg) => EquivResult::Inconclusive(msg),
             ToolchainEquivResult::Error(msg) => EquivResult::Error(msg),
         }
     }
 }
 
-fn unify_toolchain_tops<'a>(
-    lhs_ir: &'a str,
-    rhs_ir: &'a str,
-    lhs_top: &str,
-    rhs_top: &str,
-) -> (Cow<'a, str>, Cow<'a, str>, String) {
-    if lhs_top == rhs_top {
-        return (
-            Cow::Borrowed(lhs_ir),
-            Cow::Borrowed(rhs_ir),
-            lhs_top.to_string(),
-        );
+/// Sends the requested function, including signature edits, with its helper
+/// definitions.
+fn toolchain_input(entry: &ProverFn<'_>) -> Result<String, String> {
+    match entry.pkg_ref {
+        Some(pkg) => Ok(package_with_reachable_callees(pkg, entry.fn_ref)?.to_string()),
+        None => Ok(format!("package proof\n\n{}", emit_fn(entry.fn_ref, true))),
     }
-    let unified = lhs_top.to_string();
-    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
-    (Cow::Borrowed(lhs_ir), Cow::Owned(rhs_rewritten), unified)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use test_case::test_case;
     use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn external_checker_receives_the_edited_entry_and_its_callees() {
+        let ir = r#"package source
+fn helper(x: bits[1] id=1) -> bits[1] {
+  ret y: bits[1] = not(x, id=2)
+}
+fn selected(x: bits[1] id=3, unused: bits[1] id=4) -> bits[1] {
+  ret y: bits[1] = invoke(x, to_apply=helper, id=5)
+}
+top fn original(x: bits[1] id=6) -> bits[1] {
+  ret y: bits[1] = invoke(x, x, to_apply=selected, id=7)
+}"#;
+        let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+        let selected = pkg
+            .get_fn("selected")
+            .unwrap()
+            .clone()
+            .drop_params(&["unused".to_string()])
+            .unwrap();
+        let input = toolchain_input(&ProverFn::new(&selected, Some(&pkg))).unwrap();
+        let sent = Parser::new(&input).parse_and_validate_package().unwrap();
+        assert_eq!(sent.get_top_fn().unwrap().to_string(), selected.to_string());
+        assert_eq!(
+            sent.get_fn("helper").unwrap().to_string(),
+            pkg.get_fn("helper").unwrap().to_string()
+        );
+        assert!(sent.get_fn("original").is_none());
+    }
+
+    #[test_case(None; "ir_quickcheck")]
+    #[test_case(Some("label"); "assertion_filter")]
+    fn unsupported_ir_quickchecks_are_errors(assert_label_filter: Option<&str>) {
+        let ir = r#"package test
+
+fn f(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#;
+        let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+        let f = ProverFn::new(pkg.get_fn("f").unwrap(), Some(&pkg));
+        let prover = ExternalProver::Toolchain;
+        let result = prover.prove_ir_quickcheck(
+            &f,
+            QuickCheckAssertionSemantics::Never,
+            assert_label_filter,
+        );
+        assert!(matches!(result, BoolPropertyResult::Error(_)), "{result:?}");
+    }
+
+    #[test]
+    fn legacy_toolchain_exit_failure_is_not_disproof() {
+        let message = "tool exited with status 1".to_string();
+        assert_eq!(
+            EquivResult::from(ToolchainEquivResult::Disproved(message.clone())),
+            EquivResult::Error(message),
+        );
+        assert_eq!(
+            EquivResult::from(ToolchainEquivResult::Proved),
+            EquivResult::Proved,
+        );
+        let message = "tool timed out".to_string();
+        assert_eq!(
+            EquivResult::from(ToolchainEquivResult::TimedOutOrInterrupted(message.clone())),
+            EquivResult::Inconclusive(message),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test_case("exit 0\n", true; "success")]
+    #[test_case("echo service unavailable >&2\nexit 1\n", false; "ordinary_failure")]
+    #[test_case("exit 23\n", false; "unexpected_exit_code")]
+    #[test_case("kill -TERM $$\n", false; "signal")]
+    fn external_quickcheck_process_outcomes_require_success(script: &str, expect_success: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("prove_quickcheck_main");
+        std::fs::write(&exe, format!("#!/bin/sh\n{script}")).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entry_file = dir.path().join("property.x");
+        let source = "#[quickcheck]\nfn property(x: u1) -> bool { x == x }\n";
+        std::fs::write(&entry_file, source).unwrap();
+        let backend = ExternalQuickChecks {
+            exe,
+            entry_file,
+            source: source.into(),
+            stdlib: None,
+            search_paths: Vec::new(),
+        };
+        let property = QuickCheckProperty {
+            id: 0,
+            name: "property".into(),
+            name_span: None,
+            requires_implicit_token: false,
+        };
+        let result = backend.prove(&property).result;
+        if expect_success {
+            assert_eq!(result, BoolPropertyResult::Proved);
+        } else {
+            assert!(matches!(result, BoolPropertyResult::Error(_)), "{result:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test_case(false; "missing_executable")]
+    #[test_case(true; "permission_denied")]
+    fn external_quickcheck_spawn_failure_is_error(create_nonexecutable: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("prove_quickcheck_main");
+        if create_nonexecutable {
+            std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let entry_file = dir.path().join("property.x");
+        let source = "#[quickcheck]\nfn property(x: u1) -> bool { x == x }\n";
+        std::fs::write(&entry_file, source).unwrap();
+        let backend = ExternalQuickChecks {
+            exe,
+            entry_file,
+            source: source.into(),
+            stdlib: None,
+            search_paths: Vec::new(),
+        };
+        let property = QuickCheckProperty {
+            id: 0,
+            name: "property".into(),
+            name_span: None,
+            requires_implicit_token: false,
+        };
+        let result = backend.prove(&property).result;
+        assert!(matches!(result, BoolPropertyResult::Error(_)), "{result:?}");
+    }
 
     #[test]
     fn fn_equiv_convenience_uses_supported_assertion_semantics() {

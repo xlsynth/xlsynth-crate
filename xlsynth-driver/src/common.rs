@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process;
 use std::process::Command;
-use xlsynth::mangle_dslx_name;
 use xlsynth_aug_opt::AugOptOptions;
 use xlsynth_pir::ir_parser;
 
@@ -656,42 +655,13 @@ pub fn get_function_enum_param_domains(
     }
 }
 
-/// Parses uninterpreted-function mappings from CLI values into a map from
-/// mangled function name -> UF symbol.
-///
-/// Format per entry: "<func_name>:<uf_name>".
-/// Semantics: Functions that map to the same <uf_name> are treated as the same
-/// uninterpreted symbol during proving: they are assumed equivalent at the
-/// call-site interface, and any assertions within their bodies are ignored.
-pub fn parse_uf_spec(
-    module_name: &str,
-    matches: Option<clap::parser::ValuesRef<String>>,
-) -> HashMap<String, String> {
-    parse_dslx_uf_spec(matches)
-        .into_iter()
-        .map(|(name, alias)| (mangle_dslx_name(module_name, &name).unwrap(), alias))
-        .collect()
-}
-
 /// Parses UF mappings while retaining the DSLX names used by proof obligations.
 pub fn parse_dslx_uf_spec(
     matches: Option<clap::parser::ValuesRef<String>>,
-) -> HashMap<String, String> {
-    let mut m = std::collections::HashMap::new();
-    if let Some(vals) = matches {
-        for v in vals {
-            if let Some((fn_name, uf_name)) = v.split_once(':') {
-                m.insert(fn_name.trim().to_string(), uf_name.trim().to_string());
-            } else {
-                eprintln!(
-                    "Error: invalid uninterpreted function specification '{}'; expected <function-name>:<uf-name>",
-                    v
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-    m
+) -> Result<HashMap<String, String>, String> {
+    xlsynth_prover::dslx_utils::parse_dslx_uf_specs(
+        matches.into_iter().flatten().map(String::as_str),
+    )
 }
 
 #[cfg(test)]

@@ -21,9 +21,13 @@
 //! See the driver README section "Prover configuration JSON (task-spec DSL)"
 //! for the full schema and examples.
 
+use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::dslx_utils::join_dslx_search_paths;
+use crate::ir_utils::validate_drop_params;
 use crate::prover::SolverChoice;
 use crate::prover::types::AssertionSemantics;
 use crate::prover::types::EquivParallelism;
@@ -37,8 +41,43 @@ fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<()
     ))
 }
 
-fn add_flag(cmd: &mut Command, name: &str, value: &str) {
-    cmd.arg(format!("--{}", name)).arg(value);
+/// Keeps a leading dash in a value from being parsed as another option.
+fn add_flag(cmd: &mut Command, name: &str, value: impl AsRef<OsStr>) {
+    let mut arg = OsString::from(format!("--{name}="));
+    arg.push(value);
+    cmd.arg(arg);
+}
+
+/// Disambiguates positional filenames from options while allowing the
+/// scheduler to append more options after the filenames.
+fn add_positional_path(cmd: &mut Command, path: &Path) {
+    if path.as_os_str().as_encoded_bytes().starts_with(b"-") {
+        cmd.arg(Path::new(".").join(path));
+    } else {
+        cmd.arg(path);
+    }
+}
+
+/// Encodes a typed parameter list without changing which inputs are dropped.
+fn add_drop_params(cmd: &mut Command, names: Option<&[String]>) -> io::Result<()> {
+    let names = names.unwrap_or_default();
+    validate_drop_params(names).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    if !names.is_empty() {
+        add_flag(cmd, "drop_params", names.join(","));
+    }
+    Ok(())
+}
+
+/// An absent list inherits the toolchain paths. An explicit empty list clears
+/// them.
+fn add_dslx_search_paths(cmd: &mut Command, paths: Option<&[PathBuf]>) -> io::Result<()> {
+    if let Some(paths) = paths {
+        let paths: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
+        let joined = join_dslx_search_paths(&paths, ';')
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        add_flag(cmd, "dslx_path", joined);
+    }
+    Ok(())
 }
 
 fn add_bool(cmd: &mut Command, name: &str, value: Option<bool>) {
@@ -168,24 +207,51 @@ pub struct DslxFnProveAssertionsConfig {
     pub uf: Option<Vec<String>>,
 }
 
+/// Executable and optional toolchain TOML used by a proof worker.
+#[derive(Debug)]
+pub struct ProofDriver {
+    pub executable: PathBuf,
+    pub toolchain: Option<PathBuf>,
+}
+
+impl<P: AsRef<Path>> From<P> for ProofDriver {
+    fn from(executable: P) -> Self {
+        Self {
+            executable: executable.as_ref().to_owned(),
+            toolchain: None,
+        }
+    }
+}
+
+impl ProofDriver {
+    /// Applies the selected toolchain to every worker in the plan.
+    pub(super) fn command_for(&self, task: &ProverTask) -> io::Result<Command> {
+        let mut command = task.to_command_with_driver(&self.executable)?;
+        if let Some(path) = &self.toolchain {
+            add_flag(&mut command, "toolchain", path);
+        }
+        Ok(command)
+    }
+}
+
 /// Constructs a driver invocation with either an explicit or conventionally
 /// located executable.
 pub trait ToDriverCommand {
     /// Constructs a command using the conventional driver executable lookup.
-    fn to_command(&self) -> Command {
+    fn to_command(&self) -> io::Result<Command> {
         self.to_command_with_driver(&resolve_driver_exe())
     }
 
     /// Constructs a command using the supplied driver executable.
-    fn to_command_with_driver(&self, driver: &Path) -> Command;
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command>;
 }
 
 impl ToDriverCommand for IrEquivConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("ir-equiv");
-        cmd.arg(self.lhs_ir_file.as_os_str());
-        cmd.arg(self.rhs_ir_file.as_os_str());
+        add_positional_path(&mut cmd, &self.lhs_ir_file);
+        add_positional_path(&mut cmd, &self.rhs_ir_file);
         if let Some(top) = &self.top {
             add_flag(&mut cmd, "top", top);
         }
@@ -199,11 +265,7 @@ impl ToDriverCommand for IrEquivConfig {
             add_flag(&mut cmd, "solver", &solver.to_string());
         }
         add_bool(&mut cmd, "flatten_aggregates", self.flatten_aggregates);
-        if let Some(drop) = &self.drop_params {
-            if !drop.is_empty() {
-                add_flag(&mut cmd, "drop_params", &drop.join(","));
-            }
-        }
+        add_drop_params(&mut cmd, self.drop_params.as_deref())?;
         if let Some(strategy) = &self.parallelism_strategy {
             add_flag(&mut cmd, "parallelism-strategy", &strategy.to_string());
         }
@@ -224,16 +286,16 @@ impl ToDriverCommand for IrEquivConfig {
             self.rhs_fixed_implicit_activation,
         );
         add_bool(&mut cmd, "json", self.json);
-        cmd
+        Ok(cmd)
     }
 }
 
 impl ToDriverCommand for DslxEquivConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("dslx-equiv");
-        cmd.arg(self.lhs_dslx_file.as_os_str());
-        cmd.arg(self.rhs_dslx_file.as_os_str());
+        add_positional_path(&mut cmd, &self.lhs_dslx_file);
+        add_positional_path(&mut cmd, &self.rhs_dslx_file);
 
         if let Some(top) = &self.dslx_top {
             add_flag(&mut cmd, "dslx_top", top);
@@ -245,28 +307,15 @@ impl ToDriverCommand for DslxEquivConfig {
             add_flag(&mut cmd, "rhs_dslx_top", rhs_top);
         }
         if let Some(stdlib) = &self.dslx_stdlib_path {
-            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+            add_flag(&mut cmd, "dslx_stdlib_path", stdlib);
         }
-        if let Some(paths) = &self.dslx_path {
-            if !paths.is_empty() {
-                let joined = paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                add_flag(&mut cmd, "dslx_path", &joined);
-            }
-        }
+        add_dslx_search_paths(&mut cmd, self.dslx_path.as_deref())?;
 
         if let Some(solver) = &self.solver {
             add_flag(&mut cmd, "solver", &solver.to_string());
         }
         add_bool(&mut cmd, "flatten_aggregates", self.flatten_aggregates);
-        if let Some(drop) = &self.drop_params {
-            if !drop.is_empty() {
-                add_flag(&mut cmd, "drop_params", &drop.join(","));
-            }
-        }
+        add_drop_params(&mut cmd, self.drop_params.as_deref())?;
         if let Some(strategy) = &self.parallelism_strategy {
             add_flag(&mut cmd, "parallelism-strategy", &strategy.to_string());
         }
@@ -300,31 +349,18 @@ impl ToDriverCommand for DslxEquivConfig {
         }
 
         add_bool(&mut cmd, "json", self.json);
-        cmd
+        Ok(cmd)
     }
 }
 
 impl ToDriverCommand for ProveQuickcheckConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("prove-quickcheck");
-        add_flag(
-            &mut cmd,
-            "dslx_input_file",
-            &self.dslx_input_file.display().to_string(),
-        );
-        if let Some(paths) = &self.dslx_path {
-            if !paths.is_empty() {
-                let joined = paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                add_flag(&mut cmd, "dslx_path", &joined);
-            }
-        }
+        add_flag(&mut cmd, "dslx_input_file", &self.dslx_input_file);
+        add_dslx_search_paths(&mut cmd, self.dslx_path.as_deref())?;
         if let Some(stdlib) = &self.dslx_stdlib_path {
-            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+            add_flag(&mut cmd, "dslx_stdlib_path", stdlib);
         }
         if let Some(filter) = &self.test_filter {
             add_flag(&mut cmd, "test_filter", filter);
@@ -336,6 +372,11 @@ impl ToDriverCommand for ProveQuickcheckConfig {
             add_flag(&mut cmd, "assertion-semantics", &sem.to_string());
         }
         if let Some(list) = &self.uf {
+            if !list.is_empty() {
+                // Keep helper calls in the worker IR so the requested
+                // abstraction survives.
+                add_bool(&mut cmd, "opt", Some(false));
+            }
             for entry in list {
                 add_flag(&mut cmd, "uf", entry);
             }
@@ -344,32 +385,19 @@ impl ToDriverCommand for ProveQuickcheckConfig {
             add_flag(&mut cmd, "assert-label-filter", pat);
         }
         add_bool(&mut cmd, "json", self.json);
-        cmd
+        Ok(cmd)
     }
 }
 
 impl ToDriverCommand for DslxFnProveAssertionsConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("dslx-fn-prove-assertions");
-        add_flag(
-            &mut cmd,
-            "dslx_input_file",
-            &self.dslx_input_file.display().to_string(),
-        );
+        add_flag(&mut cmd, "dslx_input_file", &self.dslx_input_file);
         add_flag(&mut cmd, "dslx_top", &self.dslx_top);
-        if let Some(paths) = &self.dslx_path {
-            if !paths.is_empty() {
-                let joined = paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                add_flag(&mut cmd, "dslx_path", &joined);
-            }
-        }
+        add_dslx_search_paths(&mut cmd, self.dslx_path.as_deref())?;
         if let Some(stdlib) = &self.dslx_stdlib_path {
-            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+            add_flag(&mut cmd, "dslx_stdlib_path", stdlib);
         }
         if let Some(solver) = &self.solver {
             add_flag(&mut cmd, "solver", &solver.to_string());
@@ -383,7 +411,7 @@ impl ToDriverCommand for DslxFnProveAssertionsConfig {
                 add_flag(&mut cmd, "uf", entry);
             }
         }
-        cmd
+        Ok(cmd)
     }
 }
 
@@ -410,7 +438,7 @@ pub struct FakeTaskConfig {
 
 #[cfg(feature = "enable-fake-task")]
 impl ToDriverCommand for FakeTaskConfig {
-    fn to_command_with_driver(&self, _driver: &Path) -> Command {
+    fn to_command_with_driver(&self, _driver: &Path) -> io::Result<Command> {
         // Use a POSIX shell snippet to sleep and then locate the --output_json
         // path from argv.
         let script = r#"
@@ -441,11 +469,12 @@ while [ $# -gt 0 ]; do
 done
 if [ -n "$out" ]; then
   if [ "${FAKE_SUCCESS:-1}" -eq 1 ]; then
-    printf '{"success":true}\n' > "$out"
+    printf '{"status":"proved","success":true}\n' > "$out"
   else
-    printf '{"success":false}\n' > "$out"
+    printf '{"status":"disproved","success":false}\n' > "$out"
   fi
 fi
+if [ "${FAKE_SUCCESS:-1}" -eq 1 ]; then exit 0; else exit 1; fi
 "#;
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(script).arg("sh");
@@ -455,7 +484,7 @@ fi
         cmd.env("FAKE_SUCCESS", if self.success { "1" } else { "0" });
         cmd.env("FAKE_STDOUT_LEN", self.stdout_len.to_string());
         cmd.env("FAKE_STDERR_LEN", self.stderr_len.to_string());
-        cmd
+        Ok(cmd)
     }
 }
 
@@ -499,7 +528,7 @@ pub enum ProverTask {
 // the ProverPlan::Task node for consolidation.
 
 impl ToDriverCommand for ProverTask {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         match self {
             ProverTask::IrEquiv { config, .. } => config.to_command_with_driver(driver),
             ProverTask::DslxEquiv { config, .. } => config.to_command_with_driver(driver),
@@ -606,6 +635,8 @@ impl<'de> Deserialize<'de> for ProverPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
 
     #[test]
     fn dslx_equiv_config_rejects_removed_type_inference_key_for_any_value() {
@@ -649,10 +680,28 @@ mod tests {
             },
         ];
         for task in tasks {
-            let command = task.to_command_with_driver(driver);
+            let command = task.to_command_with_driver(driver).unwrap();
             assert_eq!(command.get_program(), driver.as_os_str());
-            assert_eq!(args_of(command), args_of(task.to_command()));
+            assert_eq!(args_of(command), args_of(task.to_command().unwrap()));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_preserves_toolchain_path_bytes() {
+        let driver = ProofDriver {
+            executable: "xlsynth-driver".into(),
+            toolchain: Some(OsStr::from_bytes(b"-tools\xff.toml").into()),
+        };
+        let command = driver
+            .command_for(&ProverTask::ProveQuickcheck {
+                config: ProveQuickcheckConfig::default(),
+            })
+            .unwrap();
+        assert_eq!(
+            command.get_args().last(),
+            Some(OsStr::from_bytes(b"--toolchain=-tools\xff.toml"))
+        );
     }
 
     #[test]
@@ -695,7 +744,7 @@ mod tests {
 
     fn head_of(plan: &ProverPlan) -> String {
         match plan {
-            ProverPlan::Task { task, .. } => args_of(task.to_command())[0].clone(),
+            ProverPlan::Task { task, .. } => args_of(task.to_command().unwrap())[0].clone(),
             ProverPlan::Group { kind, .. } => match kind {
                 GroupKind::All => "all".to_string(),
                 GroupKind::Any => "any".to_string(),
@@ -707,7 +756,7 @@ mod tests {
     #[test]
     fn test_ir_equiv_to_command_args() {
         let cfg = IrEquivConfig {
-            lhs_ir_file: "lhs.ir".into(),
+            lhs_ir_file: "-lhs.ir".into(),
             rhs_ir_file: "rhs.ir".into(),
             top: Some("main".to_string()),
             solver: Some(SolverChoice::Toolchain),
@@ -718,27 +767,20 @@ mod tests {
             json: Some(true),
             ..Default::default()
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
                 "ir-equiv",
-                "lhs.ir",
+                &format!(".{}-lhs.ir", std::path::MAIN_SEPARATOR),
                 "rhs.ir",
-                "--top",
-                "main",
-                "--solver",
-                "toolchain",
-                "--flatten_aggregates",
-                "true",
-                "--drop_params",
-                "p0,p1",
-                "--parallelism-strategy",
-                "output-bits",
-                "--assertion-semantics",
-                "same",
-                "--json",
-                "true",
+                "--top=main",
+                "--solver=toolchain",
+                "--flatten_aggregates=true",
+                "--drop_params=p0,p1",
+                "--parallelism-strategy=output-bits",
+                "--assertion-semantics=same",
+                "--json=true",
             ]
         );
     }
@@ -747,7 +789,7 @@ mod tests {
     fn test_dslx_equiv_to_command_args() {
         let cfg = DslxEquivConfig {
             lhs_dslx_file: "lhs.x".into(),
-            rhs_dslx_file: "rhs.x".into(),
+            rhs_dslx_file: "--rhs.x".into(),
             dslx_top: Some("foo".into()),
             dslx_path: Some(vec!["a".into(), "b".into()]),
             dslx_stdlib_path: Some("stdlib".into()),
@@ -761,35 +803,24 @@ mod tests {
             json: Some(true),
             ..Default::default()
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
                 "dslx-equiv",
                 "lhs.x",
-                "rhs.x",
-                "--dslx_top",
-                "foo",
-                "--dslx_stdlib_path",
-                "stdlib",
-                "--dslx_path",
-                "a;b",
-                "--solver",
-                "toolchain",
-                "--flatten_aggregates",
-                "false",
-                "--parallelism-strategy",
-                "single-threaded",
-                "--assertion-semantics",
-                "assume",
-                "--lhs_fixed_implicit_activation",
-                "true",
-                "--rhs_fixed_implicit_activation",
-                "false",
-                "--assume-enum-in-bound",
-                "true",
-                "--json",
-                "true",
+                &format!(".{}--rhs.x", std::path::MAIN_SEPARATOR),
+                "--dslx_top=foo",
+                "--dslx_stdlib_path=stdlib",
+                "--dslx_path=a;b",
+                "--solver=toolchain",
+                "--flatten_aggregates=false",
+                "--parallelism-strategy=single-threaded",
+                "--assertion-semantics=assume",
+                "--lhs_fixed_implicit_activation=true",
+                "--rhs_fixed_implicit_activation=false",
+                "--assume-enum-in-bound=true",
+                "--json=true",
             ]
         );
     }
@@ -806,25 +837,18 @@ mod tests {
             json: Some(true),
             ..Default::default()
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
                 "prove-quickcheck",
-                "--dslx_input_file",
-                "qc.x",
-                "--dslx_path",
-                "a;b",
-                "--dslx_stdlib_path",
-                "stdlib",
-                "--test_filter",
-                ".*mytest",
-                "--solver",
-                "toolchain",
-                "--assertion-semantics",
-                "assume",
-                "--json",
-                "true",
+                "--dslx_input_file=qc.x",
+                "--dslx_path=a;b",
+                "--dslx_stdlib_path=stdlib",
+                "--test_filter=.*mytest",
+                "--solver=toolchain",
+                "--assertion-semantics=assume",
+                "--json=true",
             ]
         );
     }
@@ -841,27 +865,19 @@ mod tests {
             assume_enum_in_bound: Some(false),
             uf: Some(vec!["helper:F".into()]),
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
                 "dslx-fn-prove-assertions",
-                "--dslx_input_file",
-                "assertions.x",
-                "--dslx_top",
-                "main",
-                "--dslx_path",
-                "a;b",
-                "--dslx_stdlib_path",
-                "stdlib",
-                "--solver",
-                "bitwuzla",
-                "--assert-label-filter",
-                "red|blue",
-                "--assume-enum-in-bound",
-                "false",
-                "--uf",
-                "helper:F",
+                "--dslx_input_file=assertions.x",
+                "--dslx_top=main",
+                "--dslx_path=a;b",
+                "--dslx_stdlib_path=stdlib",
+                "--solver=bitwuzla",
+                "--assert-label-filter=red|blue",
+                "--assume-enum-in-bound=false",
+                "--uf=helper:F",
             ]
         );
     }
@@ -923,13 +939,13 @@ mod tests {
         let tasks: Vec<ProverTask> = serde_json::from_str(json).unwrap();
         assert_eq!(tasks.len(), 4);
         // Smoke test command arg heads
-        let head: Vec<String> = args_of(tasks[0].to_command());
+        let head: Vec<String> = args_of(tasks[0].to_command().unwrap());
         assert_eq!(head[0], "ir-equiv");
-        let head: Vec<String> = args_of(tasks[1].to_command());
+        let head: Vec<String> = args_of(tasks[1].to_command().unwrap());
         assert_eq!(head[0], "dslx-equiv");
-        let head: Vec<String> = args_of(tasks[2].to_command());
+        let head: Vec<String> = args_of(tasks[2].to_command().unwrap());
         assert_eq!(head[0], "prove-quickcheck");
-        let head: Vec<String> = args_of(tasks[3].to_command());
+        let head: Vec<String> = args_of(tasks[3].to_command().unwrap());
         assert_eq!(head[0], "dslx-fn-prove-assertions");
     }
 

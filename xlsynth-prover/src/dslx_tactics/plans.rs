@@ -1,28 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::dslx_tactics::obligations::{
     FileWithHistory, ObligationPayload, ProverObligation, SourceFile,
 };
+use crate::dslx_utils::validate_dslx_uf_map;
 use crate::proof_plan::config::{
     DslxEquivConfig, GroupKind, ProveQuickcheckConfig, ProverPlan, ProverTask,
 };
 use crate::prover::SolverChoice;
 use regex::escape;
 
-fn write_text(
-    dir: &tempfile::TempDir,
-    name: &str,
-    text: &str,
-) -> Result<std::path::PathBuf, String> {
-    let path = dir.path().join(name);
-    std::fs::write(&path, text).map_err(|e| format!("write {}: {}", name, e))?;
-    Ok(path)
-}
-
 /// Retains module identity while isolating sources with identical basenames.
-fn write_lec_source(
+fn write_obligation_source(
     dir: &tempfile::TempDir,
     subdir: &str,
     fallback_name: &str,
@@ -41,15 +33,6 @@ fn write_lec_source(
     Ok(path)
 }
 
-fn cfg_with_paths(cfg: &mut DslxEquivConfig, stdlib: Option<&Path>, paths: &[&Path]) {
-    if let Some(p) = stdlib {
-        cfg.dslx_stdlib_path = Some(p.to_path_buf());
-    }
-    if !paths.is_empty() {
-        cfg.dslx_path = Some(paths.iter().map(|p| (*p).to_path_buf()).collect());
-    }
-}
-
 /// Executable obligation tasks and the source files they reference.
 pub struct ObligationPlan {
     pub plan: ProverPlan,
@@ -60,6 +43,16 @@ impl ObligationPlan {
     pub fn into_parts(self) -> (ProverPlan, tempfile::TempDir) {
         (self.plan, self.tempdir)
     }
+}
+
+/// Encodes the ordered obligation mapping for the worker's repeated UF flag.
+fn uf_arguments(map: &BTreeMap<String, String>) -> Result<Option<Vec<String>>, String> {
+    validate_dslx_uf_map(map)?;
+    Ok((!map.is_empty()).then(|| {
+        map.iter()
+            .map(|(function, symbol)| format!("{function}:{symbol}"))
+            .collect()
+    }))
 }
 
 /// Converts selected obligations into a process plan with retained source
@@ -73,33 +66,33 @@ pub fn build_plan_from_obligations(
 ) -> Result<ObligationPlan, String> {
     let tempdir = tempfile::TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
     let mut tasks: Vec<ProverPlan> = Vec::new();
+    // The parent has already resolved these roots, including any explicit
+    // clear.
+    let dslx_paths: Vec<_> = dslx_paths.iter().map(|p| p.to_path_buf()).collect();
 
     for (i, (task_id, ob)) in obligations.iter().enumerate() {
         match &ob.payload {
             ObligationPayload::Lec(lec) => {
-                let lhs_path =
-                    write_lec_source(&tempdir, &format!("ob{i}_lhs"), "lhs.x", &lec.lhs.file)?;
-                let rhs_path =
-                    write_lec_source(&tempdir, &format!("ob{i}_rhs"), "rhs.x", &lec.rhs.file)?;
+                let lhs_path = write_obligation_source(
+                    &tempdir,
+                    &format!("ob{i}_lhs"),
+                    "lhs.x",
+                    &lec.lhs.file,
+                )?;
+                let rhs_path = write_obligation_source(
+                    &tempdir,
+                    &format!("ob{i}_rhs"),
+                    "rhs.x",
+                    &lec.rhs.file,
+                )?;
 
-                let lhs_uf: Vec<String> = lec
-                    .lhs
-                    .uf_map
-                    .iter()
-                    .map(|(f, u)| format!("{}:{}", f, u))
-                    .collect();
-                let rhs_uf: Vec<String> = lec
-                    .rhs
-                    .uf_map
-                    .iter()
-                    .map(|(f, u)| format!("{}:{}", f, u))
-                    .collect();
-
-                let mut cfg = DslxEquivConfig {
+                let cfg = DslxEquivConfig {
                     lhs_dslx_file: lhs_path,
                     rhs_dslx_file: rhs_path,
                     lhs_dslx_top: Some(lec.lhs.top_func.clone()),
                     rhs_dslx_top: Some(lec.rhs.top_func.clone()),
+                    dslx_path: Some(dslx_paths.clone()),
+                    dslx_stdlib_path: dslx_stdlib_path.map(Path::to_path_buf),
                     solver: solver.clone(),
                     flatten_aggregates: Some(lec.options.flatten_aggregates),
                     assertion_semantics: Some(lec.options.assertion_semantics),
@@ -109,16 +102,11 @@ pub fn build_plan_from_obligations(
                     lhs_fixed_implicit_activation: Some(lec.lhs.fixed_implicit_activation),
                     rhs_fixed_implicit_activation: Some(lec.rhs.fixed_implicit_activation),
                     parallelism_strategy: Some(lec.options.parallelism),
+                    lhs_uf: uf_arguments(&lec.lhs.uf_map)?,
+                    rhs_uf: uf_arguments(&lec.rhs.uf_map)?,
                     json: None,
                     ..Default::default()
                 };
-                cfg_with_paths(&mut cfg, dslx_stdlib_path, dslx_paths);
-                if !lhs_uf.is_empty() {
-                    cfg.lhs_uf = Some(lhs_uf);
-                }
-                if !rhs_uf.is_empty() {
-                    cfg.rhs_uf = Some(rhs_uf);
-                }
 
                 tasks.push(ProverPlan::Task {
                     task: ProverTask::DslxEquiv { config: cfg },
@@ -127,8 +115,8 @@ pub fn build_plan_from_obligations(
                 });
             }
             ObligationPayload::QuickCheck(qc) => {
-                let qc_text = qc.file.text.clone();
-                let qc_path = write_text(&tempdir, &format!("ob{}_qc.x", i), &qc_text)?;
+                let qc_path =
+                    write_obligation_source(&tempdir, &format!("ob{i}_qc"), "qc.x", &qc.file)?;
 
                 let test_filter = if qc.tests.is_empty() {
                     None
@@ -144,25 +132,15 @@ pub fn build_plan_from_obligations(
                     Some(pattern)
                 };
 
-                let uf: Vec<String> = qc
-                    .uf_map
-                    .iter()
-                    .map(|(f, u)| format!("{}:{}", f, u))
-                    .collect();
-
                 let cfg = ProveQuickcheckConfig {
                     dslx_input_file: qc_path,
-                    dslx_path: if dslx_paths.is_empty() {
-                        None
-                    } else {
-                        Some(dslx_paths.iter().map(|p| (*p).to_path_buf()).collect())
-                    },
+                    dslx_path: Some(dslx_paths.clone()),
                     dslx_stdlib_path: dslx_stdlib_path.map(|p| p.to_path_buf()),
                     test_filter,
                     solver: solver.clone(),
-                    assertion_semantics: None,
-                    uf: if uf.is_empty() { None } else { Some(uf) },
-                    assert_label_filter: None,
+                    assertion_semantics: Some(qc.assertion_semantics),
+                    uf: uf_arguments(&qc.uf_map)?,
+                    assert_label_filter: qc.assert_label_filter.clone(),
                     json: None,
                 };
 

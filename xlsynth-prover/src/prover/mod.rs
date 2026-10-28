@@ -377,7 +377,10 @@ impl<S: SolverConfig> Prover for S {
                 "Only single-threaded equivalence supports parameter domains",
             ));
         }
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
+        let assert_label_regex = match build_assert_label_regex(assert_label_filter) {
+            Ok(regex) => regex,
+            Err(error) => return EquivResult::Error(error),
+        };
         match strategy {
             EquivParallelism::SingleThreaded => ir_equiv::prove_ir_fn_equiv::<S::Solver>(
                 self,
@@ -398,11 +401,31 @@ impl<S: SolverConfig> Prover for S {
                 )
             }
             EquivParallelism::InputBitSplit => {
+                // A token has no bits, and fixed activation is not a free
+                // input.
+                let prefix_len = if lhs.fixed_implicit_activation { 2 } else { 0 };
+                let Some((split_index, _)) = lhs
+                    .params()
+                    .enumerate()
+                    .skip(prefix_len)
+                    .find(|(_, param)| param.ty.bit_count() != 0)
+                else {
+                    // No bit can partition the inputs; the unsplit proof still
+                    // checks both signatures.
+                    return ir_equiv::prove_ir_fn_equiv::<S::Solver>(
+                        self,
+                        lhs,
+                        rhs,
+                        assertion_semantics,
+                        assert_label_regex.as_ref(),
+                        allow_flatten,
+                    );
+                };
                 ir_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
                     self,
                     lhs,
                     rhs,
-                    0,
+                    split_index,
                     0,
                     assertion_semantics,
                     assert_label_regex.as_ref(),
@@ -418,7 +441,10 @@ impl<S: SolverConfig> Prover for S {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
+        let assert_label_regex = match build_assert_label_regex(assert_label_filter) {
+            Ok(regex) => regex,
+            Err(error) => return BoolPropertyResult::Error(error),
+        };
         quickcheck::prove_ir_quickcheck::<S::Solver>(
             self,
             ir_fn,

@@ -8800,13 +8800,15 @@ fn main(x: u8) -> u8 { x }
     assert_eq!(
         report,
         serde_json::json!({
+            "status": "inconclusive",
             "success": false,
             "report": {
                 "solved": [],
                 "failed": [],
                 "indefinite": [],
                 "rolled_back": [],
-                "unresolved": [["root"]]
+                "unresolved": [["root"]],
+                "root_disproved": false, "has_execution_error": false
             }
         })
     );
@@ -8851,6 +8853,15 @@ fn assert_root_solve_matches_direct(
         );
         let report: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(report_path)?)?;
+        assert_eq!(
+            report["status"],
+            if expected_success {
+                "proved"
+            } else {
+                "disproved"
+            },
+            "use_tactic={use_tactic}; report: {report}"
+        );
         assert_eq!(
             report["success"],
             serde_json::json!(expected_success),
@@ -9013,6 +9024,7 @@ fn test_dslx_equiv_tactic_focus_rejects_assertion_semantics() {
     let temp_dir = tempfile::tempdir().unwrap();
     let source_path = temp_dir.path().join("input.x");
     let script_path = temp_dir.path().join("script.json");
+    let report_path = temp_dir.path().join("report.json");
     std::fs::write(
         &source_path,
         r#"
@@ -9041,11 +9053,13 @@ fn main(x: u8) -> u8 { helper(x) }
         ])
         .arg("--tactic_json")
         .arg(&script_path)
+        .arg("--output_json")
+        .arg(&report_path)
         .output()
         .unwrap();
     assert_eq!(
         output.status.code(),
-        Some(2),
+        Some(1),
         "stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -9055,6 +9069,10 @@ fn main(x: u8) -> u8 { helper(x) }
         &String::from_utf8(output.stderr).unwrap(),
         "tests/tactic_focus_assertion_semantics.golden.txt",
     );
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+    assert_eq!(report["status"], "execution-error");
+    assert_eq!(report["success"], false);
 }
 
 #[cfg(feature = "has-bitwuzla")]
@@ -9151,13 +9169,15 @@ fn main(x: u8) -> u8 { helper(x) }
     assert_eq!(
         report,
         serde_json::json!({
+            "status": if solve_pair { "proved" } else { "inconclusive" },
             "success": solve_pair,
             "report": {
                 "solved": solved,
                 "failed": [],
                 "indefinite": [],
                 "rolled_back": [],
-                "unresolved": unresolved
+                "unresolved": unresolved,
+                "root_disproved": false, "has_execution_error": false
             }
         })
     );
@@ -11168,7 +11188,9 @@ fn test_prove_quickcheck_json_array_mixed() {
     let v: serde_json::Value =
         serde_json::from_str(json_str.trim()).expect("json file must be JSON");
 
-    // New schema: object { success: bool, tests: [ ... ] }
+    // The external tool does not produce typed counterexample evidence, so its
+    // unsuccessful result is an execution error rather than a logical disproof.
+    assert_eq!(v["status"], "execution-error");
     assert_eq!(v["success"].as_bool(), Some(false));
     let arr = v["tests"].as_array().expect("expected tests array in JSON");
     assert_eq!(arr.len(), 2, "expected two quickchecks");
@@ -11179,9 +11201,13 @@ fn test_prove_quickcheck_json_array_mixed() {
         let name = item["name"].as_str().expect("missing name").to_string();
         assert!(item.get("time_micros").is_some() && item["time_micros"].is_number());
         let ok = item["success"].as_bool().expect("missing success bool");
+        assert_eq!(
+            item["status"],
+            if ok { "proved" } else { "execution-error" }
+        );
+        assert!(item["counterexample"].is_null());
         if !ok {
-            assert!(item.get("counterexample").is_some());
-            assert!(item["counterexample"].is_string());
+            assert!(item["error_str"].is_string());
         }
         name_success.insert(name, ok);
     }
@@ -11941,7 +11967,7 @@ fn test_prover_any_keep_running_mixed_children_finish() {
     let t0 = &tasks[0];
     let t1 = &tasks[1];
     assert_eq!(t0["outcome"].as_str(), Some("Success"));
-    assert_eq!(t1["outcome"].as_str(), Some("Failed"));
+    assert_eq!(t1["outcome"].as_str(), Some("ExecutionError"));
 }
 
 #[test]
@@ -12013,8 +12039,8 @@ fn test_prover_first_keep_running_both_nonequiv_finish() {
     assert!(tasks.is_array());
     let t0 = &tasks[0];
     let t1 = &tasks[1];
-    assert_eq!(t0["outcome"].as_str(), Some("Failed"));
-    assert_eq!(t1["outcome"].as_str(), Some("Failed"));
+    assert_eq!(t0["outcome"].as_str(), Some("ExecutionError"));
+    assert_eq!(t1["outcome"].as_str(), Some("ExecutionError"));
 }
 
 #[test]
@@ -12301,6 +12327,33 @@ fn test_dslx_equiv_uninterpreted_functions_solver_param(solver: &str) {
         stderr
     );
     assert!(stdout.contains("success"), "stdout: {}", stdout);
+}
+
+#[test]
+fn ir_localized_eco_exits_unsuccessfully_when_prover_cannot_run() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("input.ir"),
+        "package p\ntop fn main(x: bits[1] id=1) -> bits[1] { ret x: bits[1] = param(name=x, id=1) }",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .current_dir(temp.path())
+        .env_remove("XLSYNTH_TOOLS")
+        .args([
+            "ir-localized-eco",
+            "input.ir",
+            "input.ir",
+            "--solver=toolchain",
+            "--output_dir=out",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "xlsynth-driver: ir-localized-eco: XLSYNTH_TOOLS is not set; cannot run toolchain equivalence"
+    );
 }
 
 #[test]

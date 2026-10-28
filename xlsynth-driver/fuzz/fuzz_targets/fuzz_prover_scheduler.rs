@@ -16,14 +16,10 @@
 //!   (models potential nondeterminism due to scheduling/ordering).
 //!
 //! The plan is executed via `run_prover_plan` with 1..=4 workers. Whenever the
-//! abstract eval is determinate (`Some(v)`), we require the scheduler's
-//! `report.success == v` for every worker count. If the abstract eval is
-//! indeterminate (`None`), either outcome is acceptable. This catches
-//! ordering/parallelism bugs and ensures the scheduler matches the intended
-//! semantics of these combinators.
-//!
-//! TODO: Currently, we don't have a timeout in our prover plan. This will be
-//! left as future work.
+//! abstract eval is determinate (`Some(v)`), all worker counts must give the
+//! same logical result. A timeout or execution error cannot satisfy an
+//! expected disproof. When the abstract eval is indeterminate (`None`), we
+//! still check that required tasks finished.
 
 use libfuzzer_sys::fuzz_target;
 
@@ -83,7 +79,8 @@ fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
             Err(_) => return,
         };
         if let Some(v) = expected {
-            assert_eq!(report.success, v);
+            let expected_status = TaskOutcome::Normal { success: v }.proof_status();
+            assert_eq!(report.plan.proof_status(), expected_status);
         }
 
         assert_keep_running_corridor(&plan, &report.plan);

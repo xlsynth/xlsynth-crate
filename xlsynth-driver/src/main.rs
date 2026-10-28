@@ -203,6 +203,22 @@ struct XlsynthToolchain {
     toolchain: ToolchainConfig,
 }
 
+/// Loads an explicit toolchain or the optional default file in the working
+/// directory.
+fn read_toolchain_config(explicit_path: Option<&str>) -> Result<Option<ToolchainConfig>, String> {
+    let path = explicit_path.unwrap_or("xlsynth-toolchain.toml");
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && explicit_path.is_none() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(format!("failed to read toolchain config {path}: {error}")),
+    };
+    let config: XlsynthToolchain = toml::from_str(&source)
+        .map_err(|error| format!("invalid toolchain config {path}: {error}"))?;
+    Ok(Some(config.toolchain))
+}
+
 trait AppExt {
     fn add_delay_model_arg(self) -> Self;
     fn add_pipeline_args(self) -> Self;
@@ -556,6 +572,7 @@ fn main() {
         .arg(
             Arg::new("toolchain")
                 .long("toolchain")
+                .global(true)
                 .value_name("TOOLCHAIN")
                 .help("Path to a xlsynth-toolchain.toml file")
                 .action(ArgAction::Set),
@@ -4013,51 +4030,31 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
 
     let matches = cmd.get_matches();
 
-    let mut toml_path: Option<String> = matches
-        .get_one::<String>("toolchain")
-        .map(|s| s.to_string());
-
-    // If there is no toolchain flag specified, but there is a
-    // xlsynth-toolchain.toml in the current directory, use that.
-    if toml_path.is_none() {
-        let cwd = std::env::current_dir().unwrap();
-        let cwd_toml_path = cwd.join("xlsynth-toolchain.toml");
-        if cwd_toml_path.exists() {
-            log::info!(
-                "Using xlsynth-toolchain.toml in current directory: {}",
-                cwd_toml_path.display()
-            );
-            toml_path = Some(cwd_toml_path.to_str().unwrap().to_string());
-        }
-    }
-
-    let toml_value: Option<toml::Value> = toml_path.map(|path| {
-        // If we got a toolchain toml file, read/parse it.
-        if !std::path::Path::new(&path).exists() {
-            report_cli_error_and_exit(
-                "toolchain toml file does not exist",
-                None,
-                vec![
-                    ("path", &path),
-                    (
-                        "working directory",
-                        &std::env::current_dir().unwrap().display().to_string(),
-                    ),
-                ],
-            );
-        }
-        let toml_str =
-            std::fs::read_to_string(path).expect("read toolchain toml file should succeed");
-        toml::from_str(&toml_str).expect("parse toolchain toml file should succeed")
-    });
-    let config = toml_value.map(|v| match v.try_into::<XlsynthToolchain>() {
-        Ok(config) => config.toolchain,
-        Err(error) => report_cli_error_and_exit(
-            "invalid toolchain config",
-            None,
-            vec![("error", &error.to_string())],
-        ),
-    });
+    let start = std::time::Instant::now();
+    let config = read_toolchain_config(matches.get_one::<String>("toolchain").map(String::as_str))
+        .unwrap_or_else(|error| match matches.subcommand() {
+            Some(("prover", args)) => prover::fail_and_exit(
+                args.get_one::<String>("output_json").map(String::as_str),
+                "toolchain",
+                "Failed to load toolchain configuration",
+                &error,
+                &[],
+            ),
+            Some((command, args))
+                if matches!(
+                    command,
+                    "ir-equiv" | "dslx-equiv" | "prove-quickcheck" | "dslx-fn-prove-assertions"
+                ) =>
+            {
+                proofs::report_setup_error(
+                    start,
+                    args.get_one::<String>("output_json").map(String::as_str),
+                    command,
+                    &error,
+                )
+            }
+            _ => report_cli_error_and_exit(&error, None, vec![]),
+        });
 
     match matches.subcommand() {
         Some(("gv-instance-csv", subm)) => {

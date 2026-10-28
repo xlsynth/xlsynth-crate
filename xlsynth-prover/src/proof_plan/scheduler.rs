@@ -6,10 +6,10 @@
 //!   cmdlines.
 //! - Respects a global concurrency limit ("cores").
 //! - Group semantics:
-//!   - First: resolve on first child completion (success or failure); cancel
-//!     siblings.
+//!   - First: resolve on the first proved or disproved child; indefinite
+//!     attempts do not win the race.
 //!   - Any:   resolve true on first successful child; cancel siblings; resolve
-//!     false if all children complete and none succeeded.
+//!     false only if all children are disproved.
 //!   - All:   resolve when all children succeed; if any fails, resolve failure
 //!     and cancel siblings.
 //!
@@ -21,7 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::config::{GroupKind, ProverPlan, ProverTask, ToDriverCommand, resolve_driver_exe};
+use crate::proof_outcome::ProofResultHeader;
+
+use super::config::{GroupKind, ProofDriver, ProverPlan, ProverTask, resolve_driver_exe};
 use super::report::{IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome};
 
 use log::{debug, info, trace, warn};
@@ -30,7 +32,23 @@ use signal_hook::low_level as siglow;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+/// A validated result or an explanation of why it cannot establish a proof.
+struct ProcessResult {
+    outcome: TaskOutcome,
+    diagnostic: Option<String>,
+}
+
+impl ProcessResult {
+    /// Records a failure of the subprocess or its result protocol.
+    fn error(reason: IndefiniteReason, message: impl Into<String>) -> Self {
+        Self {
+            outcome: TaskOutcome::indefinite(reason),
+            diagnostic: Some(message.into()),
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug)]
 /// Lifecycle state of a task's subprocess.
@@ -122,7 +140,7 @@ pub struct Scheduler {
     // Run-scoped cancellation flag, toggled by CLI signal handlers or callers.
     cancel_flag: Arc<AtomicBool>,
     deadlines: BTreeMap<Instant, Vec<NodeId>>,
-    driver_executable: PathBuf,
+    driver: ProofDriver,
 }
 
 impl Scheduler {
@@ -141,7 +159,7 @@ impl Scheduler {
         plan: ProverPlan,
         max_procs: usize,
         cancel_flag: Arc<AtomicBool>,
-        driver: &Path,
+        driver: impl Into<ProofDriver>,
     ) -> Scheduler {
         log::info!("prover: new scheduler");
         let mut builder = PlanBuilder::default();
@@ -169,13 +187,17 @@ impl Scheduler {
             cmdlines: HashMap::new(),
             cancel_flag,
             deadlines: BTreeMap::new(),
-            driver_executable: driver.to_path_buf(),
+            driver: driver.into(),
         };
         // Precompute planned cmdlines for all tasks so short-circuited tasks
         // still report one.
         for n in &sched.nodes {
             if let NodeInner::Task(t) = &n.inner {
-                let cmd = t.task.to_command_with_driver(&sched.driver_executable);
+                let Ok(cmd) = sched.driver.command_for(&t.task) else {
+                    // An unrepresentable request has no command line to
+                    // display. Report its setup error if scheduled.
+                    continue;
+                };
                 let program = cmd.get_program().to_string_lossy().into_owned();
                 let args = cmd
                     .get_args()
@@ -200,29 +222,35 @@ impl Scheduler {
     /// Behavior:
     /// - Schedules up to `max_procs` concurrent tasks.
     /// - Returns when the root plan resolves or no running tasks remain.
-    /// - On cancellation, cancels all tasks and returns `Ok(false)`.
+    /// - On cancellation, cancels unresolved tasks and reports their outcomes.
     /// - Maintains `running.len() <= max_procs` at all times.
-    pub fn run(&mut self) -> io::Result<bool> {
+    pub fn run(&mut self) -> io::Result<ProverReport> {
         loop {
             // Check for cancellation request.
             if self.cancel_flag.load(Ordering::Relaxed) {
                 warn!("prover: cancellation requested; cleaning up and exiting");
-                let _ = self.cleanup_tasks();
-                return Ok(false);
+                self.cleanup_tasks()?;
+                break;
             }
 
             // Check for timeouts.
             self.check_and_handle_timeouts()?;
 
             // If the root is already resolved, finish immediately.
-            if let Some(root_outcome) = self.node_outcome(self.root) {
+            if self.node_outcome(self.root).is_some() {
                 self.cleanup_tasks()?;
-                return Ok(root_outcome.is_success());
+                break;
             }
 
             // Fill available slots next.
             if self.running.len() < self.max_procs {
                 self.fill_slots()?;
+            }
+
+            // Launch failures can resolve the plan without creating a child.
+            if self.node_outcome(self.root).is_some() {
+                self.cleanup_tasks()?;
+                break;
             }
 
             if self.running.is_empty() {
@@ -233,10 +261,11 @@ impl Scheduler {
 
             // Block until any child process changes state; handle one
             // completion at a time.
-            if let Err(_e) = self.wait_for_one_child_and_handle() {
-                return Err(io::Error::new(io::ErrorKind::Other, "waitpid failed"));
-            }
+            self.wait_for_one_child_and_handle()?;
         }
+        Ok(ProverReport {
+            plan: self.build_report_node(self.root),
+        })
     }
 
     fn check_and_handle_timeouts(&mut self) -> io::Result<()> {
@@ -302,7 +331,15 @@ impl Scheduler {
         for _ in 0..len {
             if let Some(tid) = self.round_robin.pop_front() {
                 if self.is_task_runnable(tid) {
-                    self.spawn_task(tid)?;
+                    if let Err(error) = self.spawn_task(tid) {
+                        self.finish_task(
+                            tid,
+                            ProcessResult::error(
+                                IndefiniteReason::ExecutionError,
+                                format!("failed to launch proof command: {error}"),
+                            ),
+                        )?;
+                    }
                 } else {
                     // This happens only when inconsistent state is left by the
                     // cleanup.
@@ -338,7 +375,7 @@ impl Scheduler {
             match &mut node.inner {
                 NodeInner::Task(t) => match t.state {
                     TaskState::NotStarted => {
-                        let mut cmd = t.task.to_command_with_driver(&self.driver_executable);
+                        let mut cmd = self.driver.command_for(&t.task)?;
                         // Create a temp path for JSON results and pass it to
                         // the child.
                         let json_tmp = tempfile::Builder::new().suffix(".json").tempfile()?;
@@ -484,77 +521,39 @@ impl Scheduler {
                         continue;
                     }
                     if raw == libc::ECHILD {
-                        // Child already reaped elsewhere; clean up bookkeeping.
                         if let Some(tid) = self.pid_to_node.remove(&pid) {
-                            self.remove_task_bookkeeping(tid);
-                            self.on_child_plan_finished(tid)?;
+                            if self.is_task_indefinite(tid) {
+                                self.capture_task_output(tid, None);
+                                self.remove_task_bookkeeping(tid);
+                            } else {
+                                self.finish_task(tid, ProcessResult::error(
+                                    IndefiniteReason::ProcessFailure,
+                                    "proof command was reaped without an observable exit status",
+                                ))?;
+                            }
                         }
+                        handled_any = true;
                         continue;
                     }
                 }
-                return Err(io::Error::new(io::ErrorKind::Other, "waitpid failed"));
+                return Err(err);
             }
 
             // rc > 0: child state available; complete bookkeeping for this pid.
-            let term_signal = if libc::WIFSIGNALED(status) {
-                Some(libc::WTERMSIG(status))
-            } else {
-                None
-            };
-
             if let Some(tid) = self.pid_to_node.remove(&pid) {
                 // If the task was already indefinite, do not convert it to
                 // normal or bubble up.
                 let was_indefinite = self.is_task_indefinite(tid);
                 if was_indefinite {
                     debug!("prover: reaped indefinite task pid={}", pid);
+                    self.capture_task_output(tid, None);
+                    self.remove_task_bookkeeping(tid);
                     handled_any = true;
                     continue;
                 }
 
-                if let Some(sig) = term_signal {
-                    warn!(
-                        "prover: task terminated by signal {} pid={} cmdline=\"{}\"",
-                        sig,
-                        pid,
-                        self.cmdlines.get(&tid).unwrap()
-                    );
-                }
-
-                let success = self.read_success_from_json(tid);
-
-                // Read captured stdout/stderr for this task; store for final
-                // report printing.
-                let mut captured_stdout: Option<String> = None;
-                let mut captured_stderr: Option<String> = None;
-                if let Some((stdout_tmp, stderr_tmp, _cmdline)) = self.outputs.remove(&tid) {
-                    let read_lossy = |p: &std::path::Path| -> String {
-                        match std::fs::read(p) {
-                            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                            Err(_) => String::new(),
-                        }
-                    };
-                    captured_stdout = Some(read_lossy(stdout_tmp.path()));
-                    captured_stderr = Some(read_lossy(stderr_tmp.path()));
-                }
-
-                if let NodeInner::Task(t) = &mut self.nodes[tid.0].inner {
-                    t.state = TaskState::Completed {
-                        outcome: TaskOutcome::normal(success),
-                    };
-                    t.completed_stdout = captured_stdout;
-                    t.completed_stderr = captured_stderr;
-                    debug!(
-                        "prover: task completed, cmdline=\"{}\" pid={} success={}",
-                        self.cmdlines.get(&tid).unwrap(),
-                        pid,
-                        success
-                    );
-                } else {
-                    panic!("not a task node");
-                }
-                self.remove_task_bookkeeping(tid);
-                self.on_child_plan_finished(tid)?;
+                let result = self.read_task_result(tid, status);
+                self.finish_task(tid, result)?;
                 handled_any = true;
                 break; // handle one completion per call (preserve prior pacing)
             }
@@ -572,23 +571,104 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Attempts to read a task's logical success from its JSON output.
-    /// Returns `false` if no file or parse error; does not mutate state.
-    fn read_success_from_json(&self, tid: NodeId) -> bool {
+    /// Accepts a logical result only when JSON and process termination agree.
+    fn read_task_result(&self, tid: NodeId, wait_status: libc::c_int) -> ProcessResult {
+        if libc::WIFSIGNALED(wait_status) {
+            return ProcessResult::error(
+                IndefiniteReason::ProcessFailure,
+                format!(
+                    "proof command terminated by signal {}",
+                    libc::WTERMSIG(wait_status)
+                ),
+            );
+        }
+        if !libc::WIFEXITED(wait_status) {
+            return ProcessResult::error(
+                IndefiniteReason::ProcessFailure,
+                "proof command did not exit normally",
+            );
+        }
+        let exit_code = libc::WEXITSTATUS(wait_status);
+        if exit_code != 0 && exit_code != 1 {
+            return ProcessResult::error(
+                IndefiniteReason::ProcessFailure,
+                format!("proof command exited with unexpected code {exit_code}"),
+            );
+        }
         let path = match self.json_files.get(&tid) {
             Some(tf) => tf.path(),
-            None => return false,
+            None => {
+                return ProcessResult::error(
+                    IndefiniteReason::ProtocolError,
+                    "proof command has no result file",
+                );
+            }
         };
         let data = match std::fs::read_to_string(path) {
             Ok(s) => s,
-            Err(_) => return false,
+            Err(error) => {
+                return ProcessResult::error(
+                    IndefiniteReason::ProtocolError,
+                    format!("cannot read proof result: {error}"),
+                );
+            }
         };
-        let v: serde_json::Value = match serde_json::from_str(&data) {
-            Ok(v) => v,
-            Err(_) => return false,
+        let report: ProofResultHeader = match serde_json::from_str(&data) {
+            Ok(report) => report,
+            Err(error) => {
+                return ProcessResult::error(
+                    IndefiniteReason::ProtocolError,
+                    format!("invalid proof result JSON: {error}"),
+                );
+            }
         };
+        if exit_code != report.status.exit_code() {
+            return ProcessResult::error(
+                IndefiniteReason::ProcessFailure,
+                format!(
+                    "proof result status {:?} contradicts exit code {exit_code}",
+                    report.status
+                ),
+            );
+        }
+        ProcessResult {
+            outcome: report.status.into(),
+            diagnostic: None,
+        }
+    }
 
-        v.get("success").and_then(|b| b.as_bool()).unwrap_or(false)
+    /// Saves captured streams after reaping, including timeout/cancellation
+    /// output.
+    fn capture_task_output(&mut self, tid: NodeId, diagnostic: Option<String>) {
+        let NodeInner::Task(task) = &mut self.nodes[tid.0].inner else {
+            unreachable!("only tasks have process output");
+        };
+        if let Some((stdout, stderr, _)) = self.outputs.remove(&tid) {
+            let read_lossy = |path: &Path| {
+                std::fs::read(path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_else(|error| {
+                        format!("prover: cannot read captured output: {error}\n")
+                    })
+            };
+            task.completed_stdout = Some(read_lossy(stdout.path()));
+            task.completed_stderr = Some(read_lossy(stderr.path()));
+        }
+        if let Some(diagnostic) = diagnostic {
+            let stderr = task.completed_stderr.get_or_insert_with(String::new);
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!("prover: {diagnostic}\n"));
+        }
+    }
+
+    /// Completes an attempt and propagates only its validated logical outcome.
+    fn finish_task(&mut self, tid: NodeId, result: ProcessResult) -> io::Result<()> {
+        self.set_outcome(tid, result.outcome);
+        self.capture_task_output(tid, result.diagnostic);
+        self.remove_task_bookkeeping(tid);
+        self.on_child_plan_finished(tid)
     }
 
     /// Bubbles child completion into ancestor groups, possibly resolving them,
@@ -859,12 +939,9 @@ impl Scheduler {
                 let kind = g.kind;
                 let children = g.children.clone();
                 for cid in children {
-                    self.cancel_subtree(cid, IndefiniteReason::GroupCriteriaAlreadyMet)?;
+                    self.cancel_subtree(cid, indefinite_reason)?;
                 }
-                self.set_outcome(
-                    id,
-                    TaskOutcome::indefinite(IndefiniteReason::GroupCriteriaAlreadyMet),
-                );
+                self.set_outcome(id, TaskOutcome::indefinite(indefinite_reason));
                 // Prune entire group subtree tasks from queues.
                 self.prune_subtree_tasks(id);
                 warn!("prover: canceled group subtree kind={:?} ", kind);
@@ -896,7 +973,8 @@ impl Scheduler {
         self.running.remove(&id);
         self.remove_task_from_queues(id);
         let _ = self.json_files.remove(&id);
-        let _ = self.outputs.remove(&id);
+        // Keep output files alive until reap so killed tasks retain
+        // diagnostics.
     }
 
     fn build_report_node(&self, id: NodeId) -> ProverReportNode {
@@ -963,20 +1041,29 @@ impl Scheduler {
                         }
                         if raw == libc::ECHILD {
                             // Already reaped elsewhere; drop bookkeeping.
-                            self.pid_to_node.remove(&pid);
+                            if let Some(tid) = self.pid_to_node.remove(&pid) {
+                                self.capture_task_output(tid, None);
+                            }
                             reaped_any = true;
                             continue;
                         }
                     }
                     warn!("prover: waitpid during cleanup failed: {}", err);
                     // Drop from bookkeeping to avoid getting stuck.
-                    self.pid_to_node.remove(&pid);
+                    if let Some(tid) = self.pid_to_node.remove(&pid) {
+                        self.capture_task_output(
+                            tid,
+                            Some(format!("waitpid during cleanup failed: {err}")),
+                        );
+                    }
                     reaped_any = true;
                     continue;
                 }
 
                 // rc > 0
-                self.pid_to_node.remove(&pid);
+                if let Some(tid) = self.pid_to_node.remove(&pid) {
+                    self.capture_task_output(tid, None);
+                }
                 trace!("prover: reaped child pid={} during cleanup", pid);
                 reaped_any = true;
             }
@@ -1069,7 +1156,7 @@ pub fn run_prover_plan(plan: ProverPlan, max_procs: usize) -> io::Result<ProverR
 pub fn run_prover_plan_with_driver(
     plan: ProverPlan,
     max_procs: usize,
-    driver: &Path,
+    driver: impl Into<ProofDriver>,
 ) -> io::Result<ProverReport> {
     // Create a run-scoped cancellation flag and wire OS signals to it.
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -1093,16 +1180,241 @@ pub fn run_prover_plan_with_driver(
         let _ = siglow::unregister(id);
     }
 
-    let result = match run_res {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = sched.cleanup_tasks();
-            return Err(e);
+    if run_res.is_err() {
+        let _ = sched.cleanup_tasks();
+    }
+    run_res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proof_plan::config::IrEquivConfig;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    /// Keeps the fake driver alive and reaps its processes even after a panic.
+    struct TestScheduler {
+        scheduler: Scheduler,
+        _directory: tempfile::TempDir,
+    }
+
+    impl TestScheduler {
+        /// Builds a scheduler using a shell script as its only proof backend.
+        fn new(script: &str, plan: ProverPlan) -> io::Result<Self> {
+            let directory = tempfile::tempdir()?;
+            let driver = directory.path().join("driver.sh");
+            fs::write(&driver, script)?;
+            fs::set_permissions(&driver, fs::Permissions::from_mode(0o755))?;
+            Ok(Self {
+                scheduler: Scheduler::new_with_driver(
+                    plan,
+                    2,
+                    Arc::new(AtomicBool::new(false)),
+                    &driver,
+                ),
+                _directory: directory,
+            })
         }
-    };
-    let plan_node = sched.build_report_node(sched.root);
-    Ok(ProverReport {
-        success: result,
-        plan: plan_node,
-    })
+    }
+
+    impl Drop for TestScheduler {
+        fn drop(&mut self) {
+            let _ = self.scheduler.cleanup_tasks();
+        }
+    }
+
+    /// Selects the fixture behavior through the first positional input path.
+    fn task(mode: &str) -> ProverPlan {
+        ProverPlan::Task {
+            task: ProverTask::IrEquiv {
+                config: IrEquivConfig {
+                    lhs_ir_file: PathBuf::from(mode),
+                    rhs_ir_file: PathBuf::from("unused.ir"),
+                    ..Default::default()
+                },
+            },
+            timeout_ms: None,
+            task_id: Some(mode.to_string()),
+        }
+    }
+
+    /// Waits for this specific fixture child without changing signal handling.
+    fn wait_for_pid(pid: i32, options: i32) -> io::Result<libc::c_int> {
+        loop {
+            let mut status = 0;
+            let result = unsafe { libc::waitpid(pid, &mut status, options) };
+            if result == pid {
+                return Ok(status);
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(error);
+            }
+        }
+    }
+
+    #[test]
+    fn externally_reaped_task_completes_as_process_failure() {
+        let mut fixture = TestScheduler::new(
+            r#"#!/bin/sh
+set -eu
+while [ "$1" != --output_json ]; do shift; done
+shift
+printf '%s\n' '{"status":"proved","success":true}' > "$1"
+printf 'task stdout\n'
+printf 'task stderr\n' >&2
+"#,
+            task("result"),
+        )
+        .unwrap();
+        let scheduler = &mut fixture.scheduler;
+        scheduler.fill_slots().unwrap();
+        let pid = *scheduler.pid_to_node.keys().next().unwrap();
+        let status = wait_for_pid(pid, 0).unwrap();
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+
+        // The scheduler now gets ECHILD and cannot validate the process status,
+        // even though its result file contains an otherwise valid proof.
+        scheduler.wait_for_one_child_and_handle().unwrap();
+        assert_eq!(
+            scheduler.node_outcome(scheduler.root),
+            Some(TaskOutcome::Indefinite {
+                reason: IndefiniteReason::ProcessFailure,
+            })
+        );
+        assert!(scheduler.running.is_empty());
+        assert!(scheduler.pid_to_node.is_empty());
+        assert!(scheduler.round_robin.is_empty());
+        assert!(scheduler.outputs.is_empty());
+        assert!(scheduler.json_files.is_empty());
+        let report = scheduler.run().unwrap();
+        assert_eq!(
+            report.plan.proof_status(),
+            crate::proof_outcome::ProofStatus::ExecutionError
+        );
+        let ProverReportNode::Task { stdout, stderr, .. } = report.plan else {
+            panic!("expected a task report");
+        };
+        assert_eq!(stdout.as_deref(), Some("task stdout\n"));
+        assert_eq!(
+            stderr.as_deref(),
+            Some(
+                "task stderr\nprover: proof command was reaped without an observable exit status\n"
+            )
+        );
+    }
+
+    #[test]
+    fn first_group_cancellation_retains_running_sibling_output_and_reason() {
+        let mut fixture = TestScheduler::new(
+            r#"#!/bin/sh
+set -eu
+mode="$2"
+while [ "$1" != --output_json ]; do shift; done
+shift
+output="$1"
+printf '%s stdout\n' "$mode"
+printf '%s stderr\n' "$mode" >&2
+kill -STOP "$$"
+printf '%s\n' '{"status":"proved","success":true}' > "$output"
+"#,
+            ProverPlan::Group {
+                kind: GroupKind::First,
+                tasks: vec![task("winner"), task("canceled")],
+                keep_running_till_finish: false,
+            },
+        )
+        .unwrap();
+        let scheduler = &mut fixture.scheduler;
+        scheduler.fill_slots().unwrap();
+        let children = scheduler.get_group_node(scheduler.root).children.clone();
+        let mut winner_pid = None;
+        for child in &children {
+            let NodeInner::Task(TaskNode {
+                state: TaskState::Running { pid },
+                ..
+            }) = scheduler.nodes[child.0].inner
+            else {
+                panic!("expected a running fixture child");
+            };
+            // A stopped child has flushed both streams and remains alive until
+            // explicitly resumed or canceled. No timing assumptions are needed.
+            let status = wait_for_pid(pid, libc::WUNTRACED).unwrap();
+            assert!(libc::WIFSTOPPED(status));
+            if *child == children[0] {
+                winner_pid = Some(pid);
+            }
+        }
+        assert_eq!(unsafe { libc::kill(winner_pid.unwrap(), libc::SIGCONT) }, 0);
+        let report = scheduler.run().unwrap().plan;
+        assert!(report.proof_status().is_proved());
+        assert!(scheduler.pid_to_node.is_empty());
+        assert!(scheduler.outputs.is_empty());
+
+        let ProverReportNode::Task {
+            outcome,
+            stdout,
+            stderr,
+            ..
+        } = report.find_task_node("canceled").unwrap()
+        else {
+            panic!("expected the canceled sibling's task report");
+        };
+        assert_eq!(
+            *outcome,
+            Some(TaskOutcome::Indefinite {
+                reason: IndefiniteReason::GroupCriteriaAlreadyMet,
+            })
+        );
+        assert_eq!(stdout.as_deref(), Some("canceled stdout\n"));
+        assert_eq!(stderr.as_deref(), Some("canceled stderr\n"));
+    }
+
+    #[test]
+    fn externally_reaped_cancellation_keeps_its_reason_and_output() {
+        let mut fixture = TestScheduler::new(
+            r#"#!/bin/sh
+printf 'task stdout\n'
+printf 'task stderr\n' >&2
+kill -STOP "$$"
+"#,
+            task("result"),
+        )
+        .unwrap();
+        let scheduler = &mut fixture.scheduler;
+        scheduler.fill_slots().unwrap();
+        let pid = *scheduler.pid_to_node.keys().next().unwrap();
+        let stopped = wait_for_pid(pid, libc::WUNTRACED).unwrap();
+        assert!(libc::WIFSTOPPED(stopped));
+        scheduler
+            .cancel_subtree(scheduler.root, IndefiniteReason::GroupCriteriaAlreadyMet)
+            .unwrap();
+        let killed = wait_for_pid(pid, 0).unwrap();
+        assert!(libc::WIFSIGNALED(killed));
+        assert_eq!(libc::WTERMSIG(killed), libc::SIGKILL);
+
+        scheduler.wait_for_one_child_and_handle().unwrap();
+        assert!(scheduler.pid_to_node.is_empty());
+        assert!(scheduler.outputs.is_empty());
+        let ProverReportNode::Task {
+            outcome,
+            stdout,
+            stderr,
+            ..
+        } = scheduler.build_report_node(scheduler.root)
+        else {
+            panic!("expected a task report");
+        };
+        assert_eq!(
+            outcome,
+            Some(TaskOutcome::Indefinite {
+                reason: IndefiniteReason::GroupCriteriaAlreadyMet,
+            })
+        );
+        assert_eq!(stdout.as_deref(), Some("task stdout\n"));
+        assert_eq!(stderr.as_deref(), Some("task stderr\n"));
+    }
 }
