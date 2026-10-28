@@ -25,6 +25,20 @@ pub enum IndefiniteReason {
     ProcessFailure,
 }
 
+impl IndefiniteReason {
+    /// Whether this reason indicates a failure to execute or report a proof.
+    pub(crate) fn is_execution_error(self) -> bool {
+        match self {
+            Self::ExecutionError | Self::ProtocolError | Self::ProcessFailure => true,
+            Self::GroupCriteriaAlreadyMet
+            | Self::IndefiniteChildren
+            | Self::Timeout
+            | Self::Cleanup
+            | Self::Inconclusive => false,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// A task's definite proof result or reason for an indefinite result.
 pub enum TaskOutcome {
@@ -39,12 +53,9 @@ impl TaskOutcome {
         match self {
             Self::Normal { success: true } => ProofStatus::Proved,
             Self::Normal { success: false } => ProofStatus::Disproved,
-            Self::Indefinite {
-                reason:
-                    IndefiniteReason::ExecutionError
-                    | IndefiniteReason::ProtocolError
-                    | IndefiniteReason::ProcessFailure,
-            } => ProofStatus::ExecutionError,
+            Self::Indefinite { reason } if reason.is_execution_error() => {
+                ProofStatus::ExecutionError
+            }
             Self::Indefinite { .. } => ProofStatus::Inconclusive,
         }
     }
@@ -148,30 +159,21 @@ impl ProverReportNode {
     /// Returns the resolved logical result, preserving errors in unresolved
     /// groups.
     pub fn proof_status(&self) -> ProofStatus {
-        match self {
-            Self::Task { outcome, .. } => outcome
-                .map(|o| o.proof_status())
-                .unwrap_or(ProofStatus::Inconclusive),
-            Self::Group {
-                outcome: Some(TaskOutcome::Normal { success }),
-                ..
-            } => {
-                if *success {
-                    ProofStatus::Proved
-                } else {
-                    ProofStatus::Disproved
-                }
-            }
-            Self::Group { tasks, .. } => {
-                if tasks
-                    .iter()
-                    .any(|t| t.proof_status() == ProofStatus::ExecutionError)
-                {
-                    ProofStatus::ExecutionError
-                } else {
-                    ProofStatus::Inconclusive
-                }
-            }
+        let (outcome, children) = match self {
+            Self::Task { outcome, .. } => (outcome, &[][..]),
+            Self::Group { outcome, tasks, .. } => (outcome, tasks.as_slice()),
+        };
+        let status = outcome
+            .map(|o| o.proof_status())
+            .unwrap_or(ProofStatus::Inconclusive);
+        if status == ProofStatus::Inconclusive
+            && children
+                .iter()
+                .any(|child| child.proof_status() == ProofStatus::ExecutionError)
+        {
+            ProofStatus::ExecutionError
+        } else {
+            status
         }
     }
 
@@ -221,5 +223,42 @@ impl Serialize for ProverReport {
             plan: &self.plan,
         }
         .serialize(serializer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_setup_error_is_preserved_when_children_have_no_outcome() {
+        let report = ProverReport {
+            plan: ProverReportNode::Group {
+                kind: GroupKind::All,
+                outcome: Some(ProofStatus::ExecutionError.into()),
+                tasks: vec![ProverReportNode::Task {
+                    task_id: Some("root".into()),
+                    cmdline: None,
+                    outcome: None,
+                    stdout: None,
+                    stderr: None,
+                }],
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(report).unwrap(),
+            serde_json::json!({
+                "status": "execution-error",
+                "success": false,
+                "plan": {
+                    "kind": "all",
+                    "outcome": "ExecutionError",
+                    "tasks": [{
+                        "task_id": "root", "cmdline": null, "outcome": null,
+                        "stdout": null, "stderr": null
+                    }]
+                }
+            })
+        );
     }
 }

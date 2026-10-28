@@ -8808,7 +8808,7 @@ fn main(x: u8) -> u8 { x }
                 "indefinite": [],
                 "rolled_back": [],
                 "unresolved": [["root"]],
-                "root_disproved": false
+                "root_disproved": false, "has_execution_error": false
             }
         })
     );
@@ -9177,7 +9177,7 @@ fn main(x: u8) -> u8 { helper(x) }
                 "indefinite": [],
                 "rolled_back": [],
                 "unresolved": unresolved,
-                "root_disproved": false
+                "root_disproved": false, "has_execution_error": false
             }
         })
     );

@@ -53,7 +53,11 @@ legacy reports with the current engine instead of adding a default value.
 `root_disproved` records a counterexample to the surviving root, including one
 found in an earlier call. `ScriptReport::proof_status()` preserves that conclusion
 across empty follow-up calls; failed decomposition children only justify rollback,
-not a root disproof. Reports require this field as well as `unresolved`.
+not a root disproof. `has_execution_error` records whether any surviving leaf's
+latest attempt ended in an execution error. Retrying that leaf replaces its
+result. A rollback discards the children and reopens their parent as unproved.
+The attempt logs describe only the current call. Reports require both fields
+as well as `unresolved`.
 
 Nested `Focus` and `Cosliced` decompositions allocate fresh solver symbols
 against both sides' inherited mappings. Distinct function pairs must retain

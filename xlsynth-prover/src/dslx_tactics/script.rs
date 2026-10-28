@@ -31,7 +31,9 @@ fn selector_to_path(sel: &Selector) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
     Open,
-    Pending,
+    /// The last attempt did not decide the obligation; a missing result has no
+    /// reason.
+    Pending(Option<IndefiniteReason>),
     Solved,
     Failed,
 }
@@ -181,18 +183,21 @@ fn collect_solve_targets(node: &OblNode, out: &mut Vec<(Selector, ProverObligati
     }
 }
 
-/// Collects unproved leaves from the surviving tree in deterministic tree
-/// order.
-fn collect_unresolved(node: &OblNode, out: &mut Vec<Selector>) {
+/// Records unproved leaves and outstanding execution errors in the surviving
+/// tree.
+fn collect_unresolved(node: &OblNode, report: &mut ScriptReport) {
     match &node.kind {
         NodeKind::Leaf(_) => {
             if node.status != NodeStatus::Solved {
-                out.push(node.selector.clone());
+                report.unresolved.push(node.selector.clone());
+            }
+            if let NodeStatus::Pending(Some(reason)) = node.status {
+                report.has_execution_error |= reason.is_execution_error();
             }
         }
         NodeKind::Internal { children, .. } => {
             for child in children {
-                collect_unresolved(child, out);
+                collect_unresolved(child, report);
             }
         }
     }
@@ -278,7 +283,8 @@ fn update_from_outcome(
         node.status = match status {
             Some(TaskSimple::Success) => NodeStatus::Solved,
             Some(TaskSimple::Failure) => NodeStatus::Failed,
-            Some(TaskSimple::Indefinite(_)) | None => NodeStatus::Pending,
+            Some(TaskSimple::Indefinite(reason)) => NodeStatus::Pending(Some(reason)),
+            None => NodeStatus::Pending(None),
         };
     }
     match status {
@@ -361,6 +367,8 @@ pub struct ScriptReport {
     /// Whether the surviving root leaf is disproved, including prior calls.
     /// Failed decomposition children are not counterexamples to the root.
     pub root_disproved: bool,
+    /// Whether a surviving leaf's latest attempt ended in an execution error.
+    pub has_execution_error: bool,
 }
 
 /// Final tactic report together with the subprocess output for the selected
@@ -396,16 +404,7 @@ impl ScriptReport {
             ProofStatus::Proved
         } else if self.root_disproved {
             ProofStatus::Disproved
-        } else if self.indefinite.iter().any(|entry| {
-            matches!(
-                entry.reason,
-                Some(
-                    IndefiniteReason::ExecutionError
-                        | IndefiniteReason::ProtocolError
-                        | IndefiniteReason::ProcessFailure
-                )
-            )
-        }) {
+        } else if self.has_execution_error {
             ProofStatus::ExecutionError
         } else {
             ProofStatus::Inconclusive
@@ -416,6 +415,7 @@ impl ScriptReport {
     /// tasks.
     pub fn is_complete(&self) -> bool {
         !self.root_disproved
+            && !self.has_execution_error
             && self.unresolved.is_empty()
             && self.failed.is_empty()
             && self.indefinite.is_empty()
@@ -535,7 +535,7 @@ pub(super) fn run_script(
 
     // Outcomes for discarded children remain useful attempt history, but only
     // the surviving tree determines which obligations still need proof.
-    collect_unresolved(&tree.root, &mut completion.unresolved);
+    collect_unresolved(&tree.root, &mut completion);
     completion.root_disproved =
         matches!(tree.root.kind, NodeKind::Leaf(_)) && tree.root.status == NodeStatus::Failed;
     Ok(ScriptExecution {
@@ -931,8 +931,9 @@ fn b(x: u8) -> u8 { !a(x) }
         );
     }
 
-    #[test]
-    fn rollback_stays_incomplete_after_discarded_sibling_succeeds() {
+    #[test_case(ProofStatus::Proved; "discarded_sibling_proved")]
+    #[test_case(ProofStatus::ExecutionError; "discarded_sibling_execution_error")]
+    fn rollback_classifies_the_restored_root(sibling_status: ProofStatus) {
         let mut tree = OblTree::new(base_obligation(), base_config());
         execute_script(
             &mut tree,
@@ -951,16 +952,19 @@ fn b(x: u8) -> u8 { !a(x) }
             plan: ProverReportNode::Group {
                 kind: GroupKind::All,
                 outcome: Some(TaskOutcome::Normal { success: false }),
-                tasks: [("root/pair_1", false), ("root/skeleton", true)]
-                    .into_iter()
-                    .map(|(path, success)| ProverReportNode::Task {
-                        task_id: Some(path.to_string()),
-                        cmdline: None,
-                        outcome: Some(TaskOutcome::Normal { success }),
-                        stdout: None,
-                        stderr: None,
-                    })
-                    .collect(),
+                tasks: [
+                    ("root/pair_1", ProofStatus::Disproved),
+                    ("root/skeleton", sibling_status),
+                ]
+                .into_iter()
+                .map(|(path, status)| ProverReportNode::Task {
+                    task_id: Some(path.to_string()),
+                    cmdline: None,
+                    outcome: Some(status.into()),
+                    stdout: None,
+                    stderr: None,
+                })
+                .collect(),
             },
         };
         let attempted = execute_script_with_runner(
@@ -978,15 +982,25 @@ fn b(x: u8) -> u8 { !a(x) }
             |_, _| Ok(report),
         )
         .unwrap();
-        assert_eq!(attempted.solved, vec![sel(&["root", "skeleton"])]);
+        if sibling_status == ProofStatus::Proved {
+            assert_eq!(attempted.solved, vec![sel(&["root", "skeleton"])]);
+        } else {
+            assert_eq!(attempted.indefinite.len(), 1);
+            assert_eq!(
+                attempted.indefinite[0].reason,
+                Some(IndefiniteReason::ExecutionError)
+            );
+        }
+        assert_eq!(attempted.proof_status(), ProofStatus::Inconclusive);
         assert_eq!(attempted.rolled_back.len(), 1);
         assert_eq!(attempted.rolled_back[0].selector, root_selector());
 
         // A later report has no failed attempts, but the restored root still
-        // needs proof; the discarded sibling's success cannot discharge it.
+        // needs proof, regardless of the discarded sibling's result.
         let completion = execute_script(&mut tree, &[]).unwrap();
         assert!(completion.failed.is_empty());
         assert!(!completion.is_complete());
+        assert_eq!(completion.proof_status(), ProofStatus::Inconclusive);
         assert_eq!(completion.unresolved, vec![root_selector()]);
     }
 
@@ -1007,6 +1021,9 @@ fn b(x: u8) -> u8 { !a(x) }
         let error = serde_json::from_value::<ScriptReport>(encoded.clone()).unwrap_err();
         assert_eq!(error.to_string(), "missing field `root_disproved`");
         encoded["root_disproved"] = serde_json::json!(false);
+        let error = serde_json::from_value::<ScriptReport>(encoded.clone()).unwrap_err();
+        assert_eq!(error.to_string(), "missing field `has_execution_error`");
+        encoded["has_execution_error"] = serde_json::json!(false);
         let pending = serde_json::from_value::<ScriptReport>(encoded.clone()).unwrap();
         assert!(!pending.is_complete());
         assert_eq!(pending.unresolved, vec![root_selector()]);
@@ -1037,7 +1054,7 @@ fn b(x: u8) -> u8 { !a(x) }
             |_, _| Ok(report),
         )
         .unwrap();
-        assert_eq!(tree.root.status, NodeStatus::Pending);
+        assert_eq!(tree.root.status, NodeStatus::Pending(None));
         assert!(completion.failed.is_empty());
         assert!(completion.indefinite.is_empty());
         assert!(!completion.is_complete());
@@ -1059,7 +1076,7 @@ fn b(x: u8) -> u8 { !a(x) }
                 "indefinite": [],
                 "rolled_back": [],
                 "unresolved": [["root"]],
-                "root_disproved": false
+                "root_disproved": false, "has_execution_error": false
             })
         );
     }
@@ -1116,13 +1133,16 @@ fn b(x: u8) -> u8 { !a(x) }
         assert_eq!(retried.solved, vec![root_selector()]);
     }
 
-    #[test_case(Some(TaskOutcome::Normal { success: true }), NodeStatus::Solved; "success")]
-    #[test_case(Some(TaskOutcome::Normal { success: false }), NodeStatus::Failed; "failure")]
-    #[test_case(Some(TaskOutcome::Indefinite { reason: IndefiniteReason::Timeout }), NodeStatus::Pending; "indefinite")]
-    #[test_case(None, NodeStatus::Pending; "missing")]
+    #[test_case(Some(TaskOutcome::Normal { success: true }), ProofStatus::Proved; "success")]
+    #[test_case(Some(TaskOutcome::Normal { success: false }), ProofStatus::Disproved; "failure")]
+    #[test_case(Some(TaskOutcome::Indefinite { reason: IndefiniteReason::Timeout }), ProofStatus::Inconclusive; "timeout")]
+    #[test_case(Some(TaskOutcome::Indefinite { reason: IndefiniteReason::ExecutionError }), ProofStatus::ExecutionError; "execution_error")]
+    #[test_case(Some(TaskOutcome::Indefinite { reason: IndefiniteReason::ProtocolError }), ProofStatus::ExecutionError; "protocol_error")]
+    #[test_case(Some(TaskOutcome::Indefinite { reason: IndefiniteReason::ProcessFailure }), ProofStatus::ExecutionError; "process_failure")]
+    #[test_case(None, ProofStatus::Inconclusive; "missing")]
     fn accepted_results_consume_selections_until_explicit_solve(
         outcome: Option<TaskOutcome>,
-        expected_status: NodeStatus,
+        expected_status: ProofStatus,
     ) {
         let mut tree = OblTree::new(base_obligation(), base_config());
         let solve = [ScriptStep {
@@ -1148,13 +1168,12 @@ fn b(x: u8) -> u8 { !a(x) }
             })
         })
         .unwrap();
-        assert_eq!(tree.root.status, expected_status);
+        assert_eq!(first.proof_status(), expected_status);
 
         let unchanged = execute_script_with_runner(&mut tree, &[], |_, _| {
             panic!("accepted requests must not be resubmitted by an empty followup")
         })
         .unwrap();
-        assert_eq!(tree.root.status, expected_status);
         assert_eq!(unchanged.is_complete(), first.is_complete());
         assert_eq!(unchanged.proof_status(), first.proof_status());
         let roundtrip: ScriptReport =
@@ -1223,7 +1242,7 @@ fn b(x: u8) -> u8 { !a(x) }
             },
         )
         .unwrap();
-        assert_eq!(tree.root.status, NodeStatus::Pending);
+        assert_eq!(tree.root.status, NodeStatus::Pending(None));
         assert_eq!(
             execution.task_report.as_ref().unwrap().plan.proof_status(),
             ProofStatus::Proved
@@ -1233,7 +1252,7 @@ fn b(x: u8) -> u8 { !a(x) }
             serde_json::json!({
                 "status": "inconclusive", "success": false,
                 "report": {
-                    "unresolved": [["root"]], "root_disproved": false,
+                    "unresolved": [["root"]], "root_disproved": false, "has_execution_error": false,
                     "solved": [], "indefinite": [], "failed": [], "rolled_back": []
                 }
             })
@@ -1286,7 +1305,7 @@ fn b(x: u8) -> u8 { !a(x) }
                 "indefinite": if indefinite { log } else { serde_json::json!([]) },
                 "rolled_back": [],
                 "unresolved": [["root"]],
-                "root_disproved": !indefinite
+                "root_disproved": !indefinite, "has_execution_error": false
             })
         );
     }
@@ -1399,7 +1418,7 @@ fn b(x: u8) -> u8 { !a(x) }
             match n.status {
                 NodeStatus::Solved => solved.push(n.selector.clone()),
                 NodeStatus::Failed => failed.push(n.selector.clone()),
-                NodeStatus::Pending => pending.push(n.selector.clone()),
+                NodeStatus::Pending(_) => pending.push(n.selector.clone()),
                 NodeStatus::Open => {
                     // Internal nodes retain their original status after their
                     // children are proved; only leaf completion matters.

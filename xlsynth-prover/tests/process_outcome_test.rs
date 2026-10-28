@@ -21,7 +21,9 @@ use xlsynth_prover::dslx_tactics::tactics::Tactic;
 use xlsynth_prover::dslx_tactics::tactics::focus::{FocusPair, FocusTactic};
 use xlsynth_prover::proof_outcome::ProofStatus;
 use xlsynth_prover::proof_plan::config::{GroupKind, IrEquivConfig, ProverPlan, ProverTask};
-use xlsynth_prover::proof_plan::report::{IndefiniteReason, ProverReportNode, TaskOutcome};
+use xlsynth_prover::proof_plan::report::{
+    IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome,
+};
 use xlsynth_prover::proof_plan::scheduler::run_prover_plan_with_driver;
 
 /// An executable fixture whose lifetime includes all of its scheduled tasks.
@@ -378,7 +380,7 @@ fn process_outcomes_only_roll_back_actual_child_disproofs(
     if let Some(reason) = expected_reason {
         assert!(report.failed.is_empty());
         assert!(report.rolled_back.is_empty());
-        assert_eq!(report.solved, vec![skeleton]);
+        assert_eq!(report.solved, vec![skeleton.clone()]);
         assert_eq!(report.unresolved, vec![pair.clone()]);
         assert_eq!(report.indefinite.len(), 1);
         assert_eq!(report.indefinite[0].selector, pair);
@@ -401,9 +403,30 @@ fn process_outcomes_only_roll_back_actual_child_disproofs(
         let NodeKind::Internal { children, .. } = &tree.root.kind else {
             panic!("infrastructure failures must retain the decomposition");
         };
-        assert_eq!(children[0].status, NodeStatus::Pending);
+        assert_eq!(children[0].status, NodeStatus::Pending(Some(reason)));
         assert!(!children[0].solve);
         assert_eq!(children[1].status, NodeStatus::Solved);
+
+        // A later successful batch for the sibling cannot clear the pair's last
+        // error.
+        let followup = execute_script_with_runner(&mut tree, &steps[2..], |targets, _| {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].0, "root/skeleton");
+            Ok(ProverReport {
+                plan: ProverReportNode::Task {
+                    task_id: Some(targets[0].0.clone()),
+                    cmdline: None,
+                    outcome: Some(ProofStatus::Proved.into()),
+                    stdout: None,
+                    stderr: None,
+                },
+            })
+        })
+        .unwrap();
+        assert_eq!(followup.solved, vec![skeleton]);
+        assert!(followup.indefinite.is_empty());
+        assert_eq!(followup.unresolved, vec![pair]);
+        assert_eq!(followup.proof_status(), report.proof_status());
     } else {
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].selector, pair);
