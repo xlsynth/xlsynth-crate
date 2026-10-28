@@ -347,6 +347,10 @@ pub struct ScriptReport {
     pub rolled_back: Vec<RollbackEntry>,
     /// Final leaves that are not proved, including unselected and reopened
     /// leaves.
+    ///
+    /// Required during deserialization. Legacy reports without this field are
+    /// intentionally unsupported: absence means completion is unknown, while an
+    /// empty list asserts that no unproved leaves remain. Do not default it.
     pub unresolved: Vec<Selector>,
 }
 
@@ -901,6 +905,29 @@ fn b(x: u8) -> u8 { !a(x) }
         assert!(completion.failed.is_empty());
         assert!(!completion.is_complete());
         assert_eq!(completion.unresolved, vec![root_selector()]);
+    }
+
+    #[test]
+    fn report_deserialization_requires_explicit_completion_information() {
+        // An old empty-script report records no attempts, even though its root
+        // still needs proof. It must not decode as a completed proof.
+        let mut encoded = serde_json::json!({
+            "solved": [],
+            "indefinite": [],
+            "failed": [],
+            "rolled_back": []
+        });
+        let error = serde_json::from_value::<ScriptReport>(encoded.clone()).unwrap_err();
+        assert_eq!(error.to_string(), "missing field `unresolved`");
+
+        encoded["unresolved"] = serde_json::json!([["root"]]);
+        let pending = serde_json::from_value::<ScriptReport>(encoded.clone()).unwrap();
+        assert!(!pending.is_complete());
+        assert_eq!(pending.unresolved, vec![root_selector()]);
+
+        encoded["unresolved"] = serde_json::json!([]);
+        let complete = serde_json::from_value::<ScriptReport>(encoded).unwrap();
+        assert!(complete.is_complete());
     }
 
     #[test]

@@ -26,6 +26,13 @@ follow-up script reports the existing proof state; explicitly select `Solve`
 again to retry an obligation. Runner errors or invalid result IDs leave requests
 queued for retry.
 
+Persisted tactic reports do not have a backward-compatibility guarantee.
+Deserializing a `ScriptReport` requires an explicit `unresolved` field; reports
+from older versions without it are intentionally rejected. Missing completion
+information cannot be interpreted as an empty list of unproved obligations:
+even an old empty-script report could otherwise appear complete. Regenerate
+legacy reports with the current engine instead of adding a default value.
+
 Nested `Focus` and `Cosliced` decompositions allocate fresh solver symbols
 against both sides' inherited mappings. Distinct function pairs must retain
 independent symbols; accidentally sharing one can produce a false proof.
