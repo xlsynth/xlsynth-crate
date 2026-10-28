@@ -7,8 +7,8 @@
 //! evaluates it using a function proved equivalent to Lean's stock AIG
 //! semantics.
 //!
-//! [`block`] separately exports stateful block models, with optional source
-//! names and typed representations, as Lean source text.
+//! [`block`] emits transition equations from block IR. For stateful DSLX
+//! functions it also emits a typed interface and a proof relating the models.
 
 pub mod block;
 

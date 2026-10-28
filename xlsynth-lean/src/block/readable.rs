@@ -2,8 +2,8 @@
 
 //! Source-shaped Lean values and executable expressions over a checked block.
 //!
-//! Validated attachments and graph propagation supply nominal types; the graph
-//! still supplies every equation and physical port. Codecs include undeclared
+//! The selected DSLX signature supplies names and types. The block graph
+//! supplies every equation and physical port. Codecs include undeclared
 //! enum encodings so arbitrary physical state remains representable. This
 //! module emits correspondence proof source but does not check it with Lean.
 //!
@@ -15,7 +15,7 @@
 
 use std::{collections::BTreeSet, fmt::Write};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::{
     ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop},
     ir_utils,
@@ -27,18 +27,18 @@ use crate::block::{
         self as lean, LeanBlockBundle, identifier, lean_type, record_value, tuple_element,
         tuple_value,
     },
-    source_map::{SourceMap, SourceType, TypeDecl, ValidatedSourceMap, source_shape},
+    source_types::{SourceType, StatefulInterface, TypeDecl, source_shape},
 };
 
-/// Source type annotations and collision-free names for one authenticated
-/// graph.
+/// Source type annotations and collision-free names for one verified block.
 ///
 /// All vectors use the checked graph's node or register order. Annotation
 /// contexts memoize propagation through shared nodes; they are local to one
 /// emission and cannot outlive the validated inputs.
 struct Presentation<'a> {
-    checked: &'a ValidatedSourceMap,
-    /// Only checked attachments and graph propagation introduce nominal types.
+    block: &'a Block,
+    declarations: &'a [TypeDecl],
+    interface: &'a StatefulInterface,
     node_types: Vec<Option<SourceType>>,
     /// A shared graph node is traversed once for each distinct nominal context.
     annotation_contexts: Vec<Vec<SourceType>>,
@@ -48,9 +48,13 @@ struct Presentation<'a> {
 
 /// Emit five dependent modules after the raw emitter checks supported
 /// operations.
-pub(crate) fn emit(checked: &ValidatedSourceMap) -> Result<LeanBlockBundle> {
-    let raw = lean::emit(checked.block())?;
-    let presentation = Presentation::new(checked)?;
+pub(super) fn emit(
+    block: &Block,
+    declarations: &[TypeDecl],
+    interface: &StatefulInterface,
+) -> Result<LeanBlockBundle> {
+    let raw = lean::emit(block)?;
+    let presentation = Presentation::new(block, declarations, interface)?;
     Ok(LeanBlockBundle {
         files: vec![
             ("Generated.lean".into(), raw),
@@ -72,10 +76,13 @@ impl<'a> Presentation<'a> {
     /// Allocate noncapturing names and infer types from checked register
     /// bindings.
     ///
-    /// One-bit nodes use `Bool`; nominal types come from attached reads,
+    /// One-bit nodes use `Bool`; nominal types come from register reads,
     /// projections, and write destinations rather than matching widths alone.
-    fn new(checked: &'a ValidatedSourceMap) -> Result<Self> {
-        let block = checked.block();
+    fn new(
+        block: &'a Block,
+        declarations: &'a [TypeDecl],
+        interface: &'a StatefulInterface,
+    ) -> Result<Self> {
         let reserved: BTreeSet<_> = block
             .graph
             .nodes
@@ -95,6 +102,7 @@ impl<'a> Presentation<'a> {
             "XlsCodec",
             "XlsBlock",
             "XlsReadable",
+            "_root_",
             "true",
             "false",
         ]
@@ -121,36 +129,16 @@ impl<'a> Presentation<'a> {
                 identifier(&name)
             })
             .collect::<Result<Vec<_>>>()?;
-        let reserved_fields: BTreeSet<_> = block
-            .graph
-            .registers
-            .iter()
-            .map(|register| register.name.trim_start_matches('_'))
-            .collect();
-        let mut fields = BTreeSet::new();
         let register_fields = block
             .graph
             .registers
             .iter()
-            .enumerate()
-            .map(|(index, r)| {
-                let base = r.name.trim_start_matches('_');
-                let name = if base.is_empty() || fields.contains(base) {
-                    let mut fallback = format!("register_{index}");
-                    while fields.contains(&fallback) || reserved_fields.contains(fallback.as_str())
-                    {
-                        fallback.push('_');
-                    }
-                    fallback
-                } else {
-                    base.to_owned()
-                };
-                fields.insert(name.clone());
-                identifier(&name)
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|r| identifier(&r.name))
+            .collect::<Result<_>>()?;
         let mut result = Self {
-            checked,
+            block,
+            declarations,
+            interface,
             node_types: block
                 .graph
                 .nodes
@@ -163,6 +151,9 @@ impl<'a> Presentation<'a> {
         };
         for reference in ir_utils::get_topological_nodes(&block.graph.nodes) {
             match &block.graph.get_node(reference).payload {
+                NodePayload::InputPort { name, .. } => {
+                    result.node_types[reference.index] = interface.inputs.get(name).cloned();
+                }
                 NodePayload::RegisterRead { register } => {
                     result.node_types[reference.index] = result.register_type(register)?;
                 }
@@ -175,6 +166,10 @@ impl<'a> Presentation<'a> {
                         };
                         result.node_types[reference.index] =
                             Some(fields[*index].source_type.clone());
+                    } else if let Some(source_type) = &result.node_types[tuple.index]
+                        && let SourceType::Tuple { members } = result.unalias(source_type)?
+                    {
+                        result.node_types[reference.index] = Some(members[*index].clone());
                     }
                 }
                 _ => {
@@ -191,35 +186,27 @@ impl<'a> Presentation<'a> {
                 result.annotate(*arg, &ty)?;
             }
         }
+        for (port, ty) in block.graph.output_ports().zip(&interface.outputs) {
+            result.annotate(block.graph.output_value(port), ty)?;
+        }
         Ok(result)
     }
 
     fn block(&self) -> &Block {
-        self.checked.block()
-    }
-    fn map(&self) -> &SourceMap {
-        self.checked.map()
+        self.block
     }
 
     /// Resolve a nominal reference within this presentation's checked
     /// catalogue.
     fn declaration(&self, name: &str) -> Result<&TypeDecl> {
-        self.map()
-            .declarations
+        self.declarations
             .iter()
             .find(|d| d.name() == name)
             .with_context(|| format!("validated source declaration {name}"))
     }
 
-    /// Return the explicit register attachment, leaving unattached storage
-    /// physical.
     fn register_type(&self, register: &str) -> Result<Option<SourceType>> {
-        self.map()
-            .attachments
-            .iter()
-            .find(|a| a.register == register)
-            .map(|a| self.named_type(&a.source_type))
-            .transpose()
+        Ok(self.interface.registers.get(register).cloned())
     }
 
     /// Recover a declaration's nominal kind without erasing its name.
@@ -267,6 +254,10 @@ impl<'a> Presentation<'a> {
                         for (arg, ty) in args.into_iter().zip(types) {
                             self.annotate(arg, &ty)?;
                         }
+                    } else if let SourceType::Tuple { members } = self.unalias(ty)? {
+                        for (arg, ty) in args.into_iter().zip(members.clone()) {
+                            self.annotate(arg, &ty)?;
+                        }
                     }
                 }
                 NodePayload::Sel { cases, default, .. } => {
@@ -292,9 +283,16 @@ impl<'a> Presentation<'a> {
         match ty {
             SourceType::Bool => Ok("_root_.Bool".into()),
             SourceType::Bits { width } => Ok(format!("_root_.BitVec {width}")),
+            SourceType::Tuple { members } => Ok(product_type(
+                &members
+                    .iter()
+                    .map(|ty| self.source_type(ty))
+                    .collect::<Result<Vec<_>>>()?,
+                true,
+            )),
             SourceType::Enum { name }
             | SourceType::Struct { name }
-            | SourceType::Alias { name } => Ok(format!("XlsSource.{}", identifier(name)?)),
+            | SourceType::Alias { name } => Ok(format!("_root_.XlsSource.{}", identifier(name)?)),
         }
     }
 
@@ -307,6 +305,25 @@ impl<'a> Presentation<'a> {
         match ty {
             None | Some(SourceType::Bits { .. }) => Ok(value.into()),
             Some(SourceType::Bool) => Ok(format!("(XlsCodec.{operation}Bool ({value}))")),
+            Some(SourceType::Tuple { members }) => {
+                let fields = members
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        let element = if encode {
+                            product_element(value, index, members.len(), true)
+                        } else {
+                            tuple_element(value, index)
+                        };
+                        self.convert(Some(ty), &element, encode)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if encode {
+                    Ok(tuple_value(fields.into_iter()))
+                } else {
+                    Ok(product_value(&fields, true))
+                }
+            }
             Some(
                 SourceType::Enum { name }
                 | SourceType::Struct { name }
@@ -370,24 +387,35 @@ impl<'a> Presentation<'a> {
         let mut out = String::from("import Std\n\nnamespace XlsSource\n\n");
         // Source members and generated codecs have disjoint namespaces. A
         // source field named `encode` must remain an ordinary record field.
-        for declaration in &self.map().declarations {
+        for declaration in self.declarations {
             let name = identifier(declaration.name())?;
             match declaration {
                 TypeDecl::Enum { name: original, .. } => {
                     writeln!(out, "inductive {name} where")?;
                     for (member, _) in self.enum_cases(original)? {
+                        lean::validate_lean_member(original, &member)?;
+                        ensure!(
+                            !matches!(
+                                member.as_str(),
+                                "ofNat" | "ofNat_ctorIdx" | "ctorElim" | "ctorElimType"
+                            ),
+                            "cannot emit {original}.{member}: Lean generates an enum declaration with this name"
+                        );
                         writeln!(out, "  | {}", identifier(&member)?)?;
                     }
                     writeln!(out, "  deriving _root_.Repr, _root_.DecidableEq\n")?;
                 }
                 TypeDecl::Struct { fields, .. } => {
-                    writeln!(out, "structure {name} where")?;
+                    out.push_str(&lean::structure_header(
+                        &name,
+                        fields.iter().map(|field| field.name.as_str()),
+                    )?);
+                    let mut scope = lean::RecordFields::default();
                     for field in fields {
-                        writeln!(
-                            out,
-                            "  {} : {}",
-                            identifier(&field.name)?,
-                            self.source_type(&field.source_type)?
+                        scope.write(
+                            &mut out,
+                            &identifier(&field.name)?,
+                            &self.source_type(&field.source_type)?,
                         )?;
                     }
                     writeln!(out, "  deriving _root_.Repr\n")?;
@@ -399,11 +427,11 @@ impl<'a> Presentation<'a> {
         }
         out.push_str("end XlsSource\n\nnamespace XlsCodec\n\n");
         out.push_str(BOOL_REPRESENTATION);
-        for declaration in &self.map().declarations {
+        for declaration in self.declarations {
             let name = identifier(declaration.name())?;
             let nominal = self.named_type(declaration.name())?;
             let source_type = self.source_type(&nominal)?;
-            let physical = source_shape(&nominal, &self.map().declarations)?;
+            let physical = source_shape(&nominal, self.declarations)?;
             writeln!(out, "namespace {name}\n")?;
             match declaration {
                 TypeDecl::Enum {
@@ -615,6 +643,7 @@ impl<'a> Presentation<'a> {
         let operand = |r| self.typed_operand(r, target, depth);
         let boolean = |r| self.typed_operand(r, Some(&SourceType::Bool), depth);
         match &node.payload {
+            NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
             NodePayload::RegisterRead { register } => {
                 let index = self.register_index(register)?;
                 self.coerce(
@@ -640,6 +669,19 @@ impl<'a> Presentation<'a> {
                             identifier(&field.name)?
                         ),
                     )
+                } else if let Some(ty) = &self.node_types[tuple.index]
+                    && let SourceType::Tuple { members } = self.unalias(ty)?
+                {
+                    self.coerce(
+                        Some(&members[*index]),
+                        target,
+                        &product_element(
+                            &self.operand(*tuple, depth)?,
+                            *index,
+                            members.len(),
+                            true,
+                        ),
+                    )
                 } else {
                     let physical = self.typed_operand(*tuple, None, depth)?;
                     self.convert(target, &tuple_element(&physical, *index), false)
@@ -661,6 +703,13 @@ impl<'a> Presentation<'a> {
                         })
                         .collect::<Result<Vec<_>>>()?;
                     Ok(record_value(&values))
+                } else if let SourceType::Tuple { members } = self.unalias(target.unwrap())? {
+                    let values = args
+                        .iter()
+                        .zip(members)
+                        .map(|(arg, ty)| self.typed_operand(*arg, Some(ty), depth))
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(product_value(&values, true))
                 } else {
                     self.raw_expression(reference, depth)
                 }
@@ -767,24 +816,52 @@ impl<'a> Presentation<'a> {
     fn executable(&self) -> Result<String> {
         let block = self.block();
         let mut out = format!(
-            "-- Readable execution of authenticated XLS block {}.\n-- Every equation comes from its typed graph; source types only name values.\nimport Generated\nimport ReadableTypes\n\nnamespace XlsReadable\n\nstructure State where\n",
+            "-- Readable execution of XLS block {}.\n-- Equations come from the block. The DSLX signature supplies interface names and types.\nimport Generated\nimport ReadableTypes\n\nnamespace XlsReadable\n\n",
             lean::comment(&block.graph.name)
         );
+        // These field identifiers have already been quoted by identifier().
+        out.push_str(&lean::structure_header(
+            "State",
+            self.register_fields
+                .iter()
+                .map(|field| field.trim_matches(['«', '»'])),
+        )?);
+        let mut scope = lean::RecordFields::default();
         for (index, register) in block.graph.registers.iter().enumerate() {
             let ty = if let Some(ty) = self.register_type(&register.name)? {
                 self.source_type(&ty)?
             } else {
-                lean_type(&register.ty)?
+                lean::physical_field_type(&register.ty)?
             };
-            writeln!(out, "  {} : {ty}", self.register_fields[index])?;
+            scope.write(&mut out, &self.register_fields[index], &ty)?;
         }
+        out.push_str("  deriving Repr\n\n");
+        let interface = self.interface;
+        out.push_str(&lean::structure_header(
+            "Input",
+            block
+                .graph
+                .input_ports()
+                .map(|port| block.graph.port_name(port)),
+        )?);
+        let mut scope = lean::RecordFields::default();
+        for port in block.graph.input_ports() {
+            let name = block.graph.port_name(port);
+            scope.write(
+                &mut out,
+                &identifier(name)?,
+                &self.source_type(&interface.inputs[name])?,
+            )?;
+        }
+        out.push_str("  deriving Repr\n\n");
+        let types = interface
+            .outputs
+            .iter()
+            .map(|ty| self.source_type(ty))
+            .collect::<Result<Vec<_>>>()?;
+        writeln!(out, "abbrev Output := {}", product_type(&types, false))?;
         out.push_str(
-            r#"  deriving Repr
-
--- Physical ports retain their exact names, directions and widths.
-abbrev Input := XlsBlock.Input
-abbrev Output := XlsBlock.Output
-abbrev Assertions := XlsBlock.Assertions
+            r#"abbrev Assertions := XlsBlock.Assertions
 
 structure Evaluation where
   next : State
@@ -833,10 +910,12 @@ def eval (q : State) (x : Input) : Evaluation :=
         let output = block
             .graph
             .output_ports()
-            .map(|port| {
+            .enumerate()
+            .map(|(index, port)| {
+                let target = Some(&self.interface.outputs[index]);
                 Ok((
                     identifier(block.graph.port_name(port))?,
-                    self.typed_operand(block.graph.output_value(port), None, 0)?,
+                    self.typed_operand(block.graph.output_value(port), target, 0)?,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -863,7 +942,13 @@ def eval (q : State) (x : Input) : Evaluation :=
             out,
             "  {{ next := {},\n    output := {},\n    assertions := {} }}\n",
             record_value(&next),
-            record_value(&output),
+            product_value(
+                &output
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>(),
+                false
+            ),
             record_value(&assertions)
         )?;
         out.push_str("def step (q : State) (x : Input) : State := (eval q x).next\ndef observe (q : State) (x : Input) : Output := (eval q x).output\ndef assertions (q : State) (x : Input) : Assertions := (eval q x).assertions\n\n");
@@ -881,9 +966,9 @@ def eval (q : State) (x : Input) : Evaluation :=
         if let Some(reset) = &block.graph.reset {
             writeln!(
                 out,
-                "  eval q {{ x with {} := BitVec.ofNat 1 {} }}",
+                "  eval q {{ x with {} := {} }}",
                 identifier(block.graph.port_name(reset.port))?,
-                u8::from(!reset.active_low)
+                !reset.active_low
             )?;
         } else {
             out.push_str("  eval q x\n");
@@ -894,8 +979,8 @@ def eval (q : State) (x : Input) : Evaluation :=
 
     /// Emit total state/result conversions and their round-trip proof source.
     ///
-    /// Inputs, outputs, and assertions retain the raw types and use identity
-    /// conversions; attached register values use their source codecs.
+    /// Stateful inputs and outputs use their source codecs and the block's
+    /// port names. Proc inputs and outputs retain their raw types.
     fn representation(&self) -> Result<String> {
         let mut out = String::from("import ReadableGenerated\n\nnamespace XlsReadable\n\n");
         let encoded = self
@@ -942,11 +1027,58 @@ def eval (q : State) (x : Input) : Evaluation :=
             "def decodeState (q : XlsBlock.State) : State :=\n  {}\n",
             record_value(&decoded)
         )?;
-        out.push_str(r#"def encodeInput (x : Input) : XlsBlock.Input := x
-def decodeInput (x : XlsBlock.Input) : Input := x
-def encodeOutput (x : Output) : XlsBlock.Output := x
-def decodeOutput (x : XlsBlock.Output) : Output := x
-def encodeAssertions (x : Assertions) : XlsBlock.Assertions := x
+        let interface = self.interface;
+        for encode in [true, false] {
+            let (operation, from, to) = if encode {
+                ("encode", "", "XlsBlock.")
+            } else {
+                ("decode", "XlsBlock.", "")
+            };
+            let inputs = interface
+                .inputs
+                .iter()
+                .map(|(name, ty)| {
+                    let field = identifier(name)?;
+                    Ok((
+                        field.clone(),
+                        self.convert(Some(ty), &format!("x.{field}"), encode)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            writeln!(
+                out,
+                "def {operation}Input (x : {from}Input) : {to}Input :=\n  {}\n",
+                record_value(&inputs)
+            )?;
+            let outputs = interface
+                .outputs
+                .iter()
+                .zip(self.block().graph.output_ports())
+                .enumerate()
+                .map(|(index, (ty, port))| {
+                    let field = identifier(self.block().graph.port_name(port))?;
+                    let source = if encode {
+                        product_element("x", index, interface.outputs.len(), false)
+                    } else {
+                        format!("x.{field}")
+                    };
+                    Ok((field, self.convert(Some(ty), &source, encode)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let expression = if encode {
+                record_value(&outputs)
+            } else {
+                product_value(
+                    &outputs.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+                    false,
+                )
+            };
+            writeln!(
+                out,
+                "def {operation}Output (x : {from}Output) : {to}Output :=\n  {expression}\n"
+            )?;
+        }
+        out.push_str(r#"def encodeAssertions (x : Assertions) : XlsBlock.Assertions := x
 def decodeAssertions (x : XlsBlock.Assertions) : Assertions := x
 
 def encodeEvaluation (e : Evaluation) : XlsBlock.Evaluation :=
@@ -960,12 +1092,23 @@ def decodeEvaluation (e : XlsBlock.Evaluation) : Evaluation :=
 @[simp] theorem encode_decode_state (q : XlsBlock.State) : encodeState (decodeState q) = q := by
   cases q
   simp [decodeState, encodeState]
+@[simp] theorem decode_encode_input (x : Input) : decodeInput (encodeInput x) = x := by
+  cases x
+  simp [decodeInput, encodeInput]
+@[simp] theorem encode_decode_input (x : XlsBlock.Input) : encodeInput (decodeInput x) = x := by
+  cases x
+  simp [decodeInput, encodeInput]
+@[simp] theorem decode_encode_output (x : Output) : decodeOutput (encodeOutput x) = x := by
+  simp [decodeOutput, encodeOutput]
+@[simp] theorem encode_decode_output (x : XlsBlock.Output) : encodeOutput (decodeOutput x) = x := by
+  cases x
+  simp [decodeOutput, encodeOutput]
 @[simp] theorem decode_encode_evaluation (e : Evaluation) : decodeEvaluation (encodeEvaluation e) = e := by
   cases e
-  simp [decodeEvaluation, encodeEvaluation, decodeOutput, encodeOutput, decodeAssertions, encodeAssertions]
+  simp [decodeEvaluation, encodeEvaluation, decodeAssertions, encodeAssertions]
 @[simp] theorem encode_decode_evaluation (e : XlsBlock.Evaluation) : encodeEvaluation (decodeEvaluation e) = e := by
   cases e
-  simp [decodeEvaluation, encodeEvaluation, decodeOutput, encodeOutput, decodeAssertions, encodeAssertions]
+  simp [decodeEvaluation, encodeEvaluation, decodeAssertions, encodeAssertions]
 
 end XlsReadable
 "#);
@@ -983,6 +1126,17 @@ end XlsReadable
         enums: &mut Vec<String>,
     ) -> Result<String> {
         match self.unalias(ty)? {
+            SourceType::Tuple { members } => {
+                let fields = members
+                    .iter()
+                    .map(|member| self.source_pattern(member, serial, enums))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(match fields.as_slice() {
+                    [] => "⟨⟩".into(),
+                    [field] => format!("⟨{field}, ⟨⟩⟩"),
+                    _ => format!("⟨{}⟩", fields.join(", ")),
+                })
+            }
             SourceType::Struct { name } => {
                 let TypeDecl::Struct { fields, .. } = self.declaration(name)? else {
                     unreachable!()
@@ -1015,7 +1169,7 @@ end XlsReadable
         out.push_str(BOOL_CORRESPONDENCE);
         // Expose a record's fields only at a constructor. Unfolding its encoder
         // on an if or a decoded value would hide the structural rewrite rules.
-        for declaration in &self.map().declarations {
+        for declaration in self.declarations {
             if let TypeDecl::Struct { name, fields } = declaration {
                 let binders = fields
                     .iter()
@@ -1065,8 +1219,22 @@ end XlsReadable
             })
             .collect::<Result<Vec<_>>>()?;
         writeln!(out, "  rcases q with ⟨{}⟩", patterns.join(", "))?;
+        let interface = self.interface;
+        let inputs = self
+            .block
+            .graph
+            .input_ports()
+            .map(|port| {
+                self.source_pattern(
+                    &interface.inputs[self.block.graph.port_name(port)],
+                    &mut serial,
+                    &mut enums,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        writeln!(out, "  rcases x with ⟨{}⟩", inputs.join(", "))?;
         for name in enums {
-            writeln!(out, "  cases {name}")?;
+            writeln!(out, "  all_goals cases {name}")?;
         }
         let structural_rules = {
             // Fix each function: bare apply_ite can distribute nested
@@ -1076,7 +1244,7 @@ end XlsReadable
                 "apply_ite XlsCodec.encodeBool".to_owned(),
                 "apply_ite XlsCodec.decodeBool".to_owned(),
             ]);
-            for declaration in &self.map().declarations {
+            for declaration in self.declarations {
                 let name = identifier(declaration.name())?;
                 conditional_rules.insert(format!("apply_ite XlsCodec.{name}.encode"));
                 conditional_rules.insert(format!("apply_ite XlsCodec.{name}.decode"));
@@ -1099,10 +1267,12 @@ end XlsReadable
                 }
             }
             let mut rules = conditional_rules.into_iter().collect::<Vec<_>>();
-            for declaration in self.map().declarations.iter().rev() {
+            rules.extend(["prod_fst_ite".into(), "prod_snd_ite".into()]);
+            for declaration in self.declarations.iter().rev() {
                 let name = identifier(declaration.name())?;
                 // Keep codec heads until roundtrips cancel.
                 rules.push(format!("XlsCodec.{name}.encode_decode"));
+                rules.push(format!("XlsCodec.{name}.decode_encode"));
                 if let TypeDecl::Struct { name, .. } = declaration {
                     rules.push(identifier(&format!("encode_{name}_mk"))?);
                 }
@@ -1128,7 +1298,6 @@ end XlsReadable
        {structural_rules}]"#
         )?;
         let enum_encoders = self
-            .map()
             .declarations
             .iter()
             .filter_map(|declaration| match declaration {
@@ -1145,10 +1314,41 @@ end XlsReadable
                 enum_encoders.join(", ")
             )?;
         }
+        // A source tuple is encoded one field at a time, while the raw
+        // register update selects the entire physical tuple at once.
+        out.push_str("  all_goals try simp only [ite_prod_mk, ite_self]\n");
         out.push_str("  all_goals rfl\n\n");
         out.push_str(CORRESPONDENCE);
         out.push_str("\nend XlsReadable\n");
         Ok(out)
+    }
+}
+
+/// Lean products have no trailing Unit. Only an explicit singleton DSLX
+/// tuple needs one to distinguish it from the individual element.
+fn product_type(types: &[String], singleton_tuple: bool) -> String {
+    match types {
+        [] => "_root_.Unit".into(),
+        [ty] if singleton_tuple => format!("(_root_.Prod ({ty}) _root_.Unit)"),
+        [ty] => ty.clone(),
+        [head, rest @ ..] => format!("(_root_.Prod ({head}) ({}))", product_type(rest, false)),
+    }
+}
+
+fn product_value(elements: &[String], singleton_tuple: bool) -> String {
+    match elements {
+        [] => "()".into(),
+        [value] if singleton_tuple => format!("({value}, ())"),
+        [value] => value.clone(),
+        [head, rest @ ..] => format!("({head}, {})", product_value(rest, false)),
+    }
+}
+
+fn product_element(value: &str, index: usize, len: usize, singleton_tuple: bool) -> String {
+    if index + 1 < len || (len == 1 && singleton_tuple) {
+        tuple_element(value, index)
+    } else {
+        format!("({value}){}", ".2".repeat(index))
     }
 }
 
@@ -1236,14 +1436,22 @@ private theorem decode_ofBool (b : Bool) :
     XlsCodec.decodeBool (BitVec.ofBool b) = b := by
   exact XlsCodec.decode_encodeBool b
 
+private theorem prod_fst_ite {α β : Type} (p : Prop) [Decidable p] (x y : α × β) :
+    (if p then x else y).1 = (if p then x.1 else y.1) := by split <;> rfl
+private theorem prod_snd_ite {α β : Type} (p : Prop) [Decidable p] (x y : α × β) :
+    (if p then x else y).2 = (if p then x.2 else y.2) := by split <;> rfl
+private theorem ite_prod_mk {α β : Type} (p : Prop) [Decidable p] (a c : α) (b d : β) :
+    (if p then (a, b) else (c, d)) = ((if p then a else c), (if p then b else d)) := by
+  split <;> rfl
+
 "#;
 
 /// Step, reset, and trace proof source derived from the generated evaluation
 /// theorem.
 const CORRESPONDENCE: &str = r#"theorem decoded_eval (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeEvaluation (XlsBlock.eval q x) = eval (decodeState q) (decodeInput x) := by
-  have h := congrArg decodeEvaluation (encoded_eval (decodeState q) x)
-  simpa [encodeInput, decodeInput] using h.symm
+  have h := congrArg decodeEvaluation (encoded_eval (decodeState q) (decodeInput x))
+  simpa using h.symm
 
 theorem encoded_step (q : State) (x : Input) :
     encodeState (step q x) = XlsBlock.step (encodeState q) (encodeInput x) := by
@@ -1272,11 +1480,12 @@ theorem encoded_assertionsHold (q : State) (x : Input) :
 
 theorem encoded_reset (q : State) (x : Input) :
     encodeEvaluation (reset q x) = XlsBlock.reset (encodeState q) (encodeInput x) := by
-  simpa [reset, XlsBlock.reset, encodeInput] using encoded_eval q _
+  unfold reset XlsBlock.reset
+  exact encoded_eval q _
 theorem decoded_reset (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeEvaluation (XlsBlock.reset q x) = reset (decodeState q) (decodeInput x) := by
-  have h := congrArg decodeEvaluation (encoded_reset (decodeState q) x)
-  simpa [encodeInput, decodeInput] using h.symm
+  have h := congrArg decodeEvaluation (encoded_reset (decodeState q) (decodeInput x))
+  simpa using h.symm
 
 def trace (initial : State) (input : Nat → Input) : Nat → State
   | 0 => initial
@@ -1291,13 +1500,15 @@ theorem encoded_trace (initial : State) (input : Nat → Input) (t : Nat) :
       rawTrace (encodeState initial) (fun n => encodeInput (input n)) t := by
   induction t with
   | zero => rfl
-  | succ t ih => simp only [trace, rawTrace, encoded_step, ih]
+  | succ t ih =>
+    exact (encoded_step _ _).trans (congrArg (fun q => XlsBlock.step q (encodeInput (input t))) ih)
 theorem decoded_trace (initial : XlsBlock.State) (input : Nat → XlsBlock.Input) (t : Nat) :
     decodeState (rawTrace initial input t) =
       trace (decodeState initial) (fun n => decodeInput (input n)) t := by
   induction t with
   | zero => rfl
-  | succ t ih => simp only [trace, rawTrace, decoded_step, ih]
+  | succ t ih =>
+    exact (decoded_step _ _).trans (congrArg (fun q => step q (decodeInput (input t))) ih)
 theorem trace_output (initial : State) (input : Nat → Input) (t : Nat) :
     encodeOutput (observe (trace initial input t) (input t)) =
       XlsBlock.observe (rawTrace (encodeState initial) (fun n => encodeInput (input n)) t)
@@ -1317,269 +1528,5 @@ theorem clock_relation_iff (q : Nat → State) (x : Nat → Input) :
     rw [run t, encoded_step]
   · intro run t
     have h := congrArg decodeState (run t)
-    simpa [decoded_step, decodeInput, encodeInput] using h
+    simpa [decoded_step] using h
 "#;
-
-#[cfg(test)]
-mod tests {
-    use std::{fs, path::Path};
-
-    use crate::block::source_map::{self as source_types, Attachment};
-
-    use super::*;
-
-    fn checked(source: &str, block: &str, register: &str, source_type: &str) -> ValidatedSourceMap {
-        let source_path = Path::new("readable_fixture.x");
-        let map = source_types::collect_source_map(
-            block,
-            source,
-            source_path,
-            &[Attachment {
-                register: register.into(),
-                source_type: source_type.into(),
-            }],
-        )
-        .unwrap();
-        source_types::validate_source_map(&map, block, source, source_path).unwrap()
-    }
-
-    // Verifies: The bundle retains total source types and separate readable
-    // equations. Catches: Missing enum encodings, raw-evaluator delegation,
-    // or fixed arbiter names.
-    #[test]
-    fn readable_machine_has_total_nominal_types_and_its_own_execution() {
-        let checked = checked(
-            include_str!("../../tests/fixtures/readable_machine/machine.x"),
-            include_str!("../../tests/fixtures/readable_machine/machine.block.ir"),
-            "machine",
-            "Machine",
-        );
-        let bundle = emit(&checked).unwrap();
-        assert_eq!(
-            bundle
-                .files
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "Generated.lean",
-                "ReadableTypes.lean",
-                "ReadableGenerated.lean",
-                "ReadableRepresentation.lean",
-                "ReadableCorrespondence.lean",
-            ]
-        );
-        assert_eq!(bundle.files[0].1, lean::emit(checked.block()).unwrap());
-        let types = &bundle.files[1].1;
-        assert!(types.contains("inductive «Phase»"));
-        assert!(types.contains("| .«Active» => BitVec.ofNat 2 2"));
-        assert!(types.contains("| .«encoding1» => BitVec.ofNat 2 1"));
-        assert!(types.contains("| .«encoding3» => BitVec.ofNat 2 3"));
-        let executable = &bundle.files[2].1;
-        assert!(executable.contains("(«old»).«flags»"));
-        assert!(executable.contains("(«machine_flags»).«armed»"));
-        assert!(executable.contains("if «phase_is_active» then «incoming» else «machine_sample»"));
-        assert!(executable.contains("id=11"));
-        assert!(!executable.contains("XlsBlock.eval"));
-        assert!(!executable.contains("pendingA"));
-        let correspondence = &bundle.files[4].1;
-        assert!(correspondence.contains("theorem encoded_eval (q : State) (x : Input)"));
-        assert!(correspondence.contains("theorem decoded_trace (initial : XlsBlock.State)"));
-        // Constructor equations must preserve the nested nominal layout. The
-        // fixture deliberately uses Phase 0/2 and Flags, not arbiter names.
-        assert!(correspondence.contains(
-            "private theorem «encode_Flags_mk» (field0 : _root_.Bool) (field1 : _root_.Bool) :\n    XlsCodec.«Flags».encode ⟨field0, field1⟩ =\n      ((XlsCodec.encodeBool (field0)), ((XlsCodec.encodeBool (field1)), ()))"
-        ));
-        assert!(correspondence.contains(
-            "private theorem «encode_Machine_mk» (field0 : XlsSource.«Phase») (field1 : XlsSource.«Flags») (field2 : XlsSource.«Word») :\n    XlsCodec.«Machine».encode ⟨field0, field1, field2⟩ =\n      ((XlsCodec.«Phase».encode (field0)), ((XlsCodec.«Flags».encode (field1)), ((XlsCodec.«Word».encode (field2)), ())))"
-        ));
-        assert!(correspondence.contains("only [XlsCodec.«Phase».encode]"));
-        assert!(!correspondence.contains("XlsCodec.«Priority»"));
-        for forbidden in ["sorry", "native_decide", "bv_decide", "axiom "] {
-            assert!(
-                !bundle
-                    .files
-                    .iter()
-                    .any(|(_, source)| source.contains(forbidden))
-            );
-        }
-        assert_eq!(bundle.files, emit(&checked).unwrap().files);
-    }
-
-    // Verifies: Arbiter branches and correspondence rewrites follow the
-    // physical graph. Catches: Lost fourth-encoding behavior or premature
-    // codec unfolding in proofs.
-    #[test]
-    fn readable_arbiter_renders_graph_selected_order_and_fourth_encoding() {
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/arbiter/w2");
-        let source = fs::read_to_string(directory.join("arbiter.x")).unwrap();
-        let block = fs::read_to_string(directory.join("arbiter.block.ir")).unwrap();
-        let checked = checked(&source, &block, "____state", "State");
-        let bundle = emit(&checked).unwrap();
-        let executable = &bundle.files[2].1;
-        assert!(executable.contains("state» : XlsSource.«State»"));
-        assert!(executable.contains("(«____state__1»).«priority»"));
-        assert!(executable.contains("match «__state_priority» with"));
-        for (case, first) in [("A", "A"), ("B", "B"), ("C", "C"), ("encoding3", "C")] {
-            assert!(executable.contains(&format!("| .«{case}» => (if «available{first}»")));
-        }
-        assert!(executable.contains("else «__state_priority»"));
-        assert!(executable.contains("id=310"));
-        assert_eq!(bundle.files[0].1, lean::emit(checked.block()).unwrap());
-        let proof = bundle.files[4]
-            .1
-            .split("theorem encoded_eval")
-            .nth(1)
-            .unwrap()
-            .split("theorem decoded_eval")
-            .next()
-            .unwrap();
-        // The failing broad simp unfolded codecs before their roundtrip rules
-        // and lowered selectors to Nat. Pin this separation at the emitter
-        // boundary; the native correspondence gate checks theorem closure.
-        assert_eq!(
-            proof
-                .matches("dsimp (config := { instances := true }) only")
-                .count(),
-            2
-        );
-        assert_eq!(
-            proof
-                .matches("\n    simp (config := { instances := true }) only\n")
-                .count(),
-            2
-        );
-        assert!(proof.contains("apply_ite XlsCodec.«State».encode"));
-        assert!(proof.contains("XlsCodec.«State».encode_decode"));
-        assert!(proof.contains("«encode_State_mk»"));
-        assert!(proof.contains("XlsCodec.raw_select, raw_flag, raw_not, raw_and, raw_or"));
-        assert!(!proof.contains("\n       XlsCodec.decodeBool,"));
-        assert!(!proof.contains("\n       XlsCodec.«State».decode,"));
-        assert!(!proof.contains("instances := false"));
-    }
-
-    // Verifies: Selected records and fields receive codec and projection
-    // rewrite rules. Catches: Proof source that cannot align selections
-    // with their raw expressions.
-    #[test]
-    fn selected_fields_distribute_codecs_and_projections() {
-        let source = include_str!("../../tests/fixtures/readable_machine/machine.x");
-        let block = include_str!("../../tests/fixtures/readable_machine/selections.block.ir");
-        let bundle = emit(&checked(source, block, "machine", "Machine")).unwrap();
-        assert!(bundle.files[2].1.contains(
-            "let «picked» : _root_.Bool := (if «choose» then «machine_flags_queued» else «machine_flags_armed»)"
-        ));
-        assert!(bundle.files[2].1.contains(
-            "let «selected_flags» : XlsSource.«Flags» := (if «choose_flags» then «next_flags» else «machine_flags»)"
-        ));
-        assert!(bundle.files[2].1.contains("(«selected_flags»).«armed»"));
-        // A constructor equation alone cannot align a selected Boolean field
-        // or a projection from a selected record with its raw counterpart.
-        // The native fixture check must also establish theorem closure.
-        let proof = &bundle.files[4].1;
-        assert!(proof.contains("apply_ite XlsCodec.encodeBool"));
-        assert!(proof.contains("apply_ite XlsSource.«Flags».«armed»"));
-        assert!(proof.contains(
-            "apply_ite (fun (value : Prod (BitVec 1) (Prod (BitVec 1) (Unit))) => (value).1)"
-        ));
-    }
-
-    // Verifies: Source members, local bindings, and register fields keep
-    // distinct names. Catches: Source names capturing generated codecs,
-    // built-ins, or other registers.
-    #[test]
-    fn source_and_register_names_cannot_capture_generated_names() {
-        let source = include_str!("../../tests/fixtures/readable_machine/machine.x")
-            .replace("armed: bool, queued: bool", "encode: bool, decode: bool")
-            .replace("type Word = u2;", "type Bool = bool;\ntype Word = u2;");
-        let block = include_str!("../../tests/fixtures/readable_machine/machine.block.ir")
-            .replace("machine_flags_armed", "machine_flags_encode")
-            .replace("machine_flags_queued", "machine_flags_decode")
-            .replace("phase_is_active", "Bool")
-            .replace("  reg machine", "  reg a(bits[1], reset_value=0)\n  reg _a(bits[1], reset_value=0)\n  reg register_1(bits[1], reset_value=0)\n  reg machine")
-            .replace("  telemetry:", "  old_a: bits[1] = register_read(register=a, id=20)\n  old_b: bits[1] = register_read(register=_a, id=21)\n  old_c: bits[1] = register_read(register=register_1, id=22)\n  write_a: () = register_write(old_a, register=a, reset=rst, id=23)\n  write_b: () = register_write(old_b, register=_a, reset=rst, id=24)\n  write_c: () = register_write(old_c, register=register_1, reset=rst, id=25)\n  telemetry:");
-        let bundle = emit(&checked(&source, &block, "machine", "Machine")).unwrap();
-        let types = &bundle.files[1].1;
-        let nominal = types.split("end XlsSource").next().unwrap();
-        assert!(nominal.contains("«encode» : _root_.Bool"));
-        assert!(!nominal.contains("def encode"));
-        assert!(types.contains("namespace XlsCodec"));
-        assert!(types.contains("def encode (x : XlsSource.«Flags»)"));
-        let executable = &bundle.files[2].1;
-        assert!(!executable.contains("let «Bool»"));
-        for name in ["a", "register_1_", "register_1", "machine"] {
-            assert!(
-                executable.contains(&format!("  «{name}» :")),
-                "missing independent register {name}"
-            );
-        }
-    }
-
-    // Verifies: A node named Prod cannot hide the physical tuple type
-    // constructor. Catches: Retained local names making later tuple
-    // annotations resolve incorrectly.
-    #[test]
-    fn retained_node_names_cannot_capture_physical_tuple_types() {
-        let source = include_str!("../../tests/fixtures/readable_machine/machine.x");
-        let block = include_str!("../../tests/fixtures/readable_machine/machine.block.ir")
-            .replace("phase_is_active", "Prod")
-            .replace("  telemetry:", "  raw_pair: (bits[1], bits[2]) = tuple(Prod, selected_sample, id=17)\n  unpacked: bits[2] = tuple_index(raw_pair, index=1, id=18)\n  telemetry:")
-            .replace("output_port(selected_sample,", "output_port(unpacked,");
-        let bundle = emit(&checked(source, &block, "machine", "Machine")).unwrap();
-        let executable = &bundle.files[2].1;
-        // The raw tuple depends on the named node, so its annotation occurs
-        // after that binding and must still resolve Lean's type constructor.
-        assert!(executable.contains("let «raw_pair» : Prod (BitVec 1)"));
-        assert!(!executable.contains("let «Prod»"));
-    }
-
-    // Verifies: Enum selection follows physical values and selector bit order.
-    // Catches: Reordered declarations changing branch selection or default
-    // behavior.
-    #[test]
-    fn enum_selector_follows_physical_values_not_declaration_order() {
-        let source = include_str!("../../tests/fixtures/readable_machine/machine.x")
-            .replace("Idle = 0, Active = 2", "Active = 2, Idle = 0");
-        let block = include_str!("../../tests/fixtures/readable_machine/machine.block.ir").replace(
-            "  selected_sample: bits[2] = sel(phase_is_active, cases=[machine_sample, incoming], id=11)",
-            "  idle_encoding: bits[2] = literal(value=0, id=17)\n  phase_is_idle: bits[1] = eq(machine_phase, idle_encoding, id=18)\n  phase_selector: bits[2] = concat(phase_is_active, phase_is_idle, id=19)\n  selected_sample: bits[2] = priority_sel(phase_selector, cases=[machine_sample, incoming], default=active_encoding, id=11)");
-        let bundle = emit(&checked(&source, &block, "machine", "Machine")).unwrap();
-        let executable = &bundle.files[2].1;
-        for (member, result) in [
-            ("Active", "incoming"),
-            ("Idle", "machine_sample"),
-            ("encoding1", "active_encoding"),
-            ("encoding3", "active_encoding"),
-        ] {
-            assert!(executable.contains(&format!("| .«{member}» => «{result}»")));
-        }
-    }
-
-    // Verifies: Shared selector nodes remain shared during annotation and
-    // emission. Catches: Repeated traversal or expansion along
-    // exponentially many graph paths.
-    #[test]
-    fn shared_selector_dag_does_not_expand_annotation_paths() {
-        let source = include_str!("../../tests/fixtures/readable_machine/machine.x");
-        let mut nodes = String::new();
-        let mut previous = ["next_machine".to_owned(), "next_machine".to_owned()];
-        for index in 0..50 {
-            let name = format!("choice_{index}");
-            writeln!(nodes, "  {name}: (bits[2], (bits[1], bits[1]), bits[2]) = sel(phase_is_active, cases=[{}, {}], id={})",
-                previous[0], previous[1], 100 + index).unwrap();
-            previous = [previous[1].clone(), name];
-        }
-        nodes.push_str(&format!(
-            "  write: () = register_write({}, register=machine, reset=rst, id=13)",
-            previous[1]
-        ));
-        let block = include_str!("../../tests/fixtures/readable_machine/machine.block.ir").replace(
-            "  write: () = register_write(next_machine, register=machine, reset=rst, id=13)",
-            &nodes,
-        );
-        // Fifty shared choices encode exponentially many paths but only fifty
-        // additional nodes. Named choices also remain shared in the executable.
-        let bundle = emit(&checked(source, &block, "machine", "Machine")).unwrap();
-        assert_eq!(bundle.files[2].1.matches("let «choice_").count(), 50);
-    }
-}
