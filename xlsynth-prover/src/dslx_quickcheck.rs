@@ -19,6 +19,7 @@ use crate::prover::types::{
     AssertionViolation, BoolPropertyResult, FnInput, QuickCheckAssertionSemantics,
     QuickCheckOptions, QuickCheckRunResult,
 };
+use crate::prover::uf::validate_uf_symbols;
 use crate::prover::{SolverChoice, prover_for_choice};
 
 /// The selected properties and their interpretation, shared by direct and
@@ -184,6 +185,8 @@ impl DslxQuickCheckRequest {
     /// Captures the discovered source snapshot and the same property
     /// interpretation for tactic workers.
     pub fn tactic_tree(&self) -> Result<OblTree, QuickCheckError> {
+        validate_uf_symbols(&self.uf_map)
+            .map_err(|e| QuickCheckError::new(QuickCheckErrorKind::Configuration, e))?;
         let context = load_quickcheck_context(
             &self.entry_file,
             self.dslx_stdlib_path.as_deref(),
@@ -230,6 +233,40 @@ mod tests {
     use crate::prover::types::FnOutput;
     use std::time::Duration;
     use xlsynth_pir::IrValue;
+
+    #[test]
+    fn invalid_uf_symbol_rejects_direct_and_tactic_quickchecks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("entry.x");
+        std::fs::write(
+            &path,
+            r#"
+fn helper(x: u1) -> u1 { x }
+#[quickcheck] fn p(x: u1) -> bool { helper(x) == x }
+"#,
+        )
+        .unwrap();
+        let request = DslxQuickCheckRequest {
+            entry_file: path,
+            dslx_stdlib_path: None,
+            dslx_paths: vec![],
+            solver: Some(SolverChoice::Bitwuzla),
+            test_filter: None,
+            assertion_semantics: QuickCheckAssertionSemantics::Assume,
+            assert_label_filter: None,
+            uf_map: HashMap::from([("helper".into(), "F\0x".into())]),
+        };
+        let mut events = 0;
+        let error = request
+            .run(QuickCheckOptions { optimize: false }, None, |_| events += 1)
+            .unwrap_err();
+        assert_eq!(error.kind, QuickCheckErrorKind::Configuration);
+        assert_eq!(events, 0);
+        assert_eq!(
+            request.tactic_tree().unwrap_err().kind,
+            QuickCheckErrorKind::Configuration
+        );
+    }
 
     #[test]
     fn quickcheck_rejects_nul_in_names_before_starting_a_proof() {

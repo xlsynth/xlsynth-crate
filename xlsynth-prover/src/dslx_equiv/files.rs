@@ -16,6 +16,7 @@ use crate::dslx_tactics::script::{OblTree, OblTreeConfig};
 use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_paths};
 use crate::proof_outcome::ProofSummary;
 use crate::prover::SolverChoice;
+use crate::prover::uf::validate_uf_symbols;
 
 /// One DSLX source, its top (which may have parametric bindings), and its
 /// assumptions.
@@ -36,6 +37,7 @@ impl DslxEquivFile<'_> {
     /// Retains the original top and source so each generated obligation can
     /// select its own top.
     fn into_lec_side(self) -> Result<LecSide, String> {
+        validate_uf_symbols(&self.uf_map)?;
         Ok(LecSide {
             top_func: self.top.to_owned(),
             file: FileWithHistory {
@@ -228,19 +230,18 @@ pub fn main<N: u32>(x: u8) -> u8 {{ {name}(x) + (N as u8) }}
             )
             .unwrap();
         }
-        for (abstract_helpers, rhs_top, expected) in [
-            (false, "main<u32:2>", ProofStatus::Disproved),
-            (true, "main<u32:2>", ProofStatus::Proved),
-            (true, "main<u32:3>", ProofStatus::Disproved),
+        for (symbol, rhs_top, expected) in [
+            (None, "main<u32:2>", ProofStatus::Disproved),
+            (Some("F"), "main<u32:2>", ProofStatus::Proved),
+            (Some("F"), "main<u32:3>", ProofStatus::Disproved),
+            (Some("F\0x"), "main<u32:2>", ProofStatus::ExecutionError),
         ] {
             let mappings = |name: &str| {
-                if abstract_helpers {
-                    HashMap::from([(name.to_owned(), "F".to_owned())])
-                } else {
-                    HashMap::new()
-                }
+                symbol
+                    .map(|s| HashMap::from([(name.to_owned(), s.to_owned())]))
+                    .unwrap_or_default()
             };
-            let request = DslxEquivFiles {
+            let request = || DslxEquivFiles {
                 lhs: DslxEquivFile {
                     path: &lhs,
                     top: "main<u32:2>",
@@ -258,8 +259,11 @@ pub fn main<N: u32>(x: u8) -> u8 {{ {name}(x) + (N as u8) }}
                 dslx_stdlib_path: None,
                 additional_search_paths: Vec::new(),
             };
-            let result = request.prove(None, None, None);
+            let result = request().prove(None, None, None);
             assert_eq!(result.conclusion.status, expected, "{result:?}");
+            if expected == ProofStatus::ExecutionError {
+                assert!(request().into_tactic_tree().is_err());
+            }
         }
     }
 

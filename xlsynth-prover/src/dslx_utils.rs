@@ -7,6 +7,8 @@ use std::path::Path;
 use xlsynth::dslx::{Function, InterpValue, ParametricBinding, ParametricEnv};
 use xlsynth::{XlsynthError, mangle_dslx_name};
 
+use crate::prover::uf::validate_uf_symbols;
+
 /// Returns the path text representable by the DSLX C API.
 fn dslx_path_text(path: &Path) -> Result<&str, String> {
     let text = path
@@ -56,6 +58,7 @@ pub fn mangle_dslx_uf_map(
     module_name: &str,
     uf_map: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
+    validate_uf_symbols(uf_map)?;
     uf_map
         .iter()
         .map(|(name, symbol)| {

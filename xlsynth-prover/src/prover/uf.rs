@@ -6,12 +6,22 @@ use std::collections::HashMap;
 
 use super::types::UfSignature;
 
+/// Rejects solver symbols that cannot cross a C API or process argument
+/// boundary.
+pub(crate) fn validate_uf_symbols(uf_map: &HashMap<String, String>) -> Result<(), String> {
+    if uf_map.values().any(|symbol| symbol.contains('\0')) {
+        return Err("Uninterpreted function symbol contains a NUL byte".into());
+    }
+    Ok(())
+}
+
 /// Infers UF signatures for the provided package and map from functions to UF
 /// names.
 pub fn infer_uf_signatures(
     pkg: &xlsynth_pir::ir::Package,
     uf_map: &HashMap<String, String>,
 ) -> Result<HashMap<String, UfSignature>, String> {
+    validate_uf_symbols(uf_map)?;
     let mut uf_sigs: HashMap<String, UfSignature> = HashMap::new();
     for (fn_name, uf_sym) in uf_map {
         let (ir_fn, skip_implicit) = match pkg.get_fn(fn_name) {

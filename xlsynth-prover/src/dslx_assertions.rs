@@ -20,6 +20,7 @@ use crate::prover::prover_for_choice;
 use crate::prover::types::{
     BoolPropertyResult, FnInput, FnOutput, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
 };
+use crate::prover::uf::validate_uf_symbols;
 use crate::prover::{Prover, SolverChoice};
 
 /// Request describing a proof that DSLX assertions reachable from `top` hold.
@@ -307,6 +308,13 @@ pub fn run_dslx_assertions(
                 request.path.display()
             )
         })?;
+    let uf_map = match &request.uf_map {
+        AssertionUfMappings::LocalDslx(names) => mangle_dslx_uf_map(module_name, names)?,
+        AssertionUfMappings::Ir(names) => {
+            validate_uf_symbols(names)?;
+            names.clone()
+        }
+    };
     let mangled_top = xlsynth::mangle_dslx_name_with_calling_convention(
         module_name,
         request.top,
@@ -336,10 +344,7 @@ pub fn run_dslx_assertions(
     let prover_fn = ProverFn::new(property_fn, Some(&package))
         .with_fixed_implicit_activation(true)
         .with_domains(top_domains)
-        .with_uf_map(match &request.uf_map {
-            AssertionUfMappings::LocalDslx(names) => mangle_dslx_uf_map(module_name, names)?,
-            AssertionUfMappings::Ir(names) => names.clone(),
-        });
+        .with_uf_map(uf_map);
 
     let prover = prover_for_assertions(request.solver.unwrap_or(SolverChoice::Bitwuzla))?;
     let start = Instant::now();
@@ -374,11 +379,19 @@ pub fn helper(x: u8) -> u8 { assert!(x != u8:0, "nonzero"); x }
 "#,
         )
         .unwrap();
-        for (mappings, expected) in [
-            (HashMap::new(), ProofStatus::Disproved),
+        let ir_uf = |symbol: &str| {
+            AssertionUfMappings::Ir(HashMap::from([("__dep__helper".into(), symbol.into())]))
+        };
+        for (uf_map, expected) in [
             (
-                HashMap::from([("__dep__helper".to_owned(), "F".to_owned())]),
-                ProofStatus::Proved,
+                AssertionUfMappings::Ir(HashMap::new()),
+                ProofStatus::Disproved,
+            ),
+            (ir_uf("F"), ProofStatus::Proved),
+            (ir_uf("F\0x"), ProofStatus::ExecutionError),
+            (
+                AssertionUfMappings::LocalDslx(HashMap::from([("main".into(), "F\0x".into())])),
+                ProofStatus::ExecutionError,
             ),
         ] {
             let request = DslxAssertionsRequest {
@@ -390,7 +403,7 @@ pub fn helper(x: u8) -> u8 { assert!(x != u8:0, "nonzero"); x }
                 additional_search_paths: vec![dir.path().to_owned()],
                 assert_label_filter: None,
                 assume_enum_in_bound: false,
-                uf_map: AssertionUfMappings::Ir(mappings),
+                uf_map,
             };
             let result = request.prove();
             assert_eq!(result.summary.conclusion.status, expected, "{result:?}");
