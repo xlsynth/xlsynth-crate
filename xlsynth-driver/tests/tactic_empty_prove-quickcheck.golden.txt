@@ -1,0 +1,2 @@
+[prove-quickcheck] failure
+[prove-quickcheck] unresolved obligation: root

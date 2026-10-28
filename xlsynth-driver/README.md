@@ -3308,7 +3308,7 @@ UF semantics:
 
 #### Tactic Scripts
 
-When two DSLX top functions are equivalent but a direct whole-design proof is too heavy or times out, **tactic scripts** let you describe a structured proof plan. The driver turns that plan into an obligation tree and discharges the leaves with SMT.
+When two DSLX top functions are equivalent but a direct whole-design proof is too heavy or times out, **tactic scripts** let you describe a structured proof plan. The driver invokes the [xlsynth-prover tactic engine](../xlsynth-prover/README.md), which owns the obligation tree and discharges the leaves with SMT.
 
 ##### Workflow
 
@@ -3316,6 +3316,15 @@ When two DSLX top functions are equivalent but a direct whole-design proof is to
 1. Apply a tactic – decompose the obligation into named child obligations. Tactics can also be further applied to the child obligations.
 1. Mark leaves with `Solve` – those leaves are proved directly.
 1. Succeed when all leaves succeed.
+
+Every leaf must be marked with `Solve` and proved before the command reports
+success. An empty script, an apply-only script, or a script that solves only
+some leaves exits with status 1 and lists the unresolved obligation paths.
+With `--output_json`, `report.unresolved` contains those paths as selector
+arrays, including obligations reopened by a failed tactic. `report.solved`
+records successful attempts; it does not establish whole-proof completion
+because a rollback may discard those children. These rules also apply to
+`prove-quickcheck` tactic scripts.
 
 Provide the plan via `--tactic_json` for a JSON array, or `--tactic_jsonl` for JSONL (one JSON object per line).
 
@@ -4101,28 +4110,20 @@ assert_format      = "`BR_ASSERT({label}, {condition})"
 use_system_verilog = true
 ```
 
-## Obsolete `type_inference_v2` inputs
+## Removed `type_inference_v2` inputs
 
-V2 type inference is always used. The driver no longer selects an algorithm or
-forwards `type_inference_v2` to external tools.
+V2 type inference is always used. The driver rejects `--type_inference_v2` as an
+unknown option on `dslx2ir`, `dslx2pipeline`, `dslx-g8r-stats`,
+`dslx2pipeline-eco`, and `dslx-equiv`, regardless of its value. Remove the flag
+entirely from scripts.
 
-For existing scripts, `dslx2ir`, `dslx2pipeline`, `dslx-g8r-stats`,
-`dslx2pipeline-eco`, and `dslx-equiv` still accept `--type_inference_v2 true`
-(or `--type_inference_v2=true`) with a deprecation warning on stderr. Explicit
-`false` is rejected because it requests unsupported V1 behavior; malformed values
-are also rejected. The option is hidden from help. Supplying it adds no external-tools
-requirement. `dslx2pipeline-eco` still requires external tools for its normal operation.
+The `type_inference_v2` key is also rejected in `[toolchain.dslx]` TOML and
+`dslx-equiv` prover JSON, including nested plans. Any supplied value produces
+an error before conversion or proving; remove the key rather than setting it
+to `true`, `false`, or `null`. Serialized prover plans and child commands omit
+the option.
 
-Existing `[toolchain.dslx]` TOML and `dslx-equiv` prover JSON may also contain
-`type_inference_v2`. These readers accept boolean `true` with a warning, and reject
-`false` or non-boolean values. Every supplied value is validated: CLI `true` cannot
-override an invalid or `false` config value. New serialized prover plans and child
-commands omit the key. Remove the old input to silence the warning. An explicit
-`RUST_LOG` setting controls warning visibility.
-
-For example, adding `--type_inference_v2=true` to this command produces the same
-IR with a deprecation warning. Adding `--type_inference_v2=false` instead fails
-before conversion and explains that V1 is no longer supported:
+For example, use:
 
 ```shell
 xlsynth-driver dslx2ir --dslx_input_file my_module.x --dslx_top main

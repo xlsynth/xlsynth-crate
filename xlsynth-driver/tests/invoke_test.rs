@@ -8728,6 +8728,196 @@ fn f(x: u8) -> bool { x == x }
 #[quickcheck] fn qc_failure(x: u8) -> bool { x == u8:0 }
 "#;
 
+/// Removes only the elapsed-time line from tactic command output for goldens.
+fn without_tactic_timing(output: &str, subcommand: &str) -> String {
+    let prefix = format!("[{subcommand}] Time taken: ");
+    output
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with(&prefix))
+        .collect()
+}
+
+#[test_case("dslx-equiv", false; "equiv_json")]
+#[test_case("dslx-equiv", true; "equiv_jsonl")]
+#[test_case("prove-quickcheck", false; "quickcheck_json")]
+#[test_case("prove-quickcheck", true; "quickcheck_jsonl")]
+fn test_empty_tactic_script_requires_proof(subcommand: &str, jsonl: bool) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("input.x");
+    std::fs::write(
+        &dslx_path,
+        r#"
+fn main(x: u8) -> u8 { x }
+#[quickcheck] fn qc_identity(x: u8) -> bool { main(x) == x }
+"#,
+    )
+    .unwrap();
+    let script_path = temp_dir.path().join("script.json");
+    std::fs::write(&script_path, if jsonl { "" } else { "[]" }).unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+    command.arg(subcommand);
+    match subcommand {
+        "dslx-equiv" => {
+            command
+                .arg(&dslx_path)
+                .arg(&dslx_path)
+                .args(["--dslx_top", "main"]);
+        }
+        "prove-quickcheck" => {
+            command.arg("--dslx_input_file").arg(&dslx_path);
+        }
+        _ => unreachable!("test cases name only tactic-capable subcommands"),
+    }
+    let output = command
+        .args(["--solver", "toolchain"])
+        .arg(if jsonl {
+            "--tactic_jsonl"
+        } else {
+            "--tactic_json"
+        })
+        .arg(&script_path)
+        .arg("--output_json")
+        .arg(&report_path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    compare_golden_text(
+        &without_tactic_timing(&stderr, subcommand),
+        &format!("tests/tactic_empty_{subcommand}.golden.txt"),
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(report_path).unwrap()).unwrap();
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "success": false,
+            "report": {
+                "solved": [],
+                "failed": [],
+                "indefinite": [],
+                "rolled_back": [],
+                "unresolved": [["root"]]
+            }
+        })
+    );
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case(false; "skeleton_only")]
+#[test_case(true; "all_leaves")]
+fn test_dslx_equiv_tactic_focus_requires_all_leaves(solve_pair: bool) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_path = temp_dir.path().join("lhs.x");
+    let rhs_path = temp_dir.path().join("rhs.x");
+    std::fs::write(
+        &lhs_path,
+        r#"
+fn helper(x: u8) -> u8 { x + u8:1 }
+fn main(x: u8) -> u8 { helper(x) }
+"#,
+    )
+    .unwrap();
+    // The partial proof has inequivalent helpers: solving the shared-UF
+    // skeleton alone must never establish equivalence of the original tops.
+    std::fs::write(
+        &rhs_path,
+        if solve_pair {
+            r#"
+fn helper(x: u8) -> u8 { u8:1 + x }
+fn main(x: u8) -> u8 { helper(x) }
+"#
+        } else {
+            r#"
+fn helper(x: u8) -> u8 { x + u8:2 }
+fn main(x: u8) -> u8 { helper(x) }
+"#
+        },
+    )
+    .unwrap();
+
+    let mut steps = vec![
+        serde_json::json!({
+            "selector": ["root"],
+            "command": {"Apply": {"Focus": {"pairs": [{"lhs": "helper", "rhs": "helper"}]}}}
+        }),
+        serde_json::json!({"selector": ["root", "skeleton"], "command": "Solve"}),
+    ];
+    if solve_pair {
+        steps.push(serde_json::json!({"selector": ["root", "pair_1"], "command": "Solve"}));
+    }
+    let script_path = temp_dir.path().join("script.json");
+    std::fs::write(&script_path, serde_json::to_string(&steps).unwrap()).unwrap();
+    let report_path = temp_dir.path().join("report.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("dslx-equiv")
+        .arg(&lhs_path)
+        .arg(&rhs_path)
+        .args(["--dslx_top", "main", "--solver", "bitwuzla"])
+        .arg("--tactic_json")
+        .arg(&script_path)
+        .arg("--output_json")
+        .arg(&report_path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(if solve_pair { 0 } else { 1 }),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    if solve_pair {
+        assert_eq!(stderr, "");
+        compare_golden_text(
+            &without_tactic_timing(&stdout, "dslx-equiv"),
+            "tests/tactic_focus_complete.golden.txt",
+        );
+    } else {
+        assert_eq!(stdout, "");
+        compare_golden_text(
+            &without_tactic_timing(&stderr, "dslx-equiv"),
+            "tests/tactic_focus_partial.golden.txt",
+        );
+    }
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(report_path).unwrap()).unwrap();
+    let solved = if solve_pair {
+        vec![vec!["root", "pair_1"], vec!["root", "skeleton"]]
+    } else {
+        vec![vec!["root", "skeleton"]]
+    };
+    let unresolved = if solve_pair {
+        vec![]
+    } else {
+        vec![vec!["root", "pair_1"]]
+    };
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "success": solve_pair,
+            "report": {
+                "solved": solved,
+                "failed": [],
+                "indefinite": [],
+                "rolled_back": [],
+                "unresolved": unresolved
+            }
+        })
+    );
+}
+
 #[cfg_attr(feature="has-boolector", test_case("boolector", true; "boolector_success"))]
 #[cfg_attr(feature="has-boolector", test_case("boolector", false; "boolector_failure"))]
 #[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla", true; "bitwuzla_success"))]
