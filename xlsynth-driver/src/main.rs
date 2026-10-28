@@ -130,7 +130,6 @@ mod lib2proto;
 mod lib_query;
 mod liberty_proto_info;
 mod netlist2aig;
-mod obsolete_options;
 mod proofs;
 mod prove_enum_in_bound;
 mod prove_quickcheck;
@@ -143,7 +142,6 @@ mod toolchain_config;
 mod tools;
 
 use crate::toolchain_config::ToolchainConfig;
-use anyhow::Context;
 use clap;
 use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
@@ -156,21 +154,6 @@ use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
-
-/// Accept deprecated V2 requests without advertising a typechecker choice.
-fn obsolete_type_inference_arg() -> Arg {
-    Arg::new("type_inference_v2")
-        .long("type_inference_v2")
-        .action(ArgAction::Set)
-        .num_args(1)
-        .value_parser(|value: &str| {
-            let value = value
-                .parse::<bool>()
-                .context("type_inference_v2 must be true or false")?;
-            obsolete_options::accept_type_inference_v2(value)
-        })
-        .hide(true)
-}
 
 /// Builds the shared tuning flags for commands that run aug-opt.
 fn aug_opt_tuning_args() -> [Arg; 2] {
@@ -557,14 +540,9 @@ impl AppExt for clap::Command {
 }
 
 fn main() {
-    // Keep other targets at their usual error-only default. An explicit
-    // RUST_LOG still controls all logging, including compatibility warnings.
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or(format!("error,{}=warn", obsolete_options::LOG_TARGET)),
-    )
-    .format_timestamp(None)
-    .try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
+        .format_timestamp(None)
+        .try_init();
 
     log::info!(
         "xlsynth-driver starting; version: {}",
@@ -646,8 +624,7 @@ fn main() {
                     "allow_extern_verilog",
                     "Allow codegen IR containing Verilog FFI declarations emitted from DSLX extern_verilog",
                 )
-                .add_bool_arg("keep_temps", "Keep temporary files")
-                .arg(obsolete_type_inference_arg()),
+                .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(
             clap::Command::new("dslx-stitch-pipeline")
@@ -946,7 +923,6 @@ fn main() {
                         .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
                 )
                 .args(aug_opt_tuning_args())
-                .arg(obsolete_type_inference_arg())
                 .add_bool_arg(
                     "convert_tests",
                     "Convert test procs/functions to IR",
@@ -1059,8 +1035,7 @@ fn main() {
             clap::Command::new("dslx-g8r-stats")
                 .about("Emit gate-level summary stats for a DSLX entry point")
                 .add_dslx_input_args(true)
-                .add_g8r_lowering_flags()
-                .arg(obsolete_type_inference_arg()),
+                .add_g8r_lowering_flags(),
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(
@@ -1944,7 +1919,6 @@ fn main() {
                 .add_pipeline_args()
                 .add_codegen_args()
                 .add_bool_arg("keep_temps", "Keep temporary files")
-                .arg(obsolete_type_inference_arg())
                 .arg(
                     clap::Arg::new("edits_debug_out")
                         .long("edits_debug_out")
@@ -4000,7 +3974,6 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("DSLX_STDLIB_PATH")
                         .help("Path to the DSLX standard library"),
                 )
-                .arg(obsolete_type_inference_arg())
                 .arg(solver_arg(
                     "Use the specified solver for equivalence checking",
                 ))

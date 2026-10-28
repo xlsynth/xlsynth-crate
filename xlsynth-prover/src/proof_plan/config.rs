@@ -30,6 +30,13 @@ use crate::prover::types::EquivParallelism;
 use crate::prover::types::QuickCheckAssertionSemantics;
 use serde::{Deserialize, Serialize};
 
+/// Rejects the removed key instead of letting Serde ignore it as unknown.
+fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "type_inference_v2 has been removed; V2 is always used; remove the option entirely",
+    ))
+}
+
 fn add_flag(cmd: &mut Command, name: &str, value: &str) {
     cmd.arg(format!("--{}", name)).arg(value);
 }
@@ -109,14 +116,14 @@ pub struct DslxEquivConfig {
     pub lhs_fixed_implicit_activation: Option<bool>,
     pub rhs_fixed_implicit_activation: Option<bool>,
     pub assume_enum_in_bound: Option<bool>,
-    /// Accept deprecated true values without retaining or forwarding the key.
+    /// Reject any occurrence of the removed key, regardless of its value.
     #[serde(
         default,
         rename = "type_inference_v2",
-        deserialize_with = "crate::obsolete_options::deserialize_type_inference_v2",
+        deserialize_with = "reject_type_inference_v2",
         skip_serializing
     )]
-    pub _ignored_type_inference_v2: (),
+    pub _removed_type_inference_v2: (),
     /// Include only assertions whose label matches this regex.
     pub assert_label_filter: Option<String>,
 
@@ -599,6 +606,30 @@ impl<'de> Deserialize<'de> for ProverPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dslx_equiv_config_rejects_removed_type_inference_key_for_any_value() {
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!("true"),
+            serde_json::json!(null),
+            serde_json::json!(0),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let error = serde_json::from_value::<DslxEquivConfig>(serde_json::json!({
+                "lhs_dslx_file": "lhs.x",
+                "rhs_dslx_file": "rhs.x",
+                "type_inference_v2": value,
+            }))
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "type_inference_v2 has been removed; V2 is always used; remove the option entirely"
+            );
+        }
+    }
 
     #[test]
     fn explicit_driver_is_used_for_each_proof_command() {

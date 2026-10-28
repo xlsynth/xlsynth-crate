@@ -3,6 +3,13 @@
 use clap::ArgMatches;
 use serde::Deserialize;
 
+/// Rejects the removed key instead of letting Serde ignore it as unknown.
+fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "type_inference_v2 has been removed; V2 is always used; remove the option entirely",
+    ))
+}
+
 #[derive(Deserialize, Debug)]
 pub struct ToolchainConfig {
     /// Directory path for the XLS toolset, e.g. codegen_main, opt_main, etc.
@@ -13,13 +20,13 @@ pub struct ToolchainConfig {
 
 #[derive(Deserialize, Debug)]
 pub struct DslxConfig {
-    /// Accept deprecated true values; reject V1 requests before CLI dispatch.
+    /// Reject any occurrence of the removed key, regardless of its value.
     #[serde(
         default,
         rename = "type_inference_v2",
-        deserialize_with = "crate::obsolete_options::deserialize_type_inference_v2"
+        deserialize_with = "reject_type_inference_v2"
     )]
-    pub _ignored_type_inference_v2: (),
+    pub _removed_type_inference_v2: (),
     pub dslx_stdlib_path: Option<String>,
     pub dslx_path: Option<Vec<String>>,
     pub warnings_as_errors: Option<bool>,
