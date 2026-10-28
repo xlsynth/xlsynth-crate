@@ -1,9 +1,9 @@
 # xlsynth-lean
 
-`xlsynth-lean` exports combinational `GateFn` graphs to Lean and evaluates them
-through Lean, returning the computed output values to Rust. Native `.g8r` and
-`.g8rbin` files can be loaded with the existing `xlsynth-g8r` reader before
-calling this crate.
+`xlsynth-lean` exports combinational `GateFn` graphs to Lean, evaluates them
+through Lean, and checks user-supplied Lean equivalence proofs. Evaluation
+returns the computed output values to Rust. Native `.g8r` and `.g8rbin` files
+can be loaded with the existing `xlsynth-g8r` reader before calling this crate.
 
 The companion Lean library is tested with Lean 4.34.1. Building the Rust crate
 does not require Lean to be installed.
@@ -119,6 +119,88 @@ Responses use the same bit ordering:
 An empty string represents a zero-width vector. Lean computes and returns these
 values; it does not generate a theorem for each test vector.
 
+## Check an equivalence proof
+
+Prepare a target from two `GateFn` graphs, then run a supplied proof:
+
+```rust
+use std::path::{Path, PathBuf};
+use xlsynth_lean::{LeanProofSources, prepare_equivalence_target, run_equivalence_proof};
+
+prepare_equivalence_target(&lhs, &rhs)?.write_to(Path::new("prepared"))?;
+let sources = LeanProofSources {
+    root: PathBuf::from("proof"),
+    body: PathBuf::from("proof/Body.lean"),
+    modules: vec![PathBuf::from("proof/Helpers/Partition.lean")],
+};
+let output = run_equivalence_proof(
+    Path::new("/path/to/lean/bin/lean"),
+    Path::new("prepared"),
+    &sources,
+    Path::new("work"),
+)?;
+```
+
+The input and output interfaces must have the same port names and widths in the
+same order. Interface mismatches return structured `LeanError` variants before
+Lean is invoked. The generated `Target.lean` embeds `Lhs.aag` and `Rhs.aag`
+through the shared AAG loader, defines `Generated.Lhs.circuit` and
+`Generated.Rhs.circuit`, and defines `Target.Equivalent` for that pair. Its meaning
+is equality of the complete output vectors for every shared input vector:
+
+```lean
+def Circuit.Equivalent (lhs rhs : Circuit inputCount outputCount) : Prop :=
+  ∀ inputs, lhs.denote inputs = rhs.denote inputs
+```
+
+The proof file contains a complete Lean term for `Target.Equivalent`, including
+`by` when using tactics. For example, the small three-input AND test uses:
+
+```lean
+by
+  unfold Target.Equivalent XlsynthLean.Aig.Circuit.Equivalent
+  native_decide
+```
+
+The runner generates `UserProof.lean` with `import Target`, imports for every
+supplied helper module, and the declaration
+`theorem UserProof.equivalent : Target.Equivalent := (...)`. The body is placed
+verbatim inside those parentheses, preserving its whitespace and literals. A
+direct term such as `Helpers.Proof.equivalent` is also accepted. The body is a
+term fragment rather than a standalone Lean module, so it does not contain
+top-level imports or a theorem declaration.
+
+This example's `native_decide` uses Lean's native execution trust and contributes
+a generated axiom to the proof.
+
+The prepared directory contains the companion support sources, `Lhs.aag`,
+`Rhs.aag`, `Target.lean`, and `Check.lean`. It can be retained
+as a build artifact or inspected while developing the proof.
+
+The runner requires an empty work directory. It copies the fixed prepared
+artifacts and generates `UserProof.lean` at the work root. Helper modules keep
+their paths relative to `LeanProofSources.root`; every supplied file
+must be under that root. The generated wrapper imports helpers in the supplied
+order, and Lean's `--src-deps` mode determines their compilation order. The
+selected installation must include its Lean sources.
+Generated module roots and colliding paths are rejected. A final generated
+module checks `UserProof.equivalent` at `Target.Equivalent`.
+
+The runner invokes Lean directly and does not manage Lake projects. Lean's
+default solver lookup finds the bundled CaDiCaL beside the Lean executable.
+The caller chooses the proof tactics.
+
+`check_equivalence_proof` remains a convenience API for a single proof body; it
+prepares and checks the target in a temporary directory.
+
+A successful `LeanProofOutput` means Lean accepted the named theorem at the
+generated target type. It returns `lean_version` and the captured `stdout` and
+`stderr` from successful compilation steps. A `LeanProofFailure` retains the
+underlying `LeanError`, the Lean version if its query succeeded, and diagnostics
+from completed compilation steps and the failed process. The checker performs
+no axiom audit: Lean's normal acceptance of declarations using axioms or
+`sorry` applies.
+
 ## Lean semantics and conversion trust
 
 `XlsynthLean.Aag.parse` parses and validates the ASCII AIGER resource before
@@ -164,6 +246,13 @@ Lean integration tests are explicitly enabled with a toolchain path:
 ```sh
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
   cargo test -p xlsynth-lean --test lean_eval -- --ignored
+```
+
+Proof integration tests use the same explicit toolchain configuration:
+
+```sh
+XLSYNTH_LEAN=/path/to/lean/bin/lean \
+  cargo test -p xlsynth-lean --test proof -- --ignored
 ```
 
 The differential fuzz target generates bounded graphs, permutes their node

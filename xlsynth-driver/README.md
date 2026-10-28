@@ -501,15 +501,32 @@ Flags:
 - `--liberty_proto <PATH>` – required Liberty proto, optionally gzip-compressed.
 - `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
 - `--module_name <MODULE>` – select the module when the input contains multiple modules.
-- `--collapse_sequential <BOOL>` – if true (default), collapse reached flops by substituting their next-state formulas. If false, reaching a flop that is not a source boundary is an error.
-- `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential true`.
+- `--collapse_sequential_cells <BOOL>` – if true, collapse reached flops by substituting their next-state formulas. Defaults to false; reaching a flop that is not a source boundary is then an error. The previous `--collapse_sequential` spelling remains accepted as an alias.
+- `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential_cells true`.
 - `--cone_sources <SELECTOR>` – add a compact source selector; repeat the flag for multiple selectors.
 - `--cone_sinks <SELECTOR>` – add a compact sink selector; repeat the flag for multiple selectors.
 - `--cone_boundary_file <PATH>` – read compact source and sink selectors from a JSON file. This cannot be combined with `--cone_sources` or `--cone_sinks`.
 
-#### Source and sink boundaries
+### `gv2g8r`: GV plus Liberty to native g8r
 
-The extractor elaborates structural module hierarchy, walks backward from the selected module outputs, and stops at the selected module inputs or mapped cell output pins. With no cone flags, it selects all top-module input and output ports in declaration order. Use the cone flags to select particular datapaths through this same traversal.
+Converts a GV cell netlist into native g8r text on stdout. It uses the same
+conversion path and input, module, boundary, and collapsing flags as `gv2aig`.
+The generated native g8r design is combinational, with flops handled by those
+boundary and collapsing options.
+
+```shell
+xlsynth-driver gv2g8r \
+  --netlist my_design.gv \
+  --liberty_proto cells.proto \
+  --bin-out my_design.g8rbin > my_design.g8r
+```
+
+The optional `--bin-out <PATH>` flag also writes the native binary
+representation. Without it, the command only emits native text on stdout.
+
+### GV source and sink boundaries
+
+Both `gv2aig` and `gv2g8r` use this extractor. It elaborates structural module hierarchy, walks backward from the selected module outputs, and stops at the selected module inputs or mapped cell output pins. With no cone flags, it selects all top-module input and output ports in declaration order. Use the cone flags to select particular datapaths through this same traversal.
 
 For example, `boundaries.json` can contain:
 
@@ -531,7 +548,7 @@ xlsynth-driver gv2aig \
   --liberty_proto cells.proto \
   --module_name top \
   --cone_boundary_file boundaries.json \
-  --collapse_sequential true \
+  --collapse_sequential_cells true \
   --aiger-out datapath.aig
 ```
 
@@ -545,6 +562,7 @@ xlsynth-driver gv2aig \
   --cone_sources 'input_port:data' \
   --cone_sources 'cell_output_regex:u_state_reg_[0-9]+:Q' \
   --cone_sinks 'output_port:result' \
+  --collapse_sequential_cells true \
   --aiger-out datapath.aig
 ```
 
@@ -566,9 +584,9 @@ Selectors use `[<aig-name>=]<kind>:<endpoint-or-regexp>`:
 - The file's `sources` and `sinks` arrays are both required. Sources accept input-port and cell-output selectors; sinks accept output-port selectors. Cone extraction requires at least one sink. Direct CLI selectors and `--cone_boundary_file` are mutually exclusive.
 - A module input source selects the entire port. A cell output source selects one connected scalar output pin of a mapped leaf cell, whether combinational or sequential. A sink selects an entire module output port. Sources cut the selected signal, including any `tran` aliases of it. Other outputs of the same cell are evaluated normally unless selected. Multiple selected outputs become independent AIG inputs, so relationships between those outputs are omitted from the extracted graph.
 - Selector order determines AIG interface order, with each regexp's matches sorted lexicographically by canonical endpoint text. Names must be unique within each list, and selected source net bits must not overlap. Vector bits are emitted least-significant bit first, with AIGER symbols such as `data_0`, `data_1`. Every declared source remains an input, including unused sources.
-- With `--collapse_sequential true` (the default), reached flops that are not sources are replaced by their Liberty `next_state` expressions. Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`.
+- With `--collapse_sequential_cells true`, reached flops that are not sources are replaced by their Liberty `next_state` expressions. Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`.
 - With `--collapse_load_enable_feedback`, a direct Q feedback connection implementing `(old_q & !enable) | (data & enable)` is collapsed with the prior Q value assumed zero. The enable signals may differ by one external inverter, and constant cell inputs such as disabled scan controls are folded when recognizing this pattern. This zero-prior-state assumption applies only to collapsed flops; explicitly selected `cell_output` sources retain their arbitrary input values. No implicit inputs are added. Asynchronous clear/preset, Liberty-internal state-dependent `next_state` formulas, and other feedback patterns remain unsupported. The result is a combinational AIG with no latches under the stated zero-prior-state assumption.
-- With `--collapse_sequential false`, reaching an unselected sequential cell is an error. Reaching an unselected top-module input, an undriven or multiply driven signal, an unknown value, or a dependency cycle is also an error. This requires the source list to cover every terminal signal needed by the selected sinks.
+- With `--collapse_sequential_cells false` (the default), reaching an unselected sequential cell is an error. Reaching an unselected top-module input, an undriven or multiply driven signal, an unknown value, or a dependency cycle is also an error. This requires the source list to cover every terminal signal needed by the selected sinks.
 - Without any cone flags, the source and sink lists contain all top-module inputs and outputs, preserving their names and declaration order. The same traversal and flop-collapsing logic handles default and explicit boundaries.
 
 ### `ugv2aig`: combinational UGV to AIGER
@@ -3158,6 +3176,61 @@ running the same prover-backed flow as `ir-equiv`.
 On success the command prints timing and a success line to **stdout**. On
 inequivalence or prover failure it prints details to **stderr** and exits
 non-zero.
+
+### `g8r-lean-prepare`
+
+Emits canonical ASCII AIGER files for two combinational `.g8r` or `.g8rbin`
+designs and generates one Lean target that embeds both through the shared AAG
+loader. Ordered input and output port names and widths must match.
+
+```shell
+xlsynth-driver g8r-lean-prepare \
+  --lhs reference.g8r \
+  --rhs optimized.g8r \
+  --output-dir lean-target
+```
+
+The output directory contains the companion support files, `Lhs.aag`,
+`Rhs.aag`, `Target.lean`, and `Check.lean`. `Target.lean` defines both circuits
+and `Target.Equivalent`, which is equality of all output bits for every shared
+input vector. The command performs mechanical export in Rust and does not
+invoke Lean.
+
+### `g8r-lean-check`
+
+Runs a supplied Lean proof body against a directory from `g8r-lean-prepare`.
+
+```shell
+xlsynth-driver g8r-lean-check \
+  --target-dir lean-target \
+  --proof proof/Body.lean \
+  --proof-root proof \
+  --proof-source proof/Helpers/Partition.lean \
+  --lean /path/to/lean/bin/lean \
+  --output-json lean-result.json
+```
+
+Flags:
+
+- `--target-dir <DIR>` – required prepared target directory.
+- `--proof <PATH>` – required file containing a complete Lean term for `Target.Equivalent`, such as `by ...` or a helper theorem name.
+- `--proof-root <DIR>` – root for helper paths; defaults to the body's directory.
+- `--proof-source <PATH>` – Lean helper module under the proof root; every supplied module is imported by the generated wrapper. Repeat as needed.
+- `--lean <PATH>` – required explicit Lean executable.
+- `--work-dir <DIR>` – empty work directory; otherwise a temporary directory is used.
+- `--output-json <PATH>` – write status, version, timing, and diagnostics on success or proof failure. The version is null if its query did not succeed.
+
+The driver generates `UserProof.lean` with imports for `Target` and every helper,
+then wraps the body in `theorem UserProof.equivalent : Target.Equivalent := (...)`.
+Helpers retain their paths relative to the proof root and are compiled in
+dependency order using Lean's `--src-deps` mode. Lean is invoked directly
+without a Lake project.
+`bv_decide` uses Lean's default solver lookup, which finds the bundled CaDiCaL
+beside the Lean executable.
+
+A successful result has status `accepted_by_lean` and `audit_performed: false`.
+The command performs no axiom audit; Lean's ordinary acceptance of axioms and
+`sorry` applies.
 
 ### `g8r-ir-equiv`
 

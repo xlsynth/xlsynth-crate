@@ -5,7 +5,8 @@ use std::path::Path;
 
 use crate::LeanError;
 
-/// Companion Lean support files embedded in the Rust crate.
+/// Companion Lean support files embedded in the Rust crate. Module entries are
+/// listed in dependency order.
 const LEAN_SUPPORT_FILES: &[(&str, &str)] = &[
     (
         "XlsynthLean/Aig.lean",
@@ -19,6 +20,18 @@ const LEAN_SUPPORT_FILES: &[(&str, &str)] = &[
     ("EvalMain.lean", include_str!("../lean/EvalMain.lean")),
     ("lean-toolchain", include_str!("../lean/lean-toolchain")),
 ];
+
+/// Returns support module paths in dependency order.
+pub(crate) fn lean_support_module_paths() -> impl Iterator<Item = &'static str> {
+    lean_support_paths().filter(|relative_path| relative_path.ends_with(".lean"))
+}
+
+/// Returns every embedded support artifact path.
+pub(crate) fn lean_support_paths() -> impl Iterator<Item = &'static str> {
+    LEAN_SUPPORT_FILES
+        .iter()
+        .map(|(relative_path, _)| *relative_path)
+}
 
 /// Writes the companion Lean support files into `root` using portable relative
 /// paths.

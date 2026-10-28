@@ -1,8 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
 use std::path::PathBuf;
 
-/// Error returned while exporting or evaluating a gate graph in Lean.
+/// Direction of a port in a circuit interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterfaceDirection {
+    /// Input ports.
+    Input,
+    /// Output ports.
+    Output,
+}
+
+impl fmt::Display for InterfaceDirection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        })
+    }
+}
+
+/// Error returned while exporting, evaluating, or checking a proof in Lean.
 #[derive(Debug, thiserror::Error)]
 pub enum LeanError {
     #[error("invalid Lean module name: {0}")]
@@ -10,6 +29,35 @@ pub enum LeanError {
 
     #[error("invalid GateFn: {0}")]
     InvalidGraph(String),
+
+    #[error("invalid Lean proof sources: {0}")]
+    InvalidProofSources(String),
+
+    #[error("Lean proof work directory is not empty: {0}")]
+    WorkDirectoryNotEmpty(PathBuf),
+
+    #[error("{direction} port count mismatch: lhs has {lhs}, rhs has {rhs}")]
+    InterfacePortCountMismatch {
+        direction: InterfaceDirection,
+        lhs: usize,
+        rhs: usize,
+    },
+
+    #[error("{direction} port {port_index} name mismatch: lhs is {lhs:?}, rhs is {rhs:?}")]
+    InterfacePortNameMismatch {
+        direction: InterfaceDirection,
+        port_index: usize,
+        lhs: String,
+        rhs: String,
+    },
+
+    #[error("{direction} port {port_index} width mismatch: lhs is {lhs}, rhs is {rhs}")]
+    InterfacePortWidthMismatch {
+        direction: InterfaceDirection,
+        port_index: usize,
+        lhs: usize,
+        rhs: usize,
+    },
 
     #[error("input case {case_index} has {actual} ports; expected {expected}")]
     InputCount {

@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+#[cfg(unix)]
+use std::{os::fd::OwnedFd, os::unix::net::UnixStream, process::Stdio};
 
+use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
@@ -106,7 +109,7 @@ fn run_netlist2aig_with_options(
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
-        "netlist-to-AIG failed: status={:?}\nstdout={}\nstderr={}",
+        "netlist conversion failed: status={:?}\nstdout={}\nstderr={}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -158,6 +161,85 @@ endmodule
 }
 
 #[test]
+fn gv2g8r_emits_native_text_and_optional_binary() {
+    let directory = tempfile::tempdir().unwrap();
+    let netlist = directory.path().join("and2.gv");
+    let liberty = directory.path().join("cells.textproto");
+    std::fs::write(
+        &netlist,
+        "module top(input a, input b, output y); AND2 gate(.A(a), .B(b), .Y(y)); endmodule\n",
+    )
+    .unwrap();
+    std::fs::write(&liberty, CONE_TEST_LIBERTY).unwrap();
+    let text_path = directory.path().join("and2.g8r");
+    let binary_path = directory.path().join("and2.g8rbin");
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("gv2g8r")
+        .arg("--netlist")
+        .arg(&netlist)
+        .arg("--liberty_proto")
+        .arg(&liberty)
+        .arg("--bin-out")
+        .arg(&binary_path)
+        // Exercise the previous spelling retained as a compatibility alias.
+        .arg("--collapse_sequential")
+        .arg("false")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    std::fs::write(&text_path, output.stdout).unwrap();
+    for output_path in [text_path, binary_path] {
+        let graph = load_gate_fn_from_path(&output_path).unwrap();
+        let mut simulator = PreparedGateSim::new(&graph);
+        for bits in 0..4 {
+            assert_eq!(
+                simulator.eval_outputs(&[
+                    IrBits::make_ubits(1, bits & 1).unwrap(),
+                    IrBits::make_ubits(1, (bits >> 1) & 1).unwrap(),
+                ]),
+                vec![IrBits::make_ubits(1, (bits & 1) & ((bits >> 1) & 1)).unwrap()]
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn gv2g8r_writes_binary_before_clean_broken_pipe_exit() {
+    let directory = tempfile::tempdir().unwrap();
+    let netlist = directory.path().join("and2.gv");
+    let liberty = directory.path().join("cells.textproto");
+    let binary_path = directory.path().join("and2.g8rbin");
+    std::fs::write(
+        &netlist,
+        "module top(input a, input b, output y); AND2 gate(.A(a), .B(b), .Y(y)); endmodule\n",
+    )
+    .unwrap();
+    std::fs::write(&liberty, CONE_TEST_LIBERTY).unwrap();
+
+    // Closing the peer before spawning makes the first stdout write fail with
+    // BrokenPipe without depending on process scheduling or pipe capacity.
+    let (peer, stdout) = UnixStream::pair().unwrap();
+    drop(peer);
+    let stdout: OwnedFd = stdout.into();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("gv2g8r")
+        .arg("--netlist")
+        .arg(&netlist)
+        .arg("--liberty_proto")
+        .arg(&liberty)
+        .arg("--bin-out")
+        .arg(&binary_path)
+        .stdout(Stdio::from(stdout))
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let graph = load_gate_fn_from_path(&binary_path).unwrap();
+    assert_eq!(graph.inputs.len(), 2);
+    assert_eq!(graph.outputs.len(), 1);
+}
+
+#[test]
 fn gv2aig_load_enable_feedback_requires_opt_in() {
     let liberty_text = r#"
 format_magic: 5496997758228255311
@@ -200,6 +282,20 @@ endmodule
     assert!(!default_output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&default_output.stderr),
+        include_str!("golden/gv2aig_sequential_cells_disabled.golden.txt")
+    );
+
+    let (_feedback_dir, _feedback_path, feedback_output) = run_netlist2aig_with_options(
+        "gv2aig",
+        netlist_text,
+        Some(liberty_text),
+        None,
+        None,
+        &["--collapse_sequential_cells", "true"],
+    );
+    assert!(!feedback_output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&feedback_output.stderr),
         include_str!("golden/gv2aig_load_enable_feedback.golden.txt")
     );
 
@@ -209,7 +305,11 @@ endmodule
         Some(liberty_text),
         None,
         None,
-        &["--collapse_load_enable_feedback"],
+        &[
+            "--collapse_sequential_cells",
+            "true",
+            "--collapse_load_enable_feedback",
+        ],
     );
     assert_success(&enabled_output);
     let loaded = load_aiger_auto_from_path(&enabled_path, GateBuilderOptions::no_opt())
