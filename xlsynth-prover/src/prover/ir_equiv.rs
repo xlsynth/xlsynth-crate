@@ -23,44 +23,78 @@ pub struct AlignedFnInputs<'a, R> {
     pub flattened: BitVec<R>,
 }
 
-/// Given the bit-vector representation of the two functions' inputs, this
-/// function generates a flattened bit-vector, and use slices of the flattened
-/// bit-vector for inputs to both functions.
-///
-/// We need this is to enhance term sharing. For example, when two functions
-/// shares the same prelude, they will be compiled into exactly the same SMT
-/// terms with the aligned inputs. The solver will then be able to just reason
-/// about the behavior of the remaining parts of the functions.
-pub fn align_fn_inputs<'a, S: Solver>(
+/// Returns the inputs left free after checking the implicit calling convention.
+fn free_params<'a>(
+    f: &ProverFn<'a>,
+    side: &str,
+) -> Result<impl ExactSizeIterator<Item = &'a ir::Node>, String> {
+    let mut params = f.params();
+    if f.fixed_implicit_activation
+        && !(params.next().is_some_and(|p| p.ty == ir::Type::Token)
+            && params.next().is_some_and(|p| p.ty == ir::Type::Bits(1)))
+    {
+        return Err(format!(
+            "Fixed implicit activation on {side} requires leading token and bits[1] parameters"
+        ));
+    }
+    Ok(params)
+}
+
+/// Checks that inputs can share an SMT bit vector and that flattened outputs
+/// have the same width. Tokens contribute no result bits.
+fn validate_equiv_signatures(
+    lhs: &ProverFn<'_>,
+    rhs: &ProverFn<'_>,
+    allow_flatten: bool,
+) -> Result<(), String> {
+    let lparams = free_params(lhs, "LHS")?;
+    let rparams = free_params(rhs, "RHS")?;
+    if allow_flatten {
+        let lwidth: usize = lparams.map(|p| p.ty.bit_count()).sum();
+        let rwidth: usize = rparams.map(|p| p.ty.bit_count()).sum();
+        if lwidth != rwidth {
+            return Err(format!(
+                "Free input widths differ: LHS has {lwidth} bits, RHS has {rwidth} bits"
+            ));
+        }
+    } else {
+        if lparams.len() != rparams.len() {
+            return Err(format!(
+                "Free input counts differ: LHS has {}, RHS has {}",
+                lparams.len(),
+                rparams.len()
+            ));
+        }
+        for (l, r) in lparams.zip(rparams) {
+            if l.ty != r.ty {
+                return Err(format!(
+                    "Input type mismatch for {} vs {}: {} vs {}",
+                    l.param_name(),
+                    r.param_name(),
+                    l.ty,
+                    r.ty
+                ));
+            }
+        }
+    }
+    let lwidth = lhs.fn_ref.ret_ty.bit_count();
+    let rwidth = rhs.fn_ref.ret_ty.bit_count();
+    if lwidth != rwidth {
+        return Err(format!(
+            "Return widths differ: LHS has {lwidth} bits, RHS has {rwidth} bits"
+        ));
+    }
+    Ok(())
+}
+
+/// Binds both functions' inputs to slices of one shared SMT bit vector.
+/// Requires compatible signatures as defined by [`validate_equiv_signatures`].
+fn align_compatible_inputs<'a, S: Solver>(
     solver: &mut S,
     lhs_inputs: &FnInputs<'a, S::Term>,
     rhs_inputs: &FnInputs<'a, S::Term>,
-    allow_flatten: bool,
 ) -> AlignedFnInputs<'a, S::Term> {
     let lhs_inputs_total_width = lhs_inputs.total_free_width();
-    let rhs_inputs_total_width = rhs_inputs.total_free_width();
-    assert_eq!(
-        lhs_inputs_total_width, rhs_inputs_total_width,
-        "LHS and RHS must have the same number of bits"
-    );
-    if !allow_flatten {
-        assert_eq!(
-            lhs_inputs.free_params_len(),
-            rhs_inputs.free_params_len(),
-            "LHS and RHS must have the same number of inputs"
-        );
-        for (l, r) in lhs_inputs.free_params().zip(rhs_inputs.free_params()) {
-            assert_eq!(
-                l.ty,
-                r.ty,
-                "Input type mismatch for {} vs {}: {:?} vs {:?}",
-                l.param_name(),
-                r.param_name(),
-                l.ty,
-                r.ty
-            );
-        }
-    }
     if lhs_inputs_total_width == 0 {
         return AlignedFnInputs {
             lhs: lhs_inputs.clone(),
@@ -297,6 +331,9 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
+        return EquivResult::Error(e);
+    }
     let uf_signatures: HashMap<String, UfSignature> =
         if lhs.uf_map.is_empty() && rhs.uf_map.is_empty() {
             HashMap::new()
@@ -354,7 +391,7 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
 
     let uf_registry = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures);
 
-    let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
+    let aligned = align_compatible_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs);
     let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &uf_registry);
     let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &uf_registry);
     check_aligned_fn_equiv_internal(
@@ -408,12 +445,10 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
+        return EquivResult::Error(e);
+    }
     let width = lhs.fn_ref.ret_ty.bit_count();
-    assert_eq!(
-        width,
-        rhs.fn_ref.ret_ty.bit_count(),
-        "Return widths must match"
-    );
     if width == 0 {
         // Zero-width values – fall back to the standard equivalence prover
         // because there is no bit to split on.
@@ -508,6 +543,9 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
+        return EquivResult::Error(e);
+    }
     if lhs.fn_ref.params.is_empty() || rhs.fn_ref.params.is_empty() {
         return prove_ir_fn_equiv::<S>(
             solver_config,
@@ -519,19 +557,18 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         );
     }
 
-    assert_eq!(
-        lhs.fn_ref.params.len(),
-        rhs.fn_ref.params.len(),
-        "Parameter count mismatch"
-    );
-    assert!(
-        split_input_index < lhs.fn_ref.params.len(),
-        "split_input_index out of bounds"
-    );
-    assert!(
-        split_input_bit_index < lhs.fn_ref.get_param(split_input_index).ty.bit_count(),
-        "split_input_bit_index out of bounds"
-    );
+    let Some(param) = lhs.params().nth(split_input_index) else {
+        return EquivResult::Error(format!(
+            "LHS split input index {split_input_index} is out of bounds"
+        ));
+    };
+    if split_input_bit_index >= param.ty.bit_count() {
+        return EquivResult::Error(format!(
+            "Split bit {split_input_bit_index} is out of bounds for LHS parameter {} of type {}",
+            param.param_name(),
+            param.ty
+        ));
+    }
 
     for bit_val in 0..=1u64 {
         let mut solver = S::new(solver_config).unwrap();
@@ -539,7 +576,7 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         // bit-constraint.
         let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
         let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"));
-        let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
+        let aligned = align_compatible_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = UfRegistry {
             ufs: HashMap::new(),
@@ -548,12 +585,10 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &empty_map, &empty_registry);
 
         // Locate the chosen parameter on the LHS side.
-        let param_name = lhs.fn_ref.get_param(split_input_index).param_name();
-
         let param_bv = aligned
             .lhs
             .inputs
-            .get(param_name)
+            .get(param.param_name())
             .expect("Parameter BV missing")
             .bitvec
             .clone();
@@ -584,7 +619,9 @@ pub mod test_utils {
 
     use xlsynth_pir::IrValue;
 
-    use super::{align_fn_inputs, get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv};
+    use super::{
+        align_compatible_inputs, get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
+    };
     use crate::prover::types::{AssertionSemantics, EquivResult, FnInputs, ParamDomains, ProverFn};
     use crate::solver::{BitVec, Solver, test_utils::assert_solver_eq};
     use xlsynth_pir::{ir, ir_eval, ir_parser};
@@ -1113,7 +1150,7 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let prover_fn = ProverFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         // Must not panic.
-        let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
+        let _ = align_compatible_inputs(&mut solver, &fn_inputs, &fn_inputs);
     }
 
     pub fn align_non_zero_width_fn_inputs_first_token<S: Solver>(solver_config: &S::Config) {
@@ -1129,7 +1166,7 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let prover_fn = ProverFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         // Must not panic.
-        let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
+        let _ = align_compatible_inputs(&mut solver, &fn_inputs, &fn_inputs);
     }
 
     pub fn assert_smt_fn_eq<S: Solver>(

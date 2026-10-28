@@ -70,7 +70,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
         let iact = params_iter.next().unwrap();
         assert_eq!(iact.ty, ir::Type::Bits(1));
         inputs.insert(
-            prefix_name(iact.param_name()),
+            iact.param_name().to_string(),
             IrTypedBitVec {
                 ir_type: &iact.ty,
                 bitvec: solver.one(1),

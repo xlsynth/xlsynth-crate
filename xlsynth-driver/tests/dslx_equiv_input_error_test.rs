@@ -76,6 +76,51 @@ fn dslx_equiv_reports_input_errors(lhs: &str, tactic: bool) {
     }
 }
 
+/// Incompatible signatures must return a worker error, including through a root
+/// Solve.
+#[cfg(feature = "has-bitwuzla")]
+#[test_case(false; "direct")]
+#[test_case(true; "root_solve")]
+fn incompatible_signatures_return_execution_error(tactic: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lhs.x"), "fn main(x: u8) -> u8 { x }").unwrap();
+    std::fs::write(
+        dir.path().join("rhs.x"),
+        "fn main(x: u16) -> u8 { x as u8 }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("solve.json"),
+        r#"[{"selector":["root"],"command":"Solve"}]"#,
+    )
+    .unwrap();
+    let result_path = dir.path().join("result.json");
+    std::fs::write(&result_path, r#"{"status":"proved","success":true}"#).unwrap();
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+    cli.current_dir(dir.path()).args([
+        "dslx-equiv",
+        "lhs.x",
+        "rhs.x",
+        "--dslx_top=main",
+        "--solver=bitwuzla",
+        "--output_json=result.json",
+    ]);
+    if tactic {
+        cli.arg("--tactic_json=solve.json");
+    }
+    let output = cli.output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let report: Value = serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
+    assert_eq!(report["status"], "execution-error", "{report}");
+    assert_eq!(report["success"], false);
+    if tactic {
+        assert_eq!(
+            report["report"]["indefinite"][0]["reason"], "ExecutionError",
+            "{report}"
+        );
+    }
+}
+
 /// A malformed script is a failed proof invocation, even if the DSLX inputs are
 /// valid.
 #[test]
