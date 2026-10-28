@@ -3631,6 +3631,9 @@ If `prover` cannot load the toolchain, it exits with code `1` and writes an `exe
 
 #### Proof subprocess result protocol
 
+The driver and its proof workers must be built from the same revision; see the
+[proof engine's revision compatibility policy](../xlsynth-prover/README.md#revision-compatibility).
+
 The scheduler requires child results from `ir-equiv`, `dslx-equiv`,
 `prove-quickcheck`, and `dslx-fn-prove-assertions` to contain both `status` and
 `success`. For example, a proved result includes

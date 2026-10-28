@@ -2,6 +2,21 @@
 
 Reusable equivalence checking, DSLX proof tactics, and proof-plan execution.
 
+## Revision compatibility
+
+Run the proof engine, driver, and workers from the same repository revision.
+Proof plans, tactic scripts, worker messages, and saved proof reports have no
+backward-compatibility guarantee. Changes may assume there are no proof
+artifacts on disk from an earlier revision: update inputs and regenerate
+outputs at HEAD. There is no need for migrations, compatibility aliases, or
+fallback readers for old proof formats.
+
+Every run must still validate its workers' results and termination. A previous
+result at the same output path is not evidence that the current invocation proved
+anything.
+
+## File-based proofs
+
 For a file-based equivalence proof, build a `dslx_equiv::DslxEquivFiles`
 request. Call `prove` to check it directly or `into_tactic_tree` to decompose
 the same property. Supply DSLX function names for uninterpreted functions;
@@ -43,12 +58,9 @@ result IDs, requests remain queued for retry. Only a definite counterexample can
 trigger a decomposition rollback; inconclusive results and execution errors
 leave the selected obligations unresolved.
 
-Persisted tactic reports do not have a backward-compatibility guarantee.
-Deserializing a `ScriptReport` requires an explicit `unresolved` field; reports
-from older versions without it are intentionally rejected. Missing completion
-information cannot be interpreted as an empty list of unproved obligations:
-even an old empty-script report could otherwise appear complete. Regenerate
-legacy reports with the current engine instead of adding a default value.
+Deserializing a `ScriptReport` requires an explicit `unresolved` field.
+Defaulting a missing field to an empty list would turn unknown completion
+into a claim that all obligations were proved.
 
 `root_disproved` records a counterexample to the surviving root, including one
 found in an earlier call. `ScriptReport::proof_status()` preserves that conclusion
