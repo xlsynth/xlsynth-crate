@@ -1157,15 +1157,15 @@ unsafe extern "C" {
     pub fn xls_dslx_type_annotation_get_array_type_annotation(
         type_annotation: *const CDslxTypeAnnotation,
     ) -> *mut CDslxArrayTypeAnnotation;
-
     pub fn xls_dslx_type_annotation_get_tuple_member_count(
-        annotation: *const CDslxTypeAnnotation,
+        type_annotation: *const CDslxTypeAnnotation,
         count_out: *mut i64,
     ) -> bool;
     pub fn xls_dslx_type_annotation_get_tuple_member(
-        annotation: *const CDslxTypeAnnotation,
+        type_annotation: *const CDslxTypeAnnotation,
         index: i64,
     ) -> *mut CDslxTypeAnnotation;
+
 
     // -- ArrayTypeAnnotation
 

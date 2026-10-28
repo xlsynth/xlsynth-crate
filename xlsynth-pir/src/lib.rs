@@ -55,6 +55,7 @@ pub mod prove_equiv_via_toolchain;
 pub mod random_inputs;
 pub mod range_analysis;
 pub mod simple_rebase;
+pub mod stateful_fn_to_block;
 pub mod structural_similarity;
 
 pub use xlsynth_ir_value::{ir_values, value};
