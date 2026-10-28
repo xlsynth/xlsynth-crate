@@ -1189,6 +1189,9 @@ jobs:
   fuzz-smoke:
     name: Fuzz Smoke Test
     runs-on: ubuntu-latest
+    env:
+      # Reuse compiler outputs across days. Bump this date to test a new nightly.
+      FUZZ_TOOLCHAIN: nightly-2026-10-23
     steps:
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1211,7 +1214,7 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
-          toolchain: nightly
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
           profile: minimal
           override: true
 
@@ -1225,35 +1228,15 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
           echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
           echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
-          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=1G" >> $GITHUB_ENV
 
-      - name: Resolve fuzz package lockfiles
-        run: |
-          for manifest in */fuzz/Cargo.toml; do
-            cargo generate-lockfile --manifest-path "$manifest"
-          done
-
-      - name: Enable Rust build cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Restore fuzz compiler cache
+        id: fuzz-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          # A cancelled tools/setup step must not populate an immutable cache
-          # entry before the fuzz suite has actually compiled successfully.
-          cache-on-failure: false
-          key: fuzz-packages-v1-${{ steps.resolve-xls-tag-smoke.outputs.tag }}-${{ hashFiles('**/Cargo.toml', 'scripts/run_all_fuzz_tests.py') }}
-          # Include every existing fuzz graph in dependency/lockfile hashing.
-          workspaces: |
-            xlsynth-aug-opt/fuzz
-            xlsynth-codegen/fuzz
-            xlsynth-driver/fuzz
-            xlsynth-g8r/fuzz
-            xlsynth-mcmc-pir/fuzz
-            xlsynth-pir/fuzz
-            xlsynth-pir-compiler/fuzz
-            xlsynth-vastly/fuzz
-          # A shared directory must not be cleaned once per workspace: that
-          # would discard artifacts belonging to the other fuzz packages.
-          cache-targets: false
-          cache-directories: target/fuzz-ci
+          path: ${{ runner.temp }}/sccache
+          key: fuzz-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.FUZZ_TOOLCHAIN }}-${{ github.sha }}
+          restore-keys: fuzz-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.FUZZ_TOOLCHAIN }}-
 
       - name: Install protobuf compiler
         run: |
@@ -1305,7 +1288,7 @@ jobs:
 
       - name: Install cargo-fuzz
         run: |
-          cargo install cargo-fuzz
+          cargo install --locked --version 0.13.2 cargo-fuzz
 
       - name: Audit priority-result fusion coverage
         env:
@@ -1328,6 +1311,14 @@ jobs:
           python3 scripts/run_all_fuzz_tests.py \
             --target-dir "$GITHUB_WORKSPACE/target/fuzz-ci" \
             --fuzz-bin-args=-max_total_time=5
+
+      # PRs can read main's cache. A cache saved on a PR is scoped to that PR.
+      - name: Save fuzz compiler cache
+        if: github.ref == 'refs/heads/main' && steps.fuzz-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: ${{ steps.fuzz-cache.outputs.cache-primary-key }}
 
   # -----------------------------------------------------------
   # X) Benches compile-only job

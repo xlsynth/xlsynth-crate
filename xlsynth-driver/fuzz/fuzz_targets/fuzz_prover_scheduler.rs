@@ -23,9 +23,10 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_driver::prover::{ProverReportNode, TaskOutcome, run_prover_plan};
-use xlsynth_driver::prover_config::ProverPlan;
 use xlsynth_driver_fuzz::eval_fuzz;
+use xlsynth_prover::proof_plan::config::ProverPlan;
+use xlsynth_prover::proof_plan::report::{ProverReportNode, TaskOutcome};
+use xlsynth_prover::proof_plan::scheduler::run_prover_plan;
 
 fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
     let mut budget = 64usize;
@@ -35,8 +36,7 @@ fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
     // Build a ProverPlan from normalized fuzz input (clamp already normalizes).
     let plan = xlsynth_driver_fuzz::build_plan_from_fuzz(root.clone());
 
-    // Compute expected outcome on the normalized tree; None means both
-    // possible.
+    // Either outcome is valid when the normalized tree evaluates to None.
     let expected = eval_fuzz(&root).outcome;
 
     // Helper: verify the tasks that must be kept running are not canceled.
@@ -72,8 +72,7 @@ fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
         }
     }
 
-    // Run the scheduler across 1..=4 cores. If expected is Some(v), all must
-    // match v.
+    // Every worker count must agree with a determinate outcome.
     for cores in 1..=4 {
         let report = match run_prover_plan(plan.clone(), cores) {
             Ok(r) => r,
