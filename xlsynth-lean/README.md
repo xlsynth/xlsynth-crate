@@ -98,9 +98,11 @@ fn counter(take: bool, __reg_count: u8) -> (Outputs, u8) {
 }
 ```
 
-The model exposes `count` as state and `out0.seen` as an output. The original
-DSLX supplies parameter names, aliases, struct fields and enum variants. The
-block IR supplies the cycle transition. Internal bindings stay private.
+The model exposes `count` as state. With one output port, `observe q x`
+returns the `Outputs` value directly. A Lean proof can bind it with
+`let out0 := observe q x` and use `out0.seen`. The original DSLX supplies
+parameter names, aliases, struct fields and enum variants. The block IR
+supplies the cycle transition. Internal bindings stay private.
 
 ```rust
 use std::path::Path;
@@ -113,7 +115,10 @@ let bundle = compiled.emit_readable()?;
 
 The readable interface supports unsigned bits of positive width, positional
 tuples, nonempty local structs, aliases of supported local types and unsigned
-two-bit enums with distinct encodings.
+two-bit enums with distinct encodings. For each unnamed two-bit encoding the
+emitter adds a Lean constructor so every physical value can be decoded and
+encoded again. Exposed struct fields and enum cases must avoid names Lean
+generates for their type, such as `recOn`.
 
 `LeanBlockBundle::files` contains these five files in dependency order:
 
