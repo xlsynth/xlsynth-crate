@@ -223,12 +223,13 @@ fn collect_outcomes<'a>(
     report: &'a ProverReportNode,
     expected: &BTreeSet<&str>,
 ) -> Result<HashMap<&'a str, ReportedTask<'a>>, String> {
-    /// Visits every result exactly once before any tree outcome is applied.
+    /// Validates the subtree and returns whether a selected task reported an
+    /// execution error.
     fn visit<'a>(
         report: &'a ProverReportNode,
         expected: &BTreeSet<&str>,
         out: &mut HashMap<&'a str, ReportedTask<'a>>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         match report {
             ProverReportNode::Task {
                 task_id,
@@ -256,14 +257,23 @@ fn collect_outcomes<'a>(
                 if out.insert(id, task).is_some() {
                     return Err(format!("proof runner returned duplicate task ID: {id}"));
                 }
+                Ok(outcome.is_some_and(|o| o.proof_status() == ProofStatus::ExecutionError))
             }
-            ProverReportNode::Group { tasks, .. } => {
+            ProverReportNode::Group { tasks, outcome, .. } => {
+                let mut has_task_error = false;
                 for task in tasks {
-                    visit(task, expected, out)?;
+                    has_task_error |= visit(task, expected, out)?;
                 }
+                if !has_task_error
+                    && outcome.is_some_and(|o| o.proof_status() == ProofStatus::ExecutionError)
+                {
+                    return Err(
+                        "proof runner group error cannot be assigned to a selected task".into(),
+                    );
+                }
+                Ok(has_task_error)
             }
         }
-        Ok(())
     }
     let mut out = HashMap::new();
     visit(report, expected, &mut out)?;
@@ -459,13 +469,16 @@ pub fn parse_script_steps_from_jsonl_str(input: &str) -> Result<Vec<ScriptStep>,
 /// The runner receives one batch of `(task ID, obligation)` pairs and the
 /// tree's configuration. It must return each result under its supplied task ID;
 /// missing results remain pending. Duplicate, absent, or unexpected result IDs
-/// are errors. The runner is not called when no leaves are selected. Applying
-/// script steps precedes running proofs, so an error does not undo successfully
+/// are errors. A group reporting an execution, protocol, or process error must
+/// include a selected task with an execution error in its subtree. A runner
+/// that fails before it can associate the error with a task should return
+/// `Err`. The runner is not called when no leaves are selected. Applying script
+/// steps precedes running proofs, so an error does not undo successfully
 /// applied steps.
 ///
 /// Accepting a report consumes all selected Solve requests, including those
 /// with missing or inconclusive results. A later call must explicitly Solve a
-/// leaf again to retry it. Runner errors or invalid result IDs leave requests
+/// leaf again to retry it. Runner errors and invalid reports leave requests
 /// queued, without committing outcomes.
 pub fn execute_script_with_runner(
     tree: &mut OblTree,
@@ -1131,6 +1144,42 @@ fn b(x: u8) -> u8 { !a(x) }
         .unwrap();
         assert!(retried.is_complete());
         assert_eq!(retried.solved, vec![root_selector()]);
+    }
+
+    #[test]
+    fn unassigned_group_error_leaves_selected_task_queued_for_retry() {
+        let mut tree = OblTree::new(base_obligation(), base_config());
+        let error = execute_script_with_runner(
+            &mut tree,
+            &[ScriptStep {
+                selector: root_selector(),
+                command: Command::Solve,
+            }],
+            |_, _| {
+                Ok(ProverReport {
+                    plan: ProverReportNode::Group {
+                        kind: GroupKind::All,
+                        outcome: Some(ProofStatus::ExecutionError.into()),
+                        tasks: vec![ProverReportNode::Task {
+                            task_id: Some("root".into()),
+                            outcome: None,
+                            cmdline: None,
+                            stdout: None,
+                            stderr: None,
+                        }],
+                    },
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "proof runner group error cannot be assigned to a selected task"
+        );
+        assert_eq!(tree.root.status, NodeStatus::Open);
+        let retried = execute_script_with_runner(&mut tree, &[], accept_all_obligations).unwrap();
+        assert_eq!(retried.solved, vec![root_selector()]);
+        assert!(retried.is_complete());
     }
 
     #[test_case(Some(TaskOutcome::Normal { success: true }), ProofStatus::Proved; "success")]

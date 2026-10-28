@@ -6,7 +6,8 @@ Reusable equivalence checking, DSLX proof tactics, and proof-plan execution.
 
 Run the proof engine, driver, and workers from the same repository revision.
 Proof plans, tactic scripts, worker messages, and saved proof reports have no
-backward-compatibility guarantee. Changes may assume there are no proof
+backward-compatibility guarantee. Update proof API callers together with the
+library when an interface changes. Changes may assume there are no proof
 artifacts on disk from an earlier revision: update inputs and regenerate
 outputs at HEAD. There is no need for migrations, compatibility aliases, or
 fallback readers for old proof formats.
@@ -45,6 +46,10 @@ and returns a typed `proof_plan::report::ProverReport`. It does not receive the
 mutable obligation tree. A runner is responsible for correctly proving each
 submitted obligation; the engine is responsible for interpreting those results
 against the final tree. Missing outcomes leave obligations unresolved.
+A group that reports an execution, protocol, or process error must contain a
+task that reported one of those errors under its selected ID. If setup fails
+before the runner can attribute the error to a task, return `Err` so the
+caller can retry the batch.
 
 Use `ScriptReport::is_complete()` to determine whether the proof is finished.
 An empty script or successful subset of obligations is insufficient. Failed

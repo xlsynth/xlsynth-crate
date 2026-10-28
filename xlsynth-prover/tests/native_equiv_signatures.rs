@@ -105,3 +105,31 @@ top fn main(tok: token, active: bits[1]) -> (token, bits[1]) {
         );
     }
 }
+
+#[test_case("identity(x, id=100)", true; "both_bit_values_match")]
+#[test_case("literal(value=0, id=100)", false; "counterexample_when_x_is_one")]
+fn automatic_split_uses_a_free_input_after_fixed_activation(rhs_expr: &str, equivalent: bool) {
+    let lhs = r#"package p
+top fn main(tok: token, active: bits[1], x: bits[1]) -> (token, bits[1]) {
+  ret result: (token, bits[1]) = tuple(tok, x, id=100)
+}"#;
+    let rhs = format!(
+        r#"package q
+top fn main(x: bits[1]) -> bits[1] {{
+  ret result: bits[1] = {rhs_expr}
+}}"#
+    );
+    let request = IrEquivRequest::new(
+        IrModule::new(lhs).with_fixed_implicit_activation(true),
+        IrModule::new(&rhs),
+    )
+    .with_parallelism(EquivParallelism::InputBitSplit);
+    let result = run_ir_equiv(&request).unwrap().result;
+    assert!(
+        matches!(
+            (equivalent, &result),
+            (true, EquivResult::Proved) | (false, EquivResult::Disproved { .. })
+        ),
+        "{result:?}"
+    );
+}
