@@ -179,18 +179,14 @@ mod tests {
     #[cfg(unix)]
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
-    /// A non-UTF-8 path is an execution error even if the file and module stem
-    /// are valid.
+    /// Reject a non-UTF-8 parent before reading the source, even when the
+    /// module name itself is valid.
     #[cfg(unix)]
     #[test]
     fn unrepresentable_source_path_does_not_start_a_proof() {
-        let dir = tempfile::tempdir().unwrap();
-        let parent = dir.path().join(OsStr::from_bytes(b"dir_\xff"));
-        std::fs::create_dir(&parent).unwrap();
-        let path = parent.join("entry.x");
-        std::fs::write(&path, "pub fn main(x: u8) -> u8 { x }").unwrap();
+        let path = Path::new(OsStr::from_bytes(b"dir_\xff/entry.x"));
         let side = || DslxEquivFile {
-            path: &path,
+            path,
             top: "main",
             uf_map: HashMap::new(),
             fixed_implicit_activation: false,
