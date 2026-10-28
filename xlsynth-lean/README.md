@@ -88,18 +88,6 @@ writes, reset precedence and source assertions. Unsupported operations and
 asynchronous resets return errors. The supported subset covers the arbiter and
 operator-control examples; it is not a general XLS translator.
 
-### Capture source names and types
-
-`block::collect_source_map` captures supported DSLX type declarations and
-explicit register-to-type attachments. `block::validate_source_map` checks the
-map against the supplied block and source, including hashes, names, field order
-and physical shapes. For example, an attachment can bind register `____state`
-to source type `State` without flattening its named fields.
-
-An attachment asserts the compiler's register/type relationship; validation is
-not proof that the block was compiled from that DSLX source. Source-map v1
-retains its serialized representation and rejects stale or incompatible inputs.
-
 ## Evaluate through Lean
 
 Use the actual `bin/lean` executable from a Lean distribution:

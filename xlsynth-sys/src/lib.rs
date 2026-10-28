@@ -856,6 +856,13 @@ unsafe extern "C" {
         result_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    pub fn xls_dslx_typechecked_module_convert_to_ir(
+        tm: *mut CDslxTypecheckedModule,
+        import_data: *mut CDslxImportData,
+        error_out: *mut *mut std::os::raw::c_char,
+        ir_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
     pub fn xls_dslx_typechecked_module_clone_removing_members(
         tm: *mut CDslxTypecheckedModule,
         members: *mut *mut CDslxModuleMember,
@@ -1142,6 +1149,14 @@ unsafe extern "C" {
     pub fn xls_dslx_type_annotation_get_array_type_annotation(
         type_annotation: *const CDslxTypeAnnotation,
     ) -> *mut CDslxArrayTypeAnnotation;
+    pub fn xls_dslx_type_annotation_get_tuple_member_count(
+        type_annotation: *const CDslxTypeAnnotation,
+        count_out: *mut i64,
+    ) -> bool;
+    pub fn xls_dslx_type_annotation_get_tuple_member(
+        type_annotation: *const CDslxTypeAnnotation,
+        index: i64,
+    ) -> *mut CDslxTypeAnnotation;
 
     // -- ArrayTypeAnnotation
 
