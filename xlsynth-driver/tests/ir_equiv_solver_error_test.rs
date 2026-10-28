@@ -71,3 +71,68 @@ top fn main(x: bits[2] id=1) -> bits[2] {
     assert_eq!(actual["success"], false);
     assert_eq!(actual["error_str"], expected);
 }
+
+/// A witness at x=1 disproves equivalence even if the solver could not decide
+/// x=0.
+#[test_case("unknown"; "unknown_on_zero")]
+#[test_case("unexpected-response"; "solver_error_on_zero")]
+fn input_split_counterexample_survives_failed_partition(first_response: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let solver = dir.path().join("z3");
+    fs::write(
+        &solver,
+        r#"#!/bin/sh
+while IFS= read -r command; do
+    case "$command" in
+        '(check-sat)')
+            if [ -f checked-zero ]; then
+                echo sat
+            else
+                : > checked-zero
+                echo "$FIRST_RESPONSE"
+            fi ;;
+        '(get-value ('*'))')
+            term=${command#'(get-value ('}
+            term=${term%'))'}
+            case "$term" in '#b0') value='#b0' ;; *) value='#b1' ;; esac
+            echo "(($term $value))" ;;
+        *) echo success ;;
+    esac
+done
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&solver, fs::Permissions::from_mode(0o755)).unwrap();
+    for (file, result) in [
+        ("lhs.ir", "identity(x, id=2)"),
+        ("rhs.ir", "literal(value=0, id=2)"),
+    ] {
+        let ir = format!(
+            r#"package p
+top fn main(x: bits[1] id=1) -> bits[1] {{
+  ret y: bits[1] = {result}
+}}
+"#
+        );
+        fs::write(dir.path().join(file), ir).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .current_dir(dir.path())
+        .env("PATH", dir.path())
+        .env("FIRST_RESPONSE", first_response)
+        .args([
+            "ir-equiv",
+            "lhs.ir",
+            "rhs.ir",
+            "--solver=z3-binary",
+            "--parallelism-strategy=input-bit-split",
+            "--output_json=result.json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let report: Value =
+        serde_json::from_slice(&fs::read(dir.path().join("result.json")).unwrap()).unwrap();
+    assert_eq!(report["status"], "disproved", "{report}");
+    assert_eq!(report["success"], false);
+}

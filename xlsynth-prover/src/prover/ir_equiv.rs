@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::ops::Range;
+use std::sync::Mutex;
 
 use xlsynth_pir::IrValue;
 
@@ -14,6 +14,7 @@ use super::{
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     uf::infer_merged_uf_signatures,
 };
+use crate::proof_outcome::{ProofStatus, aggregate_proof_statuses};
 use crate::solver::{BitVec, Response, Solver};
 use regex::Regex;
 use xlsynth_pir::ir;
@@ -409,11 +410,6 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     )
 }
 
-// Add parallel equivalence-checking strategies that were previously only
-// implemented in the Boolector-specific backend.  These generic versions work
-// with any `Solver` implementation by accepting a factory closure that can
-// create fresh solver instances on demand.
-
 /// Helper: create a variant of `f` that returns only the single output bit at
 /// position `bit`.
 fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
@@ -440,9 +436,7 @@ fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
     nf
 }
 
-/// Prove equivalence by splitting on each output bit in parallel.
-/// `solver_factory` must be able to create an independent solver instance for
-/// each spawned thread.
+/// Prove equivalence with an independent solver for each output bit.
 pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     solver_config: &S::Config,
     lhs: &ProverFn<'a>,
@@ -468,72 +462,80 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
         );
     };
 
-    let found = Arc::new(AtomicBool::new(false));
-    let counterexample: Arc<Mutex<Option<EquivResult>>> = Arc::new(Mutex::new(None));
-    let next_bit = Arc::new(AtomicUsize::new(0));
+    prove_partitions(width, width.min(num_cpus::get()), |idx| {
+        let lf_ir = make_bit_fn(lhs.fn_ref, idx);
+        let rf_ir = make_bit_fn(rhs.fn_ref, idx);
+        let lf = ProverFn::new(&lf_ir, None)
+            .with_fixed_implicit_activation(lhs.fixed_implicit_activation)
+            .with_domains(lhs.domains.clone());
+        let rf = ProverFn::new(&rf_ir, None)
+            .with_fixed_implicit_activation(rhs.fixed_implicit_activation)
+            .with_domains(rhs.domains.clone());
+        prove_ir_fn_equiv::<S>(
+            solver_config,
+            &lf,
+            &rf,
+            assertion_semantics,
+            assert_label_include,
+            allow_flatten,
+        )
+    })
+}
 
-    let thread_cnt = std::cmp::min(width, num_cpus::get());
+/// Tracks unclaimed partitions and the strongest completed proof result.
+struct PartitionProof {
+    remaining: Range<usize>,
+    result_index: usize,
+    result: EquivResult,
+}
 
-    std::thread::scope(|scope| {
-        for _ in 0..thread_cnt {
-            let lhs_cl = lhs.clone();
-            let rhs_cl = rhs.clone();
-            let found_cl = found.clone();
-            let cex_cl = counterexample.clone();
-            let next_cl = next_bit.clone();
-
-            scope.spawn(move || {
-                loop {
-                    if found_cl.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let idx = next_cl.fetch_add(1, Ordering::SeqCst);
-                    if idx >= width {
-                        break;
-                    }
-
-                    let lf_ir = make_bit_fn(&lhs_cl.fn_ref, idx);
-                    let rf_ir = make_bit_fn(&rhs_cl.fn_ref, idx);
-                    let lf = ProverFn::new(&lf_ir, None)
-                        .with_fixed_implicit_activation(lhs_cl.fixed_implicit_activation)
-                        .with_domains(lhs_cl.domains.clone());
-                    let rf = ProverFn::new(&rf_ir, None)
-                        .with_fixed_implicit_activation(rhs_cl.fixed_implicit_activation)
-                        .with_domains(rhs_cl.domains.clone());
-                    let res = prove_ir_fn_equiv::<S>(
-                        solver_config,
-                        &lf,
-                        &rf,
-                        assertion_semantics.clone(),
-                        assert_label_include,
-                        allow_flatten,
-                    );
-                    match &res {
-                        EquivResult::Proved => {}
-                        EquivResult::Disproved { .. }
-                        | EquivResult::Inconclusive(_)
-                        | EquivResult::ToolchainDisproved(_)
-                        | EquivResult::Error(_) => {
-                            let mut guard = cex_cl.lock().unwrap();
-                            *guard = Some(res.clone());
-                            found_cl.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-                }
-            });
+impl PartitionProof {
+    fn new(count: usize) -> Self {
+        Self {
+            remaining: 0..count,
+            result_index: usize::MAX,
+            result: EquivResult::Proved,
         }
-    });
-
-    let maybe_cex = {
-        let mut guard = counterexample.lock().unwrap();
-        guard.take()
-    };
-    if let Some(res) = maybe_cex {
-        res
-    } else {
-        EquivResult::Proved
     }
+
+    /// Retains the lowest-index payload for the combined status. Once a
+    /// counterexample arrives, all smaller indices are already in flight or
+    /// done.
+    fn record(&mut self, index: usize, result: EquivResult) {
+        let status = ProofStatus::from(&result);
+        if status == ProofStatus::Disproved {
+            self.remaining = 0..0;
+        }
+        let prior = ProofStatus::from(&self.result);
+        if aggregate_proof_statuses([prior, status]) == status
+            && (prior != status || index < self.result_index)
+        {
+            self.result_index = index;
+            self.result = result;
+        }
+    }
+}
+
+/// Checks the required partitions using up to `workers` independent solvers.
+fn prove_partitions(
+    count: usize,
+    workers: usize,
+    prove: impl Fn(usize) -> EquivResult + Sync,
+) -> EquivResult {
+    let proof = Mutex::new(PartitionProof::new(count));
+    let worker = || loop {
+        let next = proof.lock().unwrap().remaining.next();
+        let Some(index) = next else { break };
+        let result = prove(index);
+        proof.lock().unwrap().record(index, result);
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            scope.spawn(worker);
+        }
+        worker();
+    });
+    proof.into_inner().unwrap().result
 }
 
 /// Prove equivalence by case-splitting on a single input bit value (0 / 1).
@@ -576,7 +578,7 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         ));
     }
 
-    for bit_val in 0..=1u64 {
+    prove_partitions(2, 1, |bit_val| {
         let mut solver = match S::new(solver_config) {
             Ok(solver) => solver,
             Err(error) => {
@@ -604,23 +606,70 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
             .bitvec
             .clone();
         let bit_bv = solver.slice(&param_bv, split_input_bit_index, 1);
-        let val_bv = solver.numerical(1, bit_val);
+        let val_bv = solver.numerical(1, bit_val as u64);
         let eq_bv = solver.eq(&bit_bv, &val_bv);
         solver.assert(&eq_bv).unwrap();
 
-        let result = check_aligned_fn_equiv_internal(
+        check_aligned_fn_equiv_internal(
             &mut solver,
             &smt_lhs,
             &smt_rhs,
             assertion_semantics,
             assert_label_include,
-        );
-        if !matches!(result, EquivResult::Proved) {
-            return result;
+        )
+    })
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::{EquivResult, FnOutput, IrValue, PartitionProof, prove_partitions};
+
+    fn disproof() -> EquivResult {
+        EquivResult::Disproved {
+            lhs_inputs: vec![],
+            rhs_inputs: vec![],
+            lhs_output: FnOutput {
+                value: IrValue::bool(false),
+                assertion_violation: None,
+            },
+            rhs_output: FnOutput {
+                value: IrValue::bool(true),
+                assertion_violation: None,
+            },
         }
     }
 
-    EquivResult::Proved
+    #[test]
+    fn in_flight_error_cannot_overwrite_a_counterexample() {
+        let mut proof = PartitionProof::new(2);
+        proof.record(1, disproof());
+        proof.record(0, EquivResult::Error("solver failed".into()));
+        assert!(matches!(proof.result, EquivResult::Disproved { .. }));
+        assert_eq!(proof.result_index, 1);
+    }
+
+    #[test]
+    fn lowest_index_error_survives_inconclusive_results() {
+        let mut proof = PartitionProof::new(4);
+        proof.record(2, EquivResult::Error("second error".into()));
+        proof.record(1, EquivResult::Error("first error".into()));
+        proof.record(0, EquivResult::Inconclusive("unknown".into()));
+        proof.record(3, EquivResult::Error("last error".into()));
+        assert!(matches!(proof.result, EquivResult::Error(ref err) if err == "first error"));
+    }
+
+    #[test]
+    fn pending_partition_can_disprove_after_a_solver_failure() {
+        let result = prove_partitions(3, 1, |bit| match bit {
+            0 => EquivResult::Error("solver failed".into()),
+            1 => disproof(),
+            _ => panic!("checked another output bit after finding a counterexample"),
+        });
+        assert!(
+            matches!(result, EquivResult::Disproved { .. }),
+            "{result:?}"
+        );
+    }
 }
 
 #[cfg(test)]

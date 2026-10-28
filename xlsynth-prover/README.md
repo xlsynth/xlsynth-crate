@@ -23,6 +23,11 @@ request. Call `prove` to check it directly or `into_tactic_tree` to decompose
 the same property. Supply DSLX function names for uninterpreted functions;
 the library specializes the requested tops and translates names for the solver.
 
+When native equivalence splits a proof by input or output bits, a
+counterexample in any part disproves the whole claim. If no part finds a
+counterexample, a solver error takes precedence over an inconclusive result.
+All parts must prove their claims for the whole proof to succeed.
+
 For QuickCheck, `dslx_quickcheck::DslxQuickCheckRequest::run` proves the
 selected properties and returns the suite conclusion and each property's
 result. Its callback can display progress. Use `tactic_tree` to select the
