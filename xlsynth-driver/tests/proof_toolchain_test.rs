@@ -126,37 +126,57 @@ disable_warnings = ["unused_definition"]
         r#"{"kind":"prove-quickcheck","dslx_input_file":"qc.x","solver":"toolchain"}"#,
     )
     .unwrap();
-    for args in [
-        vec![
-            "prove-quickcheck",
-            "--dslx_input_file=qc.x",
-            "--solver=toolchain",
-            "--tactic_json=solve.json",
-        ],
-        vec![
-            "dslx-equiv",
-            "lhs.x",
-            "rhs.x",
-            "--dslx_top=main",
-            "--solver=toolchain",
-            "--assume-enum-in-bound=false",
-            "--assertion-semantics=ignore",
-            "--tactic_json=solve.json",
-        ],
-        vec!["prover", "--plan_json_file=plan.json"],
-    ] {
+    let check = |args: &[&str], flags: &[&str], expected: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
             .current_dir(path)
             .env_remove("XLSYNTH_TOOLS")
             .arg("--toolchain=selected tools.toml")
-            .args(&args)
+            .args(args)
+            .args(flags)
             .arg("--output_json=result.json")
             .output()
             .unwrap();
-        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert_eq!(
+            output.status.success(),
+            expected == "proved",
+            "{args:?} {flags:?}: {output:?}"
+        );
         let report: serde_json::Value =
             serde_json::from_slice(&fs::read(path.join("result.json")).unwrap()).unwrap();
-        assert_eq!(report["status"], "proved");
+        assert_eq!(report["status"], expected, "{args:?} {flags:?}: {report}");
         fs::remove_file(path.join("result.json")).unwrap();
-    }
+    };
+    let equiv = [
+        "dslx-equiv",
+        "lhs.x",
+        "rhs.x",
+        "--dslx_top=main",
+        "--solver=toolchain",
+        "--assume-enum-in-bound=false",
+        "--assertion-semantics=ignore",
+    ];
+    let solve = "--tactic_json=solve.json";
+    check(
+        &[
+            "prove-quickcheck",
+            "--dslx_input_file=qc.x",
+            "--solver=toolchain",
+        ],
+        &[solve],
+        "proved",
+    );
+    check(&equiv, &[], "proved");
+    check(&equiv, &[solve], "proved");
+    // The imported helper exists only under the configured search roots.
+    check(&equiv, &["--dslx_path="], "execution-error");
+    check(&equiv, &["--dslx_path=", solve], "execution-error");
+
+    let plan = ["prover", "--plan_json_file=plan.json"];
+    check(&plan, &[], "proved");
+    fs::write(
+        path.join("plan.json"),
+        r#"{"kind":"prove-quickcheck","dslx_input_file":"qc.x","solver":"toolchain","dslx_path":[]}"#,
+    )
+    .unwrap();
+    check(&plan, &[], "execution-error");
 }

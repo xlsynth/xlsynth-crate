@@ -31,15 +31,6 @@ fn write_obligation_source(
     Ok(path)
 }
 
-fn cfg_with_paths(cfg: &mut DslxEquivConfig, stdlib: Option<&Path>, paths: &[&Path]) {
-    if let Some(p) = stdlib {
-        cfg.dslx_stdlib_path = Some(p.to_path_buf());
-    }
-    if !paths.is_empty() {
-        cfg.dslx_path = Some(paths.iter().map(|p| (*p).to_path_buf()).collect());
-    }
-}
-
 /// Executable obligation tasks and the source files they reference.
 pub struct ObligationPlan {
     pub plan: ProverPlan,
@@ -63,6 +54,9 @@ pub fn build_plan_from_obligations(
 ) -> Result<ObligationPlan, String> {
     let tempdir = tempfile::TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
     let mut tasks: Vec<ProverPlan> = Vec::new();
+    // The parent has already resolved these roots, including any explicit
+    // clear.
+    let dslx_paths: Vec<_> = dslx_paths.iter().map(|p| p.to_path_buf()).collect();
 
     for (i, (task_id, ob)) in obligations.iter().enumerate() {
         match &ob.payload {
@@ -98,6 +92,8 @@ pub fn build_plan_from_obligations(
                     rhs_dslx_file: rhs_path,
                     lhs_dslx_top: Some(lec.lhs.top_func.clone()),
                     rhs_dslx_top: Some(lec.rhs.top_func.clone()),
+                    dslx_path: Some(dslx_paths.clone()),
+                    dslx_stdlib_path: dslx_stdlib_path.map(Path::to_path_buf),
                     solver: solver.clone(),
                     flatten_aggregates: Some(lec.options.flatten_aggregates),
                     assertion_semantics: Some(lec.options.assertion_semantics),
@@ -110,7 +106,6 @@ pub fn build_plan_from_obligations(
                     json: None,
                     ..Default::default()
                 };
-                cfg_with_paths(&mut cfg, dslx_stdlib_path, dslx_paths);
                 if !lhs_uf.is_empty() {
                     cfg.lhs_uf = Some(lhs_uf);
                 }
@@ -150,11 +145,7 @@ pub fn build_plan_from_obligations(
 
                 let cfg = ProveQuickcheckConfig {
                     dslx_input_file: qc_path,
-                    dslx_path: if dslx_paths.is_empty() {
-                        None
-                    } else {
-                        Some(dslx_paths.iter().map(|p| (*p).to_path_buf()).collect())
-                    },
+                    dslx_path: Some(dslx_paths.clone()),
                     dslx_stdlib_path: dslx_stdlib_path.map(|p| p.to_path_buf()),
                     test_filter,
                     solver: solver.clone(),

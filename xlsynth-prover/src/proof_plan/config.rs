@@ -44,10 +44,10 @@ fn add_flag(cmd: &mut Command, name: &str, value: impl AsRef<OsStr>) {
     cmd.arg(format!("--{}", name)).arg(value);
 }
 
-/// Preserves the configured directory order and rejects paths the driver cannot
-/// encode.
+/// An absent list inherits the toolchain paths. An explicit empty list clears
+/// them.
 fn add_dslx_search_paths(cmd: &mut Command, paths: Option<&[PathBuf]>) -> io::Result<()> {
-    if let Some(paths) = paths.filter(|p| !p.is_empty()) {
+    if let Some(paths) = paths {
         let paths: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
         let joined = join_dslx_search_paths(&paths, ';')
             .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;

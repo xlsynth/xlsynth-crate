@@ -3643,7 +3643,9 @@ Proof workers reject a DSLX search directory containing `;`, the driver's
 path-list separator. External XLS tools likewise cannot represent a directory
 containing `:`. These cases report an error so a proof cannot silently import
 a different module. Direct native proofs accept literal directory names from
-the toolchain TOML array.
+the toolchain TOML array. Omitting the search path inherits the toolchain
+setting; `--dslx_path=` (or `"dslx_path": []` in a plan) explicitly clears it,
+including for tactic workers.
 
 Missing or malformed JSON, unknown statuses, and contradictory fields are
 `ProtocolError`. Abnormal termination or an unexpected exit code is
