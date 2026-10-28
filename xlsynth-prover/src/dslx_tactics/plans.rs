@@ -2,12 +2,13 @@
 
 use std::path::Path;
 
-use crate::dslx_tactics::obligations::{ObligationPayload, ProverObligation};
+use crate::dslx_tactics::obligations::{
+    FileWithHistory, ObligationPayload, ProverObligation, SourceFile,
+};
 use crate::proof_plan::config::{
     DslxEquivConfig, GroupKind, ProveQuickcheckConfig, ProverPlan, ProverTask,
 };
 use crate::prover::SolverChoice;
-use crate::prover::types::AssertionSemantics;
 use regex::escape;
 
 fn write_text(
@@ -17,6 +18,26 @@ fn write_text(
 ) -> Result<std::path::PathBuf, String> {
     let path = dir.path().join(name);
     std::fs::write(&path, text).map_err(|e| format!("write {}: {}", name, e))?;
+    Ok(path)
+}
+
+/// Retains module identity while isolating sources with identical basenames.
+fn write_lec_source(
+    dir: &tempfile::TempDir,
+    subdir: &str,
+    fallback_name: &str,
+    source: &FileWithHistory,
+) -> Result<std::path::PathBuf, String> {
+    let name = match &source.base_source {
+        SourceFile::Path(path) => path
+            .file_name()
+            .ok_or_else(|| format!("source path has no filename: {}", path.display()))?,
+        SourceFile::Text(_) => std::ffi::OsStr::new(fallback_name),
+    };
+    let directory = dir.path().join(subdir);
+    std::fs::create_dir(&directory).map_err(|e| format!("create source directory: {e}"))?;
+    let path = directory.join(name);
+    std::fs::write(&path, &source.text).map_err(|e| format!("write source: {e}"))?;
     Ok(path)
 }
 
@@ -56,10 +77,10 @@ pub fn build_plan_from_obligations(
     for (i, (task_id, ob)) in obligations.iter().enumerate() {
         match &ob.payload {
             ObligationPayload::Lec(lec) => {
-                let lhs_text = lec.lhs.file.text.clone();
-                let rhs_text = lec.rhs.file.text.clone();
-                let lhs_path = write_text(&tempdir, &format!("ob{}_lhs.x", i), &lhs_text)?;
-                let rhs_path = write_text(&tempdir, &format!("ob{}_rhs.x", i), &rhs_text)?;
+                let lhs_path =
+                    write_lec_source(&tempdir, &format!("ob{i}_lhs"), "lhs.x", &lec.lhs.file)?;
+                let rhs_path =
+                    write_lec_source(&tempdir, &format!("ob{i}_rhs"), "rhs.x", &lec.rhs.file)?;
 
                 let lhs_uf: Vec<String> = lec
                     .lhs
@@ -80,8 +101,14 @@ pub fn build_plan_from_obligations(
                     lhs_dslx_top: Some(lec.lhs.top_func.clone()),
                     rhs_dslx_top: Some(lec.rhs.top_func.clone()),
                     solver: solver.clone(),
-                    flatten_aggregates: Some(false),
-                    assertion_semantics: Some(AssertionSemantics::Ignore),
+                    flatten_aggregates: Some(lec.options.flatten_aggregates),
+                    assertion_semantics: Some(lec.options.assertion_semantics),
+                    assume_enum_in_bound: Some(lec.options.assume_enum_in_bound),
+                    drop_params: Some(lec.options.drop_params.clone()),
+                    assert_label_filter: lec.options.assert_label_filter.clone(),
+                    lhs_fixed_implicit_activation: Some(lec.lhs.fixed_implicit_activation),
+                    rhs_fixed_implicit_activation: Some(lec.rhs.fixed_implicit_activation),
+                    parallelism_strategy: Some(lec.options.parallelism),
                     json: None,
                     ..Default::default()
                 };

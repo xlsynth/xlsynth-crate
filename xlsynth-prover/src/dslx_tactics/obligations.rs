@@ -5,13 +5,18 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::prover::types::{AssertionSemantics, EquivParallelism};
+
 pub use crate::dslx_tactics::source::{Edit, FileWithHistory, SourceFile};
 
+/// One side of an equivalence obligation, including its activation convention.
 #[derive(Clone, Debug)]
 pub struct LecSide {
     pub top_func: String,
+    /// DSLX function names mapped to shared symbols, before IR name mangling.
     pub uf_map: BTreeMap<String, String>,
     pub file: FileWithHistory,
+    pub fixed_implicit_activation: bool,
 }
 
 impl LecSide {
@@ -20,6 +25,7 @@ impl LecSide {
             top_func: top.to_string(),
             uf_map: BTreeMap::new(),
             file: FileWithHistory::from_text(text),
+            fixed_implicit_activation: false,
         }
     }
 
@@ -28,6 +34,7 @@ impl LecSide {
             top_func: top.to_string(),
             uf_map: BTreeMap::new(),
             file: FileWithHistory::from_path(path),
+            fixed_implicit_activation: false,
         }
     }
 
@@ -41,6 +48,7 @@ impl LecSide {
                 edits: Vec::new(),
                 text,
             },
+            fixed_implicit_activation: false,
         }
     }
 }
@@ -51,10 +59,37 @@ impl LecSide {
     }
 }
 
+/// The property and input interpretation required by an equivalence obligation.
+#[derive(Clone, Debug)]
+pub struct LecProofOptions {
+    pub assertion_semantics: AssertionSemantics,
+    pub assume_enum_in_bound: bool,
+    pub flatten_aggregates: bool,
+    pub drop_params: Vec<String>,
+    pub assert_label_filter: Option<String>,
+    pub parallelism: EquivParallelism,
+}
+
+impl Default for LecProofOptions {
+    fn default() -> Self {
+        Self {
+            assertion_semantics: AssertionSemantics::Ignore,
+            assume_enum_in_bound: false,
+            flatten_aggregates: false,
+            drop_params: Vec::new(),
+            assert_label_filter: None,
+            parallelism: EquivParallelism::SingleThreaded,
+        }
+    }
+}
+
+/// Two DSLX functions and the precise equivalence property to prove between
+/// them.
 #[derive(Clone, Debug)]
 pub struct LecObligation {
     pub lhs: LecSide,
     pub rhs: LecSide,
+    pub options: LecProofOptions,
 }
 
 #[derive(Clone, Debug)]
@@ -83,10 +118,34 @@ pub enum Side {
 }
 
 impl LecObligation {
+    /// Checks the preconditions of the current UF-based decomposition rules.
+    pub(crate) fn validate_decomposition(&self) -> Result<(), String> {
+        if self.options.assertion_semantics != AssertionSemantics::Ignore {
+            return Err("decomposition requires assertion-semantics=ignore; UF abstraction does not preserve assertion effects".to_string());
+        }
+        if !self.options.drop_params.is_empty() {
+            return Err(
+                "decomposition does not support drop_params; helper signatures may differ"
+                    .to_string(),
+            );
+        }
+        if self.options.flatten_aggregates {
+            return Err("decomposition does not support flatten_aggregates=true; helper signatures must match".to_string());
+        }
+        if self.lhs.fixed_implicit_activation || self.rhs.fixed_implicit_activation {
+            return Err("decomposition does not support fixed implicit activation; helper activation conventions may differ".to_string());
+        }
+        if self.options.parallelism != EquivParallelism::SingleThreaded {
+            return Err("decomposition requires single-threaded parallelism; UF proofs do not support other strategies".to_string());
+        }
+        Ok(())
+    }
+
     pub fn clone_lhs_self(&self) -> Self {
         Self {
             lhs: self.lhs.clone(),
             rhs: self.lhs.clone(),
+            options: self.options.clone(),
         }
     }
 
@@ -94,6 +153,7 @@ impl LecObligation {
         Self {
             lhs: self.rhs.clone(),
             rhs: self.rhs.clone(),
+            options: self.options.clone(),
         }
     }
 

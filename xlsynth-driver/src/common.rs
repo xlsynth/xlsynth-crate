@@ -667,14 +667,21 @@ pub fn parse_uf_spec(
     module_name: &str,
     matches: Option<clap::parser::ValuesRef<String>>,
 ) -> HashMap<String, String> {
+    parse_dslx_uf_spec(matches)
+        .into_iter()
+        .map(|(name, alias)| (mangle_dslx_name(module_name, &name).unwrap(), alias))
+        .collect()
+}
+
+/// Parses UF mappings while retaining the DSLX names used by proof obligations.
+pub fn parse_dslx_uf_spec(
+    matches: Option<clap::parser::ValuesRef<String>>,
+) -> HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     if let Some(vals) = matches {
         for v in vals {
             if let Some((fn_name, uf_name)) = v.split_once(':') {
-                m.insert(
-                    mangle_dslx_name(module_name, fn_name.trim()).unwrap(),
-                    uf_name.trim().to_string(),
-                );
+                m.insert(fn_name.trim().to_string(), uf_name.trim().to_string());
             } else {
                 eprintln!(
                     "Error: invalid uninterpreted function specification '{}'; expected <function-name>:<uf-name>",

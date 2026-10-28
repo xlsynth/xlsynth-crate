@@ -3326,6 +3326,21 @@ records successful attempts; it does not establish whole-proof completion
 because a rollback may discard those children. These rules also apply to
 `prove-quickcheck` tactic scripts.
 
+For `dslx-equiv`, a root-only `Solve` honors the same proof settings as direct
+equivalence, including `--assertion-semantics` (default `ignore`),
+`--assert-label-filter`, `--assume-enum-in-bound` (default `true`),
+`--drop_params`, `--flatten_aggregates`, fixed implicit activation, and
+parallelism. Original module names are retained for assertion-label matching.
+
+`Focus` and `Cosliced` require `--assertion-semantics=ignore`, empty parameter
+drops, `--flatten_aggregates=false`, both fixed-activation settings `false`, and
+`--parallelism-strategy=single-threaded` (the defaults). Other combinations are
+rejected because the current decomposition rules do not preserve their
+meaning. Child obligations always check all enum bit representations: an
+internal call may receive an invalid enum value even when the root assumes
+valid enum inputs. A decomposition can therefore fail where a direct proof
+restricted to valid root inputs succeeds.
+
 Provide the plan via `--tactic_json` for a JSON array, or `--tactic_jsonl` for JSONL (one JSON object per line).
 
 ```shell

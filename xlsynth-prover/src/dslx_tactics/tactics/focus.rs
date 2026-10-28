@@ -40,6 +40,12 @@ impl IsTactic for FocusTactic {
             _ => return Err("focus tactic requires a Lec obligation".to_string()),
         };
 
+        base_lec.validate_decomposition()?;
+        // Helper calls can receive any bit representation, even when the
+        // original top's enum inputs are restricted to declared members.
+        let mut base_lec = base_lec.clone();
+        base_lec.options.assume_enum_in_bound = false;
+
         let mut obligations: Vec<ProverObligation> = Vec::new();
 
         // 1) Per-pair equivalence checks
@@ -85,6 +91,7 @@ mod tests {
 
     fn base_obligation_with(sel: &str) -> ProverObligation {
         let lhs = LecSide {
+            fixed_implicit_activation: false,
             top_func: "f1".to_string(),
             uf_map: std::collections::BTreeMap::new(),
             file: FileWithHistory {
@@ -94,6 +101,7 @@ mod tests {
             },
         };
         let rhs = LecSide {
+            fixed_implicit_activation: false,
             top_func: "f2".to_string(),
             uf_map: std::collections::BTreeMap::new(),
             file: FileWithHistory {
@@ -105,7 +113,11 @@ mod tests {
         ProverObligation {
             selector_segment: sel.to_string(),
             description: None,
-            payload: ObligationPayload::Lec(LecObligation { lhs, rhs }),
+            payload: ObligationPayload::Lec(LecObligation {
+                lhs,
+                rhs,
+                options: Default::default(),
+            }),
         }
     }
 

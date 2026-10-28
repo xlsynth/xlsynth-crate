@@ -1,0 +1,1 @@
+[dslx-equiv] execute_script error: decomposition requires assertion-semantics=ignore; UF abstraction does not preserve assertion effects
