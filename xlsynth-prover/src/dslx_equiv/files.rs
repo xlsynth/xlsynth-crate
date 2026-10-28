@@ -303,7 +303,7 @@ pub fn main<N: u32>(x: u32) -> u32 { arithmetic::bump(x) + N }
                 uf_map: HashMap::new(),
                 fixed_implicit_activation: false,
             },
-            // With no enum domains to collect, IR conversion uses the supplied tools.
+            // Without enum domains, the external tools perform IR conversion.
             options: LecProofOptions::default(),
             solver: Some(SolverChoice::Bitwuzla),
             dslx_stdlib_path: None,
