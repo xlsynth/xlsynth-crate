@@ -2,16 +2,22 @@
 
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
 
+use test_case::test_case;
+
 /// Toolchain loading happens after argument parsing and must produce the same
 /// execution-error report as setup inside a proof command.
-#[test]
-fn toolchain_setup_failures_write_proof_reports() {
+#[test_case(OsStr::new("proof"); "portable working directory")]
+// macOS filesystems can reject non-UTF-8 names before the driver starts.
+#[cfg_attr(target_os = "linux", test_case(OsStr::from_bytes(b"proof-\xff"); "non UTF-8 working directory"))]
+fn toolchain_setup_failures_write_proof_reports(directory: &OsStr) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(std::ffi::OsStr::from_bytes(b"proof-\xff"));
+    let path = dir.path().join(directory);
     fs::create_dir(&path).unwrap();
     fs::write(path.join("xlsynth-toolchain.toml"), "[toolchain\n").unwrap();
     fs::write(path.join("type.toml"), "[toolchain]\ntool_path = true\n").unwrap();
