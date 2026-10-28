@@ -433,29 +433,6 @@ Flags:
   explicit block selection.
 - `--output <FILE>` writes the raw model to this file, replacing existing
   contents only after successful generation. The default is stdout.
-- `--dslx-source <PATH>` supplies DSLX source containing the local type
-  declarations used by the attachments. Imported source types are unsupported.
-- `--type-attachment <REGISTER=TYPE>` attaches a source type to a physical
-  register. Repeat the option for multiple registers.
-- `--output-dir <NEW_DIR>` writes the readable bundle to a new directory. Its
-  parent must exist; an existing directory is refused.
-
-The three readable options (`--dslx-source`, `--type-attachment`, and
-`--output-dir`) must be supplied together. Readable mode uses the package's
-default block selection and rejects `--top` and `--output`. For example, with
-a DSLX declaration `struct State { count: u8 }` and a matching physical register
-named `state`, generate the bundle with:
-
-```shell
-xlsynth-driver block2lean counter.block.ir \
-  --dslx-source counter.x --type-attachment state=State --output-dir counter-lean
-```
-
-The directory contains `Generated.lean`, `ReadableTypes.lean`,
-`ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
-`ReadableCorrespondence.lean`. All text is generated before any output is
-opened, so invalid inputs leave outputs untouched. A later filesystem write
-error can leave a partial directory.
 
 The supported IR subset includes exact-width bits, nested tuples, tokens,
 registers, synchronous resets, assertions, bitwise operations, addition,
@@ -463,19 +440,51 @@ equality, concatenation, slicing, sign extension, one-hot encoding, and
 ordinary, priority, and bits-valued one-hot selection. Arrays, zero-width bits,
 block instances, asynchronous resets, and unsupported operations are rejected.
 Assertions are reported as results and do not restrict the model's inputs or
-old state. Source types support unsigned bits, Booleans, two-bit enums, aliases,
-and ordered nonempty structs.
+old state.
 
-Attachments are the caller's assertion that a register represents a source
-type. The library typechecks the source and validates physical shapes and
-retained field-projection names; those checks do not prove that the IR was
-compiled from that source. A matching width alone is insufficient to establish
-source provenance.
+### `dslx2lean`: Stateful DSLX function to readable Lean
 
-Generation does not invoke Lean or check proofs. Compile the generated modules
-with Lean to check the readable correspondence proofs; see
-[`xlsynth-lean`](../xlsynth-lean/README.md) for the library contract and supported
-Lean version.
+A trailing parameter named `__reg_count` reads the current value of the
+`count` register. The final return element supplies its next value. With
+multiple registers, the final elements follow register parameter order.
+The preceding elements of the outer tuple become `out0`, `out1`, and so on.
+For example, this function exposes a single output with named fields.
+
+```dslx
+struct Outputs { seen: u1, valid: u1 }
+
+pub fn tick(x: u1, __reg_count: u1) -> (Outputs, u1) {
+    (Outputs { seen: __reg_count, valid: x }, x)
+}
+```
+
+```shell
+xlsynth-driver dslx-stateful-fn-to-block counter.x --top tick > counter.block.ir
+xlsynth-driver dslx2lean counter.x --top tick --output-dir lean
+```
+
+The second command uses the same typechecked DSLX module for lowering and
+for naming the readable interface. A proof can bind the observed output to
+`out0` and refer to `out0.seen` and `out0.valid`. All register writes take
+effect together on the clock edge. Asserting `rst` writes zero to each register.
+To convert an existing IR function, use `ir-stateful-fn-to-block` with its
+IR name as `--top`. Readable generation requires the DSLX source, and uses
+the existing Lean emitter's supported block operations. Proof-facing types
+support unsigned bits of positive width, positional tuples, nonempty local
+structs, local aliases of supported types, and unsigned two-bit enums with
+distinct encodings. Local computations stay inside the generated step.
+
+The command produces `Generated.lean`, `ReadableTypes.lean`,
+`ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
+`ReadableCorrespondence.lean`. The output directory must be new and its
+parent must exist. All modules are generated before any files are opened.
+To check the correspondence proofs, compile the modules with Lean as
+described in the [library documentation](../xlsynth-lean/README.md).
+
+Use `--dslx-stdlib-path <DIR>` to override the linked compiler's standard
+library and repeat `--dslx-search-path <DIR>` to add import directories.
+The command uses the linked compiler and rejects external toolchain
+configuration.
 
 ### `block2sv`: Block IR to SystemVerilog
 
