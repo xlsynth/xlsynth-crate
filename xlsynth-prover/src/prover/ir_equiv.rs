@@ -249,8 +249,9 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
 
     solver.assert(&condition).unwrap();
 
-    match solver.check().unwrap() {
-        Response::Sat => {
+    match solver.check() {
+        Err(error) => EquivResult::Error(format!("Equivalence solver failed: {error}")),
+        Ok(Response::Sat) => {
             // Helper to fetch first violated assertion (if any)
             let get_assertion =
                 |solver: &mut S, asserts: &[&Assertion<'_, S::Term>]| -> Option<(String, String)> {
@@ -316,8 +317,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
                 rhs_output,
             }
         }
-        Response::Unsat => EquivResult::Proved,
-        Response::Unknown => EquivResult::Inconclusive("solver returned unknown".to_string()),
+        Ok(Response::Unsat) => EquivResult::Proved,
+        Ok(Response::Unknown) => EquivResult::Inconclusive("solver returned unknown".to_string()),
     }
 }
 
@@ -359,7 +360,12 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
                 Err(e) => return EquivResult::Error(e),
             }
         };
-    let mut solver = S::new(solver_config).unwrap();
+    let mut solver = match S::new(solver_config) {
+        Ok(solver) => solver,
+        Err(error) => {
+            return EquivResult::Error(format!("Failed to create equivalence solver: {error}"));
+        }
+    };
     let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
     let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"));
 
@@ -571,7 +577,12 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     }
 
     for bit_val in 0..=1u64 {
-        let mut solver = S::new(solver_config).unwrap();
+        let mut solver = match S::new(solver_config) {
+            Ok(solver) => solver,
+            Err(error) => {
+                return EquivResult::Error(format!("Failed to create equivalence solver: {error}"));
+            }
+        };
         // Build aligned SMT representations first so we can assert the
         // bit-constraint.
         let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
