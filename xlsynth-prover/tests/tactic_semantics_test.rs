@@ -28,6 +28,22 @@ fn root_obligation() -> ProverObligation {
     }
 }
 
+/// Encoding "helper:other" as the function would tell the child to use
+/// "helper".
+#[test]
+fn a_function_name_cannot_become_part_of_a_worker_uf_symbol() {
+    let mut root = root_obligation();
+    let ObligationPayload::Lec(lec) = &mut root.payload else {
+        panic!("expected equivalence obligation");
+    };
+    lec.lhs.uf_map.insert("helper:other".into(), "F".into());
+    let result = build_plan_from_obligations(&[("root".into(), root)], None, &[], None, None);
+    assert_eq!(
+        result.err().as_deref(),
+        Some(r#"Invalid DSLX function name in UF mapping: "helper:other""#)
+    );
+}
+
 /// Provides both concrete APIs, independently of script-level validation.
 fn decomposition_tactics() -> [Tactic; 2] {
     let slice = NamedSlice {

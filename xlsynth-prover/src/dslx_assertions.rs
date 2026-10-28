@@ -20,7 +20,7 @@ use crate::prover::prover_for_choice;
 use crate::prover::types::{
     BoolPropertyResult, FnInput, FnOutput, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
 };
-use crate::prover::uf::validate_uf_symbols;
+use crate::prover::uf::validate_uf_symbol;
 use crate::prover::{Prover, SolverChoice};
 
 /// Request describing a proof that DSLX assertions reachable from `top` hold.
@@ -311,7 +311,9 @@ pub fn run_dslx_assertions(
     let uf_map = match &request.uf_map {
         AssertionUfMappings::LocalDslx(names) => mangle_dslx_uf_map(module_name, names)?,
         AssertionUfMappings::Ir(names) => {
-            validate_uf_symbols(names)?;
+            for symbol in names.values() {
+                validate_uf_symbol(symbol)?;
+            }
             names.clone()
         }
     };

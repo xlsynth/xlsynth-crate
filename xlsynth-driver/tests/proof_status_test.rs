@@ -4,6 +4,104 @@ use std::process::Command;
 
 use serde_json::Value;
 
+/// Runs the saved plan and checks both its structured result and the process
+/// exit.
+#[cfg(feature = "has-bitwuzla")]
+fn assert_saved_plan_outcome(directory: &std::path::Path, plan: &Value, expected: &str) {
+    std::fs::write(directory.join("plan.json"), plan.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .current_dir(directory)
+        .args([
+            "prover",
+            "--plan_json_file=plan.json",
+            "--output_json=result.json",
+        ])
+        .output()
+        .unwrap();
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(directory.join("result.json")).unwrap()).unwrap();
+    assert_eq!(report["status"], expected, "{plan}: {report}");
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(expected != "proved")),
+        "{plan}: {output:?}"
+    );
+}
+
+/// Both workers must preserve the distinction between two helper assumptions
+/// when reading a saved plan.
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn saved_plans_do_not_merge_distinct_uf_symbols() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("helpers.x"),
+        r#"fn g(x: u8) -> u8 { x + x }
+fn h(x: u8) -> u8 { x - x }
+fn left(x: u8) -> u8 { g(x) }
+fn right(x: u8) -> u8 { h(x) }
+#[quickcheck] fn same(x: u8) -> bool { g(x) == h(x) }
+"#,
+    )
+    .unwrap();
+    for (symbol, expected) in [
+        ("F", "proved"),
+        ("G", "disproved"),
+        ("F ", "execution-error"),
+    ] {
+        for plan in [
+            serde_json::json!({
+                "kind": "dslx-equiv", "solver": "bitwuzla",
+                "lhs_dslx_file": "helpers.x", "rhs_dslx_file": "helpers.x",
+                "lhs_dslx_top": "left", "rhs_dslx_top": "right",
+                "lhs_uf": ["g:F"], "rhs_uf": [format!("h:{symbol}")],
+            }),
+            serde_json::json!({
+                "kind": "prove-quickcheck", "solver": "bitwuzla",
+                "dslx_input_file": "helpers.x", "uf": ["g:F", format!("h:{symbol}")],
+            }),
+        ] {
+            assert_saved_plan_outcome(dir.path(), &plan, expected);
+        }
+    }
+}
+
+/// A saved plan must never drop two parameters when it names just one.
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn planned_equivalence_does_not_split_a_parameter_name() {
+    let dir = tempfile::tempdir().unwrap();
+    for (side, params) in [("lhs", ["a", "x"]), ("rhs", ["x", "b"])] {
+        let [first, second] = params;
+        std::fs::write(
+            dir.path().join(format!("{side}.x")),
+            format!("fn main({first}: u1, {second}: u1) -> u1 {{ x }}"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(format!("{side}.ir")),
+            format!(
+                "package p\ntop fn main({first}: bits[1], {second}: bits[1]) -> bits[1] {{ ret result: bits[1] = identity(x, id=3) }}"
+            ),
+        )
+        .unwrap();
+    }
+    for mut plan in [
+        serde_json::json!({"kind":"ir-equiv","lhs_ir_file":"lhs.ir","rhs_ir_file":"rhs.ir","top":"main"}),
+        serde_json::json!({"kind":"dslx-equiv","lhs_dslx_file":"lhs.x","rhs_dslx_file":"rhs.x","dslx_top":"main"}),
+    ] {
+        plan["solver"] = "bitwuzla".into();
+        for (names, expected) in [
+            (vec![], "disproved"),
+            (vec!["a", "b"], "proved"),
+            (vec!["a,b"], "execution-error"),
+        ] {
+            plan["drop_params"] = serde_json::json!(names);
+            assert_saved_plan_outcome(dir.path(), &plan, expected);
+        }
+    }
+}
+
 /// All scheduler entry points must communicate conclusions independently of
 /// exit codes.
 #[cfg(feature = "has-bitwuzla")]

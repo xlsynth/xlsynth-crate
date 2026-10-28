@@ -143,13 +143,16 @@ proof or counterexample. Legacy JSON containing only `success` is intentionally
 rejected. Captured stdout/stderr remain available in task reports, including
 after cancellation.
 
-`ToDriverCommand::to_command` returns an `io::Result<Command>`. If a DSLX
-search directory cannot be represented in a worker's argument list, command
-construction fails and the scheduler reports an execution error for that task.
+`ToDriverCommand::to_command` returns an `io::Result<Command>`. A worker
+rejects settings it cannot represent without changing the claim. For example,
+one `drop_params` entry `"a,b"` cannot stand for two parameter names, and UF
+symbols `"F"` and `"F "` cannot silently become the same symbol.
 
 Inconclusive results and execution errors are indefinite scheduler outcomes:
 they cannot win a `first` group or trigger tactic rollback. Native solver
-counterexamples remain `disproved`. External-tool failures without structured
+counterexamples remain `disproved`. If an SMT solver reports `sat` but fails
+to return the requested counterexample values, the result is an
+`execution-error`. External-tool failures without structured
 counterexample evidence are conservatively `execution-error`, because a
 nonzero exit alone cannot distinguish disproof from a broken invocation.
 

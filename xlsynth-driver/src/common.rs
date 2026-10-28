@@ -661,7 +661,6 @@ pub fn parse_dslx_uf_spec(
 ) -> Result<HashMap<String, String>, String> {
     matches.into_iter().flatten().map(|value| {
         value.split_once(':')
-            .map(|(function, symbol)| (function.trim(), symbol.trim()))
             .filter(|(function, symbol)| !function.is_empty() && !symbol.is_empty())
             .map(|(function, symbol)| (function.to_owned(), symbol.to_owned()))
             .ok_or_else(|| format!(

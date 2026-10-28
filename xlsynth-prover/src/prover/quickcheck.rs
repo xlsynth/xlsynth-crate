@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::types::{
-    AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult, UfRegistry,
+    BoolPropertyResult, ProverFn, QuickCheckAssertionSemantics, QuickCheckOptions,
+    QuickCheckRunResult, UfRegistry, UfSignature,
 };
 use super::{
     assertion_filter,
-    translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
+    translate::{assert_param_domains, get_fn_inputs, ir_to_smt},
     uf::infer_uf_signatures,
 };
 use crate::dslx_utils::validate_dslx_paths;
@@ -14,9 +14,9 @@ use crate::solver::{BitVec, Response, Solver, SolverConfig};
 
 use regex::Regex;
 use std::collections::HashMap;
-use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 mod source_index;
 use xlsynth::dslx::{ImportData, MatchableModuleMember};
@@ -79,30 +79,6 @@ where
         }
     };
 
-    // Generate SMT representation with UF mapping/registry.
-    let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
-
-    if let Some(domains) = &prover_fn.domains {
-        for param in fn_inputs.params() {
-            if let Some(allowed) = domains.get(param.param_name()) {
-                if let Some(sym) = fn_inputs.inputs.get(param.param_name()) {
-                    let mut domain_constraint: Option<BitVec<S::Term>> = None;
-                    for value in allowed {
-                        let value_bv = ir_value_to_bv(&mut solver, value, &param.ty).bitvec;
-                        let eq = solver.eq(&sym.bitvec, &value_bv);
-                        domain_constraint = Some(match domain_constraint {
-                            None => eq,
-                            Some(prev) => solver.or(&prev, &eq),
-                        });
-                    }
-                    if let Some(expr) = domain_constraint {
-                        solver.assert(&expr).unwrap();
-                    }
-                }
-            }
-        }
-    }
-
     let uf_signatures = if prover_fn.uf_map.is_empty() {
         HashMap::new()
     } else {
@@ -118,15 +94,35 @@ where
             }
         }
     };
-    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures);
-    let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &prover_fn.uf_map, &uf_registry);
+    check_quickcheck_query(
+        &mut solver,
+        prover_fn,
+        assertion_semantics,
+        assert_label_include,
+        &uf_signatures,
+    )
+    .unwrap_or_else(|error| BoolPropertyResult::Error(format!("QuickCheck solver failed: {error}")))
+}
+
+/// Checks the property and reads all parts of its counterexample on SAT.
+fn check_quickcheck_query<S: Solver>(
+    solver: &mut S,
+    prover_fn: &ProverFn<'_>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    uf_signatures: &HashMap<String, UfSignature>,
+) -> io::Result<BoolPropertyResult> {
+    let fn_inputs = get_fn_inputs(solver, prover_fn.clone(), None)?;
+    assert_param_domains(solver, &fn_inputs)?;
+    let uf_registry = UfRegistry::from_uf_signatures(solver, uf_signatures)?;
+    let smt_fn = ir_to_smt(solver, &fn_inputs, &prover_fn.uf_map, &uf_registry);
 
     // Optionally filter assertions by label before applying semantics.
     let filtered_assertions =
         assertion_filter::filter_assertions(&smt_fn.assertions, assert_label_include);
 
-    // Build a 1-bit flag that is `1` iff *all* selected in-function assertions
-    // pass.
+    // Build a 1-bit flag that is `1` iff *all* selected in-function
+    // assertions pass.
     let success_flag: BitVec<S::Term> = if filtered_assertions.is_empty() {
         solver.numerical(1, 1)
     } else {
@@ -162,57 +158,19 @@ where
     };
 
     // Ask solver for a model that satisfies the *negation* of the property.
-    solver.assert(&condition).unwrap();
-
-    let response = match solver.check() {
-        Ok(response) => response,
-        Err(error) => {
-            return BoolPropertyResult::Error(format!("QuickCheck solver failed: {error}"));
-        }
-    };
-    match response {
-        Response::Unsat => BoolPropertyResult::Proved,
+    solver.assert(&condition)?;
+    match solver.check()? {
+        Response::Unsat => Ok(BoolPropertyResult::Proved),
         Response::Sat => {
-            // Extract counter-example values.
-            let inputs: Vec<FnInput> = smt_fn
-                .fn_ref
-                .param_nodes()
-                .zip(smt_fn.inputs.iter())
-                .map(|(p, i)| FnInput {
-                    name: p.param_name().to_string(),
-                    value: solver.get_value(&i.bitvec, &i.ir_type).unwrap(),
-                })
-                .collect();
-
-            // Determine if any assertion violated and build FnOutput
-            // accordingly
-            let mut violation: Option<(String, String)> = None;
-            for a in filtered_assertions.iter() {
-                let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
-                let bits = val.to_bits().unwrap();
-                if !bits.get_bit(0).unwrap() {
-                    violation = Some((a.message.to_string(), a.label.to_string()));
-                    break;
-                }
-            }
-
-            let output: FnOutput = {
-                FnOutput {
-                    value: solver
-                        .get_value(&smt_fn.output.bitvec, &smt_fn.output.ir_type)
-                        .unwrap(),
-                    assertion_violation: violation.map(|(msg, lbl)| AssertionViolation {
-                        message: msg,
-                        label: lbl,
-                    }),
-                }
-            };
-
-            BoolPropertyResult::Disproved { inputs, output }
+            let witness = smt_fn.read_counterexample(solver, &filtered_assertions)?;
+            Ok(BoolPropertyResult::Disproved {
+                inputs: witness.inputs,
+                output: witness.output,
+            })
         }
-        Response::Unknown => {
-            BoolPropertyResult::Inconclusive("solver returned unknown".to_string())
-        }
+        Response::Unknown => Ok(BoolPropertyResult::Inconclusive(
+            "solver returned unknown".to_string(),
+        )),
     }
 }
 
@@ -662,7 +620,7 @@ pub fn discover_quickcheck_tests(
 ))]
 mod test_utils {
     use super::*;
-    use crate::prover::types::{ParamDomains, ProverFn};
+    use crate::prover::types::{FnOutput, ParamDomains, ProverFn};
     use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_parser::Parser;
 

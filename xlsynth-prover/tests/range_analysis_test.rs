@@ -164,7 +164,7 @@ fn prove_claims(function: &ir::Fn, claims: &[Claim]) -> ProofResult {
     options.set_time_limit_per(250);
     options.set_seed(0);
     let mut solver = Bitwuzla::new(&options).unwrap();
-    let inputs = get_fn_inputs(&mut solver, ProverFn::new(function, None), None);
+    let inputs = get_fn_inputs(&mut solver, ProverFn::new(function, None), None).unwrap();
     let smt = ir_to_smt_with_node_terms(
         &mut solver,
         &inputs,

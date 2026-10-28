@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::dslx_utils::join_dslx_search_paths;
+use crate::ir_utils::validate_drop_params;
 use crate::prover::SolverChoice;
 use crate::prover::types::AssertionSemantics;
 use crate::prover::types::EquivParallelism;
@@ -42,6 +43,16 @@ fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<()
 
 fn add_flag(cmd: &mut Command, name: &str, value: impl AsRef<OsStr>) {
     cmd.arg(format!("--{}", name)).arg(value);
+}
+
+/// Encodes a typed parameter list without changing which inputs are dropped.
+fn add_drop_params(cmd: &mut Command, names: Option<&[String]>) -> io::Result<()> {
+    let names = names.unwrap_or_default();
+    validate_drop_params(names).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    if !names.is_empty() {
+        add_flag(cmd, "drop_params", names.join(","));
+    }
+    Ok(())
 }
 
 /// An absent list inherits the toolchain paths. An explicit empty list clears
@@ -241,11 +252,7 @@ impl ToDriverCommand for IrEquivConfig {
             add_flag(&mut cmd, "solver", &solver.to_string());
         }
         add_bool(&mut cmd, "flatten_aggregates", self.flatten_aggregates);
-        if let Some(drop) = &self.drop_params {
-            if !drop.is_empty() {
-                add_flag(&mut cmd, "drop_params", &drop.join(","));
-            }
-        }
+        add_drop_params(&mut cmd, self.drop_params.as_deref())?;
         if let Some(strategy) = &self.parallelism_strategy {
             add_flag(&mut cmd, "parallelism-strategy", &strategy.to_string());
         }
@@ -295,11 +302,7 @@ impl ToDriverCommand for DslxEquivConfig {
             add_flag(&mut cmd, "solver", &solver.to_string());
         }
         add_bool(&mut cmd, "flatten_aggregates", self.flatten_aggregates);
-        if let Some(drop) = &self.drop_params {
-            if !drop.is_empty() {
-                add_flag(&mut cmd, "drop_params", &drop.join(","));
-            }
-        }
+        add_drop_params(&mut cmd, self.drop_params.as_deref())?;
         if let Some(strategy) = &self.parallelism_strategy {
             add_flag(&mut cmd, "parallelism-strategy", &strategy.to_string());
         }

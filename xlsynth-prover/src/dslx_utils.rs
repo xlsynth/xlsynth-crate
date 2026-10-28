@@ -7,7 +7,7 @@ use std::path::Path;
 use xlsynth::dslx::{Function, InterpValue, ParametricBinding, ParametricEnv};
 use xlsynth::{XlsynthError, mangle_dslx_name};
 
-use crate::prover::uf::validate_uf_symbols;
+use crate::prover::uf::validate_uf_symbol;
 
 /// Returns the path text representable by the DSLX C API.
 fn dslx_path_text(path: &Path) -> Result<&str, String> {
@@ -52,13 +52,37 @@ pub(crate) fn join_dslx_search_paths(paths: &[&Path], separator: char) -> Result
     Ok(joined)
 }
 
+/// Checks that each DSLX mapping has an unambiguous `function:symbol` spelling
+/// for saved plans and tactic workers.
+pub(crate) fn validate_dslx_uf_map<'a>(
+    entries: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Result<(), String> {
+    let mut entries: Vec<_> = entries.into_iter().collect();
+    entries.sort_unstable();
+    for (function, symbol) in entries {
+        if function.contains('\0') {
+            return Err("xlsynth error: DSLX function name contains a NUL byte".into());
+        }
+        if function.is_empty() || function.trim() != function || function.contains(':') {
+            return Err(format!(
+                "Invalid DSLX function name in UF mapping: {function:?}"
+            ));
+        }
+        if symbol.is_empty() || symbol.trim() != symbol {
+            return Err(format!("Invalid uninterpreted function symbol: {symbol:?}"));
+        }
+        validate_uf_symbol(symbol)?;
+    }
+    Ok(())
+}
+
 /// Translates DSLX function names to the IR names the solver sees, retaining
 /// shared UF symbols.
 pub fn mangle_dslx_uf_map(
     module_name: &str,
     uf_map: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
-    validate_uf_symbols(uf_map)?;
+    validate_dslx_uf_map(uf_map)?;
     uf_map
         .iter()
         .map(|(name, symbol)| {

@@ -12,6 +12,34 @@ const STRATEGIES: [EquivParallelism; 3] = [
     EquivParallelism::InputBitSplit,
 ];
 
+#[test_case("identity", true; "identical_callees")]
+#[test_case("not", false; "different_callees_with_the_same_name")]
+fn output_partitions_resolve_callees_in_their_own_package(rhs_op: &str, equivalent: bool) {
+    let package = |op: &str| {
+        format!(
+            r#"package p
+fn helper(x: bits[2]) -> bits[2] {{
+  ret value: bits[2] = {op}(x, id=2)
+}}
+top fn main(x: bits[2]) -> bits[2] {{
+  ret result: bits[2] = invoke(x, to_apply=helper, id=4)
+}}"#
+        )
+    };
+    let lhs = package("identity");
+    let rhs = package(rhs_op);
+    let request = IrEquivRequest::new(IrModule::new(&lhs), IrModule::new(&rhs))
+        .with_parallelism(EquivParallelism::OutputBits);
+    let result = run_ir_equiv(&request).unwrap().result;
+    assert!(
+        matches!(
+            (equivalent, &result),
+            (true, EquivResult::Proved) | (false, EquivResult::Disproved { .. })
+        ),
+        "{result:?}"
+    );
+}
+
 fn constant_function(params: &str, width: usize) -> String {
     format!(
         r#"package p

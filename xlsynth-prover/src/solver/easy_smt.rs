@@ -111,6 +111,9 @@ pub struct EasySmtSolver {
     term_cache: HashMap<String, SExpr>,
     reverse_cache: HashMap<SExpr, String>,
     fresh_counter: u64,
+    // Term constructors are infallible in the Solver API. Preserve the first
+    // rejected definition so no later command can use an undefined term.
+    definition_error: Option<io::Error>,
 }
 
 impl SolverConfig for EasySmtConfig {
@@ -127,48 +130,41 @@ impl EasySmtSolver {
         name
     }
 
-    fn cache_sexpr<F>(&mut self, rep: SExpr, def_gen: F, context: &mut MutexGuard<Context>) -> SExpr
-    where
-        F: Fn(&mut Context, &str, SExpr) -> SExpr,
-    {
-        if rep.is_atom() {
-            return rep;
+    fn check_definitions(&self) -> io::Result<()> {
+        match &self.definition_error {
+            Some(error) => Err(io::Error::new(error.kind(), error.to_string())),
+            None => Ok(()),
         }
-        if self.reverse_cache.contains_key(&rep) {
-            let name = self.reverse_cache.get(&rep).unwrap();
-            return context.atom(name);
-        }
-        let name = self.get_next_available_name();
-        self.term_cache.insert(name.clone(), rep.clone());
-        let new_expr = def_gen(context, &name, rep.clone());
-        self.reverse_cache.insert(rep.clone(), name.clone());
-        self.reverse_cache.insert(new_expr.clone(), name.clone());
-        new_expr
     }
 
+    /// Names a compound term once and records any error defining it.
     fn cache_term(
         &mut self,
         bit_vec: BitVec<SExpr>,
         context: &mut MutexGuard<Context>,
     ) -> BitVec<SExpr> {
-        let rep = match bit_vec {
-            BitVec::BitVec { rep, .. } => rep.clone(),
-            BitVec::ZeroWidth => {
-                return bit_vec;
-            }
+        let BitVec::BitVec { width, rep } = bit_vec else {
+            return bit_vec;
         };
-        let new_expr = self.cache_sexpr(
-            rep,
-            |context, name, rep| {
-                let bv_sort = context.bit_vec_sort(context.numeral(bit_vec.get_width()));
-                context.define_const(name, bv_sort, rep).unwrap()
-            },
-            context,
-        );
-        BitVec::BitVec {
-            width: bit_vec.get_width(),
-            rep: new_expr,
+        if rep.is_atom() {
+            return bit_vec;
         }
+        if let Some(name) = self.reverse_cache.get(&rep) {
+            return BitVec::BitVec {
+                width,
+                rep: context.atom(name),
+            };
+        }
+        let name = self.get_next_available_name();
+        let symbol = context.atom(&name);
+        if self.definition_error.is_none() {
+            let sort = context.bit_vec_sort(context.numeral(width));
+            self.definition_error = context.define_const(&name, sort, rep).err();
+        }
+        self.term_cache.insert(name.clone(), rep);
+        self.reverse_cache.insert(rep, name.clone());
+        self.reverse_cache.insert(symbol, name);
+        BitVec::BitVec { width, rep: symbol }
     }
 
     fn bool_to(&mut self, context: &mut MutexGuard<Context>, value: SExpr) -> BitVec<SExpr> {
@@ -300,6 +296,7 @@ impl Solver for EasySmtSolver {
             term_cache: HashMap::new(),
             reverse_cache: HashMap::new(),
             fresh_counter: 0,
+            definition_error: None,
         })
     }
 
@@ -310,6 +307,7 @@ impl Solver for EasySmtSolver {
     }
 
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<SExpr>> {
+        self.check_definitions()?;
         if width == 0 {
             return Ok(BitVec::ZeroWidth);
         }
@@ -327,6 +325,7 @@ impl Solver for EasySmtSolver {
         arg_widths: &[usize],
         result_width: usize,
     ) -> io::Result<Uf<SExpr>> {
+        self.check_definitions()?;
         if result_width == 0 {
             return Ok(Uf::UfZeroWidth {
                 arg_widths: arg_widths.to_vec(),
@@ -429,35 +428,59 @@ impl Solver for EasySmtSolver {
         bit_vec: &BitVec<SExpr>,
         ty: &ir::Type,
     ) -> io::Result<xlsynth_pir::IrValue> {
+        self.check_definitions()?;
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         match bit_vec {
             BitVec::BitVec { rep, width } => {
-                let value = context.get_value(vec![rep.clone()]).unwrap()[0].1;
-                let atom = context.get_atom(value).expect("model value must be atom");
-                let bitstr = if let Some(rest) = atom.strip_prefix("#b") {
-                    rest.to_string()
-                } else if let Some(rest) = atom.strip_prefix("#x") {
-                    rest.chars()
-                        .map(|c| match c {
-                            '0'..='9' => c.to_digit(16).unwrap(),
-                            'a'..='f' => c.to_digit(16).unwrap(),
-                            _ => panic!("Invalid hex character: {}", c),
-                        })
-                        .map(|d| format!("{:04b}", d))
-                        .collect::<Vec<_>>()
-                        .join("")
-                } else {
-                    // Trick for boolector solver.
-                    if atom == "true" && *width == 1 {
-                        "1".to_string()
-                    } else if atom == "false" && *width == 1 {
-                        "0".to_string()
-                    } else {
-                        panic!("Invalid atom: {}", atom);
-                    }
+                // easy-smt's get_value assumes every list it receives is a
+                // list of pairs. Solvers can instead return (error "...").
+                let query = context.list(vec![context.atoms().get_value, context.list(vec![*rep])]);
+                context.raw_send(query)?;
+                let reply = context.raw_recv()?;
+                let invalid = || {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Invalid get-value response for {}: {}",
+                            context.display(*rep),
+                            context.display(reply)
+                        ),
+                    )
                 };
-                let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
+                let Some([binding]) = context.get_list(reply) else {
+                    return Err(invalid());
+                };
+                let Some([term, value]) = context.get_list(*binding) else {
+                    return Err(invalid());
+                };
+                if term != rep {
+                    return Err(invalid());
+                }
+                let atom = context.get_atom(*value).ok_or_else(invalid)?;
+                let mut bits = Vec::with_capacity(*width);
+                if let Some(binary) = atom.strip_prefix("#b") {
+                    for digit in binary.bytes().rev() {
+                        bits.push(match digit {
+                            b'0' => false,
+                            b'1' => true,
+                            _ => return Err(invalid()),
+                        });
+                    }
+                } else if let Some(hex) = atom.strip_prefix("#x") {
+                    for digit in hex.chars().rev() {
+                        let nibble = digit.to_digit(16).ok_or_else(invalid)?;
+                        bits.extend((0..4).map(|bit| nibble & (1 << bit) != 0));
+                    }
+                } else if atom == "true" || atom == "false" {
+                    // Boolector prints one-bit values as booleans.
+                    bits.push(atom == "true");
+                } else {
+                    return Err(invalid());
+                }
+                if bits.len() != *width {
+                    return Err(invalid());
+                }
                 ir_value_from_lsb0_bits_with_layout(ty, &bits)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             }
@@ -741,18 +764,21 @@ impl Solver for EasySmtSolver {
     }
 
     fn push(&mut self) -> io::Result<()> {
+        self.check_definitions()?;
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         (self.solver_fn.push_fn)(&mut context)
     }
 
     fn pop(&mut self) -> io::Result<()> {
+        self.check_definitions()?;
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         (self.solver_fn.pop_fn)(&mut context)
     }
 
     fn check(&mut self) -> io::Result<Response> {
+        self.check_definitions()?;
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         match (self.solver_fn.check_fn)(&mut context) {
@@ -764,6 +790,7 @@ impl Solver for EasySmtSolver {
     }
 
     fn assert(&mut self, bit_vec: &BitVec<SExpr>) -> io::Result<()> {
+        self.check_definitions()?;
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         let bool_expr = self.bv_to_bool(&context, bit_vec);

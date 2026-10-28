@@ -12,14 +12,13 @@ use crate::dslx_tactics::obligations::{
     FileWithHistory, ObligationPayload, ProverObligation, QcObligation, SourceFile,
 };
 use crate::dslx_tactics::script::{OblTree, OblTreeConfig};
-use crate::dslx_utils::mangle_dslx_uf_map;
+use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_uf_map};
 use crate::proof_outcome::{ProofResultHeader, ProofStatus, aggregate_proof_statuses};
 use crate::prover::quickcheck::{QuickCheckError, QuickCheckErrorKind, load_quickcheck_context};
 use crate::prover::types::{
     AssertionViolation, BoolPropertyResult, FnInput, QuickCheckAssertionSemantics,
     QuickCheckOptions, QuickCheckRunResult,
 };
-use crate::prover::uf::validate_uf_symbols;
 use crate::prover::{SolverChoice, prover_for_choice};
 
 /// The selected properties and their interpretation, shared by direct and
@@ -185,7 +184,7 @@ impl DslxQuickCheckRequest {
     /// Captures the discovered source snapshot and the same property
     /// interpretation for tactic workers.
     pub fn tactic_tree(&self) -> Result<OblTree, QuickCheckError> {
-        validate_uf_symbols(&self.uf_map)
+        validate_dslx_uf_map(&self.uf_map)
             .map_err(|e| QuickCheckError::new(QuickCheckErrorKind::Configuration, e))?;
         let context = load_quickcheck_context(
             &self.entry_file,
@@ -234,8 +233,10 @@ mod tests {
     use std::time::Duration;
     use xlsynth_pir::IrValue;
 
-    #[test]
-    fn invalid_uf_symbol_rejects_direct_and_tactic_quickchecks() {
+    #[test_case::test_case("helper", "F\0x"; "symbol_with_nul")]
+    #[test_case::test_case("helper", "F "; "padded_symbol")]
+    #[test_case::test_case("helper:F", "F"; "function_with_separator")]
+    fn invalid_uf_mapping_rejects_direct_and_tactic_quickchecks(function: &str, symbol: &str) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("entry.x");
         std::fs::write(
@@ -254,7 +255,7 @@ fn helper(x: u1) -> u1 { x }
             test_filter: None,
             assertion_semantics: QuickCheckAssertionSemantics::Assume,
             assert_label_filter: None,
-            uf_map: HashMap::from([("helper".into(), "F\0x".into())]),
+            uf_map: HashMap::from([(function.into(), symbol.into())]),
         };
         let mut events = 0;
         let error = request

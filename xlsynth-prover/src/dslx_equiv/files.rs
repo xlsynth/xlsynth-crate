@@ -13,10 +13,10 @@ use crate::dslx_tactics::obligations::{
     SourceFile,
 };
 use crate::dslx_tactics::script::{OblTree, OblTreeConfig};
-use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_paths};
+use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_paths, validate_dslx_uf_map};
+use crate::ir_utils::validate_drop_params;
 use crate::proof_outcome::ProofSummary;
 use crate::prover::SolverChoice;
-use crate::prover::uf::validate_uf_symbols;
 
 /// One DSLX source, its top (which may have parametric bindings), and its
 /// assumptions.
@@ -37,7 +37,6 @@ impl DslxEquivFile<'_> {
     /// Retains the original top and source so each generated obligation can
     /// select its own top.
     fn into_lec_side(self) -> Result<LecSide, String> {
-        validate_uf_symbols(&self.uf_map)?;
         Ok(LecSide {
             top_func: self.top.to_owned(),
             file: FileWithHistory {
@@ -96,7 +95,11 @@ pub struct DslxEquivFiles<'a> {
 }
 
 impl DslxEquivFiles<'_> {
-    fn validate_paths(&self) -> Result<(), String> {
+    /// Checks file and parameter names before either proof path starts.
+    fn validate_request(&self) -> Result<(), String> {
+        validate_drop_params(&self.options.drop_params)?;
+        validate_dslx_uf_map(&self.lhs.uf_map)?;
+        validate_dslx_uf_map(&self.rhs.uf_map)?;
         validate_dslx_paths(
             [self.lhs.path, self.rhs.path]
                 .into_iter()
@@ -108,7 +111,7 @@ impl DslxEquivFiles<'_> {
     /// Creates the root obligation without pruning helper definitions that
     /// tactics may target.
     pub fn into_tactic_tree(self) -> Result<OblTree, String> {
-        self.validate_paths()?;
+        self.validate_request()?;
         let root = LecObligation {
             lhs: self.lhs.into_lec_side()?,
             rhs: self.rhs.into_lec_side()?,
@@ -138,7 +141,7 @@ impl DslxEquivFiles<'_> {
         disable_warnings: Option<&[String]>,
     ) -> ProofSummary {
         ProofSummary::run(|| {
-            self.validate_paths()?;
+            self.validate_request()?;
             let lhs = self
                 .lhs
                 .specialize(self.dslx_stdlib_path, &self.additional_search_paths)?;
@@ -206,6 +209,36 @@ mod tests {
         assert_eq!(request().into_tactic_tree().unwrap_err(), message);
     }
 
+    #[test]
+    fn neither_proof_path_reinterprets_typed_parameter_names() {
+        let side = || DslxEquivFile {
+            path: Path::new("unused.x"),
+            top: "main",
+            uf_map: HashMap::new(),
+            fixed_implicit_activation: false,
+        };
+        for name in ["a,b", " a", "b ", "", "a\0b"] {
+            let request = || DslxEquivFiles {
+                lhs: side(),
+                rhs: side(),
+                options: LecProofOptions {
+                    drop_params: vec![name.to_string()],
+                    ..Default::default()
+                },
+                solver: None,
+                dslx_stdlib_path: None,
+                additional_search_paths: Vec::new(),
+            };
+            let error = format!(
+                "Invalid drop_params entry {name:?}: expected one nonempty parameter name without commas, NULs, or surrounding whitespace"
+            );
+            let direct = request().prove(None, None, None);
+            assert_eq!(direct.conclusion.status, ProofStatus::ExecutionError);
+            assert_eq!(direct.error_str.as_ref(), Some(&error));
+            assert_eq!(request().into_tactic_tree().unwrap_err(), error);
+        }
+    }
+
     /// Shared UF symbols may abstract different helpers, but never a difference
     /// in the caller.
     #[cfg(feature = "has-bitwuzla")]
@@ -230,6 +263,7 @@ pub fn main<N: u32>(x: u8) -> u8 {{ {name}(x) + (N as u8) }}
             (None, "main<u32:2>", ProofStatus::Disproved),
             (Some("F"), "main<u32:2>", ProofStatus::Proved),
             (Some("F"), "main<u32:3>", ProofStatus::Disproved),
+            (Some("F "), "main<u32:2>", ProofStatus::ExecutionError),
             (Some("F\0x"), "main<u32:2>", ProofStatus::ExecutionError),
         ] {
             let mappings = |name: &str| {

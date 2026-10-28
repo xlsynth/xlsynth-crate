@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::dslx_tactics::obligations::{
     FileWithHistory, ObligationPayload, ProverObligation, SourceFile,
 };
+use crate::dslx_utils::validate_dslx_uf_map;
 use crate::proof_plan::config::{
     DslxEquivConfig, GroupKind, ProveQuickcheckConfig, ProverPlan, ProverTask,
 };
@@ -43,6 +45,16 @@ impl ObligationPlan {
     }
 }
 
+/// Encodes the ordered obligation mapping for the worker's repeated UF flag.
+fn uf_arguments(map: &BTreeMap<String, String>) -> Result<Option<Vec<String>>, String> {
+    validate_dslx_uf_map(map)?;
+    Ok((!map.is_empty()).then(|| {
+        map.iter()
+            .map(|(function, symbol)| format!("{function}:{symbol}"))
+            .collect()
+    }))
+}
+
 /// Converts selected obligations into a process plan with retained source
 /// files.
 pub fn build_plan_from_obligations(
@@ -74,20 +86,7 @@ pub fn build_plan_from_obligations(
                     &lec.rhs.file,
                 )?;
 
-                let lhs_uf: Vec<String> = lec
-                    .lhs
-                    .uf_map
-                    .iter()
-                    .map(|(f, u)| format!("{}:{}", f, u))
-                    .collect();
-                let rhs_uf: Vec<String> = lec
-                    .rhs
-                    .uf_map
-                    .iter()
-                    .map(|(f, u)| format!("{}:{}", f, u))
-                    .collect();
-
-                let mut cfg = DslxEquivConfig {
+                let cfg = DslxEquivConfig {
                     lhs_dslx_file: lhs_path,
                     rhs_dslx_file: rhs_path,
                     lhs_dslx_top: Some(lec.lhs.top_func.clone()),
@@ -103,15 +102,11 @@ pub fn build_plan_from_obligations(
                     lhs_fixed_implicit_activation: Some(lec.lhs.fixed_implicit_activation),
                     rhs_fixed_implicit_activation: Some(lec.rhs.fixed_implicit_activation),
                     parallelism_strategy: Some(lec.options.parallelism),
+                    lhs_uf: uf_arguments(&lec.lhs.uf_map)?,
+                    rhs_uf: uf_arguments(&lec.rhs.uf_map)?,
                     json: None,
                     ..Default::default()
                 };
-                if !lhs_uf.is_empty() {
-                    cfg.lhs_uf = Some(lhs_uf);
-                }
-                if !rhs_uf.is_empty() {
-                    cfg.rhs_uf = Some(rhs_uf);
-                }
 
                 tasks.push(ProverPlan::Task {
                     task: ProverTask::DslxEquiv { config: cfg },
@@ -137,12 +132,6 @@ pub fn build_plan_from_obligations(
                     Some(pattern)
                 };
 
-                let uf: Vec<String> = qc
-                    .uf_map
-                    .iter()
-                    .map(|(f, u)| format!("{}:{}", f, u))
-                    .collect();
-
                 let cfg = ProveQuickcheckConfig {
                     dslx_input_file: qc_path,
                     dslx_path: Some(dslx_paths.clone()),
@@ -150,7 +139,7 @@ pub fn build_plan_from_obligations(
                     test_filter,
                     solver: solver.clone(),
                     assertion_semantics: Some(qc.assertion_semantics),
-                    uf: if uf.is_empty() { None } else { Some(uf) },
+                    uf: uf_arguments(&qc.uf_map)?,
                     assert_label_filter: qc.assert_label_filter.clone(),
                     json: None,
                 };
