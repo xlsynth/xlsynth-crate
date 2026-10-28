@@ -515,11 +515,19 @@ mod tests {
                 .collect::<Result<HashMap<_, _>, String>>()?;
             let lhs = DslxModule::new(&lec.lhs.file.text, &lec.lhs.top_func)
                 .with_path(Some(Path::new("lhs.x")))
+                .with_fixed_implicit_activation(lec.lhs.fixed_implicit_activation)
                 .with_owned_uf_map(lhs_uf);
             let rhs = DslxModule::new(&lec.rhs.file.text, &lec.rhs.top_func)
                 .with_path(Some(Path::new("rhs.x")))
+                .with_fixed_implicit_activation(lec.rhs.fixed_implicit_activation)
                 .with_owned_uf_map(rhs_uf);
             let request = DslxEquivRequest::new(lhs, rhs)
+                .with_assertion_semantics(lec.options.assertion_semantics)
+                .with_assume_enum_in_bound(lec.options.assume_enum_in_bound)
+                .with_assert_label_filter(lec.options.assert_label_filter.as_deref())
+                .with_drop_params(&lec.options.drop_params)
+                .with_flatten_aggregates(lec.options.flatten_aggregates)
+                .with_parallelism(lec.options.parallelism)
                 .with_solver(config.solver.clone())
                 .with_dslx_stdlib_path(config.dslx_stdlib_path.as_deref())
                 .with_additional_search_paths(config.dslx_paths.clone());
@@ -588,6 +596,7 @@ mod tests {
     fn base_obligation() -> ProverObligation {
         let dslx = "pub fn f(x: u8) -> u8 { x + u8:3 }".to_string();
         let lhs = LecSide {
+            fixed_implicit_activation: false,
             top_func: "f".to_string(),
             uf_map: std::collections::BTreeMap::new(),
             file: FileWithHistory {
@@ -597,6 +606,7 @@ mod tests {
             },
         };
         let rhs = LecSide {
+            fixed_implicit_activation: false,
             top_func: "f".to_string(),
             uf_map: std::collections::BTreeMap::new(),
             file: FileWithHistory {
@@ -608,7 +618,11 @@ mod tests {
         ProverObligation {
             selector_segment: "root".to_string(),
             description: None,
-            payload: ObligationPayload::Lec(LecObligation { lhs, rhs }),
+            payload: ObligationPayload::Lec(LecObligation {
+                lhs,
+                rhs,
+                options: Default::default(),
+            }),
         }
     }
 
@@ -630,6 +644,7 @@ mod tests {
             payload: ObligationPayload::Lec(LecObligation {
                 lhs: LecSide::from_text("main", lhs),
                 rhs: LecSide::from_text("main", rhs),
+                options: Default::default(),
             }),
         };
         let mut config = base_config();

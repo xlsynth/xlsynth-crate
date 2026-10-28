@@ -8812,6 +8812,251 @@ fn main(x: u8) -> u8 { x }
     );
 }
 
+/// Checks that selecting a root proof preserves the direct command's semantics.
+#[cfg(feature = "has-bitwuzla")]
+fn assert_root_solve_matches_direct(
+    lhs: &str,
+    rhs: &str,
+    semantic_args: &[&str],
+    expected_success: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempfile::tempdir()?;
+    let lhs_path = temp_dir.path().join("lhs.x");
+    let rhs_path = temp_dir.path().join("rhs.x");
+    let script_path = temp_dir.path().join("script.json");
+    std::fs::write(&lhs_path, lhs)?;
+    std::fs::write(&rhs_path, rhs)?;
+    std::fs::write(&script_path, r#"[{"selector":["root"],"command":"Solve"}]"#)?;
+    for use_tactic in [false, true] {
+        let report_path = temp_dir.path().join(format!("report_{use_tactic}.json"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        command
+            .arg("dslx-equiv")
+            .arg(&lhs_path)
+            .arg(&rhs_path)
+            .args(["--dslx_top", "main", "--solver", "bitwuzla"])
+            .args(semantic_args)
+            .arg("--output_json")
+            .arg(&report_path);
+        if use_tactic {
+            command.arg("--tactic_json").arg(&script_path);
+        }
+        let output = command.output()?;
+        assert_eq!(
+            output.status.code(),
+            Some(if expected_success { 0 } else { 1 }),
+            "use_tactic={use_tactic}; stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(report_path)?)?;
+        assert_eq!(
+            report["success"],
+            serde_json::json!(expected_success),
+            "use_tactic={use_tactic}; report: {report}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case("same", false, false; "same_different_assertions")]
+#[test_case("same", true, true; "same_identical_assertions")]
+#[test_case("never", true, false; "never_identical_assertions")]
+#[test_case("ignore", false, true; "ignore_different_assertions")]
+fn test_dslx_equiv_root_tactic_assertion_semantics(
+    semantics: &str,
+    identical_assertions: bool,
+    expected_success: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lhs = r#"fn main(x: u8) -> u8 { assert!(x == u8:0, "check"); x }"#;
+    let rhs = if identical_assertions {
+        lhs
+    } else {
+        r#"fn main(x: u8) -> u8 { assert!(x == u8:1, "check"); x }"#
+    };
+    assert_root_solve_matches_direct(
+        lhs,
+        rhs,
+        &["--assertion-semantics", semantics],
+        expected_success,
+    )
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case(false; "unbounded_enum")]
+#[test_case(true; "bounded_enum")]
+fn test_dslx_equiv_root_tactic_enum_assumptions(
+    assume_enum_in_bound: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lhs = r#"
+enum E : u3 { A = 0, B = 1 }
+fn main(e: E) -> u32 { match e { E::A => u32:0, _ => u32:1, } }
+"#;
+    let rhs = r#"
+enum E : u3 { A = 0, B = 1 }
+fn main(e: E) -> u32 { match e { E::B => u32:1, _ => u32:0, } }
+"#;
+    assert_root_solve_matches_direct(
+        lhs,
+        rhs,
+        &[
+            "--assume-enum-in-bound",
+            if assume_enum_in_bound {
+                "true"
+            } else {
+                "false"
+            },
+        ],
+        assume_enum_in_bound,
+    )
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case("assume"; "assume")]
+#[test_case("implies"; "implies")]
+fn test_dslx_equiv_root_tactic_assertion_preconditions(
+    semantics: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lhs = r#"fn main(x: u8) -> u8 { assert!(x == u8:0, "check"); x }"#;
+    let rhs = r#"fn main(x: u8) -> u8 { assert!(x == u8:0, "check"); u8:0 }"#;
+    assert_root_solve_matches_direct(lhs, rhs, &["--assertion-semantics", semantics], true)
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case("^$", true; "exclude_assertions")]
+#[test_case("^__lhs__main_0_non_synth___lhs__main_check$", false; "include_original_module_assertion")]
+fn test_dslx_equiv_root_tactic_assertion_label_filter(
+    filter: &str,
+    expected_success: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source = r#"fn main(x: u8) -> u8 { assert!(x == u8:0, "check"); x }"#;
+    assert_root_solve_matches_direct(
+        source,
+        source,
+        &[
+            "--assertion-semantics=never",
+            "--assert-label-filter",
+            filter,
+        ],
+        expected_success,
+    )
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn test_dslx_equiv_root_tactic_drop_unused_parameter() -> Result<(), Box<dyn std::error::Error>> {
+    assert_root_solve_matches_direct(
+        "fn main(x: u8, unused: u4) -> u8 { x }",
+        "fn main(x: u8) -> u8 { x }",
+        &["--drop_params=unused"],
+        true,
+    )
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case("fn main(x: (u4, u4)) -> u8 { x.0 ++ x.1 }"; "tuple")]
+#[test_case("fn main(x: u4[2]) -> u8 { x[u32:1] ++ x[u32:0] }"; "array")]
+fn test_dslx_equiv_root_tactic_flatten_aggregates(
+    lhs: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_root_solve_matches_direct(
+        lhs,
+        "fn main(x: u8) -> u8 { x }",
+        &["--flatten_aggregates=true"],
+        true,
+    )
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case(true; "lhs")]
+#[test_case(false; "rhs")]
+fn test_dslx_equiv_root_tactic_fixed_activation(
+    lhs_has_activation: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let activated = "fn main(tok: token, activation: bool, x: u8) -> (token, u8) { (tok, x) }";
+    let pure = "fn main(x: u8) -> u8 { x }";
+    let (lhs, rhs, activation_flag) = if lhs_has_activation {
+        (activated, pure, "--lhs_fixed_implicit_activation=true")
+    } else {
+        (pure, activated, "--rhs_fixed_implicit_activation=true")
+    };
+    assert_root_solve_matches_direct(lhs, rhs, &[activation_flag], true)
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test_case(false; "without_assumption")]
+#[test_case(true; "with_assumption")]
+fn test_dslx_equiv_root_tactic_uf_assumptions(
+    assume_equal_helpers: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lhs = r#"
+fn g(x: u8) -> u8 { x + x }
+fn main(x: u8) -> u8 { g(x) }
+"#;
+    let rhs = r#"
+fn h(x: u8) -> u8 { x - x }
+fn main(x: u8) -> u8 { h(x) }
+"#;
+    let args: &[&str] = if assume_equal_helpers {
+        &["--lhs_uf=g:F", "--rhs_uf=h:F"]
+    } else {
+        &[]
+    };
+    assert_root_solve_matches_direct(lhs, rhs, args, assume_equal_helpers)
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn test_dslx_equiv_tactic_focus_rejects_assertion_semantics() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let source_path = temp_dir.path().join("input.x");
+    let script_path = temp_dir.path().join("script.json");
+    std::fs::write(
+        &source_path,
+        r#"
+fn helper(x: u8) -> u8 { assert!(x == u8:0, "check"); x }
+fn main(x: u8) -> u8 { helper(x) }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &script_path,
+        r#"[
+  {"selector":["root"],"command":{"Apply":{"Focus":{"pairs":[{"lhs":"helper","rhs":"helper"}]}}}},
+  {"selector":["root","pair_1"],"command":"Solve"},
+  {"selector":["root","skeleton"],"command":"Solve"}
+]"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("dslx-equiv")
+        .arg(&source_path)
+        .arg(&source_path)
+        .args([
+            "--dslx_top=main",
+            "--solver=bitwuzla",
+            "--assertion-semantics=same",
+        ])
+        .arg("--tactic_json")
+        .arg(&script_path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    compare_golden_text(
+        &String::from_utf8(output.stderr).unwrap(),
+        "tests/tactic_focus_assertion_semantics.golden.txt",
+    );
+}
+
 #[cfg(feature = "has-bitwuzla")]
 #[test_case(false; "skeleton_only")]
 #[test_case(true; "all_leaves")]

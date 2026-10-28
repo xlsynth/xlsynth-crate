@@ -37,6 +37,26 @@ Nested `Focus` and `Cosliced` decompositions allocate fresh solver symbols
 against both sides' inherited mappings. Distinct function pairs must retain
 independent symbols; accidentally sharing one can produce a false proof.
 
+`LecObligation::options` records the equivalence settings for each obligation;
+fixed implicit activation is recorded on each `LecSide`. Runners must honor
+these settings. A root-only `Solve` preserves assertion semantics, assertion
+label filters, enum domains, parameter drops, aggregate flattening, activation
+settings, and parallelism. The process backend preserves source basenames so
+module-qualified assertion filters retain their meaning. `LecSide::uf_map`
+uses DSLX function names, before IR name mangling.
+
+`Focus` and `Cosliced` currently require ignored assertions, no parameter drops,
+no aggregate flattening, no fixed implicit activation, and single-threaded
+equivalence checking. Unsupported combinations return an error before applying
+the tactic: UF abstraction discards assertion effects, and changing tops does
+not preserve signature-dependent settings automatically.
+
+Both tactics prove their children over all enum bit representations, even when
+the parent assumes valid enum inputs. Internal calls can receive invalid enum
+values, so assuming valid inputs for a helper could falsely prove its callers
+equivalent. This stronger requirement means a decomposition can fail even when
+a direct proof restricted to valid root inputs succeeds.
+
 ## Process backend
 
 On Unix, `dslx_tactics::process::execute_script` runs the same engine using an

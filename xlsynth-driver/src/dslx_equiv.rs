@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::parse_uf_spec;
+use crate::common::{parse_dslx_uf_spec, parse_uf_spec};
 use crate::ir_equiv::outcome_from_report;
-use crate::proofs::obligations::{LecObligation, LecSide, ObligationPayload, ProverObligation};
+use crate::proofs::obligations::{
+    LecObligation, LecProofOptions, LecSide, ObligationPayload, ProverObligation,
+};
 use crate::proofs::script::{
     OblTree, OblTreeConfig, ScriptStep, execute_script, read_script_steps_from_json_path,
     read_script_steps_from_jsonl_path,
@@ -88,7 +90,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let assertion_semantics = matches
         .get_one::<String>("assertion_semantics")
         .map(|s| s.parse().unwrap())
-        .unwrap_or(AssertionSemantics::Same);
+        .unwrap_or(AssertionSemantics::Ignore);
 
     let solver_choice: Option<SolverChoice> = matches
         .get_one::<String>("solver")
@@ -138,10 +140,6 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     // Semantics: Functions mapped to the same <uf_name> are assumed equivalent
     // (treated as the same uninterpreted symbol) and assertions inside them are
     // ignored.
-    let lhs_uf_map = parse_uf_spec(lhs_module_name, matches.get_many::<String>("lhs_uf"));
-    let rhs_uf_map = parse_uf_spec(rhs_module_name, matches.get_many::<String>("rhs_uf"));
-    let use_unoptimized_ir = !lhs_uf_map.is_empty() || !rhs_uf_map.is_empty();
-
     if tactic_script_json.is_some() || tactic_script_jsonl.is_some() {
         // Use tactic-based prover path.
         // Build root obligation from DSLX files.
@@ -152,20 +150,28 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         let mut lhs_side = LecSide::from_path(lhs_top_str, &lhs_pb);
         let mut rhs_side = LecSide::from_path(rhs_top_str, &rhs_pb);
         // UF mappings per side.
-        lhs_side.uf_map = lhs_uf_map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+        lhs_side.uf_map = parse_dslx_uf_spec(matches.get_many::<String>("lhs_uf"))
+            .into_iter()
             .collect();
-        rhs_side.uf_map = rhs_uf_map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+        rhs_side.uf_map = parse_dslx_uf_spec(matches.get_many::<String>("rhs_uf"))
+            .into_iter()
             .collect();
+        lhs_side.fixed_implicit_activation = lhs_fixed_implicit_activation;
+        rhs_side.fixed_implicit_activation = rhs_fixed_implicit_activation;
         let root_ob = ProverObligation {
             selector_segment: String::new(),
             description: None,
             payload: ObligationPayload::Lec(LecObligation {
                 lhs: lhs_side,
                 rhs: rhs_side,
+                options: LecProofOptions {
+                    assertion_semantics,
+                    assume_enum_in_bound,
+                    flatten_aggregates,
+                    drop_params,
+                    assert_label_filter,
+                    parallelism: strategy,
+                },
             }),
         };
         let dslx_paths_vec: Vec<std::path::PathBuf> = dslx_path
@@ -240,6 +246,9 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         }
     } else {
         // Original direct prover path (now via library API).
+        let lhs_uf_map = parse_uf_spec(lhs_module_name, matches.get_many::<String>("lhs_uf"));
+        let rhs_uf_map = parse_uf_spec(rhs_module_name, matches.get_many::<String>("rhs_uf"));
+        let use_unoptimized_ir = !lhs_uf_map.is_empty() || !rhs_uf_map.is_empty();
         let lhs_contents = std::fs::read_to_string(lhs_path).unwrap_or_else(|e| {
             eprintln!("Failed to read DSLX file {}: {}", lhs_path.display(), e);
             std::process::exit(1);
