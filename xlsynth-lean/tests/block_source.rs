@@ -5,6 +5,33 @@
 use std::{fs, path::Path};
 use xlsynth_lean::block::compile_stateful_function;
 
+#[test]
+fn private_declarations_do_not_enter_the_public_type_module() {
+    let source = r#"
+struct Private { recOn: u1 }
+enum Phase: u2 { Start = 0, Run = 2 }
+type Pair = (Phase, u1);
+struct Packet { pair: Pair }
+type ResultTuple = (Packet,);
+type ResultAlias = ResultTuple;
+fn machine(x: Packet) -> ResultAlias { (x,) }
+"#;
+    let compiled =
+        compile_stateful_function(source, Path::new("machine.x"), "machine", None, &[]).unwrap();
+    let bundle = compiled.emit_readable().unwrap();
+    let (_, types) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableTypes.lean")
+        .unwrap();
+    for name in ["Phase", "Pair", "Packet"] {
+        assert!(types.contains(name), "{name} missing from {types}");
+    }
+    for name in ["Private", "ResultTuple", "ResultAlias"] {
+        assert!(!types.contains(name), "{name} unexpectedly in {types}");
+    }
+}
+
 // Reject the signed public output even though its physical block is valid.
 #[test]
 fn unsupported_stateful_output_reports_its_position() {

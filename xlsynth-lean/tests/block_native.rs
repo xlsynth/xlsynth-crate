@@ -94,15 +94,12 @@ example (q : State) (x : Input) : (step q { x with rst := false }).one.1 = x.x.1
     check_bundle(bundle, "singleton register and no outputs");
 
     // With no registers the trace proof still must advance by one clock.
-    let empty = compile_stateful_function(
-        "fn machine() -> () { () }",
-        Path::new("machine.x"),
-        "machine",
-        None,
-        &[],
-    )
-    .unwrap();
-    check_bundle(empty.emit_readable().unwrap(), "empty state and no outputs");
+    for signature in ["fn machine() -> () { () }", "fn machine() { () }"] {
+        let empty =
+            compile_stateful_function(signature, Path::new("machine.x"), "machine", None, &[])
+                .unwrap();
+        check_bundle(empty.emit_readable().unwrap(), signature);
+    }
 }
 
 // Alias transparency permits the update while the public field keeps Current.
@@ -124,6 +121,7 @@ fn machine(x: Phase, __reg_phase: Current) -> (Current, Phase) {
         r#"
 import ReadableCorrespondence
 open XlsReadable
+example : XlsCodec.Phase.encode XlsSource.Phase.Run = BitVec.ofNat 2 2 := by rfl
 example (q : State) (x : Input) : (observe q x : XlsSource.Current) = q.phase := by rfl
 example (q : State) (x : Input) : (step q { x with rst := false }).phase = x.x := by
   cases x with | mk r p => cases p <;> rfl

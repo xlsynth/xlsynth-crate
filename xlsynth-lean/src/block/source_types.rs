@@ -78,6 +78,22 @@ pub(super) enum SourceType {
     /// A reference to an alias declaration in the same catalogue.
     Alias { name: String },
 }
+
+impl SourceType {
+    fn collect_names(&self, names: &mut BTreeSet<String>) {
+        match self {
+            Self::Bool | Self::Bits { .. } => {}
+            Self::Tuple { members } => {
+                for member in members {
+                    member.collect_names(names);
+                }
+            }
+            Self::Enum { name } | Self::Struct { name } | Self::Alias { name } => {
+                names.insert(name.clone());
+            }
+        }
+    }
+}
 /// Declarations collected in source order from the native DSLX type checker.
 struct Catalogue<'a> {
     declarations: Vec<TypeDecl>,
@@ -362,9 +378,9 @@ impl BridgeBuilder for Catalogue<'_> {
                         Ok((param.name.clone(), ty))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let annotation = return_annotation
-                    .context("stateful function requires a tuple return annotation")?;
-                let returns = if let Some(elements) = annotation.tuple_members() {
+                let returns = if let Some(elements) =
+                    return_annotation.and_then(dslx::TypeAnnotation::tuple_members)
+                {
                     let registers: Vec<_> = params
                         .iter()
                         .filter_map(|(name, _)| name.strip_prefix("__reg_"))
@@ -389,11 +405,14 @@ impl BridgeBuilder for Catalogue<'_> {
                             })
                         })
                         .collect::<Result<_>>()?
-                } else {
+                } else if let Some(annotation) = return_annotation {
                     let ty = self
                         .annotation_type(annotation, type_info)
                         .context("stateful function return type")?;
                     self.resolve_tuple(&ty)?.to_vec()
+                } else {
+                    // DSLX typechecks an omitted return annotation as unit.
+                    Vec::new()
                 };
                 Ok(FunctionSignature { params, returns })
             })();
@@ -524,6 +543,33 @@ pub(super) fn emit_stateful_readable(
         registers,
         outputs: outputs.to_vec(),
     };
+    // A nominal reference can only target an earlier collected declaration.
+    // Walk backwards to discover dependencies, then emit them in source order.
+    let mut names = BTreeSet::new();
+    for ty in interface
+        .inputs
+        .values()
+        .chain(interface.registers.values())
+        .chain(&interface.outputs)
+    {
+        ty.collect_names(&mut names);
+    }
+    for decl in catalogue.declarations.iter().rev() {
+        if names.contains(decl.name()) {
+            match decl {
+                TypeDecl::Enum { .. } => {}
+                TypeDecl::Struct { fields, .. } => {
+                    for field in fields {
+                        field.source_type.collect_names(&mut names);
+                    }
+                }
+                TypeDecl::Alias { target, .. } => target.collect_names(&mut names),
+            }
+        }
+    }
+    catalogue
+        .declarations
+        .retain(|decl| names.contains(decl.name()));
     block::readable::emit(block, &catalogue.declarations, &interface)
 }
 
