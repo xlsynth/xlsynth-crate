@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use arbitrary::Arbitrary;
-use xlsynth_driver::prover_config::{GroupKind, ProverPlan, ProverTask};
+use xlsynth_prover::proof_plan::config::{FakeTaskConfig, GroupKind, ProverPlan, ProverTask};
 
 #[derive(Debug, Clone, Arbitrary)]
 pub enum FuzzNodeKind {
@@ -154,7 +154,7 @@ pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> ProverPlan {
                 let f = n.fake.as_ref().expect(
                     "build_plan_from_fuzz: Task node missing fake config after normalization",
                 );
-                let cfg = xlsynth_driver::prover_config::FakeTaskConfig {
+                let cfg = FakeTaskConfig {
                     // If a timeout is present, make the task indefinite so it deterministically
                     // times out. Otherwise, use a bounded small delay so fuzz runs complete.
                     delay_ms: if f.timeout_ms.is_some() {
@@ -204,7 +204,7 @@ pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> ProverPlan {
 #[cfg(test)]
 mod tests {
     use super::{build_plan_from_fuzz, decode_fuzz_plan_node, eval_fuzz};
-    use xlsynth_driver::prover::run_prover_plan;
+    use xlsynth_prover::proof_plan::scheduler::run_prover_plan;
 
     #[test]
     fn crashing_scheduler_artifact_single_success_task_regression() {

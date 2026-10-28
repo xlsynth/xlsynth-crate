@@ -63,15 +63,13 @@ across packages; the runner checks this before any builds. Corpora and crash
 artifacts stay in each original fuzz package's `corpus/` and `artifacts/`
 directories, separate from the build cache.
 
-CI resolves the existing fuzz packages' lockfiles before restoring cached build
-outputs. Its cache key includes all fuzz dependency graphs, the Rust toolchain,
-Cargo configuration, XLS release, manifests/lockfiles, and the runner script.
-Only build outputs under `target/fuzz-ci` and Cargo's dependency cache persist;
-package lockfiles, corpora and run artifacts are not restored from that cache.
-Nightly remains floating; a compiler update invalidates the compiled-artifact
-cache. Only successful jobs save the cache, so interrupted setup cannot establish
-an incomplete cache entry. Fuzz runs use four workers by
-default. CI retains its `-max_total_time=5` override and
+Each CI run starts with an empty `target/fuzz-ci`. The smoke job pins its Rust
+nightly and restores the most recent sccache archive available for that
+toolchain and runner platform. A fresh checkout can reuse compilations whose
+inputs match even when Cargo sees new source timestamps. Successful `main`
+runs save the updated compiler cache for subsequent pushes and pull requests.
+
+Fuzz runs use four workers by default. CI retains its `-max_total_time=5` override and
 `--sanitizer none`. Without a `--fuzz-bin-args` override, the runner also sets a
 60-second per-input watchdog. These smoke runs do not replace longer fuzz
 campaigns. Optional external-tool targets still require explicit selection and
