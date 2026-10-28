@@ -70,8 +70,7 @@ enable_warnings = ["bad\u0000warning"]
     assert_eq!(report["status"], "execution-error", "{report}");
     assert_eq!(report["success"], false, "{report}");
     assert_eq!(
-        report["error_str"],
-        "xlsynth error: enable_warnings[0] contains a NUL byte at offset 3",
+        report["error_str"], "xlsynth error: enable_warnings[0] contains a NUL byte at offset 3",
         "{report}"
     );
 }
