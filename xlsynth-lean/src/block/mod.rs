@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generate raw and source-named Lean models from verified XLS block IR.
-//!
-//! [`parse`] checks the package with native XLS and the typed Rust parser.
-//! [`emit`] preserves physical values, while [`emit_readable`] adds checked
-//! source names, total codecs, and correspondence proof source. Source-map
-//! validation checks metadata against the supplied inputs; it does not prove
-//! that a compiler produced the block from that source.
-//! Emission returns text; it does not invoke Lean or check the generated
-//! proofs.
+//! Emit Lean from XLS block IR, or use the typechecked DSLX function signature
+//! to emit a named, typed interface for the same equations.
 
 use anyhow::{Context, Result, bail, ensure};
 use xlsynth::IrPackage;
@@ -19,13 +12,13 @@ use xlsynth_pir::{
 
 mod raw;
 mod readable;
-mod source_map;
+mod source_types;
+mod stateful;
 
-pub use raw::{LeanBlockBundle, emit, emit_readable};
-pub use source_map::{
-    Attachment, EnumMember, SourceMap, SourceType, StructField, TypeDecl, ValidatedSourceMap,
-    collect_source_map, validate_source_map,
-};
+pub use stateful::{CompiledStatefulFunction, compile_stateful_function, stateful_ir_to_block};
+
+pub use raw::{LeanBlockBundle, emit};
+use source_types::emit_stateful_readable;
 
 /// One native-verified block, its typed graph, and package source locations.
 ///

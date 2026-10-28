@@ -84,44 +84,44 @@ contextual errors. Parsing can succeed for operations that emission rejects.
 Every assertion remains an observable result, including disconnected ones;
 assertions never constrain the model's input or old-state domain.
 
-### Source names and typed representations
+### Compile a stateful DSLX function
+
+A parameter prefixed with `__reg_` represents the current register value. The
+last return-tuple elements supply the next register values in parameter order.
+Earlier elements are output ports named `out0`, `out1`, and so on.
+
+```dslx
+struct Outputs { seen: bool }
+
+fn counter(take: bool, __reg_count: u8) -> (Outputs, u8) {
+    (Outputs { seen: take }, __reg_count + u8:1)
+}
+```
+
+The model exposes `count` as state and `out0.seen` as an output. The original
+DSLX supplies parameter names, aliases, struct fields and enum variants. The
+block IR supplies the cycle transition. Internal bindings stay private.
 
 ```rust
 use std::path::Path;
-use xlsynth_lean::block::{
-    Attachment, collect_source_map, emit_readable, validate_source_map,
-};
+use xlsynth_lean::block::compile_stateful_function;
 
-let source_path = Path::new("machine.x");
-let attachments = [Attachment {
-    register: "machine".into(),
-    source_type: "Machine".into(),
-}];
-let map = collect_source_map(&ir_text, &dslx_text, source_path, &attachments)?;
-let checked = validate_source_map(&map, &ir_text, &dslx_text, source_path)?;
-let bundle = emit_readable(&checked)?;
+let compiled = compile_stateful_function(&source, Path::new("counter.x"), "counter", None, &[])?;
+let ir = compiled.block_ir();
+let bundle = compiled.emit_readable()?;
 ```
 
-The serializable version-1 source map records the exact block/source hashes,
-native-typechecked leaf declarations, and explicit register attachments.
-Validation rechecks the hashes, declarations, physical shapes, and retained
-projection names. Equal-width fields cannot silently exchange names. An
-attachment is still the caller's assertion about source provenance: these
-checks do not prove which compiler run produced the hardware.
-
-Source types support unsigned bits, Boolean values, two-bit enums, aliases,
-and ordered nonempty structs. The supplied source text is typechecked using
-`source_path` for its module name and import location; it is not reread from
-that path. Enum representations include every physical encoding, including
-unnamed encoding `3`, so arbitrary hardware state remains representable.
+The readable interface supports unsigned bits of positive width, positional
+tuples, nonempty local structs, aliases of supported local types and unsigned
+two-bit enums with distinct encodings.
 
 `LeanBlockBundle::files` contains these five files in dependency order:
 
-1. `Generated.lean` - the exact raw emission of the authenticated block.
-2. `ReadableTypes.lean` - source types and total physical codecs.
-3. `ReadableGenerated.lean` - executable equations with source names and types.
-4. `ReadableRepresentation.lean` - state and result conversions.
-5. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
+1. `Generated.lean` - the exact raw emission of the lowered block.
+1. `ReadableTypes.lean` - source types and total physical codecs.
+1. `ReadableGenerated.lean` - executable equations with source names and types.
+1. `ReadableRepresentation.lean` - state and result conversions.
+1. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
 
 Callers choose where to write the files and must compile the generated Lean
 sources to check their proofs. The readable evaluator executes its own graph
