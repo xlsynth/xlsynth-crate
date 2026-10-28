@@ -4,6 +4,35 @@ use serde_json::Value;
 use std::process::Command;
 use test_case::test_case;
 
+/// Both native proof paths must report invalid assertion filters to their
+/// callers.
+#[cfg(feature = "has-bitwuzla")]
+#[test_case(&["dslx-equiv", "entry.x", "entry.x", "--dslx_top=main"]; "equivalence")]
+#[test_case(&["dslx-fn-prove-assertions", "--dslx_input_file=entry.x", "--dslx_top=main"]; "assertions")]
+fn invalid_assertion_filter_reports_execution_error(args: &[&str]) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("entry.x"), "pub fn main(x: u1) -> u1 { x }").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .current_dir(dir.path())
+        .args(args)
+        .args([
+            "--solver=bitwuzla",
+            "--assert-label-filter=[",
+            "--output_json=result.json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("result.json")).unwrap()).unwrap();
+    assert_eq!(report["status"], "execution-error");
+    assert_eq!(report["success"], false);
+    assert_eq!(
+        report["error_str"],
+        "invalid regular expression in assert label filter: regex parse error:\n    [\n    ^\nerror: unclosed character class"
+    );
+}
+
 /// Setup failures must reach the scheduler as execution errors, even when proof
 /// never starts.
 #[test_case("missing.x", false; "missing_direct")]

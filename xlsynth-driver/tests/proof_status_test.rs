@@ -109,6 +109,60 @@ fn scheduled_producers_report_proved_and_disproved_statuses() {
 }
 
 /// A malformed request is an execution error, never a logical counterexample.
+#[test]
+fn invalid_proof_arguments_write_the_requested_report() {
+    let invalid_uf =
+        "invalid uninterpreted function specification 'typo'; expected <function-name>:<uf-name>";
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["dslx-equiv", "a.x", "a.x", "--dslx_top=f", "--lhs_uf=typo"],
+            invalid_uf,
+        ),
+        (
+            &["prove-quickcheck", "--dslx_input_file=a.x", "--uf=typo"],
+            invalid_uf,
+        ),
+        (
+            &[
+                "dslx-fn-prove-assertions",
+                "--dslx_input_file=a.x",
+                "--dslx_top=f",
+                "--uf=typo",
+            ],
+            invalid_uf,
+        ),
+        (
+            &["dslx-equiv", "a.x", "a.x"],
+            "a top function must be specified via --dslx_top or both --lhs_dslx_top/--rhs_dslx_top",
+        ),
+        (
+            &["dslx-equiv", "a.x", "a.x", "--lhs_dslx_top=f"],
+            "--lhs_dslx_top and --rhs_dslx_top must be used together",
+        ),
+        (
+            &["ir-equiv", "a.ir", "a.ir", "--top=f", "--lhs_ir_top=g"],
+            "--ir_top and --lhs_ir_top/--rhs_ir_top cannot be used together",
+        ),
+    ];
+    for (args, diagnostic) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .current_dir(dir.path())
+            .args(*args)
+            .arg("--output_json=result.json")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let report: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("result.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["status"], "execution-error", "{args:?}");
+        assert_eq!(report["success"], false, "{args:?}");
+        assert_eq!(report["error_str"], *diagnostic, "{args:?}");
+    }
+}
+
+/// A malformed IR package reaches the same worker protocol as setup errors.
 #[cfg(feature = "has-bitwuzla")]
 #[test]
 fn ir_producer_reports_request_errors_with_typed_status() {

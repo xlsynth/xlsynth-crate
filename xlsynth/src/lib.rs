@@ -99,6 +99,17 @@ fn optional_ptr_parts(array: Option<&CStringPtrArray>) -> (*const *const c_char,
         .unwrap_or((std::ptr::null(), 0))
 }
 
+/// Rejects source the XLS C API cannot represent, reporting the byte offset
+/// without echoing the program.
+fn dslx_source_c_string(source: &str) -> Result<CString, XlsynthError> {
+    CString::new(source).map_err(|e| {
+        XlsynthError(format!(
+            "DSLX source contains a NUL byte at offset {}",
+            e.nul_position()
+        ))
+    })
+}
+
 /// Converts a DSLX module's source text into an IR package. Returns the IR
 /// text.
 ///
@@ -127,7 +138,7 @@ pub fn convert_dslx_to_ir_text(
         search_paths_cstrs.push(CString::new(p).unwrap());
     }
 
-    let dslx = CString::new(dslx).unwrap();
+    let dslx = dslx_source_c_string(dslx)?;
     let c_path = CString::new(path_str).unwrap();
     let c_module_name = CString::new(module_name).unwrap();
     let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
@@ -425,6 +436,19 @@ mod tests {
         )
         .expect("mangle composed");
         assert_eq!(mangled, "__itok__my_mod__Impl__g_step1__7_9");
+    }
+
+    #[test]
+    fn conversion_rejects_nul_after_valid_dslx() {
+        let result = convert_dslx_to_ir_text(
+            "fn main() -> u1 { u1:1 }\0ignored",
+            std::path::Path::new("test.x"),
+            &DslxConvertOptions::default(),
+        );
+        assert_eq!(
+            result.err().unwrap().0,
+            "DSLX source contains a NUL byte at offset 24"
+        );
     }
 
     #[test]

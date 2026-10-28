@@ -5,9 +5,12 @@
 //! returns `true` for every possible input using an SMT solver.
 
 use crate::common::parse_dslx_uf_spec;
+use crate::proofs::report_setup_error;
 use crate::proofs::script::TacticScript;
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path, proof_driver};
+use crate::toolchain_config::{
+    ToolchainConfig, get_dslx_search_paths, get_dslx_stdlib_path, proof_driver,
+};
 use annotate_snippets::{AnnotationKind, Group, Level, Origin, Renderer, Snippet};
 use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
@@ -133,17 +136,13 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         .get_one::<String>("dslx_input_file")
         .expect("dslx_input_file arg missing");
     let input_path = std::path::Path::new(input_file_str);
+    let start = std::time::Instant::now();
+    let output_json = matches.get_one::<String>("output_json").map(String::as_str);
 
     let request = DslxQuickCheckRequest {
         entry_file: input_path.to_path_buf(),
         dslx_stdlib_path: get_dslx_stdlib_path(matches, config).map(PathBuf::from),
-        dslx_paths: get_dslx_path(matches, config)
-            .as_deref()
-            .unwrap_or_default()
-            .split(';')
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
-            .collect(),
+        dslx_paths: get_dslx_search_paths(matches, config),
         solver: matches
             .get_one::<String>("solver")
             .map(|s| s.parse().unwrap()),
@@ -152,9 +151,9 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             .get_one::<QuickCheckAssertionSemantics>("assertion_semantics")
             .expect("assertion semantics default"),
         assert_label_filter: matches.get_one::<String>("assert_label_filter").cloned(),
-        uf_map: parse_dslx_uf_spec(matches.get_many::<String>("uf")),
+        uf_map: parse_dslx_uf_spec(matches.get_many::<String>("uf"))
+            .unwrap_or_else(|message| report_setup_error(start, output_json, SUBCOMMAND, &message)),
     };
-    let output_json = matches.get_one::<String>("output_json").map(String::as_str);
     if let Some(script) = TacticScript::from_matches(matches) {
         script.execute_and_exit(
             request.tactic_tree().map_err(|e| e.to_string()),
@@ -176,7 +175,6 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
     } else {
         Renderer::plain()
     };
-    let start = std::time::Instant::now();
     let result = request.run(QuickCheckOptions { optimize }, tool_path, |event| {
         let written = match event {
             QuickCheckProgress::Started(name) => write_quickcheck_started(&mut stderr, name),

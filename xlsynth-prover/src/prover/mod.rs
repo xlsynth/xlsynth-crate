@@ -377,7 +377,10 @@ impl<S: SolverConfig> Prover for S {
                 "Only single-threaded equivalence supports parameter domains",
             ));
         }
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
+        let assert_label_regex = match build_assert_label_regex(assert_label_filter) {
+            Ok(regex) => regex,
+            Err(error) => return EquivResult::Error(error),
+        };
         match strategy {
             EquivParallelism::SingleThreaded => ir_equiv::prove_ir_fn_equiv::<S::Solver>(
                 self,
@@ -418,7 +421,10 @@ impl<S: SolverConfig> Prover for S {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
+        let assert_label_regex = match build_assert_label_regex(assert_label_filter) {
+            Ok(regex) => regex,
+            Err(error) => return BoolPropertyResult::Error(error),
+        };
         quickcheck::prove_ir_quickcheck::<S::Solver>(
             self,
             ir_fn,

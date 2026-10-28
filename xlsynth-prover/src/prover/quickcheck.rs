@@ -216,10 +216,12 @@ where
     }
 }
 
-pub(crate) fn build_assert_label_regex(filter: Option<&str>) -> Option<Regex> {
-    filter.map(|pattern| {
-        Regex::new(pattern).expect("invalid regular expression in assert label filter")
-    })
+/// Compiles the optional assertion label filter before a proof starts.
+pub(crate) fn build_assert_label_regex(filter: Option<&str>) -> Result<Option<Regex>, String> {
+    filter
+        .map(Regex::new)
+        .transpose()
+        .map_err(|e| format!("invalid regular expression in assert label filter: {e}"))
 }
 
 /// The stage at which preparing or selecting a QuickCheck failed.
@@ -545,16 +547,8 @@ pub(crate) fn prepare_dslx_quickchecks<'a, S: SolverConfig>(
     options: QuickCheckOptions,
 ) -> Result<PreparedQuickCheckSuite<'a>, QuickCheckError> {
     options.validate_uf_optimization(uf_map)?;
-    let assert_label_regex = assert_label_filter
-        .map(|pattern| {
-            Regex::new(pattern).map_err(|e| {
-                QuickCheckError::new(
-                    QuickCheckErrorKind::Configuration,
-                    format!("invalid regular expression in assert label filter: {e}"),
-                )
-            })
-        })
-        .transpose()?;
+    let assert_label_regex = build_assert_label_regex(assert_label_filter)
+        .map_err(|e| QuickCheckError::new(QuickCheckErrorKind::Configuration, e))?;
     let context = load_quickcheck_context(
         entry_file,
         dslx_stdlib_path,

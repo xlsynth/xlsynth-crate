@@ -156,6 +156,7 @@ fn type_inference_v2_json_is_not_serialized_or_forwarded() {
         assert!(
             !task
                 .to_command()
+                .unwrap()
                 .get_args()
                 .any(|arg| arg.to_string_lossy().starts_with("--type_inference_v2"))
         );

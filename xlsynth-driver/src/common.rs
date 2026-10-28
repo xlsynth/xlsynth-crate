@@ -658,22 +658,16 @@ pub fn get_function_enum_param_domains(
 /// Parses UF mappings while retaining the DSLX names used by proof obligations.
 pub fn parse_dslx_uf_spec(
     matches: Option<clap::parser::ValuesRef<String>>,
-) -> HashMap<String, String> {
-    let mut m = std::collections::HashMap::new();
-    if let Some(vals) = matches {
-        for v in vals {
-            if let Some((fn_name, uf_name)) = v.split_once(':') {
-                m.insert(fn_name.trim().to_string(), uf_name.trim().to_string());
-            } else {
-                eprintln!(
-                    "Error: invalid uninterpreted function specification '{}'; expected <function-name>:<uf-name>",
-                    v
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-    m
+) -> Result<HashMap<String, String>, String> {
+    matches.into_iter().flatten().map(|value| {
+        value.split_once(':')
+            .map(|(function, symbol)| (function.trim(), symbol.trim()))
+            .filter(|(function, symbol)| !function.is_empty() && !symbol.is_empty())
+            .map(|(function, symbol)| (function.to_owned(), symbol.to_owned()))
+            .ok_or_else(|| format!(
+                "invalid uninterpreted function specification '{value}'; expected <function-name>:<uf-name>"
+            ))
+    }).collect()
 }
 
 #[cfg(test)]

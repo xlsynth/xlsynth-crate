@@ -2710,7 +2710,7 @@ pub fn parse_and_typecheck(
     module_name: &str,
     import_data: &mut ImportData,
 ) -> Result<TypecheckedModule, XlsynthError> {
-    let program_c_str = std::ffi::CString::new(dslx).unwrap();
+    let program_c_str = crate::dslx_source_c_string(dslx)?;
     let path_c_str = std::ffi::CString::new(path).unwrap();
     let module_name_c_str = std::ffi::CString::new(module_name).unwrap();
     unsafe {

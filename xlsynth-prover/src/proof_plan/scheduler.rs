@@ -193,7 +193,11 @@ impl Scheduler {
         // still report one.
         for n in &sched.nodes {
             if let NodeInner::Task(t) = &n.inner {
-                let cmd = sched.driver.command_for(&t.task);
+                let Ok(cmd) = sched.driver.command_for(&t.task) else {
+                    // An unrepresentable request has no command line to
+                    // display. Report its setup error if scheduled.
+                    continue;
+                };
                 let program = cmd.get_program().to_string_lossy().into_owned();
                 let args = cmd
                     .get_args()
@@ -371,7 +375,7 @@ impl Scheduler {
             match &mut node.inner {
                 NodeInner::Task(t) => match t.state {
                     TaskState::NotStarted => {
-                        let mut cmd = self.driver.command_for(&t.task);
+                        let mut cmd = self.driver.command_for(&t.task)?;
                         // Create a temp path for JSON results and pass it to
                         // the child.
                         let json_tmp = tempfile::Builder::new().suffix(".json").tempfile()?;

@@ -117,6 +117,10 @@ proof or counterexample. Legacy JSON containing only `success` is intentionally
 rejected. Captured stdout/stderr remain available in task reports, including
 after cancellation.
 
+`ToDriverCommand::to_command` returns an `io::Result<Command>`. If a DSLX
+search directory cannot be represented in a worker's argument list, command
+construction fails and the scheduler reports an execution error for that task.
+
 Inconclusive results and execution errors are indefinite scheduler outcomes:
 they cannot win a `first` group or trigger tactic rollback. Native solver
 counterexamples remain `disproved`. External-tool failures without structured

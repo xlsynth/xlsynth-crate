@@ -12330,6 +12330,33 @@ fn test_dslx_equiv_uninterpreted_functions_solver_param(solver: &str) {
 }
 
 #[test]
+fn ir_localized_eco_exits_unsuccessfully_when_prover_cannot_run() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("input.ir"),
+        "package p\ntop fn main(x: bits[1] id=1) -> bits[1] { ret x: bits[1] = param(name=x, id=1) }",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .current_dir(temp.path())
+        .env_remove("XLSYNTH_TOOLS")
+        .args([
+            "ir-localized-eco",
+            "input.ir",
+            "input.ir",
+            "--solver=toolchain",
+            "--output_dir=out",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "xlsynth-driver: ir-localized-eco: XLSYNTH_TOOLS is not set; cannot run toolchain equivalence"
+    );
+}
+
+#[test]
 fn test_ir_localized_eco_midlevel_insert_and_substitute() {
     let _ = env_logger::builder().is_test(true).try_init();
 

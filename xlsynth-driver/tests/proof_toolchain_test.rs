@@ -5,6 +5,80 @@
 use std::fs;
 use std::process::Command;
 
+/// A directory in a TOML or JSON list is a single import root even when its
+/// name contains the driver's CLI separator.
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn worker_never_splits_a_literal_import_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    for (root, predicate) in [("prod;bad", "x != u8:0"), ("prod", "x == x")] {
+        fs::create_dir(path.join(root)).unwrap();
+        fs::write(
+            path.join(root).join("helper.x"),
+            format!("pub fn pred(x: u8) -> bool {{ {predicate} }}"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        path.join("tools.toml"),
+        r#"[toolchain.dslx]
+dslx_path = ["prod;bad"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        path.join("qc.x"),
+        "import helper; #[quickcheck] fn check(x: u8) -> bool { helper::pred(x) }",
+    )
+    .unwrap();
+    fs::write(
+        path.join("solve.json"),
+        r#"[{"selector":["root"],"command":"Solve"}]"#,
+    )
+    .unwrap();
+    fs::write(path.join("plan.json"), r#"{"kind":"prove-quickcheck","dslx_input_file":"qc.x","solver":"bitwuzla","dslx_path":["prod;bad"]}"#).unwrap();
+    for (index, (args, expected)) in [
+        (
+            &[
+                "prove-quickcheck",
+                "--dslx_input_file=qc.x",
+                "--solver=bitwuzla",
+            ][..],
+            "disproved",
+        ),
+        (
+            &[
+                "prove-quickcheck",
+                "--dslx_input_file=qc.x",
+                "--solver=bitwuzla",
+                "--tactic_json=solve.json",
+            ][..],
+            "execution-error",
+        ),
+        (
+            &["prover", "--plan_json_file=plan.json"][..],
+            "execution-error",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let report_file = format!("report_{index}.json");
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .current_dir(path)
+            .arg("--toolchain=tools.toml")
+            .args(args)
+            .args(["--output_json", &report_file])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(path.join(report_file)).unwrap()).unwrap();
+        assert_eq!(report["status"], expected, "{args:?}: {report}");
+    }
+}
+
 /// Workers must honor an explicit toolchain file even when the tool directory
 /// is absent from their environment.
 #[test]

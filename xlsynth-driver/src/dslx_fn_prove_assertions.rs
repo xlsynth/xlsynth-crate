@@ -9,20 +9,9 @@ use xlsynth_prover::dslx_assertions::{
 
 use crate::common::{parse_bool_flag_or, parse_dslx_uf_spec};
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
+use crate::toolchain_config::{ToolchainConfig, get_dslx_search_paths, get_dslx_stdlib_path};
 
 const SUBCOMMAND: &str = "dslx-fn-prove-assertions";
-
-fn collect_additional_search_paths(dslx_path: Option<&str>) -> Vec<PathBuf> {
-    dslx_path
-        .map(|s| {
-            s.split(';')
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 fn write_json(path: &str, outcome: &AssertionsOutcome) {
     std::fs::write(path, serde_json::to_string_pretty(outcome).unwrap()).unwrap_or_else(|err| {
@@ -86,6 +75,13 @@ pub fn handle_dslx_fn_prove_assertions(
         .map(|s| s.parse().unwrap());
     let output_json = matches.get_one::<String>("output_json");
     let start = Instant::now();
+    let dslx_uf_map =
+        parse_dslx_uf_spec(matches.get_many::<String>("uf")).unwrap_or_else(|message| {
+            emit_outcome_and_exit(
+                AssertionsOutcome::execution_error(start.elapsed(), message),
+                output_json,
+            )
+        });
     let source = std::fs::read_to_string(input_path).unwrap_or_else(|err| {
         let message = format!("Failed to read DSLX file: {err}");
         if let Some(path) = output_json {
@@ -99,13 +95,11 @@ pub fn handle_dslx_fn_prove_assertions(
 
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
     let dslx_stdlib_path_buf = dslx_stdlib_path.as_deref().map(PathBuf::from);
-    let dslx_path = get_dslx_path(matches, config);
-    let additional_search_paths = collect_additional_search_paths(dslx_path.as_deref());
+    let additional_search_paths = get_dslx_search_paths(matches, config);
     let assert_label_filter = matches
         .get_one::<String>("assert_label_filter")
         .map(String::as_str);
     let assume_enum_in_bound = parse_bool_flag_or(matches, "assume-enum-in-bound", true);
-    let dslx_uf_map = parse_dslx_uf_spec(matches.get_many::<String>("uf"));
 
     let request = DslxAssertionsRequest {
         source: &source,

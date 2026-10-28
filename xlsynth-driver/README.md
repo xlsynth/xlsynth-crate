@@ -3636,6 +3636,14 @@ The scheduler requires child results from `ir-equiv`, `dslx-equiv`,
 `{ "status": "proved", "success": true }` and exits `0`. The statuses
 `disproved`, `inconclusive`, and `execution-error` require `success: false` and
 exit `1`. Results may also contain command-specific diagnostics.
+Once a proof command has parsed its arguments, errors such as conflicting tops
+or a malformed UF mapping also write an `execution-error` report.
+
+Proof workers reject a DSLX search directory containing `;`, the driver's
+path-list separator. External XLS tools likewise cannot represent a directory
+containing `:`. These cases report an error so a proof cannot silently import
+a different module. Direct native proofs accept literal directory names from
+the toolchain TOML array.
 
 Missing or malformed JSON, unknown statuses, and contradictory fields are
 `ProtocolError`. Abnormal termination or an unexpected exit code is

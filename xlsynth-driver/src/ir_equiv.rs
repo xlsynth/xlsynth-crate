@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::proofs::report_setup_error;
 use crate::toolchain_config::ToolchainConfig;
 use std::path::Path;
 use std::time::Instant;
@@ -15,6 +16,11 @@ const SUBCOMMAND: &str = "ir-equiv";
 /// Implements the "ir-equiv" subcommand.
 pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_ir_equiv");
+    let start = Instant::now();
+    let output_json = matches.get_one::<String>("output_json");
+    let fail = |message: &str| -> ! {
+        report_setup_error(start, output_json.map(String::as_str), SUBCOMMAND, message)
+    };
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let rhs = matches.get_one::<String>("rhs_ir_file").unwrap();
 
@@ -24,12 +30,10 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     let top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
 
     if top.is_some() && (lhs_top.is_some() || rhs_top.is_some()) {
-        eprintln!("Error: --ir_top and --lhs_ir_top/--rhs_ir_top cannot be used together");
-        std::process::exit(1);
+        fail("--ir_top and --lhs_ir_top/--rhs_ir_top cannot be used together");
     }
     if lhs_top.is_some() ^ rhs_top.is_some() {
-        eprintln!("Error: --lhs_ir_top and --rhs_ir_top must be used together");
-        std::process::exit(1);
+        fail("--lhs_ir_top and --rhs_ir_top must be used together");
     }
     if top.is_some() {
         lhs_top = top;
@@ -64,21 +68,11 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         .get_one::<String>("rhs_fixed_implicit_activation")
         .map(|s| s.parse().unwrap())
         .unwrap_or(false);
-    let output_json = matches.get_one::<String>("output_json");
-
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
-    let start = Instant::now();
     let read_side = |side, path: &str| {
-        std::fs::read_to_string(path).unwrap_or_else(|err| {
-            let message = format!("Failed to read {side} IR file: {err}");
-            let outcome = ProofSummary::execution_error(start.elapsed(), message.clone());
-            if let Some(output_path) = output_json {
-                std::fs::write(output_path, serde_json::to_string(&outcome).unwrap()).unwrap();
-            }
-            eprintln!("{message}");
-            std::process::exit(outcome.conclusion.status.exit_code());
-        })
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|err| fail(&format!("Failed to read {side} IR file: {err}")))
     };
     let lhs_ir_text = read_side("lhs", lhs);
     let rhs_ir_text = read_side("rhs", rhs);

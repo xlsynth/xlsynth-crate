@@ -21,9 +21,12 @@
 //! See the driver README section "Prover configuration JSON (task-spec DSL)"
 //! for the full schema and examples.
 
+use std::ffi::OsStr;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::dslx_utils::join_dslx_search_paths;
 use crate::prover::SolverChoice;
 use crate::prover::types::AssertionSemantics;
 use crate::prover::types::EquivParallelism;
@@ -37,8 +40,20 @@ fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<()
     ))
 }
 
-fn add_flag(cmd: &mut Command, name: &str, value: &str) {
+fn add_flag(cmd: &mut Command, name: &str, value: impl AsRef<OsStr>) {
     cmd.arg(format!("--{}", name)).arg(value);
+}
+
+/// Preserves the configured directory order and rejects paths the driver cannot
+/// encode.
+fn add_dslx_search_paths(cmd: &mut Command, paths: Option<&[PathBuf]>) -> io::Result<()> {
+    if let Some(paths) = paths.filter(|p| !p.is_empty()) {
+        let paths: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
+        let joined = join_dslx_search_paths(&paths, ';')
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        add_flag(cmd, "dslx_path", joined);
+    }
+    Ok(())
 }
 
 fn add_bool(cmd: &mut Command, name: &str, value: Option<bool>) {
@@ -186,12 +201,12 @@ impl<P: AsRef<Path>> From<P> for ProofDriver {
 
 impl ProofDriver {
     /// Applies the selected toolchain to every worker in the plan.
-    pub(super) fn command_for(&self, task: &ProverTask) -> Command {
-        let mut command = task.to_command_with_driver(&self.executable);
+    pub(super) fn command_for(&self, task: &ProverTask) -> io::Result<Command> {
+        let mut command = task.to_command_with_driver(&self.executable)?;
         if let Some(path) = &self.toolchain {
             command.arg("--toolchain").arg(path);
         }
-        command
+        Ok(command)
     }
 }
 
@@ -199,16 +214,16 @@ impl ProofDriver {
 /// located executable.
 pub trait ToDriverCommand {
     /// Constructs a command using the conventional driver executable lookup.
-    fn to_command(&self) -> Command {
+    fn to_command(&self) -> io::Result<Command> {
         self.to_command_with_driver(&resolve_driver_exe())
     }
 
     /// Constructs a command using the supplied driver executable.
-    fn to_command_with_driver(&self, driver: &Path) -> Command;
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command>;
 }
 
 impl ToDriverCommand for IrEquivConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("ir-equiv");
         cmd.arg(self.lhs_ir_file.as_os_str());
@@ -251,12 +266,12 @@ impl ToDriverCommand for IrEquivConfig {
             self.rhs_fixed_implicit_activation,
         );
         add_bool(&mut cmd, "json", self.json);
-        cmd
+        Ok(cmd)
     }
 }
 
 impl ToDriverCommand for DslxEquivConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("dslx-equiv");
         cmd.arg(self.lhs_dslx_file.as_os_str());
@@ -272,18 +287,9 @@ impl ToDriverCommand for DslxEquivConfig {
             add_flag(&mut cmd, "rhs_dslx_top", rhs_top);
         }
         if let Some(stdlib) = &self.dslx_stdlib_path {
-            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+            add_flag(&mut cmd, "dslx_stdlib_path", stdlib);
         }
-        if let Some(paths) = &self.dslx_path {
-            if !paths.is_empty() {
-                let joined = paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                add_flag(&mut cmd, "dslx_path", &joined);
-            }
-        }
+        add_dslx_search_paths(&mut cmd, self.dslx_path.as_deref())?;
 
         if let Some(solver) = &self.solver {
             add_flag(&mut cmd, "solver", &solver.to_string());
@@ -327,31 +333,18 @@ impl ToDriverCommand for DslxEquivConfig {
         }
 
         add_bool(&mut cmd, "json", self.json);
-        cmd
+        Ok(cmd)
     }
 }
 
 impl ToDriverCommand for ProveQuickcheckConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("prove-quickcheck");
-        add_flag(
-            &mut cmd,
-            "dslx_input_file",
-            &self.dslx_input_file.display().to_string(),
-        );
-        if let Some(paths) = &self.dslx_path {
-            if !paths.is_empty() {
-                let joined = paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                add_flag(&mut cmd, "dslx_path", &joined);
-            }
-        }
+        add_flag(&mut cmd, "dslx_input_file", &self.dslx_input_file);
+        add_dslx_search_paths(&mut cmd, self.dslx_path.as_deref())?;
         if let Some(stdlib) = &self.dslx_stdlib_path {
-            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+            add_flag(&mut cmd, "dslx_stdlib_path", stdlib);
         }
         if let Some(filter) = &self.test_filter {
             add_flag(&mut cmd, "test_filter", filter);
@@ -376,32 +369,19 @@ impl ToDriverCommand for ProveQuickcheckConfig {
             add_flag(&mut cmd, "assert-label-filter", pat);
         }
         add_bool(&mut cmd, "json", self.json);
-        cmd
+        Ok(cmd)
     }
 }
 
 impl ToDriverCommand for DslxFnProveAssertionsConfig {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         let mut cmd = Command::new(driver);
         cmd.arg("dslx-fn-prove-assertions");
-        add_flag(
-            &mut cmd,
-            "dslx_input_file",
-            &self.dslx_input_file.display().to_string(),
-        );
+        add_flag(&mut cmd, "dslx_input_file", &self.dslx_input_file);
         add_flag(&mut cmd, "dslx_top", &self.dslx_top);
-        if let Some(paths) = &self.dslx_path {
-            if !paths.is_empty() {
-                let joined = paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                add_flag(&mut cmd, "dslx_path", &joined);
-            }
-        }
+        add_dslx_search_paths(&mut cmd, self.dslx_path.as_deref())?;
         if let Some(stdlib) = &self.dslx_stdlib_path {
-            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+            add_flag(&mut cmd, "dslx_stdlib_path", stdlib);
         }
         if let Some(solver) = &self.solver {
             add_flag(&mut cmd, "solver", &solver.to_string());
@@ -415,7 +395,7 @@ impl ToDriverCommand for DslxFnProveAssertionsConfig {
                 add_flag(&mut cmd, "uf", entry);
             }
         }
-        cmd
+        Ok(cmd)
     }
 }
 
@@ -442,7 +422,7 @@ pub struct FakeTaskConfig {
 
 #[cfg(feature = "enable-fake-task")]
 impl ToDriverCommand for FakeTaskConfig {
-    fn to_command_with_driver(&self, _driver: &Path) -> Command {
+    fn to_command_with_driver(&self, _driver: &Path) -> io::Result<Command> {
         // Use a POSIX shell snippet to sleep and then locate the --output_json
         // path from argv.
         let script = r#"
@@ -488,7 +468,7 @@ if [ "${FAKE_SUCCESS:-1}" -eq 1 ]; then exit 0; else exit 1; fi
         cmd.env("FAKE_SUCCESS", if self.success { "1" } else { "0" });
         cmd.env("FAKE_STDOUT_LEN", self.stdout_len.to_string());
         cmd.env("FAKE_STDERR_LEN", self.stderr_len.to_string());
-        cmd
+        Ok(cmd)
     }
 }
 
@@ -532,7 +512,7 @@ pub enum ProverTask {
 // the ProverPlan::Task node for consolidation.
 
 impl ToDriverCommand for ProverTask {
-    fn to_command_with_driver(&self, driver: &Path) -> Command {
+    fn to_command_with_driver(&self, driver: &Path) -> io::Result<Command> {
         match self {
             ProverTask::IrEquiv { config, .. } => config.to_command_with_driver(driver),
             ProverTask::DslxEquiv { config, .. } => config.to_command_with_driver(driver),
@@ -682,9 +662,9 @@ mod tests {
             },
         ];
         for task in tasks {
-            let command = task.to_command_with_driver(driver);
+            let command = task.to_command_with_driver(driver).unwrap();
             assert_eq!(command.get_program(), driver.as_os_str());
-            assert_eq!(args_of(command), args_of(task.to_command()));
+            assert_eq!(args_of(command), args_of(task.to_command().unwrap()));
         }
     }
 
@@ -728,7 +708,7 @@ mod tests {
 
     fn head_of(plan: &ProverPlan) -> String {
         match plan {
-            ProverPlan::Task { task, .. } => args_of(task.to_command())[0].clone(),
+            ProverPlan::Task { task, .. } => args_of(task.to_command().unwrap())[0].clone(),
             ProverPlan::Group { kind, .. } => match kind {
                 GroupKind::All => "all".to_string(),
                 GroupKind::Any => "any".to_string(),
@@ -751,7 +731,7 @@ mod tests {
             json: Some(true),
             ..Default::default()
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
@@ -794,7 +774,7 @@ mod tests {
             json: Some(true),
             ..Default::default()
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
@@ -839,7 +819,7 @@ mod tests {
             json: Some(true),
             ..Default::default()
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
@@ -874,7 +854,7 @@ mod tests {
             assume_enum_in_bound: Some(false),
             uf: Some(vec!["helper:F".into()]),
         };
-        let got = args_of(cfg.to_command());
+        let got = args_of(cfg.to_command().unwrap());
         assert_eq!(
             got,
             vec![
@@ -956,13 +936,13 @@ mod tests {
         let tasks: Vec<ProverTask> = serde_json::from_str(json).unwrap();
         assert_eq!(tasks.len(), 4);
         // Smoke test command arg heads
-        let head: Vec<String> = args_of(tasks[0].to_command());
+        let head: Vec<String> = args_of(tasks[0].to_command().unwrap());
         assert_eq!(head[0], "ir-equiv");
-        let head: Vec<String> = args_of(tasks[1].to_command());
+        let head: Vec<String> = args_of(tasks[1].to_command().unwrap());
         assert_eq!(head[0], "dslx-equiv");
-        let head: Vec<String> = args_of(tasks[2].to_command());
+        let head: Vec<String> = args_of(tasks[2].to_command().unwrap());
         assert_eq!(head[0], "prove-quickcheck");
-        let head: Vec<String> = args_of(tasks[3].to_command());
+        let head: Vec<String> = args_of(tasks[3].to_command().unwrap());
         assert_eq!(head[0], "dslx-fn-prove-assertions");
     }
 

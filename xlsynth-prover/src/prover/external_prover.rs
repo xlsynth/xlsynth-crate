@@ -13,6 +13,7 @@ use super::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckOptions,
 };
+use crate::dslx_utils::join_dslx_search_paths;
 use crate::toolchain_shim::run_prove_quickcheck_main;
 use regex::escape;
 use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
@@ -214,6 +215,8 @@ impl Prover for ExternalProver {
         } else {
             resolve_tool_path(self, "prove_quickcheck_main")
         }.map_err(|message| QuickCheckError::new(QuickCheckErrorKind::Configuration, message))?;
+        join_dslx_search_paths(additional_search_paths, ':')
+            .map_err(|message| QuickCheckError::new(QuickCheckErrorKind::Configuration, message))?;
         let context = load_quickcheck_context(
             entry_file,
             dslx_stdlib_path,

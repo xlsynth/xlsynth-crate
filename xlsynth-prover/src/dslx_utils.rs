@@ -7,19 +7,47 @@ use std::path::Path;
 use xlsynth::dslx::{Function, InterpValue, ParametricBinding, ParametricEnv};
 use xlsynth::{XlsynthError, mangle_dslx_name};
 
+/// Returns the path text representable by the DSLX C API.
+fn dslx_path_text(path: &Path) -> Result<&str, String> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| format!("DSLX path is not UTF-8: {path:?}"))?;
+    if text.contains('\0') {
+        return Err(format!("DSLX path contains a NUL byte: {path:?}"));
+    }
+    Ok(text)
+}
+
 /// Reject paths the DSLX C API cannot represent before passing them to libxls.
 pub(crate) fn validate_dslx_paths<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
 ) -> Result<(), String> {
     for path in paths {
-        let text = path
-            .to_str()
-            .ok_or_else(|| format!("DSLX path is not UTF-8: {path:?}"))?;
-        if text.contains('\0') {
-            return Err(format!("DSLX path contains a NUL byte: {path:?}"));
-        }
+        dslx_path_text(path)?;
     }
     Ok(())
+}
+
+/// Encodes search paths only when the receiving tool can split them back into
+/// the same directories, in the same order.
+pub(crate) fn join_dslx_search_paths(paths: &[&Path], separator: char) -> Result<String, String> {
+    let mut joined = String::new();
+    for path in paths {
+        let text = dslx_path_text(path)?;
+        if text.is_empty() {
+            return Err("DSLX search path contains an empty directory name".into());
+        }
+        if text.contains(separator) {
+            return Err(format!(
+                "DSLX search path contains the separator {separator:?}: {path:?}"
+            ));
+        }
+        if !joined.is_empty() {
+            joined.push(separator);
+        }
+        joined.push_str(text);
+    }
+    Ok(joined)
 }
 
 /// Translates DSLX function names to the IR names the solver sees, retaining
@@ -178,8 +206,26 @@ pub fn resolve_parametric_env(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
     use super::*;
+
+    #[test]
+    fn search_path_encoding_preserves_directory_names() {
+        let paths = [Path::new("second dir"), Path::new("./first;dir")];
+        assert_eq!(
+            join_dslx_search_paths(&paths, ':').unwrap(),
+            "second dir:./first;dir"
+        );
+        assert_eq!(join_dslx_search_paths(&[], ';').unwrap(), "");
+        for path in [paths[1], Path::new(""), Path::new("dir\0name")] {
+            assert!(join_dslx_search_paths(&[path], ';').is_err(), "{path:?}");
+        }
+        #[cfg(unix)]
+        assert!(join_dslx_search_paths(&[Path::new(OsStr::from_bytes(b"dir\xff"))], ';').is_err());
+    }
+
     fn parse_function_source(source: &str, name: &str) -> Function {
         use xlsynth::dslx::{ImportData, MatchableModuleMember, parse_and_typecheck};
 
